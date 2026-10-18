@@ -678,6 +678,44 @@ describe('files and backup credential isolation', () => {
     expect(() => adapter.deleteFiles('f729c8a1', '', ['../unrelated'])).toThrow();
     expect(() => adapter.writeFile('f729c8a1', 'large', 'x'.repeat(1048577))).toThrow();
   });
+  it.each([204, 403, 500])(
+    'times writes without changing raw bytes or error outcomes (%s)',
+    async (status) => {
+      const trace = fileReadTiming();
+      const fetcher = vi.fn<typeof fetch>(async () => {
+        trace.advance(31);
+        return new Response(null, { status });
+      });
+      const adapter = createPterodactylAdapter({ ...config, fetcher });
+      const written = adapter.writeFile(
+        'f729c8a1',
+        'private/server.properties',
+        'private=true',
+        trace.timing,
+      );
+      if (status === 204) await expect(written).resolves.toBeUndefined();
+      else
+        await expect(written).rejects.toMatchObject({
+          reason: status === 403 ? 'permission_denied' : 'unavailable',
+          outcome: status === 403 ? 'rejected' : 'unknown',
+          upstreamStatus: status,
+        });
+      expect(trace.durations).toEqual({ 'file.write.http': 31 });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+        method: 'POST',
+        body: 'private=true',
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      });
+      expect(() =>
+        adapter.writeFile('f729c8a1', '../invalid', 'private=true', trace.timing),
+      ).toThrow();
+      expect(() =>
+        adapter.writeFile('f729c8a1', 'large', 'x'.repeat(1048577), trace.timing),
+      ).toThrow();
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    },
+  );
   it.each([false, true])(
     'bounds file reads with Content-Length=%s and cancels the body',
     async (declared) => {

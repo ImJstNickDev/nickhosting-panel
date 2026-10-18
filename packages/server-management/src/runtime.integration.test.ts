@@ -1,6 +1,12 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { type AuthContext, authSessionId, createLogger, SecretCodec } from '@nickhosting/core';
+import {
+  type AuthContext,
+  authSessionId,
+  createLogger,
+  type LogRecord,
+  SecretCodec,
+} from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
@@ -887,12 +893,14 @@ describe('management runtime execution-time authorization', () => {
           return true;
         }),
       };
+      const timings: LogRecord[] = [];
       const runtime = await createManagementRuntime({
         db: f.db,
         codec,
         adapter: f.adapter,
         containerObserver: observer,
         env: { NH_OBSERVER_ID: 'isolated-observer' },
+        logger: createLogger((record) => timings.push(record), { level: 'debug' }),
       });
       const write = vi.fn(async () => {});
       const result = await processServerOperation(f.db, queued.job, {
@@ -931,10 +939,30 @@ describe('management runtime execution-time authorization', () => {
       expect(getApplicationServer).toHaveBeenCalledOnce();
       if (change === 'unchanged') {
         expect(getDirectoryBatchSettings).toHaveBeenCalledOnce();
-        expect(listDirectoriesBatch.mock.calls).toEqual([
+        expect(listDirectoriesBatch.mock.calls.map((call) => call.slice(0, 2))).toEqual([
           [remote.identifier, ['']],
           [remote.identifier, ['selected_world']],
         ]);
+        const summary = timings.find((record) => record.event === 'servers.world_selection_timing')
+          ?.data as {
+          stages: Record<string, unknown>;
+          spanGroups: { name: string }[][];
+        };
+        const spans = summary.spanGroups.flat().map((span) => span.name);
+        expect(spans).toEqual(
+          expect.arrayContaining([
+            'stop.initial.host.binding',
+            'stop.final.host.preflight',
+            'stop.final.process',
+            'auth.intent',
+            'auth.job',
+            'directories.settings.miss',
+            'directories.batch',
+          ]),
+        );
+        expect(summary.stages['auth.intent']).toEqual(
+          expect.objectContaining({ count: expect.any(Number) }),
+        );
       }
       expect(observer.preflight).toHaveBeenCalledTimes(change === 'host changed' ? 1 : 2);
       expect(observer.stopped).toHaveBeenCalledTimes(

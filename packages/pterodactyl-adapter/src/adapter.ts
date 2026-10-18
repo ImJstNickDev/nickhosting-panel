@@ -378,10 +378,14 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       );
     },
     /** Experimental Blueprint batch API; normal listing and downloads remain independent. */
-    listDirectoriesBatch: (identifier: string, directories: string[]) =>
-      listDirectoriesBatch(transport, identifier, directories),
-    getDirectoryBatchSettings: (identifier: string) =>
-      getDirectoryBatchSettings(transport, identifier),
+    listDirectoriesBatch(identifier: string, directories: string[], timing?: FileReadTiming) {
+      const request = () => listDirectoriesBatch(transport, identifier, directories);
+      return timing ? timing.measure('directoryBatch.list.http', request) : request();
+    },
+    getDirectoryBatchSettings(identifier: string, timing?: FileReadTiming) {
+      const request = () => getDirectoryBatchSettings(transport, identifier);
+      return timing ? timing.measure('directoryBatch.settings.http', request) : request();
+    },
     getFileOperationCapabilities: (identifier: string) =>
       getFileOperationCapabilities(transport, identifier),
     inspectFileOperation: (identifier: string, input: { target: string; guardFile: string }) =>
@@ -449,20 +453,16 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     ): Promise<Uint8Array> {
       parseInput(z.number().int().min(1).max(1048576), maxBytes);
       const url = timing
-        ? await timing.measure('file.signedUrl', () => fileDownloads.take(identifier, path))
+        ? await timing.measure('file.signedUrl', () => fileDownloads.take(identifier, path, timing))
         : await fileDownloads.take(identifier, path);
       return readEditorDownload(options, url, maxBytes, timing);
     },
-    writeFile(identifier: string, path: string, contents: string) {
+    writeFile(identifier: string, path: string, contents: string, timing?: FileReadTiming) {
       if (typeof contents !== 'string' || Buffer.byteLength(contents, 'utf8') > 1048576)
         throw new DomainError('validation_failed');
-      return transport.empty(
-        'client',
-        `${clientServer(identifier)}/files/write?file=${filePath(path)}`,
-        'POST',
-        contents,
-        true,
-      );
+      const endpoint = `${clientServer(identifier)}/files/write?file=${filePath(path)}`;
+      const request = () => transport.empty('client', endpoint, 'POST', contents, true);
+      return timing ? timing.measure('file.write.http', request) : request();
     },
     deleteFiles(identifier: string, root: string, files: string[]) {
       const rootPath = relativePath(root, true);

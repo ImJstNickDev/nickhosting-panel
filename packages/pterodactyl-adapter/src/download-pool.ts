@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import type { FileReadTiming } from './adapter.js';
 import { allowedOrigin, signedTarget } from './downloads.js';
 import {
   type createTransport,
@@ -150,12 +151,22 @@ export function createDownloadPool(
     `${segment(identifier)}:${relativePath(path)}`;
   const endpoint = (identifier: string, method: string) =>
     `extensions/nickhosting/servers/${segment(identifier)}/${method}`;
-  async function settings(identifier: string, refresh = false): Promise<TransferSettings> {
+  async function settings(
+    identifier: string,
+    refresh = false,
+    timing?: FileReadTiming,
+  ): Promise<TransferSettings> {
     const pool = state();
     const key = segment(identifier);
     const existing = pool.settings.get(key);
-    if (existing?.pending) return existing.pending;
-    if (!refresh && existing?.value && existing.until > Date.now()) return existing.value;
+    if (existing?.pending) {
+      const pending = existing.pending;
+      return timing ? timing.measure('grant.settings.pendingWait', () => pending) : pending;
+    }
+    if (!refresh && existing?.value && existing.until > Date.now()) {
+      const value = existing.value;
+      return timing ? timing.measureSync('grant.settings.cache', () => value) : value;
+    }
     if (pool.settings.size >= 256 && !existing) {
       const victim = [...pool.settings].find(([, value]) => !value.pending);
       if (victim) pool.settings.delete(victim[0]);
@@ -167,11 +178,9 @@ export function createDownloadPool(
     entry.pending = (async () => {
       let value: TransferSettings;
       try {
-        value = await transport.json(
-          'client',
-          endpoint(identifier, 'transfer-settings'),
-          settingsSchema,
-        );
+        const request = () =>
+          transport.json('client', endpoint(identifier, 'transfer-settings'), settingsSchema);
+        value = timing ? await timing.measure('grant.settings.http', request) : await request();
       } catch (error) {
         if (!(error instanceof PterodactylError) || error.reason !== 'not_found') throw error;
         // Older extensions support upload batches with the original defaults.
@@ -199,10 +208,11 @@ export function createDownloadPool(
     identifier: string,
     paths: string[],
     refresh = false,
+    timing?: FileReadTiming,
   ): Promise<Token[] | null> {
     const pool = state();
     if (pool.unsupportedUntil > Date.now()) return null;
-    const config = await settings(identifier, refresh);
+    const config = await settings(identifier, refresh, timing);
     const tokens: Token[] = [];
     const seen = new Set<string | null>();
     for (let offset = 0; offset < paths.length; ) {
@@ -220,30 +230,32 @@ export function createDownloadPool(
       const startedAt = Date.now();
       let result: { urls: string[]; expiresAt: string };
       try {
-        result = await transport.json(
-          'client',
-          endpoint(identifier, 'download-urls'),
-          z.strictObject({
-            expiresAt: z.string().datetime({ offset: true }),
-            urls: z
-              .array(
-                z
-                  .string()
-                  .min(1)
-                  .max(128 * 1024),
-              )
-              .length(chunk.length),
-          }),
-          'POST',
-          { paths: chunk },
-        );
+        const request = () =>
+          transport.json(
+            'client',
+            endpoint(identifier, 'download-urls'),
+            z.strictObject({
+              expiresAt: z.string().datetime({ offset: true }),
+              urls: z
+                .array(
+                  z
+                    .string()
+                    .min(1)
+                    .max(128 * 1024),
+                )
+                .length(chunk.length),
+            }),
+            'POST',
+            { paths: chunk },
+          );
+        result = timing ? await timing.measure('grant.issue.http', request) : await request();
       } catch (error) {
         if (error instanceof PterodactylError && error.reason === 'not_found') {
           pool.unsupportedUntil = Date.now() + SETTINGS_TTL_MS;
           return null;
         }
         if (!refresh && error instanceof PterodactylError && error.upstreamStatus === 422) {
-          return issue(identifier, paths, true);
+          return issue(identifier, paths, true, timing);
         }
         throw error;
       }
@@ -262,7 +274,11 @@ export function createDownloadPool(
     }
     return tokens;
   }
-  async function prefetch(identifier: string, paths: string[]): Promise<void> {
+  async function prefetch(
+    identifier: string,
+    paths: string[],
+    timing?: FileReadTiming,
+  ): Promise<void> {
     const pool = state();
     for (const current of pools.values()) {
       for (const [key, slot] of current.slots) {
@@ -281,7 +297,8 @@ export function createDownloadPool(
       const key = keyFor(identifier, path);
       const current = pool.slots.get(key);
       if (current?.pending) {
-        waiting.push(current.pending);
+        const pending = current.pending;
+        waiting.push(timing ? timing.measure('grant.pendingWait', () => pending) : pending);
         continue;
       }
       if (current && current.expiresAt > Date.now()) {
@@ -298,6 +315,8 @@ export function createDownloadPool(
       const pending = issue(
         identifier,
         requested.map(({ path }) => path),
+        false,
+        timing,
       )
         .then((tokens) => {
           for (let i = 0; i < requested.length; i++) {
@@ -329,35 +348,42 @@ export function createDownloadPool(
     }
     await Promise.all(waiting);
   }
-  async function take(identifier: string, path: string): Promise<string> {
+  async function take(identifier: string, path: string, timing?: FileReadTiming): Promise<string> {
     const pool = state();
     const key = keyFor(identifier, path);
     for (;;) {
       const current = pool.slots.get(key);
       if (current?.pending) {
-        await current.pending;
+        const pending = current.pending;
+        if (timing) await timing.measure('grant.pendingWait', () => pending);
+        else await pending;
         continue;
       }
       if (current?.error && current.expiresAt > Date.now()) throw current.error;
       if (current?.token && current.expiresAt > Date.now()) {
-        remove(pool, key); // Reserve synchronously before any competing await.
+        // Reserve synchronously before any competing await.
+        if (timing) timing.measureSync('grant.ready', () => remove(pool, key));
+        else remove(pool, key);
+        // Detached refill must never retain the consuming request's timing collector.
         void prefetch(identifier, [path]).catch(() => {});
         return current.token.url;
       }
       remove(pool, key);
       if (pool.unsupportedUntil > Date.now()) {
-        const result = await transport.entity(
-          'client',
-          `servers/${segment(identifier)}/files/download?file=${encodeURIComponent(relativePath(path))}`,
-          z.object({ url: z.string() }),
-          'GET',
-          undefined,
-          false,
-        );
+        const request = () =>
+          transport.entity(
+            'client',
+            `servers/${segment(identifier)}/files/download?file=${encodeURIComponent(relativePath(path))}`,
+            z.object({ url: z.string() }),
+            'GET',
+            undefined,
+            false,
+          );
+        const result = timing ? await timing.measure('grant.fallback', request) : await request();
         target(result.url);
         return result.url;
       }
-      await prefetch(identifier, [path]);
+      await prefetch(identifier, [path], timing);
       if (!pool.slots.has(key) && pool.unsupportedUntil <= Date.now())
         throw new PterodactylError('unavailable', 'client', 'rejected');
     }

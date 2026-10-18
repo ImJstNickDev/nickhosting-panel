@@ -13425,3 +13425,60 @@ container restart/rebuild, Blueprint update or production configuration change.
 Existing development watchers load the changes; live latency for this new pass
 remains to be measured on the Owner's next selection. No full historical-suite
 claim. Code rollback is a revert; operation history and persistent data are retained.
+
+### World selection diagnostic breakdown — 2026-10-18
+
+The Owner's retest after the preparation changes completed successfully in one
+delivery, **2,340.111 ms** end to end, versus **2,295.550 ms** for the preceding
+selection. Rounded phase times were 52 ms before the worker, 1,792 ms preparation,
+412 ms properties write and 85 ms finalization. Preparation decreased by about
+236 ms, but the write/finalization varied enough that total latency did not improve.
+The existing coarse logs left about 1,240 ms of preparation unattributed. These
+are two individual observations, not a benchmark distribution.
+
+This follow-up adds diagnostics only. With effective `logLevel=debug`, a world
+selection produces one `servers.world_selection_timing` summary per delivery.
+It measures configuration, authorization, host/process observations, operation
+journaling/resource transactions, directory batch settings and requests, signed
+download-grant preparation/cache/waits, Wings headers/body, properties comparison,
+write and finalization separately. Monotonic start offsets preserve concurrency
+and nesting; parent/child durations must not be summed as independent work. The
+trace begins after the initial operation lookup, so queue delay, runtime creation
+and that lookup still require the existing delivery/job timestamps.
+
+No new API request, database query, remote identity check or file read is introduced.
+The trace uses fixed labels and ordinal reads, with bounded aggregates/timeline and
+explicit dropped counters. It includes no paths, contents, signed URLs or credentials.
+Detached download-grant refill stays outside the operation trace; a later read's
+wait for a refill is measured. Non-debug deliveries do not collect this trace.
+
+Focused validation commands:
+
+```sh
+scripts/dev.sh pnpm exec vitest run packages/server-management/src/fileman-read.test.ts packages/server-management/src/minecraft-content.test.ts
+scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/adapter.test.ts packages/pterodactyl-adapter/src/bulk-downloads.test.ts packages/pterodactyl-adapter/src/directory-batch.test.ts packages/server-management/src/scoped-provider-adapter.test.ts
+scripts/dev.sh pnpm exec vitest run packages/server-management/src/operation-timing.test.ts packages/server-management/src/upload-timing.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts packages/server-management/src/runtime.integration.test.ts -t 'world selection|world-selection|no-op stop proof|configured physical host'
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-content.integration.test.ts -t 'selects a compatible world|world-selection|incompatible world without|changed properties source|world removed since selection|properties created after world selection'
+scripts/dev.sh pnpm exec tsc --noEmit
+```
+
+The Fileman/content unit run passed **66 tests**; the adapter/pool/scoped transport
+run passed **195 tests**. The targeted content integration run passed **11 cases**
+(56 excluded), including unchanged provider call counts, required timing stages,
+concurrent-edit protection and absence of private values from the trace. Timing
+helper tests passed **10/10**; lifecycle/runtime passed **23 cases** (330 excluded),
+including one summary on success/failure, no collection at info or for unrelated
+operations, actual runtime spans and unchanged request counts. Root TypeScript,
+scoped Biome, staged governance and diff checks passed. Independent review found
+no must-fix: call order, synchronous one-use grant reservation, original errors,
+trace bounds and redaction remain intact. These
+tests use isolated database state and provider fixtures; no live selection was
+performed. No full historical-suite or new live latency claim is made.
+
+The development logger was already at `debug`. No configuration change, migration,
+manual container restart/rebuild, Blueprint/Panel/Wings change or game-file write
+was needed. API/worker loaded it through the existing development watchers; both
+and Vite are healthy, with API readiness HTTP 200. The next live
+selection remains Owner-operated. Code rollback is a revert; no persisted data
+or operation history needs to change.

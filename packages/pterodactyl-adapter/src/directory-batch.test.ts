@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createPterodactylAdapter } from './adapter.js';
+import { createPterodactylAdapter, type FileReadTiming } from './adapter.js';
 
 const options = {
   baseURL: 'https://panel.example.test',
@@ -23,6 +23,57 @@ const settings = {
 };
 
 describe('experimental Blueprint directory batches', () => {
+  it.each([200, 403, 500])(
+    'times directory settings and ordered listing without changing requests or errors (%s)',
+    async (status) => {
+      let now = 0;
+      const durations: Record<string, number> = {};
+      const timing: FileReadTiming = {
+        async measure(name, work) {
+          const start = now;
+          try {
+            return await work();
+          } finally {
+            durations[name] = now - start;
+          }
+        },
+        measureSync: (_name, work) => work(),
+      };
+      const results = [{ directory: 'private-world', files: [file] }];
+      const fetcher = vi.fn<typeof fetch>(async (url) => {
+        const isSettings = String(url).endsWith('/directory-settings');
+        now += isSettings ? 13 : 27;
+        return status === 200
+          ? Response.json(isSettings ? settings : { results })
+          : new Response(null, { status });
+      });
+      const adapter = createPterodactylAdapter({ ...options, fetcher });
+      const settingsRead = adapter.getDirectoryBatchSettings('fixture', timing);
+      if (status === 200) await expect(settingsRead).resolves.toEqual(settings);
+      else
+        await expect(settingsRead).rejects.toMatchObject({
+          upstreamStatus: status,
+          outcome: 'rejected',
+        });
+      const listed = adapter.listDirectoriesBatch('fixture', ['private-world'], timing);
+      if (status === 200) await expect(listed).resolves.toEqual(results);
+      else
+        await expect(listed).rejects.toMatchObject({ upstreamStatus: status, outcome: 'rejected' });
+      expect(durations).toEqual({
+        'directoryBatch.settings.http': 13,
+        'directoryBatch.list.http': 27,
+      });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(fetcher.mock.calls[0]?.[1]?.method).toBe('GET');
+      expect(fetcher.mock.calls[1]?.[1]).toMatchObject({
+        method: 'POST',
+        body: JSON.stringify({ directories: ['private-world'] }),
+      });
+      for (const value of ['private-world', options.baseURL, options.clientKey, file.name])
+        expect(JSON.stringify(durations)).not.toContain(value);
+    },
+  );
+
   it('uses one managed Client request and returns ordered partial results without retries or tokens', async () => {
     const results = [
       { directory: '', files: [file] },

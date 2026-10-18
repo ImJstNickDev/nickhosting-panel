@@ -69,6 +69,39 @@ describe('managed owner Client credential dispatch', () => {
     expect(readFile).toHaveBeenLastCalledWith('server-a', 'a.txt');
   });
 
+  it.each([
+    ['readFileForEditor', ['a.txt', 100]],
+    ['prefetchDownloads', [['a.txt', 'b.txt']]],
+    ['writeFile', ['a.txt', 'private contents']],
+    ['getDirectoryBatchSettings', []],
+    ['listDirectoriesBatch', [['', 'world']]],
+  ] as const)(
+    'forwards %s timing to credential resolution and the exact owner call',
+    async (method, args) => {
+      const call = vi.fn().mockResolvedValue({});
+      const resolve = vi.fn().mockResolvedValue({ [method]: call });
+      const scoped = createScopedProviderAdapter({} as PterodactylAdapter, resolve);
+      const first = createUploadTiming();
+      const second = createUploadTiming();
+      await Promise.all([
+        Reflect.apply(scoped[method], scoped, ['server-a', ...args, first]),
+        Reflect.apply(scoped[method], scoped, ['server-b', ...args, second]),
+      ]);
+      expect(resolve).toHaveBeenCalledWith('server-a', first);
+      expect(resolve).toHaveBeenCalledWith('server-b', second);
+      expect(call).toHaveBeenCalledWith('server-a', ...args, first);
+      expect(call).toHaveBeenCalledWith('server-b', ...args, second);
+      await Reflect.apply(scoped[method], scoped, ['server-a', ...args]);
+      expect(resolve).toHaveBeenLastCalledWith('server-a');
+      expect(call).toHaveBeenLastCalledWith('server-a', ...args);
+      const failure = new Error('provider failure');
+      call.mockRejectedValueOnce(failure);
+      await expect(
+        Reflect.apply(scoped[method], scoped, ['server-a', ...args, first]),
+      ).rejects.toBe(failure);
+    },
+  );
+
   it('discovers Application scopes without probing a nonexistent shared Client key', async () => {
     const application = {
       discoverCapabilities: vi.fn().mockResolvedValue({ nodes: { available: true } }),

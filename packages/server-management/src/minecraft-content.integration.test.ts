@@ -47,6 +47,7 @@ import {
 } from './minecraft-content.js';
 import { minecraftMappingDigest, signMinecraftEvidence } from './minecraft-registry.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
+import { createOperationTiming } from './operation-timing.js';
 import { enqueueServerOperation } from './registry.js';
 import { managementFixture } from './test-fixtures.js';
 import { reserveUploadIngestion } from './upload-admission.js';
@@ -560,6 +561,40 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     expect(f.list).not.toHaveBeenCalled();
     expect(f.read).not.toHaveBeenCalled();
     expect(f.write).not.toHaveBeenCalled();
+  });
+  it('traces world-selection reads and comparison without adding provider work or private data', async () => {
+    const f = await worldSelectionFixture();
+    const timing = createOperationTiming();
+    f.context.timing = timing;
+    expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+    expect(f.listDirectories).toHaveBeenCalledExactlyOnceWith(['', 'selected']);
+    expect(f.list).not.toHaveBeenCalled();
+    expect(f.prepare).toHaveBeenCalledOnce();
+    expect(f.read.mock.calls.map((call) => call[1])).toEqual([
+      'selected/level.dat',
+      'server.properties',
+      'server.properties',
+    ]);
+    expect(f.write).toHaveBeenCalledOnce();
+    expect(f.files.get('server.properties')?.toString()).toContain('level-name=selected');
+    const stages = timing.snapshot();
+    for (const name of [
+      'minecraft.profile.read',
+      'minecraft.combination.inspect',
+      'minecraft.pending.read',
+      'minecraft.world.prepare',
+      'minecraft.world.levelRead',
+      'minecraft.world.propertiesRead',
+      'minecraft.world.validate',
+      'minecraft.text.compare',
+      'minecraft.text.persist',
+      'files.read1.total',
+      'files.read2.total',
+      'files.read3.total',
+    ])
+      expect(stages[name]?.count, name).toBe(1);
+    for (const value of ['server.properties', 'selected/level.dat', 'motd=Fixture', f.serverId])
+      expect(JSON.stringify(timing.report())).not.toContain(value);
   });
   it.each(['selected', 'level.dat'])(
     'rejects a symlink %s from the world-selection batch before reading bytes',

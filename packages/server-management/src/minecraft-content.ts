@@ -551,23 +551,29 @@ const textChangeSchema = z
   })
   .strict();
 type TextChange = z.infer<typeof textChangeSchema>;
+const measureContent = <T>(context: GameLifecycleContext, name: string, work: () => Promise<T>) =>
+  context.timing ? context.timing.measure(`minecraft.${name}`, work) : work();
 const stepId = (kind: string, path: string) => `minecraft.${kind}.${sha256(path)}`;
 async function completed(context: GameLifecycleContext, step: string): Promise<boolean> {
   return Boolean(
-    await context.db
-      .selectFrom('job_steps')
-      .select('step')
-      .where('job_id', '=', context.operation().job_id)
-      .where('step', '=', step)
-      .executeTakeFirst(),
+    await measureContent(context, 'receipt.read', () =>
+      context.db
+        .selectFrom('job_steps')
+        .select('step')
+        .where('job_id', '=', context.operation().job_id)
+        .where('step', '=', step)
+        .executeTakeFirst(),
+    ),
   );
 }
 async function complete(context: GameLifecycleContext, step: string) {
-  await context.db
-    .insertInto('job_steps')
-    .values({ job_id: context.operation().job_id, step })
-    .onConflict((c) => c.columns(['job_id', 'step']).doNothing())
-    .execute();
+  await measureContent(context, 'receipt.write', () =>
+    context.db
+      .insertInto('job_steps')
+      .values({ job_id: context.operation().job_id, step })
+      .onConflict((c) => c.columns(['job_id', 'step']).doNothing())
+      .execute(),
+  );
 }
 function uncertainEffect(context: GameLifecycleContext, phase: string): boolean {
   const operation = context.operation();
@@ -584,7 +590,9 @@ export async function applyMinecraftTextChange(
   const step = stepId('text', change.path);
   if ((await completed(context, step)) || uncertainEffect(context, step)) {
     // Recovery observes once and never blindly replays a possible prior write.
-    const current = await readTextSnapshot(context, change.path);
+    const current = await measureContent(context, 'text.recovery', () =>
+      readTextSnapshot(context, change.path),
+    );
     if (current?.hash !== change.afterSha256) throw new DomainError('operation_uncertain');
     await complete(context, step);
     return;
@@ -594,10 +602,8 @@ export async function applyMinecraftTextChange(
   // Reuse only this pre-effect phase's directory metadata, never its file bytes.
   // Absence needs a fresh listing: an external writer may have created the file.
   // Recovery above also creates a new scope after a possible mutation.
-  const current = await readTextSnapshot(
-    context,
-    change.path,
-    change.beforeSha256 === null ? undefined : files,
+  const current = await measureContent(context, 'text.compare', () =>
+    readTextSnapshot(context, change.path, change.beforeSha256 === null ? undefined : files),
   );
   if (current?.hash === change.afterSha256) {
     await complete(context, step);
@@ -605,11 +611,15 @@ export async function applyMinecraftTextChange(
   }
   if ((current?.hash ?? null) !== change.beforeSha256) throw new DomainError('conflict');
   await context.effect(step, async () => {
-    await context.adapter.writeFile(
-      context.server.pterodactyl_identifier ?? '',
-      change.path,
-      change.content,
-    );
+    const identifier = context.server.pterodactyl_identifier ?? '';
+    if (context.timing)
+      await context.adapter.writeFile(
+        identifier,
+        change.path,
+        change.content,
+        context.timing.child('write'),
+      );
+    else await context.adapter.writeFile(identifier, change.path, change.content);
   });
   // The provider acknowledgement commits the write. A lost response is handled by
   // the recovery branch above; acknowledged writes do not download the file again.
@@ -648,6 +658,7 @@ async function readTextSnapshot(
       adapter: context.adapter,
       identifier: context.server.pterodactyl_identifier ?? '',
       authorize: context.authorize,
+      timing: context.timing?.child('freshFiles'),
     });
   // These fixed configuration paths are root files. One shared root observation
   // retains the symlink/case guard; the hash is computed from the bytes we edit.
@@ -662,7 +673,8 @@ async function readTextSnapshot(
   if (entry.kind !== 'file' || entry.size > 1024 ** 2) throw new DomainError('conflict');
   const bytes = await files.read({ path, maxBytes: 1024 ** 2 });
   if (!bytes) throw new DomainError('not_found');
-  return { content: Buffer.from(bytes).toString('utf8'), hash: sha256(bytes) };
+  const snapshot = () => ({ content: Buffer.from(bytes).toString('utf8'), hash: sha256(bytes) });
+  return context.timing ? context.timing.measureSync('minecraft.text.hash', snapshot) : snapshot();
 }
 async function textSnapshot(
   context: GameLifecycleContext,
@@ -681,15 +693,19 @@ async function applyTextPlan(
   if (context.operation().plan.minecraftText === undefined) {
     // Builders may persist authority (for example a verified player UUID).
     // Read the latest plan only after they finish; an earlier spread loses it.
-    const changes = await build(
-      files ??
-        createFilemanReadService({
-          adapter: context.adapter,
-          identifier: context.server.pterodactyl_identifier ?? '',
-          authorize: context.authorize,
-        }),
+    const changes = await measureContent(context, 'text.build', () =>
+      build(
+        files ??
+          createFilemanReadService({
+            adapter: context.adapter,
+            identifier: context.server.pterodactyl_identifier ?? '',
+            authorize: context.authorize,
+          }),
+      ),
     );
-    await context.update({ plan: { ...context.operation().plan, minecraftText: changes } });
+    await measureContent(context, 'text.persist', () =>
+      context.update({ plan: { ...context.operation().plan, minecraftText: changes } }),
+    );
   }
   const plan = z.array(textChangeSchema).max(4).parse(context.operation().plan.minecraftText);
   await beforeEffects?.(plan);
@@ -1350,6 +1366,7 @@ function worldFileScope(context: GameLifecycleContext): FilemanReadService {
     adapter: context.adapter,
     identifier: context.server.pterodactyl_identifier ?? '',
     authorize: () => (authorized ??= context.authorize()),
+    timing: context.timing?.child('files'),
   });
 }
 
@@ -1724,13 +1741,17 @@ async function applyPreparedContent(
   options: MinecraftContentOptions,
   prepared: MinecraftPreparedContent,
 ): Promise<boolean> {
-  const profile = await context.db
-    .selectFrom('minecraft_server_profiles')
-    .selectAll()
-    .where('server_id', '=', context.server.id)
-    .executeTakeFirstOrThrow();
+  const profile = await measureContent(context, 'profile.read', () =>
+    context.db
+      .selectFrom('minecraft_server_profiles')
+      .selectAll()
+      .where('server_id', '=', context.server.id)
+      .executeTakeFirstOrThrow(),
+  );
   if (profile.combination_id !== prepared.combinationId) throw new DomainError('conflict');
-  const choice = await inspectMinecraftCombination(context.db, profile.combination_id, options.env);
+  const choice = await measureContent(context, 'combination.inspect', () =>
+    inspectMinecraftCombination(context.db, profile.combination_id, options.env),
+  );
   const command = minecraftContentCommandSchema.parse(prepared.command);
   await context.authorize();
   if (!minecraftContentAllowsOnline(prepared)) await context.assertStopped();
@@ -1791,7 +1812,7 @@ async function applyPreparedContent(
     )
       throw new DomainError('provenance_mismatch');
   } else await verifyInstalledRuntime(context, options);
-  const pending = await pendingContent(context);
+  const pending = await measureContent(context, 'pending.read', () => pendingContent(context));
   if (
     pending &&
     pending.jobId !== context.operation().job_id &&
@@ -2356,19 +2377,23 @@ async function applyWorldContent(
     prepared.world.dataVersion !== minecraftWorldDataVersion(choice.combination.release)
   )
     throw new DomainError('conflict');
-  const profile = await context.db
-    .selectFrom('minecraft_server_profiles')
-    .select('installed_manifest')
-    .where('server_id', '=', context.server.id)
-    .executeTakeFirstOrThrow();
+  const profile = await measureContent(context, 'runtimePaths.read', () =>
+    context.db
+      .selectFrom('minecraft_server_profiles')
+      .select('installed_manifest')
+      .where('server_id', '=', context.server.id)
+      .executeTakeFirstOrThrow(),
+  );
   assertMinecraftRuntimePathsPreserved([target], profile.installed_manifest);
   if (command.kind === 'world-select') {
     if (prepared.world.dataVersion === undefined) throw new DomainError('integration_unavailable');
     const files = worldFileScope(context);
-    const [directories, tickets] = await Promise.allSettled([
-      files.listMany(['', target]),
-      files.prepare(['server.properties', `${target}/level.dat`]),
-    ]);
+    const [directories, tickets] = await measureContent(context, 'world.prepare', () =>
+      Promise.allSettled([
+        files.listMany(['', target]),
+        files.prepare(['server.properties', `${target}/level.dat`]),
+      ]),
+    );
     if (directories.status === 'rejected') throw directories.reason;
     if (tickets.status === 'rejected') throw tickets.reason;
     for (const result of directories.value) {
@@ -2394,14 +2419,24 @@ async function applyWorldContent(
       level[0].size > 8 * 1024 ** 2
     )
       throw new DomainError('conflict');
+    const levelSize = level[0].size;
     const [bytes, snapshot] = await Promise.all([
-      files.read({ path: `${target}/level.dat`, maxBytes: level[0].size }),
-      textSnapshot(context, 'server.properties', '', files),
+      measureContent(context, 'world.levelRead', () =>
+        files.read({ path: `${target}/level.dat`, maxBytes: levelSize }),
+      ),
+      measureContent(context, 'world.propertiesRead', () =>
+        textSnapshot(context, 'server.properties', '', files),
+      ),
     ]);
     if (!bytes) throw new DomainError('not_found');
-    const validation = validateMinecraftLevelDat(bytes, prepared.world.dataVersion, {
-      release: choice.combination.release,
-    });
+    const dataVersion = prepared.world.dataVersion;
+    const validateLevel = () =>
+      validateMinecraftLevelDat(bytes, dataVersion, {
+        release: choice.combination.release,
+      });
+    const validation = context.timing
+      ? context.timing.measureSync('minecraft.world.validate', validateLevel)
+      : validateLevel();
     await applyTextPlan(
       context,
       async () => {

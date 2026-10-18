@@ -43,6 +43,7 @@ import {
   minecraftContentAllowsOnline,
   minecraftContentSelectsWorld,
 } from './minecraft-content-contracts.js';
+import { createOperationTiming, type OperationTiming } from './operation-timing.js';
 import { assertGatewaySleepFence, revokeGatewayRoutesForDeletion } from './registry.js';
 import { assertIdleSleepAllowed } from './sleep-policy.js';
 import { consumeStopEscalation, stopEscalation } from './stop-escalation.js';
@@ -62,6 +63,7 @@ export interface GameLifecycleContext {
   /** Scoped Fileman host services for trusted integration file operations. */
   fileman?: FilemanJobServices;
   logger?: ReturnType<typeof createLogger>;
+  timing?: OperationTiming;
   db: Kysely<Database>;
   server: Server;
   adapter: PterodactylAdapter;
@@ -145,6 +147,7 @@ export interface LifecycleOptions {
     serverId: string,
     connection: Kysely<Database>,
     context?: {
+      timing?: OperationTiming;
       providerServer?: ApplicationServer | Promise<ApplicationServer>;
       /** Clean Start has matched fresh provider limits and reserved local resources. */
       startAdmissionValidated?: true;
@@ -159,11 +162,16 @@ export interface LifecycleOptions {
     jobId: string,
     serverId: string,
     connection: Kysely<Database>,
+    context?: { timing?: OperationTiming },
   ) => Promise<void>;
   /** Explicit runtime guarantee; other callers retain the independent host check. */
   effectAuthorizationVerifiesHost?: boolean;
   /** Production binds host-local observations to this server's current physical host. */
-  verifyObservationHost?: (serverId: string, connection: Kysely<Database>) => Promise<void>;
+  verifyObservationHost?: (
+    serverId: string,
+    connection: Kysely<Database>,
+    timing?: OperationTiming,
+  ) => Promise<void>;
   /** Trusted host-bound running process start. Null proves non-running/absent;
    * unavailability must throw. Production always supplies this observer. */
   observeProcessStart?: (serverId: string, connection: Kysely<Database>) => Promise<string | null>;
@@ -193,6 +201,7 @@ export interface LifecycleOptions {
     context?: {
       providerServer: Promise<ApplicationServer>;
       observerPreflight?: Promise<void>;
+      timing?: OperationTiming;
     },
   ) => Promise<boolean>;
   /** Read-only host sampling may overlap provider reads. The returned admission
@@ -413,6 +422,19 @@ export async function processServerOperation(
     .where('job_id', '=', jobId)
     .executeTakeFirst();
   if (!initial) return 'missing';
+  let timing: OperationTiming | undefined;
+  try {
+    if (
+      initial.action === 'minecraft-content' &&
+      minecraftContentSelectsWorld(initial.plan.minecraftContent) &&
+      options.logger?.isEnabled('debug')
+    )
+      timing = createOperationTiming();
+  } catch {
+    // Diagnostics never prevent processing a valid operation.
+  }
+  const trace = <T>(name: string, work: () => Promise<T>) =>
+    timing ? timing.measure(name, work) : work();
   const log = (event: string, data: Record<string, unknown>) => {
     try {
       options.logger?.log('info', event, {
@@ -438,7 +460,7 @@ export async function processServerOperation(
     const began = performance.now();
     let outcome = 'error';
     try {
-      const value = await work();
+      const value = await trace(stage === 'authorization' ? 'auth.effect' : stage, work);
       outcome = 'ok';
       return value;
     } finally {
@@ -450,24 +472,26 @@ export async function processServerOperation(
     }
   };
   const lockStarted = performance.now();
+  const finishLock = timing?.start('lock.wait');
   let acquired = false;
   return withServerLock(db, initial.server_id, async (db) => {
     acquired = true;
+    finishLock?.();
     log('servers.operation_stage', {
       stage: 'server_lock',
       outcome: 'acquired',
       durationMs: Math.round(performance.now() - lockStarted),
     });
-    let operation = await db
-      .selectFrom('server_operations')
-      .selectAll()
-      .where('job_id', '=', jobId)
-      .executeTakeFirstOrThrow();
-    const job = await db
-      .selectFrom('operation_jobs')
-      .selectAll()
-      .where('id', '=', jobId)
-      .executeTakeFirstOrThrow();
+    let operation = await trace('load.operation', () =>
+      db
+        .selectFrom('server_operations')
+        .selectAll()
+        .where('job_id', '=', jobId)
+        .executeTakeFirstOrThrow(),
+    );
+    const job = await trace('load.job', () =>
+      db.selectFrom('operation_jobs').selectAll().where('id', '=', jobId).executeTakeFirstOrThrow(),
+    );
     if (job.state === 'succeeded' || job.state === 'failed') return 'duplicate';
     if (job.next_attempt_at > nowOf(options)) {
       log('servers.operation_deferred', {
@@ -476,11 +500,13 @@ export async function processServerOperation(
       });
       return 'deferred';
     }
-    let server = await db
-      .selectFrom('managed_servers')
-      .selectAll()
-      .where('id', '=', operation.server_id)
-      .executeTakeFirstOrThrow();
+    let server = await trace('load.server', () =>
+      db
+        .selectFrom('managed_servers')
+        .selectAll()
+        .where('id', '=', operation.server_id)
+        .executeTakeFirstOrThrow(),
+    );
     // Obsolete operations must not enter the transport's short contention retry.
     if (server.active_operation_id !== jobId || server.deleted_at) {
       log('servers.operation_deferred', { reason: 'inactive' });
@@ -488,38 +514,43 @@ export async function processServerOperation(
     }
     const token = randomUUID();
     const at = nowOf(options);
-    await db
-      .updateTable('server_operations')
-      .set({ lease_token: token, lease_until: new Date(at.getTime() + 120_000), updated_at: at })
-      .where('job_id', '=', jobId)
-      .execute();
-    await db
-      .updateTable('operation_jobs')
-      .set({ state: 'running', updated_at: at })
-      .where('id', '=', jobId)
-      .execute();
+    await trace('load.lease', () =>
+      db
+        .updateTable('server_operations')
+        .set({ lease_token: token, lease_until: new Date(at.getTime() + 120_000), updated_at: at })
+        .where('job_id', '=', jobId)
+        .execute(),
+    );
+    await trace('load.running', () =>
+      db
+        .updateTable('operation_jobs')
+        .set({ state: 'running', updated_at: at })
+        .where('id', '=', jobId)
+        .execute(),
+    );
 
-    const update = async (patch: {
+    const update = (patch: {
       phase?: string;
       effect_state?: Operation['effect_state'];
       effect_started_at?: Date | null;
       plan?: Record<string, unknown>;
-    }) => {
-      await db
-        .updateTable('server_operations')
-        .set({
-          ...patch,
-          plan: patch.plan === undefined ? undefined : JSON.stringify(patch.plan),
-          updated_at: nowOf(options),
-        })
-        .where('job_id', '=', jobId)
-        .execute();
-      operation = await db
-        .selectFrom('server_operations')
-        .selectAll()
-        .where('job_id', '=', jobId)
-        .executeTakeFirstOrThrow();
-    };
+    }) =>
+      trace('journal.update', async () => {
+        await db
+          .updateTable('server_operations')
+          .set({
+            ...patch,
+            plan: patch.plan === undefined ? undefined : JSON.stringify(patch.plan),
+            updated_at: nowOf(options),
+          })
+          .where('job_id', '=', jobId)
+          .execute();
+        operation = await db
+          .selectFrom('server_operations')
+          .selectAll()
+          .where('job_id', '=', jobId)
+          .executeTakeFirstOrThrow();
+      });
     const event = async (messageKey: string, data: Record<string, unknown> = {}) => {
       await db
         .insertInto('server_events')
@@ -654,196 +685,201 @@ export async function processServerOperation(
             rollbackLimits = { ...previous.data, threads: previous.data.threads ?? undefined };
         }
       }
-      const completed = await db.transaction().execute(async (tx) => {
-        await lockResources(tx);
-        if (alreadyStopped) {
-          const compute = await tx
-            .selectFrom('resource_reservations')
-            .select('server_id')
-            .where('server_id', '=', server.id)
-            .executeTakeFirst();
-          const installation = await tx
-            .selectFrom('installation_reservations')
-            .select('server_id')
-            .where('server_id', '=', server.id)
-            .executeTakeFirst();
-          if (compute || installation) return false;
-          if (!isGatewaySleep(operation) && !isScheduledStop(operation))
+      const completed = await trace('finish.transaction', () =>
+        db.transaction().execute(async (tx) => {
+          await trace('finish.lock', () => lockResources(tx));
+          if (alreadyStopped) {
+            const compute = await tx
+              .selectFrom('resource_reservations')
+              .select('server_id')
+              .where('server_id', '=', server.id)
+              .executeTakeFirst();
+            const installation = await tx
+              .selectFrom('installation_reservations')
+              .select('server_id')
+              .where('server_id', '=', server.id)
+              .executeTakeFirst();
+            if (compute || installation) return false;
+            if (!isGatewaySleep(operation) && !isScheduledStop(operation))
+              await tx
+                .updateTable('managed_servers')
+                .set({ intent: 'manually_stopped' })
+                .where('id', '=', server.id)
+                .execute();
+          }
+          if (
+            !success &&
+            operation.action === 'reinstall' &&
+            (operation.plan.installationEffectPrepared !== true ||
+              (operation.plan.rejected === true && operation.effect_state === 'none')) &&
+            ['pending', 'installing', 'installed', 'failed'].includes(
+              String(operation.plan.previousInstallationState),
+            )
+          )
             await tx
               .updateTable('managed_servers')
-              .set({ intent: 'manually_stopped' })
+              .set({
+                installation_state: operation.plan
+                  .previousInstallationState as Server['installation_state'],
+              })
               .where('id', '=', server.id)
               .execute();
-        }
-        if (
-          !success &&
-          operation.action === 'reinstall' &&
-          (operation.plan.installationEffectPrepared !== true ||
-            (operation.plan.rejected === true && operation.effect_state === 'none')) &&
-          ['pending', 'installing', 'installed', 'failed'].includes(
-            String(operation.plan.previousInstallationState),
+          if (rollbackLimits)
+            await tx
+              .updateTable('managed_servers')
+              .set({ limits: JSON.stringify(rollbackLimits) })
+              .where('id', '=', server.id)
+              .execute();
+          await tx
+            .selectFrom('managed_servers')
+            .select('id')
+            .where('id', '=', server.id)
+            .forUpdate()
+            .executeTakeFirstOrThrow();
+          if (
+            !success &&
+            operation.plan.installConfirmed !== true &&
+            (operation.action === 'provision' ||
+              (operation.action === 'reinstall' &&
+                operation.plan.installationEffectPrepared === true &&
+                !(operation.plan.rejected === true && operation.effect_state === 'none')))
           )
-        )
+            await tx
+              .updateTable('managed_servers')
+              .set({ installation_state: 'failed' })
+              .where('id', '=', server.id)
+              .where('installation_state', 'in', ['pending', 'installing'])
+              .execute();
+          if (success && operation.action === 'delete') {
+            await tx
+              .updateTable('managed_servers')
+              .set({ deleted_at: nowOf(options), runtime_state: 'offline', readiness: 'unknown' })
+              .where('id', '=', server.id)
+              .execute();
+            await tx.deleteFrom('server_allocations').where('server_id', '=', server.id).execute();
+            await tx
+              .updateTable('test_asset_provenance')
+              .set({ deleted_at: nowOf(options) })
+              .where('server_id', '=', server.id)
+              .execute();
+          }
+          if (
+            operation.plan.installConfirmed === true ||
+            operation.plan.installationEffectPrepared !== true ||
+            (operation.effect_state === 'none' && operation.plan.rejected === true)
+          )
+            await tx
+              .deleteFrom('installation_reservations')
+              .where('server_id', '=', server.id)
+              .where('operation_id', '=', jobId)
+              .execute();
+          if (release)
+            await tx
+              .deleteFrom('resource_reservations')
+              .where('server_id', '=', server.id)
+              .execute();
+          else if (
+            operation.plan.reservationCreated === true &&
+            (operation.action === 'start' ||
+              (operation.action === 'provision' && operation.plan.autoStart === true)) &&
+            (operation.plan.powerEffectPrepared !== true ||
+              (operation.effect_state === 'none' && operation.plan.rejected === true))
+          )
+            await tx
+              .deleteFrom('resource_reservations')
+              .where('server_id', '=', server.id)
+              .where('operation_id', '=', jobId)
+              .execute();
           await tx
             .updateTable('managed_servers')
             .set({
-              installation_state: operation.plan
-                .previousInstallationState as Server['installation_state'],
-            })
-            .where('id', '=', server.id)
-            .execute();
-        if (rollbackLimits)
-          await tx
-            .updateTable('managed_servers')
-            .set({ limits: JSON.stringify(rollbackLimits) })
-            .where('id', '=', server.id)
-            .execute();
-        await tx
-          .selectFrom('managed_servers')
-          .select('id')
-          .where('id', '=', server.id)
-          .forUpdate()
-          .executeTakeFirstOrThrow();
-        if (
-          !success &&
-          operation.plan.installConfirmed !== true &&
-          (operation.action === 'provision' ||
-            (operation.action === 'reinstall' &&
-              operation.plan.installationEffectPrepared === true &&
-              !(operation.plan.rejected === true && operation.effect_state === 'none')))
-        )
-          await tx
-            .updateTable('managed_servers')
-            .set({ installation_state: 'failed' })
-            .where('id', '=', server.id)
-            .where('installation_state', 'in', ['pending', 'installing'])
-            .execute();
-        if (success && operation.action === 'delete') {
-          await tx
-            .updateTable('managed_servers')
-            .set({ deleted_at: nowOf(options), runtime_state: 'offline', readiness: 'unknown' })
-            .where('id', '=', server.id)
-            .execute();
-          await tx.deleteFrom('server_allocations').where('server_id', '=', server.id).execute();
-          await tx
-            .updateTable('test_asset_provenance')
-            .set({ deleted_at: nowOf(options) })
-            .where('server_id', '=', server.id)
-            .execute();
-        }
-        if (
-          operation.plan.installConfirmed === true ||
-          operation.plan.installationEffectPrepared !== true ||
-          (operation.effect_state === 'none' && operation.plan.rejected === true)
-        )
-          await tx
-            .deleteFrom('installation_reservations')
-            .where('server_id', '=', server.id)
-            .where('operation_id', '=', jobId)
-            .execute();
-        if (release)
-          await tx.deleteFrom('resource_reservations').where('server_id', '=', server.id).execute();
-        else if (
-          operation.plan.reservationCreated === true &&
-          (operation.action === 'start' ||
-            (operation.action === 'provision' && operation.plan.autoStart === true)) &&
-          (operation.plan.powerEffectPrepared !== true ||
-            (operation.effect_state === 'none' && operation.plan.rejected === true))
-        )
-          await tx
-            .deleteFrom('resource_reservations')
-            .where('server_id', '=', server.id)
-            .where('operation_id', '=', jobId)
-            .execute();
-        await tx
-          .updateTable('managed_servers')
-          .set({
-            active_operation_id: null,
-            updated_at: nowOf(options),
-            ...(confirmedStopped
-              ? {
-                  runtime_state: 'offline' as const,
-                  readiness: 'unknown' as const,
-                  last_observed_at: nowOf(options),
-                  ...(!isGatewaySleep(operation) && !isScheduledStop(operation)
-                    ? { intent: 'manually_stopped' as const }
-                    : {}),
-                }
-              : {}),
-          })
-          .where('id', '=', server.id)
-          .where('active_operation_id', '=', jobId)
-          .execute();
-        await tx
-          .updateTable('operation_jobs')
-          .set({
-            state: success ? 'succeeded' : 'failed',
-            error_code: code,
-            completed_at: nowOf(options),
-            updated_at: nowOf(options),
-          })
-          .where('id', '=', jobId)
-          .execute();
-        await tx
-          .updateTable('server_operations')
-          .set({
-            plan: alreadyStopped
-              ? JSON.stringify({
-                  ...operation.plan,
-                  stopNoOp: true,
-                  stopAlreadyOfflineConfirmedAt: nowOf(options).toISOString(),
-                })
-              : !success &&
-                  operation.action === 'provision' &&
-                  server.pterodactyl_id === null &&
-                  operation.phase === 'planned' &&
-                  operation.effect_state === 'none'
-                ? JSON.stringify({ ...operation.plan, noExternalEffect: true })
-                : undefined,
-            phase: success ? 'complete' : 'failed',
-            effect_state: success ? 'confirmed' : operation.effect_state,
-            lease_token: null,
-            lease_until: null,
-            updated_at: nowOf(options),
-          })
-          .where('job_id', '=', jobId)
-          .execute();
-        await tx
-          .insertInto('job_steps')
-          .values({
-            job_id: jobId,
-            step: `server.${operation.action}.${success ? 'complete' : 'failed'}`,
-          })
-          .onConflict((conflict) => conflict.columns(['job_id', 'step']).doNothing())
-          .execute();
-        await tx
-          .insertInto('server_events')
-          .values({
-            server_id: server.id,
-            job_id: jobId,
-            actor_id: job.actor_id,
-            subject_id: job.subject_id,
-            support_session_id: job.support_session_id,
-            message_key: success ? 'servers.operation.succeeded' : 'servers.operation.failed',
-            data: JSON.stringify({
-              action: operation.action,
-              code,
-              ...(operation.plan.externalStopConfirmed
+              active_operation_id: null,
+              updated_at: nowOf(options),
+              ...(confirmedStopped
                 ? {
-                    source: 'provider_activity',
-                    reason: 'external_stop',
-                    receipt: operation.plan.externalStopConfirmed,
+                    runtime_state: 'offline' as const,
+                    readiness: 'unknown' as const,
+                    last_observed_at: nowOf(options),
+                    ...(!isGatewaySleep(operation) && !isScheduledStop(operation)
+                      ? { intent: 'manually_stopped' as const }
+                      : {}),
                   }
                 : {}),
-            }),
-          })
-          .execute();
-        await sql`select pg_notify('nh_server_events_' || md5(current_database() || ':' || current_schema()), ${server.id})`.execute(
-          tx,
-        );
-        await tx.deleteFrom('job_outbox').where('job_id', '=', jobId).execute();
-        return true;
-      });
+            })
+            .where('id', '=', server.id)
+            .where('active_operation_id', '=', jobId)
+            .execute();
+          await tx
+            .updateTable('operation_jobs')
+            .set({
+              state: success ? 'succeeded' : 'failed',
+              error_code: code,
+              completed_at: nowOf(options),
+              updated_at: nowOf(options),
+            })
+            .where('id', '=', jobId)
+            .execute();
+          await tx
+            .updateTable('server_operations')
+            .set({
+              plan: alreadyStopped
+                ? JSON.stringify({
+                    ...operation.plan,
+                    stopNoOp: true,
+                    stopAlreadyOfflineConfirmedAt: nowOf(options).toISOString(),
+                  })
+                : !success &&
+                    operation.action === 'provision' &&
+                    server.pterodactyl_id === null &&
+                    operation.phase === 'planned' &&
+                    operation.effect_state === 'none'
+                  ? JSON.stringify({ ...operation.plan, noExternalEffect: true })
+                  : undefined,
+              phase: success ? 'complete' : 'failed',
+              effect_state: success ? 'confirmed' : operation.effect_state,
+              lease_token: null,
+              lease_until: null,
+              updated_at: nowOf(options),
+            })
+            .where('job_id', '=', jobId)
+            .execute();
+          await tx
+            .insertInto('job_steps')
+            .values({
+              job_id: jobId,
+              step: `server.${operation.action}.${success ? 'complete' : 'failed'}`,
+            })
+            .onConflict((conflict) => conflict.columns(['job_id', 'step']).doNothing())
+            .execute();
+          await tx
+            .insertInto('server_events')
+            .values({
+              server_id: server.id,
+              job_id: jobId,
+              actor_id: job.actor_id,
+              subject_id: job.subject_id,
+              support_session_id: job.support_session_id,
+              message_key: success ? 'servers.operation.succeeded' : 'servers.operation.failed',
+              data: JSON.stringify({
+                action: operation.action,
+                code,
+                ...(operation.plan.externalStopConfirmed
+                  ? {
+                      source: 'provider_activity',
+                      reason: 'external_stop',
+                      receipt: operation.plan.externalStopConfirmed,
+                    }
+                  : {}),
+              }),
+            })
+            .execute();
+          await sql`select pg_notify('nh_server_events_' || md5(current_database() || ':' || current_schema()), ${server.id})`.execute(
+            tx,
+          );
+          await tx.deleteFrom('job_outbox').where('job_id', '=', jobId).execute();
+          return true;
+        }),
+      );
       if (!completed) return wait('already_stopped_reservation_changed', 'operation_uncertain');
       if (
         success &&
@@ -888,26 +924,33 @@ export async function processServerOperation(
       )
         throw new DomainError('operation_uncertain');
     };
-    const requireQuiescentReservation = () =>
-      db.transaction().execute(async (tx) => {
-        await lockResources(tx);
-        await assertQuiescentReservation(tx);
-      });
+    const requireQuiescentReservation = (phaseTiming?: OperationTiming) => {
+      const measure = <T>(name: string, work: () => Promise<T>) =>
+        phaseTiming ? phaseTiming.measure(name, work) : work();
+      return measure('resources', () =>
+        db.transaction().execute(async (tx) => {
+          await measure('lock', () => lockResources(tx));
+          await measure('reservation', () => assertQuiescentReservation(tx));
+        }),
+      );
+    };
     let worldSelectionObserverPreflight: Promise<void> | undefined;
     let worldSelectionStopped: Promise<boolean> | undefined;
     const confirmWorldSelectionStopped = (fresh = false) => {
       if (fresh || !worldSelectionStopped)
-        worldSelectionStopped = (async () => {
-          await requireQuiescentReservation();
+        worldSelectionStopped = trace(fresh ? 'stop.final' : 'stop.initial', async () => {
+          const stoppedTiming = timing?.child(fresh ? 'stop.final' : 'stop.initial');
+          await requireQuiescentReservation(stoppedTiming);
           if (!options.confirmAlreadyStopped) return false;
           const remote = await worldContentProvider();
           return options.confirmAlreadyStopped(server.id, db, {
             providerServer: Promise.resolve(remote),
+            timing: stoppedTiming,
             // Only preparation shares the concurrent host proof. Dispatch always
             // takes a new physical/host observation after durable intent.
             ...(fresh ? {} : { observerPreflight: worldSelectionObserverPreflight }),
           });
-        })();
+        });
       return worldSelectionStopped;
     };
     const effect = async <T>(
@@ -919,22 +962,24 @@ export async function processServerOperation(
       await timed('authorization', () =>
         (offlineWorldSelection || ['power', 'initial_start'].includes(phase)
           ? (options.authorizeIntent ?? options.authorizeEffect)
-          : options.authorizeEffect)(jobId, server.id, db),
+          : options.authorizeEffect)(jobId, server.id, db, { timing: timing?.child('auth') }),
       );
-      await db.transaction().execute(async (tx) => {
-        await lockResources(tx);
-        await assertNoPendingUpload(tx, server.id);
-        if (
-          await tx
-            .selectFrom('installation_reservations')
-            .select('server_id')
-            .where('server_id', '=', server.id)
-            .where('operation_id', '!=', jobId)
-            .executeTakeFirst()
-        )
-          throw new DomainError('operation_uncertain');
-        if (offlineWorldSelection) await assertQuiescentReservation(tx);
-      });
+      await trace('effect.resources', () =>
+        db.transaction().execute(async (tx) => {
+          await trace('effect.resourceLock', () => lockResources(tx));
+          await assertNoPendingUpload(tx, server.id);
+          if (
+            await tx
+              .selectFrom('installation_reservations')
+              .select('server_id')
+              .where('server_id', '=', server.id)
+              .where('operation_id', '!=', jobId)
+              .executeTakeFirst()
+          )
+            throw new DomainError('operation_uncertain');
+          if (offlineWorldSelection) await assertQuiescentReservation(tx);
+        }),
+      );
       if (
         !onlineWorldContent &&
         !offlineWorldSelection &&
@@ -968,31 +1013,33 @@ export async function processServerOperation(
             (operation.action !== 'provision' || server.pterodactyl_id !== null
               ? await timed('provider_identity', () => ownedRemote(db, server, options))
               : undefined));
-      await update({
-        phase,
-        effect_state: 'prepared',
-        effect_started_at: nowOf(options),
-        plan: {
-          ...operation.plan,
-          acknowledged: false,
-          // Backup completion, retention and resume are distinct effects. A
-          // rejected earlier phase cannot label an admitted resume as rejected.
-          ...(operation.action === 'backup' ? { rejected: false, rejectionCode: undefined } : {}),
-          waitReason: null,
-          effectAttempts: { ...attempts, [phase]: attempt },
-          ...(['power', 'initial_start'].includes(phase) ? { powerEffectPrepared: true } : {}),
-          ...(['provision', 'reinstall'].includes(phase)
-            ? { installationEffectPrepared: true }
-            : {}),
-        },
+      await trace('effect.prepare', async () => {
+        await update({
+          phase,
+          effect_state: 'prepared',
+          effect_started_at: nowOf(options),
+          plan: {
+            ...operation.plan,
+            acknowledged: false,
+            // Backup completion, retention and resume are distinct effects. A
+            // rejected earlier phase cannot label an admitted resume as rejected.
+            ...(operation.action === 'backup' ? { rejected: false, rejectionCode: undefined } : {}),
+            waitReason: null,
+            effectAttempts: { ...attempts, [phase]: attempt },
+            ...(['power', 'initial_start'].includes(phase) ? { powerEffectPrepared: true } : {}),
+            ...(['provision', 'reinstall'].includes(phase)
+              ? { installationEffectPrepared: true }
+              : {}),
+          },
+        });
+        await db
+          .updateTable('operation_jobs')
+          .set({ attempts: sql<number>`greatest(attempts, ${attempt})` })
+          .where('id', '=', jobId)
+          .execute();
+        await event('servers.operation.effect_prepared', { phase });
+        await options.checkpoint?.('prepared', operation);
       });
-      await db
-        .updateTable('operation_jobs')
-        .set({ attempts: sql<number>`greatest(attempts, ${attempt})` })
-        .where('id', '=', jobId)
-        .execute();
-      await event('servers.operation.effect_prepared', { phase });
-      await options.checkpoint?.('prepared', operation);
       const minecraftProvision =
         operation.action === 'provision' &&
         (await db
@@ -1018,11 +1065,13 @@ export async function processServerOperation(
             // Revalidate current local identity and policy after durable intent.
             // A changed mapping/ownership cannot borrow an earlier remote proof.
             if (!guardedDirectoryEffect) verifiedServer = await worldContentProvider();
-            const current = await db
-              .selectFrom('managed_servers')
-              .selectAll()
-              .where('id', '=', server.id)
-              .executeTakeFirstOrThrow();
+            const current = await trace('effect.registry', () =>
+              db
+                .selectFrom('managed_servers')
+                .selectAll()
+                .where('id', '=', server.id)
+                .executeTakeFirstOrThrow(),
+            );
             if (
               current.active_operation_id !== jobId ||
               current.deleted_at ||
@@ -1044,7 +1093,11 @@ export async function processServerOperation(
                 throw new DomainError('operation_uncertain');
             } else if (verifiedServer) await verifyManagedIdentity(db, current, verifiedServer);
             // Physical observations can wait; current authority belongs at dispatch.
-            await (options.authorizeIntent ?? options.authorizeEffect)(jobId, server.id, db);
+            await trace('auth.final', () =>
+              (options.authorizeIntent ?? options.authorizeEffect)(jobId, server.id, db, {
+                timing: timing?.child('auth'),
+              }),
+            );
           } else if (leanStart) {
             await timed('authorization', () =>
               options.authorizeEffect(jobId, server.id, db, {
@@ -1124,10 +1177,12 @@ export async function processServerOperation(
         throw error;
       }
       await options.checkpoint?.('remote_succeeded', operation);
-      await update({
-        effect_state: 'confirmed',
-        plan: { ...operation.plan, acknowledged: true, ...(patch?.(result) ?? {}) },
-      });
+      await trace('effect.confirm', () =>
+        update({
+          effect_state: 'confirmed',
+          plan: { ...operation.plan, acknowledged: true, ...(patch?.(result) ?? {}) },
+        }),
+      );
       await options.checkpoint?.('confirmed', operation);
       return true;
     };
@@ -1328,6 +1383,7 @@ export async function processServerOperation(
         db,
         server,
         logger: options.logger,
+        timing,
         adapter: options.adapter,
         operation: () => operation,
         update,
@@ -1335,9 +1391,11 @@ export async function processServerOperation(
         event,
         backup,
         authorize: () =>
-          (worldFileContent
-            ? (options.authorizeIntent ?? options.authorizeEffect)
-            : options.authorizeEffect)(jobId, server.id, db),
+          trace('auth.read', () =>
+            (worldFileContent
+              ? (options.authorizeIntent ?? options.authorizeEffect)
+              : options.authorizeEffect)(jobId, server.id, db, { timing: timing?.child('auth') }),
+          ),
         assertStopped: async () => {
           if (offlineWorldSelection) {
             if (!(await confirmWorldSelectionStopped()))
@@ -2256,7 +2314,7 @@ export async function processServerOperation(
         } else if (offlineWorldSelection && options.verifyObservationHost) {
           const [identity, host] = await Promise.allSettled([
             timed('provider_identity', () => ownedRemote(db, server, options)),
-            options.verifyObservationHost(server.id, db),
+            options.verifyObservationHost(server.id, db, timing?.child('stop.initial.host')),
           ]);
           if (identity.status === 'rejected') throw identity.reason;
           if (host.status === 'rejected') throw host.reason;
@@ -2921,21 +2979,37 @@ export async function processServerOperation(
         return wait('installation_terminal_unproven', code);
       return wait('provider_unavailable', code);
     } finally {
-      await db
-        .updateTable('server_operations')
-        .set({ lease_token: null, lease_until: null })
-        .where('job_id', '=', jobId)
-        .where('lease_token', '=', token)
-        .execute();
+      await trace('lease.release', () =>
+        db
+          .updateTable('server_operations')
+          .set({ lease_token: null, lease_until: null })
+          .where('job_id', '=', jobId)
+          .where('lease_token', '=', token)
+          .execute(),
+      );
     }
-  }).then((result) => {
-    if (!acquired)
-      log('servers.operation_deferred', {
-        reason: 'server_lock_busy',
-        durationMs: Math.round(performance.now() - lockStarted),
-      });
-    return result;
-  });
+  })
+    .then((result) => {
+      if (!acquired)
+        log('servers.operation_deferred', {
+          reason: 'server_lock_busy',
+          durationMs: Math.round(performance.now() - lockStarted),
+        });
+      return result;
+    })
+    .finally(() => {
+      if (!timing) return;
+      try {
+        finishLock?.();
+        options.logger?.log('debug', 'servers.world_selection_timing', {
+          jobId,
+          serverId: initial.server_id,
+          ...timing.report(),
+        });
+      } catch {
+        // A broken sink or timer cannot change operation completion or errors.
+      }
+    });
 }
 
 /** Route by the PostgreSQL command, never by caller-supplied Redis payloads. */

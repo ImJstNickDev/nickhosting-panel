@@ -53,6 +53,7 @@ import {
 } from './lifecycle.js';
 import { minecraftContentAllowsOnline } from './minecraft-content-contracts.js';
 import { createMinecraftModuleRuntime } from './minecraft-module.js';
+import type { OperationTiming } from './operation-timing.js';
 import { resolveProviderCredential } from './provider-accounts.js';
 import {
   backupSchemaAvailable,
@@ -81,24 +82,23 @@ export async function authorizeQueuedEffect(
   serverId: string,
   env: Environment = {},
   adapter?: PterodactylAdapter,
+  timing?: OperationTiming,
 ) {
-  const job = await db
-    .selectFrom('operation_jobs')
-    .selectAll()
-    .where('id', '=', jobId)
-    .executeTakeFirst();
-  const operation = await db
-    .selectFrom('server_operations')
-    .selectAll()
-    .where('job_id', '=', jobId)
-    .where('server_id', '=', serverId)
-    .executeTakeFirst();
+  const job = await traceOperation(timing, 'job', () =>
+    db.selectFrom('operation_jobs').selectAll().where('id', '=', jobId).executeTakeFirst(),
+  );
+  const operation = await traceOperation(timing, 'operation', () =>
+    db
+      .selectFrom('server_operations')
+      .selectAll()
+      .where('job_id', '=', jobId)
+      .where('server_id', '=', serverId)
+      .executeTakeFirst(),
+  );
   if (!job || !operation) throw new DomainError('forbidden');
-  const user = await db
-    .selectFrom('user')
-    .select(['id', 'role'])
-    .where('id', '=', job.actor_id)
-    .executeTakeFirst();
+  const user = await traceOperation(timing, 'actor', () =>
+    db.selectFrom('user').select(['id', 'role']).where('id', '=', job.actor_id).executeTakeFirst(),
+  );
   if (!user) throw new DomainError('unauthenticated');
   let context: AuthContext = {
     actorUserId: user.id,
@@ -144,13 +144,15 @@ export async function authorizeQueuedEffect(
     };
   }
   assertAuthContext(context);
-  const server = await authorizeServer(
-    db,
-    context,
-    serverId,
-    ['start', 'stop', 'restart', 'backup'].includes(operation.action)
-      ? 'server:operate'
-      : 'server:manage',
+  const server = await traceOperation(timing, 'access', () =>
+    authorizeServer(
+      db,
+      context,
+      serverId,
+      ['start', 'stop', 'restart', 'backup'].includes(operation.action)
+        ? 'server:operate'
+        : 'server:manage',
+    ),
   );
   if (server.owner_id !== job.resource_owner_id) throw new DomainError('forbidden');
   if (operation.plan.scheduleAutomation !== undefined)
@@ -175,7 +177,7 @@ export async function authorizeQueuedEffect(
     server.automatic_starts_paused
   )
     throw new DomainError('forbidden');
-  const game = await trustedGameModules.resolve(db, serverId);
+  const game = await traceOperation(timing, 'game', () => trustedGameModules.resolve(db, serverId));
 
   if (operation.plan.gatewayAutomation !== undefined) {
     if (server.connection_mode === 'direct') throw new DomainError('forbidden');
@@ -250,23 +252,28 @@ export async function authorizeQueuedEffect(
     )
       throw new DomainError('forbidden');
   }
-  if (game.module) {
-    const resourceOwner = await db
-      .selectFrom('user')
-      .select(['id', 'role'])
-      .where('id', '=', server.owner_id)
-      .executeTakeFirst();
+  const module = game.module;
+  if (module) {
+    const resourceOwner = await traceOperation(timing, 'owner', () =>
+      db
+        .selectFrom('user')
+        .select(['id', 'role'])
+        .where('id', '=', server.owner_id)
+        .executeTakeFirst(),
+    );
     if (!resourceOwner) throw new DomainError('forbidden');
-    await game.module.authorizeOperation({
-      db,
-      server,
-      mapping: game.mapping,
-      operation,
-      context,
-      resourceOwner,
-      env,
-      adapter,
-    });
+    await traceOperation(timing, 'policy', () =>
+      module.authorizeOperation({
+        db,
+        server,
+        mapping: game.mapping,
+        operation,
+        context,
+        resourceOwner,
+        env,
+        adapter,
+      }),
+    );
   }
 
   return context;
@@ -298,6 +305,11 @@ const directoryBatchSettings = new WeakMap<
   Kysely<Database>,
   Map<string, { expiresAt: number; value: Promise<DirectoryBatchSettings> }>
 >();
+const traceOperation = <T>(
+  timing: OperationTiming | undefined,
+  name: string,
+  work: () => Promise<T>,
+) => (timing ? timing.measure(name, work) : work());
 
 export async function createManagementRuntime(options: ManagementOptions) {
   async function timed<T>(
@@ -512,14 +524,20 @@ export async function createManagementRuntime(options: ManagementOptions) {
     return () =>
       stage('atomic_admission', () => reserveStart(connection, serverId, jobId, action, env));
   }
-  async function verifyObservationHost(serverId: string, connection: Kysely<Database>) {
-    const row = await connection
-      .selectFrom('managed_servers as server')
-      .innerJoin('managed_nodes as node', 'node.id', 'server.node_id')
-      .innerJoin('physical_hosts as host', 'host.id', 'node.physical_host_id')
-      .selectAll('host')
-      .where('server.id', '=', serverId)
-      .executeTakeFirst();
+  async function verifyObservationHost(
+    serverId: string,
+    connection: Kysely<Database>,
+    timing?: OperationTiming,
+  ) {
+    const row = await traceOperation(timing, 'binding', () =>
+      connection
+        .selectFrom('managed_servers as server')
+        .innerJoin('managed_nodes as node', 'node.id', 'server.node_id')
+        .innerJoin('physical_hosts as host', 'host.id', 'node.physical_host_id')
+        .selectAll('host')
+        .where('server.id', '=', serverId)
+        .executeTakeFirst(),
+    );
     const host = row ? resolveHostOverride(row, env) : undefined;
     if (
       !containerObserver ||
@@ -528,7 +546,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       env.NH_OBSERVER_ID !== host.observer_id
     )
       throw new DomainError('configuration_invalid');
-    await containerObserver.preflight();
+    await traceOperation(timing, 'preflight', () => containerObserver.preflight());
   }
   async function observedImageDigest(
     connection: Kysely<Database>,
@@ -622,6 +640,8 @@ export async function createManagementRuntime(options: ManagementOptions) {
             context.server.pterodactyl_identifier ?? '',
             context.server,
             directories,
+            undefined,
+            context.timing?.child('directories'),
           ),
         authorize: () =>
           authorizeQueuedEffect(
@@ -680,9 +700,11 @@ export async function createManagementRuntime(options: ManagementOptions) {
     configureGameProvision: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.configureProvision(context) ?? true,
     processGameContent: async (context: import('./lifecycle.js').GameLifecycleContext) => {
-      const module = await gameRuntime(context.db, context.server.id);
+      const module = await traceOperation(context.timing, 'game.resolve', () =>
+        gameRuntime(context.db, context.server.id),
+      );
       if (!module) throw new DomainError('integration_unavailable');
-      return module.processContent(context);
+      return traceOperation(context.timing, 'game.process', () => module.processContent(context));
     },
     verifyGameRestore: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.verifyRestore(context) ?? true,
@@ -690,24 +712,37 @@ export async function createManagementRuntime(options: ManagementOptions) {
     confirmAlreadyStopped: async (
       serverId: string,
       connection: Kysely<Database>,
-      context?: { providerServer: Promise<ApplicationServer>; observerPreflight?: Promise<void> },
+      context?: {
+        providerServer: Promise<ApplicationServer>;
+        observerPreflight?: Promise<void>;
+        timing?: OperationTiming;
+      },
     ) => {
-      const server = await connection
-        .selectFrom('managed_servers')
-        .selectAll()
-        .where('id', '=', serverId)
-        .where('deleted_at', 'is', null)
-        .executeTakeFirst();
+      const server = await traceOperation(context?.timing, 'server', () =>
+        connection
+          .selectFrom('managed_servers')
+          .selectAll()
+          .where('id', '=', serverId)
+          .where('deleted_at', 'is', null)
+          .executeTakeFirst(),
+      );
       if (!server?.pterodactyl_uuid || !server.pterodactyl_id || !containerObserver)
         throw new DomainError('configuration_invalid');
       const proofs = await Promise.allSettled([
-        context?.observerPreflight ?? verifyObservationHost(serverId, connection),
+        context?.observerPreflight ??
+          verifyObservationHost(serverId, connection, context?.timing?.child('host')),
         (context?.providerServer ?? adapter.getApplicationServer(server.pterodactyl_id)).then(
-          (remote) => verifyManagedIdentity(connection, server, remote),
+          (remote) =>
+            traceOperation(context?.timing, 'identity', () =>
+              verifyManagedIdentity(connection, server, remote),
+            ),
         ),
       ]);
       for (const proof of proofs) if (proof.status === 'rejected') throw proof.reason;
-      return containerObserver.stopped(server.pterodactyl_uuid, 'server');
+      const uuid = server.pterodactyl_uuid;
+      return traceOperation(context?.timing, 'process', () =>
+        containerObserver.stopped(uuid, 'server'),
+      );
     },
     observeExternalStop: async (
       serverId: string,
@@ -862,8 +897,17 @@ export async function createManagementRuntime(options: ManagementOptions) {
     // Recheck revocable local authority at intermediate durable/console
     // boundaries. Provider/image proofs belong to the final effect handoff,
     // not every intermediate authorization in the same operation.
-    authorizeIntent: (jobId: string, serverId: string, connection: Kysely<Database>) =>
-      authorizeQueuedEffect(connection, jobId, serverId, env, adapter).then(() => undefined),
+    authorizeIntent: (
+      jobId: string,
+      serverId: string,
+      connection: Kysely<Database>,
+      context?: { timing?: OperationTiming },
+    ) =>
+      traceOperation(context?.timing, 'intent', () =>
+        authorizeQueuedEffect(connection, jobId, serverId, env, adapter, context?.timing).then(
+          () => undefined,
+        ),
+      ),
     // authorizeEffect below binds each final handoff to this server's host.
     effectAuthorizationVerifiesHost: true,
     authorizeEffect: async (
@@ -871,6 +915,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       serverId: string,
       connection: Kysely<Database>,
       context?: {
+        timing?: OperationTiming;
         providerServer?: ApplicationServer | Promise<ApplicationServer>;
         deferFinalIntentCheck?: true;
         startAdmissionValidated?: true;
@@ -1223,6 +1268,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     server: Parameters<typeof directoryServerIdentity>[0],
     directories: string[],
     signal?: AbortSignal,
+    timing?: OperationTiming,
   ): Promise<DirectoryBatchResult[]> {
     signal?.throwIfAborted();
     let cache = directoryBatchSettings.get(db);
@@ -1232,18 +1278,23 @@ export async function createManagementRuntime(options: ManagementOptions) {
     }
     const key = JSON.stringify([consoleProviderBinding, directoryServerIdentity(server)]);
     let settings = cache.get(key);
+    if (timing) {
+      const cached = settings && settings.expiresAt > performance.now();
+      timing.measureSync(cached ? 'settings.hit' : 'settings.miss', () => {});
+    }
     if (!settings || settings.expiresAt <= performance.now()) {
       cache.delete(key);
       if (cache.size >= 256) cache.delete(cache.keys().next().value as string);
       settings = {
         expiresAt: performance.now() + 60_000,
-        value: adapter.getDirectoryBatchSettings(identifier),
+        value: adapter.getDirectoryBatchSettings(identifier, timing?.child('settings')),
       };
       cache.set(key, settings);
     }
     let configuration: DirectoryBatchSettings;
     try {
-      configuration = await settings.value;
+      const pending = settings.value;
+      configuration = await traceOperation(timing, 'settings.lookup', () => pending);
     } catch (error) {
       // Missing optional endpoints need a cooldown; transient outages must
       // not disable prefetch for a full minute after the provider recovers.
@@ -1268,9 +1319,12 @@ export async function createManagementRuntime(options: ManagementOptions) {
         );
         break;
       }
-      const chunk = await adapter.listDirectoriesBatch(
-        identifier,
-        directories.slice(offset, offset + directoryBatchLimit),
+      const chunk = await traceOperation(timing, 'batch', () =>
+        adapter.listDirectoriesBatch(
+          identifier,
+          directories.slice(offset, offset + directoryBatchLimit),
+          timing?.child('request'),
+        ),
       );
       // Splitting for a lower Owner limit must not multiply the response budget.
       responseBytes += Buffer.byteLength(JSON.stringify(chunk), 'utf8');

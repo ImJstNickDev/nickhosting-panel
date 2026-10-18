@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createPterodactylAdapter, type PterodactylOptions } from './adapter.js';
+import {
+  createPterodactylAdapter,
+  type FileReadTiming,
+  type PterodactylOptions,
+} from './adapter.js';
 
 const panel = 'https://panel.example.test';
 const wings = 'https://wings.example.test';
@@ -49,7 +53,212 @@ const text = async (
   download: Awaited<ReturnType<ReturnType<typeof createPterodactylAdapter>['downloadFile']>>,
 ) => new Response(download.body).text();
 
+function timingFixture() {
+  let now = 0;
+  const started: string[] = [];
+  const completed: Array<{ name: string; elapsedMs: number }> = [];
+  const timing: FileReadTiming = {
+    async measure(name, work) {
+      started.push(name);
+      const start = now;
+      try {
+        return await work();
+      } finally {
+        completed.push({ name, elapsedMs: now - start });
+      }
+    },
+    measureSync(name, work) {
+      started.push(name);
+      const start = now;
+      try {
+        return work();
+      } finally {
+        completed.push({ name, elapsedMs: now - start });
+      }
+    },
+  };
+  return { timing, started, completed, advance: (ms: number) => (now += ms) };
+}
+
 describe('private Blueprint signed download pool', () => {
+  it('separates settings HTTP/cache and issuance timings without private values or extra requests', async () => {
+    const f = fixture();
+    const trace = timingFixture();
+    const original = f.fetcher.getMockImplementation();
+    f.fetcher.mockImplementation(async (url, init) => {
+      trace.advance(String(url).endsWith('/transfer-settings') ? 11 : 23);
+      return original?.(url, init) as Promise<Response>;
+    });
+    await f.adapter.prefetchDownloads('fixture', ['private-world/level.dat'], trace.timing);
+    await f.adapter.prefetchDownloads('fixture', ['private-world/server.properties'], trace.timing);
+    expect(trace.completed).toEqual([
+      { name: 'grant.settings.http', elapsedMs: 11 },
+      { name: 'grant.issue.http', elapsedMs: 23 },
+      { name: 'grant.settings.cache', elapsedMs: 0 },
+      { name: 'grant.issue.http', elapsedMs: 23 },
+    ]);
+    expect(f.fetcher).toHaveBeenCalledTimes(3);
+    const serialized = JSON.stringify(trace.completed);
+    for (const value of [
+      'private-world',
+      'level.dat',
+      'server.properties',
+      panel,
+      wings,
+      'fixture-client',
+      'private-',
+    ])
+      expect(serialized).not.toContain(value);
+  });
+
+  it('measures shared pending settings independently without duplicating their HTTP request', async () => {
+    const f = fixture();
+    const producer = timingFixture();
+    const consumer = timingFixture();
+    const gate = Promise.withResolvers<void>();
+    const original = f.fetcher.getMockImplementation();
+    f.fetcher.mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/transfer-settings')) await gate.promise;
+      return original?.(url, init) as Promise<Response>;
+    });
+    const first = f.adapter.prefetchDownloads('fixture', ['a'], producer.timing);
+    const second = f.adapter.prefetchDownloads('fixture', ['b'], consumer.timing);
+    expect(consumer.started).toEqual(['grant.settings.pendingWait']);
+    producer.advance(41);
+    consumer.advance(29);
+    gate.resolve();
+    await Promise.all([first, second]);
+    expect(producer.completed).toContainEqual({ name: 'grant.settings.http', elapsedMs: 41 });
+    expect(consumer.completed).toContainEqual({
+      name: 'grant.settings.pendingWait',
+      elapsedMs: 29,
+    });
+    expect(consumer.started).not.toContain('grant.settings.http');
+    expect(
+      f.fetcher.mock.calls.filter(([url]) => String(url).endsWith('/transfer-settings')),
+    ).toHaveLength(1);
+    expect(f.batches).toEqual([['a'], ['b']]);
+  });
+
+  it('times existing refill waits without retaining the previous reader trace or issuing extra grants', async () => {
+    const f = fixture();
+    await f.adapter.prefetchDownloads('fixture', ['private-world/level.dat']);
+    const gates: Array<ReturnType<typeof Promise.withResolvers<void>>> = [];
+    const original = f.fetcher.getMockImplementation();
+    f.fetcher.mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/download-urls')) {
+        const gate = Promise.withResolvers<void>();
+        gates.push(gate);
+        await gate.promise;
+      }
+      return original?.(url, init) as Promise<Response>;
+    });
+    const first = timingFixture();
+    expect(
+      Buffer.from(
+        await f.adapter.readFileForEditor('fixture', 'private-world/level.dat', 100, first.timing),
+      ).toString(),
+    ).toBe('fixture');
+    expect(first.started).toEqual([
+      'file.signedUrl',
+      'grant.ready',
+      'file.httpHeaders',
+      'file.bodyRead',
+    ]);
+    const snapshot = structuredClone(first.completed);
+    expect(gates).toHaveLength(1);
+    const second = timingFixture();
+    const pending = f.adapter.readFileForEditor(
+      'fixture',
+      'private-world/level.dat',
+      100,
+      second.timing,
+    );
+    expect(second.started).toEqual(['file.signedUrl', 'grant.pendingWait']);
+    expect(
+      f.fetcher.mock.calls.filter(([url]) => String(url).endsWith('/download-urls')),
+    ).toHaveLength(2);
+    second.advance(37);
+    gates[0]?.resolve();
+    expect(Buffer.from(await pending).toString()).toBe('fixture');
+    expect(second.completed).toContainEqual({ name: 'grant.pendingWait', elapsedMs: 37 });
+    expect(second.started).not.toContain('grant.issue.http');
+    expect(first.completed).toEqual(snapshot);
+    expect(gates).toHaveLength(2);
+    gates[1]?.resolve();
+    await f.adapter.prefetchDownloads('fixture', ['private-world/level.dat']);
+    expect(first.completed).toEqual(snapshot);
+    expect(f.batches).toHaveLength(3);
+    expect(new Set(f.used).size).toBe(2);
+  });
+
+  it('records pending prefetch failures and preserves the cached provider error without another request', async () => {
+    const f = fixture();
+    const gate = Promise.withResolvers<void>();
+    const original = f.fetcher.getMockImplementation();
+    f.fetcher.mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/download-urls')) {
+        await gate.promise;
+        return new Response(null, { status: 403 });
+      }
+      return original?.(url, init) as Promise<Response>;
+    });
+    const producer = f.adapter.prefetchDownloads('fixture', ['private-world/level.dat']);
+    const waiter = timingFixture();
+    const consumer = f.adapter.prefetchDownloads(
+      'fixture',
+      ['private-world/level.dat'],
+      waiter.timing,
+    );
+    waiter.advance(19);
+    gate.resolve();
+    const outcomes = await Promise.allSettled([producer, consumer]);
+    const failed = outcomes[0];
+    expect(failed?.status).toBe('rejected');
+    if (failed?.status !== 'rejected') throw new Error('Expected provider rejection');
+    expect(outcomes[1]).toEqual({ status: 'rejected', reason: failed.reason });
+    expect(waiter.completed).toEqual([{ name: 'grant.pendingWait', elapsedMs: 19 }]);
+    await expect(
+      f.adapter.readFileForEditor(
+        'fixture',
+        'private-world/level.dat',
+        100,
+        timingFixture().timing,
+      ),
+    ).rejects.toBe(failed.reason);
+    expect(failed.reason).toMatchObject({
+      reason: 'permission_denied',
+      outcome: 'rejected',
+      upstreamStatus: 403,
+    });
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('times native fallback signing without changing its missing-extension behavior', async () => {
+    const f = fixture();
+    const trace = timingFixture();
+    const original = f.fetcher.getMockImplementation();
+    f.fetcher.mockImplementation(async (url, init) => {
+      const pathname = new URL(String(url)).pathname;
+      if (pathname.endsWith('/download-urls')) return new Response(null, { status: 404 });
+      if (pathname.endsWith('/files/download')) {
+        trace.advance(17);
+        return Response.json({
+          attributes: { url: `${wings}/download/file?token=fallback-private` },
+        });
+      }
+      return original?.(url, init) as Promise<Response>;
+    });
+    expect(
+      Buffer.from(
+        await f.adapter.readFileForEditor('fixture', 'private-world/level.dat', 100, trace.timing),
+      ).toString(),
+    ).toBe('fixture');
+    expect(trace.completed).toContainEqual({ name: 'grant.fallback', elapsedMs: 17 });
+    expect(f.fetcher).toHaveBeenCalledTimes(4);
+    expect(trace.started).not.toContain('grant.ready');
+  });
+
   it('prefetches 600 files once, reuses across adapter instances and replenishes only the consumed path', async () => {
     const f = fixture();
     const paths = Array.from({ length: 600 }, (_, i) => `world/${i}.json`);

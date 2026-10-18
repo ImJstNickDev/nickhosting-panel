@@ -19,6 +19,22 @@ and validation spans from Blueprint extraction, tree verification and publicatio
 overlapping or nested spans must not be added as sequential time. Normal request errors and durable audit records remain
 available without upload timing diagnostics.
 
+World selection also emits one `servers.world_selection_timing` debug summary
+per worker delivery. It separates game configuration, authorization, host/process
+observations, database transactions and journals, directory batches, download-grant
+preparation/waits, Wings response/body reads, properties comparison and the write.
+`stages` contains aggregate counts/durations; `spanGroups` records each span's
+monotonic start offset and duration, including overlapping and nested work. Do not
+sum these spans as sequential time. The trace starts after the initial operation
+lookup: runtime construction, that lookup and queue delay remain outside `totalMs`
+and must be compared with the existing delivery/job timestamps.
+
+Instrumentation adds no provider requests or database queries. Labels are fixed
+code labels and ordinal file reads, without paths, file contents, credentials or
+signed URLs. The summary bounds aggregates to 64 labels and its timeline to 128
+labels/256 spans, grouped below the logger's array limit; dropped counters expose
+truncation. No detailed trace is collected at the normal `info` level.
+
 ## Local environment context (never published)
 
 Keep machine-specific observations in `.codex/local/INFRASTRUCTURE.md`, excluded from Git. AGENTS.md directs Codex to read it before authorized infrastructure work. The local notes preserve the actual host, resolver, external network, current/stale installation paths and deployment hostnames; none are product defaults or approval to change infrastructure. A fresh clone needs Owner-supplied local context before infrastructure access. Never store credentials in documentation.

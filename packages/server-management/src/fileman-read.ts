@@ -11,6 +11,7 @@ import type {
   FilemanReadRequest,
   FilemanReadService,
 } from '../../game-sdk/src/fileman-read.js';
+import type { OperationTiming } from './operation-timing.js';
 
 const singleLimit = 8 * 1024 ** 2;
 const batchLimit = 16 * 1024 ** 2;
@@ -51,10 +52,14 @@ export function createFilemanReadService(options: {
   identifier: string;
   authorize: () => Promise<void>;
   signal?: AbortSignal;
+  timing?: OperationTiming;
   /** Runtime supplies Fileman's Owner-configured, bounded Blueprint batch transport. */
   listDirectories?: (directories: string[]) => Promise<DirectoryBatchResult[]>;
 }): FilemanReadService {
-  const { adapter, identifier, authorize, signal } = options;
+  const { adapter, identifier, authorize, signal, timing } = options;
+  const measure = <T>(name: string, work: () => Promise<T>) =>
+    timing ? timing.measure(name, work) : work();
+  let readSequence = 0;
   const directories = new Map<string, Promise<readonly FilemanEntry[]>>();
   const check = () => signal?.throwIfAborted();
   const validate = (request: FilemanReadRequest) => {
@@ -68,19 +73,29 @@ export function createFilemanReadService(options: {
   };
   async function bytes(request: FilemanReadRequest) {
     check();
+    // Ordinals distinguish concurrent reads without logging private file paths.
+    const reading = timing?.child(`read${++readSequence}`);
+    const finish = reading?.start('total');
     try {
       if (request.maxBytes <= 1024 ** 2) {
-        const data = await adapter.readFileForEditor(identifier, request.path, request.maxBytes);
+        const data = reading
+          ? await adapter.readFileForEditor(identifier, request.path, request.maxBytes, reading)
+          : await adapter.readFileForEditor(identifier, request.path, request.maxBytes);
         check();
         return data;
       }
-      const response = await adapter.downloadFile(identifier, request.path, {
-        maxBytes: request.maxBytes,
-        signal,
-      });
+      const download = () =>
+        adapter.downloadFile(identifier, request.path, {
+          maxBytes: request.maxBytes,
+          signal,
+        });
+      const response = reading
+        ? await reading.measure('stream.headers', download)
+        : await download();
       const reader = response.body.getReader();
       const chunks: Uint8Array[] = [];
       let size = 0;
+      const finishBody = reading?.start('stream.body');
       try {
         for (;;) {
           check();
@@ -93,6 +108,7 @@ export function createFilemanReadService(options: {
       } finally {
         await reader.cancel().catch(() => {});
         reader.releaseLock();
+        finishBody?.();
       }
       return Buffer.concat(chunks, size);
     } catch (error) {
@@ -104,6 +120,8 @@ export function createFilemanReadService(options: {
       )
         return undefined;
       throw error;
+    } finally {
+      finish?.();
     }
   }
   async function prepare(paths: readonly string[], authorized = false) {
@@ -112,7 +130,11 @@ export function createFilemanReadService(options: {
     check();
     if (!authorized) await authorize();
     try {
-      await adapter.prefetchDownloads(identifier, [...paths]);
+      await measure('prepare', () =>
+        timing
+          ? adapter.prefetchDownloads(identifier, [...paths], timing.child('prepare'))
+          : adapter.prefetchDownloads(identifier, [...paths]),
+      );
     } catch (error) {
       if (!(error instanceof PterodactylError && [404, 405].includes(error.upstreamStatus ?? 0)))
         throw error;
@@ -145,7 +167,9 @@ export function createFilemanReadService(options: {
       pending = (async () => {
         check();
         await authorize();
-        const files = await adapter.listFiles(identifier, directory);
+        const files = await measure('directory.native', () =>
+          adapter.listFiles(identifier, directory),
+        );
         check();
         await authorize();
         return files.map(entry);
@@ -162,7 +186,8 @@ export function createFilemanReadService(options: {
     await authorize();
     if (options.listDirectories) {
       try {
-        const results = await options.listDirectories([...paths]);
+        const batch = options.listDirectories;
+        const results = await measure('directory.batch', () => batch([...paths]));
         check();
         await authorize();
         return results.map((result) => {
@@ -179,7 +204,9 @@ export function createFilemanReadService(options: {
     const results = await parallel(paths, async (directory): Promise<FilemanDirectoryResult> => {
       try {
         check();
-        const files = (await adapter.listFiles(identifier, directory)).map(entry);
+        const files = (
+          await measure('directory.native', () => adapter.listFiles(identifier, directory))
+        ).map(entry);
         directories.set(directory, Promise.resolve(files));
         return { directory, files };
       } catch (error) {

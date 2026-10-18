@@ -415,7 +415,10 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
       return profile ? configureMinecraftProvision(context, await minecraftOptions()) : true;
     },
     async processContent(context: GameLifecycleContext) {
-      return processMinecraftContent(context, await minecraftOptions());
+      const settings = context.timing
+        ? await context.timing.measure('game.options', minecraftOptions)
+        : await minecraftOptions();
+      return processMinecraftContent(context, settings);
     },
     async verifyRestore(context: GameLifecycleContext) {
       const profile = await context.db

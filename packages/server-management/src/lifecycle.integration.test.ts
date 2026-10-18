@@ -3911,6 +3911,60 @@ describe('Minecraft world selection without telemetry settling', () => {
       backupBefore: false,
     },
   });
+  it.each([
+    ['debug', false],
+    ['debug', true],
+    ['info', false],
+  ] as const)('summarizes world-selection timing only at %s, failed=%s', async (level, fail) => {
+    const f = await fixture('minecraft-content', plan());
+    const records: LogRecord[] = [];
+    f.options.logger = createLogger((record) => records.push(record), { level });
+    f.options.authorizeIntent = async () => {};
+    f.options.confirmAlreadyStopped = async () => true;
+    f.options.processGameContent = async (context) => {
+      expect(Boolean(context.timing)).toBe(level === 'debug');
+      if (fail) throw new DomainError('conflict', 409, { privatePath: '/private/world' });
+      await context.effect('minecraft.text.fixture', async () => {});
+      return true;
+    };
+    expect(await f.run()).toBe(fail ? 'failed' : 'succeeded');
+    const summaries = records.filter((record) => record.event === 'servers.world_selection_timing');
+    expect(summaries).toHaveLength(level === 'debug' ? 1 : 0);
+    if (level !== 'debug') return;
+    const summary = summaries[0]?.data as {
+      jobId: string;
+      serverId: string;
+      totalMs: number;
+      spanGroups: { name: string }[][];
+    };
+    expect(summary).toMatchObject({ jobId: f.jobId, serverId: f.serverId });
+    expect(summary.totalMs).toBeGreaterThanOrEqual(0);
+    const names = summary.spanGroups.flat().map((span) => span.name);
+    expect(names).toContain('lock.wait');
+    expect(names).toContain('finish.transaction');
+    expect(names).toContain('lease.release');
+    if (!fail) expect(names).toContain('provider_effect');
+    expect(JSON.stringify(summary)).not.toContain('/private/world');
+    expect(JSON.stringify(summary)).not.toContain('minecraft.text.fixture');
+  });
+  it('keeps debug timing scoped to world selection and ignores a broken summary sink', async () => {
+    const ordinary = await fixture('stop');
+    const records: LogRecord[] = [];
+    ordinary.options.logger = createLogger((record) => records.push(record), { level: 'debug' });
+    ordinary.options.confirmAlreadyStopped = async () => true;
+    await ordinary.run();
+    expect(records.some((record) => record.event === 'servers.world_selection_timing')).toBe(false);
+    const selected = await fixture('minecraft-content', plan());
+    selected.options.logger = createLogger(
+      (record) => {
+        if (record.event === 'servers.world_selection_timing') throw new Error('sink unavailable');
+      },
+      { level: 'debug' },
+    );
+    selected.options.confirmAlreadyStopped = async () => true;
+    selected.options.processGameContent = async () => true;
+    expect(await selected.run()).toBe('succeeded');
+  });
   it('selects in one delivery with shared identity, local read authorization and fresh physical stop proof', async () => {
     const f = await fixture('minecraft-content', plan());
     const write = vi.fn(async () => {});

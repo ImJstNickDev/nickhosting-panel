@@ -44,6 +44,7 @@ export function createFilemanJobServices(
         identifier: context.server.pterodactyl_identifier ?? '',
         authorize: () => (authorized ??= context.authorize()),
         listDirectories: options.listDirectories,
+        timing: context.timing?.child('files'),
       });
     },
     removeDirectory: (input) => removeFilemanDirectory(context, input),

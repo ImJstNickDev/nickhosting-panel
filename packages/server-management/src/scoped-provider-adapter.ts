@@ -44,6 +44,14 @@ const identifierArguments: Partial<Record<keyof PterodactylAdapter, number>> = {
   prepareUploadBatch: 0,
   relayConsole: 0,
 };
+const timingArguments: Partial<Record<keyof PterodactylAdapter, number>> = {
+  getDirectoryBatchSettings: 1,
+  listDirectoriesBatch: 2,
+  readFile: 3,
+  readFileForEditor: 3,
+  prefetchDownloads: 2,
+  writeFile: 3,
+};
 export function createScopedProviderAdapter(
   application: PterodactylAdapter,
   resolve: (
@@ -68,10 +76,11 @@ export function createScopedProviderAdapter(
         return async (...args: unknown[]) => {
           const identifier = args[index];
           if (typeof identifier !== 'string' || !identifier) throw new DomainError('forbidden');
+          const timingIndex = timingArguments[property as keyof PterodactylAdapter];
           const timing =
-            property === 'readFile' || property === 'readFileForEditor'
-              ? (args[3] as Parameters<PterodactylAdapter['readFile']>[3])
-              : undefined;
+            timingIndex === undefined
+              ? undefined
+              : (args[timingIndex] as Parameters<PterodactylAdapter['readFile']>[3]);
           const scoped = timing ? await resolve(identifier, timing) : await resolve(identifier);
           const method = Reflect.get(scoped, property);
           return Reflect.apply(method, scoped, args);
