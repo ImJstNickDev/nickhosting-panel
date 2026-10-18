@@ -36,6 +36,7 @@ import {
   reconcileServerStorageQuota,
 } from './external.js';
 import { createFileDiskUsageCache, trackFileDiskMutations } from './file-disk-usage.js';
+import { createFilemanJobServices } from './fileman-transfers.js';
 import {
   createGameRuntimeDispatcher,
   type FileMutationContext,
@@ -600,6 +601,18 @@ export async function createManagementRuntime(options: ManagementOptions) {
     );
   }
   const lifecycle = {
+    fileman: (context: import('./lifecycle.js').GameLifecycleContext) =>
+      createFilemanJobServices(context, {
+        env,
+        authorize: () =>
+          authorizeQueuedEffect(
+            context.db,
+            context.operation().job_id,
+            context.server.id,
+            env,
+            adapter,
+          ),
+      }),
     backupEventsEnabled: providerBackupEventsEnabled,
     backupSchemaAvailable,
     readBackupCompletion: readProviderBackupCompletion,

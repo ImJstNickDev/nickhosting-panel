@@ -2,7 +2,7 @@ import { createMinecraftUiController, type MinecraftWorlds } from '@nickhosting/
 import { useEffect, useId, useRef, useState } from 'react';
 import { ApiError, download, idempotencyKey } from '../../api/client.js';
 import { hashFile } from '../../api/hash.js';
-import { useT } from '../../app/i18n.js';
+import { useFormat, useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
 import { Check, ConfirmDialog, Dialog, ErrorNotice, Input } from '../../components/ui.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
@@ -65,6 +65,7 @@ function Icon({
 
 export function MinecraftWorldsSection(props: GameSectionViewProps) {
   const t = useT();
+  const format = useFormat();
   const id = useId();
   const snapshot = props.data.metadata?.worlds as MinecraftWorlds | undefined;
   const supported = Boolean(snapshot?.installed && snapshot.supported);
@@ -73,6 +74,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
   const [page, setPage] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [fileName, setFileName] = useState('');
   const [target, setTarget] = useState('');
   const [archiveRef, setArchiveRef] = useState<string>();
@@ -113,8 +115,16 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
   );
   const currentState = useRef({ importDisabled });
   currentState.current = { importDisabled };
+  const importInProgress =
+    props.pending &&
+    (!props.operation || ['queued', 'running'].includes(props.operation.state)) &&
+    props.operation?.effectState !== 'uncertain' &&
+    (importing || props.fileTransfer);
 
   useEffect(() => () => transfer.current?.abort(), []);
+  useEffect(() => {
+    if (!props.pending) setImporting(false);
+  }, [props.pending]);
   useEffect(() => {
     if (!importStateAllowed || !props.canManage || props.pending || !supported) {
       transfer.current?.abort();
@@ -269,6 +279,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
     try {
       const result = await controller.operate(props.serverId, intent.requestKey, intent.command);
       props.onAccepted(result.jobId);
+      setImporting(intent.command.kind === 'world-import');
       setUncertain(undefined);
       setSelection(undefined);
       setAdding(false);
@@ -406,6 +417,30 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
           )}
         </div>
       </div>
+      {importInProgress && (
+        <div className="minecraft-worlds-transfer" role="status" aria-live="polite">
+          <div>
+            <span>{t(key('importing'))}</span>
+            {props.fileTransfer && props.fileTransfer.totalFiles > 0 && (
+              <span className="minecraft-worlds-transfer-count">
+                {t(key('transferredFiles'), {
+                  completed: format.number(props.fileTransfer.completedFiles, 0),
+                  total: format.number(props.fileTransfer.totalFiles, 0),
+                })}
+              </span>
+            )}
+          </div>
+          <progress
+            aria-label={t(key('importing'))}
+            max={Math.max(1, props.fileTransfer?.totalFiles ?? 0)}
+            value={
+              props.fileTransfer && props.fileTransfer.totalFiles > 0
+                ? props.fileTransfer.completedFiles
+                : undefined
+            }
+          />
+        </div>
+      )}
       {Boolean(operationError) && !adding && !selection && <ErrorNotice error={operationError} />}
       {!snapshot ? (
         <p className="minecraft-worlds-status" role="status">

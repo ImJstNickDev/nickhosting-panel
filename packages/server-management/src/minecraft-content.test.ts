@@ -76,6 +76,10 @@ function fixture(initial: Record<string, string> = {}) {
       return [...entries.values()];
     }),
     readFile: vi.fn(async (_id: string, path: string) => Buffer.from(files.get(path) ?? '')),
+    readFileForEditor: vi.fn(async (_id: string, path: string) =>
+      Buffer.from(files.get(path) ?? ''),
+    ),
+    prefetchDownloads: vi.fn(async () => {}),
     downloadFile: vi.fn(
       async (
         _id: string,
@@ -381,6 +385,9 @@ describe('Minecraft durable content safety', () => {
     expect(f.assertStopped).toHaveBeenCalledOnce();
     expect(f.authorize).toHaveBeenCalled();
     expect(f.adapter.writeFile).toHaveBeenCalledOnce();
+    expect(f.adapter.readFileForEditor).toHaveBeenCalledTimes(1);
+    expect(f.adapter.listFiles).toHaveBeenCalledTimes(1);
+    expect(f.adapter.downloadFile).not.toHaveBeenCalled();
   });
   it('rejects edits to unrelated externally changed data without overwriting it', async () => {
     const f = fixture({ 'server.properties': 'motd=Owner changed this\n' });

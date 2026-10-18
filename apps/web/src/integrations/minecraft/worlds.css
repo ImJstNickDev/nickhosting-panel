@@ -54,6 +54,27 @@
   font-size: 0.8rem;
   line-height: 1.5;
 }
+.minecraft-worlds-transfer {
+  margin: 0 0 18px;
+  font-size: 0.8rem;
+}
+.minecraft-worlds-transfer > div {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-bottom: 7px;
+}
+.minecraft-worlds-transfer-count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.minecraft-worlds-transfer > progress {
+  display: block;
+  width: 100%;
+  height: 5px;
+  accent-color: var(--blue);
+}
 .minecraft-worlds-list {
   list-style: none;
   padding: 0;

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { gatewayMessageDefinitionSchema } from './gateway-messages.js';
 import { runtimeImagePolicySchema } from './runtime-images.js';
 
+export * from './fileman-transfers.js';
 export * from './gateway.js';
 export * from './gateway-messages.js';
 export * from './runtime-images.js';
@@ -339,3 +340,5 @@ export function defineGameIntegration(integration: GameIntegration): GameIntegra
   }
   return { ...integration, manifest: parsed.data };
 }
+
+export * from './fileman-read.js';

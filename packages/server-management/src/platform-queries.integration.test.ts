@@ -1074,6 +1074,66 @@ describe('M5 platform browser queries and metadata', () => {
     await expect(getPlatformJob(f.db, other.context, queued.jobId)).rejects.toThrow('not_found');
     expect((await listPlatformActivity(f.db, other.context)).items).toHaveLength(0);
   });
+  it('exposes only valid acknowledged file transfer counters to authorized job readers', async () => {
+    const id = await f.server();
+    const queued = await enqueueServerOperation(f.db, f.context, id, {
+      action: 'backup',
+      idempotencyKey: randomUUID(),
+    });
+    expect((await getPlatformJob(f.db, f.context, queued.jobId)).fileTransfer).toBeUndefined();
+    const counters = {
+      completedFiles: 1,
+      totalFiles: 3,
+      completedBytes: 1024,
+      totalBytes: 4096,
+    };
+    const plan = {
+      backupComplete: true,
+      fileTransfer: {
+        ...counters,
+        id: randomUUID(),
+        digest: 'a'.repeat(64),
+        sourcePath: '/private/staging/source',
+      },
+    };
+    await f.db
+      .updateTable('server_operations')
+      .set({ plan: JSON.stringify(plan) })
+      .where('job_id', '=', queued.jobId)
+      .execute();
+    const detail = await getPlatformJob(f.db, f.context, queued.jobId);
+    expect(detail.fileTransfer).toEqual(counters);
+    expect(detail.backupResult?.state).toBe('succeeded');
+    expect(JSON.stringify(detail)).not.toContain('/private/staging/source');
+    expect(JSON.stringify(detail)).not.toContain('a'.repeat(64));
+    await expect(getPlatformJob(f.db, (await peer()).context, queued.jobId)).rejects.toThrow(
+      'not_found',
+    );
+    await f.db
+      .updateTable('server_operations')
+      .set({ action: 'minecraft-content' })
+      .where('job_id', '=', queued.jobId)
+      .execute();
+    expect(await getPlatformJob(f.db, f.context, queued.jobId)).toMatchObject({
+      fileTransfer: counters,
+      backupResult: null,
+    });
+    for (const invalid of [
+      { ...counters, completedFiles: 4 },
+      { ...counters, completedBytes: 4097 },
+      { ...counters, completedFiles: -1 },
+      { ...counters, totalFiles: 0 },
+      { ...counters, totalBytes: Number.MAX_SAFE_INTEGER + 1 },
+      { ...counters, completedFiles: 0.5 },
+    ]) {
+      await f.db
+        .updateTable('server_operations')
+        .set({ plan: JSON.stringify({ fileTransfer: invalid }) })
+        .where('job_id', '=', queued.jobId)
+        .execute();
+      expect((await getPlatformJob(f.db, f.context, queued.jobId)).fileTransfer).toBeUndefined();
+    }
+  });
   it('creates idempotent new intent for proved no-effect failure but never resets or replays uncertainty', async () => {
     const id = await f.server(),
       old = await enqueueServerOperation(f.db, f.context, id, {

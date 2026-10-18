@@ -12249,3 +12249,61 @@ findings were resolved in the empty-list NBT typing, fixture Response bytes and
 the diagnostic script's newly optional metadata field; formatting was corrected
 in the affected fixture only. No production build or full historical suite was
 needed for this bounded change.
+
+### 2026-10-18 — Shared Fileman services for Minecraft management
+
+The Owner's completed FCTN import took **951.525s** in the former sequential
+executor. The final upload acknowledgement preceded completion by roughly 160s.
+Read-only inspection found repeated ancestor listings, per-file lifecycle
+preparation and remote hash downloads followed by another manifest verification.
+The prior success remains recorded; the closed dialog did not mean the transfer
+had completed. No real import was repeated for this change.
+
+Added Game SDK contracts for Core-owned Fileman reads and durable staged transfers.
+Settings, Players and Worlds use the existing private signed Wings read transport;
+Worlds uses Fileman's configured Blueprint directory batches. Text edits share
+their content/hash snapshot and preserve a fresh precondition while avoiding a
+post-acknowledgement download. Installed data-only operations no longer download
+the runtime JAR; local mapping checks and lifecycle provider authorization remain.
+Installation, restoration, explicit audit and runtime-changing content still use
+artifact verification.
+
+World transfer now uses one lifecycle effect, one ingestion reservation, bounded
+bulk grants and the existing Owner upload concurrency. Source hashes are checked
+while streaming. Exact job/manifest receipts replace redundant remote hash reads
+on ordinary successful completion. Unknown dispatches are fenced, not replayed.
+The browser shows real confirmed-file counts, recovers the active job after
+remount, and refreshes inventory after completion. An initial reload during archive
+staging has no transfer counters yet; it must not invent a percentage.
+
+Focused evidence (existing isolated test services, no historical full-suite run):
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/upload-url-cache.test.ts packages/server-management/src/fileman-read.test.ts packages/server-management/src/minecraft-content.test.ts packages/server-management/src/minecraft-world-inventory.test.ts apps/api/src/minecraft-players.test.ts apps/api/src/minecraft-worlds.test.ts`: **78 passed**. Covers signed-read reuse, optional 404 versus failures, bounded reads, directory fallback, permission changes, snapshot reuse and text-write recovery.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/fileman-transfers.integration.test.ts packages/server-management/src/minecraft-content.integration.test.ts`: **49 passed** before the final narrow installed-data JAR-audit removal. The affected final cases plus two new regressions were run with `-t 'installed data edits|imports a .* world online|player'`: **7 passed / 39 excluded**. This is a targeted rerun, not another complete suite.
+- The 101-file fixture proves **one** bulk-grant request, **one** destination listing, **two** directory creations, **one** lifecycle effect, **two** concurrent uploads and **zero** post-upload downloads. These are provider-call counts with an isolated adapter, not claimed real-network timings. Grant failure, lost acknowledgement, source cancellation, waiting-lane shutdown, exact receipts, replay prevention and admission release/retention are covered.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/platform-queries.integration.test.ts -t 'acknowledged file transfer counters|scopes Activity and job detail'`: **2 passed / 33 excluded**, validating safe progress projection and access scope.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-worlds.browser.test.ts`: **14 passed**. Actual application auth/API/job handlers with isolated PostgreSQL and an in-memory provider filesystem; progress 1/3, reload, completion refresh, honest failures/uncertainty, version states, folder upload, permission boundaries, EN/IT and mobile reflow. Axe checks passed.
+- `scripts/dev.sh pnpm typecheck` passed; after the final backend-only refinement, `scripts/dev.sh pnpm exec tsc --noEmit` passed again. i18n completeness, changed-source Biome and `git diff --check` passed. Indexed governance/hygiene passed before commit. No new dependency, production build, migration or Blueprint update was needed.
+
+Initial world integration tests (**3 failed**) and the first progress browser case
+caught an extra staging-only `source` field passed to the strict transfer manifest.
+The integration now explicitly projects path/size/hash. The affected tests then
+passed, followed by the full focused runs above. Test-fixture signed-read aliases
+and TypeScript annotations were corrected; no failures were reclassified as passes.
+
+Independent technical review found and resolved cancellation/settlement races:
+source cleanup now covers pre-dispatch DB failure, all active workers settle before
+unlock, and a waiting lane cannot dispatch after another lane fails. Independent
+rendered UX/accessibility review and the coordinator's screenshot inspection found
+no remaining must-fix issue. The final installed-data audit reduction was reviewed
+separately; installation and ownership boundaries remain in their existing layers.
+
+- [Confirmed transfer, desktop](screenshots/m5/minecraft-worlds-transfer-desktop-en.png)
+- [Confirmed transfer, mobile](screenshots/m5/minecraft-worlds-transfer-mobile-en.png)
+
+No live Panel/Wings/Blueprint configuration, real server files, credentials, DNS,
+networks or persistent review data changed. Dev API/worker/Vite reloaded through
+existing watchers and were healthy in read-only checks; no manual restart or image
+rebuild was performed. Fixtures cleaned their isolated schemas/staging data.
+Real-provider timings for the new import await the Owner's next test. SFTPGo #18 and
+the production-release boundary remain unchanged.

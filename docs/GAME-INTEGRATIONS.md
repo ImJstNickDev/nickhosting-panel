@@ -433,8 +433,9 @@ Worlds uses the trusted `minecraft-worlds` section renderer. A single authorized
 inventory response supplies the configured `level-name`, installed state, server
 release and each discovered world's compatibility. The shared Fileman read-access
 boundary supplies its existing managed-identity proof; there is no second identity
-cache. Discovery lists the root once and checks candidate directories with at most
-two concurrent readers. Only `level.dat` is read, not region/chunk contents.
+cache. Discovery lists the root once, batches candidate directories through
+Fileman's configured transport, and reads their actual `level.dat` files with
+bounded concurrency. Region/chunk contents are not read.
 
 Missing installation or unknown release metadata does not hide the inventory.
 World-format compatibility uses the integration's bundled exact-release DataVersion
@@ -463,3 +464,52 @@ export, not an atomic snapshot or replacement for the Backups workflow.
 Read-only collaborators can browse/download within their existing file permission;
 managed mutations require `server:manage`. No custom-map catalog, Owner presets,
 new runtime support or Blueprint extension update is introduced by this UI pass.
+
+### Fileman host services — M5, 2026-10-18
+
+The Game SDK declares backend `FilemanReadService` and `FilemanJobServices`
+contracts for trusted compiled integrations. Core supplies the transport and
+authorization; an integration supplies its format interpretation, staging,
+destination and game-specific preconditions. These are backend services, separate
+from ViewerEngine's browser presentation extensions.
+
+- Reads use Fileman's existing managed-identity access and private signed Wings
+  downloads. `readMany` prepares URLs together and reads at most four files at a
+  time. Limits are 8 MiB per metadata file and 16 MiB per read group. Explicit 404
+  can mean an optional absent file; forbidden/unavailable responses cannot.
+- `list`/`listMany` share request-local directory snapshots. The runtime supplies
+  Fileman's existing Owner-configured Blueprint directory batch adapter; native
+  Client API/Wings remains the fallback when the optional endpoint is absent.
+  No second cache, filesystem proxy, or provider credentials reach the browser.
+- `uploadStaged` creates a new destination tree from one immutable manifest per
+  durable operation, with at most 20,000 files. The caller resolves trusted staged
+  streams and owns replacement consent/backup/selection semantics. One ingestion
+  reservation covers the transfer; the configured Fileman `uploadConcurrency`
+  controls streams. One lane takes large files while remaining lanes drain small
+  ones. Bulk grants use windows of at most 500 and renew only unused grants.
+- Source bytes are hashed while streaming. A successful Wings response and
+  durable per-file receipt confirm that upload; they do not certify gameplay or
+  an atomic filesystem snapshot. Normal completion does not download the same
+  bytes again. Unacknowledged dispatches stay uncertain and are never replayed
+  automatically. Active streams settle before releasing coordination.
+- The operation detail exposes only confirmed file/byte counters, within its
+  existing access scope. Manifests, staging paths, hashes and grants remain private.
+
+Minecraft Settings and Players read through this service. Player-file reads are
+prepared together. Text editing derives content and hash from one snapshot, keeps
+the final fresh precondition, and uses the acknowledged write as its receipt;
+uncertain write recovery still verifies the after-image before avoiding replay.
+Ordinary settings/player/world changes on confirmed installations reuse the
+installed runtime proof and validate the local mapping identity/digest, rather
+than downloading the runtime JAR again. Lifecycle authorization and provider
+identity corroboration remain in force. Unconfirmed installation, explicit audit,
+restore and runtime-changing content paths retain artifact verification.
+Worlds overlaps properties/root reads, batches candidate directories and prepares
+download URLs only for actual `level.dat` files. World imports hand the validated
+stage to `uploadStaged`; they retain archive/NBT/path rules and the existing
+online-additive versus stopped-replacement distinction.
+
+The Worlds UI shows confirmed transfer counts and follows the current server job
+after remount. Completion refreshes the inventory; accepted/uncertain/failed jobs
+are not presented as successful imports. During local submission and transfer it
+shows progress; a reload during archive staging precedes the persisted counters.

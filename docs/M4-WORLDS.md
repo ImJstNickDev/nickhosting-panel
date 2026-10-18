@@ -118,8 +118,9 @@ An import stages structurally recognized worlds even when their version differs
 from the installed game or cannot be identified. It preserves the original bytes,
 does not change `level-name`, and performs no conversion or game start. The optional
 target DataVersion remains in the durable plan identity; source metadata is recorded
-separately with `targetRelease` explicitly named. Final promotion compares the
-remote metadata digest with the staged digest rather than parsing it again.
+separately with `targetRelease` explicitly named. Final promotion originally
+compared the remote metadata digest with the staged digest; the Fileman transfer
+amendment below replaces that redundant reread on acknowledged imports.
 The completion event says the world was imported, not certified compatible.
 
 Cross-version imports must target an inactive folder. Replacement of the configured
@@ -136,3 +137,28 @@ otherwise it says the version is unknown. Import and removal are independent of
 the target-version catalog gate; selection is not. Catalog and metadata processing
 add no provider calls or network lookups. Existing archive containment, integrity,
 resource admission, permission and recovery boundaries remain in place.
+
+### Shared Fileman transfer amendment — M5, 2026-10-18
+
+The previous executor uploaded staged world files sequentially, repeatedly
+listed their ancestors and downloaded each result for a hash check, then checked
+the manifest again. The executor now delegates the staged manifest to Core's
+generic Fileman job service. Admission and destination preparation happen once;
+upload grants are batched, streams use the Owner's existing concurrency setting,
+and source hashes are checked during transmission. Directory creation is bounded
+to the manifest tree rather than repeated for every file.
+
+Normal completion requires the exact manifest digest and complete Fileman receipt
+from the same job. It does not redownload the world or `level.dat`. Lost replies,
+incomplete receipts, changed manifests and other-job recovery cannot use this
+shortcut. Existing replacement proofs and content fences remain authoritative.
+This acknowledges the provider transfer, not an atomic snapshot or a guarantee
+that the game will load the map. Legacy partially applied imports are not silently
+adopted into a new transfer; they retain their existing recovery boundary.
+
+World discovery uses the same shared read transport as Minecraft Settings and
+Players. It reads root/properties concurrently, batches candidate directory
+metadata and only downloads bounded `level.dat` files. The UI follows confirmed
+file counts during import, survives remount once counters exist, and refreshes
+world inventory after actual completion. See the generic
+[Fileman host contract](GAME-INTEGRATIONS.md#fileman-host-services--m5-2026-10-18).

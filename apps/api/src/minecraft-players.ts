@@ -3,8 +3,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import { type createDatabase, getSettings, recordAudit } from '@nickhosting/database';
 import { createMinecraftIdentityProvider, verifyMinecraftPlayer } from '@nickhosting/minecraft';
-import { type ConsoleRelay, PterodactylError } from '@nickhosting/pterodactyl-adapter';
+import type { ConsoleRelay } from '@nickhosting/pterodactyl-adapter';
 import {
+  createFilemanReadService,
   inspectMinecraftCombination,
   type ManagementRuntime,
   parse,
@@ -33,30 +34,29 @@ type Online = {
   observedAt: string | null;
 };
 const unavailable = (): Online => ({ state: 'unavailable', players: [], observedAt: null });
-async function readFile(service: ManagementRuntime, identifier: string, path: string) {
-  try {
-    return Buffer.from(await service.adapter.readFile(identifier, path, 1048576)).toString('utf8');
-  } catch (error) {
-    // Only an explicit missing list is empty. Transport, permission and parse failures
-    // must never erase an existing list; server.properties must always exist.
-    if (
-      path !== 'server.properties' &&
-      error instanceof PterodactylError &&
-      error.reason === 'not_found' &&
-      error.upstreamStatus === 404
-    )
-      return '[]';
-    throw error;
-  }
-}
-async function readPlayerFiles(service: ManagementRuntime, identifier: string) {
+async function readPlayerFiles(
+  service: ManagementRuntime,
+  identifier: string,
+  authorize: () => Promise<void>,
+) {
   const paths = ['ops.json', 'whitelist.json', 'banned-players.json', 'server.properties'];
-  const values = await Promise.all(paths.map(async (path) => readFile(service, identifier, path)));
+  const files = createFilemanReadService({ adapter: service.adapter, identifier, authorize });
+  const values = await files.readMany(
+    paths.map((path) => ({
+      path,
+      maxBytes: 1048576,
+      ...(path !== 'server.properties' ? { missing: 'allow' as const } : {}),
+    })),
+  );
+  const text = (path: string) => {
+    const bytes = values.get(path);
+    return bytes === undefined ? '[]' : Buffer.from(bytes).toString('utf8');
+  };
   return parseMinecraftPlayerFiles({
-    operators: values[0] ?? '',
-    whitelist: values[1] ?? '',
-    banned: values[2] ?? '',
-    properties: values[3] ?? '',
+    operators: text('ops.json'),
+    whitelist: text('whitelist.json'),
+    banned: text('banned-players.json'),
+    properties: text('server.properties'),
   });
 }
 /** A fresh relay receives only new output: requestLogs is deliberately never called. */
@@ -136,11 +136,10 @@ export function registerMinecraftPlayerRoutes(
   app.get('/v1/servers/:id/minecraft/players', async (c) => {
     const context = await principal(c),
       service = await management();
-    const result = await service.access(
+    const result = await service.fileReadAccess(
       context,
       c.req.param('id'),
-      false,
-      async (id, connection) => {
+      async (id, connection, current) => {
         const state = await profile(connection, c.req.param('id'));
         if (!state.supported || !state.value.installed)
           return {
@@ -152,7 +151,13 @@ export function registerMinecraftPlayerRoutes(
             whitelistEnabled: false,
             enforceWhitelist: false,
           };
-        return { supported: true, installed: true, ...(await readPlayerFiles(service, id)) };
+        return {
+          supported: true,
+          installed: true,
+          ...(await readPlayerFiles(service, id, () =>
+            service.authorizeTransfer(current, c.req.param('id'), false, connection),
+          )),
+        };
       },
     );
     c.header('Cache-Control', 'no-store');
@@ -164,10 +169,9 @@ export function registerMinecraftPlayerRoutes(
       serverId = c.req.param('id');
     // Release the access connection before resolving provider credentials or opening
     // a relay. Those operations borrow their own pool connections.
-    const { id, server, state } = await service.access(
+    const { id, server, state } = await service.fileReadAccess(
       context,
       serverId,
-      false,
       async (id, connection, _current, server) => ({
         id,
         server,
@@ -236,7 +240,9 @@ export function registerMinecraftPlayerRoutes(
           input.action === 'whitelist-remove' ||
           input.action === 'pardon'
         ) {
-          const snapshot = await readPlayerFiles(service, id);
+          const snapshot = await readPlayerFiles(service, id, () =>
+            service.authorizeTransfer(current, serverId, true, connection),
+          );
           const entries =
             input.action === 'deop'
               ? snapshot.operators
@@ -275,7 +281,9 @@ export function registerMinecraftPlayerRoutes(
           let confirmed = false;
           for (let attempt = 0; attempt < 4; attempt++) {
             if (attempt) await delay(250 * attempt);
-            const snapshot = await readPlayerFiles(service, id);
+            const snapshot = await readPlayerFiles(service, id, () =>
+              service.authorizeTransfer(current, serverId, true, connection),
+            );
             const contains = (list: { name: string; uuid: string }[]) =>
               'name' in input &&
               list.some((player) =>

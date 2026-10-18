@@ -2,6 +2,7 @@ import { type AuthContext, DomainError } from '@nickhosting/core';
 import type { createDatabase } from '@nickhosting/database';
 import {
   authorizeServer,
+  inspectMinecraftCombination,
   inspectMinecraftWorlds,
   type ManagementRuntime,
 } from '@nickhosting/server-management';
@@ -14,6 +15,7 @@ vi.mock('@nickhosting/server-management', async (original) => ({
   ...(await original<typeof import('@nickhosting/server-management')>()),
   authorizeServer: vi.fn(),
   inspectMinecraftWorlds: vi.fn(),
+  inspectMinecraftCombination: vi.fn(),
 }));
 const actor = { subjectUserId: 'reader' } as AuthContext;
 const db = {} as ReturnType<typeof createDatabase>['db'];
@@ -26,7 +28,7 @@ const snapshot = {
   worlds: [],
 };
 
-function fixture() {
+function fixture(connection = db) {
   const app = new Hono<{ Variables: Variables }>();
   app.onError((error, c) =>
     c.json(
@@ -35,21 +37,22 @@ function fixture() {
     ),
   );
   const authorizeTransfer = vi.fn(async () => {});
-  const access = vi.fn(async (_actor, _server, work) => work('provider', db, actor));
+  const access = vi.fn(async (_actor, _server, work) => work('provider', connection, actor));
+  const readFileForEditor = vi.fn(async () => Buffer.from('motd=Fixture\nmax-players=20\n'));
   const service = {
-    adapter: {},
+    adapter: { readFileForEditor },
     fileReadAccess: access,
     authorizeTransfer,
   } as unknown as ManagementRuntime;
   const management = vi.fn(async () => service);
   registerMinecraftRoutes(app, {
-    db,
+    db: connection,
     env: {},
     principal: async () => actor,
     body: async (c) => c.req.json(),
     management,
   });
-  return { app, access, management, authorizeTransfer };
+  return { app, access, management, authorizeTransfer, readFileForEditor };
 }
 beforeEach(() => {
   vi.mocked(authorizeServer)
@@ -69,6 +72,32 @@ describe('world snapshot HTTP access contract', () => {
     const authorize = vi.mocked(inspectMinecraftWorlds).mock.calls[0]?.[3];
     await authorize?.();
     expect(f.authorizeTransfer).toHaveBeenCalledExactlyOnceWith(actor, 'server', false, db);
+  });
+  it('opens Settings through Fileman identity access and one direct signed read', async () => {
+    const profile = { combination_id: 'choice', configuration: {}, installed: true };
+    const query = {
+      selectAll: () => query,
+      select: () => query,
+      where: () => query,
+      executeTakeFirst: async () => profile,
+      execute: async () => [],
+    };
+    const connection = { selectFrom: () => query } as unknown as typeof db;
+    vi.mocked(inspectMinecraftCombination).mockResolvedValueOnce({
+      combination: { release: '26.1', profile: 'vanilla' },
+    } as never);
+    const f = fixture(connection);
+    const response = await f.app.request('/v1/servers/server/minecraft');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      effectiveProperties: { motd: 'Fixture', 'max-players': '20' },
+    });
+    expect(f.access).toHaveBeenCalledExactlyOnceWith(actor, 'server', expect.any(Function));
+    expect(f.readFileForEditor).toHaveBeenCalledExactlyOnceWith(
+      'provider',
+      'server.properties',
+      1048576,
+    );
   });
   it('rejects unrelated callers before constructing provider services', async () => {
     const f = fixture();

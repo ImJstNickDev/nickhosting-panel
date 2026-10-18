@@ -31,6 +31,7 @@ import {
   Textarea,
   Time,
 } from '../components/ui.js';
+import type { GameSectionViewProps } from './game-section-view.js';
 import {
   gameUiClient,
   gameUiRegistry,
@@ -470,6 +471,8 @@ export function GameSections({
   const loaded = useQuery({
     queryKey: ['game-section', serverId, gameId, sectionId],
     enabled: Boolean(module && section && canReadSection),
+    // An operation can finish while this section is unmounted and clear the active ID.
+    refetchOnMount: 'always',
     queryFn: ({ signal }) =>
       module?.handlers[section?.loader ?? '']?.(gameUiClient, {
         serverId,
@@ -477,7 +480,14 @@ export function GameSections({
         signal,
       }) as Promise<UiSectionData>,
   });
-  const [operationId, setOperationId] = useState<string>();
+  const [trackedOperation, setTrackedOperation] = useState<{ serverId: string; id: string }>();
+  const operationId =
+    trackedOperation?.serverId === serverId
+      ? trackedOperation.id
+      : canReadSection
+        ? (server.data?.activeOperationId ?? undefined)
+        : undefined;
+  const setOperationId = (id: string) => setTrackedOperation({ serverId, id });
   const [completedOperationId, setCompletedOperationId] = useState<string>();
   const [refreshToken, setRefreshToken] = useState(0);
   const refreshedOperation = useRef<string | undefined>(undefined);
@@ -488,17 +498,30 @@ export function GameSections({
     operationServer.current = serverId;
     refreshedOperation.current = undefined;
     refreshedOutcome.current = undefined;
-    setOperationId(undefined);
+    setTrackedOperation(undefined);
     setCompletedOperationId(undefined);
     setRefreshToken(0);
   }, [serverId]);
+  useEffect(() => {
+    if (!canReadSection || !server.data?.activeOperationId) return;
+    setTrackedOperation({ serverId, id: server.data.activeOperationId });
+  }, [canReadSection, serverId, server.data?.activeOperationId]);
   const operation = useQuery({
-    queryKey: ['game-operation', operationId],
-    enabled: Boolean(operationId),
-    queryFn: ({ signal }) =>
-      api<{ state: string; effectState: string | null }>(`/v1/platform/jobs/${operationId}`, {
+    queryKey: ['game-operation', serverId, operationId],
+    enabled: Boolean(operationId && canReadSection),
+    queryFn: async ({ signal }) => {
+      const result = await api<{
+        serverId: string;
+        state: string;
+        effectState: string | null;
+        fileTransfer?: GameSectionViewProps['fileTransfer'];
+      }>(`/v1/platform/jobs/${operationId}`, {
         signal,
-      }),
+      });
+      if (result.serverId !== serverId)
+        throw new ApiError('not_found', 'errors.not_found', undefined, 404);
+      return result;
+    },
     refetchInterval: (query) => {
       const result = query.state.data;
       if (result && ['uncertain', 'prepared'].includes(result.effectState ?? ''))
@@ -510,6 +533,7 @@ export function GameSections({
   const effectState = operation.data?.effectState;
   useEffect(() => {
     if (
+      !canReadSection ||
       !operationId ||
       !operation.dataUpdatedAt ||
       !operationState ||
@@ -531,6 +555,7 @@ export function GameSections({
       cancelled = true;
     };
   }, [
+    canReadSection,
     operationId,
     operationState,
     effectState,
@@ -603,6 +628,13 @@ export function GameSections({
             pending={
               pendingOperation || Boolean(server.data.activeOperationId) || Boolean(refreshError)
             }
+            operation={
+              operation.data && {
+                state: operation.data.state,
+                effectState: operation.data.effectState,
+              }
+            }
+            fileTransfer={pendingOperation ? operation.data?.fileTransfer : undefined}
             onAccepted={(jobId) => {
               setOperationId(jobId);
               void server.refetch();

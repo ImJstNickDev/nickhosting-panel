@@ -12,6 +12,11 @@ import { ZipFile } from 'yazl';
 import { canonicalMinecraftJarSha256 } from '../../../games/minecraft/src/generated-launcher.js';
 import { planMinecraftPlayerList } from '../../../games/minecraft/src/management.js';
 import * as contentDisk from '../../content-providers/src/disk.js';
+import {
+  createFilemanJobServices,
+  filemanTransferDigest,
+  filemanTransferReceiptStep,
+} from './fileman-transfers.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { type LifecycleOptions, processServerOperation } from './lifecycle.js';
 import {
@@ -405,6 +410,8 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
         files.set(path, Buffer.from(content));
       },
       readFile: async (_id: string, path: string) => files.get(path) ?? Buffer.alloc(0),
+      readFileForEditor: async (_id: string, path: string) => files.get(path) ?? Buffer.alloc(0),
+      prefetchDownloads: async () => {},
       downloadFile: async (_id: string, path: string) => ({
         body: new ReadableStream<Uint8Array>({
           start(controller) {
@@ -678,6 +685,16 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
           for await (const chunk of upload.body) chunks.push(chunk);
           f.files.set(path, Buffer.concat(chunks));
         });
+        f.context.adapter.prepareUploadBatch = vi.fn(async () => null);
+        f.context.adapter.prepareUpload = vi.fn(
+          async (identifier, path) => (input: Parameters<PterodactylAdapter['uploadFile']>[2]) =>
+            f.context.adapter.uploadFile(identifier, path, input),
+        );
+        f.context.fileman = createFilemanJobServices(f.context, {
+          env,
+          authorize: async () => f.f.context,
+        });
+        const downloads = vi.spyOn(f.context.adapter, 'downloadFile');
         f.files.set('new_world/foreign.txt', Buffer.from('keep'));
         await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
           code: 'conflict',
@@ -712,6 +729,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
         expect(f.files.get('new_world/level.dat')).toEqual(level);
         expect(f.files.get('new_world/region/r.0.0.mca')).toEqual(Buffer.from('region fixture'));
         expect(f.context.assertStopped).not.toHaveBeenCalled();
+        expect(downloads.mock.calls.some(([, path]) => path === 'server.jar')).toBe(false);
         const inventory = await inspectMinecraftWorlds(
           f.f.db,
           f.context.adapter,
@@ -733,6 +751,131 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       }
     },
   );
+
+  it.each(['properties', 'player'] as const)(
+    'installed data edits (%s) retain mapping checks without reauditing runtime bytes',
+    async (kind) => {
+      const f = await minecraftFixture();
+      await f.f.db
+        .updateTable('minecraft_server_profiles')
+        .set({ installed: true, configuration_state: '{}' })
+        .where('server_id', '=', f.serverId)
+        .execute();
+      const identity = {
+        name: 'Player',
+        uuid: '11111111-1111-1111-1111-111111111111',
+        level: 4,
+        bypassesPlayerLimit: false,
+      };
+      f.files.set('ops.json', Buffer.from(JSON.stringify([identity])));
+      const command =
+        kind === 'properties'
+          ? { kind: 'properties' as const, changes: { motd: 'Updated' } }
+          : {
+              kind: 'player' as const,
+              list: 'operators' as const,
+              action: 'remove' as const,
+              name: identity.name,
+              expectedUuid: identity.uuid,
+            };
+      f.operation.action = 'minecraft-content';
+      f.operation.plan.minecraftContent = await prepareMinecraftContentPlan(
+        f.f.db,
+        f.serverId,
+        command,
+        { ...f.options, adapter: f.context.adapter },
+      );
+      const remote = vi.spyOn(f.context.adapter, 'getApplicationServer');
+      const download = vi.spyOn(f.context.adapter, 'downloadFile');
+      const image = vi.fn(f.options.observedImageDigest);
+      f.options.observedImageDigest = image;
+      const mapping = await f.f.db
+        .selectFrom('runtime_egg_mappings')
+        .select('startup')
+        .where('id', '=', f.f.mappingId)
+        .executeTakeFirstOrThrow();
+      await f.f.db
+        .updateTable('runtime_egg_mappings')
+        .set({ startup: `${mapping.startup} changed` })
+        .where('id', '=', f.f.mappingId)
+        .execute();
+      await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
+        code: 'provenance_mismatch',
+      });
+      await f.f.db
+        .updateTable('runtime_egg_mappings')
+        .set({ startup: mapping.startup })
+        .where('id', '=', f.f.mappingId)
+        .execute();
+      expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+      expect(remote).not.toHaveBeenCalled();
+      expect(image).not.toHaveBeenCalled();
+      expect(download.mock.calls.some(([, path]) => path === 'server.jar')).toBe(false);
+      expect(
+        f.files.get(kind === 'properties' ? 'server.properties' : 'ops.json')?.toString(),
+      ).toContain(kind === 'properties' ? 'motd=Updated' : '[]');
+    },
+  );
+
+  it('accepts only the exact same-job Fileman receipt when completing a world import', async () => {
+    const f = await minecraftFixture();
+    const manifest = {
+      id: 'minecraft.world-import',
+      destinationRoot: 'imported',
+      files: [{ path: 'imported/level.dat', size: 9, sha256: 'a'.repeat(64) }],
+    };
+    const digest = filemanTransferDigest(manifest);
+    const pending = {
+      jobId: f.operation.job_id,
+      kind: 'world',
+      planDigest: 'b'.repeat(64),
+      filemanTransfer: { id: manifest.id, destinationRoot: manifest.destinationRoot, digest },
+      files: manifest.files,
+      absentPaths: [],
+      wipes: [],
+      inventory: [],
+      removeInventoryPaths: [],
+    };
+    const save = async (value: typeof pending) => {
+      await f.f.db
+        .updateTable('minecraft_server_profiles')
+        .set({ content_state: JSON.stringify(value) })
+        .where('server_id', '=', f.serverId)
+        .execute();
+    };
+    await save(pending);
+    await expect(verifyMinecraftPendingContent(f.context)).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    await f.f.db
+      .insertInto('job_steps')
+      .values({ job_id: f.operation.job_id, step: filemanTransferReceiptStep(digest) })
+      .execute();
+    await save({
+      ...pending,
+      files: [
+        { ...manifest.files[0], path: 'imported/other.dat', size: 9, sha256: 'a'.repeat(64) },
+      ],
+    });
+    await expect(verifyMinecraftPendingContent(f.context)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    await save({ ...pending, jobId: randomUUID() });
+    await expect(verifyMinecraftPendingContent(f.context)).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    await save(pending);
+    await verifyMinecraftPendingContent(f.context);
+    expect(
+      (
+        await f.f.db
+          .selectFrom('minecraft_server_profiles')
+          .select('content_state')
+          .where('server_id', '=', f.serverId)
+          .executeTakeFirstOrThrow()
+      ).content_state,
+    ).toEqual({});
+  });
 
   async function installedPackFixture(
     selection:

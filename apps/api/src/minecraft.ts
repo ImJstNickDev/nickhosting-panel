@@ -12,6 +12,7 @@ import {
 } from '@nickhosting/minecraft';
 import {
   authorizeServer,
+  createFilemanReadService,
   createManagedServer,
   createMinecraftSourceStore,
   createServerSchema,
@@ -450,15 +451,26 @@ export function registerMinecraftRoutes(
     const service = await management();
     c.header('cache-control', 'no-store');
     return c.json(
-      await service.fileReadAccess(context, serverId, async (_identifier, connection, current) =>
-        inspectMinecraftWorlds(
-          connection,
-          service.adapter,
-          serverId,
-          () => service.authorizeTransfer(current, serverId, false, connection),
-          env,
-          c.req.raw.signal,
-        ),
+      await service.fileReadAccess(
+        context,
+        serverId,
+        async (identifier, connection, current, server) =>
+          inspectMinecraftWorlds(
+            connection,
+            service.adapter,
+            serverId,
+            () => service.authorizeTransfer(current, serverId, false, connection),
+            env,
+            c.req.raw.signal,
+            createFilemanReadService({
+              adapter: service.adapter,
+              identifier,
+              signal: c.req.raw.signal,
+              authorize: () => service.authorizeTransfer(current, serverId, false, connection),
+              listDirectories: (paths) =>
+                service.fileDirectoryBatch(identifier, server, paths, c.req.raw.signal),
+            }),
+          ),
       ),
     );
   });
@@ -474,16 +486,19 @@ export function registerMinecraftRoutes(
     if (!profile) throw new DomainError('not_found');
     const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
     const service = await management();
-    const effectiveProperties = await service.access(
+    const effectiveProperties = await service.fileReadAccess(
       context,
       serverId,
-      false,
-      async (identifier) => {
-        const properties = parseMinecraftProperties(
-          Buffer.from(
-            await service.adapter.readFile(identifier, 'server.properties', 1048576),
-          ).toString('utf8'),
-        );
+      async (identifier, connection, current) => {
+        const files = createFilemanReadService({
+          adapter: service.adapter,
+          identifier,
+          signal: c.req.raw.signal,
+          authorize: () => service.authorizeTransfer(current, serverId, false, connection),
+        });
+        const bytes = await files.read({ path: 'server.properties', maxBytes: 1048576 });
+        if (!bytes) throw new DomainError('not_found');
+        const properties = parseMinecraftProperties(Buffer.from(bytes).toString('utf8'));
         return Object.fromEntries(
           Object.entries(properties).filter(([key]) => minecraftEditablePropertyKeys.includes(key)),
         );

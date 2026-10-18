@@ -57,7 +57,13 @@ import {
   validateMinecraftLevelDat,
 } from '../../../games/minecraft/src/world.js';
 import { assessMinecraftWorldCompatibility } from '../../../games/minecraft/src/world-version.js';
+import type {
+  FilemanDirectoryResult,
+  FilemanReadService,
+} from '../../game-sdk/src/fileman-read.js';
 import type { Environment } from './admission.js';
+import { createFilemanReadService } from './fileman-read.js';
+import { filemanTransferDigest, filemanTransferReceiptStep } from './fileman-transfers.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 import {
@@ -517,15 +523,12 @@ async function textFile(
   path: string,
   absent?: string,
 ): Promise<string> {
-  const entry = await remoteEntry(context, path);
-  if (!entry) {
+  const snapshot = await readTextSnapshot(context, path);
+  if (snapshot === null) {
     if (absent === undefined) throw new DomainError('not_found');
     return absent;
   }
-  if (!entry.is_file || entry.size > 1024 * 1024) throw new DomainError('conflict');
-  return Buffer.from(
-    await context.adapter.readFile(context.server.pterodactyl_identifier ?? '', path),
-  ).toString('utf8');
+  return snapshot.content;
 }
 const textChangeSchema = z
   .object({
@@ -569,41 +572,46 @@ export async function applyMinecraftTextChange(
   textChangeSchema.parse(change);
   if (sha256(change.content) !== change.afterSha256) throw new DomainError('conflict');
   const step = stepId('text', change.path);
-  const current = await hashMinecraftRemoteFile(context, change.path);
-  if (current?.sha256 === change.afterSha256) {
+  if ((await completed(context, step)) || uncertainEffect(context, step)) {
+    // Recovery observes once and never blindly replays a possible prior write.
+    const current = await readTextSnapshot(context, change.path);
+    if (current?.hash !== change.afterSha256) throw new DomainError('operation_uncertain');
     await complete(context, step);
     return;
   }
-  if ((await completed(context, step)) || uncertainEffect(context, step))
-    throw new DomainError('operation_uncertain');
-  if ((current?.sha256 ?? null) !== change.beforeSha256) throw new DomainError('conflict');
+  await context.assertStopped();
+  await context.authorize();
+  const current = await readTextSnapshot(context, change.path);
+  if (current?.hash === change.afterSha256) {
+    await complete(context, step);
+    return;
+  }
+  if ((current?.hash ?? null) !== change.beforeSha256) throw new DomainError('conflict');
   await context.effect(step, async () => {
-    await context.assertStopped();
-    await context.authorize();
-    if (
-      ((await hashMinecraftRemoteFile(context, change.path))?.sha256 ?? null) !==
-      change.beforeSha256
-    )
-      throw new DomainError('conflict');
     await context.adapter.writeFile(
       context.server.pterodactyl_identifier ?? '',
       change.path,
       change.content,
     );
   });
-  if ((await hashMinecraftRemoteFile(context, change.path))?.sha256 !== change.afterSha256)
-    throw new DomainError('operation_uncertain');
+  // The provider acknowledgement commits the write. A lost response is handled by
+  // the recovery branch above; acknowledged writes do not download the file again.
   await complete(context, step);
 }
+
 async function plannedText(
   context: GameLifecycleContext,
   path: TextChange['path'],
   content: string,
   expectedBefore?: string | null,
+  files?: FilemanReadService,
 ): Promise<TextChange> {
-  const beforeSha256 = (await hashMinecraftRemoteFile(context, path))?.sha256 ?? null;
-  if (expectedBefore !== undefined && expectedBefore !== beforeSha256)
-    throw new DomainError('conflict');
+  // A builder already has the exact bytes/hash. The fresh comparison belongs to
+  // the effect boundary, not another fetch while serializing the same plan.
+  const beforeSha256 =
+    expectedBefore !== undefined
+      ? expectedBefore
+      : ((await readTextSnapshot(context, path, files))?.hash ?? null);
   return {
     path,
     content,
@@ -611,22 +619,57 @@ async function plannedText(
     afterSha256: sha256(content),
   };
 }
-async function textSnapshot(context: GameLifecycleContext, path: string, fallback: string) {
-  const before = await hashMinecraftRemoteFile(context, path);
-  const content = await textFile(context, path, fallback);
-  if (before && sha256(content) !== before.sha256) throw new DomainError('conflict');
-  if (!before && (await remoteEntry(context, path))) throw new DomainError('conflict');
-  return { content, hash: before?.sha256 ?? null };
+async function readTextSnapshot(
+  context: GameLifecycleContext,
+  path: string,
+  fileman?: FilemanReadService,
+) {
+  safeArchivePath(path);
+  const files =
+    fileman ??
+    createFilemanReadService({
+      adapter: context.adapter,
+      identifier: context.server.pterodactyl_identifier ?? '',
+      authorize: context.authorize,
+    });
+  // These fixed configuration paths are root files. One shared root observation
+  // retains the symlink/case guard; the hash is computed from the bytes we edit.
+  if (path.includes('/')) throw new DomainError('validation_failed');
+  const matches = (await files.list('')).filter(
+    (entry) => entry.name.toLowerCase() === path.toLowerCase(),
+  );
+  if (matches.length > 1 || (matches[0] && matches[0].name !== path))
+    throw new DomainError('conflict');
+  const entry = matches[0];
+  if (!entry) return null;
+  if (entry.kind !== 'file' || entry.size > 1024 ** 2) throw new DomainError('conflict');
+  const bytes = await files.read({ path, maxBytes: 1024 ** 2 });
+  if (!bytes) throw new DomainError('not_found');
+  return { content: Buffer.from(bytes).toString('utf8'), hash: sha256(bytes) };
+}
+async function textSnapshot(
+  context: GameLifecycleContext,
+  path: string,
+  fallback: string,
+  files?: FilemanReadService,
+) {
+  return (await readTextSnapshot(context, path, files)) ?? { content: fallback, hash: null };
 }
 async function applyTextPlan(
   context: GameLifecycleContext,
-  build: () => Promise<TextChange[]>,
+  build: (files: FilemanReadService) => Promise<TextChange[]>,
   beforeEffects?: (plan: TextChange[]) => Promise<void>,
 ) {
   if (context.operation().plan.minecraftText === undefined) {
     // Builders may persist authority (for example a verified player UUID).
     // Read the latest plan only after they finish; an earlier spread loses it.
-    const changes = await build();
+    const changes = await build(
+      createFilemanReadService({
+        adapter: context.adapter,
+        identifier: context.server.pterodactyl_identifier ?? '',
+        authorize: context.authorize,
+      }),
+    );
     await context.update({ plan: { ...context.operation().plan, minecraftText: changes } });
   }
   const plan = z.array(textChangeSchema).max(4).parse(context.operation().plan.minecraftText);
@@ -1116,10 +1159,12 @@ export async function configureMinecraftProvision(
   const initialContentDigest = initial ? minecraftDigest(initial) : undefined;
   await applyTextPlan(
     context,
-    async () => {
-      const changes: TextChange[] = [await plannedText(context, 'eula.txt', 'eula=true\n')];
+    async (files) => {
+      const changes: TextChange[] = [
+        await plannedText(context, 'eula.txt', 'eula=true\n', undefined, files),
+      ];
       if (Object.keys(configuration.properties).length) {
-        const snapshot = await textSnapshot(context, 'server.properties', '');
+        const snapshot = await textSnapshot(context, 'server.properties', '', files);
         const source = snapshot.content;
         const edited = editMinecraftProperties(source, configuration.properties, {
           release: verified.choice.combination.release,
@@ -1137,7 +1182,7 @@ export async function configureMinecraftProvision(
         ['whitelist', configuration.playerIdentities?.whitelist ?? [], 'whitelist.json'],
       ] as const) {
         if (!players.length) continue;
-        const snapshot = await textSnapshot(context, path, '[]');
+        const snapshot = await textSnapshot(context, path, '[]', files);
         let content = snapshot.content;
         for (const player of players)
           content = planMinecraftPlayerList(content, kind, 'add', player, {
@@ -1351,6 +1396,14 @@ const pendingContentSchema = z
     jobId: z.uuid(),
     kind: z.enum(['content', 'world']),
     planDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    filemanTransfer: z
+      .object({
+        id: z.string(),
+        destinationRoot: z.string(),
+        digest: z.string().regex(/^[a-f0-9]{64}$/),
+      })
+      .strict()
+      .optional(),
     files: z
       .array(
         z.object({
@@ -1411,7 +1464,25 @@ async function beginContent(
 export async function verifyMinecraftPendingContent(context: GameLifecycleContext): Promise<void> {
   const pending = await pendingContent(context);
   if (!pending) return;
-  for (const file of pending.files) {
+  let transferConfirmed = false;
+  if (pending.filemanTransfer && pending.jobId === context.operation().job_id) {
+    const digest = filemanTransferDigest({
+      id: pending.filemanTransfer.id,
+      destinationRoot: pending.filemanTransfer.destinationRoot,
+      files: pending.files,
+    });
+    if (digest !== pending.filemanTransfer.digest) throw new DomainError('conflict');
+    transferConfirmed = Boolean(
+      await context.db
+        .selectFrom('job_steps')
+        .select('step')
+        .where('job_id', '=', pending.jobId)
+        .where('step', '=', filemanTransferReceiptStep(digest))
+        .executeTakeFirst(),
+    );
+    if (!transferConfirmed) throw new DomainError('operation_uncertain');
+  }
+  for (const file of transferConfirmed ? [] : pending.files) {
     const actual = await hashMinecraftRemoteFile(context, file.path);
     if (!actual || actual.sha256 !== file.sha256 || actual.size !== file.size)
       throw new DomainError('operation_uncertain');
@@ -1527,7 +1598,18 @@ async function applyPreparedContent(
     !['provision', 'reinstall', 'wipe'].includes(context.operation().action)
   )
     throw new DomainError('operation_uncertain');
-  await verifyInstalledRuntime(context, options);
+  const editsInstalledData =
+    profile.installed &&
+    ['properties', 'player', 'world-import', 'world-select', 'world-remove'].includes(command.kind);
+  if (editsInstalledData) {
+    // These operations cannot change the runtime. Installation already proved
+    // its bytes; the lifecycle still corroborates provider ownership per effect.
+    if (
+      choice.row.mapping_id !== context.server.mapping_id ||
+      choice.mappingDigest !== choice.row.mapping_digest
+    )
+      throw new DomainError('provenance_mismatch');
+  } else await verifyInstalledRuntime(context, options);
   const pending = await pendingContent(context);
   if (
     pending &&
@@ -1575,9 +1657,9 @@ async function applyPreparedContent(
       await recoverMinecraftPlayerReceipt(context, options, command);
     await applyTextPlan(
       context,
-      async () => {
+      async (files) => {
         if (command.kind === 'properties') {
-          const snapshot = await textSnapshot(context, 'server.properties', '');
+          const snapshot = await textSnapshot(context, 'server.properties', '', files);
           const source = snapshot.content;
           const result = editMinecraftProperties(source, command.changes, {
             release: choice.combination.release,
@@ -1586,7 +1668,7 @@ async function applyPreparedContent(
           return [await plannedText(context, 'server.properties', result.content, snapshot.hash)];
         }
         const path = command.list === 'operators' ? 'ops.json' : 'whitelist.json';
-        const snapshot = await textSnapshot(context, path, '[]');
+        const snapshot = await textSnapshot(context, path, '[]', files);
         const player = await resolveMinecraftPlayerChangeIdentity(
           command,
           snapshot.content,
@@ -1937,27 +2019,14 @@ async function readWorldLevel(
   maxBytes = 8 * 1024 ** 2,
   signal?: AbortSignal,
 ) {
-  const response = await context.adapter.downloadFile(
-    context.server.pterodactyl_identifier ?? '',
-    `${minecraftWorldName(world)}/level.dat`,
-    { maxBytes, authorize: context.authorize, signal },
-  );
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const item = await reader.read();
-      if (item.done) break;
-      size += item.value.byteLength;
-      if (size > maxBytes) throw new DomainError('validation_failed');
-      chunks.push(item.value);
-    }
-  } finally {
-    await reader.cancel().catch(() => {});
-    reader.releaseLock();
-  }
-  return Buffer.concat(chunks, size);
+  const bytes = await createFilemanReadService({
+    adapter: context.adapter,
+    identifier: context.server.pterodactyl_identifier ?? '',
+    authorize: context.authorize,
+    signal,
+  }).read({ path: `${minecraftWorldName(world)}/level.dat`, maxBytes });
+  if (!bytes) throw new DomainError('not_found');
+  return bytes;
 }
 export interface MinecraftWorldSnapshot {
   installed: boolean;
@@ -1975,6 +2044,7 @@ export async function inspectMinecraftWorlds(
   authorize: () => Promise<void>,
   env: Environment = {},
   signal?: AbortSignal,
+  fileman?: FilemanReadService,
 ): Promise<MinecraftWorldSnapshot> {
   const profile = await db
     .selectFrom('minecraft_server_profiles')
@@ -2001,31 +2071,76 @@ export async function inspectMinecraftWorlds(
   };
   if (!snapshot.installed || !snapshot.supported) return snapshot;
   signal?.throwIfAborted();
-  const properties = parseMinecraftProperties(
-    Buffer.from(
-      await adapter.readFile(server.pterodactyl_identifier, 'server.properties', 1048576),
-    ).toString('utf8'),
-  );
+  const files =
+    fileman ??
+    createFilemanReadService({
+      adapter,
+      identifier: server.pterodactyl_identifier,
+      authorize,
+      signal,
+    });
+  const [propertiesBytes, root] = await Promise.all([
+    files.read({ path: 'server.properties', maxBytes: 1048576 }),
+    files.list(''),
+  ]);
+  if (!propertiesBytes) throw new DomainError('not_found');
+  const properties = parseMinecraftProperties(Buffer.from(propertiesBytes).toString('utf8'));
   // Preserve the observed value, including legacy names that managed mutations cannot accept.
   snapshot.selectedWorld = properties['level-name'] ?? 'world';
+  const directories = new Map<string, FilemanDirectoryResult>();
   snapshot.worlds = await discoverMinecraftWorlds(
     {
       listRoot: async () => {
-        signal?.throwIfAborted();
-        return (await adapter.listFiles(server.pterodactyl_identifier ?? '')).map((entry) => ({
+        // The same candidates as discovery, bounded before any remote fan-out.
+        const candidates = root.filter((entry) => {
+          if (entry.kind !== 'directory') return false;
+          try {
+            minecraftWorldName(entry.name);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+        if (candidates.length > 100) throw new DomainError('validation_failed');
+        if (candidates.length) {
+          const results = await files.listMany(candidates.map(({ name }) => name));
+          const paths: string[] = [];
+          for (const result of results) {
+            directories.set(result.directory, result);
+            if (
+              'files' in result &&
+              result.files.some(
+                (entry) =>
+                  entry.name === 'level.dat' &&
+                  entry.kind === 'file' &&
+                  entry.size <= 8 * 1024 ** 2,
+              )
+            )
+              paths.push(`${result.directory}/level.dat`);
+          }
+          if (paths.length) await files.prepare(paths);
+        }
+        return root.map((entry) => ({
           name: entry.name,
-          isDirectory: !entry.is_file,
-          isSymlink: entry.is_symlink,
+          isDirectory: entry.kind === 'directory',
+          isSymlink: entry.kind === 'symlink',
         }));
       },
       readLevelDat: async (world, maxBytes) => {
-        signal?.throwIfAborted();
-        const entries = await adapter.listFiles(server.pterodactyl_identifier ?? '', world);
-        const level = entries.find((entry) => entry.name === 'level.dat');
+        const directory = directories.get(world);
+        if (!directory || 'error' in directory) {
+          if (directory && 'error' in directory && directory.error === 'not_found')
+            return undefined;
+          throw new DomainError(
+            directory && 'error' in directory && directory.error === 'forbidden'
+              ? 'forbidden'
+              : 'integration_unavailable',
+          );
+        }
+        const level = directory.files.find((entry) => entry.name === 'level.dat');
         if (!level) return undefined;
-        if (!level.is_file || level.is_symlink || level.size > maxBytes)
-          throw new DomainError('conflict');
-        return readWorldLevel({ adapter, server, authorize }, world, maxBytes, signal);
+        if (level.kind !== 'file' || level.size > maxBytes) throw new DomainError('conflict');
+        return files.read({ path: `${world}/level.dat`, maxBytes });
       },
     },
     { expectedDataVersion, release: choice.combination.release, signal },
@@ -2178,11 +2293,12 @@ async function applyWorldContent(
     }) !== 'verified'
   )
     fail('minecraft_world_active_version');
-  let bytes = 0;
-  for (const file of staged.manifest)
-    if (!(await completed(context, stepId('install', file.path)))) bytes += file.size;
-  const usage = await context.adapter.getResources(context.server.pterodactyl_identifier ?? '');
-  assertServerStorageCapacity(context.server.limits.disk, usage.resources.disk_bytes + bytes);
+  if (!context.fileman) throw new DomainError('configuration_invalid');
+  const transfer = {
+    id: 'minecraft.world-import',
+    destinationRoot: target,
+    files: staged.manifest.map(({ path, size, sha256 }) => ({ path, size, sha256 })),
+  };
   if (context.operation().plan.minecraftWorldPrepared !== true) {
     const actual = await remoteEntry(context, target);
     if (Boolean(actual) !== prepared.world.existing || actual?.is_file)
@@ -2201,6 +2317,11 @@ async function applyWorldContent(
     {
       kind: 'world',
       planDigest: staged.planDigest,
+      filemanTransfer: {
+        id: transfer.id,
+        destinationRoot: target,
+        digest: filemanTransferDigest(transfer),
+      },
       files: staged.manifest,
       absentPaths: [],
       wipes: prepared.world.existing ? [{ jobId: context.operation().job_id, path: target }] : [],
@@ -2212,21 +2333,17 @@ async function applyWorldContent(
   );
   if (prepared.world.existing && !(await completed(context, stepId('remove', target))))
     await removeContentPath(context, target);
-  for (const file of staged.manifest)
-    await installContentFile(
-      context,
-      options,
-      file,
-      join(staged.directory, file.path),
-      undefined,
-      target,
-      assertWritable,
-    );
-  // Staging already parsed the metadata. Verify the promoted bytes without
-  // reinterpreting an imported world's version as the target runtime's version.
-  const levelDatSha256 = sha256(await readWorldLevel(context, target));
-  if (levelDatSha256 !== staged.validation.levelDatSha256)
-    throw new DomainError('operation_uncertain');
+  await context.fileman.uploadStaged({
+    ...transfer,
+    beforeWrite: onlineImport && !activeTarget ? undefined : context.assertStopped,
+    open: async (path) => {
+      const source = join(staged.directory, path);
+      const metadata = await lstat(source);
+      if (!metadata.isFile() || metadata.isSymbolicLink()) throw new DomainError('conflict');
+      return Readable.toWeb(createReadStream(source)) as ReadableStream<Uint8Array>;
+    },
+  });
+  const levelDatSha256 = staged.validation.levelDatSha256;
   await verifyMinecraftPendingContent(context);
   await context.event('minecraft.world.imported', {
     world: target,

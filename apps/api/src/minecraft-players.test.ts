@@ -81,7 +81,8 @@ function fixture() {
   const requestLogs = vi.fn();
   const service = {
     adapter: {
-      readFile: vi.fn(async (_id, path) => {
+      prefetchDownloads: vi.fn(async () => {}),
+      readFileForEditor: vi.fn(async (_id, path) => {
         if (!(path in files)) throw new DomainError('integration_unavailable');
         return Buffer.from(files[path] ?? '');
       }),
@@ -107,6 +108,10 @@ function fixture() {
       } finally {
         accessActive = false;
       }
+    }),
+    fileReadAccess: vi.fn(async (_context, _serverId, callback) => {
+      if (denied) throw new DomainError('forbidden');
+      return callback('identifier', db, context, server);
     }),
     authorizeTransfer: vi.fn(async () => {
       if (denied) throw new DomainError('forbidden');
@@ -180,7 +185,15 @@ describe('Minecraft player HTTP handlers with isolated boundaries', () => {
       operators: [{ ...player, level: 1 }],
       banned: [],
     });
-    expect(f.service.adapter.readFile).toHaveBeenCalledTimes(4);
+    expect(f.service.adapter.readFileForEditor).toHaveBeenCalledTimes(4);
+    expect(f.service.adapter.prefetchDownloads).toHaveBeenCalledExactlyOnceWith('identifier', [
+      'ops.json',
+      'whitelist.json',
+      'banned-players.json',
+      'server.properties',
+    ]);
+    expect(f.service.fileReadAccess).toHaveBeenCalledOnce();
+    expect(f.service.access).not.toHaveBeenCalled();
     expect(f.db.updateTable).not.toHaveBeenCalled();
   });
   it('does not turn missing/malformed files into empty lists', async () => {
@@ -190,13 +203,13 @@ describe('Minecraft player HTTP handlers with isolated boundaries', () => {
   });
   it('treats only an explicit provider 404 as an empty list', async () => {
     const f = fixture();
-    f.service.adapter.readFile.mockRejectedValueOnce(
+    f.service.adapter.readFileForEditor.mockRejectedValueOnce(
       new PterodactylError('not_found', 'client', 'rejected', 404),
     );
     const response = await f.app.request('/v1/servers/server/minecraft/players');
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ operators: [] });
-    f.service.adapter.readFile.mockRejectedValueOnce(
+    f.service.adapter.readFileForEditor.mockRejectedValueOnce(
       new PterodactylError('permission_denied', 'client', 'rejected', 403),
     );
     expect((await f.app.request('/v1/servers/server/minecraft/players')).status).toBe(503);
@@ -205,7 +218,7 @@ describe('Minecraft player HTTP handlers with isolated boundaries', () => {
     const f = fixture();
     f.denied(true);
     expect((await f.app.request('/v1/servers/server/minecraft/players')).status).toBe(403);
-    expect(f.service.adapter.readFile).not.toHaveBeenCalled();
+    expect(f.service.adapter.readFileForEditor).not.toHaveBeenCalled();
     f.denied(false);
     f.writeDenied();
     expect((await f.action({ action: 'op', name: 'PlayerOne' })).status).toBe(403);
@@ -220,7 +233,7 @@ describe('Minecraft player HTTP handlers with isolated boundaries', () => {
     expect(
       await (await f.app.request('/v1/servers/server/minecraft/players')).json(),
     ).toMatchObject({ supported: false });
-    expect(f.service.adapter.readFile).not.toHaveBeenCalled();
+    expect(f.service.adapter.readFileForEditor).not.toHaveBeenCalled();
     f.profile.installed = false;
     expect((await f.action({ action: 'op', name: 'PlayerOne' })).status).toBe(409);
   });
@@ -380,7 +393,7 @@ describe('Minecraft player HTTP handlers with isolated boundaries', () => {
       'identifier',
       'kick PlayerOne Reason',
     );
-    expect(f.service.adapter.readFile).not.toHaveBeenCalled();
+    expect(f.service.adapter.readFileForEditor).not.toHaveBeenCalled();
     expect(f.db.updateTable).not.toHaveBeenCalled();
   });
   it('shares fresh roster observations while authorizing every caller and invalidating binding/lifecycle changes', async () => {

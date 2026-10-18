@@ -24,6 +24,8 @@ export const minecraftWorldsMessages: Record<string, [string, string]> = {
   'worlds.refresh': ['Refresh worlds', 'Aggiorna mondi'],
   'worlds.refreshing': ['Refreshing worlds…', 'Aggiornamento dei mondi…'],
   'worlds.import': ['Import world', 'Importa mondo'],
+  'worlds.importing': ['Importing world…', 'Importazione del mondo…'],
+  'worlds.transferredFiles': ['{completed} of {total} files', '{completed} di {total} file'],
   'worlds.select': ['Select world', 'Seleziona mondo'],
   'worlds.delete': ['Delete world', 'Elimina mondo'],
   'worlds.replace': ['Replace world', 'Sostituisci mondo'],

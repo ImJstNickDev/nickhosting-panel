@@ -3,6 +3,7 @@ import type { Database } from '@nickhosting/database';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createFilemanReadService } from './fileman-read.js';
 import { inspectMinecraftWorlds } from './minecraft-content.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 
@@ -68,7 +69,13 @@ function fixture(
   const downloadFile = vi.fn(async () => ({
     body: new Response(Uint8Array.from(worldLevel)).body,
   }));
-  const adapter = { readFile, listFiles, downloadFile } as unknown as PterodactylAdapter;
+  const prefetchDownloads = vi.fn(async () => {});
+  const adapter = {
+    readFileForEditor: readFile,
+    prefetchDownloads,
+    listFiles,
+    downloadFile,
+  } as unknown as PterodactylAdapter;
   const authorize = vi.fn(async () => {});
   return { db, adapter, authorize, readFile, listFiles, downloadFile };
 }
@@ -102,6 +109,46 @@ describe('Minecraft world inventory snapshot', () => {
     expect(f.readFile).toHaveBeenCalledExactlyOnceWith('provider', 'server.properties', 1048576);
     expect(f.listFiles).toHaveBeenCalledTimes(2);
     expect(f.downloadFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('batches directory discovery and prepares only metadata files that are actually present', async () => {
+    const f = fixture();
+    f.listFiles.mockImplementation(async () => [
+      { name: 'older', is_file: false },
+      { name: 'notes', is_file: false },
+    ]);
+    const listDirectories = vi.fn(async () => [
+      {
+        directory: 'older',
+        files: [{ name: 'level.dat', is_file: true, is_symlink: false, size: level.length }],
+      },
+      { directory: 'notes', files: [] },
+    ]);
+    const files = createFilemanReadService({
+      adapter: f.adapter,
+      identifier: 'provider',
+      authorize: f.authorize,
+      listDirectories: listDirectories as unknown as NonNullable<
+        Parameters<typeof createFilemanReadService>[0]['listDirectories']
+      >,
+    });
+    const result = await inspectMinecraftWorlds(
+      f.db,
+      f.adapter,
+      'server',
+      f.authorize,
+      {},
+      undefined,
+      files,
+    );
+    expect(result.worlds).toHaveLength(1);
+    expect(f.listFiles).toHaveBeenCalledTimes(1);
+    expect(listDirectories).toHaveBeenCalledExactlyOnceWith(['older', 'notes']);
+    expect(f.adapter.prefetchDownloads).toHaveBeenCalledExactlyOnceWith('provider', [
+      'older/level.dat',
+    ]);
+    expect(f.downloadFile).toHaveBeenCalledTimes(1);
+    expect(f.readFile).toHaveBeenCalledTimes(1);
   });
 
   it('uses release metadata with no per-server evidence', async () => {
@@ -169,7 +216,7 @@ describe('Minecraft world inventory snapshot', () => {
     await expect(
       inspectMinecraftWorlds(broken.db, broken.adapter, 'server', broken.authorize),
     ).rejects.toMatchObject({ code: 'integration_unavailable' });
-    expect(broken.listFiles).not.toHaveBeenCalled();
+    expect(broken.listFiles).toHaveBeenCalledTimes(1); // Root metadata overlaps the properties read.
   });
 
   it('refuses to return an inventory when final authorization is revoked', async () => {

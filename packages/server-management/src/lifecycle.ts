@@ -8,7 +8,7 @@ import {
   safeError,
 } from '@nickhosting/core';
 import { type Database, notifyGatewayChange, recordAudit } from '@nickhosting/database';
-import type { GameBackupPolicy } from '@nickhosting/game-sdk';
+import type { FilemanJobServices, GameBackupPolicy } from '@nickhosting/game-sdk';
 import { parseCommand, processJob } from '@nickhosting/jobs';
 import {
   type ApplicationServer,
@@ -56,6 +56,8 @@ type Result =
   | 'duplicate'
   | 'missing';
 export interface GameLifecycleContext {
+  /** Scoped Fileman host services for trusted integration file operations. */
+  fileman?: FilemanJobServices;
   db: Kysely<Database>;
   server: Server;
   adapter: PterodactylAdapter;
@@ -92,6 +94,7 @@ export interface ExternalStopReceipt {
   action: 'stop' | 'kill';
 }
 export interface LifecycleOptions {
+  fileman?: (context: GameLifecycleContext) => FilemanJobServices;
   logger?: ReturnType<typeof createLogger>;
   adapter: PterodactylAdapter;
   backupSchemaAvailable?: (db: Kysely<Database>) => Promise<boolean>;
@@ -1235,22 +1238,29 @@ export async function processServerOperation(
       return true;
     };
 
-    const gameContext = (): GameLifecycleContext => ({
-      db,
-      server,
-      adapter: options.adapter,
-      operation: () => operation,
-      update,
-      effect,
-      event,
-      backup,
-      authorize: () => options.authorizeEffect(jobId, server.id, db),
-      assertStopped: async () => {
-        await requireQuiescentReservation();
-        if (!options.confirmAlreadyStopped || !(await options.confirmAlreadyStopped(server.id, db)))
-          throw new DomainError('operation_uncertain');
-      },
-    });
+    const gameContext = (): GameLifecycleContext => {
+      const context: GameLifecycleContext = {
+        db,
+        server,
+        adapter: options.adapter,
+        operation: () => operation,
+        update,
+        effect,
+        event,
+        backup,
+        authorize: () => options.authorizeEffect(jobId, server.id, db),
+        assertStopped: async () => {
+          await requireQuiescentReservation();
+          if (
+            !options.confirmAlreadyStopped ||
+            !(await options.confirmAlreadyStopped(server.id, db))
+          )
+            throw new DomainError('operation_uncertain');
+        },
+      };
+      context.fileman = options.fileman?.(context);
+      return context;
+    };
     const backupResumeAllowed = async () => {
       const current = await db
         .selectFrom('managed_servers')

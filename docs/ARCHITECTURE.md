@@ -203,6 +203,16 @@ and an uncertain remote effect is not retried as a new side effect. Owner
 acknowledgement uses the existing remote identity/stopped-state proof and records
 failure without inventing rollback.
 
+Trusted game integrations also use Fileman's backend host services (M5,
+2026-10-18). `FilemanReadService` exposes bounded byte and directory reads through
+the existing signed Wings transport and optional Blueprint directory batching.
+Its directory snapshots live only for the request/operation phase; bytes are not
+cached across calls. `GameLifecycleContext.fileman.uploadStaged` accepts an
+immutable relative-path/hash/size manifest and a lazy stream opener, under the
+real durable job's authority. It reuses Fileman's upload grants and ingestion
+admission, without creating an interactive session or exposing provider tokens.
+See [integration file services](GAME-INTEGRATIONS.md#fileman-host-services--m5-2026-10-18).
+
 The existing React Router route tree is mounted through its data router to use
 the supported [navigation blocker](https://reactrouter.com/api/hooks/useBlocker)
 for unsaved editor drafts and pending writes, including browser Back/Forward.

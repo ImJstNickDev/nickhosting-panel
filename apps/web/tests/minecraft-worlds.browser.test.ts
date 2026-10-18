@@ -189,6 +189,80 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     return dialog;
   }
 
+  it('shows acknowledged import progress after a reload and refreshes worlds on completion', async () => {
+    await user.goto(route());
+    const dialog = await importDialog(
+      'progress-world',
+      await archive({
+        'source/level.dat': browserLevelDat(),
+        'source/data/a.txt': Buffer.from('First fixture file'),
+        'source/data/b.txt': Buffer.from('Second fixture file'),
+      }),
+    );
+    const accepted = user.waitForResponse(
+      (result) =>
+        result.request().method() === 'POST' && result.url().endsWith(`${api()}/operations`),
+    );
+    await dialog.getByRole('button', { name: 'Import world', exact: true }).click();
+    const response = await accepted;
+    expect(response.status()).toBe(202);
+    const { jobId } = (await response.json()) as { jobId: string };
+    await browserExpect(user.getByRole('dialog')).toHaveCount(0);
+    await browserExpect(user.getByText('Importing world…', { exact: true })).toBeVisible();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const upload = provider.adapter.uploadFile;
+    provider.adapter.uploadFile = async (...args) => {
+      if (!args[1].endsWith('/level.dat')) await gate;
+      return upload(...args);
+    };
+    const delivery = provider.processPending();
+    try {
+      await browserExpect(user.getByText('1 of 3 files', { exact: true }))
+        .toBeVisible()
+        .catch(async (error: unknown) => {
+          const detail = await user.request.get(`${fixture.origin}/v1/platform/jobs/${jobId}`);
+          throw new Error(`${String(error)}\nJob: ${await detail.text()}`);
+        });
+      const detail = await user.request.get(`${fixture.origin}/v1/platform/jobs/${jobId}`);
+      expect(detail.status()).toBe(200);
+      expect((await detail.json()).fileTransfer).toMatchObject({
+        completedFiles: 1,
+        totalFiles: 3,
+        completedBytes: browserLevelDat().length,
+      });
+      await user.reload();
+      await browserExpect(user.getByText('1 of 3 files', { exact: true })).toBeVisible();
+      await browserExpect(
+        user.getByRole('progressbar', { name: 'Importing world…' }),
+      ).toHaveAttribute('value', '1');
+      await browserExpect(
+        user.getByRole('button', { name: 'Import world', exact: true }),
+      ).toBeDisabled();
+      await screenshot(user, 'minecraft-worlds-transfer-desktop-en');
+      await accessible();
+      await user.setViewportSize({ width: 390, height: 844 });
+      await screenshot(user, 'minecraft-worlds-transfer-mobile-en');
+      await accessible();
+      release();
+      await delivery;
+      await browserExpect(user.getByText('Importing world…', { exact: true })).toHaveCount(0);
+      await browserExpect(
+        user.getByRole('button', { name: 'Select world: progress-world', exact: true }),
+      ).toBeEnabled();
+      expect((await provider.files()).get('progress-world/data/b.txt')?.toString()).toBe(
+        'Second fixture file',
+      );
+    } finally {
+      release();
+      await delivery;
+      provider.adapter.uploadFile = upload;
+      await user.setViewportSize({ width: 1440, height: 1000 });
+    }
+  });
+
   it('imports, selects, downloads and removes a world only after confirmation', async () => {
     await user.goto(route());
     await browserExpect(
@@ -315,6 +389,7 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     await browserExpect(
       user.getByRole('link', { name: 'View operation', exact: true }),
     ).toBeVisible();
+    await browserExpect(user.getByText('Importing world…', { exact: true })).toHaveCount(0);
     expect((await provider.files()).has('broken/level.dat')).toBe(false);
     await screenshot(user, 'minecraft-worlds-invalid-import-desktop-en');
   });

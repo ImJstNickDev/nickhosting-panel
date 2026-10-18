@@ -893,6 +893,17 @@ async function retryEligibility(db: DB, jobId: string) {
     ? (row.action as 'start' | 'stop' | 'restart' | 'backup')
     : null;
 }
+const publicFileTransferSchema = z
+  .object({
+    completedFiles: z.number().int().nonnegative(),
+    totalFiles: z.number().int().positive(),
+    completedBytes: z.number().int().nonnegative(),
+    totalBytes: z.number().int().nonnegative(),
+  })
+  .refine(
+    (value) => value.completedFiles <= value.totalFiles && value.completedBytes <= value.totalBytes,
+  );
+
 export async function getPlatformJob(db: DB, context: AuthContext, jobId: string) {
   parse(z.uuid(), jobId);
   const job = await activityQuery(db, context).where('job.id', '=', jobId).executeTakeFirst();
@@ -906,14 +917,17 @@ export async function getPlatformJob(db: DB, context: AuthContext, jobId: string
     }
   }
   let ownerRecovery: { available: boolean; availableAt: Date } | null = null;
-  const backupOperation = ['backup', 'restore'].includes(job.action ?? '')
+  const operation = job.serverId
     ? await db
         .selectFrom('server_operations')
         .select('plan')
         .where('job_id', '=', jobId)
         .executeTakeFirst()
     : undefined;
-  const backupPlan = backupOperation?.plan;
+  const backupPlan = ['backup', 'restore'].includes(job.action ?? '') ? operation?.plan : undefined;
+  // Only confirmed counters are public; staging identities, source paths and
+  // integrity digests stay in the protected operation plan.
+  const fileTransfer = publicFileTransferSchema.safeParse(operation?.plan.fileTransfer);
   if (owner(context) && job.serverId && ['queued', 'running'].includes(job.state)) {
     const recovery = await db
       .selectFrom('server_operations as operation')
@@ -940,6 +954,7 @@ export async function getPlatformJob(db: DB, context: AuthContext, jobId: string
   }
   return {
     ...job,
+    ...(fileTransfer.success ? { fileTransfer: fileTransfer.data } : {}),
     backupResult: backupPlan
       ? {
           state:
