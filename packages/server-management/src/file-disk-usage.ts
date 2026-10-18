@@ -65,6 +65,9 @@ export function trackFileDiskMutations(
   const methods: Partial<Record<keyof PterodactylAdapter, number>> = {
     writeFile: 0,
     deleteFiles: 0,
+    guardedDeleteDirectory: 0,
+    commitFileArchive: 0,
+    extractArchive: 0,
     createDirectory: 0,
     renameFiles: 0,
     uploadFile: 0,

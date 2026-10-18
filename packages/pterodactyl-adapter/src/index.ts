@@ -57,6 +57,13 @@ export type { ConsoleEvent, ConsoleRelay, ConsoleRelayOptions, ConsoleStats } fr
 export { type ContainerObserver, createContainerObserver } from './container-observer.js';
 export type { DirectoryBatchResult, DirectoryBatchSettings } from './directory-batch.js';
 export type { DownloadProxyOptions, ProxiedDownload } from './downloads.js';
+export type {
+  FileArchiveCommit,
+  FileArchiveReceipt,
+  FileOperationInspection,
+  FileOperationReceipt,
+  GuardedDirectoryDelete,
+} from './file-operations.js';
 export * from './network-observer.js';
 export { supportsStopConfirmation } from './power.js';
 export type { TransferOptions } from './transfer-guard.js';

@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { safeContentPath } from '@nickhosting/content-providers';
 import { DomainError } from '@nickhosting/core';
+import type { FilemanJobServices } from '@nickhosting/game-sdk';
+import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import { describe, expect, it, vi } from 'vitest';
 import {
   planMinecraftPlayerList,
@@ -131,6 +133,23 @@ const change = (before = 'motd=Old\n', after = 'motd=New\n') => ({
   beforeSha256: hash(before),
   afterSha256: hash(after),
 });
+
+function guardedRemovalFixture(configured = 'world') {
+  const f = fixture({ 'server.properties': `level-name=${configured}\n`, 'spare/a': 'bytes' });
+  const capabilities = vi.fn(async () => ({
+    inspection: true,
+    guardedDelete: true,
+    archiveCommit: true,
+  }));
+  Object.assign(f.adapter, { getFileOperationCapabilities: capabilities });
+  const removeDirectory = vi.fn<NonNullable<FilemanJobServices['removeDirectory']>>(
+    async (input) => {
+      input.validateGuard(f.files.get(input.guardFile) ?? '');
+    },
+  );
+  f.context.fileman = { removeDirectory, uploadStaged: vi.fn() };
+  return { ...f, capabilities, removeDirectory };
+}
 
 describe('Minecraft durable content safety', () => {
   it('keeps every permitted pack path inside the previewed content roots', () => {
@@ -587,6 +606,110 @@ describe('UUID-bound existing Minecraft player changes', () => {
     expect(f.adapter.downloadFile).not.toHaveBeenCalled();
     expect(f.assertStopped).not.toHaveBeenCalled();
     expect(f.files.has('spare/region/r.0.0.mca')).toBe(false);
+  });
+  it('delegates a supported removal to Fileman without legacy metadata or delete requests', async () => {
+    const f = guardedRemovalFixture();
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
+      true,
+    );
+    expect(f.removeDirectory).toHaveBeenCalledExactlyOnceWith({
+      target: 'spare',
+      guardFile: 'server.properties',
+      validateGuard: expect.any(Function),
+    });
+    expect(f.capabilities).toHaveBeenCalledExactlyOnceWith('fixture');
+    expect(f.adapter.listFiles).not.toHaveBeenCalled();
+    expect(f.adapter.readFileForEditor).not.toHaveBeenCalled();
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+    expect(f.assertStopped).not.toHaveBeenCalled();
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
+      true,
+    );
+    expect(f.removeDirectory).toHaveBeenCalledOnce();
+  });
+  it.each([
+    ['spare', 'validation_failed'],
+    ['SPARE', 'validation_failed'],
+    ['./spare/', 'validation_failed'],
+    ['spare/selected', 'validation_failed'],
+    ['../outside', 'conflict'],
+  ])(
+    'validates the inspected selection %s before accepting guarded removal',
+    async (configured, code) => {
+      const f = guardedRemovalFixture(configured);
+      await expect(
+        applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+      ).rejects.toMatchObject({ code });
+      expect(f.steps.size).toBe(0);
+      expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+    },
+  );
+  it('uses the legacy safety checks only when capability discovery proves the bridge unavailable', async () => {
+    const f = guardedRemovalFixture();
+    f.capabilities.mockRejectedValueOnce(
+      new PterodactylError('not_found', 'client', 'rejected', 404),
+    );
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
+      true,
+    );
+    expect(f.removeDirectory).not.toHaveBeenCalled();
+    expect(f.adapter.listFiles).toHaveBeenCalledOnce();
+    expect(f.adapter.readFileForEditor).toHaveBeenCalledOnce();
+    expect(f.adapter.deleteFiles).toHaveBeenCalledExactlyOnceWith('fixture', '', ['spare']);
+  });
+  it('propagates denied capability discovery without a legacy fallback', async () => {
+    const f = guardedRemovalFixture();
+    f.capabilities.mockRejectedValueOnce(
+      new PterodactylError('permission_denied', 'client', 'rejected', 403),
+    );
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toMatchObject({ upstreamStatus: 403 });
+    expect(f.removeDirectory).not.toHaveBeenCalled();
+    expect(f.adapter.listFiles).not.toHaveBeenCalled();
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+  });
+  it('keeps a pinned request on the bridge path even when that request returns 404', async () => {
+    const f = guardedRemovalFixture();
+    f.operation.plan = {
+      fileDirectoryRemoval: { request: { operationId: 'fixture' }, completed: false },
+    };
+    f.capabilities.mockRejectedValue(new PterodactylError('not_found', 'client', 'rejected', 404));
+    f.removeDirectory.mockRejectedValue(
+      new PterodactylError('not_found', 'client', 'rejected', 404),
+    );
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toMatchObject({ upstreamStatus: 404 });
+    expect(f.capabilities).not.toHaveBeenCalled();
+    expect(f.removeDirectory).toHaveBeenCalledOnce();
+    expect(f.adapter.listFiles).not.toHaveBeenCalled();
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+    expect(f.steps.size).toBe(0);
+  });
+  it('fails closed when recovery cannot execute its pinned Fileman request', async () => {
+    const f = guardedRemovalFixture();
+    f.operation.plan = {
+      fileDirectoryRemoval: { request: { operationId: 'fixture' }, completed: false },
+    };
+    f.context.fileman = undefined;
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toMatchObject({ code: 'operation_uncertain' });
+    expect(f.adapter.listFiles).not.toHaveBeenCalled();
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+  });
+  it('retains the backup and offline workflow even when the guarded bridge is available', async () => {
+    const f = guardedRemovalFixture();
+    f.context.backup = vi.fn(async () => false);
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: true })).toBe(
+      false,
+    );
+    expect(f.assertStopped).toHaveBeenCalledOnce();
+    expect(f.context.backup).toHaveBeenCalledOnce();
+    expect(f.removeDirectory).not.toHaveBeenCalled();
+    expect(f.capabilities).not.toHaveBeenCalled();
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
   });
   it('prepares the properties ticket during root discovery without reading a symlink', async () => {
     const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });

@@ -45,7 +45,8 @@ check(DB::table('nickhosting_backup_events')->count()===1 && DB::table('nickhost
 DB::rollBack();
 check(DB::table('nickhosting_backup_events')->count()===0 && DB::table('nickhosting_outbox')->count()===$beforeBackupCount,
     'S3/finalization rollback leaves no backup source or delivery');
-Illuminate\Support\Carbon::setTestNow(Illuminate\Support\Carbon::parse('2026-10-17T10:11:12.654321Z'));
+$backupEventTime = Illuminate\Support\Carbon::now('UTC')->addSeconds(2)->setMicrosecond(654321);
+Illuminate\Support\Carbon::setTestNow($backupEventTime);
 DB::beginTransaction();
 $activity = nativeBackupActivity('server:backup.complete', $nativeBackup, $backupServer);
 DB::commit();
@@ -56,7 +57,7 @@ check($source->processed_at !== null && $backupPayload['type']==='backup.complet
     && $backupPayload['backup']===['uuid'=>$backupUuid,'name'=>'Native backup','isSuccessful'=>true,
         'checksum'=>'sha256:abcd','bytes'=>4096,'completedAt'=>'2026-01-01T00:00:00+00:00'],
     'committed native completion resolves subjects and carries backup metadata');
-check($backupPayload['occurredAt']==='2026-10-17T10:11:12.654321Z', 'native event occurrence preserves microseconds across durable marker and payload');
+check($backupPayload['occurredAt']===$backupEventTime->toISOString(), 'native event occurrence preserves microseconds across durable marker and payload');
 check(!isset($backupPayload['revision']) && !isset($backupPayload['limits'])
     && DB::table('nickhosting_servers')->where('uuid',$backupServer->uuid)->value('revision')===$beforeRevision,
     'backup notifications independent of limit revision');

@@ -318,10 +318,13 @@ describe('Minecraft browser module and exact API contracts', () => {
     });
     await expect(controller.inspectModpack(sourceId)).rejects.toThrow('integration_unavailable');
   });
-  it('uploads the original Blob without buffering and re-reads source state before proceeding', async () => {
+  it('uses the acknowledged upload response without buffering the Blob or requesting source state again', async () => {
     const client = clientFixture();
     client.request.mockResolvedValue({ id: sourceId, state: 'ready' });
-    const upload = vi.fn<NonNullable<GameUiClient['upload']>>(async () => ({ id: sourceId }));
+    const upload = vi.fn<NonNullable<GameUiClient['upload']>>(async () => ({
+      id: sourceId,
+      state: 'ready',
+    }));
     const file = new Blob(['world bytes']);
     const controller = createMinecraftUiController({ ...client, upload });
     await controller.uploadSource({
@@ -349,10 +352,25 @@ describe('Minecraft browser module and exact API contracts', () => {
       file,
       expect.objectContaining({ bytes: 11 }),
     );
-    expect(client.request).toHaveBeenLastCalledWith(
-      `/v1/minecraft/sources/${sourceId}`,
-      expect.objectContaining({ method: 'GET' }),
-    );
+    expect(client.request).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    { id: sourceId, state: 'receiving' },
+    { id: serverId, state: 'ready' },
+  ])('rejects an unconfirmed or mismatched upload response: %s', async (result) => {
+    const client = clientFixture();
+    client.request.mockResolvedValue({ id: sourceId, state: 'reserved' });
+    const controller = createMinecraftUiController({ ...client, upload: async () => result });
+    await expect(
+      controller.uploadSource({
+        kind: 'world',
+        serverId,
+        idempotencyKey: 'source-one',
+        file: new Blob(['bytes']),
+        sha256: 'a'.repeat(64),
+      }),
+    ).rejects.toMatchObject({ code: 'conflict', reason: 'source_not_ready' });
+    expect(client.request).toHaveBeenCalledTimes(1);
   });
   it('carries cancellation and rejects path-injection IDs before touching the API', async () => {
     const client = clientFixture(),

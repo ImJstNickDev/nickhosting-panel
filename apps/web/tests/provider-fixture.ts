@@ -542,6 +542,23 @@ export async function installBrowserFixtures(
         type: 'console',
         data: `[Server thread/INFO]: ${command === 'list' ? 'There are 0 of a max of 20 players online' : `Command received: ${command}`}`,
       }),
+    // This isolated provider models the stock API. Blueprint-only composite
+    // operations are covered by their own native-framework/adapter tests.
+    getFileOperationCapabilities: async () => {
+      throw new PterodactylError('not_found', 'client', 'rejected', 404);
+    },
+    inspectFileOperation: async () => {
+      throw new PterodactylError('not_found', 'client', 'rejected', 404);
+    },
+    guardedDeleteDirectory: async () => {
+      throw new PterodactylError('not_found', 'client', 'rejected', 404);
+    },
+    commitFileArchive: async () => {
+      throw new PterodactylError('not_found', 'client', 'rejected', 404);
+    },
+    extractArchive: async () => {
+      throw new PterodactylError('not_found', 'client', 'rejected', 404);
+    },
     getDirectoryBatchSettings: async (id) => {
       remote(id);
       return { directoryBatchLimit: 48, directoryConcurrency: 2, directoryTimeoutSeconds: 8 };

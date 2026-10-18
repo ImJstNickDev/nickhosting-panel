@@ -185,6 +185,7 @@ export function createTransport(options: TransportOptions) {
     method = 'GET',
     body?: unknown,
     raw = false,
+    requestOptions?: { timeoutMs: number },
   ): Promise<Response> {
     const key = scope === 'application' ? options.applicationKey : options.clientKey;
     if (!key) throw new PterodactylError('credential_missing', scope, 'rejected');
@@ -209,7 +210,11 @@ export function createTransport(options: TransportOptions) {
       response = await fetcher(new URL(`api/${scope}/${path}`, base), {
         method,
         redirect: 'error',
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(
+          requestOptions
+            ? parseInput(z.number().int().min(1).max(120000), requestOptions.timeoutMs)
+            : timeoutMs,
+        ),
         headers: {
           Authorization: `Bearer ${key}`,
           Accept: 'application/vnd.pterodactyl.v1+json',
@@ -262,10 +267,11 @@ export function createTransport(options: TransportOptions) {
     method = 'GET',
     body?: unknown,
     coalesce = true,
+    requestOptions?: { timeoutMs: number },
   ): Promise<T> {
     async function readJson(): Promise<string> {
       // Request errors preserve rate-limit metadata and mutation uncertainty.
-      const response = await request(scope, path, method, body);
+      const response = await request(scope, path, method, body, false, requestOptions);
       try {
         return Buffer.from(await readBounded(response, 4 * 1024 * 1024)).toString('utf8');
       } catch {
@@ -309,8 +315,9 @@ export function createTransport(options: TransportOptions) {
     method: string,
     body?: unknown,
     raw = false,
+    requestOptions?: { timeoutMs: number },
   ): Promise<void> {
-    const response = await request(scope, path, method, body, raw);
+    const response = await request(scope, path, method, body, raw, requestOptions);
     await response.body?.cancel();
   }
   async function entity<T>(

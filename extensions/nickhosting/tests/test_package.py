@@ -61,9 +61,9 @@ class PackageTests(unittest.TestCase):
         with zipfile.ZipFile(self.output) as archive:
             for name in ('app/Services/TechnicalAccounts.php', 'app/Http/Middleware/TechnicalAccountAccess.php', 'private/migrations/2026_10_12_000003_nickhosting_technical_users.php'):
                 self.assertIn(name, archive.namelist())
-            self.assertIn(b'version: 1.5.0\n', archive.read('conf.yml'))
-            self.assertIn(b"'extensionVersion' => '1.5.0'", archive.read('app/Http/Controllers/CapabilitiesController.php'))
-            self.assertIn(b'<small>1.5.0</small>', archive.read('admin/view.blade.php'))
+            self.assertIn(b'version: 1.6.0\n', archive.read('conf.yml'))
+            self.assertIn(b"'extensionVersion' => '1.6.0'", archive.read('app/Http/Controllers/CapabilitiesController.php'))
+            self.assertIn(b'<small>1.6.0</small>', archive.read('admin/view.blade.php'))
 
     def test_client_upload_route_and_authorization_packaged(self):
         packager.build(self.source, self.output)
@@ -82,7 +82,7 @@ class PackageTests(unittest.TestCase):
             route = archive.read('routes/client.php').decode()
             self.assertIn('/servers/{server}/download-urls', route)
             self.assertIn('/servers/{server}/transfer-settings', route)
-            self.assertEqual(route.count('->middleware(AuthenticateServerAccess::class)'), 5)
+            self.assertEqual(route.count('->middleware(AuthenticateServerAccess::class)'), 9)
             for name in ('app/Http/Requests/ClientTransferSettings.php', 'app/Http/Requests/DownloadUrlsRequest.php',
                          'app/Http/Requests/TransferSettingsRequest.php', 'app/Http/Controllers/DownloadUrlsController.php',
                          'app/Http/Controllers/TransferSettingsController.php', 'app/Services/ManagedTransferAccess.php'):
@@ -97,6 +97,20 @@ class PackageTests(unittest.TestCase):
             self.assertIn(b"'backupEvents' => true", archive.read('app/Http/Controllers/CapabilitiesController.php'))
             self.assertIn(b'ActivityLogged::class', archive.read('app/Providers/BridgeServiceProvider.php'))
             self.assertNotIn('/backups', archive.read('routes/client.php').decode())
+
+    def test_scoped_file_operations_and_durable_receipts_packaged(self):
+        packager.build(self.source, self.output)
+        with zipfile.ZipFile(self.output) as archive:
+            for name in ('app/Services/FileOperationPaths.php', 'app/Services/FileOperationRepository.php',
+                         'app/Http/Requests/FileInspectionRequest.php', 'app/Http/Requests/GuardedDeleteRequest.php',
+                         'app/Http/Requests/ArchiveCommitRequest.php', 'app/Http/Controllers/FileOperationController.php',
+                         'app/Http/Controllers/ArchiveCommitController.php',
+                         'private/migrations/2026_10_18_000005_nickhosting_file_operations.php'):
+                self.assertIn(name, archive.namelist())
+            routes = archive.read('routes/client.php').decode()
+            for path in ('file-operation-capabilities', 'file-inspection', 'guarded-delete', 'archive-commit'):
+                self.assertIn('/servers/{server}/' + path, routes)
+            self.assertIn(b"'fileOperations' => true", archive.read('app/Http/Controllers/CapabilitiesController.php'))
 
     def test_does_not_overwrite(self):
         self.output.write_text("preserve")
@@ -117,7 +131,7 @@ class PackageTests(unittest.TestCase):
                          'Http/Controllers/DirectorySettingsController.php'):
                 self.assertIn('app/' + name, archive.namelist())
             self.assertIn(b"'bulkDirectoryListings' => true", archive.read('app/Http/Controllers/CapabilitiesController.php'))
-            self.assertEqual(sum(name.startswith('private/migrations/') for name in archive.namelist()), 4)
+            self.assertEqual(sum(name.startswith('private/migrations/') for name in archive.namelist()), 5)
 
     def test_rejects_source_symlink(self):
         config = self.source / "conf.yml"

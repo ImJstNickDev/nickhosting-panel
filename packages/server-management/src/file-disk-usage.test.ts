@@ -93,6 +93,9 @@ describe('file write disk invalidation', () => {
   it.each([
     'writeFile',
     'deleteFiles',
+    'guardedDeleteDirectory',
+    'commitFileArchive',
+    'extractArchive',
     'createDirectory',
     'renameFiles',
     'uploadFile',

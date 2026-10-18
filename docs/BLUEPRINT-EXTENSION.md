@@ -822,3 +822,43 @@ correction prevents this traversal. This is an observed failure, not an extensio
 payload issue. A successful installer exit or unchanged provider IDs does not prove
 that game filesystem permissions survived. Do not automatically repair unrelated
 servers or change the SFTP service identity as a workaround.
+
+
+### 1.6.0 — Generic Fileman archive commit and guarded directory removal
+
+The optional Client API endpoints are scoped through the existing managed server
+link, technical user and per-user key. Discovery advertises `fileOperations`; scoped discovery returns `inspection`,
+`guardedDelete` and `archiveCommit` only when implemented. Core caches
+capability availability briefly; this does not cache permission to mutate files.
+Each operation validates the exact provider identity in the extension.
+
+Inspection returns a bounded regular guard file and opaque directory metadata
+observation. Guarded deletion binds those observations to an operation UUID,
+checks them again and uses one native Wings bulk-delete call. A durable receipt
+prevents a repeated request from deleting a newly recreated path. These metadata
+checks are not an inode compare-and-swap against arbitrary out-of-band writers.
+
+Archive commit receives an already uploaded normalized ZIP in job-owned scratch,
+an exact destination, archive digest and bounded member manifest (10,000 files,
+4 MiB request maximum). It invokes native Wings extraction, verifies the resulting
+entry metadata, checks the destination, publishes it and removes its scratch.
+Core validates decoded sizes, CRC32 and SHA-256 while sending; the archive digest
+in the commit request binds its receipt, rather than requesting a remote rehash.
+A request-specific 90-second timeout covers extraction; ordinary API timeouts are
+unchanged. Unknown outcomes retain the journal and are never blindly replayed.
+The minimal commit requires ten Wings calls in seven dependency waves, contained
+in one Panel request. This reduces Panel round trips; it does not remove Wings I/O.
+Native rename has no atomic no-replace guarantee against unrelated writers.
+
+The reviewed package is `build/blueprint/1.6.0-reviewed/nickhosting.blueprint`,
+SHA-256 `96a84b8d0569486d66505d7a2541f6c7ffc0d61593c2cc90864d817d816648ee`.
+The [bounded extension-only updater](../extensions/nickhosting/UPDATE-INSTALLED.md)
+was dry-run against the identified installation and independently reviewed. It
+changes twelve extension-owned files and runs one additive receipt migration,
+without the native installer or recursive permission changes. The Owner subsequently approved this exact procedure and its scoped rollback.
+Activation changed exactly the twelve listed extension files and applied only
+the extension receipt-table migration. The updater verified its final result;
+no native installer, global cache clearing or restart ran. A private rollback
+manifest preserves original contents and ownership. The native-installer
+deployment blocker above remains in force. No live extraction is proven by
+activation itself.

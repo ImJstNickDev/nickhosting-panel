@@ -21,6 +21,7 @@ export const nickHostingExtensionSchema = z
         bulkDownloadUrls: z.boolean().optional(),
         bulkDirectoryListings: z.boolean().optional(),
         backupEvents: z.boolean().optional(),
+        fileOperations: z.boolean().optional(),
       })
       .strict(),
   })

@@ -21,3 +21,12 @@ Route::post('/servers/{server}/directory-list', DirectoryListController::class)
     ->middleware(AuthenticateServerAccess::class);
 Route::get('/servers/{server}/directory-settings', DirectorySettingsController::class)
     ->middleware(AuthenticateServerAccess::class);
+
+Route::get('/servers/{server}/file-operation-capabilities', [\Pterodactyl\BlueprintFramework\Extensions\{identifier}\Http\Controllers\FileOperationController::class, 'capabilities'])
+    ->middleware(AuthenticateServerAccess::class);
+Route::post('/servers/{server}/file-inspection', [\Pterodactyl\BlueprintFramework\Extensions\{identifier}\Http\Controllers\FileOperationController::class, 'inspect'])
+    ->middleware(AuthenticateServerAccess::class);
+Route::post('/servers/{server}/guarded-delete', [\Pterodactyl\BlueprintFramework\Extensions\{identifier}\Http\Controllers\FileOperationController::class, 'delete'])
+    ->middleware(AuthenticateServerAccess::class);
+Route::post('/servers/{server}/archive-commit', \Pterodactyl\BlueprintFramework\Extensions\{identifier}\Http\Controllers\ArchiveCommitController::class)
+    ->middleware(AuthenticateServerAccess::class);

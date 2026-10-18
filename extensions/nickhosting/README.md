@@ -1,6 +1,6 @@
 # NickHosting Blueprint bridge
 
-Version **1.5.0**, targeting Pterodactyl **1.11.11** and Blueprint
+Version **1.6.0**, targeting Pterodactyl **1.11.11** and Blueprint
 **beta-2025-09**. The monorepo is the source of truth; `.blueprint/dev` is optional
 Blueprint build staging. Do not use `-build` on production as a development loop.
 Actual deployment evidence is recorded in [the extension report](../../docs/BLUEPRINT-EXTENSION.md).
@@ -124,6 +124,69 @@ report. Rollback to the retained 1.3.0 artifact removes the new routes/capabilit
 data reset or change to existing uploads/downloads/account links. The new optional
 settings may remain stored and are ignored by 1.3.0. Installation or rollback on
 the real Panel still follows the Owner-approved Blueprint workflow.
+
+### Scoped file operations — Client API (1.6.0)
+
+Capability discovery adds `fileOperations:true`. Per-server
+`GET /api/client/extensions/nickhosting/servers/{server}/file-operation-capabilities`
+returns `{inspection:true,guardedDelete:true,archiveCommit:true}`. Older versions
+return 404; callers choose their existing stock-provider fallback before starting
+an operation, never after an uncertain effect.
+
+All routes retain native Client authentication and server-state middleware and
+require the exact linked nonadministrator owner credential. Inspection requires
+native `file.read-content`, deletion `file.delete`, archive commit `file.create`.
+Managed provider identity is checked inside the same request; no separate
+Application API identity round trip is required.
+
+`POST .../file-inspection` accepts `{target,guardFile}` and returns
+`{identity,target:{path,observation},guard:{path,sha256,contents}}`. Paths are
+canonical relative UTF-8. The target must be a non-symlink directory. One bounded
+native Wings parent listing and one bounded guard-file read run concurrently.
+The guard must be an exact regular, non-symlink file without case aliases. Its parent metadata reuses the target listing when possible. The guard is UTF-8 text, at most 1 MiB; directory responses are limited to 4 MiB /
+10,000 entries. Native Wings has no individual stat endpoint, so a parent listing
+is necessary. The endpoint does not inspect JARs, game versions or other files.
+
+`POST .../guarded-delete` accepts
+`{operationId,identity,target:{path,observation},guard:{path,sha256}}`. The guard
+must lie outside the removed subtree. The endpoint compares fresh target metadata
+and guard SHA-256, then sends exactly one native Wings deletion. It returns
+`{operationId,identity,target,state:"confirmed"|"uncertain"}`. Core interprets the
+guard content and owns active-world rules and local authorization.
+
+`POST .../archive-commit` accepts
+`{operationId,identity,destinationRoot,archiveSha256,files:[{path,size}]}`. Every
+manifest file is under the single-component `destinationRoot`; at most 10,000
+files / 4 MiB JSON. Core first streams its validated, CRC-checked, sanitized ZIP
+to `.nickhosting-import-<operationId>/payload.zip`. The SHA-256 binds the request
+and receipt, without downloading the archive again. This is a trusted backend
+contract, not an endpoint accepting arbitrary browser-provided ZIP manifests.
+
+In one Panel request the extension extracts through native Wings, verifies the
+exact extracted tree and file sizes with two concurrent bounded metadata reads,
+checks the final destination is absent, publishes via native rename, checks both
+source and destination, and deletes only that operation's scratch directory. Any
+missing/ignored/extra entry prevents publication. The response is
+`{operationId,identity,destinationRoot,archiveSha256,state:"confirmed"|"uncertain"}`.
+The adapter gives archive commit a bounded 90-second deadline while ordinary requests keep their existing timeout. The stock decompression/rename endpoints are unchanged. No SFTP permissions,
+Wings code, node configuration or filesystem mounts are changed.
+
+The additive `nickhosting_file_operations` table persists dispatch intent and
+confirmed receipts. Repeating an operation UUID with the same parameters returns
+its receipt without repeating filesystem mutations; changed parameters return
+409. A response lost after dispatch, partial native failure or process crash
+remains uncertain. Recovery must inspect and resolve it; neither method blindly
+replays. A pre-dispatch validation rejection is preserved as a rejection. No DB
+transaction stays open during node I/O. Receipts must not be pruned while Core
+can still retry the operation; rollback preserves this table.
+
+Native limitations remain explicit: directory observations are metadata hashes,
+not inode identities; guard checks and deletion are not filesystem compare-and-
+swap. Native rename is not promised atomic no-replace against external concurrent
+filesystem changes. Core serializes its own mutations. The scratch namespace is
+an operation convention, not an OS access-control boundary against the same
+server's privileged user. Actual extraction and recursive deletion require disk
+work; successful receipts represent confirmed effects, not optimistic UI removal.
 
 ### Administrator settings
 
@@ -337,7 +400,12 @@ uses Laravel fakes. It exercises transaction rollback, idempotency, encryption,
 authorization, identity invalidation, delivery retry and configuration transforms.
 It is not a MySQL lock-concurrency or real HTTP middleware test. Packaging uses
 an explicit file allowlist, excludes secrets/tests/docs, rejects symlinks and
-existing output, and defaults to ignored `build/blueprint/1.5.0/nickhosting.blueprint`.
+existing output, and defaults to ignored `build/blueprint/1.6.0/nickhosting.blueprint`.
+
+For the already installed 1.5.0 extension, the reviewed deployment needs the
+[extension-only update procedure](UPDATE-INSTALLED.md). Its default is a read-only
+plan; explicit approval is required to apply it. Do not use the native installer
+on this deployment: its ownership housekeeping can traverse mounted game data.
 
 Version 1.2.0 introduced bulk upload URLs. Version 1.3.0 adds bulk path-scoped
 download URLs, transfer settings discovery and configurable operational bounds;

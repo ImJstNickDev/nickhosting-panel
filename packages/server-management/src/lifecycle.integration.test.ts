@@ -8,6 +8,7 @@ import {
   type Backup,
   type BackupActivity,
   type BuildUpdate,
+  type GuardedDirectoryDelete,
   type PterodactylAdapter,
   PterodactylError,
   type Resources,
@@ -16,12 +17,14 @@ import type { Kysely } from 'kysely';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { BackendAllocationPool } from './allocation-pool.js';
+import { removeFilemanDirectory } from './fileman-directory.js';
 import {
   type LifecycleOptions,
   processServerOperation,
   reconcileManagedServer,
   resolveUncertainOperation,
 } from './lifecycle.js';
+import { applyMinecraftWorldRemoval } from './minecraft-content.js';
 import { enqueueServerOperation } from './registry.js';
 import { pendingUploadFixture } from './test-fixtures.js';
 
@@ -3911,6 +3914,7 @@ describe('additive Minecraft world imports', () => {
   });
   it('runs the content effect while online without releasing compute or changing power', async () => {
     const f = await fixture('minecraft-content', plan());
+    f.options.supportsManagedFileOperations = vi.fn(async () => true);
     f.setState('running');
     await f.db
       .updateTable('managed_servers')
@@ -3940,6 +3944,7 @@ describe('additive Minecraft world imports', () => {
     ).toEqual({ state: 'running' });
     expect(f.adapter.power).not.toHaveBeenCalled();
     expect(f.adapter.getApplicationServer).toHaveBeenCalledOnce();
+    expect(f.options.supportsManagedFileOperations).not.toHaveBeenCalled();
   });
   it('refreshes the delivery identity when world preparation takes a minute', async () => {
     const f = await fixture('minecraft-content', plan());
@@ -4071,6 +4076,243 @@ describe('inactive Minecraft world removal', () => {
       backupBefore,
     },
   });
+  function guardedBridge(f: Awaited<ReturnType<typeof fixture>>) {
+    const identity = {
+      providerId: f.remote.id,
+      providerUuid: f.remote.uuid,
+      identifier: f.remote.identifier,
+      externalId: f.remote.external_id as string,
+      nodeId: f.remote.node,
+    };
+    const snapshot = {
+      identity,
+      target: { path: 'unused_world', observation: 'a'.repeat(64) },
+      guard: { path: 'server.properties', sha256: 'b'.repeat(64), contents: 'level-name=world\n' },
+    };
+    const adapter = Object.assign(f.adapter, {
+      getFileOperationCapabilities: vi.fn(async () => ({
+        inspection: true,
+        guardedDelete: true,
+        archiveCommit: true,
+      })),
+      inspectFileOperation: vi.fn(async () => structuredClone(snapshot)),
+      guardedDeleteDirectory: vi.fn(
+        async (_identifier: string, request: GuardedDirectoryDelete) => ({
+          operationId: request.operationId,
+          state: 'confirmed' as const,
+          identity: request.identity,
+          target: request.target,
+        }),
+      ),
+    });
+    f.options.supportsManagedFileOperations = vi.fn(async () => true);
+    f.options.fileman = (context) => ({
+      removeDirectory: (input) => removeFilemanDirectory(context, input),
+      uploadStaged: vi.fn(),
+    });
+    f.options.processGameContent = (context) =>
+      applyMinecraftWorldRemoval(context, 'unused_world', { backupBefore: false });
+    return { snapshot, adapter };
+  }
+
+  it.each(['running', 'offline'] as const)(
+    'confirms guarded removal while %s without an Application identity request',
+    async (state) => {
+      const f = await fixture('minecraft-content', plan());
+      const bridge = guardedBridge(f);
+      f.setState(state);
+      await f.db
+        .updateTable('managed_servers')
+        .set({ runtime_state: state })
+        .where('id', '=', f.serverId)
+        .execute();
+      expect(await f.run()).toBe('succeeded');
+      expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+      expect(f.adapter.getResources).not.toHaveBeenCalled();
+      expect(f.adapter.listFiles).not.toHaveBeenCalled();
+      expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(bridge.adapter.inspectFileOperation).toHaveBeenCalledExactlyOnceWith(
+        f.remote.identifier,
+        {
+          target: 'unused_world',
+          guardFile: 'server.properties',
+        },
+      );
+      expect(bridge.adapter.guardedDeleteDirectory).toHaveBeenCalledOnce();
+      expect((await f.operation()).effect_state).toBe('confirmed');
+      expect((await f.server()).runtime_state).toBe(state);
+    },
+  );
+
+  it('keeps Application identity verification when the guarded capability is unavailable', async () => {
+    const f = await fixture('minecraft-content', plan());
+    f.options.supportsManagedFileOperations = vi.fn(async () => false);
+    f.options.processGameContent = async (context) => {
+      await context.effect('minecraft.remove.fixture', () =>
+        context.adapter.deleteFiles(f.remote.identifier, '', ['unused_world']),
+      );
+      return true;
+    };
+    expect(await f.run()).toBe('succeeded');
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledOnce();
+    expect(f.adapter.deleteFiles).toHaveBeenCalledOnce();
+  });
+
+  function legacyBridgeFallback(
+    f: Awaited<ReturnType<typeof fixture>>,
+    fallback: 'missing Fileman' | 'expired capability',
+  ) {
+    const bridge = guardedBridge(f);
+    if (fallback === 'missing Fileman') f.options.fileman = undefined;
+    else
+      bridge.adapter.getFileOperationCapabilities.mockRejectedValue(
+        new PterodactylError('not_found', 'client', 'rejected', 404),
+      );
+    f.adapter.listFiles.mockImplementation(async () =>
+      ['server.properties', 'unused_world'].map((name) => ({
+        name,
+        mode: name === 'server.properties' ? '-rw' : 'drw',
+        size: 17,
+        is_file: name === 'server.properties',
+        is_symlink: false,
+        mimetype: 'text/plain',
+        created_at: f.now().toISOString(),
+        modified_at: f.now().toISOString(),
+      })),
+    );
+    Object.assign(f.adapter, {
+      readFileForEditor: vi.fn(async () => Buffer.from('level-name=world\n')),
+      prefetchDownloads: vi.fn(async () => {}),
+    });
+    return bridge;
+  }
+
+  it.each(['missing Fileman', 'expired capability'] as const)(
+    'verifies Application identity before a legacy effect after %s',
+    async (fallback) => {
+      const f = await fixture('minecraft-content', plan());
+      const bridge = legacyBridgeFallback(f, fallback);
+      expect(await f.run()).toBe('succeeded');
+      expect(f.options.supportsManagedFileOperations).toHaveBeenCalledOnce();
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledOnce();
+      expect(f.adapter.deleteFiles).toHaveBeenCalledExactlyOnceWith(f.remote.identifier, '', [
+        'unused_world',
+      ]);
+      expect(bridge.adapter.inspectFileOperation).not.toHaveBeenCalled();
+      expect(bridge.adapter.guardedDeleteDirectory).not.toHaveBeenCalled();
+      expect((await f.operation()).effect_state).toBe('confirmed');
+    },
+  );
+
+  it.each(['missing Fileman', 'expired capability'] as const)(
+    'rejects a foreign provider before a legacy effect after %s',
+    async (fallback) => {
+      const f = await fixture('minecraft-content', plan());
+      const bridge = legacyBridgeFallback(f, fallback);
+      f.remote.uuid = randomUUID();
+      expect(await f.run()).toBe('failed');
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledOnce();
+      expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+      expect(bridge.adapter.guardedDeleteDirectory).not.toHaveBeenCalled();
+      expect((await f.operation()).effect_state).toBe('none');
+    },
+  );
+
+  it('refreshes legacy fallback identity after durable preparation when its proof expires', async () => {
+    const f = await fixture('minecraft-content', plan());
+    const bridge = legacyBridgeFallback(f, 'missing Fileman');
+    f.options.checkpoint = async (phase) => {
+      if (phase !== 'prepared') return;
+      f.tick(60_000);
+      f.remote.uuid = randomUUID();
+    };
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+    expect(bridge.adapter.guardedDeleteDirectory).not.toHaveBeenCalled();
+    expect((await f.operation()).effect_state).toBe('none');
+  });
+
+  it.each(['uuid', 'identifier', 'externalId', 'providerUser', 'mapping', 'revocation'] as const)(
+    'blocks guarded dispatch when local %s changes after durable preparation',
+    async (change) => {
+      const f = await fixture('minecraft-content', plan());
+      const bridge = guardedBridge(f);
+      let revoked = false;
+      f.options.authorizeIntent = async () => {
+        if (revoked) throw new DomainError('forbidden');
+      };
+      f.options.checkpoint = async (phase) => {
+        if (phase !== 'prepared') return;
+        if (change === 'revocation') {
+          revoked = true;
+          return;
+        }
+        if (change === 'mapping') {
+          const previous = await f.db
+            .selectFrom('runtime_egg_mappings')
+            .selectAll()
+            .where('id', '=', (await f.server()).mapping_id)
+            .executeTakeFirstOrThrow();
+          const replacement = randomUUID();
+          await f.db
+            .insertInto('runtime_egg_mappings')
+            .values({
+              ...previous,
+              id: replacement,
+              runtime_id: 'guarded-replacement',
+              environment: JSON.stringify(previous.environment),
+              port_roles: JSON.stringify(previous.port_roles),
+              feature_limits: JSON.stringify(previous.feature_limits),
+            })
+            .execute();
+          await f.db
+            .updateTable('managed_servers')
+            .set({ mapping_id: replacement })
+            .where('id', '=', f.serverId)
+            .execute();
+          return;
+        }
+        const patch =
+          change === 'uuid'
+            ? { pterodactyl_uuid: randomUUID() }
+            : change === 'identifier'
+              ? { pterodactyl_identifier: 'changed' }
+              : change === 'externalId'
+                ? { external_id: `nh:${randomUUID()}` }
+                : { provider_user_id: 999999 };
+        await f.db.updateTable('managed_servers').set(patch).where('id', '=', f.serverId).execute();
+      };
+      expect(await f.run()).toBe('failed');
+      expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+      expect(bridge.adapter.inspectFileOperation).toHaveBeenCalledOnce();
+      expect(bridge.adapter.guardedDeleteDirectory).not.toHaveBeenCalled();
+      expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+      expect((await f.operation()).effect_state).toBe('none');
+    },
+  );
+
+  it('rejects a foreign inspection before a guarded effect without an Application lookup', async () => {
+    const f = await fixture('minecraft-content', plan());
+    const bridge = guardedBridge(f);
+    bridge.snapshot.identity.providerUuid = randomUUID();
+    expect(await f.run()).toBe('failed');
+    expect(bridge.adapter.guardedDeleteDirectory).not.toHaveBeenCalled();
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+    expect((await f.operation()).effect_state).toBe('none');
+  });
+
+  it('rejects an inspected active world before a guarded effect', async () => {
+    const f = await fixture('minecraft-content', plan());
+    const bridge = guardedBridge(f);
+    bridge.snapshot.guard.contents = 'level-name=unused_world\n';
+    expect(await f.run()).toBe('failed');
+    expect(bridge.adapter.guardedDeleteDirectory).not.toHaveBeenCalled();
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+    expect((await f.operation()).effect_state).toBe('none');
+  });
+
   it.each(['running', 'offline'] as const)(
     'deletes in one delivery while %s without telemetry, offline settling or duplicate identity reads',
     async (state) => {
@@ -4114,11 +4356,13 @@ describe('inactive Minecraft world removal', () => {
   );
   it('keeps requested backup and replacement workflows behind offline confirmation', async () => {
     const f = await fixture('minecraft-content', plan(true));
+    f.options.supportsManagedFileOperations = vi.fn(async () => true);
     f.setState('running');
     f.options.processGameContent = vi.fn(async () => true);
     expect(await f.run()).toBe('waiting');
     expect(f.options.processGameContent).not.toHaveBeenCalled();
     expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+    expect(f.options.supportsManagedFileOperations).not.toHaveBeenCalled();
   });
   it('rejects a foreign provider identity before reading or removing a world', async () => {
     const f = await fixture('minecraft-content', plan());

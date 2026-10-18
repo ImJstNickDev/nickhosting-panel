@@ -12590,3 +12590,100 @@ The requested five-second total remains a real-provider measurement target, not
 an established result or a general bound for arbitrary world sizes. The Owner's
 next import/delete will verify total latency using the existing logs/receipts;
 no extra timetrace logging was added.
+
+
+## 2026-10-18 — World import/delete transport redesign
+
+The Owner requested a complete transport pass: import overhead should approach
+actual byte transfer, with a three-second target and inactive-world deletion
+below 300 ms. These are measurement targets, **not established guarantees**. The
+last real-provider baseline remained 8.808 s import and 1.311 s deletion, excluding
+browser upload and API source preparation. No earlier failed attempt is superseded
+by the isolated evidence below.
+
+Additive imports now prepare a normalized ZIP without an expanded local staging
+tree. Compressed member bytes are forwarded while decoded CRC, size and SHA-256
+validation runs in parallel with transfer; the ZIP ending is withheld until it
+passes. One Fileman upload/claim replaces per-member HTTP/SQL receipts. Blueprint
+commits the archive through native Wings extraction, bounded metadata inspection,
+publish and cleanup; a durable exact-request receipt handles response loss.
+The old staged path remains for replacement/backup, active destinations,
+unsupported bridges and manifests outside the bounded ZIP32/batch envelope.
+A pinned new operation cannot downgrade or silently repeat extraction.
+
+Ingestion seals the private source after hashing once. Resolving an intact sealed
+source avoids rereading its whole archive; legacy sources validate/hash once and
+upgrade. The seal is not a defense against a privileged writer or arbitrary disk
+corruption. The real transferred contents are still independently validated.
+Inactive-world deletion uses the generic Fileman guard/receipt path; exact managed
+identity is verified in Blueprint instead of a separate Application read. Legacy
+effects retain their ordinary identity check. Active worlds and their enclosing
+paths cannot be removed online. Permissions, resource claims and recovery remain
+server-side, never inferred from the UI.
+
+Terminal job events wake the existing authorized SSE stream through one shared
+PostgreSQL listener per API pool. The browser rereads durable results immediately;
+ordinary polling remains recovery. Successful UI completion never follows merely
+from queue acceptance. The visual layout is unchanged.
+
+A read-only benchmark streamed the existing approximately 81 MB uploaded world into
+a discard sink inside the 2 CPU development worker. It did not write a game file:
+
+| Run | Metadata/plan | Validated stream | Total | CPU | RSS peak |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 136.42ms | 2,587.12ms | 2,723.55ms | 3,325.07ms | 115.04MiB |
+| 2 | 102.78ms | 1,652.71ms | 1,755.49ms | 2,536.33ms | 118.25MiB |
+
+Both runs selected 101 files / 116,278,134 expanded bytes and emitted 81,251,092 ZIP
+bytes from an 81,259,766-byte source. In production execution validation overlaps
+upload. These local measurements exclude network upload, native Wings extraction,
+provider journal and final publication; they cannot establish the requested total.
+Synthetic archive/dependency probes and their limits are documented in
+[the experiment record](../scripts/experiments/world-transfer/README.md).
+
+Focused validation, with no repeated full historical matrix:
+
+- `scripts/dev.sh pnpm typecheck`: root, WebPanel and browser test TypeScript passed.
+- `scripts/dev.sh pnpm exec vitest run packages/server-management/src/scoped-provider-adapter.test.ts packages/server-management/src/minecraft-content.test.ts packages/server-management/src/minecraft-content-world.test.ts`: **95 passed**.
+- `scripts/dev.sh pnpm exec vitest run packages/server-management/src/file-disk-usage.test.ts`: **16 passed**, including all three new disk mutations and in-flight observation invalidation.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-sources.integration.test.ts packages/server-management/src/fileman-transfers.integration.test.ts apps/api/src/server-events-stream.integration.test.ts`: **43 passed** with isolated PostgreSQL/Redis.
+- The same integration command for `packages/server-management/src/minecraft-content.integration.test.ts -t 'imports a .* world online'`: **11 passed, 45 excluded**. It covers compatible, different/legacy versions, collision preservation, staged fallback and lost-commit-response recovery through actual Minecraft handlers with a fixture provider.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-worlds.browser.test.ts`: **15 passed** in the actual browser/handler fixture; external provider effects are simulated.
+- Independent bounded agents exercised 31 archive encoder tests, 16 archive-helper DB cases, 33 guarded-delete DB cases, 40 completion/upload unit cases and 3 SSE integration cases. Counts overlap the combined commands above and must not be summed as unique tests.
+- Adapter/PHP/update/package results are recorded with the 1.6 contract and update procedure. PHP execution used isolated harnesses; a live updater dry run and installed-code equality checks were read-only.
+
+Intermediate failures retained: an initial TypeScript failure exposed two widened
+closure/fixture types and was corrected; the first import run passed 10 and failed 1
+because recovery treated the already published directory as a fresh collision.
+The fix binds recovery to its original receipt and reruns passed 11. One test's
+raw-provider-error expectation was corrected to the intended uncertain domain
+error. Biome caught an import-order issue, subsequently fixed. Independent review
+required atomic receipt/claim settlement, cancellation that joins both sender and
+authorization callbacks before returning its database connection, exact guard-file
+metadata, a longer extraction-only timeout, and new disk-cache invalidations.
+Those findings were fixed and exercised rather than described as successful
+initial attempts. A final review also scoped the lifecycle identity bypass to the
+new guarded-delete phase so a fallback retains existing protection. Five new
+regressions reproduced that omission before the fix; all 31 focused lifecycle
+cases passed afterward. Final independent review found no remaining must-fix.
+
+Development preparation applied only additive migration 042 after a verified
+private database backup. API/worker/web/Vite are healthy and HTTPS 200 / anonymous
+API 401 checks pass. The worker remains 2 CPU; network/port topology is unchanged.
+The Owner approved the exact Blueprint 1.6 package/update and scoped rollback.
+Its twelve-file extension-only update and additive receipt migration completed;
+private original-file/ownership backup is retained. The unsafe native installer
+was not run, and Panel/Wings were not restarted. No game world was created,
+modified or deleted by this pass, and no real-provider latency claim is made.
+The next Owner import/delete is the required end-to-end measurement. SFTPGo #18,
+production release boundaries and the native installer ownership incident remain
+open independently of these tests.
+
+Post-activation read-only smoke: authenticated discovery reports version 1.6.0
+and `fileOperations:true`; scoped capabilities report inspection, guarded delete
+and archive commit. A real inspection of an existing directory and
+`server.properties` matched the exact managed provider identity. Its first request
+took 356 ms; this is inspection latency only, not a deletion benchmark, and is
+additional evidence against claiming an already proven 300 ms end-to-end bound.
+No game mutation or new test world was performed. Existing development services
+remain healthy. The next Owner test can use the activated path immediately.

@@ -68,6 +68,7 @@ import {
   validateFileMoves,
 } from './file-operations.js';
 import { registerUploadBatchRoutes } from './file-upload-batches.js';
+import { createServerEventStream } from './server-events-stream.js';
 import { boundedEventWriter } from './stream-buffer.js';
 
 type C = Context<{ Variables: Variables }>;
@@ -96,6 +97,7 @@ export function registerServerRoutes(
   const { db, env, principal, management } = options;
   const commandRelays = createConsoleCommandRelays();
   const backupEvents = options.pool ? createBackupEventStream(options.pool) : undefined;
+  const serverEvents = options.pool ? createServerEventStream(options.pool) : undefined;
   registerFileBrowsingRoutes(app, options);
   registerFileOperationRoutes(app, options);
   const runBatchUpload = registerUploadBatchRoutes(app, options);
@@ -362,28 +364,86 @@ export function registerServerRoutes(
   });
   app.get('/v1/servers/:id/events/stream', async (c) => {
     const server = await authorizeServer(db, await principal(c), c.req.param('id'));
-    let after = parse(z.string().regex(/^\d{1,18}$/), c.req.query('after') ?? '0');
+    // EventSource resumes from the last emitted ID, even when its original URL
+    // selected latest. Never discard events by resetting latest on reconnect.
+    const requested = parse(
+      z.union([z.literal('latest'), z.string().regex(/^\d{1,18}$/)]),
+      c.req.header('Last-Event-ID') ?? c.req.query('after') ?? '0',
+    );
     return streamSSE(c, async (stream) => {
-      const end = Date.now() + 900000;
-      while (!stream.aborted && Date.now() < end) {
-        try {
+      let after = requested === 'latest' ? '0' : requested;
+      let dirty = false;
+      let lost = false;
+      let wake: (() => void) | undefined;
+      const changed = () => {
+        dirty = true;
+        wake?.();
+      };
+      stream.onAbort(() => wake?.());
+      let release: (() => void) | undefined;
+      try {
+        // Subscribe before sampling a cursor/reading. An overlapping commit
+        // either appears in that read or wakes the next one.
+        if (serverEvents)
+          release = await serverEvents.subscribe(server.id, changed, () => {
+            lost = true;
+            wake?.();
+          });
+        if (requested === 'latest') {
+          const last = await db
+            .selectFrom('server_events')
+            .select('id')
+            .where('server_id', '=', server.id)
+            .orderBy('id', 'desc')
+            .limit(1)
+            .executeTakeFirst();
+          after = last?.id ?? '0';
+        }
+        await authorizeServer(db, await principal(c), server.id);
+        // Read current job state after ready: it may have completed before this
+        // initial latest cursor was sampled. The event is only a read hint.
+        await stream.writeSSE({
+          id: after,
+          event: 'ready',
+          data: JSON.stringify({ serverId: server.id }),
+        });
+        const end = Date.now() + 900000;
+        while (!stream.aborted && !lost && Date.now() < end) {
+          dirty = false;
           await authorizeServer(db, await principal(c), server.id);
-        } catch {
-          return;
+          const events = await db
+            .selectFrom('server_events')
+            .selectAll()
+            .where('server_id', '=', server.id)
+            .where('id', '>', after)
+            .orderBy('id')
+            .limit(100)
+            .execute();
+          for (const event of events) {
+            // Authority is not carried over a slow client write or a batch.
+            await authorizeServer(db, await principal(c), server.id);
+            if (stream.aborted || lost) return;
+            await stream.writeSSE({ id: event.id, event: 'activity', data: JSON.stringify(event) });
+            after = event.id;
+          }
+          if (events.length === 100) continue;
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(done, 2000);
+            function done() {
+              clearTimeout(timer);
+              wake = undefined;
+              resolve();
+            }
+            wake = done;
+            if (dirty || lost || stream.aborted) done();
+          });
         }
-        const events = await db
-          .selectFrom('server_events')
-          .selectAll()
-          .where('server_id', '=', server.id)
-          .where('id', '>', after)
-          .orderBy('id')
-          .limit(100)
-          .execute();
-        for (const event of events) {
-          await stream.writeSSE({ id: event.id, event: 'activity', data: JSON.stringify(event) });
-          after = event.id;
-        }
-        await stream.sleep(2000);
+      } catch {
+        // A revoked session or disconnected listener ends this delivery. The
+        // client retains its cursor and ordinary authorized job polling.
+        return;
+      } finally {
+        release?.();
       }
     });
   });

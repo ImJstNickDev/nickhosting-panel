@@ -517,37 +517,38 @@ than downloading the runtime JAR again. Lifecycle authorization and provider
 identity corroboration remain in force. Unconfirmed installation, explicit audit,
 restore and runtime-changing content paths retain artifact verification.
 Worlds overlaps properties/root reads, batches candidate directories and prepares
-download URLs only for actual `level.dat` files. World imports hand the validated
-stage to `uploadStaged`; they retain archive/NBT/path rules and the existing
-online-additive versus stopped-replacement distinction.
+download URLs only for actual `level.dat` files. Additive world imports use `uploadArchive` when Blueprint declares the capability.
+The integration reads only `level.dat` and selects canonical members; Fileman
+streams one sanitized ZIP to Wings without recompression or expanded local staging.
+CRC, decoded sizes and per-file hashes are checked while bytes flow, before the
+terminal ZIP record. One Blueprint request extracts into an operation-specific
+scratch directory, verifies expected metadata, publishes the destination and removes
+scratch. Stock Wings extraction alone is not an integrity proof (see the pinned
+[experiment](../scripts/experiments/world-transfer/README.md)).
 
-World import preparation shares the validated ZIP inventory with staging
-reservation instead of scanning it again to count expanded bytes. Source-store
-authorization is coalesced over 500 ms (including stalled-transfer revocation)
-and checked freshly at completion, never once per stream chunk. Local source
-hashing uses bounded 1 MiB reads; network upload buffering is unchanged. Each resolution
-still verifies the source hash. Within one worker delivery, staging reuses that
-verification using an ephemeral proof bound to the exact path, digest and file
-identity. It rechecks inode/size/nanosecond modification metadata before and after
-extraction, without hashing the ZIP twice. Proofs are never persisted in job plans
-or accepted from browser input; callers without one still hash the source.
-World DEFLATE streams use bounded 256 KiB output blocks instead of the ZIP
-library's 16 KiB default, with exact expanded-size checks, CRC and per-file hashes.
-Extraction remains sequential and abortable. Private directory validation is
-reused within the job; disk
-headroom is checked at bounded file/byte/time boundaries. A confirmed world-only
-transfer does not reread the unrelated root EULA. Additive inactive imports need
-no process/host observation, including during a power transition; current local
-authority, provider identity, staging/storage
-admission and normalized active-world protection remain enforced.
-Their provider identity proof is reused only within the same locked delivery for
-less than 60 seconds, then refreshed if necessary. Current local ownership,
-mapping, UUID/node/allocations and authorization are checked before dispatch.
-Root metadata and read-ticket preparation overlap source hashing; properties
-bytes overlap local extraction, with all work settled before external effects.
-For additive imports, Fileman's final destination check replaces the integration's
-redundant post-staging listing. Replacement/backup paths retain their independent
-fresh checks before deletion and after mutation.
+One admission claim covers compressed and expanded space plus Wings multipart
+storage. The exact provider commit request and immutable manifest are journaled;
+recovery asks for the same receipt without uploading again. Receipt persistence
+and claim settlement are atomic. Once selected, this transport cannot silently
+fall back during recovery. Replacement/backup, active-world imports, unsupported
+Blueprint installations and ZIP32/10,000-member/manifest-size overflow retain
+`uploadStaged` and their existing offline/compatibility guards. A missing response
+never means success. Native Wings rename is not an atomic no-replace guarantee
+against concurrent out-of-band filesystem writers.
+
+Source uploads hash bytes during ingestion, close the writer, restrict the private
+file and seal its source identity, digest and nanosecond filesystem metadata in
+PostgreSQL. Resolution checks the sealed file rather than rereading the whole ZIP.
+Legacy unsealed ready sources are hashed once before upgrade. Invalid existing seals
+fail closed. The ephemeral proof is never accepted from browser input. These seals
+assume service-owned private storage, not immunity to a malicious host/root process.
+The transfer still validates actual archive members. The source PUT response is
+reused directly by the browser instead of followed by a redundant GET.
+
+Additive inactive imports need no process/host observation, including during a
+power transition. Local authority, provider identity, storage admission and
+normalized active-world protection remain enforced. The existing legacy transfer
+retains its own staging budget, hashing, collision and recovery contracts.
 
 The Worlds UI shows confirmed transfer counts and follows the current server job
 after remount. Completion refreshes the inventory; accepted/uncertain/failed jobs
@@ -559,21 +560,26 @@ shows progress; a reload during archive staging precedes the persisted counters.
 Deletion is a single recursive provider file operation under the existing durable
 job/server lock. It does not change installation state, reserve compute, read the
 runtime JAR, verify EULA, parse `level.dat`, or wait for an offline settling timer.
-Preparation records intent without listing the root. Dispatch reads one root
-snapshot and the current `server.properties` through Fileman; it rejects aliases,
-symlinks and the configured world, its enclosing folder and sibling dimension
-folders. Private read-ticket preparation overlaps the root request, but file bytes
-are read only after metadata validation. A single provider identity proof is shared
-within that locked delivery for less than 60 seconds; current local identity and
-permissions are checked again immediately before dispatch.
+Preparation records intent without listing the root. With Blueprint 1.6,
+`FilemanJobServices.removeDirectory` obtains one compact inspection containing
+managed identity, target metadata and a bounded regular configuration file. The
+integration rejects the configured world, its enclosing folder and sibling
+dimension folders. The guarded delete endpoint checks the same configuration hash
+and target observation, corroborates managed ownership, and issues one recursive
+Wings delete. Its durable provider receipt prevents retries from deleting a
+recreated folder. The observation is metadata, not an inode-based atomic CAS.
 
-The provider's successful delete response is the completion receipt. A missing
-acknowledgement permits one absence check on recovery, never a blind repeated
-delete. A confirmed receipt does not delete a folder recreated afterward. Existing
-pending content fences from older jobs retain their recovery path.
+For this exact guarded path the lifecycle delegates remote identity verification
+to the provider mutation boundary, retaining current local authorization and
+identity checks. Legacy operations retain Application API corroboration and the
+existing missing-target recovery check. A pinned bridge operation never falls
+back to stock deletion when the extension becomes unavailable. Optional backup
+retains its offline prerequisite; old pending-content fences remain intact.
 
 The Worlds view removes the row after confirmed job success, without waiting for
 full inventory/server refresh; older in-flight inventory responses are cancelled.
-Only this short interactive operation polls its local job at 250 ms for the first
-five seconds, then uses the normal interval. No provider polling is added. Backup
-is opt-in in the delete dialog and retains its offline prerequisite.
+Terminal lifecycle transactions notify the existing authorized server-event SSE
+stream through one shared PostgreSQL listener per API pool. Notifications are
+hints: the browser rereads the durable job, then updates confirmed inventory.
+Resumable cursors and an initial ready notification close reconnect races. Local
+job polling remains a fallback; no provider polling is added.

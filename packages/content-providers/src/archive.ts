@@ -10,6 +10,8 @@ export interface ArchiveFile {
   size: number;
   entry: Entry;
   open: (options?: { inflateChunkSize?: number }) => Promise<Readable>;
+  /** Exact compressed member bytes. The caller must independently validate decoded size/CRC. */
+  openRaw: () => Promise<Readable>;
 }
 async function openArchiveEntry(
   zip: ZipFile,
@@ -112,6 +114,17 @@ export async function visitArchive(
             size: entry.uncompressedSize,
             entry,
             open: (options) => openArchiveEntry(zip, entry, options),
+            openRaw: () =>
+              new Promise<Readable>((resolve, reject) =>
+                zip.openReadStream(
+                  entry,
+                  entry.compressionMethod === 8 ? { decompress: false } : {},
+                  (error, stream) =>
+                    error || !stream
+                      ? reject(error ?? new Error('archive_stream'))
+                      : resolve(stream),
+                ),
+              ),
           });
         })().then(() => zip.readEntry(), reject);
       });

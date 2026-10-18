@@ -60,6 +60,7 @@ import {
   readProviderBackupCompletion,
 } from './provider-backup-events.js';
 import { cachedProviderStartLimits } from './provider-change-feed.js';
+import { supportsProviderFileOperations } from './provider-file-operations.js';
 import { assertGatewaySleepFence, authorizeServer } from './registry.js';
 import { authorizeScheduledEffect } from './schedules.js';
 import { createScopedProviderAdapter } from './scoped-provider-adapter.js';
@@ -602,6 +603,17 @@ export async function createManagementRuntime(options: ManagementOptions) {
     );
   }
   const lifecycle = {
+    supportsManagedFileOperations: async (serverId: string, connection: Kysely<Database>) => {
+      const server = await connection
+        .selectFrom('managed_servers')
+        .select('pterodactyl_identifier')
+        .where('id', '=', serverId)
+        .executeTakeFirstOrThrow();
+      return (
+        Boolean(server.pterodactyl_identifier) &&
+        supportsProviderFileOperations(adapter, server.pterodactyl_identifier as string)
+      );
+    },
     fileman: (context: import('./lifecycle.js').GameLifecycleContext) =>
       createFilemanJobServices(context, {
         env,

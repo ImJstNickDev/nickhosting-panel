@@ -8,7 +8,7 @@ parser=argparse.ArgumentParser()
 parser.add_argument('--container', required=True)
 args=parser.parse_args()
 sources=[]
-for path in sorted((root/'app').rglob('*.php')):
+for path in sorted((root/'app').rglob('*.php'), key=lambda p: (not p.name.startswith('Client'), str(p))):
     # CapabilitiesRequest depends on Panel autoload and is safe to define, never instantiate.
     sources.append("eval(base64_decode('"+base64.b64encode(path.read_bytes().replace(b'{identifier}',b'nickhosting').removeprefix(b'<?php')).decode()+"'));")
 sources.append("eval(base64_decode('"+base64.b64encode((root/'admin/controller.php').read_bytes().replace(b'{identifier}',b'nickhosting').removeprefix(b'<?php')).decode()+"'));")
@@ -23,5 +23,8 @@ script+="\n$backupHarness=base64_decode('"+base64.b64encode((root/'tests/backup_
 script+="\ndefine('NICKHOSTING_TEST_CONFIGURE', true); eval(base64_decode('"+base64.b64encode((root/'private/configure.php').read_bytes().removeprefix(b'<?php')).decode()+"'));\n"
 script+="\n$settingsView=base64_decode('"+base64.b64encode((root/'admin/view.blade.php').read_bytes()).decode()+"');\n"
 script+="\n$directoryHarness=base64_decode('"+base64.b64encode((root/'tests/directory_harness.php').read_bytes().removeprefix(b'<?php')).decode()+"');\n"
+fileops=root/'private/migrations/2026_10_18_000005_nickhosting_file_operations.php'
+script+="\n$fileOperationMigration=eval(base64_decode('"+base64.b64encode(fileops.read_bytes().removeprefix(b'<?php')).decode()+"'));\n"
+script+="\n$fileOperationHarness=base64_decode('"+base64.b64encode((root/'tests/file_operations_harness.php').read_bytes().removeprefix(b'<?php')).decode()+"');\n"
 script+=(root/'tests/php_harness.php').read_text().removeprefix('<?php')
 subprocess.run(['docker','exec','-i',args.container,'php'],input=script,text=True,check=True)

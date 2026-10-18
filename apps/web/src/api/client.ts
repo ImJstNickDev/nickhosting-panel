@@ -122,7 +122,7 @@ export function upload(
     signal?: AbortSignal;
     onProgress?: (sent: number, total: number) => void;
   } = {},
-): Promise<void> {
+): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('PUT', safeApiPath(path));
@@ -135,8 +135,16 @@ export function upload(
     xhr.upload.onprogress = (event) => options.onProgress?.(event.loaded, file.size);
     xhr.onload = () => {
       finish();
-      if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        if (xhr.status === 204 || !xhr.responseText) resolve(undefined);
+        else {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch {
+            reject(apiError(null, xhr.status));
+          }
+        }
+      } else {
         let payload: unknown;
         try {
           payload = JSON.parse(xhr.responseText);

@@ -1,0 +1,520 @@
+import { createHash } from 'node:crypto';
+import { resolve } from 'node:path';
+import { DomainError } from '@nickhosting/core';
+import { createTestDatabase } from '@nickhosting/database/testing';
+import type { FilemanJobServices } from '@nickhosting/game-sdk';
+import type { FileArchiveCommit, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
+import { sql } from 'kysely';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  uploadCancelled,
+  uploadNotDispatched,
+} from '../../pterodactyl-adapter/src/upload-dispatch.js';
+import { uploadFilemanArchive } from './fileman-archive.js';
+import { filemanTransferDigest, filemanTransferReceiptStep } from './fileman-transfers.js';
+import type { GameLifecycleContext } from './lifecycle.js';
+import { managementFixture } from './test-fixtures.js';
+import { assertNoPendingUpload } from './upload-admission.js';
+
+type ArchiveInput = Parameters<NonNullable<FilemanJobServices['uploadArchive']>>[0];
+const sha256 = (value: Uint8Array) => createHash('sha256').update(value).digest('hex');
+
+describe('Fileman archive durable transfer', () => {
+  let database: Awaited<ReturnType<typeof createTestDatabase>>;
+  beforeEach(async () => {
+    database = await createTestDatabase();
+  });
+  afterEach(async () => {
+    await database?.destroy();
+  });
+
+  async function fixture(db = database.db) {
+    const f = await managementFixture(db);
+    const serverId = await f.server();
+    const server = await db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    let operation = await db
+      .selectFrom('server_operations')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    await db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: operation.job_id })
+      .where('id', '=', serverId)
+      .execute();
+    await db
+      .updateTable('operation_jobs')
+      .set({ state: 'running', completed_at: null })
+      .where('id', '=', operation.job_id)
+      .execute();
+    await db
+      .updateTable('physical_hosts')
+      .set({
+        local_disk_path: resolve('.'),
+        disk_headroom_mib: '0',
+        upload_policy: JSON.stringify({
+          providerMaxFileBytes: 1024 ** 2,
+          temporaryDiskPath: resolve('.'),
+          temporaryDiskBudgetBytes: 16 * 1024 ** 2,
+          temporaryDiskHeadroomBytes: 0,
+        }),
+      })
+      .where('id', '=', f.hostId)
+      .execute();
+    const uploaded: Uint8Array[] = [];
+    type SendInput = Parameters<Awaited<ReturnType<PterodactylAdapter['prepareUpload']>>>[0];
+    const send = vi.fn(async (input: SendInput) => {
+      await input.authorize?.();
+      uploaded.push(new Uint8Array(await new Response(input.body).arrayBuffer()));
+    });
+    const adapter = {
+      getResources: vi.fn(async () => ({ resources: { disk_bytes: 0 } })),
+      listFiles: vi.fn(async () => []),
+      prepareUpload: vi.fn(async () => send),
+      commitFileArchive: vi.fn(async (_id: string, request: FileArchiveCommit) => ({
+        ...request,
+        state: 'confirmed' as const,
+      })),
+    };
+    const update = vi.fn(async (patch: Parameters<GameLifecycleContext['update']>[0]) => {
+      await db
+        .updateTable('server_operations')
+        .set({ ...patch, plan: patch.plan ? JSON.stringify(patch.plan) : undefined })
+        .where('job_id', '=', operation.job_id)
+        .execute();
+      Object.assign(operation, patch);
+    });
+    const context: GameLifecycleContext = {
+      db,
+      server,
+      adapter: adapter as unknown as PterodactylAdapter,
+      operation: () => operation,
+      authorize: async () => {},
+      assertStopped: async () => {},
+      event: async () => {},
+      backup: async () => false,
+      update,
+      effect: vi.fn(async (phase, perform) => {
+        await assertNoPendingUpload(db, serverId);
+        await update({ phase, effect_started_at: new Date(), effect_state: 'prepared' });
+        await perform();
+        return true;
+      }),
+    };
+    const options = {
+      env: { NH_OBSERVER_ID: 'isolated-observer' },
+      authorize: vi.fn(async () => f.context),
+    };
+    const input = (count = 3) => {
+      const payload = Buffer.alloc(128, 42);
+      const files = Array.from({ length: count }, (_, i) => ({
+        path: `new-world/region/${i}.mca`,
+        size: i + 1,
+        sha256: sha256(Buffer.alloc(i + 1, i)),
+      }));
+      const complete = Promise.withResolvers<{ files: typeof files; bytes: number }>();
+      void complete.promise.catch(() => {});
+      const value = {
+        id: 'fixture.archive',
+        destinationRoot: 'new-world',
+        sourceSha256: 'a'.repeat(64),
+        files,
+        contentLength: payload.length,
+        open: vi.fn(() => {
+          let emitted = false;
+          return new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (!emitted) {
+                emitted = true;
+                controller.enqueue(payload);
+              } else {
+                controller.close();
+                complete.resolve({ files, bytes: files.reduce((n, f) => n + f.size, 0) });
+              }
+            },
+            cancel(reason) {
+              complete.reject(reason);
+            },
+          });
+        }),
+        completion: complete.promise,
+        cancel: vi.fn((reason?: unknown) => complete.reject(reason)),
+        beforeWrite: vi.fn(async () => {}),
+        beforePublish: vi.fn(async () => {}),
+      } satisfies ArchiveInput;
+      return value;
+    };
+    const claims = () =>
+      db
+        .selectFrom('upload_ingestion_claims')
+        .selectAll()
+        .where('server_id', '=', serverId)
+        .execute();
+    const reload = async () => {
+      operation = await db
+        .selectFrom('server_operations')
+        .selectAll()
+        .where('job_id', '=', operation.job_id)
+        .executeTakeFirstOrThrow();
+    };
+    const run = (value: ArchiveInput) => uploadFilemanArchive(context, options, value);
+    return { context, options, adapter, send, uploaded, input, claims, reload, update, run };
+  }
+
+  it('streams 101 members through one upload, commits their digest, atomically settles, and returns its receipt without replay', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const input = f.input(101);
+      const receipt = await f.run(input);
+      expect(receipt).toMatchObject({ files: 101, bytes: 5151 });
+      expect(f.adapter.prepareUpload).toHaveBeenCalledExactlyOnceWith(
+        f.context.server.pterodactyl_identifier,
+        `.nickhosting-import-${f.context.operation().job_id}/payload.zip`,
+      );
+      expect(f.adapter.commitFileArchive).toHaveBeenCalledTimes(1);
+      expect(f.adapter.commitFileArchive.mock.calls[0]?.[1].archiveSha256).toBe(
+        sha256(f.uploaded[0] as Uint8Array),
+      );
+      expect(f.context.operation().plan.fileArchive).toMatchObject({
+        commitDispatched: true,
+        completed: true,
+      });
+      expect(f.context.operation().plan.fileTransfer).toMatchObject({
+        completedFiles: 101,
+        completedBytes: 5151,
+      });
+      expect(await f.claims()).toEqual([]);
+      await f.reload();
+      const replay = f.input(101);
+      expect(await f.run(replay)).toEqual(receipt);
+      expect(replay.open).not.toHaveBeenCalled();
+      expect(f.adapter.commitFileArchive).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it.each(['not-dispatched', 'cancelled'] as const)(
+    'cancels a stalled producer and releases admission only with %s adapter proof',
+    async (kind) => {
+      await database.db.connection().execute(async (db) => {
+        const f = await fixture(db);
+        const input = f.input();
+        const failure = new DomainError('forbidden');
+        f.send.mockRejectedValueOnce(
+          kind === 'not-dispatched' ? uploadNotDispatched(failure) : uploadCancelled(failure),
+        );
+        await expect(f.run(input)).rejects.toBe(failure);
+        expect(input.cancel).toHaveBeenCalled();
+        expect(await f.claims()).toEqual([]);
+        expect(f.context.operation().plan.fileArchive).toMatchObject({ retrySafe: true });
+        expect(f.adapter.commitFileArchive).not.toHaveBeenCalled();
+        await f.reload();
+        await f.run(f.input());
+        expect(await f.claims()).toEqual([]);
+      });
+    },
+  );
+
+  it('cancels immediately on an unproven send failure, retains its claim, and never retries the upload', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const input = f.input();
+      f.send.mockRejectedValueOnce(new Error('connection lost before consuming body'));
+      await expect(f.run(input)).rejects.toMatchObject({ code: 'operation_uncertain' });
+      expect(input.cancel).toHaveBeenCalled();
+      expect(await f.claims()).toHaveLength(1);
+      await f.reload();
+      await expect(f.run(f.input())).rejects.toMatchObject({ code: 'operation_uncertain' });
+      expect(f.send).toHaveBeenCalledTimes(1);
+      expect(f.adapter.commitFileArchive).not.toHaveBeenCalled();
+    });
+  });
+
+  it('replays the exact saved commit after a lost response without listing, admission or source consumption', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      f.adapter.commitFileArchive.mockRejectedValueOnce(
+        new Error('response lost after provider confirmation'),
+      );
+      await expect(f.run(f.input())).rejects.toMatchObject({ code: 'operation_uncertain' });
+      const original = structuredClone(f.adapter.commitFileArchive.mock.calls[0]?.[1]);
+      expect(f.context.operation().plan.fileArchive).toMatchObject({
+        commitDispatched: true,
+        completed: false,
+      });
+      expect(await f.claims()).toHaveLength(1);
+      await f.reload(); // JSONB changes object key order: replay must still preserve semantic identity.
+      const replay = f.input();
+      const receipt = await f.run(replay);
+      expect(receipt.files).toBe(3);
+      expect(f.adapter.commitFileArchive.mock.calls[1]?.[1]).toEqual(original);
+      expect(replay.open).not.toHaveBeenCalled();
+      expect(replay.beforePublish).toHaveBeenCalledOnce();
+      expect(f.adapter.prepareUpload).toHaveBeenCalledOnce();
+      expect(f.adapter.listFiles).toHaveBeenCalledOnce();
+      expect(f.context.effect).toHaveBeenCalledOnce();
+      expect(await f.claims()).toEqual([]);
+    });
+  });
+
+  it('repeats the game guard after uploaded bytes were verified and persists dispatch only after it passes', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const input = f.input();
+      input.beforePublish.mockRejectedValueOnce(new DomainError('conflict'));
+      await expect(f.run(input)).rejects.toMatchObject({ code: 'operation_uncertain' });
+      expect(f.context.operation().plan.fileArchive).toMatchObject({ commitDispatched: false });
+      expect(f.adapter.commitFileArchive).not.toHaveBeenCalled();
+      await f.reload();
+      const replay = f.input();
+      await f.run(replay);
+      expect(replay.beforePublish).toHaveBeenCalledOnce();
+      expect(replay.open).not.toHaveBeenCalled();
+      expect(f.send).toHaveBeenCalledOnce();
+      expect(await f.claims()).toEqual([]);
+    });
+  });
+
+  it('never commits when source verification rejects after the body has begun', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const input = f.input();
+      const verification = Promise.withResolvers<Awaited<typeof input.completion>>();
+      const failure = new Error('CRC mismatch');
+      input.completion = verification.promise;
+      input.open.mockImplementationOnce(() => {
+        let emitted = false;
+        return new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (!emitted) {
+              emitted = true;
+              controller.enqueue(Buffer.alloc(64));
+            } else {
+              verification.reject(failure);
+              controller.error(failure);
+            }
+          },
+        });
+      });
+      await expect(f.run(input)).rejects.toMatchObject({ code: 'operation_uncertain' });
+      expect(input.cancel).toHaveBeenCalled();
+      expect(f.adapter.commitFileArchive).not.toHaveBeenCalled();
+      expect(await f.claims()).toHaveLength(1);
+      expect(f.context.operation().plan.fileArchive).not.toHaveProperty('request');
+    });
+  });
+
+  it('joins a cancelled sender and its delayed authorization before releasing the claim and connection', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const input = f.input();
+      const verification = Promise.withResolvers<Awaited<typeof input.completion>>();
+      input.completion = verification.promise;
+      const started = Promise.withResolvers<void>();
+      const aborted = Promise.withResolvers<void>();
+      const finishSender = Promise.withResolvers<void>();
+      const failure = new DomainError('validation_failed');
+      let authorizationFinished = false;
+      f.send.mockImplementationOnce(async (request) => {
+        request.signal?.addEventListener('abort', () => aborted.resolve(), { once: true });
+        started.resolve();
+        await aborted.promise;
+        await finishSender.promise;
+        await request.authorize?.();
+        authorizationFinished = true;
+        throw uploadCancelled(new Error('confirmed incomplete multipart'));
+      });
+      const running = f.run(input);
+      let finished = false;
+      const observed = running.then(
+        () => {
+          finished = true;
+        },
+        () => {
+          finished = true;
+        },
+      );
+      await started.promise;
+      verification.reject(failure);
+      await aborted.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(finished).toBe(false);
+      expect(authorizationFinished).toBe(false);
+      expect(await f.claims()).toHaveLength(1);
+      finishSender.resolve();
+      await expect(running).rejects.toBe(failure);
+      await observed;
+      expect(authorizationFinished).toBe(true);
+      expect(input.cancel).toHaveBeenCalledOnce();
+      expect(await f.claims()).toEqual([]);
+      expect(f.adapter.commitFileArchive).not.toHaveBeenCalled();
+    });
+  });
+
+  it('drains an authorization callback that outlives the sender abort race', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const input = f.input();
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const failure = uploadNotDispatched(new Error('sender aborted its authorization race'));
+      let authorizationFinished = false;
+      f.send.mockImplementationOnce(async (request) => {
+        input.beforeWrite.mockImplementationOnce(async () => {
+          entered.resolve();
+          await release.promise;
+          // This query must still use our pinned connection and retained claim.
+          expect(await f.claims()).toHaveLength(1);
+          authorizationFinished = true;
+        });
+        void request.authorize?.().catch(() => {});
+        await entered.promise;
+        throw failure;
+      });
+      const running = f.run(input);
+      let finished = false;
+      const observed = running.then(
+        () => {
+          finished = true;
+        },
+        () => {
+          finished = true;
+        },
+      );
+      await entered.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(finished).toBe(false);
+      expect(authorizationFinished).toBe(false);
+      expect(await f.claims()).toHaveLength(1);
+      release.resolve();
+      await expect(running).rejects.toBe(failure);
+      await observed;
+      expect(authorizationFinished).toBe(true);
+      expect(await f.claims()).toEqual([]);
+    });
+  });
+
+  it('releases all session lock counts after failure and refuses recovery while that exact claim is actively held', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      f.adapter.commitFileArchive.mockRejectedValueOnce(new Error('response lost'));
+      await expect(f.run(f.input())).rejects.toMatchObject({ code: 'operation_uncertain' });
+      const claim = (await f.claims())[0];
+      expect(claim).toBeDefined();
+      const key = `:nickhosting:upload:${claim?.id}`;
+      await database.db.connection().execute(async (other) => {
+        const held = await sql<{
+          acquired: boolean;
+        }>`select pg_try_advisory_lock(hashtextextended(current_schema() || ${key},0)) as acquired`.execute(
+          other,
+        );
+        expect(held.rows[0]?.acquired).toBe(true);
+        try {
+          await f.reload();
+          await expect(f.run(f.input())).rejects.toMatchObject({ code: 'operation_uncertain' });
+          expect(f.adapter.commitFileArchive).toHaveBeenCalledOnce();
+          expect(await f.claims()).toHaveLength(1);
+        } finally {
+          await sql`select pg_advisory_unlock(hashtextextended(current_schema() || ${key},0))`.execute(
+            other,
+          );
+        }
+      });
+      await f.run(f.input());
+      expect(await f.claims()).toEqual([]);
+    });
+  });
+
+  it('keeps an uncertain provider commit claim and refuses recovery after the game guard or authorization changes', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      f.adapter.commitFileArchive.mockRejectedValueOnce(new Error('uncertain provider commit'));
+      await expect(f.run(f.input())).rejects.toMatchObject({ code: 'operation_uncertain' });
+      await f.reload();
+      const replay = f.input();
+      replay.beforePublish.mockRejectedValueOnce(new DomainError('conflict'));
+      await expect(f.run(replay)).rejects.toMatchObject({ code: 'conflict' });
+      f.options.authorize.mockRejectedValueOnce(new DomainError('forbidden'));
+      await expect(f.run(f.input())).rejects.toMatchObject({ code: 'forbidden' });
+      expect(f.adapter.commitFileArchive).toHaveBeenCalledOnce();
+      expect(f.send).toHaveBeenCalledOnce();
+      expect(await f.claims()).toHaveLength(1);
+    });
+  });
+
+  it('recovers a crash after atomic receipt settlement but before the completed plan update', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const originalUpdate = f.context.update;
+      f.context.update = async (patch) => {
+        if ((patch.plan?.fileArchive as { completed?: boolean })?.completed)
+          throw new Error('worker crashed');
+        await originalUpdate(patch);
+      };
+      await expect(f.run(f.input())).rejects.toMatchObject({ code: 'operation_uncertain' });
+      expect(await f.claims()).toEqual([]);
+      expect(f.context.operation().plan.fileArchive).toMatchObject({ completed: false });
+      await f.reload();
+      f.context.update = originalUpdate;
+      const replay = f.input();
+      await f.run(replay);
+      expect(replay.open).not.toHaveBeenCalled();
+      expect(f.adapter.commitFileArchive).toHaveBeenCalledTimes(2);
+      expect(f.context.operation().plan.fileArchive).toMatchObject({ completed: true });
+      expect(await f.claims()).toEqual([]);
+    });
+  });
+
+  it('settles a retained exact claim even if a prior writer persisted completed before settlement', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const input = f.input();
+      f.adapter.commitFileArchive.mockRejectedValueOnce(new Error('lost'));
+      await expect(f.run(input)).rejects.toMatchObject({ code: 'operation_uncertain' });
+      const journal = f.context.operation().plan.fileArchive as Record<string, unknown>;
+      const manifest = { id: input.id, destinationRoot: input.destinationRoot, files: input.files };
+      await db
+        .insertInto('job_steps')
+        .values({
+          job_id: f.context.operation().job_id,
+          step: filemanTransferReceiptStep(filemanTransferDigest(manifest)),
+        })
+        .execute();
+      await f.context.update({
+        plan: { ...f.context.operation().plan, fileArchive: { ...journal, completed: true } },
+      });
+      await f.reload();
+      await f.run(f.input());
+      expect(await f.claims()).toEqual([]);
+      expect(f.adapter.prepareUpload).toHaveBeenCalledOnce();
+      expect(f.adapter.commitFileArchive).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it.each(['source', 'identity', 'claim-scope'] as const)(
+    'refuses altered %s during recovery before any provider commit or capacity release',
+    async (changed) => {
+      await database.db.connection().execute(async (db) => {
+        const f = await fixture(db);
+        f.adapter.commitFileArchive.mockRejectedValueOnce(new Error('lost'));
+        await expect(f.run(f.input())).rejects.toMatchObject({ code: 'operation_uncertain' });
+        await f.reload();
+        const replay = f.input();
+        if (changed === 'source') replay.sourceSha256 = 'b'.repeat(64);
+        if (changed === 'identity') f.context.server.pterodactyl_id = 99999;
+        if (changed === 'claim-scope')
+          await db
+            .updateTable('upload_ingestion_claims')
+            .set({ scope_hash: 'f'.repeat(64) })
+            .execute();
+        await expect(f.run(replay)).rejects.toBeInstanceOf(DomainError);
+        expect(f.adapter.commitFileArchive).toHaveBeenCalledOnce();
+        expect(replay.open).not.toHaveBeenCalled();
+        expect(await f.claims()).toHaveLength(1);
+      });
+    },
+  );
+});

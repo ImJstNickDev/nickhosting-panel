@@ -1,12 +1,20 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { rm } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { installedContentChange } from '@nickhosting/content-providers';
+import {
+  installedContentChange,
+  readArchiveFile,
+  visitArchive,
+} from '@nickhosting/content-providers';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { minecraftDigest, minecraftVerificationChecks } from '@nickhosting/minecraft';
-import type { ApplicationServer, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
+import {
+  type ApplicationServer,
+  type PterodactylAdapter,
+  PterodactylError,
+} from '@nickhosting/pterodactyl-adapter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ZipFile } from 'yazl';
 import { canonicalMinecraftJarSha256 } from '../../../games/minecraft/src/generated-launcher.js';
@@ -703,9 +711,10 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       { label: 'different version', field: 'DataVersion', value: 4786, status: 'incompatible' },
       { label: 'legacy Anvil', field: 'version', value: 19133, status: 'unknown' },
     ].flatMap((version) =>
-      (version.status === 'verified' ? ['none', 'staging', 'checkpoint'] : ['none', 'staging']).map(
-        (collision) => ({ ...version, collision }),
-      ),
+      (version.status === 'verified'
+        ? ['none', 'staging', 'checkpoint', 'archive', 'archive-recover']
+        : ['none', 'staging', 'archive']
+      ).map((collision) => ({ ...version, collision })),
     ),
   )(
     'imports a $label world online without selecting it or overwriting collisions ($collision)',
@@ -870,6 +879,43 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
           env,
           authorize: async () => f.f.context,
         });
+        const bulk = collision.startsWith('archive');
+        let published = false;
+        if (bulk) {
+          f.context.adapter.getFileOperationCapabilities = vi.fn<
+            PterodactylAdapter['getFileOperationCapabilities']
+          >(async () => ({
+            inspection: true,
+            guardedDelete: true,
+            archiveCommit: true,
+          }));
+          f.context.adapter.commitFileArchive = vi.fn<PterodactylAdapter['commitFileArchive']>(
+            async (_id, request) => {
+              if (!published) {
+                const payload = f.files.get(
+                  `.nickhosting-import-${request.operationId}/payload.zip`,
+                );
+                if (!payload) throw new Error('Missing archive');
+                const path = resolve(root, 'received.zip');
+                await writeFile(path, payload);
+                await visitArchive(path, async (file) => {
+                  f.files.set(file.path, await readArchiveFile(file, 1024 ** 2));
+                });
+                f.files.delete(`.nickhosting-import-${request.operationId}/payload.zip`);
+                published = true;
+                if (collision === 'archive-recover')
+                  throw new PterodactylError('unavailable', 'client', 'unknown');
+              }
+              return {
+                operationId: request.operationId,
+                state: 'confirmed',
+                identity: request.identity,
+                destinationRoot: request.destinationRoot,
+                archiveSha256: request.archiveSha256,
+              };
+            },
+          );
+        }
         const downloads = vi.spyOn(f.context.adapter, 'downloadFile');
         f.files.set('new_world/foreign.txt', Buffer.from('keep'));
         await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
@@ -909,7 +955,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
         vi.mocked(f.context.assertStopped).mockClear();
         const stageWorld = minecraftWorld.stageMinecraftWorld;
         const stageSpy = vi.spyOn(minecraftWorld, 'stageMinecraftWorld');
-        if (collision !== 'none') {
+        if (collision !== 'none' && !bulk) {
           if (collision === 'staging')
             stageSpy.mockImplementationOnce(async (...args) => {
               const result = await stageWorld(...args);
@@ -999,6 +1045,41 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
           return;
         }
         vi.mocked(f.context.adapter.listFiles).mockClear();
+        if (bulk) {
+          stageSpy.mockClear();
+          if (collision === 'archive-recover') {
+            await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
+              code: 'operation_uncertain',
+            });
+            expect(published).toBe(true);
+          }
+          expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+          expect(f.context.adapter.uploadFile).toHaveBeenCalledTimes(1);
+          expect(f.context.adapter.commitFileArchive).toHaveBeenCalledTimes(
+            collision === 'archive-recover' ? 2 : 1,
+          );
+          expect(stageSpy).not.toHaveBeenCalled();
+          expect(f.context.adapter.createDirectory).not.toHaveBeenCalled();
+          expect(f.files.get('new_world/level.dat')).toEqual(level);
+          expect(f.files.get('new_world/region/r.0.0.mca')).toEqual(Buffer.from('region fixture'));
+          expect(
+            await f.f.db
+              .selectFrom('upload_ingestion_claims')
+              .select('id')
+              .where('server_id', '=', f.serverId)
+              .execute(),
+          ).toEqual([]);
+          expect(
+            (
+              await f.f.db
+                .selectFrom('minecraft_server_profiles')
+                .select('content_state')
+                .where('server_id', '=', f.serverId)
+                .executeTakeFirstOrThrow()
+            ).content_state,
+          ).toEqual({});
+          return;
+        }
         const staged = Promise.withResolvers<void>();
         const reading = Promise.withResolvers<void>();
         stageSpy.mockImplementation(async (...args) => {

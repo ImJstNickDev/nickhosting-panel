@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
+import { type BigIntStats, constants } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
@@ -33,6 +33,34 @@ import { authorizeServer, ownerOnly, parse } from './registry.js';
 type Source = Selectable<Database['minecraft_sources']>;
 const identifier = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
+const statInteger = z.string().regex(/^[0-9]+$/);
+const sourceFileIdentitySchema = z.strictObject({
+  dev: statInteger,
+  ino: statInteger,
+  mode: statInteger,
+  uid: statInteger,
+  gid: statInteger,
+  nlink: z.literal('1'),
+  size: statInteger,
+  mtimeNs: z.string().regex(/^-?[0-9]+$/),
+  ctimeNs: z.string().regex(/^-?[0-9]+$/),
+});
+const sourceDirectoryIdentitySchema = sourceFileIdentitySchema.pick({
+  dev: true,
+  ino: true,
+  mode: true,
+  uid: true,
+  gid: true,
+});
+const sourceSealSchema = z.strictObject({
+  version: z.literal(1),
+  sourceId: z.uuid(),
+  identityDigest: digest,
+  sha256: digest,
+  file: sourceFileIdentitySchema,
+  directory: sourceDirectoryIdentitySchema,
+});
+type SourceSeal = z.infer<typeof sourceSealSchema>;
 export const minecraftSourceUploadSchema = z.strictObject({
   kind: z.enum(['world', 'modpack']),
   serverId: z.uuid().optional(),
@@ -77,6 +105,123 @@ function publicSource(row: Source) {
 function sourcePath(source: Source): string {
   parse(z.uuid(), source.id);
   return join(source.storage_root, source.id, 'archive.bin');
+}
+function sourceDirectoryIdentity(info: BigIntStats) {
+  return {
+    dev: String(info.dev),
+    ino: String(info.ino),
+    mode: String(info.mode),
+    uid: String(info.uid),
+    gid: String(info.gid),
+  };
+}
+function sourceFileIdentity(info: BigIntStats) {
+  return {
+    ...sourceDirectoryIdentity(info),
+    nlink: String(info.nlink),
+    size: String(info.size),
+    mtimeNs: String(info.mtimeNs),
+    ctimeNs: String(info.ctimeNs),
+  };
+}
+function sameIdentity(actual: Record<string, string>, expected: Record<string, string>) {
+  return Object.keys(expected).every((key) => actual[key] === expected[key]);
+}
+
+/** A seal is server-owned storage evidence, never the client's claimed digest.
+ * The sole writer owns an exclusive generated file in a private directory. It
+ * hashes the bytes it writes, closes its writer, then makes the file read-only
+ * and syncs both file and directory before the DB can publish the seal. Ordinary
+ * edits, chmod/chown, hard links or replacement invalidate the stored identity.
+ * Host administrators and storage corruption are outside this trust boundary;
+ * outgoing world streams still verify every file against the extracted manifest.
+ */
+async function withSourceFile<T>(
+  row: Source,
+  work: (
+    file: Awaited<ReturnType<typeof open>>,
+    directory: Awaited<ReturnType<typeof open>>,
+    directoryIdentity: BigIntStats,
+  ) => Promise<T>,
+): Promise<T> {
+  await contentStageDirectory(row.storage_root);
+  const path = join(row.storage_root, row.id);
+  const directory = await open(
+    path,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+  );
+  try {
+    const info = await directory.stat({ bigint: true });
+    if (!info.isDirectory() || (info.mode & 0o077n) !== 0n) throw new DomainError('conflict');
+    const file = await open(sourcePath(row), constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const result = await work(file, directory, info);
+      const current = await lstat(path, { bigint: true });
+      if (
+        !current.isDirectory() ||
+        current.isSymbolicLink() ||
+        !sameIdentity(sourceDirectoryIdentity(current), sourceDirectoryIdentity(info))
+      )
+        throw new DomainError('conflict');
+      return result;
+    } finally {
+      await file.close();
+    }
+  } finally {
+    await directory.close();
+  }
+}
+async function sealSource(row: Source, verified: ContentFileVerification): Promise<SourceSeal> {
+  return withSourceFile(row, async (file, directory, directoryIdentity) => {
+    const before = await file.stat({ bigint: true });
+    if (
+      verified.path !== sourcePath(row) ||
+      !before.isFile() ||
+      before.nlink !== 1n ||
+      before.size !== BigInt(row.declared_bytes) ||
+      before.uid !== directoryIdentity.uid ||
+      !sameIdentity(sourceFileIdentity(before), sourceFileIdentity(verified.identity))
+    )
+      throw new DomainError('conflict');
+    if ((before.mode & 0o7777n) !== 0o400n) await file.chmod(0o400);
+    await file.sync();
+    await directory.sync();
+    const identity = await file.stat({ bigint: true });
+    if (!(await contentFileUnchanged(sourcePath(row), identity))) throw new DomainError('conflict');
+    return sourceSealSchema.parse({
+      version: 1,
+      sourceId: row.id,
+      identityDigest: row.identity_digest,
+      sha256: verified.sha256,
+      file: sourceFileIdentity(identity),
+      directory: sourceDirectoryIdentity(directoryIdentity),
+    });
+  });
+}
+async function verifySourceSeal(row: Source): Promise<ContentFileVerification> {
+  const parsed = sourceSealSchema.safeParse(row.source_seal);
+  if (
+    !parsed.success ||
+    parsed.data.sourceId !== row.id ||
+    parsed.data.identityDigest !== row.identity_digest ||
+    parsed.data.sha256 !== row.actual_sha256
+  )
+    throw new DomainError('conflict');
+  const seal = parsed.data;
+  return withSourceFile(row, async (file, _directory, directoryIdentity) => {
+    const identity = await file.stat({ bigint: true });
+    if (
+      !identity.isFile() ||
+      identity.nlink !== 1n ||
+      identity.size !== BigInt(row.declared_bytes) ||
+      (identity.mode & 0o7777n) !== 0o400n ||
+      !sameIdentity(sourceFileIdentity(identity), seal.file) ||
+      !sameIdentity(sourceDirectoryIdentity(directoryIdentity), seal.directory) ||
+      !(await contentFileUnchanged(sourcePath(row), identity))
+    )
+      throw new DomainError('conflict');
+    return { path: sourcePath(row), sha256: seal.sha256, identity };
+  });
 }
 async function current(
   db: Kysely<Database>,
@@ -356,7 +501,11 @@ export function createMinecraftSourceStore(
   }
   async function executeTransfer(
     reference: string,
-    transfer: (row: Source, signal: AbortSignal, authorize: () => Promise<void>) => Promise<void>,
+    transfer: (
+      row: Source,
+      signal: AbortSignal,
+      authorize: () => Promise<void>,
+    ) => Promise<ContentFileVerification | undefined>,
     signal?: AbortSignal,
   ) {
     return rowLock(db, reference, async (connection) => {
@@ -394,8 +543,12 @@ export function createMinecraftSourceStore(
       timer.unref();
       try {
         await contentStageDirectory(join(row.storage_root, row.id));
-        await transfer(row, abort, authorize);
-        const { sha256 } = await hashSource(row, authorize);
+        // Direct uploads return the server's digest of the successful writes.
+        // Provider acquisition retains its full-file verification fallback.
+        const verified =
+          (await transfer(row, abort, authorize)) ?? (await hashSource(row, authorize));
+        const seal = await sealSource(row, verified);
+        const { sha256 } = verified;
         // Do not let the background check share this pinned connection with the
         // final transaction. The transaction reauthorizes once more before ready.
         clearInterval(timer);
@@ -407,7 +560,12 @@ export function createMinecraftSourceStore(
           await ownedSource(tx, currentActor, reference);
           await tx
             .updateTable('minecraft_sources')
-            .set({ state: 'ready', actual_sha256: sha256, updated_at: new Date() })
+            .set({
+              state: 'ready',
+              actual_sha256: sha256,
+              source_seal: JSON.stringify(seal),
+              updated_at: new Date(),
+            })
             .where('id', '=', row.id)
             .execute();
           await recordAudit(tx, currentActor, 'minecraft.source.ready', {
@@ -445,13 +603,30 @@ export function createMinecraftSourceStore(
   }
   async function resolveSource(reference: string, kind: Source['kind'], serverId?: string) {
     return rowLock(db, reference, async (connection) => {
-      const row = await ownedSource(connection, await reauthorize(connection), reference, serverId);
+      let row = await ownedSource(connection, await reauthorize(connection), reference, serverId);
       if (row.state !== 'ready' || row.kind !== kind || (!serverId && row.server_id))
         throw new DomainError('conflict');
       const authorize = sourceAuthorization(async () =>
         ownedSource(connection, await reauthorize(connection), reference, serverId),
       );
-      const verified = await hashSource(row, authorize);
+      if (row.source_seal == null) {
+        // Old sources have no publication seal. Verify their actual bytes once
+        // under the source lock before upgrading; a bad non-null seal never
+        // falls back to recertifying changed storage.
+        const previous = await hashSource(row, authorize);
+        const seal = await sealSource(row, previous);
+        await authorize(true);
+        row = await connection
+          .updateTable('minecraft_sources')
+          .set({ source_seal: JSON.stringify(seal), updated_at: new Date() })
+          .where('id', '=', row.id)
+          .where('state', '=', 'ready')
+          .returningAll()
+          .executeTakeFirstOrThrow();
+      }
+      const verified = await verifySourceSeal(row);
+      // A seal removes byte passes, never a current session/job/scope check.
+      await authorize(true);
       return {
         path: verified.path,
         sha256: verified.sha256,
@@ -521,6 +696,7 @@ export function createMinecraftSourceStore(
           };
           abort.addEventListener('abort', cancel, { once: true });
           let received = 0;
+          const hash = createHash('sha256');
           try {
             for (;;) {
               await authorize();
@@ -532,12 +708,24 @@ export function createMinecraftSourceStore(
               while (offset < chunk.value.length) {
                 const result = await file.write(chunk.value, offset, chunk.value.length - offset);
                 if (result.bytesWritten === 0) throw new DomainError('integration_unavailable');
+                hash.update(chunk.value.subarray(offset, offset + result.bytesWritten));
                 offset += result.bytesWritten;
               }
             }
             await authorize();
             if (received !== bytes) throw new DomainError('validation_failed');
-            await file.sync();
+            const sha256 = hash.digest('hex');
+            if (sha256 !== hashesSchema.parse(source.expected_hashes).sha256)
+              throw new DomainError('conflict');
+            const identity = await file.stat({ bigint: true });
+            if (
+              !identity.isFile() ||
+              identity.nlink !== 1n ||
+              identity.size !== BigInt(bytes) ||
+              !(await contentFileUnchanged(sourcePath(source), identity))
+            )
+              throw new DomainError('conflict');
+            return { path: sourcePath(source), sha256, identity };
           } finally {
             abort.removeEventListener('abort', cancel);
             await reader.cancel().catch(() => {});
@@ -587,6 +775,7 @@ export function createMinecraftSourceStore(
           // Reuse the audited provider downloader: SSRF protection, identity URL
           // allowlists, streaming, hash verification, timeouts and bounded retries.
           await http.download(artifact as ContentArtifact, sourcePath(source), { signal: abort });
+          return undefined;
         },
         signal,
       );

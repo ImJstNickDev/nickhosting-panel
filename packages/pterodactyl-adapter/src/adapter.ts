@@ -11,6 +11,14 @@ import {
   signedTarget,
 } from './downloads.js';
 import { readEditorDownload } from './editor-download.js';
+import {
+  commitFileArchive,
+  type FileArchiveCommit,
+  type GuardedDirectoryDelete,
+  getFileOperationCapabilities,
+  guardedDeleteDirectory,
+  inspectFileOperation,
+} from './file-operations.js';
 import { confirmInstallation } from './installation.js';
 import { type StopConfirmationOptions, stopWithConfirmation } from './power.js';
 import { createTransferGuard, type TransferOptions } from './transfer-guard.js';
@@ -343,6 +351,41 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       listDirectoriesBatch(transport, identifier, directories),
     getDirectoryBatchSettings: (identifier: string) =>
       getDirectoryBatchSettings(transport, identifier),
+    getFileOperationCapabilities: (identifier: string) =>
+      getFileOperationCapabilities(transport, identifier),
+    inspectFileOperation: (identifier: string, input: { target: string; guardFile: string }) =>
+      inspectFileOperation(transport, identifier, input),
+    commitFileArchive(identifier: string, input: FileArchiveCommit) {
+      fileDownloads.invalidate(identifier, [input.destinationRoot]);
+      return commitFileArchive(transport, identifier, input).finally(() =>
+        fileDownloads.invalidate(identifier, [input.destinationRoot]),
+      );
+    },
+    guardedDeleteDirectory(identifier: string, input: GuardedDirectoryDelete) {
+      fileDownloads.invalidate(identifier, [input.target.path]);
+      return guardedDeleteDirectory(transport, identifier, input).finally(() =>
+        fileDownloads.invalidate(identifier, [input.target.path]),
+      );
+    },
+    /** Native synchronous extraction; caller owns archive validation, staging and recovery. */
+    extractArchive(identifier: string, root: string, file: string) {
+      const rootPath = relativePath(root, true);
+      const archive = relativePath(file).slice(1);
+      fileDownloads.invalidate(identifier);
+      return transport
+        .empty(
+          'client',
+          `${clientServer(identifier)}/files/decompress`,
+          'POST',
+          {
+            root: rootPath,
+            file: archive,
+          },
+          false,
+          { timeoutMs: 90000 },
+        )
+        .finally(() => fileDownloads.invalidate(identifier));
+    },
     async readFile(
       identifier: string,
       path: string,

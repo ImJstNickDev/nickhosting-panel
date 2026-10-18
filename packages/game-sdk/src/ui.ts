@@ -565,6 +565,7 @@ export interface GameUiClient {
     path: string,
     options?: { method?: 'GET' | 'POST' | 'PUT' | 'DELETE'; body?: unknown; signal?: AbortSignal },
   ): Promise<unknown>;
+  /** Returns the application's acknowledged JSON response (or undefined for 204). */
   upload?(
     path: string,
     body: Blob,

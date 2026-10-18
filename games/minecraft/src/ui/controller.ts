@@ -495,13 +495,15 @@ export function createMinecraftUiController(client: GameUiClient) {
         await request('/v1/minecraft/sources', 'POST', reservation, input.signal),
       );
       // The shared client streams the Blob; neither JSON nor arrayBuffer materialization is used.
-      await client.upload(`/v1/minecraft/sources/${reserved.id}/upload`, input.file, {
-        bytes: input.file.size,
-        signal: input.signal,
-        onProgress: input.onProgress,
-      });
-      const finished = await source(reserved.id, input.signal);
-      if (finished.state !== 'ready') throw new MinecraftUiError('conflict', 'source_not_ready');
+      const finished = sourceSchema.parse(
+        await client.upload(`/v1/minecraft/sources/${reserved.id}/upload`, input.file, {
+          bytes: input.file.size,
+          signal: input.signal,
+          onProgress: input.onProgress,
+        }),
+      );
+      if (finished.id !== reserved.id || finished.state !== 'ready')
+        throw new MinecraftUiError('conflict', 'source_not_ready');
       return finished;
     },
     async acquireModpack(

@@ -1,5 +1,6 @@
 export * from './acquisition.js';
 export * from './archive.js';
+export * from './archive-transfer.js';
 export * from './changes.js';
 export * from './contracts.js';
 export * from './curseforge.js';

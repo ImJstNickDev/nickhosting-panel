@@ -14,6 +14,7 @@ import {
   inspectModpack,
   installedContentChange,
   ModrinthProvider,
+  prepareArchiveTransfer,
   recoverContentStageLock,
   safeArchivePath,
   safeContentPath,
@@ -50,6 +51,7 @@ import {
 } from '../../../games/minecraft/src/runtime.js';
 import {
   discoverMinecraftWorlds,
+  inspectMinecraftWorldTransfer,
   planMinecraftWorldReplacement,
   recoverMinecraftWorldStageLock,
   stageMinecraftWorld,
@@ -71,6 +73,7 @@ import {
   requireMinecraftRuntimeImageEvidence,
 } from './minecraft-runtime-evidence.js';
 import { createMinecraftSourceStore, reserveMinecraftStaging } from './minecraft-sources.js';
+import { supportsProviderFileOperations } from './provider-file-operations.js';
 import { assertServerStorageCapacity } from './storage-capacity.js';
 import { reserveUploadIngestion } from './upload-admission.js';
 
@@ -1393,6 +1396,29 @@ export async function applyMinecraftWorldRemoval(
     await complete(context, step);
     return true;
   }
+  const pinnedRemoval = context.operation().plan.fileDirectoryRemoval !== undefined;
+  if (pinnedRemoval && !context.fileman?.removeDirectory)
+    throw new DomainError('operation_uncertain');
+  if (
+    !options.backupBefore &&
+    context.fileman?.removeDirectory &&
+    (pinnedRemoval ||
+      (await supportsProviderFileOperations(
+        context.adapter,
+        context.server.pterodactyl_identifier ?? '',
+      )))
+  ) {
+    await context.fileman.removeDirectory({
+      target,
+      guardFile: 'server.properties',
+      validateGuard(contents) {
+        const configured = parseMinecraftProperties(contents)['level-name'] ?? 'world';
+        if (targetsConfiguredMinecraftWorld(configured, target)) fail('minecraft_world_selected');
+      },
+    });
+    await complete(context, step);
+    return true;
+  }
   async function assertInactiveTarget() {
     const { files, entries } = await prepareWorldFiles(context);
     if (!worldDirectoryEntry(entries, target)) throw new DomainError('not_found');
@@ -2372,7 +2398,10 @@ async function applyWorldContent(
   const onlineImport = minecraftContentAllowsOnline(prepared);
   const { files, entries: rootEntries } = preparedFiles ?? (await prepareWorldFiles(context));
   const originalTarget = worldDirectoryEntry(rootEntries, target);
-  if (context.operation().plan.minecraftWorldPrepared !== true) {
+  if (
+    context.operation().plan.minecraftWorldPrepared !== true &&
+    context.operation().plan.fileArchive === undefined
+  ) {
     if (Boolean(originalTarget) !== prepared.world.existing) throw new DomainError('conflict');
     planMinecraftWorldReplacement(target, Boolean(originalTarget), command.replace);
   }
@@ -2398,6 +2427,117 @@ async function applyWorldContent(
     )
     .digest('hex');
   const archivePath = prepared.archivePath;
+  const preparedWorld = prepared.world;
+  // Additive imports transfer one normalized compressed archive. Replacement
+  // retains its existing offline/backup recovery path and never borrows this path.
+  const pinnedArchive = context.operation().plan.fileArchive !== undefined;
+  if (pinnedArchive && (!verifiedArchive || !context.fileman?.uploadArchive))
+    throw new DomainError('operation_uncertain');
+  const tryArchiveTransfer = async () => {
+    if (
+      verifiedArchive &&
+      context.fileman?.uploadArchive &&
+      !preparedWorld.existing &&
+      !prepared.backupBefore &&
+      (pinnedArchive ||
+        (await supportsProviderFileOperations(
+          context.adapter,
+          context.server.pterodactyl_identifier ?? '',
+        )))
+    ) {
+      const [selected, snapshot] = await Promise.all([
+        inspectMinecraftWorldTransfer(archivePath, { targetWorld: target, verifiedArchive }),
+        readTextSnapshot(context, 'server.properties', files),
+      ]);
+      if (!snapshot) throw new DomainError('not_found');
+      const configured = parseMinecraftProperties(snapshot.content)['level-name'] ?? 'world';
+      if (targetsConfiguredMinecraftWorld(configured, target)) {
+        if (pinnedArchive) throw new DomainError('conflict');
+        return false; // Existing offline/compatible active-world workflow.
+      }
+      // Large ZIP64/manifest transfers retain the existing bounded staging path.
+      if (
+        selected.mappings.length > 10000 ||
+        Buffer.byteLength(JSON.stringify(selected.mappings)) > 3 * 1024 ** 2
+      ) {
+        if (pinnedArchive) throw new DomainError('operation_uncertain');
+        return false;
+      }
+      let stream: Awaited<ReturnType<typeof prepareArchiveTransfer>>;
+      try {
+        stream = await prepareArchiveTransfer(archivePath, selected.mappings, {
+          verification: verifiedArchive,
+        });
+      } catch (error) {
+        if (
+          !pinnedArchive &&
+          error instanceof DomainError &&
+          error.details?.contentReason === 'archive_zip64'
+        )
+          return false;
+        throw error;
+      }
+      try {
+        const transfer = await context.fileman.uploadArchive({
+          id: 'minecraft.world-import',
+          destinationRoot: target,
+          sourceSha256: stageOptions.archiveSha256,
+          files: stream.files,
+          contentLength: stream.contentLength,
+          open: () => stream.open(),
+          completion: stream.completion,
+          cancel: (reason) => stream.cancel(reason),
+          beforePublish: async (manifest) => {
+            // This small current configuration read is the game's only publication
+            // precondition; archive bytes/paths/admission belong to shared Fileman.
+            const current = await worldFileScope(context).read({
+              path: 'server.properties',
+              maxBytes: 1024 ** 2,
+            });
+            if (
+              !current ||
+              targetsConfiguredMinecraftWorld(
+                parseMinecraftProperties(Buffer.from(current).toString('utf8'))['level-name'] ??
+                  'world',
+                target,
+              )
+            )
+              throw new DomainError('conflict');
+            await beginContent(
+              context,
+              {
+                kind: 'world',
+                planDigest: digest,
+                filemanTransfer: {
+                  id: manifest.id,
+                  destinationRoot: target,
+                  digest: filemanTransferDigest(manifest),
+                },
+                files: manifest.files,
+                absentPaths: [],
+                wipes: [],
+                inventory: [],
+                removeInventoryPaths: [],
+              },
+              context.authorize,
+              true,
+            );
+          },
+        });
+        await verifyMinecraftPendingContent(context);
+        await context.event('minecraft.world.imported', {
+          world: target,
+          files: transfer.files,
+          levelDatSha256: selected.validation.sha256,
+        });
+        return true;
+      } finally {
+        stream.cancel();
+      }
+    }
+    return false;
+  };
+  if (await tryArchiveTransfer()) return true;
   const stage = async () => {
     try {
       await lstat(

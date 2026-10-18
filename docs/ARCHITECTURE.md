@@ -211,6 +211,14 @@ cached across calls. `GameLifecycleContext.fileman.uploadStaged` accepts an
 immutable relative-path/hash/size manifest and a lazy stream opener, under the
 real durable job's authority. It reuses Fileman's upload grants and ingestion
 admission, without creating an interactive session or exposing provider tokens.
+Additive archive imports use its optional `uploadArchive` service: one validated
+compressed stream, one durable provider commit, atomic receipt/admission settlement.
+`removeDirectory` binds a game-provided configuration guard to a generic provider
+inspection and idempotent deletion receipt. Both use the managed owner's Client
+credential and retain their transport during recovery. Private source seals avoid
+repeated whole-archive reads; validation remains in the streaming transfer.
+Terminal lifecycle transactions wake the existing authorized SSE stream through
+PostgreSQL; the browser retrieves the authoritative job before updating inventory.
 See [integration file services](GAME-INTEGRATIONS.md#fileman-host-services--m5-2026-10-18).
 
 The existing React Router route tree is mounted through its data router to use

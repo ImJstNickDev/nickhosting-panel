@@ -13,6 +13,7 @@ import {
   contentFileUnchanged,
   contentLimits,
   contentStageDirectory,
+  readArchiveFile,
   type StagedContentFile,
   visitArchive,
 } from '@nickhosting/content-providers';
@@ -324,6 +325,60 @@ export interface StagedMinecraftWorld {
   validation: MinecraftWorldValidation & { targetRelease: string; levelDatSha256: string };
   targetWorld: string;
   archiveSha256: string;
+}
+
+/** Select a world and decode only its metadata. Fileman's streaming archive
+ * writer validates every selected member while copying its compressed bytes. */
+export async function inspectMinecraftWorldTransfer(
+  archivePath: string,
+  options: {
+    targetWorld: string;
+    verifiedArchive: ContentFileVerification;
+    limits?: Partial<ContentLimits>;
+    nbtLimits?: Partial<MinecraftNbtLimits>;
+  },
+) {
+  const limits = contentLimits(options.limits);
+  const metadataLimits = nbtLimits(options.nbtLimits);
+  if (options.verifiedArchive.path !== resolve(archivePath)) fail('source');
+  await assertFileUnchanged(archivePath, options.verifiedArchive.identity);
+  const entries: { path: string; size: number; compressedSize: number; type: 'file' }[] = [];
+  await visitArchive(
+    archivePath,
+    async (file) => {
+      entries.push({
+        path: file.path,
+        size: file.size,
+        compressedSize: file.entry.compressedSize,
+        type: 'file',
+      });
+    },
+    limits,
+  );
+  const world = planMinecraftWorldImport(
+    entries.filter((entry) => !/(^|\/)session\.lock$/.test(entry.path)),
+    {
+      targetWorld: minecraftWorldName(options.targetWorld),
+      maxBytes: limits.maxExpandedBytes,
+      maxEntries: limits.maxEntries,
+      maxExpansionRatio: limits.maxCompressionRatio,
+    },
+  );
+  const level = world.files.find((file) => file.target === `${options.targetWorld}/level.dat`);
+  if (!level || level.size > metadataLimits.maxCompressedBytes) fail('level_data');
+  let data: Buffer | undefined;
+  await visitArchive(
+    archivePath,
+    async (file) => {
+      if (file.path === level.source)
+        data = await readArchiveFile(file, metadataLimits.maxCompressedBytes);
+    },
+    limits,
+  );
+  if (!data) fail('level_data');
+  const validation = inspectMinecraftLevelDat(data, { limits: metadataLimits });
+  await assertFileUnchanged(archivePath, options.verifiedArchive.identity);
+  return { mappings: world.files.map(({ source, target }) => ({ source, target })), validation };
 }
 export async function stageMinecraftWorld(
   archivePath: string,

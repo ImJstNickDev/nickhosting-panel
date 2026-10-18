@@ -1514,3 +1514,54 @@ Rollback: keep the additive schema and receipts. Prefer a forward correction;
 an older application does not honor the new pause flag, so do not roll back
 code on a live stack without an explicit plan to preserve automatic-start
 suppression. No production deployment was performed.
+
+
+## 2026-10-18 — World transfer redesign: development preparation
+
+The existing Owner authorization for Minecraft development migrations/restarts
+covers the development preparation below. A private `pg_dump -Fc` backup was
+validated with `pg_restore --list`; all 41 existing migration checksums matched
+source, with only `042_content_source_seals.sql` pending. The explicit runner
+applied exactly migration 042. It adds a nullable source-seal column and an object
+constraint; accounts, configuration, jobs and existing uploads were not reset.
+
+Commands executed, preserving every current environment overlay:
+
+```sh
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local build api
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local --profile tools run --rm --no-deps migrate
+```
+
+The one-off migration container was removed normally. API/worker source loads
+through the existing watchers; no explicit service restart/recreation was needed
+for this preparation. API, worker, Vite and web are healthy, HTTPS returns 200,
+and anonymous `/v1/me` returns 401. Existing networks and published ports remain
+unchanged. Worker quota remains 2 CPU; no game files or provider records were
+mutated. The old image and a private topology/database record are retained.
+
+The Owner approved the reviewed
+[extension-only update](../extensions/nickhosting/UPDATE-INSTALLED.md) and scoped
+rollback. It applied the pinned 1.6.0 package to twelve extension-owned files and
+ran only its additive receipt-table migration. The old files, owners and modes
+are preserved in a private rollback manifest. No native installer, global cache
+clearing, Panel/Wings restart or game-volume traversal ran. Unsupported bridge
+installations still retain the prior staged Fileman path. A real latency result
+requires an Owner import/delete test; fixture success and local streaming
+throughput do not establish a provider latency bound. The existing native
+installer remains blocked by its observed game-volume ownership bug.
+
+Rollback keeps additive migration 042 and the extension receipt table. Reconcile
+or finish new in-flight archive operations before reverting the application;
+older workers do not understand their pinned receipts. Do not reset the database,
+restore over new review data, or delete uncertain scratch automatically. The
+extension updater can restore only its own verified files from its private
+manifest. No production Compose deployment is included.
+
+Post-activation read-only smoke: authenticated discovery reports version 1.6.0
+and `fileOperations:true`; scoped capabilities report inspection, guarded delete
+and archive commit. A real inspection of an existing directory and
+`server.properties` matched the exact managed provider identity. Its first request
+took 356 ms; this is inspection latency only, not a deletion benchmark, and is
+additional evidence against claiming an already proven 300 ms end-to-end bound.
+No game mutation or new test world was performed. Existing development services
+remain healthy. The next Owner test can use the activated path immediately.

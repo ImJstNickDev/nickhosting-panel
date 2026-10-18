@@ -486,6 +486,7 @@ export function GameSections({
     confirmedUpdate?: GameSectionAcceptedOptions['confirmedUpdate'];
     quickUntil?: number;
   }>();
+  const [operationEventsConnected, setOperationEventsConnected] = useState(false);
   const operationId =
     trackedOperation?.serverId === serverId
       ? trackedOperation.id
@@ -543,6 +544,7 @@ export function GameSections({
       const interval =
         trackedOperation?.serverId === serverId &&
         trackedOperation.id === operationId &&
+        !operationEventsConnected &&
         Date.now() < (trackedOperation.quickUntil ?? 0)
           ? 250
           : 1000;
@@ -553,6 +555,47 @@ export function GameSections({
   });
   const operationState = operation.data?.state;
   const effectState = operation.data?.effectState;
+  const operationTerminal = operationState === 'succeeded' || operationState === 'failed';
+  useEffect(() => {
+    if (!canReadSection || !operationId || operationTerminal) return;
+    const queryKey = ['game-operation', serverId, operationId];
+    let closed = false;
+    const refresh = () => {
+      // A read already in flight may describe the state before the commit.
+      // Discard it before requesting the authoritative outcome after the hint.
+      void queryClient.cancelQueries({ queryKey, exact: true }).then(() => {
+        if (!closed) return queryClient.refetchQueries({ queryKey, exact: true });
+      });
+    };
+    const events = new EventSource(`/v1/servers/${serverId}/events/stream?after=latest`, {
+      withCredentials: true,
+    });
+    events.addEventListener('ready', () => {
+      setOperationEventsConnected(true);
+      refresh();
+    });
+    events.addEventListener('activity', (event: MessageEvent<string>) => {
+      try {
+        const value = JSON.parse(event.data) as Record<string, unknown>;
+        if (
+          value.server_id === serverId &&
+          value.job_id === operationId &&
+          ['servers.operation.succeeded', 'servers.operation.failed'].includes(
+            String(value.message_key),
+          )
+        )
+          refresh();
+      } catch {
+        // Malformed notifications cannot confirm an effect. Polling remains available.
+      }
+    });
+    events.onerror = () => setOperationEventsConnected(false);
+    return () => {
+      closed = true;
+      events.close();
+      setOperationEventsConnected(false);
+    };
+  }, [canReadSection, operationId, operationTerminal, serverId]);
   useEffect(() => {
     if (
       !canReadSection ||

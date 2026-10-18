@@ -94,6 +94,9 @@ export interface ExternalStopReceipt {
   action: 'stop' | 'kill';
 }
 export interface LifecycleOptions {
+  /** True only when the first-party file bridge checks managed ownership inside
+   * every provider mutation. Capability discovery itself grants no authority. */
+  supportsManagedFileOperations?: (serverId: string, db: Kysely<Database>) => Promise<boolean>;
   fileman?: (context: GameLifecycleContext) => FilemanJobServices;
   logger?: ReturnType<typeof createLogger>;
   adapter: PterodactylAdapter;
@@ -830,6 +833,9 @@ export async function processServerOperation(
             }),
           })
           .execute();
+        await sql`select pg_notify('nh_server_events_' || md5(current_database() || ':' || current_schema()), ${server.id})`.execute(
+          tx,
+        );
         await tx.deleteFrom('job_outbox').where('job_id', '=', jobId).execute();
         return true;
       });
@@ -851,6 +857,7 @@ export async function processServerOperation(
     const onlineWorldContent =
       operation.action === 'minecraft-content' &&
       minecraftContentAllowsOnline(operation.plan.minecraftContent);
+    let providerFileEffects = false;
     // Reuse only this locked delivery's identity proof for inactive-world file
     // operations. Long staging refreshes it; no proof crosses jobs or deliveries.
     let worldContentIdentity: { remote: ApplicationServer; checkedAt: number } | undefined;
@@ -917,16 +924,20 @@ export async function processServerOperation(
         phase === 'initial_start' ||
         phase === 'backup_resume' ||
         (phase === 'power' && ['start', 'restart'].includes(operation.action));
+      // Capability discovery can be followed by a legacy fallback. Only the
+      // guarded bridge effect validates provider identity inside its mutation.
+      const guardedDirectoryEffect = providerFileEffects && phase === 'fileman.directory.remove';
       // Stop preparation may share this attempt's initial identity for its internal
       // status relay. beforePower always rechecks identity after the socket handshake.
       // Start identity belongs after durable preparation, not before that await.
-      let verifiedServer = finalPowerIdentity
-        ? undefined
-        : (preparationServer ??
-          (onlineWorldContent ? await worldContentProvider() : undefined) ??
-          (operation.action !== 'provision' || server.pterodactyl_id !== null
-            ? await timed('provider_identity', () => ownedRemote(db, server, options))
-            : undefined));
+      let verifiedServer =
+        finalPowerIdentity || guardedDirectoryEffect
+          ? undefined
+          : (preparationServer ??
+            (onlineWorldContent ? await worldContentProvider() : undefined) ??
+            (operation.action !== 'provision' || server.pterodactyl_id !== null
+              ? await timed('provider_identity', () => ownedRemote(db, server, options))
+              : undefined));
       await update({
         phase,
         effect_state: 'prepared',
@@ -976,7 +987,7 @@ export async function processServerOperation(
           if (onlineWorldContent) {
             // Revalidate current local identity and policy after durable intent.
             // A changed mapping/ownership cannot borrow an earlier remote proof.
-            verifiedServer = await worldContentProvider();
+            if (!guardedDirectoryEffect) verifiedServer = await worldContentProvider();
             const current = await db
               .selectFrom('managed_servers')
               .selectAll()
@@ -986,10 +997,16 @@ export async function processServerOperation(
               current.active_operation_id !== jobId ||
               current.deleted_at ||
               current.owner_id !== server.owner_id ||
-              current.mapping_id !== server.mapping_id
+              current.mapping_id !== server.mapping_id ||
+              current.pterodactyl_id !== server.pterodactyl_id ||
+              current.pterodactyl_uuid !== server.pterodactyl_uuid ||
+              current.pterodactyl_identifier !== server.pterodactyl_identifier ||
+              current.external_id !== server.external_id ||
+              current.node_id !== server.node_id ||
+              current.provider_user_id !== server.provider_user_id
             )
               throw new DomainError('conflict');
-            await verifyManagedIdentity(db, current, verifiedServer);
+            if (verifiedServer) await verifyManagedIdentity(db, current, verifiedServer);
             await (options.authorizeIntent ?? options.authorizeEffect)(jobId, server.id, db);
           } else if (leanStart) {
             await timed('authorization', () =>
@@ -1941,6 +1958,26 @@ export async function processServerOperation(
         return operation.action === 'backup'
           ? recoverRejectedBackup()
           : finish(false, false, 'integration_unavailable');
+      // File-only jobs use the bridge's exact managed-owner check at the actual
+      // mutation boundary. They do not need a separate Application API inventory
+      // fetch (allocations/egg/resources) before entering that same boundary.
+      const filePlan = operation.plan.minecraftContent as
+        | { command?: { kind?: string }; world?: { existing?: boolean }; backupBefore?: boolean }
+        | undefined;
+      if (
+        onlineWorldContent &&
+        filePlan?.backupBefore === false &&
+        filePlan.command?.kind === 'world-remove' &&
+        (operation.phase === 'planned' || operation.plan.fileDirectoryRemoval !== undefined) &&
+        options.supportsManagedFileOperations &&
+        (await options.supportsManagedFileOperations(server.id, db))
+      ) {
+        if (!options.processGameContent) throw new DomainError('configuration_invalid');
+        providerFileEffects = true;
+        if (!(await options.processGameContent(gameContext())))
+          return wait('game_content_confirmation');
+        return finish(true);
+      }
       if (operation.action === 'delete') {
         const leasesExpired = await db.transaction().execute(async (tx) => {
           await lockResources(tx);

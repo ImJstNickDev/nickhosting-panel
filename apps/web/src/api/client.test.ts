@@ -1,7 +1,59 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { api, apiError, consumeEvents, download, readText, safeApiPath } from './client.js';
+import { api, apiError, consumeEvents, download, readText, safeApiPath, upload } from './client.js';
 
 afterEach(() => vi.unstubAllGlobals());
+it.each([
+  {
+    status: 200,
+    body: '{"id":"source","state":"ready"}',
+    expected: { id: 'source', state: 'ready' },
+  },
+  { status: 204, body: '', expected: undefined },
+])(
+  'preserves acknowledged upload metadata for HTTP $status',
+  async ({ status, body, expected }) => {
+    const send = vi.fn();
+    vi.stubGlobal(
+      'XMLHttpRequest',
+      class {
+        status = status;
+        responseText = body;
+        upload = {};
+        withCredentials = false;
+        onload?: () => void;
+        open = vi.fn();
+        setRequestHeader = vi.fn();
+        send(file: Blob) {
+          send(file);
+          this.onload?.();
+        }
+      },
+    );
+    const file = new Blob(['original bytes']);
+    await expect(upload('/v1/minecraft/sources/source/upload', file)).resolves.toEqual(expected);
+    expect(send).toHaveBeenCalledExactlyOnceWith(file);
+  },
+);
+it('rejects a malformed successful upload response instead of claiming a ready source', async () => {
+  vi.stubGlobal(
+    'XMLHttpRequest',
+    class {
+      status = 200;
+      responseText = '<html>unexpected proxy response</html>';
+      upload = {};
+      withCredentials = false;
+      onload?: () => void;
+      open = vi.fn();
+      setRequestHeader = vi.fn();
+      send() {
+        this.onload?.();
+      }
+    },
+  );
+  await expect(
+    upload('/v1/minecraft/sources/source/upload', new Blob(['bytes'])),
+  ).rejects.toMatchObject({ status: 200 });
+});
 it('submits a large native POST download and removes its temporary form without fetching ZIP bytes', () => {
   const form = { append: vi.fn(), remove: vi.fn() };
   const append = vi.fn();

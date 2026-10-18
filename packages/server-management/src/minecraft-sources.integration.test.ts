@@ -1,5 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  link,
+  lstat,
+  open,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { type ContentHttp, contentFileUnchanged } from '@nickhosting/content-providers';
 import { authSessionId } from '@nickhosting/core';
@@ -62,6 +73,7 @@ beforeEach(async () => {
   };
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   if (root) await rm(root, { recursive: true, force: true });
 });
 
@@ -93,6 +105,7 @@ describe('durable Minecraft archive source admission', () => {
     expect(await service.archiveResolver(source.id, otherServer)).toBe(resolved.path);
     // Binding is separate; a user's exact archive remains usable for another creation.
     expect(await service.resolveForCreation(source.id)).toEqual(resolved);
+    await chmod(resolved.path, 0o600);
     await writeFile(resolved.path, new Uint8Array(binary.length));
     await expect(service.resolveForCreation(source.id)).rejects.toThrow('conflict');
   });
@@ -109,6 +122,7 @@ describe('durable Minecraft archive source admission', () => {
     // The in-process proof is absent from public source data and becomes stale
     // immediately if local bytes change between resolution and staging.
     expect(await store().inspect(source.id)).not.toHaveProperty('verified');
+    await chmod(resolved.path, 0o600);
     await writeFile(resolved.path, new Uint8Array(binary.length));
     expect(await contentFileUnchanged(resolved.path, resolved.verified.identity)).toBe(false);
     await expect(store().worldArchiveResolver(source.id, await f.server())).rejects.toThrow(
@@ -122,7 +136,132 @@ describe('durable Minecraft archive source admission', () => {
       createMinecraftSourceStore(f.db, other.context, env).reserveUpload(uploadInput({ serverId })),
     ).rejects.toThrow('forbidden');
   });
-  it('bounds upload and source-hash authorization by elapsed time instead of chunk count', async () => {
+  it('seals successful ingress writes and resolves across store instances without another byte pass', async () => {
+    const serverId = await f.server();
+    const source = await store().reserveUpload(uploadInput({ kind: 'world', serverId }));
+    const probe = await open(join(root, 'read-probe'), 'w');
+    const reads = vi.spyOn(Object.getPrototypeOf(probe), 'createReadStream');
+    await probe.close();
+    const ready = await store().upload(source.id, stream(), binary.length);
+    expect(ready).toMatchObject({ state: 'ready', sha256: digest(binary), bytes: binary.length });
+    expect(ready).not.toHaveProperty('source_seal');
+    const path = join(resolve(root), source.id, 'archive.bin');
+    const info = await lstat(path, { bigint: true });
+    expect(info.mode & 0o777n).toBe(0o400n);
+    const row = await f.db
+      .selectFrom('minecraft_sources')
+      .select(['source_seal', 'identity_digest'])
+      .where('id', '=', source.id)
+      .executeTakeFirstOrThrow();
+    expect(row.source_seal).toMatchObject({
+      version: 1,
+      sourceId: source.id,
+      identityDigest: row.identity_digest,
+      sha256: digest(binary),
+      file: {
+        dev: String(info.dev),
+        ino: String(info.ino),
+        size: String(binary.length),
+        mtimeNs: String(info.mtimeNs),
+        ctimeNs: String(info.ctimeNs),
+      },
+    });
+    const first = await store().worldArchiveResolver(source.id, serverId);
+    const later = await store().worldArchiveResolver(source.id, serverId);
+    expect(first.path).toBe(path);
+    expect(later.sha256).toBe(digest(binary));
+    expect(later.verified?.identity.ino).toBe(info.ino);
+    expect(reads).not.toHaveBeenCalled();
+  });
+  it('fully verifies and seals legacy ready sources once without trusting the recorded digest alone', async () => {
+    const source = await store().reserveUpload(uploadInput());
+    await store().upload(source.id, stream(), binary.length);
+    await f.db
+      .updateTable('minecraft_sources')
+      .set({ source_seal: null })
+      .where('id', '=', source.id)
+      .execute();
+    const probe = await open(join(root, 'read-probe'), 'w');
+    const reads = vi.spyOn(Object.getPrototypeOf(probe), 'createReadStream');
+    await probe.close();
+    const resolved = await store().resolveForCreation(source.id);
+    expect(resolved.sha256).toBe(digest(binary));
+    expect(reads).toHaveBeenCalledTimes(1);
+    await store().resolveForCreation(source.id);
+    expect(reads).toHaveBeenCalledTimes(1);
+    await f.db
+      .updateTable('minecraft_sources')
+      .set({ source_seal: null })
+      .where('id', '=', source.id)
+      .execute();
+    await chmod(resolved.path, 0o600);
+    await writeFile(resolved.path, new Uint8Array(binary.length));
+    await expect(store().resolveForCreation(source.id)).rejects.toThrow('conflict');
+    expect(reads).toHaveBeenCalledTimes(2);
+    expect(
+      await f.db
+        .selectFrom('minecraft_sources')
+        .select('source_seal')
+        .where('id', '=', source.id)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ source_seal: null });
+  });
+  it.each(['write-restored-time', 'replacement', 'hardlink', 'permissions'] as const)(
+    'refuses a %s change to a sealed source without recertifying it',
+    async (change) => {
+      const source = await store().reserveUpload(uploadInput());
+      await store().upload(source.id, stream(), binary.length);
+      const resolved = await store().resolveForCreation(source.id);
+      const before = await lstat(resolved.path);
+      if (change === 'write-restored-time') {
+        await chmod(resolved.path, 0o600);
+        await writeFile(resolved.path, new Uint8Array(binary.length));
+        await utimes(resolved.path, before.atime, before.mtime);
+        await chmod(resolved.path, 0o400);
+      } else if (change === 'replacement') {
+        await rename(resolved.path, `${resolved.path}.old`);
+        await writeFile(resolved.path, binary, { flag: 'wx', mode: 0o400 });
+      } else if (change === 'hardlink') await link(resolved.path, `${resolved.path}.alias`);
+      else await chmod(resolved.path, 0o600);
+      const probe = await open(join(root, 'read-probe'), 'w');
+      const reads = vi.spyOn(Object.getPrototypeOf(probe), 'createReadStream');
+      await probe.close();
+      await expect(store().resolveForCreation(source.id)).rejects.toThrow('conflict');
+      expect(reads).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['version', 'sourceId', 'directory'] as const)(
+    'rejects invalid seal %s evidence without a hash fallback',
+    async (changed) => {
+      const source = await store().reserveUpload(uploadInput());
+      await store().upload(source.id, stream(), binary.length);
+      const row = await f.db
+        .selectFrom('minecraft_sources')
+        .select('source_seal')
+        .where('id', '=', source.id)
+        .executeTakeFirstOrThrow();
+      const seal = row.source_seal as Record<string, unknown>;
+      const invalid = {
+        ...seal,
+        ...(changed === 'version'
+          ? { version: 2 }
+          : changed === 'sourceId'
+            ? { sourceId: randomUUID() }
+            : { directory: { ...(seal.directory as Record<string, string>), ino: '0' } }),
+      };
+      await f.db
+        .updateTable('minecraft_sources')
+        .set({ source_seal: JSON.stringify(invalid) })
+        .where('id', '=', source.id)
+        .execute();
+      const probe = await open(join(root, 'read-probe'), 'w');
+      const reads = vi.spyOn(Object.getPrototypeOf(probe), 'createReadStream');
+      await probe.close();
+      await expect(store().resolveForCreation(source.id)).rejects.toThrow('conflict');
+      expect(reads).not.toHaveBeenCalled();
+    },
+  );
+  it('bounds streamed authorization by elapsed time and rechecks sealed resolution authority', async () => {
     const bytes = new Uint8Array(8 * 1024 ** 2).fill(37);
     const authorize = vi.fn<NonNullable<MinecraftSourceOptions['authorize']>>(
       (connection, previous) => currentInteractiveContext(connection, previous, env),
@@ -145,7 +284,7 @@ describe('durable Minecraft archive source admission', () => {
     const uploadStarted = performance.now();
     expect((await service.upload(source.id, body, bytes.length)).state).toBe('ready');
     const uploadMs = performance.now() - uploadStarted;
-    // 2,048 body chunks plus 128 hash chunks must not each query authorization.
+    // 2,048 body chunks must not each query authorization.
     expect(authorize.mock.calls.length).toBeLessThanOrEqual(6 + Math.ceil(uploadMs / 500) * 2);
     authorize.mockClear();
     const resolveStarted = performance.now();
@@ -154,7 +293,7 @@ describe('durable Minecraft archive source admission', () => {
     expect(authorize.mock.calls.length).toBeLessThanOrEqual(2 + Math.ceil(resolveMs / 500) * 2);
     expect(authorize.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
-  it('rechecks authority at the end of a quick hash before resolving a ready source', async () => {
+  it('rechecks authority after verifying the seal before resolving a ready source', async () => {
     const service = store();
     const source = await service.reserveUpload(uploadInput());
     await service.upload(source.id, stream(), binary.length);
@@ -214,6 +353,7 @@ describe('durable Minecraft archive source admission', () => {
     await expect(
       createMinecraftSourceStore(f.db, other.context, env).resolveForServer(source.id, serverId),
     ).rejects.toThrow('forbidden');
+    await chmod(resolved.path, 0o600);
     await writeFile(resolved.path, new Uint8Array(binary.length));
     await expect(service.resolveForServer(source.id, serverId)).rejects.toThrow('conflict');
   });

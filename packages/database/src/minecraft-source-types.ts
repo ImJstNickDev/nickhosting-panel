@@ -32,6 +32,8 @@ export interface MinecraftSourceTables {
     reserved_bytes: string;
     expected_hashes: ColumnType<unknown, string, string>;
     actual_sha256: string | null;
+    /** Private immutable source seal; never accepted from a browser or exposed in DTOs. */
+    source_seal: ColumnType<unknown | null, string | null | undefined, string | null>;
     storage_root: string;
     provider_project_id: string | null;
     provider_version_id: string | null;

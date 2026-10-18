@@ -62,6 +62,27 @@ export interface FilemanTransferReceipt {
  * replacement consent and selection. One manifest per operation, reused unchanged
  * on recovery. An interrupted write is never blindly replayed. */
 export interface FilemanJobServices {
+  /** Delete one inactive top-level directory. The game interprets its small
+   * configuration file; Fileman owns the identity, effect receipt and transport. */
+  removeDirectory?(input: {
+    target: string;
+    guardFile: string;
+    validateGuard(contents: string): void;
+  }): Promise<void>;
+  /** Bulk tree transfer. Core owns staging, provider transport and recovery;
+   * the compiled integration owns file selection and its final content guard. */
+  uploadArchive?(input: {
+    id: string;
+    destinationRoot: string;
+    sourceSha256: string;
+    files: readonly { path: string; size: number }[];
+    contentLength: number;
+    open(): ReadableStream<Uint8Array>;
+    completion: Promise<{ files: { path: string; size: number; sha256: string }[]; bytes: number }>;
+    cancel?(reason?: unknown): void;
+    beforePublish(manifest: FilemanTransferManifest): Promise<void>;
+    beforeWrite?: () => Promise<void>;
+  }): Promise<FilemanTransferReceipt & { manifest: FilemanTransferManifest }>;
   uploadStaged(
     input: FilemanTransferManifest & {
       open(path: string): Promise<ReadableStream<Uint8Array>>;
