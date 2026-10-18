@@ -13088,3 +13088,37 @@ Read-only database verification confirms the tested server is offline/sleeping
 with no active operation remaining. Independent timing review checked overlap,
 outcomes and limitations. Only existing logs and selected development records
 were read; no new instrumentation, test mutation or restart occurred.
+
+### Minecraft content navigation split — 2026-10-18
+
+M5 navigation-only pass on `milestone/m5-webpanel`, PR #21. Settings, Players and
+Worlds retain their current screens. Content becomes runtime-filtered Mods and
+Plugins, plus inventory-only Datapacks and the existing Modpacks workflow. Shared
+SDK guards apply to both navigation and direct URLs, without new provider reads.
+Old Content links redirect to Modpacks with query/hash retained. Existing category
+behaviour, runtime rollout and production-release boundaries are unchanged; this
+is not evidence for a complete mod/plugin/datapack catalogue or installer.
+
+Validation on the final source:
+
+- `scripts/dev.sh pnpm exec vitest run packages/game-sdk/src/ui.test.ts games/minecraft/src/ui/ui.test.ts apps/web/src/features/game-ui.test.ts`: **49 passed**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-settings.browser.test.ts -t 'separates content navigation'`: **1 passed, 5 intentionally unselected**, in Chromium; repeated with `NH_BROWSER=firefox`: **1 passed, 5 unselected**. Both cover EN/IT, desktop/mobile, keyboard navigation, blocked direct URLs without profile reads, legacy redirect and automated WCAG-tagged axe checks with zero violations.
+- Same browser command with `apps/web/tests/minecraft.browser.test.ts -t 'keeps Vanilla mod controls absent'`: **1 passed, 2 unselected**, exercising actual handlers/durable jobs, verification, backup and modpack replacement against isolated provider fixtures.
+- `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm i18n:check`, targeted Biome checks, `scripts/dev.sh pnpm build`, `git diff --check` and `python3 scripts/check-governance.py`: passed. Build retains large-chunk advisory warnings.
+- Initial unit run exposed an outdated Worlds fixture that granted read permission while expecting refusal; corrected to deny read and rerun successfully. An extra `games/minecraft/src/manifest.test.ts` filter matched no test file; it contributes no test evidence.
+
+Independent technical and rendered UX/content review found no must-fix findings;
+a stale documentation reference was corrected. Reviewed sanitized screenshots:
+[desktop EN](screenshots/m5/minecraft-content-tabs-desktop-en.png) and
+[mobile IT](screenshots/m5/minecraft-content-tabs-mobile-it.png).
+
+Browser/API verification uses existing isolated test PostgreSQL and synthetic
+provider/files, not real game-server mutations. Temporary test schemas/staging were
+cleaned by the fixtures. Existing dev Vite/API/worker/web remain healthy; source HMR
+loaded the changes without a container rebuild/restart. Read-only HTTPS requests
+for the Minecraft UI module and its new shared content declarations both returned
+HTTP 200 through the existing development ingress. The previously documented
+Gateway health condition is unchanged and outside this pass. No production,
+Blueprint, Wings, DNS, network, credential or persistent review-data changes.
+Rollback: revert this scoped commit; no migration or dependency update is needed.
+PR #21 stays open and unmerged. Individual category development awaits Owner direction.

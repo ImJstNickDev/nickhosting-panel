@@ -76,7 +76,7 @@ describe('trusted game frontend rendering', () => {
     expect(markup).toContain('https://www.minecraft.net/en-us/eula');
     expect(markup).not.toContain('format="uuid"');
     const fields = minecraftUiModule.descriptor.sections
-      .find((section) => section.id === 'content')
+      .find((section) => section.id === 'modpacks')
       ?.forms.find((form) => form.id === 'replace-pack')?.fields;
     expect(fields).toBeDefined();
     const replacement = render(
@@ -177,10 +177,10 @@ describe('trusted game frontend rendering', () => {
     expect(markup).toContain('min="2"');
     expect(markup).toContain('max="16"');
   });
-  it('shows authorization refusal before attempting manager-only section data', () => {
+  it('shows authorization refusal before attempting section data without read permission', () => {
     const query = new QueryClient();
     query.setQueryData(['server', 'server-id'], {
-      permissions: { read: true, manage: false, operate: false },
+      permissions: { read: false, manage: false, operate: false },
     });
     const markup = render(
       h(GameSections, { serverId: 'server-id', sectionId: 'worlds', gameId: 'minecraft' }),

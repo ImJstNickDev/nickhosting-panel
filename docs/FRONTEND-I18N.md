@@ -222,7 +222,7 @@ During a provider-confirmed stopping state it becomes Kill, enabled only for an
 eligible current NickHosting stop operation. Force-stop confirmation explains the
 risk of unsaved/corrupted data and binds to that exact operation; a changed state
 or operation closes it. Status is an informational tab after
-all game sections (after Content for Minecraft); its URL is `/servers/:id/status`.
+all game sections (after the integration tab); its URL is `/servers/:id/status`.
 The server root replaces history with `/console` when console capability or operate
 permission is available. An operator without console capability retains lifecycle
 controls without an unsupported stream; a viewer with neither falls back to Status.
@@ -1245,3 +1245,14 @@ configured world and all operations that the current state/permissions cannot
 perform. Request acceptance does not mean import/switch/deletion has completed.
 Unknown submission outcomes retain a frozen idempotency key and payload for
 explicit receipt recovery, with no automatic replay under a new identity.
+
+### Minecraft content tabs — M5, 2026-10-18
+
+Within Minecraft, Settings, Players and Worlds retain their existing screens.
+Content becomes Mods / Plugins / Datapacks / Modpacks (Italian: Mod / Plugin /
+Datapack / Modpack). Runtime-inapplicable Mods/Plugins tabs are omitted; their
+direct URLs cannot load the section. The secondary navigation remains scrollable
+on narrow screens and keyboard-accessible. Existing Content bookmarks redirect
+to Modpacks. This is a navigation and inventory separation, without category
+redesign, new catalogues or installation claims; see the [scope and capability
+boundary](GAME-INTEGRATIONS.md#minecraft-content-navigation-split--m5-2026-10-18).

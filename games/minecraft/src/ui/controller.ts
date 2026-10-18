@@ -1,5 +1,8 @@
 import type { GameUiClient, UiOption, UiValues } from '@nickhosting/game-sdk/ui';
 import { z } from 'zod';
+import { minecraftContentCapabilities } from '../content-capabilities.js';
+
+export { minecraftContentCapabilities } from '../content-capabilities.js';
 
 const uuid = z.uuid();
 const key = z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/);
@@ -246,12 +249,6 @@ export class MinecraftUiError extends Error {
   ) {
     super(code);
   }
-}
-export function minecraftContentCapabilities(runtime: MinecraftUiChoice['runtime']) {
-  return {
-    mods: runtime === 'fabric' || runtime === 'forge',
-    plugins: runtime === 'paper' || runtime === 'folia',
-  };
 }
 /** Release chronology is independent of release kind; unknown dates stay last. */
 export function minecraftCatalogOptions(

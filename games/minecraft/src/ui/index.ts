@@ -7,6 +7,7 @@ import {
   type UiSectionData,
 } from '@nickhosting/game-sdk/ui';
 import { z } from 'zod';
+import { minecraftContentRuntimes } from '../content-capabilities.js';
 import { minecraftPropertyEnumName } from '../property-enums.js';
 import {
   createMinecraftUiController,
@@ -116,7 +117,10 @@ const translated: Record<string, [string, string]> = {
   'sections.properties': ['Settings', 'Impostazioni'],
   'sections.players': ['Players', 'Giocatori'],
   'sections.worlds': ['Worlds', 'Mondi'],
-  'sections.content': ['Content', 'Contenuti'],
+  'sections.mods': ['Mods', 'Mod'],
+  'sections.plugins': ['Plugins', 'Plugin'],
+  'sections.datapacks': ['Datapacks', 'Datapack'],
+  'sections.modpacks': ['Modpacks', 'Modpack'],
   'forms.properties': ['Server properties', 'Proprietà del server'],
   'forms.player': ['Player access', 'Accesso giocatori'],
   'forms.selectWorld': ['Select world', 'Seleziona mondo'],
@@ -432,8 +436,67 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
       forms: [],
     },
     {
-      id: 'content',
-      titleKey: k('sections.content'),
+      id: 'mods',
+      titleKey: k('sections.mods'),
+      loader: 'content',
+      runtimeIds: [...minecraftContentRuntimes.mods],
+      requiredPermissions: ['server:read'],
+      requiredCapabilities: ['files'],
+      columns: [
+        { id: 'path', labelKey: k('fields.path') },
+        { id: 'installed_at', labelKey: k('fields.installedAt'), format: 'date' },
+      ],
+      forms: [
+        {
+          id: 'remove-content',
+          titleKey: k('forms.removeContent'),
+          fields: [
+            field('provider', {
+              type: 'choice',
+              required: true,
+              options: [
+                { value: 'modrinth', label: 'Modrinth' },
+                { value: 'curseforge', label: 'CurseForge' },
+              ],
+            }),
+            field('projectId', { type: 'text', maxLength: 128, required: true }),
+          ],
+          action: action('remove', 'mods', {
+            destructive: true,
+            confirmationKey: k('warnings.removeContent'),
+          }),
+        },
+      ],
+    },
+    {
+      id: 'plugins',
+      titleKey: k('sections.plugins'),
+      loader: 'content',
+      runtimeIds: [...minecraftContentRuntimes.plugins],
+      requiredPermissions: ['server:read'],
+      requiredCapabilities: ['files'],
+      columns: [
+        { id: 'path', labelKey: k('fields.path') },
+        { id: 'installed_at', labelKey: k('fields.installedAt'), format: 'date' },
+      ],
+      forms: [],
+    },
+    {
+      id: 'datapacks',
+      titleKey: k('sections.datapacks'),
+      loader: 'content',
+      requiredPermissions: ['server:read'],
+      requiredCapabilities: ['files'],
+      columns: [
+        { id: 'path', labelKey: k('fields.path') },
+        { id: 'installed_at', labelKey: k('fields.installedAt'), format: 'date' },
+      ],
+      forms: [],
+    },
+    {
+      id: 'modpacks',
+      aliases: ['content'],
+      titleKey: k('sections.modpacks'),
       loader: 'content',
       requiredPermissions: ['server:read'],
       requiredCapabilities: ['files'],
@@ -475,25 +538,6 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
           action: action('replace', 'files', {
             destructive: true,
             confirmationKey: k('warnings.replacePack'),
-          }),
-        },
-        {
-          id: 'remove-content',
-          titleKey: k('forms.removeContent'),
-          fields: [
-            field('provider', {
-              type: 'choice',
-              required: true,
-              options: [
-                { value: 'modrinth', label: 'Modrinth' },
-                { value: 'curseforge', label: 'CurseForge' },
-              ],
-            }),
-            field('projectId', { type: 'text', maxLength: 128, required: true }),
-          ],
-          action: action('remove', 'mods', {
-            destructive: true,
-            confirmationKey: k('warnings.removeContent'),
           }),
         },
       ],
@@ -783,7 +827,20 @@ export const minecraftUiModule = defineTrustedGameUiModule({
       );
       return {
         values: { wipeConsent: false, backupBefore: true },
-        rows: profile.content,
+        // These are the existing tracked installation receipts, not a new scan.
+        // Pack inventory remains complete; individual categories are projections.
+        rows: profile.content.filter((item) => {
+          switch (context.values.sectionId) {
+            case 'mods':
+              return item.path.startsWith('mods/');
+            case 'plugins':
+              return item.path.startsWith('plugins/');
+            case 'datapacks':
+              return /^[^/]+\/datapacks\//.test(item.path);
+            default:
+              return true;
+          }
+        }),
         metadata: {
           installed: profile.installed,
           ...minecraftContentCapabilities(profile.runtime),

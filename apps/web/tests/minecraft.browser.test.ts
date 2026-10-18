@@ -155,6 +155,7 @@ describe('M5 Minecraft browser management through actual API and durable jobs', 
 
   it('keeps Vanilla mod controls absent and verifies explicit modpack replacement with a backup', async () => {
     await user.goto(`${base}/content`);
+    await browserExpect(user).toHaveURL(`${base}/modpacks`);
     await browserExpect(section('Remove content')).toHaveCount(0);
     await operation(() =>
       section('Verify installation')

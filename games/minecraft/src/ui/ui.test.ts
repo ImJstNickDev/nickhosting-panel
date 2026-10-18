@@ -1,4 +1,4 @@
-import type { GameUiClient } from '@nickhosting/game-sdk/ui';
+import { availableGameUiSections, type GameUiClient } from '@nickhosting/game-sdk/ui';
 import { describe, expect, it, vi } from 'vitest';
 import {
   createMinecraftUiController,
@@ -52,6 +52,69 @@ describe('Minecraft browser module and exact API contracts', () => {
     expect(minecraftUiModule.descriptor.creation.fields.some((f) => f.id === 'protocol')).toBe(
       false,
     );
+  });
+  it('splits content navigation by declared runtime without changing runtime eligibility', () => {
+    const sections = (runtimeId: string) =>
+      availableGameUiSections(minecraftUiModule, {
+        runtimeId,
+        permissions: ['server:read'],
+        capabilities: { files: true, players: true, worlds: true, mods: true },
+      }).map((section) => section.id);
+    expect(sections('vanilla')).toEqual([
+      'properties',
+      'players',
+      'worlds',
+      'datapacks',
+      'modpacks',
+    ]);
+    for (const runtime of ['fabric', 'forge']) {
+      expect(sections(runtime)).toContain('mods');
+      expect(sections(runtime)).not.toContain('plugins');
+    }
+    for (const runtime of ['paper', 'folia']) {
+      expect(sections(runtime)).toContain('plugins');
+      expect(sections(runtime)).not.toContain('mods');
+    }
+    const packs = minecraftUiModule.descriptor.sections.find(
+      (section) => section.id === 'modpacks',
+    );
+    expect(packs?.aliases).toEqual(['content']);
+    expect(packs?.forms.map((form) => form.id)).toEqual(['verify', 'replace-pack']);
+    expect(
+      minecraftUiModule.descriptor.sections.find((section) => section.id === 'datapacks')?.forms,
+    ).toEqual([]);
+  });
+  it('projects the existing tracked inventory without scanning files or duplicating requests', async () => {
+    const client = clientFixture();
+    const paths = [
+      'mods/example.jar',
+      'plugins/example.jar',
+      'world/datapacks/example.zip',
+      'config/example.properties',
+      'mods-other/example.jar',
+    ];
+    client.request.mockResolvedValue({
+      ...profile,
+      content: paths.map((path) => ({ path, artifact: {}, installed_at: '2026-10-18T00:00:00Z' })),
+    });
+    for (const [sectionId, expected] of [
+      ['mods', [paths[0]]],
+      ['plugins', [paths[1]]],
+      ['datapacks', [paths[2]]],
+      ['modpacks', paths],
+    ] as const) {
+      client.request.mockClear();
+      const result = (await minecraftUiModule.handlers.content?.(client, {
+        serverId,
+        values: { sectionId },
+      })) as { rows: { path: string }[] };
+      expect(result.rows.map((row) => row.path)).toEqual(expected);
+      expect(client.request).toHaveBeenCalledTimes(1);
+      expect(client.request).toHaveBeenCalledWith(
+        `/v1/servers/${serverId}/minecraft`,
+        expect.any(Object),
+      );
+    }
   });
   it('uses only eligible opaque public choices and strips technical metadata', async () => {
     const client = clientFixture(),

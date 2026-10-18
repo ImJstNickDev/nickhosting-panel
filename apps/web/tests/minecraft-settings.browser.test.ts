@@ -80,6 +80,64 @@ describe('Minecraft settings browser journeys', () => {
     );
   }
 
+  it('separates content navigation, preserves old links and does not load unavailable sections', async () => {
+    await page.goto(`${fixture.origin}${base()}/datapacks`);
+    const tabs = page.getByRole('navigation', { name: 'Minecraft', exact: true });
+    await browserExpect(tabs.getByRole('link')).toHaveText([
+      'Settings',
+      'Players',
+      'Worlds',
+      'Datapacks',
+      'Modpacks',
+    ]);
+    await browserExpect(
+      page.getByRole('heading', { name: 'Datapacks', exact: true }),
+    ).toBeVisible();
+    await screenshot('minecraft-content-tabs-desktop-en');
+    await accessible();
+    await page.goto(`${fixture.origin}${base()}/content?source=bookmark#inventory`);
+    await browserExpect(page).toHaveURL(
+      `${fixture.origin}${base()}/modpacks?source=bookmark#inventory`,
+    );
+    await browserExpect(
+      page.getByRole('heading', { name: 'Replace modpack', exact: true }),
+    ).toBeVisible();
+    let profileReads = 0;
+    const countRead = (request: import('@playwright/test').Request) => {
+      if (request.method() === 'GET' && new URL(request.url()).pathname === profilePath())
+        profileReads++;
+    };
+    page.on('request', countRead);
+    await page.goto(`${fixture.origin}${base()}/mods`);
+    await browserExpect(
+      page.getByText('This game section is not available.', { exact: true }),
+    ).toBeVisible();
+    expect(profileReads).toBe(0);
+    page.off('request', countRead);
+    await journeyRequest(fixture, page, '/api/auth/update-user', { locale: 'it' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${fixture.origin}${base()}/datapacks`);
+    await browserExpect(tabs.getByRole('link')).toHaveText([
+      'Impostazioni',
+      'Giocatori',
+      'Mondi',
+      'Datapack',
+      'Modpack',
+    ]);
+    await tabs.getByRole('link', { name: 'Modpack', exact: true }).focus();
+    await page.keyboard.press('Enter');
+    await browserExpect(page).toHaveURL(`${fixture.origin}${base()}/modpacks`);
+    await tabs.getByRole('link', { name: 'Datapack', exact: true }).click();
+    await browserExpect(page.getByRole('heading', { name: 'Datapack', exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      390,
+    );
+    await screenshot('minecraft-content-tabs-mobile-it');
+    await accessible();
+    await journeyRequest(fixture, page, '/api/auth/update-user', { locale: 'en' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+  });
+
   it('groups Minecraft navigation and saves only changed supported fields through the real job', async () => {
     await page.goto(`${fixture.origin}/servers/${provider.ids.serverId}/settings`);
     const top = page.getByRole('navigation', { name: 'Servers', exact: true });
@@ -89,7 +147,7 @@ describe('Minecraft settings browser journeys', () => {
     await top.getByRole('link', { name: 'Minecraft', exact: true }).click();
     await browserExpect(page).toHaveURL(`${fixture.origin}${base()}/properties`);
     const tabs = page.getByRole('navigation', { name: 'Minecraft', exact: true });
-    await browserExpect(tabs.getByRole('link')).toHaveCount(4);
+    await browserExpect(tabs.getByRole('link')).toHaveCount(5);
     await tabs.getByRole('link', { name: 'Players', exact: true }).click();
     await browserExpect(page).toHaveURL(`${fixture.origin}${base()}/players`);
     await page.goto(`${fixture.origin}${base()}/properties`);

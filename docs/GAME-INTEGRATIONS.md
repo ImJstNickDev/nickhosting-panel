@@ -368,7 +368,8 @@ The shared server shell groups each integration's declared sections beneath its
 translated game name. Existing `/servers/:id/game/:sectionId` links remain valid;
 `/servers/:id/game` opens the first section available to the user's permissions
 and server capabilities. The current Minecraft subsections are Settings, Players,
-Worlds and Content. Only the active section loads. Generic Files, Backups,
+Worlds, Mods, Plugins, Datapacks and Modpacks. Mods and Plugins appear only for
+their declared runtimes. Only the active section loads. Generic Files, Backups,
 Connection and Automation retain their existing places and authority.
 
 A form can declare a bounded `renderer` key resolved only through bundled
@@ -583,3 +584,24 @@ stream through one shared PostgreSQL listener per API pool. Notifications are
 hints: the browser rereads the durable job, then updates confirmed inventory.
 Resumable cursors and an initial ready notification close reconnect races. Local
 job polling remains a fallback; no provider polling is added.
+
+### Minecraft content navigation split — M5, 2026-10-18
+
+The former Content section is split into Mods, Plugins, Datapacks and Modpacks;
+Worlds remains the existing single workspace. The trusted UI descriptor accepts
+optional `runtimeIds` and bounded, unambiguous route `aliases`. Navigation and
+section loaders share the same permission, capability and runtime filter. These
+are presentation rules, not authorization or runtime rollout approval. Minecraft's
+manifest and UI reuse one content-runtime declaration: Fabric/Forge for Mods,
+Paper/Folia for Plugins. Vanilla displays neither. No provider request is added
+for navigation and no runtime eligibility is changed.
+
+`/servers/:id/game/content` redirects with history replacement to `modpacks`,
+preserving query/hash. Existing verification and pack replacement remain there;
+the existing mod removal form moves to Mods. The category lists project the
+existing tracked installation inventory by path; Modpacks retains the complete
+pack inventory. They do not scan manually uploaded files or add installation,
+discovery, update or version-compatibility behavior. Datapacks is an inventory-only
+section at this stage, including on historical versions: its presence does not
+claim that such versions can install or run datapacks. Category-specific workflows
+and version eligibility will be addressed individually under Owner direction.

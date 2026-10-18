@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   actionAvailability,
+  availableGameUiSections,
   createTrustedGameUiRegistry,
   defineTrustedGameUiModule,
   gameUiDescriptorSchema,
@@ -168,6 +169,96 @@ describe('browser game UI descriptors', () => {
       'static-host-port',
       'custom-subdomain',
     ]);
+  });
+  it('accepts bounded runtime allowlists and rejects ambiguous section route aliases', () => {
+    const descriptor = fixture();
+    const section = descriptor.sections[0];
+    if (!section) throw new Error('missing fixture section');
+    expect(section.aliases).toEqual([]);
+    expect(section.runtimeIds).toBeUndefined();
+    const parse = (sections: unknown[]) =>
+      gameUiDescriptorSchema.safeParse({ ...descriptor, sections });
+    expect(
+      parse([{ ...section, runtimeIds: ['arena-classic', 'arena-next'], aliases: ['old-arena'] }])
+        .success,
+    ).toBe(true);
+    for (const runtimeIds of [
+      [],
+      ['arena-classic', 'arena-classic'],
+      ['https://example.test/runtime'],
+      Array.from({ length: 33 }, (_, index) => `runtime-${index}`),
+    ])
+      expect(parse([{ ...section, runtimeIds }]).success).toBe(false);
+    for (const aliases of [
+      ['arena'],
+      ['old-arena', 'old-arena'],
+      ['../old-arena'],
+      Array.from({ length: 17 }, (_, index) => `old-${index}`),
+    ])
+      expect(parse([{ ...section, aliases }]).success).toBe(false);
+    expect(
+      parse([
+        { ...section, aliases: ['another'] },
+        { ...section, id: 'another' },
+      ]).success,
+    ).toBe(false);
+    expect(
+      parse([
+        { ...section, aliases: ['old-arena'] },
+        { ...section, id: 'another', aliases: ['old-arena'] },
+      ]).success,
+    ).toBe(false);
+  });
+  it('filters section navigation and aliases by every permission, capability and runtime guard', () => {
+    const source = moduleFixture();
+    const section = source.descriptor.sections[0];
+    if (!section) throw new Error('missing fixture section');
+    const module = defineTrustedGameUiModule({
+      ...source,
+      descriptor: gameUiDescriptorSchema.parse({
+        ...source.descriptor,
+        sections: [
+          {
+            ...section,
+            runtimeIds: ['arena-classic', 'arena-next'],
+            requiredPermissions: ['server:read', 'server:manage'],
+            aliases: ['old-arena'],
+          },
+          { ...section, id: 'common', requiredCapabilities: [] },
+        ],
+      }),
+    });
+    const context = {
+      runtimeId: 'arena-classic',
+      permissions: ['server:read', 'server:manage'],
+      capabilities: { arena: true },
+    };
+    expect(availableGameUiSections(module, context).map((item) => item.id)).toEqual([
+      'arena',
+      'common',
+    ]);
+    expect(
+      availableGameUiSections(module, { ...context, runtimeId: 'arena-next' }).map(
+        (item) => item.id,
+      ),
+    ).toEqual(['arena', 'common']);
+    for (const override of [
+      { runtimeId: 'unknown-runtime' },
+      { permissions: ['server:read'] },
+      { capabilities: null },
+      { capabilities: {} },
+      { capabilities: { arena: false } },
+      { capabilities: { arena: 'true' } },
+    ]) {
+      const available = availableGameUiSections(module, { ...context, ...override });
+      expect(available.map((item) => item.id)).toEqual(['common']);
+      expect(available.find((item) => item.aliases.includes('old-arena'))).toBeUndefined();
+    }
+    expect(availableGameUiSections(module, { ...context, permissions: [] })).toEqual([]);
+    expect(
+      availableGameUiSections(module, context).find((item) => item.aliases.includes('old-arena'))
+        ?.id,
+    ).toBe('arena');
   });
   it('rejects executable URLs, undeclared fields, duplicate ports and oversized lists', () => {
     const descriptor = fixture();

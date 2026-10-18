@@ -33,6 +33,7 @@ import {
 } from '../components/ui.js';
 import type { GameSectionAcceptedOptions, GameSectionViewProps } from './game-section-view.js';
 import {
+  availableGameSections,
   gameUiClient,
   gameUiRegistry,
   getGameFormView,
@@ -465,8 +466,13 @@ export function GameSections({
   const permissions = Object.entries(server.data?.permissions ?? {}).flatMap(([name, allowed]) =>
     allowed ? [`server:${name}`] : [],
   );
-  const canReadSection = Boolean(
+  const hasSectionPermission = Boolean(
     section?.requiredPermissions.every((permission) => permissions.includes(permission)),
+  );
+  const canReadSection = Boolean(
+    server.data &&
+      module &&
+      availableGameSections(server.data, module).some((candidate) => candidate.id === sectionId),
   );
   const loaded = useQuery({
     queryKey: ['game-section', serverId, gameId, sectionId],
@@ -476,7 +482,7 @@ export function GameSections({
     queryFn: ({ signal }) =>
       module?.handlers[section?.loader ?? '']?.(gameUiClient, {
         serverId,
-        values: {},
+        values: { sectionId: section?.id },
         signal,
       }) as Promise<UiSectionData>,
   });
@@ -679,7 +685,8 @@ export function GameSections({
   };
   if (server.isPending) return <Loading />;
   if (server.error && !server.data) return <ErrorNotice error={server.error} retry={retryReads} />;
-  if (!canReadSection) return <Notice>{t('gameUi.noPermission')}</Notice>;
+  if (!hasSectionPermission) return <Notice>{t('gameUi.noPermission')}</Notice>;
+  if (!canReadSection) return <Empty text={t('gameUi.missingSection')} />;
   if (loaded.isPending) return <Loading />;
   // Retain custom view state (including frozen uncertain submission keys) when a
   // background read fails. Stale data is visible, but mutations remain blocked.

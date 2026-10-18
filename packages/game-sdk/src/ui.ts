@@ -255,6 +255,10 @@ export const gameUiDescriptorSchema = z
             id,
             titleKey: key,
             loader: id,
+            /** Optional runtime allowlist; omitted sections apply to every runtime. */
+            runtimeIds: z.array(id).min(1).max(32).optional(),
+            /** Previous route identifiers, redirected to this canonical section. */
+            aliases: z.array(id).max(16).default([]),
             /** Bundled first-party section view; never executable code from metadata. */
             renderer: id.optional(),
             requiredPermissions: z
@@ -327,9 +331,11 @@ export const gameUiDescriptorSchema = z
       ['administration'],
     );
     unique(
-      d.sections.map((s) => s.id),
+      d.sections.flatMap((s) => [s.id, ...s.aliases]),
       ['sections'],
     );
+    for (const [index, section] of d.sections.entries())
+      if (section.runtimeIds) unique(section.runtimeIds, ['sections', index, 'runtimeIds']);
     unique(
       d.ports.map((p) => p.role),
       ['ports'],
@@ -600,6 +606,24 @@ export interface TrustedGameUiModule {
   assets?: Readonly<Record<string, string>>;
   /** Trusted integration owns avatar provider and bundled fallback; never API-supplied URLs. */
   playerAppearance?: { fallback: string; avatarUrl(name: string): string };
+}
+/** Presentation guards only; API handlers remain authoritative for authorization. */
+export function availableGameUiSections(
+  module: TrustedGameUiModule,
+  context: {
+    runtimeId: string;
+    permissions: readonly string[];
+    capabilities: Readonly<Record<string, unknown>> | null;
+  },
+) {
+  return module.descriptor.sections.filter(
+    (section) =>
+      (!section.runtimeIds || section.runtimeIds.includes(context.runtimeId)) &&
+      section.requiredPermissions.every((permission) => context.permissions.includes(permission)) &&
+      section.requiredCapabilities.every(
+        (capability) => context.capabilities?.[capability] === true,
+      ),
+  );
 }
 /** Call only with imports compiled into the application. API JSON cannot register executable modules. */
 export function defineTrustedGameUiModule(module: TrustedGameUiModule): TrustedGameUiModule {

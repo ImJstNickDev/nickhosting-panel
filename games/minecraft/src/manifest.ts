@@ -1,5 +1,6 @@
 import { gameManifestSchema } from '@nickhosting/game-sdk';
 import { minecraftProfiles } from './compatibility.js';
+import { minecraftContentCapabilities } from './content-capabilities.js';
 import { minecraftGatewayMessages } from './gateway-messages.js';
 import { minecraftImagePolicy } from './image-policy.js';
 
@@ -35,7 +36,7 @@ export const minecraftManifest = gameManifestSchema.parse({
     nameKey: `games.minecraft.runtimes.${id}`,
     supportedGameVersions: [],
     imagePolicy: minecraftImagePolicy,
-    supports: { mods: ['fabric', 'forge'].includes(id), plugins: ['paper', 'folia'].includes(id) },
+    supports: minecraftContentCapabilities(id),
   })),
   wizard: {
     steps: [

@@ -1,9 +1,28 @@
-import { createTrustedGameUiRegistry, type GameUiClient } from '@nickhosting/game-sdk/ui';
+import {
+  availableGameUiSections,
+  createTrustedGameUiRegistry,
+  type GameUiClient,
+} from '@nickhosting/game-sdk/ui';
 import { minecraftUiModule } from '@nickhosting/minecraft/ui';
 import { api, queryClient, upload } from '../api/client.js';
+import type { ServerInfo } from './service-contracts.js';
 
 /** Executable modules and artwork are build-time imports, never API URLs. */
 export const gameUiRegistry = createTrustedGameUiRegistry([minecraftUiModule]);
+export function availableGameSections(
+  server: ServerInfo,
+  module = gameUiRegistry.get(server.gameId),
+) {
+  return module
+    ? availableGameUiSections(module, {
+        runtimeId: server.runtimeId,
+        permissions: Object.entries(server.permissions).flatMap(([name, allowed]) =>
+          allowed ? [`server:${name}`] : [],
+        ),
+        capabilities: server.capabilities,
+      })
+    : [];
+}
 export const gameUiClient: GameUiClient = {
   request: api,
   upload,

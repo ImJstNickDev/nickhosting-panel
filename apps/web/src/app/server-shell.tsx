@@ -3,33 +3,17 @@ import { Navigate, NavLink, Outlet, useLocation, useMatch, useParams } from 'rea
 import { ApiError } from '../api/client.js';
 import { ErrorNotice, Loading } from '../components/ui.js';
 import { GameSections } from '../features/game-sections.js';
-import { gameUiRegistry, getGameSectionView } from '../features/integrations.js';
-import { type ServerInfo, useServer } from '../features/service-contracts.js';
+import {
+  availableGameSections,
+  gameUiRegistry,
+  getGameSectionView,
+} from '../features/integrations.js';
+import { useServer } from '../features/service-contracts.js';
 import './server-game.css';
 import { useT } from './i18n.js';
 
 function accessLost(error: unknown) {
   return error instanceof ApiError && [401, 403, 404].includes(error.status);
-}
-
-function availableGameSections(server: ServerInfo) {
-  const permissions = new Set(
-    Object.entries(server.permissions).flatMap(([name, allowed]) =>
-      allowed ? [`server:${name}`] : [],
-    ),
-  );
-  return (
-    gameUiRegistry
-      .get(server.gameId)
-      ?.descriptor.sections.filter(
-        (section) =>
-          section.requiredPermissions.every((permission) => permissions.has(permission)) &&
-          section.requiredCapabilities.every(
-            (capability) =>
-              server.capabilities?.[capability as keyof typeof server.capabilities] === true,
-          ),
-      ) ?? []
-  );
 }
 
 export function ServerShell() {
@@ -49,8 +33,11 @@ export function ServerShell() {
     server.data && gameRoute
       ? gameUiRegistry
           .get(server.data.gameId)
-          ?.descriptor.sections.find((section) => section.id === gameRoute.params.sectionId)
-          ?.renderer
+          ?.descriptor.sections.find(
+            (section) =>
+              section.id === gameRoute.params.sectionId ||
+              section.aliases.includes(gameRoute.params.sectionId ?? ''),
+          )?.renderer
       : undefined;
   // A transient background failure must not discard a custom view's request
   // receipt. Its section boundary shows the error and blocks mutations.
@@ -106,6 +93,7 @@ export function ServerShell() {
 }
 export function ServerGameSection() {
   const { serverId = '', sectionId = '' } = useParams(),
+    location = useLocation(),
     server = useServer(serverId),
     t = useT();
   if (server.isPending) return <Loading />;
@@ -113,13 +101,27 @@ export function ServerGameSection() {
     server.data &&
     gameUiRegistry
       .get(server.data.gameId)
-      ?.descriptor.sections.find((section) => section.id === sectionId)?.renderer;
+      ?.descriptor.sections.find(
+        (section) => section.id === sectionId || section.aliases.includes(sectionId),
+      )?.renderer;
   if (server.error && (!server.data || !getGameSectionView(renderer) || accessLost(server.error)))
     return <ErrorNotice error={server.error} retry={() => void server.refetch()} />;
 
   const game = gameUiRegistry.get(server.data.gameId);
   const sections = availableGameSections(server.data);
   if (!sectionId && sections?.[0]) return <Navigate to={sections[0].id} replace />;
+  const canonical = sections.find((section) => section.aliases.includes(sectionId));
+  if (canonical)
+    return (
+      <Navigate
+        to={{
+          pathname: `/servers/${serverId}/game/${canonical.id}`,
+          search: location.search,
+          hash: location.hash,
+        }}
+        replace
+      />
+    );
   return (
     <>
       {game && Boolean(sections?.length) && (
