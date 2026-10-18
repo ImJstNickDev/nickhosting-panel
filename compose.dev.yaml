@@ -123,6 +123,7 @@ services:
       retries: 5
   worker:
     <<: *app
+    cpus: 2
     command: [worker]
     depends_on:
       api: { condition: service_healthy }

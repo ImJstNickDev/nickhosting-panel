@@ -8,7 +8,9 @@ import { crc32, gunzipSync } from 'node:zlib';
 import {
   assertContentDiskSpace,
   type ContentDiskPolicy,
+  type ContentFileVerification,
   type ContentLimits,
+  contentFileUnchanged,
   contentLimits,
   contentStageDirectory,
   type StagedContentFile,
@@ -268,17 +270,7 @@ export function inspectMinecraftLevelDat(
   };
 }
 async function assertFileUnchanged(path: string, before: BigIntStats): Promise<void> {
-  const after = await lstat(path, { bigint: true });
-  if (
-    !after.isFile() ||
-    after.isSymbolicLink() ||
-    after.dev !== before.dev ||
-    after.ino !== before.ino ||
-    after.size !== before.size ||
-    after.mtimeNs !== before.mtimeNs ||
-    after.ctimeNs !== before.ctimeNs
-  )
-    fail('archive_changed');
+  if (!(await contentFileUnchanged(path, before))) fail('archive_changed');
 }
 async function fileDigest(
   path: string,
@@ -344,6 +336,8 @@ export async function stageMinecraftWorld(
     release: string;
     expectedDataVersion?: number;
     archiveSha256: string;
+    /** Trusted in-process source proof; never supplied by a request or persisted across jobs. */
+    verifiedArchive?: ContentFileVerification;
     limits?: Partial<ContentLimits>;
     nbtLimits?: Partial<MinecraftNbtLimits>;
     diskPolicy?: ContentDiskPolicy;
@@ -384,7 +378,21 @@ export async function stageMinecraftWorld(
   const planDigest = createHash('sha256').update(JSON.stringify(plan)).digest('hex');
   try {
     options.signal?.throwIfAborted();
-    const source = await fileDigest(archivePath, limits.maxArchiveBytes, options.signal);
+    const verified = options.verifiedArchive;
+    if (verified) {
+      if (
+        verified.path !== resolve(archivePath) ||
+        verified.sha256 !== options.archiveSha256 ||
+        !verified.identity.isFile() ||
+        verified.identity.isSymbolicLink() ||
+        verified.identity.size < 0n ||
+        verified.identity.size > limits.maxArchiveBytes
+      )
+        fail('archive_changed');
+      await assertFileUnchanged(archivePath, verified.identity);
+    }
+    const source =
+      verified ?? (await fileDigest(archivePath, limits.maxArchiveBytes, options.signal));
     if (source.sha256 !== options.archiveSha256) fail('archive_changed');
     const metadataPath = join(job, 'plan.json');
     if (await exists(metadataPath)) {
@@ -474,9 +482,9 @@ export async function stageMinecraftWorld(
         const hash = createHash('sha256');
         try {
           await pipeline(
-            await file.open(),
+            await file.open({ inflateChunkSize: 256 * 1024 }),
             new Transform({
-              highWaterMark: 64 * 1024,
+              highWaterMark: 256 * 1024,
               transform(chunk: Buffer, _encoding, callback) {
                 size += chunk.length;
                 if (size > file.size) {
@@ -488,7 +496,7 @@ export async function stageMinecraftWorld(
                 callback(null, chunk);
               },
             }),
-            createWriteStream(temporary, { flags: 'wx', mode: 0o600, highWaterMark: 64 * 1024 }),
+            createWriteStream(temporary, { flags: 'wx', mode: 0o600, highWaterMark: 256 * 1024 }),
             { signal: options.signal },
           );
           const sha256 = hash.digest('hex');

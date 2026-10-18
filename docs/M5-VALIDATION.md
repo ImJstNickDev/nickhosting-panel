@@ -12423,3 +12423,86 @@ provider mutation, game-server file operation, Blueprint update or infrastructur
 change occurred. The **15 s maximum / 5–10 s target remains to be measured on the
 Owner's next real import**; network throughput and provider rate-limit retries
 are not bounded by the local benchmark. SFTPGo #18 remains a release gate.
+
+
+### 2026-10-18 — World import: single source proof and native directory creation
+
+The Owner's subsequent real run succeeded on the previous revision in **11.812 s**:
+6.149 s before the transfer effect, 2.572 s from effect start to its first sent
+marker, 3.055 s through the last confirmed file, and 0.036 s finalization.
+It imported 101 files / 116,278,134 bytes in one delivery. Deletion succeeded in
+1.130 s, including a 318 ms provider-effect phase. These are observed previous-code
+results, not measurements of this new pass. The sent marker precedes HTTP dispatch,
+so its interval includes local guards and receipts rather than pure network time.
+
+Read-only staging timestamps locate about 3.04 s in extraction/manifest completion.
+The real archive uses DEFLATE; the earlier uncompressed benchmark is not equivalent.
+Directory receipts locate 0.606 s in root setup, 1.952 s in 13 descendant mkdir
+requests and 0.014 s before the first sent marker. Per-file timings do not separate
+socket time from reading, hashing, authorization and persistence; no invented
+atomic timings or additional runtime logging were introduced.
+
+The worker now passes its freshly verified source digest and file identity directly
+to staging. The proof lives only in memory; path, expected digest, type, size,
+inode/device and nanosecond change timestamps remain fenced before/after extraction.
+No second full ZIP hash is needed in the same delivery. Other callers retain the
+hashing fallback. This does not weaken per-file CRC/SHA verification or recovery.
+
+Destination root collision checks and durable ownership markers remain. The 13
+individual descendant mkdir calls are eliminated because the existing Wings upload
+already creates their parents. Read-only inspection matched the running image's
+revision to [Filesystem.Write](https://github.com/pterodactyl/wings/blob/71c5338549801ca1dde46919f3ea81500269264d/server/filesystem/filesystem.go#L129)
+and [UnixFS.Touch/MkdirAll](https://github.com/pterodactyl/wings/blob/71c5338549801ca1dde46919f3ea81500269264d/internal/ufs/fs_unix.go#L527).
+No Blueprint update or new endpoint is required. Upload concurrency, scheduling,
+per-file signed streams, admission and durable sent/done receipts are unchanged.
+The existing file manifest never promised empty-directory preservation.
+
+The Owner separately approved raising the dev worker from 1 to **2 CPU**. After
+checking its Compose identity, `docker update --cpus 2 nickhosting-dev-worker-1`
+applied the limit live; cgroup `cpu.max` became `200000 100000`. The container did
+not restart; RAM remains 512 MiB, mounts/networks/ports remain unchanged, and the
+Compose worker override preserves the limit. Rollback is documented in
+`M5-ENVIRONMENTS.md`; production configuration was not changed.
+
+World extraction now opts into 256 KiB DEFLATE output instead of 16 KiB, with
+bounded buffering, exact expanded sizes, CRC/SHA and complete abort/error cleanup.
+On a synthetic compressed fixture (101 files, 116,391,936 expanded bytes,
+81,747,238 ZIP bytes), three interleaved full preparation runs per revision on
+process affinity cores 0–1 gave:
+
+| Local source verification + staging | Before (`fb6f535`) | After |
+| --- | ---: | ---: |
+| Median elapsed | 2,319.73 ms | 2,054.70 ms |
+| Range | 2,000.71–3,728.14 ms | 1,620.19–2,061.36 ms |
+| Median CPU time | 2,882.33 ms | 2,529.76 ms |
+| Median final RSS | 146.48 MiB | 145.55 MiB |
+
+Median elapsed improved **11.4%**; CPU improved **12.2%**. Both variants include
+the source hash; only the new variant shares its proof with staging. The first
+baseline was slower, so median/range are retained rather than a cherry-picked
+cold-run ratio. These are local preparation timings, not end-to-end/provider
+results or a controlled before/after Docker CPU-quota experiment.
+A separate two-run-per-variant extraction experiment on the same two cores found
+concurrency 1 averaging 1,185.75 ms versus concurrency 2 averaging 1,154.65 ms
+(only 2.6%, overlapping ranges), with slightly higher CPU at concurrency 2.
+No extraction parallelism was introduced for that inconclusive gain. Synthetic
+fixtures were removed; no real server/source data was changed by benchmarks.
+
+Focused evidence (no historical full-suite rerun):
+
+- `scripts/dev.sh pnpm exec vitest run games/minecraft/src/world.test.ts packages/content-providers/src/archive.test.ts packages/content-providers/src/content.test.ts`: **104 passed**. Includes compressed/stored bytes, malformed DEFLATE, size mismatches, cancellation, proof mismatch, symlinks and recovery.
+
+- `scripts/dev.sh pnpm exec vitest run packages/content-providers/src/file-verification.test.ts`: **3 passed**, including same-size edits with restored mtime, replacement and symlinks.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-sources.integration.test.ts -t 'streams exact binary|retains per-server scope|bounds upload|quick hash|final upload chunk|stalled body|resolves a server-scoped|charged uncertain claim'`: **10 passed / 11 excluded**. Public source metadata excludes the proof; source changes invalidate it and current authority remains checked.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/fileman-transfers.integration.test.ts`: **9 passed**. Nested paths use only root mkdir; root collisions, grant failure/recovery, revocation and uncertain acknowledgements retain their boundaries.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-content.integration.test.ts -t 'imports a .* world online|removes an inactive world online'`: **5 passed / 43 excluded**, exercising the real source-store to staging composition against an isolated provider fixture.
+- Backend `tsc --noEmit` and changed-source Biome passed. An initial typecheck found unavailable stream/zlib type members; the implementation was corrected to use the typed pipeline API, then typecheck passed. Compose interpolation confirms worker 2 CPU / 512 MiB, only data/egress networks and no published ports.
+
+Independent technical review covered ephemeral proof reuse, malformed DEFLATE,
+size bounds, cancellation, directory creation and durable recovery; no must-fix
+findings remain. API/worker loaded source changes through their existing watchers
+and remained healthy; HTTPS returned 200 and unauthenticated `/v1/me` returned 401.
+No game-server files, Panel/Wings/Blueprint configuration, credentials, DNS or
+production resources were mutated. Tests use isolated schemas and disposable
+fixtures. SFTPGo #18 remains a separate release gate. Real-provider timings after
+this pass require the Owner's next import; no live test import was performed.

@@ -4,6 +4,7 @@ export * from './changes.js';
 export * from './contracts.js';
 export * from './curseforge.js';
 export * from './disk.js';
+export * from './file-verification.js';
 export * from './http.js';
 export * from './modpack.js';
 export * from './modrinth.js';

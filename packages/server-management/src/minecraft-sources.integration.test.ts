@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import type { ContentHttp } from '@nickhosting/content-providers';
+import { type ContentHttp, contentFileUnchanged } from '@nickhosting/content-providers';
 import { authSessionId } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -100,7 +100,17 @@ describe('durable Minecraft archive source admission', () => {
     const serverId = await f.server();
     const source = await store().reserveUpload(uploadInput({ kind: 'world', serverId }));
     await store().upload(source.id, stream(), binary.length);
-    expect((await store().worldArchiveResolver(source.id, serverId)).sha256).toBe(digest(binary));
+    const resolved = await store().worldArchiveResolver(source.id, serverId);
+    expect(resolved.sha256).toBe(digest(binary));
+    expect(resolved.verified?.sha256).toBe(resolved.sha256);
+    expect(resolved.verified?.path).toBe(resolved.path);
+    if (!resolved.verified) throw new Error('missing verification proof');
+    expect(await contentFileUnchanged(resolved.path, resolved.verified.identity)).toBe(true);
+    // The in-process proof is absent from public source data and becomes stale
+    // immediately if local bytes change between resolution and staging.
+    expect(await store().inspect(source.id)).not.toHaveProperty('verified');
+    await writeFile(resolved.path, new Uint8Array(binary.length));
+    expect(await contentFileUnchanged(resolved.path, resolved.verified.identity)).toBe(false);
     await expect(store().worldArchiveResolver(source.id, await f.server())).rejects.toThrow(
       'forbidden',
     );

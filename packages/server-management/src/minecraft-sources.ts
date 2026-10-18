@@ -4,7 +4,9 @@ import { lstat, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   type ContentArtifact,
+  type ContentFileVerification,
   type ContentHttp,
+  contentFileUnchanged,
   contentStageDirectory,
   hashesSchema,
   ModrinthProvider,
@@ -175,7 +177,10 @@ function sourceAuthorization(check: () => Promise<unknown>, signal?: AbortSignal
     return checking;
   };
 }
-async function hashSource(row: Source, authorize: (force?: boolean) => Promise<void>) {
+async function hashSource(
+  row: Source,
+  authorize: (force?: boolean) => Promise<void>,
+): Promise<ContentFileVerification> {
   await authorize();
   await contentStageDirectory(row.storage_root);
   const directory = join(row.storage_root, row.id);
@@ -183,8 +188,8 @@ async function hashSource(row: Source, authorize: (force?: boolean) => Promise<v
   if (!info.isDirectory() || info.isSymbolicLink()) throw new DomainError('conflict');
   const file = await open(sourcePath(row), constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
-    const before = await file.stat();
-    if (!before.isFile() || before.nlink !== 1 || before.size !== Number(row.declared_bytes))
+    const before = await file.stat({ bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || before.size !== BigInt(row.declared_bytes))
       throw new DomainError('conflict');
     const hashes = hashesSchema.parse(row.expected_hashes);
     const checks = Object.fromEntries(
@@ -200,17 +205,15 @@ async function hashSource(row: Source, authorize: (force?: boolean) => Promise<v
     const actual = Object.fromEntries(
       Object.entries(checks).map(([key, hash]) => [key, hash.digest('hex')]),
     );
-    const after = await file.stat();
     if (
       bytes !== Number(row.declared_bytes) ||
-      after.size !== before.size ||
-      after.mtimeMs !== before.mtimeMs ||
+      !(await contentFileUnchanged(sourcePath(row), before)) ||
       Object.entries(hashes).some(([key, value]) => actual[key] !== value) ||
       (row.actual_sha256 !== null && actual.sha256 !== row.actual_sha256)
     )
       throw new DomainError('conflict');
     await authorize(true);
-    return actual.sha256 as string;
+    return { path: sourcePath(row), sha256: actual.sha256 as string, identity: before };
   } finally {
     await file.close();
   }
@@ -387,7 +390,7 @@ export function createMinecraftSourceStore(
       try {
         await contentStageDirectory(join(row.storage_root, row.id));
         await transfer(row, abort, authorize);
-        const sha256 = await hashSource(row, authorize);
+        const { sha256 } = await hashSource(row, authorize);
         // Do not let the background check share this pinned connection with the
         // final transaction. The transaction reauthorizes once more before ready.
         clearInterval(timer);
@@ -443,8 +446,14 @@ export function createMinecraftSourceStore(
       const authorize = sourceAuthorization(async () =>
         ownedSource(connection, await reauthorize(connection), reference, serverId),
       );
-      const sha256 = await hashSource(row, authorize);
-      return { path: sourcePath(row), sha256 };
+      const verified = await hashSource(row, authorize);
+      return {
+        path: verified.path,
+        sha256: verified.sha256,
+        // Only world staging consumes this in-process proof. It is not stored
+        // in a job plan or exposed by the public source metadata projection.
+        ...(kind === 'world' ? { verified } : {}),
+      };
     });
   }
   return {

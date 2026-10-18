@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -311,6 +311,57 @@ describe('bounded Java level.dat validation', () => {
   });
 });
 describe('streamed isolated world staging', () => {
+  it('reuses a trusted current source hash while inflating exact world bytes', async () => {
+    const { root } = await environment();
+    const region = randomBytes(2 * 1024 ** 2);
+    const archive = await makeZip(
+      root,
+      {
+        'source/level.dat': levelDat(),
+        'source/region/r.0.0.mca': region,
+      },
+      { compress: true },
+    );
+    const verifiedArchive = {
+      path: archive.path,
+      sha256: archive.sha256,
+      identity: await lstat(archive.path, { bigint: true }),
+    };
+    const staged = await stageMinecraftWorld(archive.path, {
+      ...options(root, archive.sha256),
+      verifiedArchive,
+    });
+    expect(staged.manifest).toHaveLength(2);
+    expect(await readFile(join(staged.directory, 'imported/region/r.0.0.mca'))).toEqual(region);
+    expect(staged.manifest.find((file) => file.path.endsWith('.mca'))?.sha256).toBe(
+      createHash('sha256').update(region).digest('hex'),
+    );
+    for (const invalid of [
+      { ...verifiedArchive, path: join(root, 'other.zip') },
+      { ...verifiedArchive, sha256: 'a'.repeat(64) },
+    ]) {
+      await expect(
+        stageMinecraftWorld(archive.path, {
+          ...options(root, archive.sha256),
+          verifiedArchive: invalid,
+        }),
+      ).rejects.toMatchObject({ details: { reason: 'minecraft_world_archive_changed' } });
+    }
+    await expect(
+      stageMinecraftWorld(archive.path, {
+        ...options(root, archive.sha256),
+        verifiedArchive,
+        limits: { maxArchiveBytes: 1024 },
+      }),
+    ).rejects.toMatchObject({ details: { reason: 'minecraft_world_archive_changed' } });
+    await writeFile(archive.path, await readFile(archive.path));
+    await expect(
+      stageMinecraftWorld(archive.path, {
+        ...options(root, archive.sha256),
+        verifiedArchive,
+      }),
+    ).rejects.toMatchObject({ details: { reason: 'minecraft_world_archive_changed' } });
+  });
   it('reserves only the validated world bytes before extraction and checks disk space in batches', async () => {
     const { root } = await environment();
     const level = levelDat();

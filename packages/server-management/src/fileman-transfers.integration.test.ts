@@ -73,6 +73,10 @@ describe('Fileman durable integration transfers', () => {
           await input.authorize?.();
           const bytes = new Uint8Array(await new Response(input.body).arrayBuffer());
           await new Promise((resolve) => setTimeout(resolve, 2));
+          // Native Wings uploads create missing parent directories via Touch/MkdirAll.
+          const parts = path.split('/');
+          for (let index = 1; index < parts.length; index++)
+            directories.add(parts.slice(0, index).join('/'));
           uploaded.set(path, bytes);
         } finally {
           active--;
@@ -175,7 +179,7 @@ describe('Fileman durable integration transfers', () => {
       expect(f.uploaded.size).toBe(101);
       expect(f.peak()).toBe(2);
       expect(f.adapter.listFiles).toHaveBeenCalledTimes(1);
-      expect(f.adapter.createDirectory).toHaveBeenCalledTimes(2);
+      expect(f.adapter.createDirectory).toHaveBeenCalledTimes(1);
       expect(f.adapter.getResources).toHaveBeenCalledTimes(1);
       expect(f.adapter.prepareUploadBatch).toHaveBeenCalledTimes(1);
       expect(f.adapter.prepareUpload).not.toHaveBeenCalled();
@@ -202,9 +206,15 @@ describe('Fileman durable integration transfers', () => {
       });
       expect(input.open).not.toHaveBeenCalled();
       expect(await f.claims()).toEqual([]);
+      expect([...f.directories]).toEqual(['new-world']);
+      // Root ownership survives the failed grant: recovery does not recreate it.
+      await f.files.uploadStaged(input);
+      expect(f.adapter.createDirectory).toHaveBeenCalledTimes(1);
+      expect(f.uploaded.size).toBe(3);
+      expect(await f.claims()).toEqual([]);
     });
   });
-  it('overlaps grants and sibling directories, waits for parents, and respects the configured concurrency', async () => {
+  it('lets native uploads create nested parents without preparatory descendant requests', async () => {
     await database.db.connection().execute(async (db) => {
       const f = await fixture(db);
       const input = f.input(4);
@@ -219,70 +229,55 @@ describe('Fileman durable integration transfers', () => {
       input.open.mockImplementation(
         (path) => open?.(paths.get(path) as string) as Promise<ReadableStream<Uint8Array>>,
       );
-      let active = 0;
-      let peak = 0;
-      let firstDirectory!: () => void;
-      const directoryStarted = new Promise<void>((resolve) => {
-        firstDirectory = resolve;
-      });
-      const mkdir = f.adapter.createDirectory.getMockImplementation();
-      f.adapter.createDirectory.mockImplementation(async (id, parent, name) => {
-        if (parent) expect(f.directories.has(parent)).toBe(true);
-        active++;
-        peak = Math.max(peak, active);
-        if (parent) firstDirectory();
-        try {
-          await new Promise((resolve) => setTimeout(resolve, 10));
-          await mkdir?.(id, parent, name);
-        } finally {
-          active--;
-        }
-      });
       const grants = f.adapter.prepareUploadBatch.getMockImplementation();
       f.adapter.prepareUploadBatch.mockImplementation(async (id, paths) => {
-        await directoryStarted;
+        expect([...f.directories]).toEqual(['new-world']);
         expect(input.open).not.toHaveBeenCalled();
         return grants?.(id, paths) as ReturnType<NonNullable<typeof grants>>;
       });
       await f.files.uploadStaged(input);
-      expect(peak).toBe(2);
-      expect(active).toBe(0);
-      expect(f.adapter.createDirectory).toHaveBeenCalledTimes(9);
+      expect(f.peak()).toBe(2);
+      expect(f.active()).toBe(0);
+      expect(f.adapter.createDirectory).toHaveBeenCalledExactlyOnceWith(
+        f.context.server.pterodactyl_identifier,
+        '',
+        'new-world',
+      );
       expect(f.adapter.prepareUploadBatch).toHaveBeenCalledOnce();
+      expect(f.directories.size).toBe(9);
+      for (const path of paths.keys())
+        expect(f.directories.has(path.split('/').slice(0, -1).join('/'))).toBe(true);
       expect(f.uploaded.size).toBe(4);
       expect(await f.claims()).toEqual([]);
     });
   });
-  it('settles failed directory waves without creating queued descendants or dispatching uploads', async () => {
+  it('does not issue grants or dispatch uploads if the destination root cannot be created', async () => {
     await database.db.connection().execute(async (db) => {
       const f = await fixture(db);
       const input = f.input(4);
-      input.files = input.files.map((file, index) => ({
-        ...file,
-        path: `new-world/part${index}/region/file.mca`,
-      }));
-      const mkdir = f.adapter.createDirectory.getMockImplementation();
-      let active = 0;
-      f.adapter.createDirectory.mockImplementation(async (id, parent, name) => {
-        if (!parent) return mkdir?.(id, parent, name);
-        active++;
-        try {
-          await new Promise((resolve) => setTimeout(resolve, name === 'part0' ? 5 : 20));
-          if (name === 'part0') throw new Error('mkdir failed');
-          await mkdir?.(id, parent, name);
-        } finally {
-          active--;
-        }
-      });
-      await expect(f.files.uploadStaged(input)).rejects.toMatchObject({
-        code: 'operation_uncertain',
-      });
-      expect(active).toBe(0);
-      expect(f.adapter.createDirectory).toHaveBeenCalledTimes(3);
+      f.adapter.createDirectory.mockRejectedValueOnce(new Error('root mkdir failed'));
+      await expect(f.files.uploadStaged(input)).rejects.toThrow('root mkdir failed');
+      expect(f.adapter.createDirectory).toHaveBeenCalledTimes(1);
+      expect(f.adapter.prepareUploadBatch).not.toHaveBeenCalled();
       expect(input.open).not.toHaveBeenCalled();
       expect(f.send).not.toHaveBeenCalled();
       expect(await f.claims()).toEqual([]);
     });
+  });
+  it('rechecks current authority after root preparation before opening any source', async () => {
+    const f = await fixture();
+    const input = f.input();
+    const beforeWrite = vi
+      .fn(async () => {})
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValue(new DomainError('forbidden'));
+    await expect(f.files.uploadStaged({ ...input, beforeWrite })).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    expect([...f.directories]).toEqual(['new-world']);
+    expect(input.open).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
+    expect(await f.claims()).toEqual([]);
   });
   it('skips per-server disk telemetry for shared-pool storage while retaining batch admission', async () => {
     const f = await fixture();

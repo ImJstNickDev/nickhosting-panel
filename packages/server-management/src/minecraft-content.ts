@@ -4,6 +4,7 @@ import { lstat } from 'node:fs/promises';
 import { join, posix, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import {
+  type ContentFileVerification,
   type ContentHttp,
   type ContentTarget,
   type CurseForgeProvider,
@@ -1667,6 +1668,7 @@ async function applyPreparedContent(
     prepared,
     await completed(context, selectionStep),
   );
+  let verifiedWorldArchive: ContentFileVerification | undefined;
   if (prepared.archivePath) {
     if (!prepared.archiveRef) throw new DomainError('configuration_invalid');
     const actor = await options.authorizeJob(
@@ -1687,6 +1689,7 @@ async function applyPreparedContent(
       ('sha256' in source && source.sha256 !== prepared.archiveSha256)
     )
       throw new DomainError('conflict');
+    if ('verified' in source) verifiedWorldArchive = source.verified;
   }
   if (command.kind === 'verify') return verifyMinecraftRestore(context, options);
   if (
@@ -1734,7 +1737,7 @@ async function applyPreparedContent(
     command.kind === 'world-select' ||
     command.kind === 'world-remove'
   )
-    return applyWorldContent(context, options, prepared, choice, pending);
+    return applyWorldContent(context, options, prepared, choice, pending, verifiedWorldArchive);
   if (
     command.kind === 'player' &&
     choice.supportAuthority === 'integration' &&
@@ -2260,6 +2263,7 @@ async function applyWorldContent(
   prepared: MinecraftPreparedContent,
   choice: Awaited<ReturnType<typeof inspectMinecraftCombination>>,
   pending?: PendingContent,
+  verifiedArchive?: ContentFileVerification,
 ): Promise<boolean> {
   const command = prepared.command;
   if (
@@ -2353,6 +2357,7 @@ async function applyWorldContent(
   // Complete ZIP, hash and NBT validation must precede optional backup and deletion.
   const staged = await stageMinecraftWorld(prepared.archivePath, {
     ...stageOptions,
+    verifiedArchive,
     // Reuse the staging inventory instead of parsing the ZIP once more just to
     // count bytes. Reservation still precedes extraction and every remote write.
     reserve: async (expandedBytes) => {

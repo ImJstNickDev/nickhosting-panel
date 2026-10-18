@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { lstat } from 'node:fs/promises';
-import type { Readable } from 'node:stream';
-import { crc32 } from 'node:zlib';
+import { pipeline, type Readable, Transform } from 'node:stream';
+import { crc32, createInflateRaw } from 'node:zlib';
 import { type Entry, fromBuffer, open, type ZipFile } from 'yauzl';
 import { type ContentLimits, contentLimits, fail, safeArchivePath } from './contracts.js';
 
@@ -9,7 +9,43 @@ export interface ArchiveFile {
   path: string;
   size: number;
   entry: Entry;
-  open: () => Promise<Readable>;
+  open: (options?: { inflateChunkSize?: number }) => Promise<Readable>;
+}
+async function openArchiveEntry(
+  zip: ZipFile,
+  entry: Entry,
+  options: { inflateChunkSize?: number } = {},
+): Promise<Readable> {
+  const chunkSize = options.inflateChunkSize;
+  if (
+    chunkSize !== undefined &&
+    (!Number.isSafeInteger(chunkSize) || chunkSize < 16 * 1024 || chunkSize > 1024 * 1024)
+  )
+    fail('archive_chunk_size');
+  const inflate = chunkSize !== undefined && entry.compressionMethod === 8;
+  const source = await new Promise<Readable>((resolve, reject) =>
+    zip.openReadStream(entry, inflate ? { decompress: false } : {}, (error, stream) =>
+      error || !stream ? reject(error ?? new Error('archive_stream')) : resolve(stream),
+    ),
+  );
+  if (!inflate) return source;
+  // yauzl defaults to 16KiB inflation output. Larger bounded chunks avoid thousands of
+  // zlib callbacks for region files, while keeping size validation and cancellation intact.
+  let size = 0;
+  const output = new Transform({
+    highWaterMark: chunkSize,
+    transform(chunk: Buffer, _encoding, callback) {
+      size += chunk.length;
+      callback(size > entry.uncompressedSize ? new Error('archive_size') : null, chunk);
+    },
+    flush(callback) {
+      callback(size !== entry.uncompressedSize ? new Error('archive_size') : null);
+    },
+  });
+  // The returned stream retains the pipeline error for its consumer; cancellation destroys
+  // the inflater and ZIP reader as well. The callback consumes pipeline completion only.
+  pipeline(source, createInflateRaw({ chunkSize }), output, () => {});
+  return output;
 }
 /** Lazy processing bounds memory, while checking every entry, including ignored client overrides. */
 export async function visitArchive(
@@ -75,12 +111,7 @@ export async function visitArchive(
             path: name,
             size: entry.uncompressedSize,
             entry,
-            open: () =>
-              new Promise<Readable>((r, j) =>
-                zip.openReadStream(entry, (e, s) =>
-                  e || !s ? j(e ?? new Error('archive_stream')) : r(s),
-                ),
-              ),
+            open: (options) => openArchiveEntry(zip, entry, options),
           });
         })().then(() => zip.readEntry(), reject);
       });

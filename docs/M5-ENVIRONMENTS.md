@@ -103,6 +103,15 @@ reported, never overlapped with a second worker. Image/lockfile/workspace change
 require a rebuild. SQL migrations are image-baked: rebuild the `api` image before
 running the explicit migration command after a migration change.
 
+The development worker has a **2 CPU / 512 MiB** limit; API and other service
+limits are unchanged. On 2026-10-18 the Owner approved raising only that worker
+from 1 to 2 CPU for archive preparation. `docker update --cpus 2
+nickhosting-dev-worker-1` applied the limit without restarting the container;
+`compose.dev.yaml` preserves it on recreation. Rollback is the corresponding
+`cpus: 1` setting and `docker update --cpus 1 nickhosting-dev-worker-1`. Neither
+operation changes mounts, networks, ports or application data. Production
+resource configuration is independent and was not changed.
+
 Vite exposes development source to people allowed to reach the development host.
 Use an Owner-managed NPM access list for reviewers if it should not be public.
 This supplements application authentication; it does not replace it.

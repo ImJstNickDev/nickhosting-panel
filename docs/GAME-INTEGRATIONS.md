@@ -488,9 +488,12 @@ from ViewerEngine's browser presentation extensions.
   reservation covers the transfer; the configured Fileman `uploadConcurrency`
   controls streams. One lane takes large files while remaining lanes drain small
   ones. Bulk grants use windows of at most 500 and renew only unused grants.
-  Destination ancestors remain ordered; sibling directories are prepared at that
-  same bounded concurrency, overlapping the first bulk-grant request. Failure
-  stops queued preparation and drains in-flight work before releasing admission.
+  Destination ancestors retain collision checks and a durable root marker.
+  Descendant directories are created by Wings' existing native upload path,
+  without separate mkdir requests. This is verified against Wings 1.11.13:
+  `Filesystem.Write` calls `UnixFS.Touch`, which creates missing parents using
+  `MkdirAll`. The file-only manifest does not promise empty-directory preservation.
+  Failure stops queued streams and drains in-flight work before releasing admission.
   Shared-pool storage skips per-server disk telemetry, while physical free space
   and transfer budgets remain covered by the batch reservation.
 - Source bytes are hashed while streaming. A successful Wings response and
@@ -519,9 +522,15 @@ World import preparation shares the validated ZIP inventory with staging
 reservation instead of scanning it again to count expanded bytes. Source-store
 authorization is coalesced over 500 ms (including stalled-transfer revocation)
 and checked freshly at completion, never once per 64 KiB chunk. Each resolution
-still verifies the source hash. Staging hashes the archive once, fences changes
-with inode/size/nanosecond modification metadata, and verifies extracted CRC and
-per-file hashes. Private directory validation is reused within the job; disk
+still verifies the source hash. Within one worker delivery, staging reuses that
+verification using an ephemeral proof bound to the exact path, digest and file
+identity. It rechecks inode/size/nanosecond modification metadata before and after
+extraction, without hashing the ZIP twice. Proofs are never persisted in job plans
+or accepted from browser input; callers without one still hash the source.
+World DEFLATE streams use bounded 256 KiB output blocks instead of the ZIP
+library's 16 KiB default, with exact expanded-size checks, CRC and per-file hashes.
+Extraction remains sequential and abortable. Private directory validation is
+reused within the job; disk
 headroom is checked at bounded file/byte/time boundaries. A confirmed world-only
 transfer does not reread the unrelated root EULA. Additive inactive imports need
 no process/host observation, including during a power transition; current local
