@@ -407,7 +407,10 @@ The [extension-only update procedure](UPDATE-INSTALLED.md) supports the reviewed
 explicit approval is required to apply it. The original deployment's native
 installer ownership hazard was removed by the approved Panel/Wings mount
 separation; the original failure remains historical evidence, not a claim that
-the native installer was retested.
+all future extension hooks are safe. The Owner-approved native update to 1.6.1
+was subsequently verified on 2026-10-18: no game ownership or permission changes
+were detected across 28 server roots. See the
+[activation record](../../docs/M5-VALIDATION.md#native-blueprint-161-activation--2026-10-18).
 
 Version 1.2.0 introduced bulk upload URLs. Version 1.3.0 adds bulk path-scoped
 download URLs, transfer settings discovery and configurable operational bounds;

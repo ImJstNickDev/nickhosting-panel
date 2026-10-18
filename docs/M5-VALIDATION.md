@@ -12857,3 +12857,61 @@ Blueprint activation and its new end-to-end timing remain pending separate exact
 Owner approval. Scoped rollback retains a private six-file/metadata backup;
 no game/database backup or broad permission operation is involved. PR #21 stays
 open and unmerged; SFTPGo #18 and release boundaries are unchanged.
+
+### Native Blueprint 1.6.1 activation — 2026-10-18
+
+The Owner subsequently authorized the normal Blueprint update, specifically to
+verify that separating Panel and Wings mounts prevents the historical game-data
+permission incident. The reviewed 1.6.1 artifact above was staged with its exact
+SHA-256, then activated with:
+
+```sh
+docker exec --workdir /app --env TERM=xterm pterodactyl-panel-2 blueprint -install nickhosting
+```
+
+The native installer selected its update workflow, exited zero in **4.065 seconds**
+and reported **Nothing to migrate**. No bounded updater was used. All **45 package
+files** match installed content after normal placeholder/admin-wrapper expansion.
+Authenticated adapter discovery reports 1.6.1; inspection, guarded-delete and
+archive-commit capabilities are available. A read-only Wings-backed inspection
+matched the managed provider identity and returned its guard in 361 ms. This is
+not an import benchmark; the new world-import latency remains to be measured.
+
+Before and after, a complete no-follow scan recorded **3,410,085 entries across
+28 server roots**, with **zero scan errors**, without reading file contents or
+changing permissions. The existing read-only viewer mount was inspected from
+each server working directory using its existing numeric game identity. All
+objects retain UID/GID **988:988**; per-root mode/type histograms are identical.
+Twenty-seven roots have identical full metadata digests. The remaining root has
+one removed and one added Spark profiler temporary file, both `988:988/0600`,
+plus directory enumeration reordering. Every common path retains identical
+UID/GID/mode/type/inode metadata. These are sequential observations of live data,
+not an atomic snapshot; no game ownership or permission changes were detected.
+
+Native housekeeping remains observable and is not described as extension-only:
+
+- Eleven Panel metadata changes: the isolated `/app/var` directory and two
+  Laravel logs adopted the Panel identity, and eight extension files acquired
+  the framework's executable bits. The `.env` contents and `100:101/0640` metadata
+  are unchanged. No game mount is exposed beneath `/app`.
+- Cache rebuilding and the normal PHP queue restart completed. nginx/PHP-FPM
+  continued running. Existing-extension link warnings refer to unchanged links;
+  the chown warning refers to the already dangling `public/storage` link. These
+  warnings were preserved; no unrelated link repair was attempted.
+- Fifteen of sixteen configuration/identity table fingerprints are unchanged.
+  The settings aggregate changed consistently with Blueprint's verified cache
+  timestamp write. Aggregate fingerprints cannot establish a per-key-only delta.
+- All **112 container definitions**, image IDs, mounts, networks and published
+  ports are unchanged. No unexpected container restart occurred; three unrelated
+  pre-existing restart loops remain separate baseline conditions. Panel and dev
+  API/worker are healthy; Panel and development HTTPS return 200. Wings and game
+  containers were not restarted or reconfigured.
+
+Private rollback material contains previous installed extension/configuration
+files, staged artifacts and metadata inventories, not game contents or a database
+dump. Rollback must preserve the corrected mount layout and controlled startup;
+it must not blindly reinstall a stale staged package or run recursive game-data
+permission repairs. No game fixture or live import/delete was created by this
+activation. Existing code-test evidence above was reused; documentation checks
+and an independent post-install configuration/permission review passed with no
+remaining must-fix. PR #21 remains open and unmerged; SFTPGo #18 is unchanged.

@@ -934,3 +934,22 @@ file contents enter the diagnostic output. Existing 1.6.0 bridges remain readabl
 This patch adds no route, permission, migration or setting. Its bounded updater
 permits only the six reviewed transport/version files and no other package changes;
 see [activation and rollback](../extensions/nickhosting/UPDATE-INSTALLED.md).
+
+The Owner instead approved the **normal Blueprint installer** for this activation
+after the mount separation. On 2026-10-18, the reviewed package was staged and
+`blueprint -install nickhosting` selected its native update workflow successfully.
+It completed in 4.065 seconds with no pending migration. All 45 installed package
+files matched the artifact, and authenticated discovery/inspection succeeded.
+Complete before/after metadata scans of 28 game roots found no ownership or
+permission changes; one running profiler rotated a temporary file. Native Panel
+ownership/cache actions and its PHP queue restart still occurred. Existing-link
+warnings and a previously dangling `public/storage` link are recorded rather than
+hidden or repaired as part of the update.
+
+This verifies the corrected mount layout for this package, not arbitrary future
+extension hooks. Native installation still needs scoped approval and its own
+rollback record: the six-file bounded updater's rollback is not sufficient to
+describe native framework effects. The private activation bundle retains exact
+previous extension/configuration files and metadata, without copying game data or
+dumping the database. See the
+[complete activation evidence](M5-VALIDATION.md#native-blueprint-161-activation--2026-10-18).
