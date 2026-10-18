@@ -7,6 +7,7 @@ import { Tooltip } from '../../components/tooltip.js';
 import { Check, ConfirmDialog, Dialog, ErrorNotice, Input } from '../../components/ui.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { gameUiClient } from '../../features/integrations.js';
+import { MinecraftWorldCatalog, type SelectedCatalogWorld } from './world-catalog.js';
 import { prepareMinecraftWorldFolder, WorldFolderArchiveError } from './world-folder-archive.js';
 import './worlds.css';
 
@@ -90,6 +91,8 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
   const [page, setPage] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [catalogSource, setCatalogSource] = useState<SelectedCatalogWorld>();
   const [importing, setImporting] = useState(false);
   const [fileName, setFileName] = useState('');
   const [target, setTarget] = useState('');
@@ -168,9 +171,37 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
       setRefreshing(false);
     }
   }
+  function suggestTarget(name: string) {
+    const base =
+      name
+        .replace(/\.zip$/i, '')
+        .normalize('NFKD')
+        .replace(/[^A-Za-z0-9_-]/g, '-')
+        .replace(/^[^A-Za-z0-9]+/, '')
+        .slice(0, 56) || 'world';
+    let suggested = base;
+    for (
+      let suffix = 2;
+      rows.some((row) => row.name.toLowerCase() === suggested.toLowerCase()) ||
+      snapshot?.selectedWorld?.toLowerCase() === suggested.toLowerCase();
+      suffix++
+    )
+      suggested = `${base}-${suffix}`;
+    return suggested;
+  }
+  function chooseCatalogWorld(world: SelectedCatalogWorld) {
+    if (importDisabled) return;
+    openImport();
+    setCatalogSource(world);
+    setFileName(world.filename);
+    setTarget(suggestTarget(world.projectName));
+    setArchiveRef(world.sourceId);
+    setCatalogOpen(false);
+  }
   function openImport() {
     if (importDisabled || transfer.current) return;
     setAdding(true);
+    setCatalogSource(undefined);
     setFileName('');
     setTarget('');
     setArchiveRef(undefined);
@@ -207,22 +238,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
     setUploadError(undefined);
     setOperationError(undefined);
     setFileName(selectedName);
-    const base =
-      selectedName
-        .replace(/\.zip$/i, '')
-        .normalize('NFKD')
-        .replace(/[^A-Za-z0-9_-]/g, '-')
-        .replace(/^[^A-Za-z0-9]+/, '')
-        .slice(0, 56) || 'world';
-    let suggested = base;
-    for (
-      let suffix = 2;
-      rows.some((row) => row.name.toLowerCase() === suggested.toLowerCase()) ||
-      snapshot?.selectedWorld?.toLowerCase() === suggested.toLowerCase();
-      suffix++
-    )
-      suggested = `${base}-${suffix}`;
-    setTarget(suggested);
+    setTarget(suggestTarget(selectedName));
     importKey.current = idempotencyKey();
     try {
       let file: File;
@@ -461,6 +477,17 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
           {props.canManage && (
             <button
               type="button"
+              className="secondary minecraft-worlds-import"
+              disabled={importDisabled || Boolean(progress)}
+              onClick={() => setCatalogOpen(true)}
+            >
+              <Icon name="search" />
+              {t(key('catalog.browse'))}
+            </button>
+          )}
+          {props.canManage && (
+            <button
+              type="button"
               className="minecraft-worlds-import"
               disabled={importDisabled || Boolean(progress)}
               onClick={openImport}
@@ -680,6 +707,15 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
           )}
         </>
       )}
+      {catalogOpen && (
+        <MinecraftWorldCatalog
+          serverId={props.serverId}
+          release={snapshot?.release}
+          disabled={importDisabled}
+          onClose={() => setCatalogOpen(false)}
+          onChoose={chooseCatalogWorld}
+        />
+      )}
       <Dialog
         open={adding && selection?.action !== 'replace'}
         title={t(key('import'))}
@@ -689,7 +725,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
         closeIcon
         closeDisabled={busy}
         className="minecraft-worlds-import-dialog"
-        initialFocusSelector="[data-world-picker]"
+        initialFocusSelector={catalogSource ? '[data-world-target]' : '[data-world-picker]'}
       >
         <form
           onSubmit={(event) => {
@@ -699,59 +735,76 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
         >
           {Boolean(uploadError) && <ErrorNotice error={uploadError} />}
           {Boolean(operationError) && <ErrorNotice error={operationError} />}
-          <fieldset
-            aria-label={t(key('source'))}
-            className={`minecraft-worlds-dropzone${dragging ? ' dragging' : ''}`}
-            onDragOver={(event) => {
-              event.preventDefault();
-              if (!importDisabled && !progress) setDragging(true);
-            }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={(event) => {
-              event.preventDefault();
-              setDragging(false);
-              void upload(event.dataTransfer.files);
-            }}
-          >
-            <Icon name="upload" />
-            <div className="actions minecraft-worlds-source-actions">
-              <button
-                type="button"
-                data-world-picker
-                className="secondary"
-                disabled={importDisabled || Boolean(progress)}
-                onClick={() => picker.current?.click()}
-              >
-                {t(key('chooseZip'))}
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                disabled={importDisabled || Boolean(progress)}
-                onClick={() => folderPicker.current?.click()}
-              >
-                {t(key('chooseFolder'))}
-              </button>
+          {catalogSource ? (
+            <div className="minecraft-worlds-catalog-source">
+              <strong>{catalogSource.projectName}</strong>
+              <span>{catalogSource.filename}</span>
+              {snapshot?.release &&
+                catalogSource.gameVersions.length > 0 &&
+                !catalogSource.gameVersions.includes(snapshot.release) && (
+                  <p className="minecraft-worlds-replacement">
+                    {t(key('catalog.otherVersion'), {
+                      versions: catalogSource.gameVersions.join(', '),
+                      current: snapshot.release,
+                    })}
+                  </p>
+                )}
             </div>
-            <input
-              ref={picker}
-              type="file"
-              accept=".zip,application/zip"
-              aria-label={t(key('zip'))}
-              hidden
-              onChange={(event) => void upload(event.target.files)}
-            />
-            <input
-              ref={folderPicker}
-              type="file"
-              {...{ webkitdirectory: '' }}
-              multiple
-              aria-label={t(key('worldFolder'))}
-              hidden
-              onChange={(event) => void upload(event.target.files, true)}
-            />
-            <span>{fileName || t(key('dropZip'))}</span>
-          </fieldset>
+          ) : (
+            <fieldset
+              aria-label={t(key('source'))}
+              className={`minecraft-worlds-dropzone${dragging ? ' dragging' : ''}`}
+              onDragOver={(event) => {
+                event.preventDefault();
+                if (!importDisabled && !progress) setDragging(true);
+              }}
+              onDragLeave={() => setDragging(false)}
+              onDrop={(event) => {
+                event.preventDefault();
+                setDragging(false);
+                void upload(event.dataTransfer.files);
+              }}
+            >
+              <Icon name="upload" />
+              <div className="actions minecraft-worlds-source-actions">
+                <button
+                  type="button"
+                  data-world-picker
+                  className="secondary"
+                  disabled={importDisabled || Boolean(progress)}
+                  onClick={() => picker.current?.click()}
+                >
+                  {t(key('chooseZip'))}
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={importDisabled || Boolean(progress)}
+                  onClick={() => folderPicker.current?.click()}
+                >
+                  {t(key('chooseFolder'))}
+                </button>
+              </div>
+              <input
+                ref={picker}
+                type="file"
+                accept=".zip,application/zip"
+                aria-label={t(key('zip'))}
+                hidden
+                onChange={(event) => void upload(event.target.files)}
+              />
+              <input
+                ref={folderPicker}
+                type="file"
+                {...{ webkitdirectory: '' }}
+                multiple
+                aria-label={t(key('worldFolder'))}
+                hidden
+                onChange={(event) => void upload(event.target.files, true)}
+              />
+              <span>{fileName || t(key('dropZip'))}</span>
+            </fieldset>
+          )}
           {progress && (
             <div className="minecraft-worlds-progress">
               <label htmlFor={`${id}-progress`}>{t(key(progress.phase))}</label>
@@ -767,11 +820,12 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
           )}
           {archiveRef && (
             <p className="minecraft-worlds-status" role="status">
-              {t(key('uploaded'))}
+              {t(key(catalogSource ? 'catalog.ready' : 'uploaded'))}
             </p>
           )}
           <Input
             label={t(key('folder'))}
+            data-world-target
             hint={t(key('folderHint'))}
             value={target}
             maxLength={64}

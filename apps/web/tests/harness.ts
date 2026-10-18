@@ -14,6 +14,7 @@ import { validateConnection } from '@nickhosting/pterodactyl-adapter';
 import type { ManagementRuntime } from '@nickhosting/server-management';
 import { type Browser, chromium, firefox, type Page } from '@playwright/test';
 import { createServer as createViteServer } from 'vite';
+import type { ContentHttp } from '../../../packages/content-providers/src/contracts.js';
 import { createApp } from '../../api/src/app.js';
 import { createApiHttpServer } from '../../api/src/http-server.js';
 
@@ -22,6 +23,7 @@ export async function browserHarness(
   options: {
     discord?: { clientId: string; clientSecret: string };
     browser?: 'chromium' | 'firefox';
+    minecraftContentHttp?: ContentHttp;
     handleFixtureRequest?: (request: IncomingMessage, response: ServerResponse) => boolean;
   } = {},
 ) {
@@ -93,6 +95,7 @@ export async function browserHarness(
       identity: async () => identity,
       codec,
       env,
+      minecraftContentHttp: options.minecraftContentHttp,
       origins: [origin],
       management: async () => {
         if (!management) throw new Error('Browser provider fixture not installed');

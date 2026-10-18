@@ -1578,3 +1578,69 @@ environment, Wings, database/cache services, game containers, ports and networks
 were preserved. Panel and development HTTPS, authenticated extension discovery
 and read-only Wings-backed file inspection passed. No application deployment,
 native extension update, game-data backup or database dump was performed.
+
+## Worlds catalog activation proposal — 2026-10-18
+
+The CurseForge world catalog reuses the protected `curseforgeApiKey`, shared
+content-download settings and existing source/import transport. Development has
+an explicit `NH_DEV_CURSEFORGE_ENABLED` opt-in, default `false`; `true` requires
+`NH_DEV_PROVIDER_MODE=real` and removes only the disabled CurseForge credential
+override. The Owner then enters the real key under **Owner → Settings →
+Credentials → CurseForge API key**. Do not put it in chat or the frontend.
+Production continues using the existing protected secret/environment precedence.
+
+Read-only preflight found no stored CurseForge key in dev. Existing dev database
+migrations 001–042 match the repository checksums; only
+`043_world_catalog_sources.sql` is pending. It extends provenance constraints and
+preserves source rows, hashes and reservations. The browser-safe catalog package
+export also requires refreshing the image-baked workspace manifests: HMR alone
+cannot activate a new `package.json` export. Until activation, the running Vite
+reports a missing `./world-catalog` export for the changed Minecraft UI module.
+
+The following is a **proposal, not an executed activation**. It requires specific
+Owner approval under AGENTS.md. Verify exact dev project/service labels, image
+IDs, private overlay chain and absence of active transfers immediately before
+applying. Current identities:
+
+- API/worker image: `sha256:82c27833ec05ff838f72a5ffe9007c9b29644d666c7e4fe0cf719e81ee7dbe79`.
+- Vite image: `sha256:2826f15993d2904e0da636ef101b01774937896cef45ae0d5bfc1c800a22a350`.
+- API: dev-data/dev-edge/dev-egress; worker: dev-data/dev-egress; Vite: dev-edge.
+  None publishes a host port. The ingress container and its prod-frontend attachment
+  are unchanged.
+
+Save a non-overwriting private copy of `.env.dev.local` under
+`.codex/local/world-catalog-activation/`, preserving mode0600, then change only:
+
+```diff
++NH_DEV_CURSEFORGE_ENABLED=true
+```
+
+Preserve all existing private settings and the full overlay chain. Proposed commands:
+
+```sh
+docker image tag sha256:82c27833ec05ff838f72a5ffe9007c9b29644d666c7e4fe0cf719e81ee7dbe79 nickhosting-dev-app:before-world-catalog-api
+docker image tag sha256:2826f15993d2904e0da636ef101b01774937896cef45ae0d5bfc1c800a22a350 nickhosting-dev-app:before-world-catalog-vite
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local build api
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local --profile tools run --rm --no-deps migrate
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local up -d --no-deps --wait api worker vite
+```
+
+The shared application build updates these three dev services. The migration
+container is temporary and must apply only043. No image build, source download or
+application startup may apply migrations implicitly. No Blueprint installation,
+Pterodactyl/Wings operation, game-server mutation, DNS/NPM/network change or
+production deployment is part of this proposal. Accounts, databases, secrets,
+review data and persistent mounts stay intact. API/worker/Vite recreation briefly
+interrupts web requests; do not run it during uploads or active application jobs.
+
+Verify health, same mounts/networks/ports, HTTPS module delivery, migration
+checksums and protected-setting editability afterward. Once the Owner supplies
+its key, use read-only catalog search/files discovery to verify real CurseForge
+access; do not download/import into a real server without a selected test scope.
+MinecraftMaps remains an external link and Modrinth offers no world catalog.
+
+Rollback: restore the exact private environment copy and scoped source commit,
+then use a temporary Compose override assigning the saved API image to API/worker
+and saved Vite image to Vite. Recreate only those services with `--no-deps --wait`.
+Retain additive migration043, source rows and staging reservations; do not drop
+constraints, reset data or rewrite migration history. Preserve failure logs.

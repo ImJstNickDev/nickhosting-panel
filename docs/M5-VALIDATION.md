@@ -13122,3 +13122,60 @@ Gateway health condition is unchanged and outside this pass. No production,
 Blueprint, Wings, DNS, network, credential or persistent review-data changes.
 Rollback: revert this scoped commit; no migration or dependency update is needed.
 PR #21 stays open and unmerged. Individual category development awaits Owner direction.
+
+### Worlds provider catalog — 2026-10-18
+
+M5 / PR #21 adds CurseForge world search, project file selection and server-side
+acquisition into the existing source/import workflow. Existing Modrinth integration
+serves mods/modpacks; its current project-type API has no saved-world type.
+MinecraftMaps is an external link followed by manual ZIP/folder import: no public
+API was found and its terms prohibit automated collection. Provider research and
+links are recorded in [GAME-INTEGRATIONS](GAME-INTEGRATIONS.md#world-catalogs--m5-2026-10-18).
+No Blueprint change or new world-transfer implementation is needed.
+
+Validation:
+
+- `scripts/dev.sh pnpm exec vitest run scripts/deployment-config.test.ts games/minecraft/src/ui/ui.test.ts games/minecraft/src/ui/world-catalog.test.ts packages/content-providers/src/curseforge-worlds.test.ts packages/content-providers/src/content.test.ts`: **189 passed**.
+- `scripts/dev.sh pnpm exec vitest run packages/server-management/src/minecraft-world-catalog.test.ts`: **1 passed**, exercising native Node/tsx ESM imports independently of Vitest's transformed module graph.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/minecraft-world-catalog.integration.test.ts packages/server-management/src/minecraft-sources.integration.test.ts`: catalog/source combined **40 passed** before the final dev-disabled readiness case; final catalog-only run **11 passed**, with the unchanged existing source suite **30 passed**. This is focused coverage, not a full M1–M5 run.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-world-catalog.browser.test.ts`: **3 passed** in Chromium; repeated with `NH_BROWSER=firefox`: **3 passed**. Actual application handlers, sessions, database sources and durable import jobs are used with isolated CurseForge HTTP and game-provider fixtures. Covers search, unavailable distribution, version warnings, import without activation, close during download, ready-source reuse with a new request key, keyboard, foreign/read-only scope and Origin/CSRF rejection before external reads. EN desktop / IT mobile axe checks report zero violations and no horizontal overflow.
+- `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm build`, targeted Biome,
+  Compose interpolation validation and diff hygiene passed. Build retains its
+  existing large-chunk advisory. Localization compiled 2338 keys in EN/IT/pseudo.
+
+Failures found and corrected during development: migration initially referenced
+an incorrect unnamed historical CHECK constraint; isolated migration tests caught
+it before live use. A native ESM import exposed a dependency initialization cycle
+hidden by transformed tests; contracts were separated and a native-import
+regression added. Web-test type checking caught a fixture-only undeclared package
+import; changed to an existing relative type-only contract. Browser testing found
+mobile toolbar overflow, now fixed. Independent visual review found a tooltip
+left visible by programmatic Back focus; focus now moves to the results region.
+All affected checks were rerun successfully.
+
+Independent technical/configuration and rendered UX/content review found no
+remaining must-fix after those corrections. Reviewed sanitized fixtures:
+[search desktop](screenshots/m5/minecraft-world-catalog-search-desktop-en.png),
+[file selection desktop](screenshots/m5/minecraft-world-catalog-files-desktop-en.png),
+[import](screenshots/m5/minecraft-world-catalog-import-desktop-en.png),
+[search mobile IT](screenshots/m5/minecraft-world-catalog-search-mobile-it.png),
+[file selection mobile IT](screenshots/m5/minecraft-world-catalog-files-mobile-it.png).
+
+**Activation remains pending Owner approval.** Read-only dev inspection confirmed
+001–042 checksum agreement, only043 pending, no stored CurseForge key, existing
+service identities and no published host ports for API/worker/Vite. The development
+bootstrap currently locks CurseForge to a disabled credential. New explicit opt-in
+`NH_DEV_CURSEFORGE_ENABLED=true` removes that override, allowing the Owner to save
+its real key privately. API/worker must load the updated bootstrap, Vite needs the
+new image-baked package export, and043 must be applied explicitly. Source HMR alone
+currently produces a missing-export error for the Minecraft UI module; this is
+not reported as activated/working live. Exact commands, risks and rollback are in
+[the activation proposal](M5-ENVIRONMENTS.md#worlds-catalog-activation-proposal--2026-10-18).
+
+No live provider archive was downloaded or imported, no game server was mutated,
+and no new test-owned game server was created. Only disposable schemas and local
+fixture staging were created and cleaned. Production, Blueprint/Wings, DNS/NPM,
+networks, credentials and persistent review data remain unchanged. The existing
+Gateway readiness condition and SFTPGo #18 release gate remain outside this pass.
+Retain additive043 and any future source records on application rollback; no
+constraint downgrade, pruning or data reset. PR #21 remains open and unmerged.

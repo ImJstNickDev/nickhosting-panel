@@ -10,3 +10,4 @@ export * from './http.js';
 export * from './modpack.js';
 export * from './modrinth.js';
 export * from './staging.js';
+export * from './world-catalog.js';

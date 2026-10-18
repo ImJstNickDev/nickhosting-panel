@@ -1,13 +1,7 @@
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { CurseForgeProvider, SafeContentHttp } from '@nickhosting/content-providers';
-import {
-  type AuthContext,
-  contentPolicyValues,
-  DomainError,
-  type SecretCodec,
-} from '@nickhosting/core';
-import { type Database, getSecret, getSettings } from '@nickhosting/database';
+import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
+import type { Database } from '@nickhosting/database';
 import {
   minecraftManifest,
   minecraftReadinessSource,
@@ -52,6 +46,7 @@ import {
   minecraftProvisionEnvironment,
   requireMinecraftRuntimeImageEvidence,
 } from './minecraft-runtime-evidence.js';
+import { minecraftContentProviders } from './minecraft-world-catalog.js';
 
 async function authorizeOperation(input: GameOperationAuthorization) {
   const { db, server, operation, mapping, env, adapter, resourceOwner: owner } = input;
@@ -376,26 +371,21 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
   }
   /** Resolve provider settings only for Minecraft calls, preserving other integrations. */
   async function minecraftOptions(): Promise<MinecraftContentOptions> {
-    const { values: minecraft } = await getSettings(db, env);
-    if (!minecraft.contentMetadataUserAgent) throw new DomainError('configuration_invalid');
-    const http = new SafeContentHttp({
-      userAgent: minecraft.contentMetadataUserAgent,
-      allowedOrigins: [
-        'https://api.modrinth.com',
-        'https://api.curseforge.com',
-        ...contentPolicyValues(minecraft, 'minecraft').downloadOrigins,
-      ],
-    });
-    const key = await getSecret(db, options.codec, 'curseforgeApiKey', env);
+    const { values: minecraft, providers } = await minecraftContentProviders(
+      db,
+      options.codec,
+      env,
+    );
+    if (!providers || !minecraft.contentMetadataUserAgent)
+      throw new DomainError('configuration_invalid');
     const mountdataRoot = resolve(minecraft.contentWorkRoot);
     return {
-      http,
+      ...providers,
       mountdataRoot,
       sourceRoot: resolve(minecraft.contentSourceRoot),
       userAgent: minecraft.contentMetadataUserAgent,
       env,
       observedImageDigest,
-      curseforge: key ? new CurseForgeProvider(http, { apiKey: key }) : undefined,
       authorizeJob: (connection, jobId, serverId) =>
         options.authorizeJob(connection, jobId, serverId),
     };

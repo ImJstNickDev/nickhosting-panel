@@ -430,6 +430,42 @@ not expand runtime installation or Gateway certification.
 
 ### Minecraft Worlds — 2026-10-17
 
+#### World catalogs — M5, 2026-10-18
+
+Worlds → **Find worlds** searches the official CurseForge Worlds class, then lists
+the project's published files. The existing protected `curseforgeApiKey` and shared
+content-download configuration are reused; credentials and download URLs never
+enter the browser. The adapter resolves the Worlds class from CurseForge category
+metadata, rather than applying the mod loader/category filters to maps. Search is
+debounced, paginated (20 items) and cached/coalesced for 60 seconds with a bounded
+128-entry metadata cache. Effective credential/origin changes replace the provider
+instance. Opening this catalog makes no Pterodactyl discovery/file requests.
+
+Selecting a file acquires its exact project/file identity into the existing
+quota-accounted source store, verifies its declared size/hash during streaming,
+then opens the normal world-import confirmation. The verified streaming digest is
+reused for the source seal; the archive is not read again solely to recompute it.
+No new provider transfer or world-installation implementation is introduced.
+Provider-declared Minecraft versions are advisory and do not hide old maps; actual
+compatibility continues to come from `level.dat`. Import never selects the world.
+Unavailable distribution or missing download/integrity metadata is not bypassed.
+
+Closing the catalog does not deliberately cancel an in-flight source acquisition
+or reopen the import dialog on completion. A completed source is deduplicated when
+selected again. Network/process interruptions retain the existing uncertain-source
+reservation and Owner recovery semantics; this is not a resumable-download system.
+
+Provider boundaries checked on 2026-10-18:
+
+| Provider | Worlds behavior | Basis |
+| --- | --- | --- |
+| CurseForge | Integrated search, file selection and server-side ZIP acquisition | [Official API](https://docs.curseforge.com/rest-api/) and [Worlds catalog](https://www.curseforge.com/minecraft/worlds). Requires an authorized API key and permitted file distribution. |
+| Modrinth | No world/map catalog offered in this screen | [Current project types](https://api.modrinth.com/v2/tag/project_type) include datapacks, not worlds/maps. World-generation datapacks are not saved worlds. Existing mod/modpack integration remains separate. |
+| MinecraftMaps | External site link, then import the user-downloaded ZIP/folder | No documented public catalog API found; [site terms](https://www.minecraftmaps.com/terms) prohibit automated collection. No scraping or guessed private endpoints. |
+
+This catalog does not turn downloaded maps into Owner-verified presets. Preset
+properties/version overrides remain a separate future workflow.
+
 Worlds uses the trusted `minecraft-worlds` section renderer. A single authorized
 inventory response supplies the configured `level-name`, installed state, server
 release and each discovered world's compatibility. The shared Fileman read-access

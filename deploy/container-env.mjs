@@ -17,6 +17,13 @@ export function containerEnvironment(input) {
   )
     throw new Error('Invalid development Cloudflare opt-in');
   const userSftpEnabled = input.NH_DEV_SFTP_ENABLED ?? 'false';
+  const curseforgeEnabled = input.NH_DEV_CURSEFORGE_ENABLED ?? 'false';
+  if (
+    development &&
+    (!['true', 'false'].includes(curseforgeEnabled) ||
+      (curseforgeEnabled === 'true' && providerMode !== 'real'))
+  )
+    throw new Error('Invalid development CurseForge opt-in');
   if (
     development &&
     (!['true', 'false'].includes(userSftpEnabled) ||
@@ -166,6 +173,7 @@ export function containerEnvironment(input) {
     });
     // The Owner's encrypted secret store supplies the token after explicit opt-in.
     if (cloudflareEnabled === 'true') delete env.NH_CLOUDFLARE_API_TOKEN;
+    if (curseforgeEnabled === 'true') delete env.NH_CURSEFORGE_API_KEY;
     if (userSftpEnabled === 'true') {
       // Explicit approved user-SFTP deployment: protected DB settings own the
       // endpoint and encrypted key instead of the disabled simulator override.

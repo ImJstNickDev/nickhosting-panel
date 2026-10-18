@@ -1,7 +1,15 @@
+import {
+  worldCatalogFilesSchema,
+  worldCatalogProjectsSchema,
+} from '@nickhosting/content-providers/world-catalog';
 import type { GameUiClient, UiOption, UiValues } from '@nickhosting/game-sdk/ui';
 import { z } from 'zod';
 import { minecraftContentCapabilities } from '../content-capabilities.js';
 
+export type {
+  WorldCatalogFile,
+  WorldCatalogProject,
+} from '@nickhosting/content-providers/world-catalog';
 export { minecraftContentCapabilities } from '../content-capabilities.js';
 
 const uuid = z.uuid();
@@ -546,6 +554,89 @@ export function createMinecraftUiController(client: GameUiClient) {
             signal,
           ),
         );
+    },
+    async worldCatalog(serverId: string, signal?: AbortSignal) {
+      return z
+        .object({
+          providers: z
+            .array(z.object({ id: z.literal('curseforge'), available: z.boolean() }))
+            .max(8),
+        })
+        .parse(
+          await request(
+            `/v1/servers/${uuid.parse(serverId)}/minecraft/world-catalog`,
+            'GET',
+            undefined,
+            signal,
+          ),
+        );
+    },
+    async searchWorlds(
+      input: { serverId: string; query: string; offset?: number; gameVersion?: string },
+      signal?: AbortSignal,
+    ) {
+      const value = z
+        .strictObject({
+          serverId: uuid,
+          query: z.string().max(256),
+          offset: z.number().int().min(0).max(9980).default(0),
+          gameVersion: z.string().min(1).max(80).optional(),
+        })
+        .parse(input);
+      const params = new URLSearchParams({
+        provider: 'curseforge',
+        query: value.query,
+        offset: String(value.offset),
+        ...(value.gameVersion ? { gameVersion: value.gameVersion } : {}),
+      });
+      return worldCatalogProjectsSchema.parse(
+        await request(
+          `/v1/servers/${value.serverId}/minecraft/world-catalog/search?${params}`,
+          'GET',
+          undefined,
+          signal,
+        ),
+      );
+    },
+    async worldCatalogFiles(serverId: string, projectId: string, offset = 0, signal?: AbortSignal) {
+      const value = z
+        .strictObject({
+          serverId: uuid,
+          projectId: z.string().regex(/^[1-9]\d{0,14}$/),
+          offset: z.number().int().min(0).max(9980),
+        })
+        .parse({ serverId, projectId, offset });
+      return worldCatalogFilesSchema.parse(
+        await request(
+          `/v1/servers/${value.serverId}/minecraft/world-catalog/curseforge/${value.projectId}/files?offset=${value.offset}`,
+          'GET',
+          undefined,
+          signal,
+        ),
+      );
+    },
+    async acquireWorld(
+      input: { serverId: string; projectId: string; versionId: string; idempotencyKey: string },
+      signal?: AbortSignal,
+    ) {
+      const body = z
+        .strictObject({
+          serverId: uuid,
+          projectId: z.string().regex(/^[1-9]\d{0,14}$/),
+          versionId: z.string().regex(/^[1-9]\d{0,14}$/),
+          idempotencyKey: key,
+        })
+        .parse(input);
+      const result = sourceSchema.parse(
+        await request(
+          '/v1/minecraft/sources/world-catalog',
+          'POST',
+          { ...body, provider: 'curseforge' },
+          signal,
+        ),
+      );
+      if (result.state !== 'ready') throw new MinecraftUiError('conflict', 'source_not_ready');
+      return result;
     },
     async searchContent(
       input: {

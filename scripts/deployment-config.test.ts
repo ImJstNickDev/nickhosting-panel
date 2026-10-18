@@ -34,6 +34,29 @@ function deployment(environment: Environment): Record<string, string> {
 }
 
 describe('scoped container environment', () => {
+  it('unlocks protected CurseForge credentials only for explicit real-dev opt-in', () => {
+    const real = { ...deployment('development'), NH_DEV_PROVIDER_MODE: 'real' };
+    expect(containerEnvironment(real).NH_CURSEFORGE_API_KEY).toBe('development-disabled');
+    const enabled = containerEnvironment({ ...real, NH_DEV_CURSEFORGE_ENABLED: 'true' });
+    expect(enabled).not.toHaveProperty('NH_CURSEFORGE_API_KEY');
+    expect(enabled.NH_CLOUDFLARE_API_TOKEN).toBe('development-disabled');
+    expect(enabled.NH_SFTPGO_API_KEY).toBe('development-disabled');
+    expect(enabled.NH_SECRETS_MASTER_KEY).toBe(containerEnvironment(real).NH_SECRETS_MASTER_KEY);
+    for (const input of [
+      { ...deployment('development'), NH_DEV_CURSEFORGE_ENABLED: 'true' },
+      { ...real, NH_DEV_CURSEFORGE_ENABLED: 'yes' },
+      { ...deployment('production'), NH_DEV_CURSEFORGE_ENABLED: 'true' },
+      { ...real, NH_DEV_CURSEFORGE_ENABLED: 'true', NH_CURSEFORGE_API_KEY: 'forbidden-env-key' },
+    ])
+      expect(() => containerEnvironment(input)).toThrow();
+    expect(
+      containerEnvironment({ ...real, NH_DEV_CURSEFORGE_ENABLED: 'false' }).NH_CURSEFORGE_API_KEY,
+    ).toBe('development-disabled');
+    expect(containerEnvironment(deployment('production'))).not.toHaveProperty(
+      'NH_CURSEFORGE_API_KEY',
+    );
+  });
+
   it('unlocks Cloudflare credentials only for an explicit real-dev opt-in', () => {
     const real = { ...deployment('development'), NH_DEV_PROVIDER_MODE: 'real' };
     expect(containerEnvironment(real).NH_CLOUDFLARE_API_TOKEN).toBe('development-disabled');

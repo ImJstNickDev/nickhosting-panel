@@ -1486,3 +1486,43 @@ World directory selection (2026-10-18) is a browser input alternative, not a new
 API contract: the worker prepares a ZIP source and uses the same authenticated
 `/v1/minecraft/sources` upload and `world-import` durable command. No direct
 per-file write or second installation path is exposed for directory input.
+
+### Minecraft world catalog acquisition — 2026-10-18
+
+- `GET /v1/servers/:id/minecraft/world-catalog` returns
+  `{providers:[{id:'curseforge',available:boolean}]}` after local server-read
+  authorization. It reveals neither credentials nor protected configuration.
+- `GET /v1/servers/:id/minecraft/world-catalog/search` accepts
+  `provider=curseforge`, `query` (up to 256 characters), `offset` (0–9980) and an
+  optional `gameVersion`. Default search spans all world versions. No loader filter.
+- `GET /v1/servers/:id/minecraft/world-catalog/curseforge/:projectId/files` accepts
+  `offset` and lists published file identities, names, byte counts, declared game
+  versions, publication times and automatic-download availability.
+- Both lists return `{items,offset,limit:20,total}`. Read scope is checked on every
+  request, even for cached metadata. Cache is bounded, coalesced and scoped to the
+  effective protected provider configuration. Discovery does not request game files
+  or Pterodactyl server identities.
+- `POST /v1/minecraft/sources/world-catalog` accepts exactly
+  `{provider:'curseforge',serverId,projectId,versionId,idempotencyKey}`. IDs are
+  positive decimal provider IDs. Current `server:manage` authority is required.
+  It returns HTTP201 with the existing safe source DTO only after `state:'ready'`.
+  Arbitrary URLs, provider keys and filesystem paths are not accepted.
+
+Acquisition resolves exact project/file metadata again, honors distribution denial,
+then reuses source admission, quota/concurrency limits, authorized streaming,
+integrity verification and immutable source sealing. It reuses the downloader's
+verified digest instead of hashing the archive twice. The source is bound to the
+same server/owner; idempotent retries return ready sources without a new download.
+Uncertain transfers retain their reservation and existing Owner recovery controls.
+Browser disconnect is not a claim that an external download completed or that its
+staging was removed. The existing `world-import` command and its explicit overwrite
+consent remain unchanged; catalog acquisition itself never changes game files.
+
+Migration `043_world_catalog_sources.sql` extends the source origin/identity CHECK
+constraints for `curseforge` world archives. It rewrites no source rows. Apply it
+explicitly before acquisition; do not edit historical migrations. Rollback can
+retain the additive schema and existing staged sources while reverting code.
+
+Modrinth remains the existing mod/modpack provider, not a saved-world catalog.
+MinecraftMaps is an external link plus manual ZIP/folder import; no scraper or
+private endpoint was added. See [provider evidence](GAME-INTEGRATIONS.md#world-catalogs--m5-2026-10-18).

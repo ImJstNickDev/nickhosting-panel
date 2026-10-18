@@ -6,6 +6,7 @@ import {
   type ContentArtifact,
   type ContentFileVerification,
   type ContentHttp,
+  type CurseForgeProvider,
   contentFileUnchanged,
   contentStageDirectory,
   hashesSchema,
@@ -28,6 +29,7 @@ import {
   reserveContentStaging,
 } from './content-admission.js';
 import { currentInteractiveContext } from './interactive-context.js';
+import { minecraftWorldProjectId } from './minecraft-world-catalog-contracts.js';
 import { authorizeServer, ownerOnly, parse } from './registry.js';
 
 type Source = Selectable<Database['minecraft_sources']>;
@@ -78,11 +80,20 @@ export const minecraftSourceModrinthSchema = z.strictObject({
   serverId: z.uuid().optional(),
   idempotencyKey: identifier,
 });
+export const minecraftSourceWorldCatalogSchema = z.strictObject({
+  provider: z.literal('curseforge'),
+  projectId: minecraftWorldProjectId,
+  versionId: minecraftWorldProjectId,
+  serverId: z.uuid(),
+  idempotencyKey: identifier,
+});
 export interface MinecraftSourceOptions {
   /** Internal worker composition only. Must revalidate the exact durable job. */
   authorize?: (db: Kysely<Database>, previous: AuthContext) => Promise<AuthContext>;
   /** Isolated tests can substitute provider HTTP, never a browser input. */
   http?: ContentHttp;
+  /** Configured by protected server-side provider composition, never browser input. */
+  curseforge?: CurseForgeProvider;
   /** Only test snapshots; production observes the real configured filesystem. */
   observeDisk?: (directory: string) => Promise<{ available: bigint; total: bigint }>;
 }
@@ -244,6 +255,24 @@ async function authorizeScope(
   }
   return (await authorizeServer(db, context, serverId, 'server:manage')).owner_id;
 }
+
+/** Catalog browsing and acquisition use the same local managed-server boundary. */
+export async function authorizeMinecraftWorldCatalog(
+  db: Kysely<Database>,
+  context: AuthContext,
+  serverId: string,
+  permission: 'server:read' | 'server:manage' = 'server:read',
+) {
+  const server = await authorizeServer(db, context, serverId, permission);
+  const mapping = await db
+    .selectFrom('runtime_egg_mappings')
+    .select('game_id')
+    .where('id', '=', server.mapping_id)
+    .executeTakeFirst();
+  if (mapping?.game_id !== 'minecraft') throw new DomainError('not_found');
+  return server;
+}
+
 async function ownedSource(
   db: Kysely<Database>,
   context: AuthContext,
@@ -776,6 +805,67 @@ export function createMinecraftSourceStore(
           // allowlists, streaming, hash verification, timeouts and bounded retries.
           await http.download(artifact as ContentArtifact, sourcePath(source), { signal: abort });
           return undefined;
+        },
+        signal,
+      );
+    },
+    async acquireWorldCatalog(input: unknown, signal?: AbortSignal) {
+      const value = parse(minecraftSourceWorldCatalogSchema, input);
+      const actor = await reauthorize();
+      const server = await authorizeMinecraftWorldCatalog(
+        db,
+        actor,
+        value.serverId,
+        'server:manage',
+      );
+      const provider = options.curseforge;
+      if (!provider) throw new DomainError('integration_unavailable');
+      const existing = await db
+        .selectFrom('minecraft_sources')
+        .selectAll()
+        .where('owner_user_id', '=', server.owner_id)
+        .where('idempotency_key', '=', value.idempotencyKey)
+        .executeTakeFirst();
+      if (existing) {
+        if (
+          existing.game_id !== 'minecraft' ||
+          existing.server_id !== value.serverId ||
+          existing.origin !== 'curseforge' ||
+          existing.kind !== 'world' ||
+          existing.provider_project_id !== value.projectId ||
+          existing.provider_version_id !== value.versionId ||
+          existing.state === 'released'
+        )
+          throw new DomainError('conflict');
+        if (existing.state === 'ready') return publicSource(existing);
+        if (existing.state !== 'reserved') throw new DomainError('operation_uncertain');
+      }
+      const artifact = await provider.worldArchive(value.projectId, value.versionId, signal);
+      if (
+        artifact.projectId !== value.projectId ||
+        artifact.versionId !== value.versionId ||
+        !Number.isSafeInteger(artifact.size) ||
+        artifact.size < 1 ||
+        artifact.size > Number.MAX_SAFE_INTEGER - 65536
+      )
+        throw new DomainError('validation_failed');
+      const row = await reserve({
+        ...value,
+        origin: 'curseforge',
+        kind: 'world',
+        bytes: artifact.size,
+        hashes: artifact.hashes,
+      });
+      return executeTransfer(
+        row.id,
+        async (source, abort) => {
+          const path = sourcePath(source);
+          // The audited downloader verifies every advertised hash while writing.
+          // Reuse that digest, then seal the exact file identity: no second archive read.
+          const result = await provider.http.download(artifact, path, { signal: abort });
+          if (result.size !== artifact.size || !digest.safeParse(result.sha256).success)
+            throw new DomainError('conflict');
+          return { path, sha256: result.sha256, identity: await lstat(path, { bigint: true }) };
         },
         signal,
       );

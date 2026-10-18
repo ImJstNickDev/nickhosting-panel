@@ -20,6 +20,43 @@ export const minecraftWorldsMessages: Record<string, [string, string]> = {
     'Selected world: {name}. This folder is not listed.',
     'Mondo selezionato: {name}. Questa cartella non è elencata.',
   ],
+  'worlds.catalog.browse': ['Find worlds', 'Trova mondi'],
+  'worlds.catalog.search': ['Search CurseForge worlds', 'Cerca mondi su CurseForge'],
+  'worlds.catalog.files': ['Files for {name}', 'File di {name}'],
+  'worlds.catalog.back': ['Back to results', 'Torna ai risultati'],
+  'worlds.catalog.view': ['View project', 'Apri progetto'],
+  'worlds.catalog.choose': ['Use this file', 'Usa questo file'],
+  'worlds.catalog.downloading': ['Downloading world…', 'Download del mondo…'],
+  'worlds.catalog.unavailable': [
+    'Automatic download is not available for this file.',
+    'Download automatico non disponibile per questo file.',
+  ],
+  'worlds.catalog.notConfigured': [
+    'CurseForge is not configured. Ask the Owner to check the API key and content download settings.',
+    'CurseForge non è configurato. Chiedi all’Owner di controllare la chiave API e le impostazioni di download dei contenuti.',
+  ],
+  'worlds.catalog.empty': ['No worlds found.', 'Nessun mondo trovato.'],
+  'worlds.catalog.noFiles': [
+    'No downloadable world files found.',
+    'Nessun file mondo scaricabile trovato.',
+  ],
+  'worlds.catalog.otherVersion': [
+    'Declared for Minecraft {versions}. This server uses {current}.',
+    'Dichiarato per Minecraft {versions}. Questo server usa {current}.',
+  ],
+  'worlds.catalog.versionUnknown': [
+    'Minecraft version not specified',
+    'Versione Minecraft non specificata',
+  ],
+  'worlds.catalog.external': [
+    'Open MinecraftMaps in a new tab, then import the downloaded ZIP.',
+    'Apri MinecraftMaps in una nuova scheda, poi importa lo ZIP scaricato.',
+  ],
+  'worlds.catalog.ready': [
+    'World downloaded. Import it to add it to the server.',
+    'Mondo scaricato. Importalo per aggiungerlo al server.',
+  ],
+  'worlds.catalog.loading': ['Loading worlds', 'Caricamento dei mondi'],
   'worlds.search': ['Search worlds', 'Cerca mondi'],
   'worlds.refresh': ['Refresh worlds', 'Aggiorna mondi'],
   'worlds.refreshing': ['Refreshing worlds…', 'Aggiornamento dei mondi…'],

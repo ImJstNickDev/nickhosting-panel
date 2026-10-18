@@ -1,14 +1,22 @@
 import { z } from 'zod';
 import {
+  type ContentArtifact,
   type ContentHttp,
   type ContentLimits,
   type ContentPlan,
   type ContentTarget,
   contentLimits,
   fail,
+  safeArchivePath,
   unavailable,
   validateContentPlan,
 } from './contracts.js';
+import {
+  type WorldCatalogFiles,
+  type WorldCatalogProjects,
+  worldCatalogFilesSchema,
+  worldCatalogProjectsSchema,
+} from './world-catalog.js';
 
 const numeric = z.number().int().positive();
 const fileSchema = z.object({
@@ -27,6 +35,74 @@ const projectSchema = z.object({
   name: z.string(),
   allowModDistribution: z.boolean().nullable().optional(),
 });
+const worldProjectSchema = projectSchema.extend({
+  gameId: numeric,
+  classId: numeric,
+  slug: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,255}$/),
+  summary: z.string(),
+  downloadCount: z.number().nonnegative(),
+  authors: z.array(z.object({ name: z.string() })),
+  logo: z.object({ thumbnailUrl: z.string() }).nullable().optional(),
+  isAvailable: z.boolean(),
+});
+const worldFileSchema = fileSchema.extend({
+  gameId: numeric,
+  displayName: z.string(),
+  fileDate: z.iso.datetime({ offset: true }),
+});
+const paginationSchema = z.object({
+  index: z.number().int().nonnegative(),
+  pageSize: z.literal(20),
+  resultCount: z.number().int().min(0).max(20),
+  totalCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+});
+const responseSchema = z.object({ data: z.unknown(), pagination: z.unknown().optional() });
+const minecraftGameId = 432;
+const worldPageSize = 20 as const;
+
+function worldOffset(offset: number): void {
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset + worldPageSize > 10000) fail('search');
+}
+function worldId(value: string): number {
+  if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value)))
+    fail('curseforge_identity');
+  return Number(value);
+}
+function worldPagination(raw: unknown, offset: number, count: number) {
+  const page = paginationSchema.parse(raw);
+  if (page.index !== offset || page.resultCount !== count || page.totalCount < count)
+    fail('curseforge_pagination');
+  return { offset, limit: worldPageSize, total: page.totalCount };
+}
+function httpsUrl(value: string | null | undefined): URL | undefined {
+  if (!value || value.length > 2048) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password && !url.hash
+      ? url
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+function worldFileIntegrity(file: z.infer<typeof worldFileSchema>): string | undefined {
+  const sha1 = file.hashes.find((hash) => hash.algo === 1)?.value.toLowerCase();
+  if (
+    !sha1 ||
+    !/^[a-f0-9]{40}$/.test(sha1) ||
+    !/\.zip$/i.test(file.fileName) ||
+    file.fileName.includes('/') ||
+    !httpsUrl(file.downloadUrl) ||
+    !Number.isSafeInteger(file.fileLength)
+  )
+    return undefined;
+  try {
+    safeArchivePath(file.fileName);
+    return sha1;
+  } catch {
+    return undefined;
+  }
+}
 export type CurseForgeFile = z.infer<typeof fileSchema>;
 const loaderNames: Record<ContentTarget['loader'], string> = {
   vanilla: '',
@@ -48,6 +124,7 @@ export class CurseForgeProvider {
   readonly #key: string;
   private readonly base: string;
   private readonly limits: ContentLimits;
+  private worldClass: Promise<number> | undefined;
   constructor(
     readonly http: ContentHttp,
     options: { apiKey: string; apiBase?: string; limits?: Partial<ContentLimits> },
@@ -57,11 +134,174 @@ export class CurseForgeProvider {
     this.base = options.apiBase ?? 'https://api.curseforge.com/v1';
     this.limits = contentLimits(options.limits);
   }
-  private async get(path: string): Promise<unknown> {
-    const result = z
-      .object({ data: z.unknown() })
-      .parse(await this.http.json(`${this.base}${path}`, { headers: { 'x-api-key': this.#key } }));
-    return result.data;
+  private async request(path: string, signal?: AbortSignal) {
+    return responseSchema.parse(
+      await this.http.json(`${this.base}${path}`, {
+        headers: { 'x-api-key': this.#key },
+        ...(signal ? { signal } : {}),
+      }),
+    );
+  }
+  private async get(path: string, signal?: AbortSignal): Promise<unknown> {
+    return (await this.request(path, signal)).data;
+  }
+  private getWorldClass(signal?: AbortSignal): Promise<number> {
+    signal?.throwIfAborted();
+    // Resolve the provider's current class once; no guessed class ID or request per result.
+    this.worldClass ??= this.get('/categories?gameId=432&classesOnly=true', signal)
+      .then((data) => {
+        const classes = z
+          .array(
+            z.object({
+              id: numeric,
+              gameId: numeric,
+              slug: z.string(),
+              isClass: z.boolean().nullable(),
+            }),
+          )
+          .max(1000)
+          .parse(data)
+          .filter(
+            (category) =>
+              category.gameId === minecraftGameId &&
+              category.isClass === true &&
+              category.slug === 'worlds',
+          );
+        if (classes.length !== 1 || !classes[0]) unavailable('curseforge_worlds_class');
+        return classes[0].id;
+      })
+      .catch((error) => {
+        this.worldClass = undefined;
+        throw error;
+      });
+    return this.worldClass;
+  }
+  private async worldProject(projectId: number, signal?: AbortSignal) {
+    const [classId, raw] = await Promise.all([
+      this.getWorldClass(signal),
+      this.get(`/mods/${projectId}`, signal),
+    ]);
+    const project = worldProjectSchema.parse(raw);
+    if (
+      project.id !== projectId ||
+      project.gameId !== minecraftGameId ||
+      project.classId !== classId
+    )
+      fail('curseforge_world_identity');
+    return project;
+  }
+  async searchWorlds(
+    query: string,
+    offset = 0,
+    gameVersion?: string,
+    signal?: AbortSignal,
+  ): Promise<WorldCatalogProjects> {
+    worldOffset(offset);
+    if (
+      query.length > 256 ||
+      (gameVersion !== undefined && (!gameVersion || gameVersion.length > 80))
+    )
+      fail('search');
+    const classId = await this.getWorldClass(signal);
+    const params = new URLSearchParams({
+      gameId: String(minecraftGameId),
+      classId: String(classId),
+      searchFilter: query,
+      index: String(offset),
+      pageSize: String(worldPageSize),
+      sortField: '6',
+      sortOrder: 'desc',
+    });
+    if (gameVersion) params.set('gameVersion', gameVersion);
+    const response = await this.request(`/mods/search?${params}`, signal);
+    const projects = z.array(worldProjectSchema).max(worldPageSize).parse(response.data);
+    if (
+      projects.some((project) => project.gameId !== minecraftGameId || project.classId !== classId)
+    )
+      fail('curseforge_world_identity');
+    return worldCatalogProjectsSchema.parse({
+      ...worldPagination(response.pagination, offset, projects.length),
+      items: projects.map((project) => {
+        const image = httpsUrl(project.logo?.thumbnailUrl);
+        return {
+          id: String(project.id),
+          name: project.name,
+          summary: project.summary,
+          websiteUrl: `https://www.curseforge.com/minecraft/worlds/${project.slug}`,
+          ...(image && ['media.forgecdn.net', 'mediafilez.forgecdn.net'].includes(image.hostname)
+            ? { imageUrl: image.href }
+            : {}),
+          authors: project.authors.map((author) => author.name),
+          downloads: project.downloadCount,
+        };
+      }),
+    });
+  }
+  async worldFiles(
+    projectId: string,
+    offset = 0,
+    signal?: AbortSignal,
+  ): Promise<WorldCatalogFiles> {
+    worldOffset(offset);
+    const pid = worldId(projectId);
+    const [project, response] = await Promise.all([
+      this.worldProject(pid, signal),
+      this.request(`/mods/${pid}/files?index=${offset}&pageSize=${worldPageSize}`, signal),
+    ]);
+    const files = z.array(worldFileSchema).max(worldPageSize).parse(response.data);
+    if (files.some((file) => file.gameId !== minecraftGameId || file.modId !== pid))
+      fail('curseforge_world_identity');
+    return worldCatalogFilesSchema.parse({
+      ...worldPagination(response.pagination, offset, files.length),
+      items: files.map((file) => ({
+        id: String(file.id),
+        projectId,
+        name: file.displayName,
+        filename: file.fileName,
+        gameVersions: file.gameVersions,
+        publishedAt: file.fileDate,
+        bytes: file.fileLength,
+        available:
+          project.isAvailable &&
+          project.allowModDistribution !== false &&
+          file.isAvailable &&
+          Boolean(worldFileIntegrity(file)),
+      })),
+    });
+  }
+  async worldArchive(
+    projectId: string,
+    fileId: string,
+    signal?: AbortSignal,
+  ): Promise<ContentArtifact> {
+    const pid = worldId(projectId);
+    const fid = worldId(fileId);
+    const [project, raw] = await Promise.all([
+      this.worldProject(pid, signal),
+      this.get(`/mods/${pid}/files/${fid}`, signal),
+    ]);
+    const file = worldFileSchema.parse(raw);
+    if (file.gameId !== minecraftGameId || file.modId !== pid || file.id !== fid)
+      fail('curseforge_world_identity');
+    if (
+      !project.isAvailable ||
+      project.allowModDistribution === false ||
+      !file.isAvailable ||
+      !file.downloadUrl
+    )
+      unavailable('distribution_unavailable');
+    const sha1 = worldFileIntegrity(file);
+    if (!sha1) fail('curseforge_integrity');
+    return {
+      path: 'config/input.zip',
+      urls: [file.downloadUrl],
+      size: file.fileLength,
+      hashes: { sha1 },
+      projectId,
+      versionId: fileId,
+      kind: 'override',
+      serverSide: 'required',
+    };
   }
   async search(query: string, target: ContentTarget): Promise<unknown> {
     if (query.length > 256) fail('search');

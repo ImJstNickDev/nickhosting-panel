@@ -19,6 +19,9 @@
 }
 .minecraft-worlds-controls {
   gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 100%;
 }
 .minecraft-worlds-search {
   position: relative;
@@ -308,4 +311,16 @@
   justify-content: center;
   flex-wrap: wrap;
   margin: 0;
+}
+
+.minecraft-worlds-catalog-source {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 18px;
+  overflow-wrap: anywhere;
+}
+.minecraft-worlds-catalog-source > span {
+  font-size: 0.8rem;
+  color: var(--muted);
 }

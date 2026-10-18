@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import type { Identity } from '@nickhosting/auth';
+import type { ContentHttp } from '@nickhosting/content-providers';
 import {
   type AuthContext,
   assertPermission,
@@ -38,6 +39,7 @@ import { registerGatewayMessageRoutes } from './gateway-messages.js';
 import { registerHealthRoutes } from './health.js';
 import { registerMinecraftRoutes } from './minecraft.js';
 import { registerMinecraftSourceRoutes } from './minecraft-sources.js';
+import { registerMinecraftWorldCatalogRoutes } from './minecraft-world-catalog.js';
 import { registerPlatformRoutes } from './platform.js';
 import { registerProfilePhotoRoutes } from './profile-photo.js';
 import { PROVIDER_EVENTS_PATH, receiveProviderEvent } from './provider-events.js';
@@ -60,6 +62,8 @@ interface Options {
   defaultLocale?: () => Promise<'en' | 'it'>;
   log?: (event: Record<string, unknown>) => void;
   management?: () => Promise<ManagementRuntime>;
+  /** Isolated tests only: substitute public content HTTP without provider credentials. */
+  minecraftContentHttp?: ContentHttp;
 }
 export type Variables = {
   identity: Identity;
@@ -607,6 +611,14 @@ export function createApp(options: Options) {
       }),
   });
   registerMinecraftSourceRoutes(app, { db, env, principal, acquireUploadSlot });
+  registerMinecraftWorldCatalogRoutes(app, {
+    db,
+    env,
+    codec: options.codec,
+    principal,
+    acquireUploadSlot,
+    http: options.minecraftContentHttp,
+  });
   registerMinecraftRoutes(app, {
     db,
     env,
