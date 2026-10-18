@@ -159,6 +159,324 @@ describe('Gateway address collision semantics', () => {
   });
 });
 
+describe('Gateway snapshot provider batches', () => {
+  it.each([false, true])('shares four server routes with bulk support=%s', async (bulk) => {
+    const f = fixture();
+    const context = await f.options.resolveContext(f.route);
+    const container = f.observation.containers[0];
+    if (!container) throw new Error('Missing fixture container');
+    const entries = [ids.route, ids.server, ids.node, ids.allocation].map((id, index) => {
+      const port = f.route.backend.port + index;
+      const allocation = { ...f.allocation, id: 7 + index, port };
+      const server = {
+        ...f.server,
+        id: 42 + index,
+        uuid: id,
+        relationships: {
+          allocations: { object: 'list' as const, data: [{ attributes: allocation }] },
+        },
+      };
+      return {
+        allocation,
+        server,
+        route: {
+          ...f.route,
+          id,
+          public: { ...f.route.public, port },
+          backend: { ...f.route.backend, port },
+        },
+        container: {
+          ...container,
+          id: String(index + 1).repeat(64),
+          name: `/${id}`,
+          configuredBindings: container.configuredBindings.map((binding) => ({ ...binding, port })),
+          activeBindings: container.activeBindings.map((binding) => ({ ...binding, port })),
+        },
+      };
+    });
+    f.observation.containers = entries.map((entry) => entry.container);
+    f.options.provider.listAllocations = vi.fn(async () =>
+      entries.map((entry) => entry.allocation),
+    );
+    f.options.provider.getApplicationServer = vi.fn(async (id) => {
+      const entry = entries.find((entry) => entry.server.id === id);
+      if (!entry) throw new Error('Missing fixture server');
+      return entry.server;
+    });
+    f.options.resolveContext = vi.fn(async (route) => {
+      const entry = entries.find((entry) => entry.route.id === route.id);
+      if (!entry) throw new Error('Missing fixture context');
+      return {
+        ...context,
+        providerServerId: entry.server.id,
+        providerServerUuid: entry.server.uuid,
+        providerAllocationId: entry.allocation.id,
+      };
+    });
+    if (bulk)
+      f.options.provider.getApplicationServers = vi.fn(async () =>
+        entries.map((entry) => entry.server),
+      );
+    const batch = f.validator().createValidationBatch?.(entries.map((entry) => entry.route));
+    if (!batch) throw new Error('Missing validation batch');
+    await Promise.all(entries.map(({ route }) => batch.validate(route, [])));
+    expect(f.options.provider.listNodes).toHaveBeenCalledOnce();
+    expect(f.options.provider.listAllocations).toHaveBeenCalledOnce();
+    expect(f.options.provider.getApplicationServer).toHaveBeenCalledTimes(bulk ? 0 : 4);
+    if (bulk) {
+      expect(f.options.provider.getApplicationServers).toHaveBeenCalledOnce();
+      expect(f.options.provider.getApplicationServers).toHaveBeenCalledWith(
+        entries.map((entry) => entry.route.id),
+      );
+    }
+  });
+
+  it.each(['missing', 'duplicate', 'failed', 'identity'] as const)(
+    'rejects %s bulk evidence without retrying single-server reads',
+    async (kind) => {
+      const f = fixture();
+      f.options.provider.getApplicationServers = vi.fn(async () => {
+        if (kind === 'failed') throw new Error('Bulk failed');
+        if (kind === 'missing') return [];
+        if (kind === 'duplicate') return [f.server, f.server];
+        return [{ ...f.server, external_id: 'foreign' }];
+      });
+      const safety = f.validator();
+      const batch = safety.createValidationBatch?.([f.route]);
+      if (!batch) throw new Error('Missing validation batch');
+      await expect(batch.validate(f.route, [])).rejects.toThrow();
+      await expect(batch.validate(f.route, [])).rejects.toThrow();
+      expect(f.options.provider.getApplicationServers).toHaveBeenCalledOnce();
+      expect(f.options.provider.getApplicationServer).not.toHaveBeenCalled();
+      expect(f.options.saveProof).not.toHaveBeenCalled();
+      f.options.provider.getApplicationServers = vi.fn(async () => [f.server]);
+      await expect(
+        safety.createValidationBatch?.([f.route]).validate(f.route, []),
+      ).resolves.toEqual({ backendReady: true });
+    },
+  );
+
+  it('keeps bulk evidence inside its source age and snapshot boundary', async () => {
+    const f = fixture();
+    let clock = f.observation.observedAt;
+    f.options.now = () => clock;
+    f.options.provider.getApplicationServers = vi.fn(async () => [f.server]);
+    const safety = f.validator();
+    const batch = safety.createValidationBatch?.([f.route]);
+    if (!batch) throw new Error('Missing validation batch');
+    await batch.validate(f.route, []);
+    await batch.validate(f.route, []);
+    clock += 5001;
+    f.observation.observedAt = clock;
+    await expect(batch.validate(f.route, [])).rejects.toMatchObject({
+      reason: 'observation_stale',
+    });
+    expect(f.options.provider.getApplicationServers).toHaveBeenCalledOnce();
+    await safety.createValidationBatch?.([f.route]).validate(f.route, []);
+    expect(f.options.provider.getApplicationServers).toHaveBeenCalledTimes(2);
+    await safety.validate(f.route, []);
+    expect(f.options.provider.getApplicationServer).toHaveBeenCalledOnce();
+  });
+
+  it('shares all-node inventory and each server across routes and final bind checks only in one batch', async () => {
+    const f = fixture();
+    const secondAllocation = { ...f.allocation, id: 8, port: 25566 };
+    const secondServer = {
+      ...f.server,
+      id: 43,
+      uuid: ids.generation,
+      external_id: 'nh-second-server',
+      relationships: {
+        allocations: { object: 'list' as const, data: [{ attributes: secondAllocation }] },
+      },
+    };
+    const routes: GatewayRoute[] = [
+      f.route,
+      { ...f.route, id: ids.node, public: { ...f.route.public, transport: 'udp' } },
+      {
+        ...f.route,
+        id: ids.allocation,
+        serverId: ids.provider,
+        allocationId: ids.node,
+        public: { ...f.route.public, port: secondAllocation.port },
+        backend: { ...f.route.backend, port: secondAllocation.port },
+      },
+    ];
+    const container = f.observation.containers[0];
+    const node = f.options.policy.nodes[0];
+    if (!container || !node) throw new Error('Missing fixture topology');
+    f.observation.containers.push({
+      ...container,
+      id: 'c'.repeat(64),
+      name: `/${secondServer.uuid}`,
+      configuredBindings: container.configuredBindings.map((binding) => ({
+        ...binding,
+        port: secondAllocation.port,
+      })),
+      activeBindings: container.activeBindings.map((binding) => ({
+        ...binding,
+        port: secondAllocation.port,
+      })),
+    });
+    f.options.policy.nodes.push({ ...node, nodeId: 2, nodeUuid: 'provider-node-2' });
+    f.options.provider.listNodes = vi.fn(async () => [f.node, { id: 2, uuid: 'provider-node-2' }]);
+    f.options.provider.listAllocations = vi.fn(async (nodeId) =>
+      nodeId === 1 ? [f.allocation, secondAllocation] : [],
+    );
+    f.options.provider.getApplicationServer = vi.fn(async (serverId) =>
+      serverId === 42 ? f.server : secondServer,
+    );
+    const context = await f.options.resolveContext(f.route);
+    f.options.resolveContext = vi.fn(async (route) =>
+      route.serverId === f.route.serverId
+        ? context
+        : {
+            ...context,
+            providerServerId: secondServer.id,
+            providerServerUuid: secondServer.uuid,
+            externalId: secondServer.external_id,
+            providerAllocationId: secondAllocation.id,
+          },
+    );
+    const proofs = new Map<string, GatewayReachabilityProof>();
+    f.options.loadProof = vi.fn(async (route) => proofs.get(route.id) ?? null);
+    f.options.saveProof = vi.fn(async (route, proof) => {
+      proofs.set(route.id, proof);
+    });
+    const safety = f.validator();
+    const batch = safety.createValidationBatch?.();
+    if (!batch) throw new Error('Missing validation batch');
+    expect(f.options.provider.listNodes).not.toHaveBeenCalled();
+    for (let gate = 0; gate < 2; gate++)
+      await Promise.all(routes.map((route) => batch.validate(route, [])));
+    expect(f.options.provider.listNodes).toHaveBeenCalledOnce();
+    expect(f.options.provider.listAllocations).toHaveBeenCalledTimes(2);
+    expect(f.options.provider.getApplicationServer).toHaveBeenCalledTimes(2);
+    expect(f.options.provider.getApplicationServer).toHaveBeenCalledWith(42);
+    expect(f.options.provider.getApplicationServer).toHaveBeenCalledWith(43);
+    expect(f.options.resolveContext).toHaveBeenCalledTimes(6);
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(6);
+    expect(f.options.loadProof).toHaveBeenCalledTimes(6);
+    const next = safety.createValidationBatch?.();
+    if (!next) throw new Error('Missing next validation batch');
+    await Promise.all(routes.map((route) => next.validate(route, [])));
+    expect(f.options.provider.listNodes).toHaveBeenCalledTimes(2);
+    expect(f.options.provider.listAllocations).toHaveBeenCalledTimes(4);
+    expect(f.options.provider.getApplicationServer).toHaveBeenCalledTimes(4);
+  });
+
+  it.each(['listNodes', 'listAllocations', 'getApplicationServer'] as const)(
+    'retains a failed %s read in its batch and recovers only with fresh sources',
+    async (source) => {
+      const f = fixture();
+      vi.mocked(f.options.provider[source]).mockRejectedValueOnce(new Error('Provider failed'));
+      const safety = f.validator();
+      const batch = safety.createValidationBatch?.();
+      if (!batch) throw new Error('Missing validation batch');
+      await expect(batch.validate(f.route, [])).rejects.toThrow('Provider failed');
+      await expect(batch.validate(f.route, [])).rejects.toThrow('Provider failed');
+      expect(f.options.provider[source]).toHaveBeenCalledOnce();
+      expect(f.options.probeBackend).not.toHaveBeenCalled();
+      expect(f.options.saveProof).not.toHaveBeenCalled();
+      const next = safety.createValidationBatch?.();
+      if (!next) throw new Error('Missing next validation batch');
+      await expect(next.validate(f.route, [])).resolves.toEqual({ backendReady: true });
+      expect(f.options.provider[source]).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('isolates concurrently active batches, including source failures', async () => {
+    const f = fixture();
+    let rejectFirst!: (error: Error) => void;
+    f.options.provider.listNodes = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectFirst = reject;
+          }),
+      )
+      .mockResolvedValue([f.node]);
+    const safety = f.validator();
+    const first = safety.createValidationBatch?.();
+    const second = safety.createValidationBatch?.();
+    if (!first || !second) throw new Error('Missing validation batches');
+    const failed = first.validate(f.route, []).catch((error) => error);
+    await vi.waitFor(() => expect(rejectFirst).toBeTypeOf('function'));
+    const otherRoute = { ...f.route, id: ids.node };
+    await expect(second.validate(otherRoute, [])).resolves.toEqual({ backendReady: true });
+    rejectFirst(new Error('First batch failed'));
+    expect(await failed).toMatchObject({ message: 'First batch failed' });
+    expect(f.options.provider.listNodes).toHaveBeenCalledTimes(2);
+    expect(f.options.provider.listAllocations).toHaveBeenCalledTimes(2);
+    expect(f.options.provider.getApplicationServer).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['before-inspection', 'proof-read', 'node-challenge'] as const)(
+    'rejects provider evidence expiring at %s without renewing its timestamp',
+    async (phase) => {
+      const f = fixture();
+      let clock = f.observation.observedAt;
+      f.options.now = () => clock;
+      f.options.providerReady = () => true;
+      const safety = f.validator();
+      const batch = safety.createValidationBatch?.();
+      if (!batch) throw new Error('Missing validation batch');
+      await batch.validate(f.route, []);
+      clock += phase === 'before-inspection' ? 5001 : 4999;
+      f.observation.observedAt = clock;
+      if (phase === 'proof-read') {
+        f.options.loadProof = async () => {
+          clock += 2;
+          return f.proof();
+        };
+      }
+      if (phase === 'node-challenge') {
+        f.route.mode = 'sleeping';
+        f.options.probeNode = async () => {
+          clock += 2;
+          return true;
+        };
+      }
+      await expect(batch.validate(f.route, [f.route.public])).rejects.toMatchObject({
+        reason: 'observation_stale',
+      });
+      expect(f.options.provider.listNodes).toHaveBeenCalledOnce();
+      expect(f.options.provider.getApplicationServer).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(['provider', 'socket', 'context', 'proof'] as const)(
+    'does not let shared provider reads bypass %s safety at the final bind gate',
+    async (change) => {
+      const f = fixture();
+      const safety = f.validator();
+      const batch = safety.createValidationBatch?.();
+      if (!batch) throw new Error('Missing validation batch');
+      if (change === 'provider')
+        f.options.provider.listAllocations = vi.fn(async () => [
+          f.allocation,
+          { id: 8, ip: f.route.public.address, port: f.route.public.port + 1, assigned: false },
+        ]);
+      await batch.validate(f.route, []);
+      if (change === 'provider') f.route.public.port++;
+      if (change === 'socket')
+        f.observation.sockets.push({ ...f.route.public, processOwned: false, inode: 'foreign' });
+      if (change === 'context') {
+        const context = await f.options.resolveContext(f.route);
+        f.options.resolveContext = async () => ({ ...context, externalId: 'foreign-owner' });
+      }
+      if (change === 'proof') {
+        f.options.loadProof = async () => null;
+        f.options.probeBackend = async () => false;
+      }
+      await expect(batch.validate(f.route, [f.route.public])).rejects.toThrow();
+      expect(f.options.provider.listNodes).toHaveBeenCalledOnce();
+      expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
+    },
+  );
+});
+
 describe('Gateway pre-bind and forwarding safety', () => {
   it('uses declared provider readiness only with existing matching network proof and running bindings', async () => {
     const f = fixture();
@@ -595,6 +913,129 @@ describe('Gateway pre-bind and forwarding safety', () => {
     });
     expect(f.options.saveProof).toHaveBeenCalledOnce();
   });
+  it.each(['unchanged', 'owner', 'container', 'failure'] as const)(
+    'joins an already active %s renewal without duplicate backend inventory or host inspection',
+    async (change) => {
+      const f = fixture();
+      f.route.mode = 'waking';
+      const safety = f.validator();
+      await safety.validate(f.route, []);
+      if (change === 'owner') {
+        const context = await f.options.resolveContext(f.route);
+        f.server.user = 3;
+        f.options.resolveContext = vi.fn(async () => ({ ...context, providerUserId: 3 }));
+      }
+      if (change === 'container') {
+        const container = f.observation.containers[0];
+        if (!container) throw new Error('Missing fixture container');
+        container.id = 'c'.repeat(64);
+      }
+      if (change === 'failure') f.server.suspended = true;
+      let finish!: () => void;
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      f.options.provider.listNodes = vi.fn(async () => {
+        entered();
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        return [f.node];
+      });
+      const sample = { ready: true, playerCount: 1, idle: false };
+      f.options.probeBackend = vi.fn(async () => sample);
+      const renewal = safety.validate(f.route, [f.route.public]).catch((error) => error);
+      await started;
+      const pending = safety.probeLeasedBackend?.(f.route).catch((error) => error);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
+      expect(f.options.provider.listNodes).toHaveBeenCalledOnce();
+      expect(f.options.probeBackend).not.toHaveBeenCalled();
+      finish();
+      await renewal;
+      const result = await pending;
+      if (change === 'unchanged') expect(result).toBe(sample);
+      else
+        expect(result).toMatchObject({
+          reason: 'observation_stale',
+          observationFailure: 'lease_grant_replaced',
+        });
+      expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
+      expect(f.options.provider.listAllocations).toHaveBeenCalledTimes(2);
+      expect(f.options.provider.getApplicationServer).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('does not extend the original evidence deadline after joining a successful renewal', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    let clock = f.observation.observedAt;
+    f.options.now = () => clock;
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    clock += 4999;
+    f.observation.observedAt = clock;
+    let finish!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    f.options.provider.listNodes = async () => {
+      entered();
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      return [f.node];
+    };
+    const renewal = safety.validate(f.route, [f.route.public]);
+    await started;
+    const pending = safety.probeLeasedBackend?.(f.route).catch((error) => error);
+    f.options.probeBackend = async () => {
+      clock += 2;
+      return { ready: true };
+    };
+    finish();
+    await renewal;
+    expect(await pending).toMatchObject({ reason: 'observation_stale' });
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
+  });
+
+  it('bounds joining an active renewal by the original grant deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      f.route.mode = 'waking';
+      let clock = f.observation.observedAt;
+      f.options.now = () => clock;
+      const safety = f.validator();
+      await safety.validate(f.route, []);
+      let finish!: () => void;
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      f.options.provider.listNodes = async () => {
+        entered();
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        return [f.node];
+      };
+      const renewal = safety.validate(f.route, [f.route.public]).catch((error) => error);
+      await started;
+      const pending = safety.probeLeasedBackend?.(f.route).catch((error) => error);
+      clock += 5000;
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(await pending).toMatchObject({ reason: 'observation_stale' });
+      expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
+      finish();
+      await renewal;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     'unchanged',
     'owner',

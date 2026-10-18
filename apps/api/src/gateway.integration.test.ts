@@ -158,6 +158,7 @@ beforeEach(async () => {
   Object.assign(f.adapter, {
     listNodes: vi.fn(async () => [{ id: f.providerNodeId, uuid: f.nodeId, fqdn: secret }]),
     getApplicationServer: vi.fn(async () => remote),
+    getApplicationServers: vi.fn(async () => [remote]),
     listAllocations: vi.fn(async () => [
       {
         id: claim.pterodactyl_allocation_id,
@@ -324,6 +325,203 @@ describe('M3 Core service authentication and managed control plane', () => {
       (await request(`${prefix()}/inventory`, { operation: 'server', routeId: route.id })).status,
     ).toBe(409);
   });
+  it('fetches multiple managed routes for the same server once and strips private provider metadata', async () => {
+    await setGatewayRoute(f.db, f.owner, { ...(routeInput as object), transport: 'udp' }, env);
+    const routes = (await getGatewaySnapshot(f.db, env)).routes;
+    expect(routes).toHaveLength(2);
+    const response = await request(`${prefix()}/inventory`, {
+      operation: 'servers',
+      routeIds: routes.map((route) => route.id),
+    });
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).not.toContain(secret);
+    const parsed = JSON.parse(text);
+    expect(parsed).toHaveLength(1);
+    expect(safetyProviderServerSchema.safeParse(parsed[0]).success).toBe(true);
+    expect(f.adapter.getApplicationServers).toHaveBeenCalledExactlyOnceWith([remote.uuid]);
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+  });
+
+  it('batches distinct managed servers while verifying every returned identity', async () => {
+    vi.mocked(f.adapter.listAllocations).mockResolvedValue(f.inventory);
+    const otherId = await f.server();
+    const other = await f.db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', otherId)
+      .executeTakeFirstOrThrow();
+    const claim = await f.db
+      .selectFrom('server_allocations')
+      .selectAll()
+      .where('server_id', '=', otherId)
+      .executeTakeFirstOrThrow();
+    if (
+      !other.pterodactyl_id ||
+      !other.pterodactyl_uuid ||
+      !other.pterodactyl_identifier ||
+      !other.provider_user_id
+    )
+      throw new Error('Missing second fixture provider identity');
+    await setGatewayPolicy(f.db, f.context, otherId, policy);
+    await setGatewayRoute(
+      f.db,
+      f.owner,
+      { ...(routeInput as object), serverId: otherId, allocationId: claim.id, publicPort: 26001 },
+      env,
+    );
+    const otherRemote = {
+      ...remote,
+      id: other.pterodactyl_id,
+      uuid: other.pterodactyl_uuid,
+      identifier: other.pterodactyl_identifier,
+      external_id: other.external_id,
+      user: other.provider_user_id,
+      allocation: claim.pterodactyl_allocation_id,
+      relationships: {
+        allocations: {
+          object: 'list' as const,
+          data: [
+            {
+              attributes: {
+                id: claim.pterodactyl_allocation_id,
+                ip: claim.address,
+                port: claim.port,
+                assigned: true,
+              },
+            },
+          ],
+        },
+      },
+    };
+    vi.mocked(f.adapter.getApplicationServers).mockResolvedValue([otherRemote, remote]);
+    const routes = (await getGatewaySnapshot(f.db, env)).routes;
+    const data = { operation: 'servers', routeIds: routes.map((route) => route.id) };
+    const response = await request(`${prefix()}/inventory`, data);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toHaveLength(2);
+    expect(f.adapter.getApplicationServers).toHaveBeenCalledExactlyOnceWith(
+      expect.arrayContaining([remote.uuid, otherRemote.uuid]),
+    );
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+    vi.mocked(f.adapter.getApplicationServers).mockResolvedValue([
+      remote,
+      { ...otherRemote, external_id: 'foreign' },
+    ]);
+    expect((await request(`${prefix()}/inventory`, data)).status).toBe(409);
+  });
+
+  it.each(['missing', 'foreign', 'duplicate', 'identity', 'allocations'] as const)(
+    'rejects %s members from batched provider inventory without individual retries',
+    async (failure) => {
+      if (failure === 'missing') vi.mocked(f.adapter.getApplicationServers).mockResolvedValue([]);
+      if (failure === 'foreign')
+        vi.mocked(f.adapter.getApplicationServers).mockResolvedValue([
+          remote,
+          { ...remote, uuid: randomUUID(), id: remote.id + 1 },
+        ]);
+      if (failure === 'duplicate')
+        vi.mocked(f.adapter.getApplicationServers).mockResolvedValue([remote, remote]);
+      if (failure === 'identity') remote = { ...remote, user: remote.user + 1 };
+      if (failure === 'allocations') remote = { ...remote, relationships: undefined };
+      const response = await request(`${prefix()}/inventory`, {
+        operation: 'servers',
+        routeIds: [route.id],
+      });
+      expect(response.status).toBe(409);
+      expect(f.adapter.getApplicationServers).toHaveBeenCalledOnce();
+      expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+      expect(await response.text()).not.toContain(secret);
+    },
+  );
+
+  it.each(['foreign', 'disabled'] as const)(
+    'rejects a %s route before requesting batched provider inventory',
+    async (failure) => {
+      if (failure === 'disabled')
+        await f.db
+          .updateTable('gateway_routes')
+          .set({ enabled: false })
+          .where('id', '=', route.id)
+          .execute();
+      const response = await request(`${prefix()}/inventory`, {
+        operation: 'servers',
+        routeIds: [failure === 'foreign' ? randomUUID() : route.id],
+      });
+      expect(response.status).toBe(412);
+      expect(await response.json()).toMatchObject({
+        error: {
+          code: 'conflict',
+          messageKey: 'errors.conflict',
+          details: { gatewayControlReason: 'snapshot_membership_changed' },
+        },
+      });
+      expect(f.adapter.getApplicationServers).not.toHaveBeenCalled();
+      expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+    },
+  );
+
+  it('requires current managed provider context before requesting batched inventory', async () => {
+    await f.db
+      .updateTable('managed_servers')
+      .set({ provider_user_id: null })
+      .where('id', '=', serverId)
+      .execute();
+    const response = await request(`${prefix()}/inventory`, {
+      operation: 'servers',
+      routeIds: [route.id],
+    });
+    expect(response.status).toBe(412);
+    expect(await response.json()).toMatchObject({
+      error: { details: { gatewayControlReason: 'snapshot_membership_changed' } },
+    });
+    expect(f.adapter.getApplicationServers).not.toHaveBeenCalled();
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+  });
+
+  it('does not classify a context provenance failure as retryable membership drift', async () => {
+    const management = await import('@nickhosting/server-management');
+    const context = vi
+      .spyOn(management, 'gatewaySafetyContext')
+      .mockRejectedValueOnce(new DomainError('provenance_mismatch'));
+    try {
+      const response = await request(`${prefix()}/inventory`, {
+        operation: 'servers',
+        routeIds: [route.id],
+      });
+      expect(response.status).toBe(409);
+      const body = await response.text();
+      expect(body).toContain('provenance_mismatch');
+      expect(body).not.toContain('snapshot_membership_changed');
+      expect(f.adapter.getApplicationServers).not.toHaveBeenCalled();
+    } finally {
+      context.mockRestore();
+    }
+  });
+
+  it('requires service authentication and unique bounded route selectors for batched inventory', async () => {
+    const inputs = [
+      { operation: 'servers', routeIds: [] },
+      { operation: 'servers', routeIds: [route.id, route.id] },
+      { operation: 'servers', routeIds: Array.from({ length: 1001 }, () => randomUUID()) },
+      { operation: 'servers', routeIds: [route.id], applicationKey: secret },
+      { operation: 'servers', routeIds: [remote.id] },
+    ];
+    for (const data of inputs)
+      expect((await request(`${prefix()}/inventory`, data)).status).toBe(400);
+    expect(
+      (
+        await request(
+          `${prefix()}/inventory`,
+          { operation: 'servers', routeIds: [route.id] },
+          { authorization: '' },
+        )
+      ).status,
+    ).toBe(401);
+    expect(f.adapter.getApplicationServers).not.toHaveBeenCalled();
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+  });
+
   it('scopes allocations to configured nodes without duplicating fresh node discovery', async () => {
     const before = vi.mocked(f.adapter.listNodes).mock.calls.length;
     expect(

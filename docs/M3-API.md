@@ -446,10 +446,44 @@ Backend probes may reuse provider inventory from the exact route/context's last
 successful listener validation, only within `maximumObservationAgeMs` measured
 from the original inventory acquisition start. Backend probes still resolve Core
 context and inspect Docker/sockets and game readiness afresh. Revision, generation,
-context changes, expiration or failed listener renewal prevent reuse. Each listener
-bind/renewal fetches fresh provider inventory. This removes the repeated provider
+context changes, expiration or failed listener renewal prevent reuse. Each snapshot
+application fetches fresh provider inventory shared across its listener checks, as
+specified in the 2026-10-18 amendment below. This removes the repeated provider
 reads between nearby snapshot validation and backend observation without caching
 permission or treating a configured address as reachability proof.
+
+### 2026-10-18 — Snapshot-scoped provider inventory
+
+`GatewaySafety.createValidationBatch(routes)` shares provider source reads during
+one snapshot application, including the final pre-bind check. Nodes and each
+configured node's complete allocation inventory are read once. Core's authenticated
+`inventory` operation `{operation: "servers", routeIds}` accepts 1–1000 unique
+managed route IDs and returns only sanitized, identity-verified server records.
+The Gateway chunks larger snapshots into bounded control requests. The existing
+single-server operation remains available for independent validations.
+
+The Pterodactyl adapter uses the standard Application server list, filtered by
+complete UUIDs in batches of 48 with `include=allocations`. Pagination remains
+bounded; missing, duplicate or unexpected results reject rather than falling back
+to a burst of individual requests. Several roles for one server share its record.
+No Blueprint endpoint, provider rate-limit increase or cross-snapshot TTL cache is
+required. Four servers on one node require three provider list operations per
+snapshot instead of twelve, before pagination; pagination/chunking still adds
+requests, so this is not an unlimited-capacity guarantee.
+
+Every validation still resolves current managed context, observes current host
+bindings and checks the durable reachability proof. The batch retains its original
+acquisition start, including time spent on later routes and proof/node challenges;
+expired evidence cannot renew a listener. A standalone `validate` reads fresh
+sources. An equivalent in-progress renewal may be joined by a backend probe within
+the original grant deadline, without restoring authority before it completes.
+
+Periodic gameplay observations skip coherent authenticated `sleeping`,
+`manually_stopped` and `maintenance` route modes. Listener safety still renews.
+`blocked`, `waking` and `online` observations, including pending sleep fences, remain.
+Core's existing worker reconciliation detects external starts: a sleeping server
+whose runtime becomes running exports `blocked`, resuming readiness observation.
+The Blueprint inventory feed is not a runtime-event substitute.
 
 
 ## 2026-10-11 — Confirmed sleep acknowledgement and readiness refresh

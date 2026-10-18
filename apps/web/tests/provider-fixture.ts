@@ -371,6 +371,13 @@ export async function installBrowserFixtures(
       check();
       return [...remotes.values()].map((r) => structuredClone(r.server));
     },
+    getApplicationServers: async (uuids) => {
+      check();
+      const selected = new Set(uuids);
+      return [...remotes.values()]
+        .filter((r) => selected.has(r.server.uuid))
+        .map((r) => structuredClone(r.server));
+    },
     getApplicationServer: async (id) => structuredClone(remote(id).server),
     findServerByExternalId: async (id) => {
       check();

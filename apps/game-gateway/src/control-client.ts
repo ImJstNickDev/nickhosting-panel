@@ -171,6 +171,34 @@ export function createGatewayControlClient(
           .object({ routeId: z.uuid(), routeRevision: z.number().int().positive() })
           .strict()
           .safeParse(body);
+        const membershipChanged = z
+          .object({
+            error: z.object({
+              code: z.literal('conflict'),
+              messageKey: z.literal('errors.conflict'),
+              details: z
+                .object({ gatewayControlReason: z.literal('snapshot_membership_changed') })
+                .strict(),
+            }),
+          })
+          .safeParse(parsed);
+        if (
+          response.status === 412 &&
+          action === 'inventory' &&
+          membershipChanged.success &&
+          z
+            .object({
+              operation: z.literal('servers'),
+              routeIds: z
+                .array(z.uuid())
+                .min(1)
+                .max(1000)
+                .refine((ids) => new Set(ids).size === ids.length),
+            })
+            .strict()
+            .safeParse(body).success
+        )
+          throw new GatewayRouteRevisionStaleError();
         if (
           response.status === 412 &&
           ['context', 'proof-read', 'proof-write'].includes(action) &&

@@ -152,6 +152,10 @@ export interface GatewayProviderSource {
   listNodes(): Promise<z.infer<typeof safetyProviderNodeSchema>[]>;
   listAllocations(nodeId: number): Promise<z.infer<typeof safetyProviderAllocationSchema>[]>;
   getApplicationServer(serverId: number): Promise<z.infer<typeof safetyProviderServerSchema>>;
+  /** Core scopes a bulk read to these authenticated managed routes. */
+  getApplicationServers?(
+    routeIds: readonly string[],
+  ): Promise<z.infer<typeof safetyProviderServerSchema>[]>;
 }
 export interface GatewaySafetyOptions {
   provider: GatewayProviderSource;
@@ -399,17 +403,54 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     server: Awaited<ReturnType<GatewayProviderSource['getApplicationServer']>>;
     nodeInventories: Awaited<ReturnType<typeof inventories>>;
   };
-  // Only backend observations may share a successful listener check. A bind or
-  // renewal always fetches fresh provider inventory; sharing never extends its age.
-  const validatedProvider = new Map<
+  type ProviderBatch = (serverId: number) => Promise<ProviderEvidence>;
+  function createProviderBatch(routes: readonly GatewayRoute[]): ProviderBatch {
+    let inventory: Promise<Pick<ProviderEvidence, 'started' | 'nodes' | 'nodeInventories'>>;
+    let bulkServers: Promise<Map<number, ProviderEvidence['server']>> | undefined;
+    const servers = new Map<number, Promise<ProviderEvidence['server']>>();
+    const routeIds = [...new Set(routes.map((route) => route.id))];
+    return (serverId) => {
+      // Scope these promises to one explicit snapshot apply, never to the validator
+      // lifetime. Keep failures and the earliest source-read timestamp in the batch.
+      inventory ??= (() => {
+        const started = now();
+        return Promise.all([options.provider.listNodes(), inventories()]).then(
+          ([nodes, nodeInventories]) => structuredClone({ started, nodes, nodeInventories }),
+        );
+      })();
+      let server = servers.get(serverId);
+      if (!server) {
+        if (options.provider.getApplicationServers && routeIds.length) {
+          bulkServers ??= options.provider.getApplicationServers(routeIds).then((values) => {
+            const indexed = new Map(values.map((value) => [value.id, structuredClone(value)]));
+            if (indexed.size !== values.length) unavailable('provider_identity');
+            return indexed;
+          });
+          server = bulkServers.then(
+            (values) => values.get(serverId) ?? unavailable('provider_identity'),
+          );
+        } else {
+          server = options.provider
+            .getApplicationServer(serverId)
+            .then((value) => structuredClone(value));
+        }
+        servers.set(serverId, server);
+      }
+      return Promise.all([inventory, server]).then(([shared, server]) => ({ ...shared, server }));
+    };
+  }
+  // Successful listener checks may supply backend observations, without extending
+  // their age. Listener checks share provider reads only inside an explicit batch.
+  type ProviderGrant = {
+    key: string;
+    evidence: ProviderEvidence;
+    leasedProbe?: { routeKey: string; observedAt: number; identity: string; failures: object };
+  };
+  const validatedProvider = new Map<string, ProviderGrant>();
+  const renewals = new Map<
     string,
-    {
-      key: string;
-      evidence: ProviderEvidence;
-      leasedProbe?: { routeKey: string; observedAt: number; identity: string; failures: object };
-    }
+    { routeKey: string; previous?: ProviderGrant; work: Promise<{ backendReady: boolean }> }
   >();
-  const renewals = new Map<string, Promise<{ backendReady: boolean }>>();
   const failures = new Map<string, object>();
   function failureToken(routeId: string, revoke = false) {
     let token = failures.get(routeId);
@@ -429,10 +470,11 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     route: GatewayRoute,
     ownedBindings: readonly GatewayEndpoint[],
     listener: boolean,
+    batch?: ProviderBatch,
   ) {
     const validationId = randomUUID();
     return timed(route, validationId, 'inspect_total', () =>
-      inspectDetails(route, ownedBindings, listener, validationId),
+      inspectDetails(route, ownedBindings, listener, validationId, batch),
     );
   }
   async function inspectDetails(
@@ -440,6 +482,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     ownedBindings: readonly GatewayEndpoint[],
     listener: boolean,
     validationId: string,
+    batch?: ProviderBatch,
   ) {
     const route = gatewayRouteSchema.parse(routeValue);
     if (!exactBindableAddress(route.public.address) || !privateBackend(route.backend.address))
@@ -456,20 +499,22 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     const providerRead = timed(
       route,
       validationId,
-      share ? 'provider_reuse' : 'provider_inventory',
+      share ? 'provider_reuse' : batch ? 'provider_batch' : 'provider_inventory',
       () =>
         share
           ? Promise.resolve(previous.evidence)
-          : Promise.all([
-              options.provider.listNodes(),
-              options.provider.getApplicationServer(context.providerServerId),
-              inventories(),
-            ]).then(([nodes, server, nodeInventories]) => ({
-              started,
-              nodes,
-              server,
-              nodeInventories,
-            })),
+          : batch
+            ? batch(context.providerServerId)
+            : Promise.all([
+                options.provider.listNodes(),
+                options.provider.getApplicationServer(context.providerServerId),
+                inventories(),
+              ]).then(([nodes, server, nodeInventories]) => ({
+                started,
+                nodes,
+                server,
+                nodeInventories,
+              })),
     );
     // Actual sockets/Docker topology and local context are still fresh on every
     // probe. Settle both branches before abandoning a failed inspection.
@@ -627,6 +672,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         unavailable();
     }
     if (
+      providerEvidence.started > now() ||
       now() - providerEvidence.started > policy.maximumObservationAgeMs ||
       now() - started > policy.maximumObservationAgeMs ||
       now() - observation.observedAt > policy.maximumObservationAgeMs
@@ -718,9 +764,22 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       throw error;
     }
   }
-  async function validateListener(route: GatewayRoute, ownedBindings: readonly GatewayEndpoint[]) {
-    const state = await inspect(route, ownedBindings, true);
+  async function validateListener(
+    route: GatewayRoute,
+    ownedBindings: readonly GatewayEndpoint[],
+    batch?: ProviderBatch,
+  ) {
+    const state = await inspect(route, ownedBindings, true, batch);
     const accepted = (backendReady: boolean) => {
+      // Proof reads, node challenges and protocol responses may outlive the
+      // provider inventory, especially when it was shared earlier in this batch.
+      if (
+        state.providerEvidence.started > now() ||
+        state.observation.observedAt > now() ||
+        now() - state.providerEvidence.started > policy.maximumObservationAgeMs ||
+        now() - state.observation.observedAt > policy.maximumObservationAgeMs
+      )
+        unavailable('observation_stale');
       validatedProvider.set(route.id, {
         key: evidenceKey(state.route, state.context),
         evidence: structuredClone(state.providerEvidence),
@@ -809,54 +868,113 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     retainBinding();
     return accepted(false);
   }
-  return {
-    validate(route, ownedBindings) {
-      // Serialize renewals: an older successful inspection must never restore
-      // authority after a newer failed inspection. Revoke while checks run.
-      const preceding = renewals.get(route.id);
+  function validate(
+    route: GatewayRoute,
+    ownedBindings: readonly GatewayEndpoint[],
+    batch?: ProviderBatch,
+  ) {
+    // Serialize renewals: an older successful inspection must never restore
+    // authority after a newer failed inspection. Revoke while checks run.
+    const preceding = renewals.get(route.id);
+    const previous = validatedProvider.get(route.id) ?? preceding?.previous;
+    validatedProvider.delete(route.id);
+    let work!: Promise<{ backendReady: boolean }>;
+    work = (async () => {
+      await preceding?.work.catch(() => undefined);
       validatedProvider.delete(route.id);
-      let work!: Promise<{ backendReady: boolean }>;
-      work = (async () => {
-        await preceding?.catch(() => undefined);
+      try {
+        return await validateListener(route, ownedBindings, batch);
+      } catch (error) {
         validatedProvider.delete(route.id);
-        try {
-          return await validateListener(route, ownedBindings);
-        } catch (error) {
-          validatedProvider.delete(route.id);
-          failureToken(route.id, true);
-          throw error;
-        } finally {
-          if (renewals.get(route.id) === work) renewals.delete(route.id);
-        }
-      })();
-      renewals.set(route.id, work);
-      return work;
+        failureToken(route.id, true);
+        throw error;
+      } finally {
+        if (renewals.get(route.id)?.work === work) renewals.delete(route.id);
+      }
+    })();
+    renewals.set(route.id, { routeKey: JSON.stringify(route), previous, work });
+    return work;
+  }
+  const freshGrant = (grant: ProviderGrant | undefined) => {
+    const time = now();
+    return (
+      grant?.leasedProbe !== undefined &&
+      grant.leasedProbe.observedAt <= time &&
+      grant.evidence.started <= time &&
+      time - grant.leasedProbe.observedAt < policy.maximumObservationAgeMs &&
+      time - grant.evidence.started < policy.maximumObservationAgeMs
+    );
+  };
+  function equivalentGrant(routeId: string, previous: ProviderGrant, current?: ProviderGrant) {
+    return (
+      freshGrant(current) &&
+      current?.key === previous.key &&
+      current?.leasedProbe?.identity === previous.leasedProbe?.identity &&
+      current?.leasedProbe?.failures === previous.leasedProbe?.failures &&
+      failures.get(routeId) === previous.leasedProbe?.failures
+    );
+  }
+  async function waitForRenewals(routeId: string, previous: ProviderGrant) {
+    while (renewals.has(routeId) && freshGrant(previous)) {
+      const renewal = renewals.get(routeId);
+      const remaining =
+        Math.min(previous.leasedProbe?.observedAt ?? 0, previous.evidence.started) +
+        policy.maximumObservationAgeMs -
+        now();
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const completed = await Promise.race([
+        renewal?.work.then(
+          () => true,
+          () => false,
+        ),
+        new Promise<false>((resolve) => {
+          timeout = setTimeout(() => resolve(false), Math.max(0, remaining));
+        }),
+      ]).finally(() => clearTimeout(timeout));
+      if (!completed) break;
+    }
+  }
+  return {
+    validate,
+    createValidationBatch(routes = []) {
+      const batch = createProviderBatch(routes);
+      return { validate: (route, ownedBindings) => validate(route, ownedBindings, batch) };
     },
     validateBackend,
     async probeLeasedBackend(routeValue) {
       const route = gatewayRouteSchema.parse(routeValue);
-      const previous = validatedProvider.get(route.id);
-      const fresh = () => {
-        const time = now();
-        return (
-          previous?.leasedProbe !== undefined &&
-          previous.leasedProbe.observedAt <= time &&
-          previous.evidence.started <= time &&
-          time - previous.leasedProbe.observedAt < policy.maximumObservationAgeMs &&
-          time - previous.evidence.started < policy.maximumObservationAgeMs
-        );
-      };
+      let previous = validatedProvider.get(route.id);
+      const active = renewals.get(route.id);
+      if (
+        !previous &&
+        ['waking', 'online'].includes(route.mode) &&
+        active?.routeKey === JSON.stringify(route) &&
+        active.previous?.leasedProbe?.routeKey === active.routeKey &&
+        freshGrant(active.previous) &&
+        failures.get(route.id) === active.previous.leasedProbe.failures
+      ) {
+        // A renewal revokes permission while it inspects. Join that full check
+        // instead of starting a duplicate, but retain the original grant's deadline.
+        previous = active.previous;
+        await waitForRenewals(route.id, previous);
+        if (
+          !freshGrant(previous) ||
+          renewals.has(route.id) ||
+          !equivalentGrant(route.id, previous, validatedProvider.get(route.id))
+        )
+          throw new GatewaySafetyError('observation_stale', 'lease_grant_replaced');
+      }
+      const fresh = () => freshGrant(previous);
       // The caller owns the live listener lease. This only samples an unchanged
       // backend within the ORIGINAL full validation budget; it cannot bind,
       // renew, change identity or produce a reusable reachability proof.
       if (
         !['waking', 'online'].includes(route.mode) ||
         previous?.leasedProbe?.routeKey !== JSON.stringify(route) ||
-        validatedProvider.get(route.id) !== previous ||
+        !equivalentGrant(route.id, previous, validatedProvider.get(route.id)) ||
         !fresh()
       )
         return validateBackend(route);
-      const leasedProbe = previous.leasedProbe;
       const validationId = randomUUID();
       const result = await timed(route, validationId, 'leased_backend_protocol', () =>
         options.probeBackend(route, validationId),
@@ -865,37 +983,9 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         unavailable('backend_protocol');
       // A fresh identical renewal may finish during the game response. Await it
       // rather than throwing away that response, within the ORIGINAL age budget.
-      await timed(route, validationId, 'renewal_wait', async () => {
-        while (renewals.has(route.id) && fresh()) {
-          const renewal = renewals.get(route.id);
-          const remaining =
-            Math.min(leasedProbe.observedAt, previous.evidence.started) +
-            policy.maximumObservationAgeMs -
-            now();
-          let timeout: ReturnType<typeof setTimeout> | undefined;
-          const completed = await Promise.race([
-            renewal?.then(
-              () => true,
-              () => false,
-            ),
-            new Promise<false>((resolve) => {
-              timeout = setTimeout(() => resolve(false), Math.max(0, remaining));
-            }),
-          ]).finally(() => clearTimeout(timeout));
-          if (!completed) break;
-        }
-      });
+      await timed(route, validationId, 'renewal_wait', () => waitForRenewals(route.id, previous));
       const current = validatedProvider.get(route.id);
-      const equivalent =
-        current?.leasedProbe !== undefined &&
-        current.leasedProbe.observedAt <= now() &&
-        current.evidence.started <= now() &&
-        now() - current.leasedProbe.observedAt < policy.maximumObservationAgeMs &&
-        now() - current.evidence.started < policy.maximumObservationAgeMs &&
-        current?.key === previous.key &&
-        current?.leasedProbe?.identity === previous.leasedProbe.identity &&
-        current?.leasedProbe?.failures === previous.leasedProbe.failures &&
-        failures.get(route.id) === previous.leasedProbe.failures;
+      const equivalent = equivalentGrant(route.id, previous, current);
       if (!fresh() || renewals.has(route.id) || !equivalent)
         throw new GatewaySafetyError(
           'observation_stale',

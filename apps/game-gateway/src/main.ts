@@ -188,6 +188,29 @@ export async function createGatewayRuntime(
             await client.requestJson('inventory', { operation: 'server', routeId }),
           );
         },
+        getApplicationServers: async (routeIds) => {
+          const servers = new Map<number, z.infer<typeof safetyProviderServerSchema>>();
+          // Keep each control request bounded without lowering the snapshot route
+          // limit. Several roles may refer to the same server across chunks.
+          for (let offset = 0; offset < routeIds.length; offset += 1000) {
+            const values = z
+              .array(safetyProviderServerSchema)
+              .max(1000)
+              .parse(
+                await client.requestJson('inventory', {
+                  operation: 'servers',
+                  routeIds: routeIds.slice(offset, offset + 1000),
+                }),
+              );
+            for (const server of values) {
+              const previous = servers.get(server.id);
+              if (previous && fingerprint(previous) !== fingerprint(server))
+                throw new DomainError('provenance_mismatch');
+              servers.set(server.id, server);
+            }
+          }
+          return [...servers.values()];
+        },
       },
       resolveContext: context,
       loadProof: async (route) =>

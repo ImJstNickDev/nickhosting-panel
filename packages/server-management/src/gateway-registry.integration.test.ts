@@ -60,6 +60,18 @@ const input = () => ({
   transport: 'tcp' as const,
 });
 describe('durable explicit Gateway route registry', () => {
+  it('exports a sleeping server as blocked after reconciliation observes an external start', async () => {
+    await setGatewayRoute(f.db, f.owner, input(), env);
+    expect((await getGatewaySnapshot(f.db, env)).routes[0]?.mode).toBe('sleeping');
+    // This is the state written by managed-server reconciliation, independent
+    // of Gateway readiness observations. Blocked routes resume full probing.
+    await f.db
+      .updateTable('managed_servers')
+      .set({ runtime_state: 'running' })
+      .where('id', '=', serverId)
+      .execute();
+    expect((await getGatewaySnapshot(f.db, env)).routes[0]?.mode).toBe('blocked');
+  });
   const directPin = (port: number) => ({
     allocationId: 987654,
     address: input().publicAddress,

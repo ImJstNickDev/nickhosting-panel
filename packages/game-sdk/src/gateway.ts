@@ -278,6 +278,10 @@ export interface GatewayProtocolAdapter {
 }
 
 export interface GatewaySafety {
+  /** One snapshot application may share provider reads across its routes. Each
+   * validation still checks current context, host bindings and proof. Evidence
+   * retains its original age; a batch never grants or extends listener authority. */
+  createValidationBatch?(routes?: readonly GatewayRoute[]): Pick<GatewaySafety, 'validate'>;
   /** Freshly checks provider allocations, host bindings and ownership. Missing
    * binding proof requires a successful live backend protocol challenge. A matching
    * prior proof plus fresh node reachability can retain a status-only listener when

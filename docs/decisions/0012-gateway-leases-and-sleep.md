@@ -147,3 +147,28 @@ with all branches settled before returning. No JAR or Mojang download is added.
 [ADR 0016](0016-provider-readiness.md) supersedes the requirement to repeat a
 game-protocol readiness probe after authenticated live provider-running for the
 compiled Minecraft integration. Original decisions and test history remain above.
+
+## 2026-10-18 amendment — Shared provider reads within one snapshot
+
+Serial route renewals repeated the same node and allocation inventories and fetched
+each provider server separately. At short polling intervals this exhausted the
+shared Application API quota even with few registered servers. A new explicit
+validation batch shares these source reads within one snapshot application. The
+standard provider server-list endpoint filters exact managed UUIDs in bounded
+batches; Core verifies every identity and returns only the requested route records.
+
+This supersedes independent provider fetches for each route and its final bind
+gate, not the gates themselves. Context, host/socket/collision and proof checks
+remain per validation. Original provider acquisition time bounds every use and is
+checked again after proof/node work; new snapshots fetch again. Failed or stale
+evidence grants nothing. Standalone checks remain fresh. Equivalent pending
+renewals can be joined within the prior backend grant's original deadline, with
+identity, failure-token and authority checks unchanged.
+
+Coherent sleeping, manually stopped and maintenance modes no longer run periodic
+gameplay observations. Listener safety refresh remains mandatory. Core's existing
+runtime reconciliation detects an external start and moves a sleeping route to
+effective blocked mode, where full readiness observation resumes. Waking/online
+observations and automatic-stop fences remain active. This does not replace the
+provider with a cached permission, extend a lease or promise arbitrary scale under
+a finite provider quota. See the [control contract](../M3-API.md#2026-10-18--snapshot-scoped-provider-inventory).

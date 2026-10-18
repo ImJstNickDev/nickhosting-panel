@@ -188,6 +188,66 @@ describe('authenticated bounded Gateway control client', () => {
       ).rejects.toThrow(/^integration_unavailable$/);
     },
   );
+  it.each([
+    {
+      action: 'inventory',
+      operation: 'servers',
+      status: 412,
+      reason: 'snapshot_membership_changed',
+      stale: true,
+    },
+    {
+      action: 'inventory',
+      operation: 'nodes',
+      status: 412,
+      reason: 'snapshot_membership_changed',
+      stale: false,
+    },
+    {
+      action: 'snapshot',
+      operation: 'servers',
+      status: 412,
+      reason: 'snapshot_membership_changed',
+      stale: false,
+    },
+    {
+      action: 'inventory',
+      operation: 'servers',
+      status: 409,
+      reason: 'snapshot_membership_changed',
+      stale: false,
+    },
+    {
+      action: 'inventory',
+      operation: 'servers',
+      status: 412,
+      reason: 'provider_identity',
+      stale: false,
+    },
+  ])(
+    'recognizes only explicit bulk membership drift: $action/$operation/$status/$reason',
+    async ({ action, operation, status, reason, stale }) => {
+      const client = createGatewayControlClient({
+        ...settings,
+        fetcher: vi.fn(async () =>
+          Response.json(
+            {
+              error: {
+                code: 'conflict',
+                messageKey: 'errors.conflict',
+                details: { gatewayControlReason: reason },
+              },
+            },
+            { status },
+          ),
+        ),
+      });
+      const work = client.requestJson(action, { operation, routeIds: [randomUUID()] });
+      if (stale) await expect(work).rejects.toBeInstanceOf(GatewayRouteRevisionStaleError);
+      else await expect(work).rejects.toThrow(/^integration_unavailable$/);
+    },
+  );
+
   it('requires an explicit revision and bounds even a valid 412 error body', async () => {
     const error = { error: { code: 'conflict', messageKey: 'errors.conflict' } };
     const client = createGatewayControlClient({

@@ -8,6 +8,7 @@ import {
 import { type createDatabase, getSecret, getSettings } from '@nickhosting/database';
 import { gatewayObservationSchema, gatewayWakeRequestSchema } from '@nickhosting/game-sdk';
 import { gatewayReachabilityProofSchema } from '@nickhosting/gateway-safety';
+import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
 import {
   authorizeServer,
   gatewayConfiguration,
@@ -36,6 +37,24 @@ const routeRequest = z
   .object({ routeId: z.uuid(), routeRevision: z.number().int().positive().optional() })
   .strict();
 const hash = (text: string) => createHash('sha256').update(text).digest();
+const safetyServer = (remote: ApplicationServer) => ({
+  id: remote.id,
+  uuid: remote.uuid,
+  external_id: remote.external_id,
+  user: remote.user,
+  node: remote.node,
+  nest: remote.nest,
+  egg: remote.egg,
+  suspended: remote.suspended,
+  relationships: {
+    allocations: {
+      object: 'list' as const,
+      data: (remote.relationships?.allocations?.data ?? []).map(({ attributes: a }) => ({
+        attributes: { id: a.id, ip: a.ip, port: a.port, assigned: a.assigned },
+      })),
+    },
+  },
+});
 export function registerGatewayRoutes(
   app: Hono<{ Variables: Variables }>,
   options: {
@@ -307,6 +326,16 @@ export function registerGatewayRoutes(
           .object({ operation: z.literal('allocations'), nodeId: z.number().int().positive() })
           .strict(),
         z.object({ operation: z.literal('server'), routeId: z.uuid() }).strict(),
+        z
+          .object({
+            operation: z.literal('servers'),
+            routeIds: z
+              .array(z.uuid())
+              .min(1)
+              .max(1000)
+              .refine((ids) => new Set(ids).size === ids.length),
+          })
+          .strict(),
       ])
       .safeParse(await options.body(c));
     if (!parsed.success) throw new DomainError('validation_failed');
@@ -331,6 +360,74 @@ export function registerGatewayRoutes(
         })),
       );
     }
+    if (value.operation === 'servers') {
+      // Resolve every selector through the current enabled Gateway membership;
+      // the service cannot use this facade to enumerate unrelated provider servers.
+      const snapshot = await getGatewaySnapshot(db, env);
+      const current = new Map(snapshot.routes.map((route) => [route.id, route]));
+      const identities = new Map<string, Awaited<ReturnType<typeof gatewaySafetyContext>>>();
+      const membershipChanged = () =>
+        c.json(
+          {
+            error: {
+              code: 'conflict',
+              messageKey: 'errors.conflict',
+              details: { gatewayControlReason: 'snapshot_membership_changed' },
+            },
+            requestId: c.get('requestId'),
+          },
+          412,
+        );
+      for (const routeId of value.routeIds) {
+        const selected = current.get(routeId);
+        if (!selected) return membershipChanged();
+        let context: Awaited<ReturnType<typeof gatewaySafetyContext>>;
+        try {
+          context = await gatewaySafetyContext(db, selected);
+        } catch (error) {
+          // Membership can change after the snapshot read and before its route
+          // context is resolved. Only absence permits the bounded snapshot retry.
+          if (error instanceof DomainError && error.code === 'not_found')
+            return membershipChanged();
+          throw error;
+        }
+        const previous = identities.get(selected.serverId);
+        if (
+          previous &&
+          (previous.providerServerId !== context.providerServerId ||
+            previous.providerServerUuid !== context.providerServerUuid)
+        )
+          throw new DomainError('provenance_mismatch');
+        identities.set(selected.serverId, context);
+      }
+      const servers = await db
+        .selectFrom('managed_servers')
+        .selectAll()
+        .where('id', 'in', [...identities.keys()])
+        .execute();
+      const expected = new Set(
+        [...identities.values()].map((context) => context.providerServerUuid),
+      );
+      if (servers.length !== identities.size || expected.size !== identities.size)
+        throw new DomainError('provenance_mismatch');
+      const remotes = await management.adapter.getApplicationServers([...expected]);
+      const byUuid = new Map<string, ApplicationServer>();
+      const providerIds = new Set<number>();
+      for (const remote of remotes) {
+        if (!expected.has(remote.uuid) || byUuid.has(remote.uuid) || providerIds.has(remote.id))
+          throw new DomainError('provenance_mismatch');
+        byUuid.set(remote.uuid, remote);
+        providerIds.add(remote.id);
+      }
+      if (byUuid.size !== expected.size) throw new DomainError('provenance_mismatch');
+      for (const server of servers) {
+        const context = identities.get(server.id);
+        const remote = context && byUuid.get(context.providerServerUuid);
+        if (!remote) throw new DomainError('provenance_mismatch');
+        await verifyManagedIdentity(db, server, remote);
+      }
+      return c.json(remotes.map(safetyServer));
+    }
     const selected = await requireGatewayRoute(db, value.routeId, undefined, env);
     const context = await gatewaySafetyContext(db, selected);
     const server = await db
@@ -340,24 +437,7 @@ export function registerGatewayRoutes(
       .executeTakeFirstOrThrow();
     const remote = await management.adapter.getApplicationServer(context.providerServerId);
     await verifyManagedIdentity(db, server, remote);
-    return c.json({
-      id: remote.id,
-      uuid: remote.uuid,
-      external_id: remote.external_id,
-      user: remote.user,
-      node: remote.node,
-      nest: remote.nest,
-      egg: remote.egg,
-      suspended: remote.suspended,
-      relationships: {
-        allocations: {
-          object: 'list' as const,
-          data: (remote.relationships?.allocations?.data ?? []).map(({ attributes: a }) => ({
-            attributes: { id: a.id, ip: a.ip, port: a.port, assigned: a.assigned },
-          })),
-        },
-      },
-    });
+    return c.json(safetyServer(remote));
   });
   app.post(`${prefix}/proof-read`, async (c) => {
     const selected = await route(await options.body(c));

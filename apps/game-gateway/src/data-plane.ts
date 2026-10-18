@@ -815,6 +815,9 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       }
       await Promise.all(rejected.map((listener) => closeListener(listener)));
     };
+    // Share only provider source reads for this snapshot. Each route and final
+    // bind still checks its own current authority, topology and reachability.
+    const validation = options.safety.createValidationBatch?.(next.routes) ?? options.safety;
     for (const route of next.routes) {
       if (stopping) throw new DomainError('integration_unavailable');
       if (withheldServers.has(route.serverId)) continue;
@@ -822,7 +825,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         await bounded(async () => {
           // Listener validation can establish its initial proof from the same
           // fresh inspection; a separate backend inspection duplicates inventory.
-          const verdict = await options.safety.validate(route, owned);
+          const verdict = await validation.validate(route, owned);
           readiness.set(route.id, verdict?.backendReady ?? true);
           // A known failed backend must stop receiving traffic immediately,
           // even if validation of another route keeps this snapshot pending.
@@ -931,7 +934,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         // staged listeners are already ours even before the snapshot commits.
         try {
           await bounded(async () => {
-            const verdict = await options.safety.validate(route, [
+            const verdict = await validation.validate(route, [
               ...[...listeners.values()].map((listener) => listener.route.public),
               ...staged.map((listener) => listener.route.public),
             ]);
@@ -1450,6 +1453,11 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           });
           continue;
         }
+        // These authenticated states do not need a gameplay readiness/idle
+        // probe. Listener safety still renews independently. Core reconciles an
+        // externally started sleeping server into blocked, which resumes full
+        // probing; never skip blocked or an online pending sleep fence.
+        if (['sleeping', 'manually_stopped', 'maintenance'].includes(anchor.mode)) continue;
         if (
           anchor.mode === 'waking' &&
           protocol(anchor)?.readinessSource === 'provider_running' &&

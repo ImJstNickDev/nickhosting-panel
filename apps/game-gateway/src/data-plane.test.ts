@@ -1462,6 +1462,65 @@ describe('sleep protocol handling and observations', () => {
     expect(f.safety.validate).toHaveBeenCalledTimes(3);
     expect(f.safety.validateBackend).not.toHaveBeenCalled();
   });
+  it('uses one isolated validation batch per snapshot, including final pre-bind checks', async () => {
+    const first = await tcpFixture();
+    const second = await tcpFixture();
+    const batches: ReturnType<typeof vi.fn<GatewaySafety['validate']>>[] = [];
+    const createValidationBatch = vi.fn(() => {
+      const validate = vi.fn<GatewaySafety['validate']>(async () => ({ backendReady: false }));
+      batches.push(validate);
+      return { validate };
+    });
+    const f = plane([route(first.port, 'tcp', 'sleeping'), route(second.port, 'tcp', 'sleeping')], {
+      safety: { createValidationBatch },
+    });
+    await f.gateway.start();
+    expect(createValidationBatch).toHaveBeenCalledOnce();
+    expect(createValidationBatch).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ id: expect.any(String) })]),
+    );
+    expect(batches[0]).toHaveBeenCalledTimes(4);
+    expect(f.safety.validate).not.toHaveBeenCalled();
+    expect(f.gateway.health().routes).toBe(2);
+    await f.gateway.refresh();
+    expect(createValidationBatch).toHaveBeenCalledTimes(2);
+    expect(batches[0]).toHaveBeenCalledTimes(4);
+    expect(batches[1]).toHaveBeenCalledTimes(2);
+  });
+  it.each(['sleeping', 'manually_stopped', 'maintenance'] as const)(
+    'renews %s listener safety without periodic gameplay observations',
+    async (mode) => {
+      const backend = await tcpFixture();
+      const observe = vi.fn(async () => ({ ready: false, idle: false }));
+      const f = plane([route(backend.port, 'tcp', mode)], {
+        protocols: [fixtureProtocol({ observe })],
+      });
+      await f.gateway.start();
+      await f.gateway.observe();
+      await f.gateway.refresh();
+      await f.gateway.observe();
+      expect(f.safety.validate).toHaveBeenCalledTimes(3);
+      expect(f.safety.validateBackend).not.toHaveBeenCalled();
+      expect(observe).not.toHaveBeenCalled();
+      expect(f.control.reportObservation).not.toHaveBeenCalled();
+      expect(f.gateway.metrics().observationErrors).toBe(0);
+    },
+  );
+  it('resumes full readiness checks when Core reconciles a sleeping server into blocked', async () => {
+    const backend = await tcpFixture();
+    const r = route(backend.port, 'tcp', 'sleeping');
+    const f = plane([r]);
+    await f.gateway.start();
+    await f.gateway.observe();
+    expect(f.safety.validateBackend).not.toHaveBeenCalled();
+    const blocked = { ...r, revision: 2, mode: 'blocked' as const };
+    await f.gateway.applySnapshot(f.snapshot([blocked], 2));
+    await f.gateway.observe();
+    expect(f.safety.validateBackend).toHaveBeenCalledWith(blocked);
+    expect(f.control.reportObservation).toHaveBeenCalledWith(
+      expect.objectContaining({ routeId: r.id, routeRevision: 2, ready: true }),
+    );
+  });
   it('probes and reports first-run readiness even while the listener remains unsafe to bind', async () => {
     const backend = await tcpFixture();
     const r = route(backend.port, 'tcp', 'waking');

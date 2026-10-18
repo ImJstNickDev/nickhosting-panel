@@ -121,6 +121,103 @@ function fileReadTiming(onStart: (name: string) => void = () => {}) {
 }
 
 describe('typed Pterodactyl boundary', () => {
+  it('deduplicates filtered server lookup, includes allocations and preserves bounded pagination across chunks', async () => {
+    const uuids = Array.from(
+      { length: 49 },
+      (_, index) => `f729c8a1-6773-467a-af3f-${String(index + 1).padStart(12, '0')}`,
+    );
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      expect(url.origin).toBe(config.baseURL);
+      expect(url.pathname).toBe('/api/application/servers');
+      expect(url.searchParams.get('include')).toBe('allocations');
+      const chunk = url.searchParams.get('filter[uuid]')?.split(',') ?? [];
+      expect(chunk.length).toBeLessThanOrEqual(48);
+      expect(url.toString().length).toBeLessThan(2100);
+      const page = Number(url.searchParams.get('page'));
+      const paginated = chunk.length === 48;
+      const records = (paginated ? chunk.slice((page - 1) * 24, page * 24) : chunk).map((uuid) => ({
+        ...server,
+        id: uuids.indexOf(uuid) + 1,
+        uuid,
+        relationships: {
+          allocations: {
+            object: 'list',
+            data: [{ attributes: { id: 10, ip: '127.0.0.1', port: 25565, assigned: true } }],
+          },
+        },
+      }));
+      return list(records, page, paginated ? 2 : 1);
+    });
+    const found = await createPterodactylAdapter({ ...config, fetcher }).getApplicationServers([
+      ...uuids,
+      uuids[0] ?? fixtureUUID,
+    ]);
+    expect(found.map((entry) => entry.uuid)).toEqual(uuids);
+    expect(found[0]?.relationships?.allocations?.data[0]?.attributes.id).toBe(10);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(
+      fetcher.mock.calls.every(([, request]) => !request?.method || request.method === 'GET'),
+    ).toBe(true);
+  });
+
+  it.each(['unexpected', 'duplicate-uuid', 'duplicate-id', 'malformed-allocations'] as const)(
+    'rejects %s in a filtered server response without per-server fallback',
+    async (failure) => {
+      const otherUuid = 'f729c8a1-6773-467a-af3f-a7ea8704f0be';
+      const second = { ...server, uuid: otherUuid, id: 21 };
+      const records =
+        failure === 'unexpected'
+          ? [second]
+          : failure === 'duplicate-uuid'
+            ? [server, server]
+            : failure === 'duplicate-id'
+              ? [server, { ...second, id: server.id }]
+              : [
+                  {
+                    ...server,
+                    relationships: {
+                      allocations: { object: 'list', data: [{ attributes: { id: 'invalid' } }] },
+                    },
+                  },
+                ];
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(list(records));
+      const requested = failure === 'duplicate-id' ? [fixtureUUID, otherUuid] : [fixtureUUID];
+      await expect(
+        createPterodactylAdapter({ ...config, fetcher }).getApplicationServers(requested),
+      ).rejects.toMatchObject({ reason: 'invalid_response' });
+      expect(fetcher).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('rejects duplicate filtered servers across pagination and reports omitted members without retrying individuals', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(list([server], 1, 2))
+      .mockResolvedValueOnce(list([server], 2, 2))
+      .mockResolvedValueOnce(list([]));
+    const adapter = createPterodactylAdapter({ ...config, fetcher });
+    await expect(adapter.getApplicationServers([fixtureUUID])).rejects.toMatchObject({
+      reason: 'invalid_response',
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await expect(adapter.getApplicationServers([fixtureUUID])).resolves.toEqual([]);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it('bounds and validates server UUID selectors before any provider request', async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const adapter = createPterodactylAdapter({ ...config, fetcher });
+    await expect(adapter.getApplicationServers([])).resolves.toEqual([]);
+    await expect(adapter.getApplicationServers(['foreign,selector'])).rejects.toMatchObject({
+      code: 'validation_failed',
+    });
+    await expect(
+      adapter.getApplicationServers(Array.from({ length: 1001 }, () => fixtureUUID)),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it('accepts installed Panel null_resource configuration on an egg without inheritance', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       Response.json({

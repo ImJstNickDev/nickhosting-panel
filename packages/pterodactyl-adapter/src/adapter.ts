@@ -34,6 +34,7 @@ import {
   type TransportOptions,
 } from './transport.js';
 import {
+  type ApplicationServer,
   applicationServerSchema,
   type BuildUpdate,
   backupActivitySchema,
@@ -137,6 +138,36 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         `${appServer(id)}?include=allocations`,
         applicationServerSchema,
       ),
+    async getApplicationServers(uuids: string[]): Promise<ApplicationServer[]> {
+      const selected = [...new Set(parseInput(z.array(z.uuid()).max(1000), uuids))];
+      const servers: ApplicationServer[] = [];
+      const seen = new Set<string>();
+      const seenIds = new Set<number>();
+      // Standard Panel UUID filtering accepts comma-separated exact values.
+      // Bound URL length and keep all pagination inside the existing transport.
+      for (let offset = 0; offset < selected.length; offset += 48) {
+        const chunk = new Set(selected.slice(offset, offset + 48));
+        const query = new URLSearchParams({
+          'filter[uuid]': [...chunk].join(','),
+          include: 'allocations',
+        });
+        const found = await transport.list(
+          'application',
+          `servers?${query}`,
+          applicationServerSchema,
+        );
+        for (const server of found) {
+          if (!chunk.has(server.uuid) || seen.has(server.uuid) || seenIds.has(server.id))
+            throw new PterodactylError('invalid_response', 'application', 'rejected');
+          seen.add(server.uuid);
+          seenIds.add(server.id);
+          servers.push(server);
+        }
+      }
+      // Missing members remain visible to the caller's managed-identity check;
+      // never hide partial inventory behind per-server fallback requests.
+      return servers;
+    },
     async findServerByExternalId(externalId: string) {
       const key = parseInput(
         z
