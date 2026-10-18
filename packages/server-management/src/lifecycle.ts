@@ -39,7 +39,10 @@ import {
   recoverProvisionGateway,
 } from './gateway-provision.js';
 import { currentInteractiveContext } from './interactive-context.js';
-import { minecraftContentAllowsOnline } from './minecraft-content-contracts.js';
+import {
+  minecraftContentAllowsOnline,
+  minecraftContentRemovesInactiveWorld,
+} from './minecraft-content-contracts.js';
 import { assertGatewaySleepFence, revokeGatewayRoutesForDeletion } from './registry.js';
 import { assertIdleSleepAllowed } from './sleep-policy.js';
 import { consumeStopEscalation, stopEscalation } from './stop-escalation.js';
@@ -848,9 +851,15 @@ export async function processServerOperation(
       }
       return success ? 'succeeded' : 'failed';
     };
-    const onlineWorldImport =
+    const onlineWorldContent =
       operation.action === 'minecraft-content' &&
       minecraftContentAllowsOnline(operation.plan.minecraftContent);
+    const inactiveWorldRemoval =
+      operation.action === 'minecraft-content' &&
+      minecraftContentRemovesInactiveWorld(operation.plan.minecraftContent);
+    // One provider identity proof for this short, locked file operation. Other
+    // lifecycle workflows continue to take fresh proofs at their effect boundary.
+    let worldRemovalProvider: ApplicationServer | undefined;
     const requireQuiescentReservation = async () => {
       await db.transaction().execute(async (tx) => {
         await lockResources(tx);
@@ -889,7 +898,7 @@ export async function processServerOperation(
           throw new DomainError('operation_uncertain');
       });
       if (
-        !onlineWorldImport &&
+        !onlineWorldContent &&
         ['configure', 'reinstall', 'wipe', 'restore', 'delete', 'minecraft-content'].includes(
           operation.action,
         )
@@ -912,6 +921,7 @@ export async function processServerOperation(
       let verifiedServer = finalPowerIdentity
         ? undefined
         : (preparationServer ??
+          (inactiveWorldRemoval ? worldRemovalProvider : undefined) ??
           (operation.action !== 'provision' || server.pterodactyl_id !== null
             ? await timed('provider_identity', () => ownedRemote(db, server, options))
             : undefined));
@@ -949,6 +959,7 @@ export async function processServerOperation(
           .executeTakeFirst()) !== undefined;
       if (
         finalPowerIdentity ||
+        inactiveWorldRemoval ||
         ((operation.plan.gatewayAutomation !== undefined ||
           operation.plan.scheduleAutomation !== undefined ||
           minecraftProvision) &&
@@ -960,7 +971,9 @@ export async function processServerOperation(
         try {
           if (operation.plan.gatewayAutomation !== undefined)
             assertGatewaySleepFence(operation.plan, nowOf(options));
-          if (leanStart) {
+          if (inactiveWorldRemoval) {
+            await (options.authorizeIntent ?? options.authorizeEffect)(jobId, server.id, db);
+          } else if (leanStart) {
             await timed('authorization', () =>
               options.authorizeEffect(jobId, server.id, db, {
                 startAdmissionValidated: true,
@@ -1248,7 +1261,10 @@ export async function processServerOperation(
         effect,
         event,
         backup,
-        authorize: () => options.authorizeEffect(jobId, server.id, db),
+        authorize: () =>
+          (inactiveWorldRemoval
+            ? (options.authorizeIntent ?? options.authorizeEffect)
+            : options.authorizeEffect)(jobId, server.id, db),
         assertStopped: async () => {
           await requireQuiescentReservation();
           if (
@@ -2154,6 +2170,7 @@ export async function processServerOperation(
         }
         throw error;
       }
+      if (inactiveWorldRemoval) worldRemovalProvider = remote;
       if (['start', 'stop', 'restart'].includes(operation.action)) {
         const action = operation.action as 'start' | 'stop' | 'restart';
         const observedStop = await completeObservedStop();
@@ -2421,12 +2438,16 @@ export async function processServerOperation(
         if (await backup()) return completeStandaloneBackup();
         return wait('backup_confirmation');
       }
-      if (onlineWorldImport) {
-        if (!['running', 'offline'].includes((await resources()).current_state))
-          return wait('world_import_power_transition');
-      } else {
-        await requireQuiescentReservation();
-        if (!(await offline())) return wait('offline_confirmation');
+      // The integration checks the selected world at dispatch. An unused folder
+      // needs neither process telemetry nor an artificial offline settling period.
+      if (!inactiveWorldRemoval) {
+        if (onlineWorldContent) {
+          if (!['running', 'offline'].includes((await resources()).current_state))
+            return wait('world_import_power_transition');
+        } else {
+          await requireQuiescentReservation();
+          if (!(await offline())) return wait('offline_confirmation');
+        }
       }
       if (operation.action === 'minecraft-content') {
         if (!options.processGameContent) throw new DomainError('configuration_invalid');

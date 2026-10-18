@@ -189,6 +189,80 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     return dialog;
   }
 
+  it('removes an inactive world while running and updates immediately before slow inventory refreshes finish', async () => {
+    const world = 'online-remove';
+    const files = await provider.files();
+    for (const name of [world, 'world_nether', 'world_the_end']) {
+      await provider.adapter.createDirectory(identifier, '', name);
+      files.set(`${name}/level.dat`, browserLevelDat());
+    }
+    await running(true);
+    await user.goto(route());
+    for (const name of ['world', 'world_nether', 'world_the_end'])
+      await browserExpect(
+        user.getByRole('button', { name: `Delete world: ${name}`, exact: true }),
+      ).toBeDisabled();
+    const row = user
+      .locator('.minecraft-world')
+      .filter({ has: user.getByText(world, { exact: true }) });
+    await browserExpect(row).toBeVisible();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const snapshots: boolean[] = [];
+    const endpoint = `${fixture.origin}${api()}/worlds`;
+    await user.route(endpoint, async (request) => {
+      const response = await request.fetch();
+      const body = await response.json();
+      snapshots.push(body.worlds.some((item: { name: string }) => item.name === world));
+      await gate;
+      // The old query is intentionally cancelled when the durable deletion confirms.
+      await request.fulfill({ response, json: body }).catch(() => {});
+    });
+    try {
+      await user.getByRole('button', { name: 'Refresh worlds', exact: true }).click();
+      await expect.poll(() => snapshots).toEqual([true]);
+      const dialog = await choose('Delete world', world);
+      await browserExpect(
+        dialog.getByLabel('Create a verified backup first', { exact: true }),
+      ).not.toBeChecked();
+      await browserExpect(
+        dialog.getByLabel('Create a verified backup first', { exact: true }),
+      ).toBeDisabled();
+      await screenshot(user, 'minecraft-worlds-online-delete-confirm-desktop-en');
+      await accessible();
+      const accepted = user.waitForResponse(
+        (result) =>
+          result.request().method() === 'POST' && result.url().endsWith(`${api()}/operations`),
+      );
+      await dialog.getByRole('button', { name: 'Delete world', exact: true }).click();
+      expect((await accepted).status()).toBe(202);
+      // Acceptance alone must never hide a world or claim that its files were removed.
+      await browserExpect(row).toBeVisible();
+      expect(files.has(`${world}/level.dat`)).toBe(true);
+      await provider.processPending();
+      await browserExpect(row).toHaveCount(0);
+      await browserExpect(
+        user.getByRole('button', { name: 'Import world', exact: true }),
+      ).toBeEnabled();
+      await expect.poll(() => snapshots).toEqual([true, false]);
+      expect(files.has(`${world}/level.dat`)).toBe(false);
+      expect((await provider.adapter.getResources(identifier)).current_state).toBe('running');
+      await screenshot(user, 'minecraft-worlds-delete-confirmed-before-refresh-desktop-en');
+      const fresh = user.waitForResponse(
+        (response) => response.url() === endpoint && response.status() === 200,
+      );
+      release();
+      await fresh;
+      await browserExpect(row).toHaveCount(0);
+    } finally {
+      release();
+      await user.unroute(endpoint);
+      await provider.adapter.deleteFiles(identifier, '', ['world_nether', 'world_the_end']);
+    }
+  });
+
   it('shows acknowledged import progress after a reload and refreshes worlds on completion', async () => {
     await user.goto(route());
     const dialog = await importDialog(
@@ -320,6 +394,11 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
       user.getByRole('button', { name: 'Delete world: imported', exact: true }),
     ).toBeEnabled();
     dialog = await choose('Delete world', 'imported');
+    const optionalBackup = dialog.getByLabel('Create a verified backup first', { exact: true });
+    await browserExpect(optionalBackup).not.toBeChecked();
+    await browserExpect(optionalBackup).toBeEnabled();
+    await optionalBackup.check();
+    await browserExpect(optionalBackup).toBeChecked();
     expect((await provider.files()).has('imported/level.dat')).toBe(true);
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
     expect((await provider.files()).has('imported/level.dat')).toBe(true);
@@ -539,7 +618,7 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     await browserExpect(user.getByRole('dialog')).toHaveCount(0);
     await browserExpect(
       user.getByRole('button', { name: 'Delete world: live-import', exact: true }),
-    ).toBeDisabled();
+    ).toBeEnabled();
     expect((await provider.files()).has('live-import/level.dat')).toBe(true);
     expect((await provider.files()).get('server.properties')?.toString()).toContain(
       'level-name=world',

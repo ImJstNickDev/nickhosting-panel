@@ -867,19 +867,19 @@ export async function enqueueLockedServerOperation(
       }
     }
   }
-  const onlineWorldImport =
+  const onlineWorldContent =
     value.action === 'minecraft-content' && minecraftContentAllowsOnline(options.minecraftPlan);
-  if (onlineWorldImport && !['offline', 'running'].includes(server.runtime_state))
+  if (onlineWorldContent && !['offline', 'running'].includes(server.runtime_state))
     throw new DomainError('conflict');
   const reservation = await tx
     .selectFrom('resource_reservations')
     .selectAll()
     .where('server_id', '=', serverId)
     .executeTakeFirst();
-  if (onlineWorldImport && reservation && reservation.state !== 'running')
+  if (onlineWorldContent && reservation && reservation.state !== 'running')
     throw new DomainError('operation_uncertain');
   if (
-    !onlineWorldImport &&
+    !onlineWorldContent &&
     ['configure', 'reinstall', 'wipe', 'restore', 'delete', 'minecraft-content'].includes(
       value.action,
     ) &&
@@ -903,7 +903,7 @@ export async function enqueueLockedServerOperation(
       .execute();
   }
   if (
-    !onlineWorldImport &&
+    !onlineWorldContent &&
     ['wipe', 'reinstall', 'restore', 'configure', 'delete', 'minecraft-content'].includes(
       value.action,
     ) &&

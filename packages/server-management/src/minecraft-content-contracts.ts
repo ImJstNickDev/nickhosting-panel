@@ -152,9 +152,25 @@ export interface MinecraftPreparedContent {
   world?: { archiveSha256?: string; dataVersion?: number; existing: boolean };
 }
 
-/** Only a new, isolated world folder can be written without stopping the game.
- * Derived from the trusted prepared plan, never a client-controlled online flag. */
+/** Removing an inactive world is a file operation, independent of process state.
+ * Its current selected-world/path checks run at dispatch, under the server lock.
+ * A requested whole-server backup retains the existing stopped-state workflow. */
+export function minecraftContentRemovesInactiveWorld(input: unknown): boolean {
+  if (!input || typeof input !== 'object') return false;
+  const plan = input as Partial<MinecraftPreparedContent>;
+  const command = minecraftContentCommandSchema.safeParse(plan.command);
+  return (
+    command.success &&
+    command.data.kind === 'world-remove' &&
+    command.data.backupBefore === false &&
+    plan.backupBefore === false &&
+    plan.world?.existing === true
+  );
+}
+
+/** Derived from a trusted prepared plan, never a client-controlled online flag. */
 export function minecraftContentAllowsOnline(input: unknown): boolean {
+  if (minecraftContentRemovesInactiveWorld(input)) return true;
   if (!input || typeof input !== 'object') return false;
   const plan = input as Partial<MinecraftPreparedContent>;
   const command = minecraftContentCommandSchema.safeParse(plan.command);

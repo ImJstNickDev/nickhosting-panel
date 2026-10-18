@@ -527,6 +527,175 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     ).toEqual({ state: 'running' });
   });
 
+  it.each([false, true])(
+    'removes an inactive world online through the real lifecycle, with final selection protection=%s',
+    async (selectedAfterQueue) => {
+      const f = await minecraftFixture(undefined, true);
+      const runtime = f.files.get('server.jar');
+      if (!runtime) throw new Error('Missing fixture runtime');
+      await f.f.db
+        .updateTable('minecraft_server_profiles')
+        .set({
+          installed: true,
+          configuration_state: '{}',
+          installed_manifest: JSON.stringify([
+            {
+              path: 'server.jar',
+              sha256: createHash('sha256').update(runtime).digest('hex'),
+              size: runtime.length,
+            },
+          ]),
+        })
+        .where('server_id', '=', f.serverId)
+        .execute();
+      await f.f.db
+        .updateTable('managed_servers')
+        .set({ runtime_state: 'running' })
+        .where('id', '=', f.serverId)
+        .execute();
+      f.files.set('server.properties', Buffer.from('level-name=world\n'));
+      // Deletion does not require parsing a valid level.dat or verifying its version.
+      f.files.set('spare/region/r.0.0.mca', Buffer.from('region bytes'));
+      const listFiles = vi.fn(f.context.adapter.listFiles);
+      const readFileForEditor = vi.fn(f.context.adapter.readFileForEditor);
+      const downloadFile = vi.fn(f.context.adapter.downloadFile);
+      Object.assign(f.context.adapter, { listFiles, readFileForEditor, downloadFile });
+      const command = {
+        kind: 'world-remove' as const,
+        world: 'spare',
+        confirm: true as const,
+        backupBefore: false,
+      };
+      const prepared = await prepareMinecraftContentPlan(f.f.db, f.serverId, command, {
+        ...f.options,
+        adapter: f.context.adapter,
+      });
+      expect(listFiles).not.toHaveBeenCalled();
+      expect(readFileForEditor).not.toHaveBeenCalled();
+      await f.f.db
+        .insertInto('resource_reservations')
+        .values({
+          server_id: f.serverId,
+          owner_id: f.f.context.subjectUserId,
+          physical_host_id: f.f.hostId,
+          memory_mib: 128,
+          physical_memory_mib: 148,
+          cpu_percent: 10,
+          operation_id: randomUUID(),
+          state: 'running',
+        })
+        .execute();
+      const queued = await enqueueServerOperation(
+        f.f.db,
+        f.f.context,
+        f.serverId,
+        { action: 'minecraft-content', command, idempotencyKey: randomUUID() },
+        f.options.env,
+        { minecraftPlan: prepared },
+      );
+      const server = await f.f.db
+        .selectFrom('managed_servers')
+        .selectAll()
+        .where('id', '=', f.serverId)
+        .executeTakeFirstOrThrow();
+      const allocations = await f.f.db
+        .selectFrom('server_allocations')
+        .selectAll()
+        .where('server_id', '=', f.serverId)
+        .execute();
+      const remote = {
+        id: server.pterodactyl_id,
+        uuid: server.pterodactyl_uuid,
+        identifier: server.pterodactyl_identifier,
+        external_id: server.external_id,
+        node: f.f.providerNodeId,
+        user: server.provider_user_id,
+        egg: 1,
+        allocation: allocations.find((item) => item.is_primary)?.pterodactyl_allocation_id,
+        status: null,
+        suspended: false,
+        container: { installed: true },
+        limits: server.limits,
+        relationships: {
+          allocations: {
+            data: allocations.map((item) => ({
+              attributes: {
+                id: item.pterodactyl_allocation_id,
+                ip: item.address,
+                port: item.port,
+                assigned: true,
+              },
+            })),
+          },
+        },
+      } as ApplicationServer;
+      const getResources = vi.fn(async () => {
+        throw new Error('No power polling for inactive world removal');
+      });
+      const confirmAlreadyStopped = vi.fn(async () => {
+        throw new Error('No observer required for inactive world removal');
+      });
+      const deleteFiles = vi.fn(async (_id: string, _root: string, paths: string[]) => {
+        for (const path of f.files.keys())
+          if (paths.some((root) => path === root || path.startsWith(`${root}/`)))
+            f.files.delete(path);
+      });
+      const adapter = {
+        ...f.context.adapter,
+        getApplicationServer: vi.fn(async () => remote),
+        getResources,
+        deleteFiles,
+      } as PterodactylAdapter;
+      const observedImageDigest = vi.fn(async () => {
+        throw new Error('No runtime audit for a world deletion');
+      });
+      if (selectedAfterQueue) f.files.set('server.properties', Buffer.from('level-name=spare\n'));
+      const result = await processServerOperation(f.f.db, queued.jobId, {
+        adapter,
+        env: f.options.env,
+        authorizeEffect: async () => {},
+        authorizeIntent: async () => {},
+        confirmAlreadyStopped,
+        processGameContent: (context) =>
+          processMinecraftContent(context, { ...f.options, observedImageDigest }),
+      });
+      expect(result).toBe(selectedAfterQueue ? 'failed' : 'succeeded');
+      expect(deleteFiles).toHaveBeenCalledTimes(selectedAfterQueue ? 0 : 1);
+      if (!selectedAfterQueue)
+        expect(deleteFiles).toHaveBeenCalledExactlyOnceWith(server.pterodactyl_identifier, '', [
+          'spare',
+        ]);
+      expect(f.files.has('spare/region/r.0.0.mca')).toBe(selectedAfterQueue);
+      expect(listFiles).toHaveBeenCalledTimes(1);
+      expect(readFileForEditor).toHaveBeenCalledTimes(1);
+      expect(downloadFile).not.toHaveBeenCalled();
+      expect(getResources).not.toHaveBeenCalled();
+      expect(confirmAlreadyStopped).not.toHaveBeenCalled();
+      expect(observedImageDigest).not.toHaveBeenCalled();
+      expect(
+        await f.f.db
+          .selectFrom('minecraft_server_profiles')
+          .select(['installed', 'content_state'])
+          .where('server_id', '=', f.serverId)
+          .executeTakeFirst(),
+      ).toEqual({ installed: true, content_state: {} });
+      expect(
+        await f.f.db
+          .selectFrom('resource_reservations')
+          .select('state')
+          .where('server_id', '=', f.serverId)
+          .executeTakeFirst(),
+      ).toEqual({ state: 'running' });
+      const final = await f.f.db
+        .selectFrom('server_operations')
+        .select(['effect_state', 'plan'])
+        .where('job_id', '=', queued.jobId)
+        .executeTakeFirstOrThrow();
+      expect(final.effect_state).toBe(selectedAfterQueue ? 'none' : 'confirmed');
+      expect(final.plan.offlineSince).toBeUndefined();
+    },
+  );
+
   it.each([
     { label: 'matching', field: 'DataVersion', value: 3955, status: 'verified' },
     { label: 'different version', field: 'DataVersion', value: 4786, status: 'incompatible' },

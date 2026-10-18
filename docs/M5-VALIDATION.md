@@ -12307,3 +12307,67 @@ existing watchers and were healthy in read-only checks; no manual restart or ima
 rebuild was performed. Fixtures cleaned their isolated schemas/staging data.
 Real-provider timings for the new import await the Owner's next test. SFTPGo #18 and
 the production-release boundary remain unchanged.
+
+### 2026-10-18 — Immediate inactive-world deletion
+
+The Owner's previous deletion completed in **34.835 s**: about **29.0 s** until
+the offline gate passed, **4.0 s** of preparation, **0.741 s** in the provider-effect
+phase (including its final guards), and **1.107 s** of confirmation/finalization.
+No backup was requested. The old 21-second per-job settling interval plus
+2/4/8/10-second retry backoff caused the dominant wait. This was one recursive
+provider delete, not a request per file. These timings describe the previous code;
+the provider-effect duration is not an isolated Wings DELETE measurement.
+
+Inactive-world deletion now runs online or offline without resource polling,
+process/image observations or offline settling. The prepared intent makes no
+remote directory request; execution shares one fresh provider identity within
+its locked delivery, reads root once and current properties once, and sends one
+recursive delete. It does not read `level.dat`/EULA/JAR, create a content-install
+fence, or repeat root absence checks after an acknowledged response. Local
+revocable authority remains checked at dispatch. Active-world paths include
+normalized aliases, enclosing folders and dimension siblings. Uncertain dispatch
+recovery checks absence once and never blindly repeats deletion. Explicit backup
+requests retain their stopped-state and successful-backup requirements.
+
+The delete dialog defaults backup off, with an explicit offline opt-in. Confirmed
+job success patches the displayed inventory immediately and releases the controls
+while refresh runs in background. A cancelled older response cannot resurrect the
+removed row. Acceptance alone, failure and uncertainty never remove the row. Only
+this short interactive action uses 250 ms local-job polling for five seconds;
+there is no new provider polling or event system.
+
+Focused final evidence, using the existing isolated services and fixture provider:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts -t 'inactive Minecraft world removal|additive Minecraft world imports'`: **8 passed / 238 excluded**. One delivery, one identity proof, no resource reads, preserved running reservation, backup guard, foreign identity and revocation after preparation.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/runtime.integration.test.ts -t 'inactive-world removal without a host observer|binds lifecycle observation|keeps standalone final authorization'`: **4 passed / 58 excluded**. Real runtime authorizer requires no observer for this file-only operation and still rejects revoked resource ownership; power host checks remain intact.
+- Content deletion unit checks: **15 passed / 27 excluded**. Recovery after lost acknowledgement, confirmed receipt with a recreated folder, selected-world aliases/ancestors, invalid paths, symlink and missing target, backup and denied dispatch.
+- Content integration checks: **2 passed / 46 excluded**. Real preparation, queue, lifecycle and game-content hooks with isolated PostgreSQL and a fixture adapter: running deletion and a world selected after enqueue. One root listing, one signed-read adapter call, one delete, unchanged installation/content state and compute reservation. These content fixtures mock the authorization hooks; the separate runtime tests above exercise their real implementation.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-worlds.browser.test.ts -t 'removes an inactive world while running|imports, selects, downloads and removes|imports new folders while running|recovers a lost response'`: **4 passed / 11 excluded**. Includes deliberately delayed old/new inventory responses, 202 versus confirmed semantics, online active-world protection, existing selection/import/recovery, Cancel focus and axe.
+- Typecheck, i18n completeness (EN/IT/pseudo), changed-source Biome and whitespace checks passed. No complete historical suite or production build was repeated.
+
+The initial new content integration runs exposed an incomplete fixture:
+`installed=true` still carried pending initial configuration. The real lifecycle
+correctly refused it. The fixture now declares completed configuration; no product
+safety check was relaxed to make the test pass. An interim formatting check caught
+temporary diagnostics while that test was under investigation; those were removed
+and the final formatting check passed.
+
+Independent source review found the nested/aliased active-world case; it is fixed
+with local path normalization and regression coverage. Final source and rendered
+UX/content review found no remaining must-fix finding.
+
+- [Online deletion confirmation](screenshots/m5/minecraft-worlds-online-delete-confirm-desktop-en.png)
+- [Confirmed deletion before refresh finishes](screenshots/m5/minecraft-worlds-delete-confirmed-before-refresh-desktop-en.png)
+
+The 300 ms target is **not yet established on the real provider**. Deterministic
+waits and repeated requests are removed; actual directory deletion still depends
+on Panel/Wings and filesystem latency. No real world was deleted to benchmark
+this change. The Owner's next intended deletion can be measured with existing job
+traces; no additional verbose logging was added.
+
+Dev API/worker/Vite used their existing source watchers; HTTPS returned 200 and
+unauthenticated API returned 401. No manual restart, migration, Blueprint update,
+production mutation or new persistent test asset was needed. The pre-existing dev
+Gateway health check was already failing (over 5,000 consecutive checks) and was
+not modified in this file-operation task. Isolated test schemas were cleaned by
+the fixtures. Issue #18 and production-release boundaries remain unchanged.

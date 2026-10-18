@@ -20,6 +20,22 @@ type Progress = {
   total: number;
 };
 
+function configuredWorldRoots(value: string | null | undefined): string[] | undefined {
+  if (!value || value.startsWith('/') || value.startsWith('\\')) return undefined;
+  const parts: string[] = [];
+  for (const part of value.replaceAll('\\', '/').split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (!parts.length) return undefined;
+      parts.pop();
+    } else parts.push(part.toLowerCase());
+  }
+  const root = parts[0];
+  if (!root) return undefined;
+  // The list shows root directories; protect the ancestor of a nested world too.
+  return parts.length === 1 ? [root, `${root}_nether`, `${root}_the_end`] : [root];
+}
+
 function Icon({
   name,
 }: {
@@ -97,6 +113,9 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
   const importStateAllowed =
     offline || (props.runtimeState === 'running' && snapshot?.selectedWorld != null);
   const importDisabled = mutationsDisabled || !importStateAllowed;
+  const removeDisabled = mutationsDisabled || !importStateAllowed;
+  const activeRoots = configuredWorldRoots(snapshot?.selectedWorld);
+  const activeWorld = (name: string) => !activeRoots || activeRoots.includes(name.toLowerCase());
   const rows = snapshot?.worlds ?? [];
   const visible = rows.filter((row) =>
     row.name.toLowerCase().includes(search.trim().toLowerCase()),
@@ -132,7 +151,10 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
     }
   }, [importStateAllowed, props.canManage, props.pending, supported]);
   useEffect(() => {
-    if (!offline && !mutationLock.current) setSelection(undefined);
+    if (!offline && !mutationLock.current) {
+      setSelection((current) => (current?.action === 'delete' ? current : undefined));
+      setBackup(false);
+    }
   }, [offline]);
 
   async function refresh() {
@@ -259,6 +281,12 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
     }
   }
   function allowsState(intent: Intent) {
+    if (intent.command.kind === 'world-remove')
+      return (
+        importStateAllowed &&
+        typeof intent.command.world === 'string' &&
+        !activeWorld(intent.command.world)
+      );
     return intent.command.kind === 'world-import' && !intent.command.replace
       ? importStateAllowed
       : offline;
@@ -278,7 +306,32 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
     setOperationError(undefined);
     try {
       const result = await controller.operate(props.serverId, intent.requestKey, intent.command);
-      props.onAccepted(result.jobId);
+      const removedWorld =
+        intent.command.kind === 'world-remove' && typeof intent.command.world === 'string'
+          ? intent.command.world
+          : undefined;
+      props.onAccepted(
+        result.jobId,
+        removedWorld
+          ? {
+              quickCompletion: true,
+              confirmedUpdate: (current) => {
+                const worlds = current.metadata?.worlds as MinecraftWorlds | undefined;
+                if (!worlds) return current;
+                return {
+                  ...current,
+                  metadata: {
+                    ...current.metadata,
+                    worlds: {
+                      ...worlds,
+                      worlds: worlds.worlds.filter((world) => world.name !== removedWorld),
+                    },
+                  },
+                };
+              },
+            }
+          : undefined,
+      );
       setImporting(intent.command.kind === 'world-import');
       setUncertain(undefined);
       setSelection(undefined);
@@ -325,13 +378,14 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
     });
   }
   function choose(action: 'select' | 'delete', name: string) {
-    if (disabled || transfer.current) return;
+    if ((action === 'delete' ? removeDisabled || activeWorld(name) : disabled) || transfer.current)
+      return;
     setOperationError(undefined);
-    setBackup(true);
+    setBackup(action !== 'delete' && offline);
     setSelection({ action, name, requestKey: idempotencyKey() });
   }
   async function confirm() {
-    if (!selection || disabled) return;
+    if (!selection || (selection.action === 'delete' ? removeDisabled : disabled)) return;
     if (selection.action === 'select') {
       if (
         snapshot?.compatibility !== 'available' ||
@@ -345,7 +399,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
     } else if (selection.action === 'delete') {
       if (
         !snapshot?.selectedWorld ||
-        selection.name === snapshot.selectedWorld ||
+        activeWorld(selection.name) ||
         !rows.some((row) => row.name === selection.name && row.validation)
       )
         return;
@@ -355,7 +409,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
           kind: 'world-remove',
           world: selection.name,
           confirm: true,
-          backupBefore: backup,
+          backupBefore: offline && backup,
         },
       });
     } else {
@@ -567,7 +621,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
                       {props.canManage && (
                         <Tooltip
                           content={
-                            selected
+                            activeWorld(world.name)
                               ? t(key('selectedCannotDelete'))
                               : !world.validation
                                 ? t(key('cannotDelete'))
@@ -579,8 +633,8 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
                             className="minecraft-world-action minecraft-world-action--danger"
                             aria-label={actionName('delete')}
                             disabled={
-                              disabled ||
-                              selected ||
+                              removeDisabled ||
+                              activeWorld(world.name) ||
                               !world.validation ||
                               snapshot.selectedWorld === null
                             }
@@ -771,7 +825,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
         title={selection ? t(key(selection.action)) : ''}
         confirmLabel={selection ? t(key(selection.action)) : undefined}
         destructive={selection?.action !== 'select'}
-        busy={disabled}
+        busy={selection?.action === 'delete' ? removeDisabled : disabled}
         onClose={() => {
           if (!mutationLock.current) {
             setSelection(undefined);
@@ -794,7 +848,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
               <Check
                 label={t(key('backup'))}
                 checked={backup}
-                disabled={busy}
+                disabled={busy || !offline}
                 onChange={(event) => {
                   setBackup(event.target.checked);
                   setSelection({ ...selection, requestKey: idempotencyKey() });

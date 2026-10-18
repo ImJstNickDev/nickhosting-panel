@@ -10,6 +10,7 @@ import type { GameLifecycleContext } from './lifecycle.js';
 import {
   applyMinecraftStoredPlayerChange,
   applyMinecraftTextChange,
+  applyMinecraftWorldRemoval,
   assertMinecraftContentTarget,
   assertMinecraftModpackTransition,
   assertMinecraftRuntimePathsPreserved,
@@ -99,6 +100,10 @@ function fixture(initial: Record<string, string> = {}) {
     ),
     writeFile: vi.fn(async (_id: string, path: string, value: string) => {
       files.set(path, value);
+    }),
+    deleteFiles: vi.fn(async (_id: string, _root: string, paths: string[]) => {
+      for (const key of files.keys())
+        if (paths.some((path) => key === path || key.startsWith(`${path}/`))) files.delete(key);
     }),
   };
   const authorize = vi.fn(async () => {});
@@ -563,5 +568,152 @@ describe('UUID-bound existing Minecraft player changes', () => {
     });
     expect(lookup.lookupName).toHaveBeenCalledOnce();
     expect(lookup.lookupUuid).toHaveBeenCalledOnce();
+  });
+  it('removes an inactive world with one root snapshot, one properties read and one recursive delete', async () => {
+    const f = fixture({
+      'server.properties': 'level-name=world\n',
+      'spare/region/r.0.0.mca': 'region',
+    });
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
+      true,
+    );
+    expect(f.adapter.listFiles).toHaveBeenCalledTimes(1);
+    expect(f.adapter.readFileForEditor).toHaveBeenCalledExactlyOnceWith(
+      'fixture',
+      'server.properties',
+      1048576,
+    );
+    expect(f.adapter.deleteFiles).toHaveBeenCalledExactlyOnceWith('fixture', '', ['spare']);
+    expect(f.adapter.downloadFile).not.toHaveBeenCalled();
+    expect(f.assertStopped).not.toHaveBeenCalled();
+    expect(f.files.has('spare/region/r.0.0.mca')).toBe(false);
+  });
+  it.each(['world', 'world_nether', 'world_the_end', 'WORLD'])(
+    'does not remove configured world or its runtime dimensions: %s',
+    async (target) => {
+      const f = fixture({
+        'server.properties': 'level-name=World\n',
+        [`${target}/region/r.0.0.mca`]: 'region',
+      });
+      await expect(
+        applyMinecraftWorldRemoval(f.context, target, { backupBefore: false }),
+      ).rejects.toMatchObject({ code: 'validation_failed' });
+      expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+      expect(f.operation.effect_state).toBe('none');
+    },
+  );
+  it.each([
+    { configured: 'worlds/main', target: 'worlds', code: 'validation_failed' },
+    { configured: './world', target: 'world', code: 'validation_failed' },
+    { configured: './world/', target: 'world_nether', code: 'validation_failed' },
+    { configured: '../outside', target: 'spare', code: 'conflict' },
+    { configured: '/absolute/world', target: 'spare', code: 'conflict' },
+  ])(
+    'protects configured relative paths and fails closed for unsafe paths: $configured',
+    async ({ configured, target, code }) => {
+      const f = fixture({
+        'server.properties': `level-name=${configured}\n`,
+        [`${target}/a`]: 'bytes',
+      });
+      await expect(
+        applyMinecraftWorldRemoval(f.context, target, { backupBefore: false }),
+      ).rejects.toMatchObject({ code });
+      expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+      expect(f.operation.effect_state).toBe('none');
+    },
+  );
+  it('refuses a changed symlink target and missing target before preparing a destructive effect', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
+    f.symlinks.add('spare');
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'missing', { backupBefore: false }),
+    ).rejects.toMatchObject({ code: 'not_found' });
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+    expect(f.operation.effect_state).toBe('none');
+  });
+  it('finalizes an acknowledged removal without touching a folder recreated afterwards', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
+    f.context.effect = async (phase, action) => {
+      f.operation.phase = phase;
+      f.operation.effect_state = 'prepared';
+      await action();
+      f.operation.effect_state = 'confirmed';
+      throw new Error('crash after acknowledgement');
+    };
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toThrow('crash after acknowledgement');
+    f.files.set('spare/recreated', 'new data');
+    f.adapter.listFiles.mockClear();
+    f.adapter.readFileForEditor.mockClear();
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
+      true,
+    );
+    expect(f.files.get('spare/recreated')).toBe('new data');
+    expect(f.adapter.deleteFiles).toHaveBeenCalledOnce();
+    expect(f.adapter.listFiles).not.toHaveBeenCalled();
+    expect(f.adapter.readFileForEditor).not.toHaveBeenCalled();
+  });
+  it('reconciles an ambiguous deletion with one absence check and never replays it', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
+    f.adapter.deleteFiles.mockImplementationOnce(async () => {
+      f.files.delete('spare/a');
+      throw new Error('lost response');
+    });
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toThrow('lost response');
+    f.adapter.listFiles.mockClear();
+    f.adapter.readFileForEditor.mockClear();
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
+      true,
+    );
+    expect(f.adapter.listFiles).toHaveBeenCalledTimes(1);
+    expect(f.adapter.readFileForEditor).not.toHaveBeenCalled();
+    expect(f.adapter.deleteFiles).toHaveBeenCalledOnce();
+    f.files.set('spare/recreated', 'new data');
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
+      true,
+    );
+    expect(f.files.get('spare/recreated')).toBe('new data');
+  });
+  it('keeps an ambiguous removal blocked when the folder still exists', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
+    f.adapter.deleteFiles.mockRejectedValueOnce(new Error('lost response'));
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toThrow('lost response');
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toMatchObject({ code: 'operation_uncertain' });
+    expect(f.adapter.deleteFiles).toHaveBeenCalledOnce();
+  });
+  it('waits for a requested backup and retains the offline requirement', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
+    const backup = vi.fn(async () => false);
+    f.context.backup = backup;
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: true })).toBe(
+      false,
+    );
+    expect(f.assertStopped).toHaveBeenCalledOnce();
+    expect(backup).toHaveBeenCalledOnce();
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+    f.operation.plan = { backupComplete: true };
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: true })).toBe(true);
+    expect(f.assertStopped).toHaveBeenCalledTimes(2);
+    expect(f.adapter.deleteFiles).toHaveBeenCalledOnce();
+  });
+  it('does not dispatch when authorization is lost after the fresh preflight', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
+    f.context.effect = async () => {
+      throw new DomainError('forbidden');
+    };
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
   });
 });

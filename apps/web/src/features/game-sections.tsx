@@ -14,7 +14,7 @@ import { useQuery } from '@tanstack/react-query';
 import { type FormEvent, Suspense, useEffect, useId, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { z } from 'zod';
-import { ApiError, api, idempotencyKey } from '../api/client.js';
+import { ApiError, api, idempotencyKey, queryClient } from '../api/client.js';
 import { hashFile } from '../api/hash.js';
 import { useT } from '../app/i18n.js';
 import { Tooltip } from '../components/tooltip.js';
@@ -31,7 +31,7 @@ import {
   Textarea,
   Time,
 } from '../components/ui.js';
-import type { GameSectionViewProps } from './game-section-view.js';
+import type { GameSectionAcceptedOptions, GameSectionViewProps } from './game-section-view.js';
 import {
   gameUiClient,
   gameUiRegistry,
@@ -480,31 +480,47 @@ export function GameSections({
         signal,
       }) as Promise<UiSectionData>,
   });
-  const [trackedOperation, setTrackedOperation] = useState<{ serverId: string; id: string }>();
+  const [trackedOperation, setTrackedOperation] = useState<{
+    serverId: string;
+    id: string;
+    confirmedUpdate?: GameSectionAcceptedOptions['confirmedUpdate'];
+    quickUntil?: number;
+  }>();
   const operationId =
     trackedOperation?.serverId === serverId
       ? trackedOperation.id
       : canReadSection
         ? (server.data?.activeOperationId ?? undefined)
         : undefined;
-  const setOperationId = (id: string) => setTrackedOperation({ serverId, id });
+  const setOperationId = (id: string, options?: GameSectionAcceptedOptions) =>
+    setTrackedOperation({
+      serverId,
+      id,
+      confirmedUpdate: options?.confirmedUpdate,
+      quickUntil: options?.quickCompletion ? Date.now() + 5000 : undefined,
+    });
   const [completedOperationId, setCompletedOperationId] = useState<string>();
   const [refreshToken, setRefreshToken] = useState(0);
   const refreshedOperation = useRef<string | undefined>(undefined);
   const refreshedOutcome = useRef<string | undefined>(undefined);
+  const patchedOperation = useRef<string | undefined>(undefined);
   const operationServer = useRef(serverId);
   useEffect(() => {
     if (operationServer.current === serverId) return;
     operationServer.current = serverId;
     refreshedOperation.current = undefined;
     refreshedOutcome.current = undefined;
+    patchedOperation.current = undefined;
     setTrackedOperation(undefined);
     setCompletedOperationId(undefined);
     setRefreshToken(0);
   }, [serverId]);
   useEffect(() => {
     if (!canReadSection || !server.data?.activeOperationId) return;
-    setTrackedOperation({ serverId, id: server.data.activeOperationId });
+    const id = server.data.activeOperationId;
+    setTrackedOperation((current) =>
+      current?.serverId === serverId && current.id === id ? current : { serverId, id },
+    );
   }, [canReadSection, serverId, server.data?.activeOperationId]);
   const operation = useQuery({
     queryKey: ['game-operation', serverId, operationId],
@@ -524,9 +540,15 @@ export function GameSections({
     },
     refetchInterval: (query) => {
       const result = query.state.data;
+      const interval =
+        trackedOperation?.serverId === serverId &&
+        trackedOperation.id === operationId &&
+        Date.now() < (trackedOperation.quickUntil ?? 0)
+          ? 250
+          : 1000;
       if (result && ['uncertain', 'prepared'].includes(result.effectState ?? ''))
-        return result.state === 'failed' ? 5000 : 1000;
-      return result && ['succeeded', 'failed'].includes(result.state) ? false : 1000;
+        return result.state === 'failed' ? 5000 : interval;
+      return result && ['succeeded', 'failed'].includes(result.state) ? false : interval;
     },
   });
   const operationState = operation.data?.state;
@@ -543,14 +565,34 @@ export function GameSections({
     )
       return;
     let cancelled = false;
-    void Promise.all([loaded.refetch(), server.refetch()]).then(([sectionResult, serverResult]) => {
+    void (async () => {
+      const update =
+        trackedOperation?.serverId === serverId && trackedOperation.id === operationId
+          ? trackedOperation.confirmedUpdate
+          : undefined;
+      if (
+        operationState === 'succeeded' &&
+        effectState === 'confirmed' &&
+        update &&
+        patchedOperation.current !== operationId
+      ) {
+        const queryKey = ['game-section', serverId, gameId, sectionId];
+        // An older inventory response must not resurrect the confirmed removal.
+        await queryClient.cancelQueries({ queryKey, exact: true });
+        if (cancelled) return;
+        patchedOperation.current = operationId;
+        queryClient.setQueryData<UiSectionData>(queryKey, (current) =>
+          current ? update(current) : current,
+        );
+      }
+      const [sectionResult, serverResult] = await Promise.all([loaded.refetch(), server.refetch()]);
       if (cancelled || sectionResult.error || serverResult.error) return;
       refreshedOperation.current = operationId;
       refreshedOutcome.current = `${operationState}:${effectState}`;
       setRefreshToken((previous) => previous + 1);
       if (operationState === 'succeeded' && effectState === 'confirmed')
         setCompletedOperationId(operationId);
-    });
+    })();
     return () => {
       cancelled = true;
     };
@@ -562,14 +604,27 @@ export function GameSections({
     operation.dataUpdatedAt,
     loaded.refetch,
     server.refetch,
+    trackedOperation,
+    serverId,
+    gameId,
+    sectionId,
   ]);
+  const patchedCompletion =
+    operationState === 'succeeded' &&
+    effectState === 'confirmed' &&
+    patchedOperation.current === operationId;
   const pendingOperation = Boolean(
     operationId &&
       (!operation.data ||
         ['uncertain', 'prepared'].includes(operation.data.effectState ?? '') ||
         ['queued', 'running'].includes(operation.data.state) ||
-        refreshedOperation.current !== operationId ||
-        refreshedOutcome.current !== `${operationState}:${effectState}`),
+        (!patchedCompletion &&
+          (refreshedOperation.current !== operationId ||
+            refreshedOutcome.current !== `${operationState}:${effectState}`))),
+  );
+  const serverOperationPending = Boolean(
+    server.data?.activeOperationId &&
+      !(patchedCompletion && server.data.activeOperationId === operationId),
   );
   if (!module || !section) return <Empty text={t('gameUi.missingSection')} />;
   const SectionView = getGameSectionView(section.renderer);
@@ -625,9 +680,7 @@ export function GameSections({
             serverName={server.data.name}
             runtimeState={server.data.runtimeState}
             canManage={server.data.permissions.manage === true}
-            pending={
-              pendingOperation || Boolean(server.data.activeOperationId) || Boolean(refreshError)
-            }
+            pending={pendingOperation || serverOperationPending || Boolean(refreshError)}
             operation={
               operation.data && {
                 state: operation.data.state,
@@ -635,8 +688,8 @@ export function GameSections({
               }
             }
             fileTransfer={pendingOperation ? operation.data?.fileTransfer : undefined}
-            onAccepted={(jobId) => {
-              setOperationId(jobId);
+            onAccepted={(jobId, options) => {
+              setOperationId(jobId, options);
               void server.refetch();
             }}
             reload={() => loaded.refetch({ throwOnError: true })}

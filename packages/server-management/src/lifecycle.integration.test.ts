@@ -3959,3 +3959,92 @@ describe('additive Minecraft world imports', () => {
     expect(f.options.processGameContent).not.toHaveBeenCalled();
   });
 });
+
+describe('inactive Minecraft world removal', () => {
+  const plan = (backupBefore = false) => ({
+    minecraftContent: {
+      combinationId: randomUUID(),
+      command: { kind: 'world-remove', world: 'unused_world', confirm: true, backupBefore },
+      world: { existing: true },
+      backupBefore,
+    },
+  });
+  it.each(['running', 'offline'] as const)(
+    'deletes in one delivery while %s without telemetry, offline settling or duplicate identity reads',
+    async (state) => {
+      const f = await fixture('minecraft-content', plan());
+      f.setState(state);
+      await f.db
+        .updateTable('managed_servers')
+        .set({ runtime_state: state })
+        .where('id', '=', f.serverId)
+        .execute();
+      if (state === 'running') {
+        await f.prepareReservation();
+        await f.db
+          .updateTable('resource_reservations')
+          .set({ state: 'running' })
+          .where('server_id', '=', f.serverId)
+          .execute();
+      }
+      f.options.confirmAlreadyStopped = vi.fn(async () => false);
+      f.options.authorizeIntent = vi.fn(async () => {});
+      f.options.processGameContent = async (context) => {
+        await context.authorize();
+        await context.effect('minecraft.remove.fixture', () =>
+          context.adapter.deleteFiles(context.server.pterodactyl_identifier ?? '', '', [
+            'unused_world',
+          ]),
+        );
+        return true;
+      };
+      expect(await f.run()).toBe('succeeded');
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledOnce();
+      expect(f.adapter.getResources).not.toHaveBeenCalled();
+      expect(f.options.confirmAlreadyStopped).not.toHaveBeenCalled();
+      expect(f.adapter.deleteFiles).toHaveBeenCalledOnce();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect((await f.server()).runtime_state).toBe(state);
+      expect((await f.operation()).effect_state).toBe('confirmed');
+      expect((await f.operation()).plan.offlineSince).toBeUndefined();
+      if (state === 'running') expect((await f.reservation())?.state).toBe('running');
+    },
+  );
+  it('keeps requested backup and replacement workflows behind offline confirmation', async () => {
+    const f = await fixture('minecraft-content', plan(true));
+    f.setState('running');
+    f.options.processGameContent = vi.fn(async () => true);
+    expect(await f.run()).toBe('waiting');
+    expect(f.options.processGameContent).not.toHaveBeenCalled();
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+  });
+  it('rejects a foreign provider identity before reading or removing a world', async () => {
+    const f = await fixture('minecraft-content', plan());
+    f.remote.uuid = randomUUID();
+    f.options.processGameContent = vi.fn(async () => true);
+    await f.run();
+    expect(f.options.processGameContent).not.toHaveBeenCalled();
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+  });
+  it('rechecks revocation after durable preparation without marking an undispatched delete uncertain', async () => {
+    const f = await fixture('minecraft-content', plan());
+    let revoked = false;
+    f.options.checkpoint = async (phase) => {
+      if (phase === 'prepared') revoked = true;
+    };
+    f.options.authorizeIntent = async () => {
+      if (revoked) throw new DomainError('forbidden');
+    };
+    f.options.processGameContent = async (context) => {
+      await context.effect('minecraft.remove.fixture', () =>
+        context.adapter.deleteFiles(context.server.pterodactyl_identifier ?? '', '', [
+          'unused_world',
+        ]),
+      );
+      return true;
+    };
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+    expect((await f.operation()).effect_state).toBe('none');
+  });
+});

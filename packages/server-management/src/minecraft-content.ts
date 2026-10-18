@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join, posix, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import {
   type ContentHttp,
@@ -50,7 +50,6 @@ import {
 } from '../../../games/minecraft/src/runtime.js';
 import {
   discoverMinecraftWorlds,
-  inspectMinecraftLevelDat,
   planMinecraftWorldReplacement,
   recoverMinecraftWorldStageLock,
   stageMinecraftWorld,
@@ -288,12 +287,18 @@ export async function prepareMinecraftContentPlan(
     const name = minecraftWorldName(
       command.kind === 'world-import' ? command.targetWorld : command.world,
     );
-    const actual = (await options.adapter.listFiles(server.pterodactyl_identifier)).filter(
-      (entry) => entry.name.toLowerCase() === name.toLowerCase(),
-    );
+    // Removal validates the exact target at dispatch. Preparing its intent must
+    // not list the same root again before the durable job can run.
+    const actual =
+      command.kind === 'world-remove'
+        ? undefined
+        : (await options.adapter.listFiles(server.pterodactyl_identifier)).filter(
+            (entry) => entry.name.toLowerCase() === name.toLowerCase(),
+          );
     if (
-      actual.length > 1 ||
-      actual.some((entry) => entry.name !== name || entry.is_file || entry.is_symlink)
+      actual &&
+      (actual.length > 1 ||
+        actual.some((entry) => entry.name !== name || entry.is_file || entry.is_symlink))
     )
       throw new DomainError('conflict');
     assertMinecraftRuntimePathsPreserved([name], profile.installed_manifest);
@@ -302,7 +307,7 @@ export async function prepareMinecraftContentPlan(
         command.kind === 'world-select'
           ? worldDataVersion(choice)
           : minecraftWorldDataVersion(choice.combination.release),
-      existing: actual.length === 1,
+      existing: command.kind === 'world-remove' || actual?.length === 1,
     };
     if (command.kind === 'world-import') {
       if (server.runtime_state === 'running') {
@@ -1300,6 +1305,91 @@ async function removeContentPath(
   if (await remoteEntry(context, path)) throw new DomainError('operation_uncertain');
   await complete(context, step);
 }
+/** A world-folder removal is one acknowledged provider effect. It does not
+ * reinstall/configure Minecraft, so it needs no binary/EULA/level.dat audit. */
+export async function applyMinecraftWorldRemoval(
+  context: GameLifecycleContext,
+  target: string,
+  options: { backupBefore: boolean },
+): Promise<boolean> {
+  minecraftWorldName(target);
+  const step = stepId('remove', target);
+  if (await completed(context, step)) return true;
+  const operation = context.operation();
+  if (operation.phase === step && operation.effect_state === 'confirmed') {
+    // The provider acknowledged deletion before a crash could persist job_steps.
+    // A recreated folder must never be removed by replaying that successful job.
+    await complete(context, step);
+    return true;
+  }
+  if (uncertainEffect(context, step)) {
+    // A missing target proves the ambiguous delete took effect. Otherwise leave
+    // recovery uncertain, even if the current folder looks like the original.
+    if (await remoteEntry(context, target)) throw new DomainError('operation_uncertain');
+    await complete(context, step);
+    return true;
+  }
+  async function assertInactiveTarget() {
+    let authorized: Promise<void> | undefined;
+    const files = createFilemanReadService({
+      adapter: context.adapter,
+      identifier: context.server.pterodactyl_identifier ?? '',
+      authorize: () => (authorized ??= context.authorize()),
+    });
+    const entries = await files.list('');
+    const matches = entries.filter((entry) => entry.name.toLowerCase() === target.toLowerCase());
+    if (matches.length !== 1) throw new DomainError(matches.length ? 'conflict' : 'not_found');
+    if (matches[0]?.name !== target || matches[0]?.kind !== 'directory')
+      throw new DomainError('conflict');
+    const properties = entries.filter((entry) => entry.name.toLowerCase() === 'server.properties');
+    if (
+      properties.length !== 1 ||
+      properties[0]?.name !== 'server.properties' ||
+      properties[0]?.kind !== 'file' ||
+      properties[0].size > 1024 ** 2
+    )
+      throw new DomainError('conflict');
+    const bytes = await files.read({ path: 'server.properties', maxBytes: 1024 ** 2 });
+    if (!bytes) throw new DomainError('not_found');
+    const configured =
+      parseMinecraftProperties(Buffer.from(bytes).toString('utf8'))['level-name'] ?? 'world';
+    const active = posix.normalize(configured).replace(/\/+$/u, '').toLowerCase();
+    if (
+      !configured ||
+      !active ||
+      configured.includes('\\') ||
+      /\p{Cc}/u.test(configured) ||
+      /^[a-z]:/i.test(configured) ||
+      posix.isAbsolute(configured) ||
+      active === '.' ||
+      active === '..' ||
+      active.startsWith('../')
+    )
+      throw new DomainError('conflict');
+    const selected = [active, `${active}_nether`, `${active}_the_end`];
+    if (
+      selected.some(
+        (path) => path === target.toLowerCase() || path.startsWith(`${target.toLowerCase()}/`),
+      )
+    )
+      fail('minecraft_world_selected');
+  }
+  if (options.backupBefore && context.operation().plan.backupComplete !== true) {
+    await context.assertStopped();
+    await assertInactiveTarget();
+    if (!(await context.backup())) return false;
+  }
+  await assertInactiveTarget();
+  await context.effect(step, async () => {
+    if (options.backupBefore) await context.assertStopped();
+    // The enclosing durable effect performs the final authorization and managed
+    // identity check after preparation, before dispatching this single mutation.
+    await context.adapter.deleteFiles(context.server.pterodactyl_identifier ?? '', '', [target]);
+  });
+  await complete(context, step);
+  return true;
+}
+
 async function installContentFile(
   context: GameLifecycleContext,
   options: MinecraftContentOptions,
@@ -1638,7 +1728,7 @@ async function applyPreparedContent(
     command.kind === 'world-select' ||
     command.kind === 'world-remove'
   )
-    return applyWorldContent(context, options, prepared, choice);
+    return applyWorldContent(context, options, prepared, choice, pending);
   if (
     command.kind === 'player' &&
     choice.supportAuthority === 'integration' &&
@@ -2163,6 +2253,7 @@ async function applyWorldContent(
   options: MinecraftContentOptions,
   prepared: MinecraftPreparedContent,
   choice: Awaited<ReturnType<typeof inspectMinecraftCombination>>,
+  pending?: PendingContent,
 ): Promise<boolean> {
   const command = prepared.command;
   if (
@@ -2206,29 +2297,13 @@ async function applyWorldContent(
     return true;
   }
   if (command.kind === 'world-remove') {
-    const source = parseMinecraftProperties(await textFile(context, 'server.properties', ''));
-    if ((source['level-name'] ?? 'world') === target) fail('minecraft_world_selected');
-    if (!(await completed(context, stepId('remove', target)))) {
-      if (!(await remoteEntry(context, `${target}/level.dat`))) throw new DomainError('not_found');
-      inspectMinecraftLevelDat(await readWorldLevel(context, target));
-      if (
-        prepared.backupBefore &&
-        context.operation().plan.backupComplete !== true &&
-        !(await context.backup())
-      )
-        return false;
-      await beginContent(context, {
-        kind: 'world',
-        planDigest: minecraftDigest(command),
-        files: [],
-        absentPaths: [target],
-        wipes: [],
-        inventory: [],
-        removeInventoryPaths: [],
-      });
-      await removeContentPath(context, target);
-    }
-    await verifyMinecraftPendingContent(context);
+    if (
+      !(await applyMinecraftWorldRemoval(context, target, { backupBefore: prepared.backupBefore }))
+    )
+      return false;
+    // Upgrade compatibility: a job started by the previous implementation may
+    // already have an installation fence. New removals never create one.
+    if (pending) await verifyMinecraftPendingContent(context);
     return true;
   }
   const onlineImport = minecraftContentAllowsOnline(prepared);

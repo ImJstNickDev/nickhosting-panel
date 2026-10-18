@@ -57,8 +57,8 @@ export const minecraftWorldsMessages: Record<string, [string, string]> = {
     'La gestione dei mondi non è disponibile per questa versione.',
   ],
   'worlds.stopFirst': [
-    'Stop the server to select, replace, delete or download a world.',
-    'Arresta il server per selezionare, sostituire, eliminare o scaricare un mondo.',
+    'Stop the server to select, replace, download or back up a world.',
+    'Arresta il server per selezionare, sostituire, scaricare o eseguire il backup di un mondo.',
   ],
   'worlds.stateUnknown': [
     'Wait for the server to finish starting or stopping before importing a world.',

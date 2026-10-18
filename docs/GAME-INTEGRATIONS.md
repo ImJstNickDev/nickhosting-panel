@@ -453,10 +453,11 @@ See [world metadata evidence](MINECRAFT-WORLD-FORMATS.md) and the current
 
 The configured world is marked independently of compatibility. Importing a ZIP
 creates its requested folder; selecting it is a separate durable operation and
-changes which world the next server start uses. Select/delete/replace jobs retain stopped-state enforcement. Additive imports
-may run online into a new non-active folder. All jobs retain bounded archive/NBT
-validation, exact-path
-replacement consent, optional verified backup and uncertain-effect recovery.
+changes which world the next server start uses. Selection and replacement retain
+stopped-state enforcement. Additive imports and deletion of an inactive world
+may run online. Import/selection retain bounded archive/NBT validation; replacement
+retains exact-path consent. A requested backup retains its stopped-state and
+verified-completion requirements. All mutations preserve uncertain-effect recovery.
 Deleting the selected world is unavailable. World ZIP download reuses the generic
 Fileman streaming archive endpoint; the UI offers it when stopped. It is a file
 export, not an atomic snapshot or replacement for the Backups workflow.
@@ -513,3 +514,25 @@ The Worlds UI shows confirmed transfer counts and follows the current server job
 after remount. Completion refreshes the inventory; accepted/uncertain/failed jobs
 are not presented as successful imports. During local submission and transfer it
 shows progress; a reload during archive staging precedes the persisted counters.
+
+### Inactive world deletion — M5, 2026-10-18
+
+Deletion is a single recursive provider file operation under the existing durable
+job/server lock. It does not change installation state, reserve compute, read the
+runtime JAR, verify EULA, parse `level.dat`, or wait for an offline settling timer.
+Preparation records intent without listing the root. Dispatch reads one root
+snapshot and the current `server.properties` through Fileman; it rejects aliases,
+symlinks and the configured world, its enclosing folder and sibling dimension
+folders. A single provider identity proof is shared within that locked delivery;
+current local permissions are checked again immediately before dispatch.
+
+The provider's successful delete response is the completion receipt. A missing
+acknowledgement permits one absence check on recovery, never a blind repeated
+delete. A confirmed receipt does not delete a folder recreated afterward. Existing
+pending content fences from older jobs retain their recovery path.
+
+The Worlds view removes the row after confirmed job success, without waiting for
+full inventory/server refresh; older in-flight inventory responses are cancelled.
+Only this short interactive operation polls its local job at 250 ms for the first
+five seconds, then uses the normal interval. No provider polling is added. Backup
+is opt-in in the delete dialog and retains its offline prerequisite.
