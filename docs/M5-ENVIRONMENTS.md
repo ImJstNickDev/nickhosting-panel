@@ -1644,3 +1644,41 @@ then use a temporary Compose override assigning the saved API image to API/worke
 and saved Vite image to Vite. Recreate only those services with `--no-deps --wait`.
 Retain additive migration043, source rows and staging reservations; do not drop
 constraints, reset data or rewrite migration history. Preserve failure logs.
+
+### Worlds catalog activation completed — 2026-10-18
+
+The Owner approved the above proposal and scoped rollback. Activation used source
+`1b4415d37e6cf41ad28478c2e9aea06a9bf95915`. The private environment backup and
+before/after evidence are retained under `.codex/local/world-catalog-activation/`;
+previous API/worker and Vite images have the proposed rollback tags.
+
+The shared development image was rebuilt as
+`sha256:54f8e70e635c8ef56bb12879e696f3c5d32bd22cf68ade228ad9c15235e7c101`.
+The explicit temporary migrator applied only043 and removed its container. API,
+worker and Vite were recreated with `--no-deps --wait`; all three are healthy with
+zero restart counts. The existing112-container inventory remains; only these
+three container IDs/images changed. Canonical mount sets, networks and published
+ports are unchanged for every recorded container. Existing unrelated restart loops
+advanced their counters during the observation period; their identities and
+configuration were not changed by this activation.
+
+All43 migration checksums match. Existing dev counts remain:2 users,4 managed
+servers,1 physical host,1 node,1 runtime mapping,1 source. No active jobs, receiving
+sources or upload claims were present at activation. No credentials, accounts or
+review data were reset. No game-server/Blueprint/Pterodactyl/Wings operation was
+issued, and NPM/DNS/ingress/Gateway configuration was untouched.
+
+`NH_DEV_CURSEFORGE_ENABLED=true` is active; the protected CurseForge setting now
+reports database source, unlocked and unconfigured. The Owner must supply its API
+key privately before real catalog access can be verified. The frontend homepage,
+Vite client, Minecraft controller and Worlds catalog module all return HTTPS200;
+the missing package-export error is resolved. API readiness returns200. No error
+records appeared in the recreated API/worker/Vite startup logs. The prior proposal
+is preserved as historical approval evidence; its pending-activation limitation
+is superseded by this execution record.
+
+A real Chromium smoke check through `https://dev.hub.nickhost.ing` also loaded the
+login form without page errors and received Vite's connected message over WSS.
+Independent review verified the before/after snapshots and found no activation
+blockers. Existing SFTPGo#18 and the previously documented Gateway route condition
+are not changed or reclassified by this activation.

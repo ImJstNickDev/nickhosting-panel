@@ -13179,3 +13179,34 @@ networks, credentials and persistent review data remain unchanged. The existing
 Gateway readiness condition and SFTPGo #18 release gate remain outside this pass.
 Retain additive043 and any future source records on application rollback; no
 constraint downgrade, pruning or data reset. PR #21 remains open and unmerged.
+
+### Worlds catalog dev activation — 2026-10-18
+
+Owner-approved activation of implementation `1b4415d` completed. Compose built the
+shared dev image, the explicit temporary migrator applied only043, and
+`up -d --no-deps --wait api worker vite` replaced only the three approved services.
+All are healthy with restart counters0. Private env/image rollback copies remain.
+All43 SQL checksums match and original dev user/server/infrastructure/source counts
+are unchanged; no uploads or jobs were active. No real game map was downloaded or
+imported during activation. CurseForge's credential is now editable and absent,
+so real authenticated catalog verification awaits the Owner's key.
+
+Homepage, Vite client and both previously failing Minecraft/catalog modules return
+HTTPS200 with the appropriate HTML/JavaScript content types; API readiness is200.
+Startup log inspection found no error/fatal/unhandled records in API/worker/Vite.
+The prior missing-export limitation is resolved. This activation did not rerun the
+historical full-suite matrix; the implementation retains its focused/browser
+results above.
+
+Before/after metadata covers112 containers. Only API/worker/Vite identities/images
+changed, and all canonical mount sets/networks/ports match. A first comparison
+incorrectly treated reordered Docker mount arrays as changes; normalized comparison
+resolved those false positives. Three unrelated containers already in restart
+loops advanced their large counters; their IDs/images/configuration stayed equal
+and no operation targeted them. No blanket zero-restart claim is made for the
+host. Production, Blueprint/Wings, NPM/DNS and game data were not modified.
+
+Real Chromium through development HTTPS loaded the login form, reported zero page
+errors and confirmed a connected secure Vite HMR WebSocket. Independent read-only
+review recomputed container topology and SQL checksums and found no remaining
+activation blocker. Existing Gateway/SFTPGo release limitations remain unchanged.
