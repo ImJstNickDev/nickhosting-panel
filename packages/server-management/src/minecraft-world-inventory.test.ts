@@ -1,6 +1,5 @@
 import { DomainError } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
-import { minecraftDigest } from '@nickhosting/minecraft';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -15,7 +14,7 @@ function named(type: number, name: string, value: Buffer) {
   return Buffer.concat([Buffer.from([type]), length, Buffer.from(name), value]);
 }
 const version = Buffer.alloc(4);
-version.writeInt32BE(1234);
+version.writeInt32BE(169);
 const level = Buffer.concat([
   Buffer.from([10, 0, 0]),
   named(
@@ -86,12 +85,12 @@ describe('Minecraft world inventory snapshot', () => {
       supported: true,
       selectedWorld: 'Older World',
       release: '26.1',
-      compatibility: 'unavailable',
+      compatibility: 'available',
       worlds: [
         {
           name: 'older',
-          status: 'unavailable',
-          validation: { dataVersion: 1234, versionName: '1.9' },
+          status: 'incompatible',
+          validation: { dataVersion: 169, versionName: '1.9' },
         },
       ],
     });
@@ -100,28 +99,27 @@ describe('Minecraft world inventory snapshot', () => {
     expect(f.downloadFile).toHaveBeenCalledTimes(1);
   });
 
-  it('marks compatibility available only with matching current evidence and still reports actual world version', async () => {
-    const combination = { release: '1.9' };
+  it('uses release metadata with no per-server evidence', async () => {
     inspect.mockResolvedValue({
-      combination,
-      row: { identity_digest: 'choice' },
-      mappingDigest: 'mapping',
-      evidence: [
-        {
-          kind: 'installation-bootstrap',
-          recordedAt: new Date().toISOString(),
-          choiceDigest: 'choice',
-          mappingDigest: 'mapping',
-          combinationDigest: minecraftDigest(combination),
-          checks: { installation: true },
-          server: { worldDataVersion: 1234 },
-        },
-      ],
+      combination: { release: '1.9' },
+      evidence: [],
     } as unknown as Awaited<ReturnType<typeof inspectMinecraftCombination>>);
     const f = fixture();
     expect(await inspectMinecraftWorlds(f.db, f.adapter, 'server', f.authorize)).toMatchObject({
       compatibility: 'available',
-      worlds: [{ status: 'verified', validation: { versionName: '1.9' } }],
+      worlds: [{ status: 'verified', validation: { dataVersion: 169, versionName: '1.9' } }],
+    });
+  });
+
+  it('does not let a report redefine an unknown release or trust the uploaded world', async () => {
+    inspect.mockResolvedValue({
+      combination: { release: 'future-unknown' },
+      evidence: [{ server: { worldDataVersion: 169 }, checks: { installation: true } }],
+    } as unknown as Awaited<ReturnType<typeof inspectMinecraftCombination>>);
+    const f = fixture();
+    expect(await inspectMinecraftWorlds(f.db, f.adapter, 'server', f.authorize)).toMatchObject({
+      compatibility: 'unavailable',
+      worlds: [{ status: 'unavailable', validation: { dataVersion: 169 } }],
     });
   });
 

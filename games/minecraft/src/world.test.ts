@@ -349,6 +349,11 @@ describe('world operation consent and discovery', () => {
         backupBefore: true,
       }),
     ).toMatchObject({ deletePaths: ['existing'], backupBefore: true, requiresStoppedServer: true });
+    expect(planMinecraftWorldReplacement('new_world', false)).toMatchObject({
+      deletePaths: [],
+      backupBefore: false,
+      requiresStoppedServer: false,
+    });
     expect(() =>
       planMinecraftWorldReplacement('new', false, {
         wipeConsent: true,

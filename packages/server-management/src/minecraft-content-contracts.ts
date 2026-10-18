@@ -150,3 +150,20 @@ export interface MinecraftPreparedContent {
   deletePaths?: string[];
   world?: { archiveSha256?: string; dataVersion: number; existing: boolean };
 }
+
+/** Only a new, isolated world folder can be written without stopping the game.
+ * Derived from the trusted prepared plan, never a client-controlled online flag. */
+export function minecraftContentAllowsOnline(input: unknown): boolean {
+  if (!input || typeof input !== 'object') return false;
+  const plan = input as Partial<MinecraftPreparedContent>;
+  const command = minecraftContentCommandSchema.safeParse(plan.command);
+  return (
+    command.success &&
+    command.data.kind === 'world-import' &&
+    command.data.replace === undefined &&
+    plan.world?.existing === false &&
+    plan.backupBefore === false &&
+    Array.isArray(plan.deletePaths) &&
+    plan.deletePaths.length === 0
+  );
+}

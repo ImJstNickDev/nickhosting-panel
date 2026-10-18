@@ -26,6 +26,7 @@ import {
   minecraftCombinationSchema,
   minecraftDigest,
   minecraftManifest,
+  minecraftWorldDataVersion,
 } from '@nickhosting/minecraft';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
@@ -78,6 +79,7 @@ import {
   type MinecraftContentCommand,
   type MinecraftPreparedContent,
   minecraftConfigurationSchema,
+  minecraftContentAllowsOnline,
   minecraftContentCommandSchema,
   minecraftStoredConfigurationSchema,
   minecraftStoredPlayerSchema,
@@ -289,6 +291,18 @@ export async function prepareMinecraftContentPlan(
     assertMinecraftRuntimePathsPreserved([name], profile.installed_manifest);
     result.world = { dataVersion: worldDataVersion(choice), existing: actual.length === 1 };
     if (command.kind === 'world-import') {
+      if (server.runtime_state === 'running') {
+        const properties = parseMinecraftProperties(
+          Buffer.from(
+            await options.adapter.readFile(server.pterodactyl_identifier, 'server.properties'),
+          ).toString('utf8'),
+        );
+        if (
+          result.world.existing ||
+          (properties['level-name'] ?? 'world').toLowerCase() === name.toLowerCase()
+        )
+          throw new DomainError('conflict');
+      }
       const source = await options.worldArchiveResolver?.(command.archiveRef, serverId);
       if (!source) throw new DomainError('integration_unavailable');
       const replacement = planMinecraftWorldReplacement(
@@ -424,26 +438,9 @@ function requiredCurseForge(options: MinecraftContentOptions): CurseForgeProvide
   return options.curseforge;
 }
 function worldDataVersion(choice: Awaited<ReturnType<typeof inspectMinecraftCombination>>): number {
-  const now = Date.now();
-  const reports = choice.evidence
-    .filter(
-      (report) =>
-        (report.kind === 'real-server' || report.kind === 'installation-bootstrap') &&
-        report.choiceDigest === choice.row.identity_digest &&
-        report.mappingDigest === choice.mappingDigest &&
-        report.combinationDigest === minecraftDigest(choice.combination) &&
-        Date.parse(report.recordedAt) <= now &&
-        now - Date.parse(report.recordedAt) < 180 * 86400000,
-    )
-    .sort((a, b) => Date.parse(b.recordedAt) - Date.parse(a.recordedAt));
-  const report = reports[0];
-  if (
-    !report?.checks.installation ||
-    report.server?.worldDataVersion === undefined ||
-    (reports[1] && Date.parse(reports[1].recordedAt) === Date.parse(report.recordedAt))
-  )
-    throw new DomainError('integration_unavailable');
-  return report.server.worldDataVersion;
+  const version = minecraftWorldDataVersion(choice.combination.release);
+  if (version === undefined) throw new DomainError('integration_unavailable');
+  return version;
 }
 
 /** Every ancestor is checked; Wings accepts paths but does not make symlink ownership ours. */
@@ -510,10 +507,13 @@ export async function hashMinecraftRemoteFile(
 async function textFile(
   context: GameLifecycleContext,
   path: string,
-  absent: string,
+  absent?: string,
 ): Promise<string> {
   const entry = await remoteEntry(context, path);
-  if (!entry) return absent;
+  if (!entry) {
+    if (absent === undefined) throw new DomainError('not_found');
+    return absent;
+  }
   if (!entry.is_file || entry.size > 1024 * 1024) throw new DomainError('conflict');
   return Buffer.from(
     await context.adapter.readFile(context.server.pterodactyl_identifier ?? '', path),
@@ -1194,7 +1194,11 @@ export async function configureMinecraftProvision(
   return true;
 }
 
-async function ensureRemoteDirectory(context: GameLifecycleContext, path: string) {
+async function ensureRemoteDirectory(
+  context: GameLifecycleContext,
+  path: string,
+  assertWritable = context.assertStopped,
+) {
   const parts = path.split('/').slice(0, -1);
   for (let index = 0; index < parts.length; index++) {
     const directory = parts.slice(0, index + 1).join('/');
@@ -1206,7 +1210,7 @@ async function ensureRemoteDirectory(context: GameLifecycleContext, path: string
     const phase = stepId('directory', directory);
     if (uncertainEffect(context, phase)) throw new DomainError('operation_uncertain');
     await context.effect(phase, async () => {
-      await context.assertStopped();
+      await assertWritable();
       await context.authorize();
       await context.adapter.createDirectory(
         context.server.pterodactyl_identifier ?? '',
@@ -1250,6 +1254,7 @@ async function installContentFile(
   localPath: string,
   previousSha256?: string,
   worldRoot?: string,
+  assertWritable = context.assertStopped,
 ) {
   if (worldRoot) {
     safeArchivePath(file.path);
@@ -1279,9 +1284,9 @@ async function installContentFile(
   const localHash = createHash('sha256');
   for await (const chunk of createReadStream(localPath)) localHash.update(chunk);
   if (localHash.digest('hex') !== file.sha256) throw new DomainError('conflict');
-  await ensureRemoteDirectory(context, file.path);
+  await ensureRemoteDirectory(context, file.path, assertWritable);
   await context.effect(step, async () => {
-    await context.assertStopped();
+    await assertWritable();
     const actor = await options.authorizeJob(
       context.db,
       context.operation().job_id,
@@ -1304,7 +1309,7 @@ async function installContentFile(
         maxBytes: file.size,
         authorize: async () => {
           await context.authorize();
-          await context.assertStopped();
+          await assertWritable();
         },
       });
       const actual = await hashMinecraftRemoteFile(context, file.path);
@@ -1374,15 +1379,20 @@ async function pendingContent(context: GameLifecycleContext): Promise<PendingCon
     return undefined;
   return pendingContentSchema.parse(row.content_state);
 }
-async function beginContent(context: GameLifecycleContext, state: Omit<PendingContent, 'jobId'>) {
+async function beginContent(
+  context: GameLifecycleContext,
+  state: Omit<PendingContent, 'jobId'>,
+  assertWritable = context.assertStopped,
+  preserveInstallation = false,
+) {
   const previous = await pendingContent(context);
   if (previous?.jobId === context.operation().job_id) return;
   await context.authorize();
-  await context.assertStopped();
+  await assertWritable();
   await context.db
     .updateTable('minecraft_server_profiles')
     .set({
-      installed: false,
+      ...(preserveInstallation ? {} : { installed: false }),
       content_state: JSON.stringify({ ...state, jobId: context.operation().job_id }),
       updated_at: new Date(),
     })
@@ -1475,7 +1485,7 @@ async function applyPreparedContent(
   const choice = await inspectMinecraftCombination(context.db, profile.combination_id, options.env);
   const command = minecraftContentCommandSchema.parse(prepared.command);
   await context.authorize();
-  await context.assertStopped();
+  if (!minecraftContentAllowsOnline(prepared)) await context.assertStopped();
   const selectionStep = stepId('modpack-selection', minecraftDigest(prepared));
   assertMinecraftModpackTransition(
     minecraftStoredConfigurationSchema.parse(profile.configuration).modpack,
@@ -2101,6 +2111,16 @@ async function applyWorldContent(
     await verifyMinecraftPendingContent(context);
     return true;
   }
+  const onlineImport = minecraftContentAllowsOnline(prepared);
+  let activeTarget = false;
+  // Even a missing folder is the running world's target when level-name points
+  // to it; importing there would race the game's own writes.
+  if (onlineImport) {
+    const properties = parseMinecraftProperties(await textFile(context, 'server.properties'));
+    activeTarget = (properties['level-name'] ?? 'world').toLowerCase() === target.toLowerCase();
+    if (activeTarget) await context.assertStopped();
+  }
+  const assertWritable = onlineImport && !activeTarget ? context.authorize : context.assertStopped;
   if (!prepared.archivePath || !prepared.world.archiveSha256)
     throw new DomainError('configuration_invalid');
   const stageOptions = {
@@ -2164,15 +2184,20 @@ async function applyWorldContent(
       return false;
     await context.update({ plan: { ...context.operation().plan, minecraftWorldPrepared: true } });
   }
-  await beginContent(context, {
-    kind: 'world',
-    planDigest: staged.planDigest,
-    files: staged.manifest,
-    absentPaths: [],
-    wipes: prepared.world.existing ? [{ jobId: context.operation().job_id, path: target }] : [],
-    inventory: [],
-    removeInventoryPaths: [],
-  });
+  await beginContent(
+    context,
+    {
+      kind: 'world',
+      planDigest: staged.planDigest,
+      files: staged.manifest,
+      absentPaths: [],
+      wipes: prepared.world.existing ? [{ jobId: context.operation().job_id, path: target }] : [],
+      inventory: [],
+      removeInventoryPaths: [],
+    },
+    assertWritable,
+    onlineImport,
+  );
   if (prepared.world.existing && !(await completed(context, stepId('remove', target))))
     await removeContentPath(context, target);
   for (const file of staged.manifest)
@@ -2183,6 +2208,7 @@ async function applyWorldContent(
       join(staged.directory, file.path),
       undefined,
       target,
+      assertWritable,
     );
   const level = validateMinecraftLevelDat(
     await readWorldLevel(context, target),

@@ -39,6 +39,7 @@ import {
   recoverProvisionGateway,
 } from './gateway-provision.js';
 import { currentInteractiveContext } from './interactive-context.js';
+import { minecraftContentAllowsOnline } from './minecraft-content-contracts.js';
 import { assertGatewaySleepFence, revokeGatewayRoutesForDeletion } from './registry.js';
 import { assertIdleSleepAllowed } from './sleep-policy.js';
 import { consumeStopEscalation, stopEscalation } from './stop-escalation.js';
@@ -844,6 +845,9 @@ export async function processServerOperation(
       }
       return success ? 'succeeded' : 'failed';
     };
+    const onlineWorldImport =
+      operation.action === 'minecraft-content' &&
+      minecraftContentAllowsOnline(operation.plan.minecraftContent);
     const requireQuiescentReservation = async () => {
       await db.transaction().execute(async (tx) => {
         await lockResources(tx);
@@ -882,6 +886,7 @@ export async function processServerOperation(
           throw new DomainError('operation_uncertain');
       });
       if (
+        !onlineWorldImport &&
         ['configure', 'reinstall', 'wipe', 'restore', 'delete', 'minecraft-content'].includes(
           operation.action,
         )
@@ -2406,8 +2411,13 @@ export async function processServerOperation(
         if (await backup()) return completeStandaloneBackup();
         return wait('backup_confirmation');
       }
-      await requireQuiescentReservation();
-      if (!(await offline())) return wait('offline_confirmation');
+      if (onlineWorldImport) {
+        if (!['running', 'offline'].includes((await resources()).current_state))
+          return wait('world_import_power_transition');
+      } else {
+        await requireQuiescentReservation();
+        if (!(await offline())) return wait('offline_confirmation');
+      }
       if (operation.action === 'minecraft-content') {
         if (!options.processGameContent) throw new DomainError('configuration_invalid');
         if (!(await options.processGameContent(gameContext())))

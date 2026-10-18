@@ -2098,6 +2098,41 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
     expect(await report(fixture)).toMatchObject({ state: 'online', sleepJobId: null });
     expect((await getGatewayState(f.db, serverId, options)).state).toBe('online');
   });
+  it('keeps a ready game routable during an additive world import without scheduling sleep', async () => {
+    const fixture = await started();
+    await report(fixture);
+    const queued = await enqueueServerOperation(f.db, f.context, serverId, {
+      action: 'backup',
+      idempotencyKey: randomUUID(),
+    });
+    // Persist a trusted prepared content operation; identity/admission enqueue is
+    // covered separately by the Minecraft integration suite.
+    await f.db
+      .updateTable('server_operations')
+      .set({
+        action: 'minecraft-content',
+        plan: JSON.stringify({
+          minecraftContent: {
+            command: { kind: 'world-import', archiveRef: randomUUID(), targetWorld: 'new_world' },
+            world: { existing: false, dataVersion: 3955 },
+            backupBefore: false,
+            deletePaths: [],
+          },
+        }),
+      })
+      .where('job_id', '=', queued.jobId)
+      .execute();
+    advance(10000);
+    expect(await report(fixture)).toMatchObject({ state: 'online', sleepJobId: null });
+    expect((await getGatewayState(f.db, serverId, options)).state).toBe('online');
+    expect(
+      await f.db
+        .selectFrom('resource_reservations')
+        .select('server_id')
+        .where('server_id', '=', serverId)
+        .executeTakeFirst(),
+    ).toBeTruthy();
+  });
   it('reconstructs the same durable wake state through a fresh database connection', async () => {
     await configure();
     const pending = await wake();

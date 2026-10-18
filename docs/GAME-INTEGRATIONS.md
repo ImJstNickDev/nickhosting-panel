@@ -436,16 +436,19 @@ boundary supplies its existing managed-identity proof; there is no second identi
 cache. Discovery lists the root once and checks candidate directories with at most
 two concurrent readers. Only `level.dat` is read, not region/chunk contents.
 
-Missing installation/DataVersion evidence no longer hides the inventory. It leaves
-compatibility unavailable, without granting import/select/delete eligibility.
+Missing installation or unknown release metadata does not hide the inventory.
+World-format compatibility uses the integration's bundled exact-release DataVersion
+catalog, independently of signed per-server reports (M5 correction, 2026-10-18).
+Unknown/pre-DataVersion releases retain unavailable mutation eligibility.
 Malformed or mismatched worlds remain distinct from unreadable directories. The
 existing exact DataVersion/release checks remain; this pass does not add automatic
 world upgrading, downgrading or support for historical NBT formats.
 
 The configured world is marked independently of compatibility. Importing a ZIP
 creates its requested folder; selecting it is a separate durable operation and
-changes which world the next server start uses. Existing import/select/delete jobs
-retain stopped-state enforcement, bounded archive/NBT validation, exact-path
+changes which world the next server start uses. Select/delete/replace jobs retain stopped-state enforcement. Additive imports
+may run online into a new non-active folder. All jobs retain bounded archive/NBT
+validation, exact-path
 replacement consent, optional verified backup and uncertain-effect recovery.
 Deleting the selected world is unavailable. World ZIP download reuses the generic
 Fileman streaming archive endpoint; the UI offers it when stopped. It is a file

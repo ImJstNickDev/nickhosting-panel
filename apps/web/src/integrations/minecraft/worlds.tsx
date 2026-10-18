@@ -83,15 +83,17 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
   const mutationLock = useRef(false);
   const picker = useRef<HTMLInputElement>(null);
   const importKey = useRef(idempotencyKey());
-  const disabled =
+  const mutationsDisabled =
     !props.canManage ||
     !supported ||
     snapshot?.compatibility !== 'available' ||
-    !offline ||
     props.pending ||
     busy ||
     Boolean(uncertain);
-  const importDisabled = disabled || snapshot?.compatibility !== 'available';
+  const disabled = mutationsDisabled || !offline;
+  const importStateAllowed =
+    offline || (props.runtimeState === 'running' && snapshot?.selectedWorld != null);
+  const importDisabled = mutationsDisabled || !importStateAllowed;
   const rows = snapshot?.worlds ?? [];
   const visible = rows.filter((row) =>
     row.name.toLowerCase().includes(search.trim().toLowerCase()),
@@ -101,6 +103,10 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
   const pageRows = visible.slice(currentPage * 50, currentPage * 50 + 50);
   const targetValid = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(target);
   const existing = rows.some((row) => row.name === target);
+  const liveCollision =
+    !offline &&
+    (rows.some((row) => row.name.toLowerCase() === target.toLowerCase()) ||
+      snapshot?.selectedWorld?.toLowerCase() === target.toLowerCase());
   const caseCollision = rows.find(
     (row) => row.name !== target && row.name.toLowerCase() === target.toLowerCase(),
   );
@@ -110,7 +116,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
   useEffect(() => () => transfer.current?.abort(), []);
   useEffect(() => {
     if (
-      !offline ||
+      !importStateAllowed ||
       !props.canManage ||
       props.pending ||
       !supported ||
@@ -119,7 +125,10 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
       transfer.current?.abort();
       if (!mutationLock.current) setSelection(undefined);
     }
-  }, [offline, props.canManage, props.pending, supported, snapshot?.compatibility]);
+  }, [importStateAllowed, props.canManage, props.pending, supported, snapshot?.compatibility]);
+  useEffect(() => {
+    if (!offline && !mutationLock.current) setSelection(undefined);
+  }, [offline]);
 
   async function refresh() {
     if (refreshing) return;
@@ -175,7 +184,8 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
     let suggested = base;
     for (
       let suffix = 2;
-      rows.some((row) => row.name.toLowerCase() === suggested.toLowerCase());
+      rows.some((row) => row.name.toLowerCase() === suggested.toLowerCase()) ||
+      snapshot?.selectedWorld?.toLowerCase() === suggested.toLowerCase();
       suffix++
     )
       suggested = `${base}-${suffix}`;
@@ -211,10 +221,15 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
       if (picker.current) picker.current.value = '';
     }
   }
+  function allowsState(intent: Intent) {
+    return intent.command.kind === 'world-import' && !intent.command.replace
+      ? importStateAllowed
+      : offline;
+  }
   async function submit(intent: Intent, recovery = false) {
     if (
       mutationLock.current ||
-      !offline ||
+      !allowsState(intent) ||
       !props.canManage ||
       !supported ||
       props.pending ||
@@ -252,7 +267,15 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
     }
   }
   async function importWorld() {
-    if (importDisabled || !archiveRef || !targetValid || caseCollision || transfer.current) return;
+    if (
+      importDisabled ||
+      !archiveRef ||
+      !targetValid ||
+      caseCollision ||
+      liveCollision ||
+      transfer.current
+    )
+      return;
     if (existing) {
       setBackup(true);
       setSelection({ action: 'replace', name: target, requestKey: idempotencyKey() });
@@ -392,7 +415,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
               <button
                 type="button"
                 className="secondary"
-                disabled={busy || !offline || !props.canManage || props.pending}
+                disabled={busy || !allowsState(uncertain) || !props.canManage || props.pending}
                 onClick={() => void submit(uncertain, true)}
               >
                 {t(key('recover'))}
@@ -554,11 +577,6 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
             void importWorld();
           }}
         >
-          {!offline && (
-            <p className="minecraft-worlds-status" role="status">
-              {t(key('stopFirst'))}
-            </p>
-          )}
           {Boolean(uploadError) && <ErrorNotice error={uploadError} />}
           {Boolean(operationError) && <ErrorNotice error={operationError} />}
           <fieldset
@@ -628,12 +646,17 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
             autoComplete="off"
             spellCheck={false}
           />
-          {caseCollision && (
+          {caseCollision && !liveCollision && (
             <p className="minecraft-worlds-replacement" role="status">
               {t(key('caseCollision'), { name: caseCollision.name })}
             </p>
           )}
-          {existing && (
+          {liveCollision && (
+            <p className="minecraft-worlds-replacement" role="status">
+              {t(key('liveCollision'), { name: target })}
+            </p>
+          )}
+          {existing && !liveCollision && (
             <p className="minecraft-worlds-replacement" role="status">
               {t(key('existing'), { name: target })}
             </p>
@@ -649,10 +672,11 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
                 !archiveRef ||
                 !targetValid ||
                 Boolean(caseCollision) ||
+                Boolean(liveCollision) ||
                 Boolean(progress)
               }
             >
-              {t(key(existing ? 'reviewReplacement' : 'import'))}
+              {t(key(existing && !liveCollision ? 'reviewReplacement' : 'import'))}
             </button>
           </div>
         </form>

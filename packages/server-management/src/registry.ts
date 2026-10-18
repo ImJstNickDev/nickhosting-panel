@@ -51,6 +51,7 @@ import { currentInteractiveContext } from './interactive-context.js';
 import {
   type MinecraftPreparedContent,
   minecraftConfigurationSchema,
+  minecraftContentAllowsOnline,
   minecraftStoredConfigurationSchema,
 } from './minecraft-content-contracts.js';
 import { requireMinecraftChoice } from './minecraft-registry.js';
@@ -866,12 +867,19 @@ export async function enqueueLockedServerOperation(
       }
     }
   }
+  const onlineWorldImport =
+    value.action === 'minecraft-content' && minecraftContentAllowsOnline(options.minecraftPlan);
+  if (onlineWorldImport && !['offline', 'running'].includes(server.runtime_state))
+    throw new DomainError('conflict');
   const reservation = await tx
     .selectFrom('resource_reservations')
     .selectAll()
     .where('server_id', '=', serverId)
     .executeTakeFirst();
+  if (onlineWorldImport && reservation && reservation.state !== 'running')
+    throw new DomainError('operation_uncertain');
   if (
+    !onlineWorldImport &&
     ['configure', 'reinstall', 'wipe', 'restore', 'delete', 'minecraft-content'].includes(
       value.action,
     ) &&
@@ -895,6 +903,7 @@ export async function enqueueLockedServerOperation(
       .execute();
   }
   if (
+    !onlineWorldImport &&
     ['wipe', 'reinstall', 'restore', 'configure', 'delete', 'minecraft-content'].includes(
       value.action,
     ) &&

@@ -12036,3 +12036,78 @@ compatibility and active upload. Other explored states remain in private harness
 artifacts. Final i18n check passed with 2305 EN/IT/pseudolocale keys; scoped Biome and
 whitespace checks passed. Production build also emitted Rolldown plugin-timing
 information (12.70s successful build), not a runtime failure.
+
+### 2026-10-18 — Worlds metadata and additive online imports
+
+Fixed the disabled Import world flow: inventory, preparation and execution use
+integration-owned exact-release DataVersion metadata, not signed per-server
+installation reports. The pinned 660-entry catalog is local and requires no JAR
+reads, upstream requests, profile migration or Owner evidence entry. Historical
+pre-DataVersion worlds (including 1.5.2) and unknown releases remain unsupported;
+this change does not claim world conversion or arbitrary chunk compatibility.
+
+New-world import may run while the server is running, but cannot replace an
+existing directory or target the configured active world, even if absent. Other
+world mutations retain stopped-state checks. Existing job/auth/resource fences
+remain; additive import preserves installed state, compute reservation and Gateway
+readiness, while the active job still prevents a competing automatic sleep.
+
+Validation on isolated services and generated fixtures:
+
+- `scripts/dev.sh pnpm exec vitest run games/minecraft/src/world-version.test.ts games/minecraft/src/world.test.ts packages/server-management/src/minecraft-world-inventory.test.ts`: 40 passed.
+- `scripts/dev.sh pnpm exec vitest run packages/server-management/src/minecraft-content.test.ts packages/server-management/src/minecraft-content-world.test.ts apps/api/src/minecraft-worlds.test.ts games/minecraft/src/ui/ui.test.ts`: 50 passed.
+- After the online policy change, `scripts/dev.sh pnpm exec vitest run games/minecraft/src/world.test.ts packages/server-management/src/minecraft-content.test.ts`: 43 passed (affected subset, not 43 additional distinct tests).
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run packages/server-management/src/lifecycle.integration.test.ts packages/server-management/src/minecraft-content.integration.test.ts packages/server-management/src/gateway-orchestration.integration.test.ts -t 'additive Minecraft world imports|prepares a new world online|during an additive world import'`: 5 passed, 375 unrelated cases excluded.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run packages/server-management/src/minecraft-content.integration.test.ts -t 'applies a new world online'`: 1 passed, 40 excluded. Actual Minecraft worker/source store/ZIP/NBT/staging with simulated Wings uploads; tests a late destination collision, missing active target, nested files, preserved installation and no stop requirement.
+- `scripts/dev.sh pnpm build`: passed (13.45s; existing large-chunk and plugin timing warnings).
+
+Initial failures are retained here: the M1 test wrapper stopped safely because its
+services were absent; the existing M2 wrapper verified ownership and ran the tests.
+A queue fixture initially lacked the required interactive session; a worker fixture
+pointed to nonexistent `/isolated` disk state. Both fixtures were corrected without
+changing product protections. Interim typechecks caught a Uint8Array/string
+conversion in the new properties read; it was corrected with Buffer conversion.
+The first browser pass had an assertion for a select action omitted on the already
+selected world; the failed case left the shared fixture running and caused two
+following cases to fail. The test now asserts the existing delete action and resets
+runtime state per case. Final checks and browser outcomes are recorded below.
+
+Live verification used only authenticated GETs: dev servers on 26.1 and 26.2 now
+return compatibility available, with observed worlds matching 4786 and 4903.
+The 1.5.2 server remains unavailable for structured world mutation. No real world
+upload, selection, deletion, game power command or infrastructure change was made.
+The dev source watcher picked up changes; no manual restart, migration, new service
+or real test server was required. Temporary worker test files were removed. Issue
+#18 remains an independent production-release gate.
+
+Final source checks: `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm i18n:check`
+(2306 EN/IT/pseudolocale keys), scoped `pnpm exec biome check` (19 TS/TSX/JSON files)
+and `git diff --check` passed. Independent technical review found and resolved one
+must-fix: Gateway observations initially invalidated readiness for every active
+operation except backup. The additive-import predicate now preserves it, covered
+by the targeted Gateway regression. Final technical and screenshot/content reviews
+report no remaining must-fix. New sanitized browser evidence:
+`docs/screenshots/m5/minecraft-worlds-running-import-desktop-en.png`.
+
+Browser command: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-worlds.browser.test.ts`.
+The last whole-file pass was **7/8**, with an Italian mobile label failure. Targeted
+`-t 'imports new folders'` and `-t 'renders Italian'` each passed 1/1. Investigation
+of the recovery/mobile sequence verified the stored session locale and removed a
+test-only localStorage write racing the mounting shell; the fixture now waits for
+`html[lang=it]`. The final affected sequence (`-t 'recovers a lost response|renders Italian'`)
+passed **2/2**, six excluded. This is targeted final verification, not a claim that
+another full eight-case pass was run. Accessibility checks in the browser journeys
+passed. No product locale behavior was changed. The single new screenshot passed
+independent visual/content review.
+
+Final root review also tightened an edge case: importing into the configured world
+folder while it is absent and the server is offline must retain stopped checks
+throughout writes, not only at the initial check. The existing properties read now
+selects that guard; no additional provider lookup. The actual-worker regression
+simulates an external start between checks and confirms no upload occurs. Its
+final targeted rerun passed 1/1; normal additive import still calls no stopped
+check. The independent reviewer approved this final change.
+
+`python3 scripts/check-governance.py` passed for the staged content. Final dev API,
+worker and Vite were running/healthy. PR #21 remains open and unmerged; no release,
+production deployment or later milestone work is implied by these checks.

@@ -146,7 +146,7 @@ export interface MinecraftWorldValidation {
   uncompressedBytes: number;
   versionName?: string;
 }
-/** Java big-endian level.dat only. Exact DataVersion comes from trusted release evidence, never semver. */
+/** Java big-endian level.dat only. Exact DataVersion comes from integration release metadata, never semver. */
 export function validateMinecraftLevelDat(
   input: Uint8Array,
   expectedDataVersion: number,
@@ -479,7 +479,7 @@ export function planMinecraftWorldReplacement(
   targetWorld: string;
   deletePaths: readonly string[];
   backupBefore: boolean;
-  requiresStoppedServer: true;
+  requiresStoppedServer: boolean;
 } {
   const targetWorld = minecraftWorldName(target);
   if (
@@ -494,7 +494,7 @@ export function planMinecraftWorldReplacement(
     targetWorld,
     deletePaths: exists ? [targetWorld] : [],
     backupBefore: consent?.backupBefore ?? false,
-    requiresStoppedServer: true,
+    requiresStoppedServer: exists,
   };
 }
 export interface MinecraftWorldDiscovery {

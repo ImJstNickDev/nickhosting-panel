@@ -17,6 +17,7 @@ import { type DB, type Environment, lockResources } from './admission.js';
 import { type GatewayPolicyContext, loadGatewayPolicyContext } from './gateway-policy-context.js';
 import { requireMinecraftGatewayProtocol } from './gateway-registry.js';
 import { currentInteractiveContext } from './interactive-context.js';
+import { minecraftContentAllowsOnline } from './minecraft-content-contracts.js';
 import {
   assertGatewaySleepFence,
   authorizeServer,
@@ -840,7 +841,12 @@ export async function reportGatewayObservation(
     if (
       !value.processStartedAt ||
       server.runtime_state !== 'running' ||
-      (server.active_operation_id && activeOperation?.action !== 'backup')
+      (server.active_operation_id &&
+        activeOperation?.action !== 'backup' &&
+        !(
+          activeOperation?.action === 'minecraft-content' &&
+          minecraftContentAllowsOnline(activeOperation.plan.minecraftContent)
+        ))
     ) {
       await tx
         .updateTable('gateway_server_states')

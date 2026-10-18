@@ -15,7 +15,7 @@ export const browserMinecraft = {
   release: '26.1',
   protocolId: 775,
   javaMajor: 25,
-  worldDataVersion: 5000,
+  worldDataVersion: 4786,
   image: 'isolated-browser/java:25',
   imageDigest: `sha256:${'f'.repeat(64)}`,
   serverJar: Buffer.from('NickHosting isolated browser provider server artifact; not executable'),

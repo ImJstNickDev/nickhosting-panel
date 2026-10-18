@@ -45,7 +45,8 @@ async function fixture(
     | 'delete'
     | 'backup'
     | 'restore'
-    | 'configure',
+    | 'configure'
+    | 'minecraft-content',
   plan: Record<string, unknown> = {},
   binding?: {
     address: string;
@@ -3896,4 +3897,65 @@ it('retains resumed compute after a rejected backup create without inheriting it
       .where('server_id', '=', f.serverId)
       .executeTakeFirst(),
   ).toEqual({ state: 'running' });
+});
+
+describe('additive Minecraft world imports', () => {
+  const plan = () => ({
+    minecraftContent: {
+      combinationId: randomUUID(),
+      command: { kind: 'world-import', archiveRef: randomUUID(), targetWorld: 'new_world' },
+      world: { existing: false, dataVersion: 3955 },
+      backupBefore: false,
+      deletePaths: [],
+    },
+  });
+  it('runs the content effect while online without releasing compute or changing power', async () => {
+    const f = await fixture('minecraft-content', plan());
+    f.setState('running');
+    await f.db
+      .updateTable('managed_servers')
+      .set({ runtime_state: 'running' })
+      .where('id', '=', f.serverId)
+      .execute();
+    await f.options.reserveStart?.(f.serverId, f.jobId, 'start', f.db);
+    await f.db
+      .updateTable('resource_reservations')
+      .set({ state: 'running' })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    const write = vi.fn(async () => {});
+    f.options.processGameContent = vi.fn(async (context) => {
+      await context.effect('minecraft.import.fixture', write);
+      return true;
+    });
+    expect(await f.run()).toBe('succeeded');
+    expect(write).toHaveBeenCalledOnce();
+    expect((await f.server()).runtime_state).toBe('running');
+    expect(
+      await f.db
+        .selectFrom('resource_reservations')
+        .select('state')
+        .where('server_id', '=', f.serverId)
+        .executeTakeFirst(),
+    ).toEqual({ state: 'running' });
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it('does not execute an online import during a provider power transition', async () => {
+    const f = await fixture('minecraft-content', plan());
+    f.setState('starting');
+    f.options.processGameContent = vi.fn(async () => true);
+    expect(await f.run()).toBe('waiting');
+    expect(f.options.processGameContent).not.toHaveBeenCalled();
+    expect((await f.operation()).plan.waitReason).toBe('world_import_power_transition');
+  });
+  it('keeps existing-world replacement behind quiescence even with a running reservation', async () => {
+    const prepared = plan();
+    prepared.minecraftContent.world.existing = true;
+    const f = await fixture('minecraft-content', prepared);
+    f.setState('running');
+    await f.options.reserveStart?.(f.serverId, f.jobId, 'start', f.db);
+    f.options.processGameContent = vi.fn(async () => true);
+    await f.run();
+    expect(f.options.processGameContent).not.toHaveBeenCalled();
+  });
 });

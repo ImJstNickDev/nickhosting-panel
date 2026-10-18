@@ -4,6 +4,10 @@ export const minecraftWorldsMessages: Record<string, [string, string]> = {
     'A folder named {name} already exists. Use that exact name to replace it, or choose a different name.',
     'Esiste già una cartella chiamata {name}. Usa lo stesso nome per sostituirla oppure scegli un nome diverso.',
   ],
+  'worlds.liveCollision': [
+    '{name} already exists or is the active world. Choose a different folder name while the server is running.',
+    '{name} esiste già o è il mondo attivo. Scegli un nome diverso mentre il server è acceso.',
+  ],
   'worlds.cannotChange': [
     'This world is not verified for the server version.',
     'Questo mondo non è verificato per la versione del server.',
@@ -44,12 +48,12 @@ export const minecraftWorldsMessages: Record<string, [string, string]> = {
     'La gestione dei mondi non è disponibile per questa versione.',
   ],
   'worlds.stopFirst': [
-    'Stop the server before changing or downloading worlds.',
-    'Arresta il server prima di modificare o scaricare i mondi.',
+    'Stop the server to select, replace, delete or download a world.',
+    'Arresta il server per selezionare, sostituire, eliminare o scaricare un mondo.',
   ],
   'worlds.stateUnknown': [
-    'Wait for the server to be confirmed offline before changing or downloading worlds.',
-    'Attendi che il server risulti offline prima di modificare o scaricare i mondi.',
+    'Wait for the server to finish starting or stopping before importing a world.',
+    'Attendi il termine dell’avvio o dell’arresto del server prima di importare un mondo.',
   ],
   'worlds.readOnly': [
     'You have read-only access to worlds.',

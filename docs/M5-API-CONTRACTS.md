@@ -1470,7 +1470,11 @@ Inventory uses `server:read`, current session/managed identity through the share
 Fileman access helper, no-store responses and reauthorization during/following
 reads. At most two candidate readers run concurrently. Existing `world-import`,
 `world-select` and `world-remove` durable command contracts are unchanged and
-remain `server:manage`, stopped-server operations. The frontend checks expected
+remain `server:manage` operations. As of 2026-10-18, additive world import may
+run while running into a new folder other than the configured active world.
+Selection/removal/replacement still require offline state. World DataVersion now
+comes from the integration's bundled exact-release catalog, not signed installation
+reports; unknown and historical pre-DataVersion releases remain unavailable. The frontend checks expected
 eligibility but authoritative validation remains in the worker.
 
 Downloads use the existing `/v1/servers/:id/files/archive` endpoint with root `''`

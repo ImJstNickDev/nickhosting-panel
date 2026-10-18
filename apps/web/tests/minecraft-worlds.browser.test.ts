@@ -82,9 +82,10 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     await fixture?.close();
     if (ownedDirectory) await rm(ownedDirectory, { recursive: true, force: true });
   });
-  beforeEach(() => {
+  beforeEach(async () => {
     failFiles = false;
     readGate = undefined;
+    await running(false);
   });
   async function running(value: boolean) {
     await provider.adapter.power(identifier, value ? 'start' : 'stop');
@@ -285,16 +286,51 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     await screenshot(user, 'minecraft-worlds-invalid-import-desktop-en');
   });
 
-  it('blocks writes while running and preserves a shared viewer inventory', async () => {
+  it('imports new folders while running, rejects collisions and preserves a shared viewer inventory', async () => {
     await running(true);
     await user.goto(route());
     await browserExpect(
       user.getByRole('button', { name: 'Import world', exact: true }),
-    ).toBeDisabled();
+    ).toBeEnabled();
     await browserExpect(
-      user.getByRole('button', { name: 'Select world: replacement', exact: true }),
+      user.getByRole('button', { name: 'Delete world: world', exact: true }),
     ).toBeDisabled();
-    await screenshot(user, 'minecraft-worlds-running-blocked-desktop-en');
+    const dialog = await importDialog('world');
+    await browserExpect(
+      dialog.getByText(
+        'world already exists or is the active world. Choose a different folder name while the server is running.',
+      ),
+    ).toBeVisible();
+    await browserExpect(
+      dialog.getByRole('button', { name: 'Import world', exact: true }),
+    ).toBeDisabled();
+    await dialog.getByLabel('Folder name', { exact: true }).fill('live-import');
+    await screenshot(user, 'minecraft-worlds-running-import-desktop-en');
+    await operation(() =>
+      dialog.getByRole('button', { name: 'Import world', exact: true }).click(),
+    );
+    await browserExpect(user.getByRole('dialog')).toHaveCount(0);
+    await browserExpect(
+      user.getByRole('button', { name: 'Delete world: live-import', exact: true }),
+    ).toBeDisabled();
+    expect((await provider.files()).has('live-import/level.dat')).toBe(true);
+    expect((await provider.files()).get('server.properties')?.toString()).toContain(
+      'level-name=world',
+    );
+    // The selected directory can be absent before Minecraft has generated it.
+    const files = await provider.files();
+    const original = files.get('server.properties');
+    files.set('server.properties', Buffer.from('level-name=not-generated-yet\n'));
+    try {
+      await user.goto(route());
+      const missingDialog = await importDialog('not-generated-yet');
+      await browserExpect(
+        missingDialog.getByRole('button', { name: 'Import world', exact: true }),
+      ).toBeDisabled();
+      await missingDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    } finally {
+      if (original) files.set('server.properties', original);
+    }
     await accessible();
     await running(false);
     const project = await journeyRequest<{ id: string }>(fixture, user, '/v1/projects', {
@@ -337,7 +373,7 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     await accessible(identities.peer);
   });
 
-  it('distinguishes loading, provider failure and unavailable compatibility from an empty inventory', async () => {
+  it('distinguishes loading and provider failure and uses version metadata without verification reports', async () => {
     let release = () => {};
     readGate = new Promise<void>((resolve) => {
       release = resolve;
@@ -372,11 +408,11 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
       await user.goto(route());
       await browserExpect(
         user.getByRole('button', { name: 'Import world', exact: true }),
-      ).toBeDisabled();
+      ).toBeEnabled();
       await browserExpect(
         user.getByRole('button', { name: 'Select world: replacement', exact: true }),
-      ).toBeDisabled();
-      await screenshot(user, 'minecraft-worlds-compatibility-unavailable-desktop-en');
+      ).toBeEnabled();
+      await screenshot(user, 'minecraft-worlds-version-metadata-desktop-en');
       await accessible();
     } finally {
       for (const row of evidence)
@@ -561,8 +597,15 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
 
   it('renders Italian mobile worlds and import controls without overflow', async () => {
     await journeyRequest(fixture, user, '/api/auth/update-user', { locale: 'it' });
+    const localizedSession = await journeyRequest<{ subject: { locale: string } }>(
+      fixture,
+      user,
+      '/v1/web/session',
+    );
+    expect(localizedSession.subject.locale).toBe('it');
     await user.goto(fixture.origin);
-    await user.evaluate(() => localStorage.setItem('nh.locale', 'it'));
+    // Let the shell apply the persisted session locale before navigating again.
+    await browserExpect(user.locator('html')).toHaveAttribute('lang', 'it');
     await user.goto(route());
     for (const width of [390, 320]) {
       await user.setViewportSize({ width, height: 844 });

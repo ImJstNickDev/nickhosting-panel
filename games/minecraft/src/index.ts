@@ -12,3 +12,4 @@ export * from './vanilla-egg.js';
 export * from './vanilla-policy.js';
 export * from './wizard.js';
 export * from './world.js';
+export * from './world-version.js';
