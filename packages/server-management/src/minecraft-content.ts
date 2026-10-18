@@ -92,10 +92,13 @@ import {
   minecraftConfigurationSchema,
   minecraftContentAllowsOnline,
   minecraftContentCommandSchema,
+  minecraftContentSelectsWorld,
   minecraftStoredConfigurationSchema,
   minecraftStoredPlayerSchema,
 } from './minecraft-content-contracts.js';
+import type { createMinecraftWorldPreparation } from './minecraft-world-preparation.js';
 export interface MinecraftContentOptions {
+  worldPreparation?: ReturnType<typeof createMinecraftWorldPreparation>;
   http: ContentHttp;
   mountdataRoot: string;
   sourceRoot?: string;
@@ -291,8 +294,8 @@ export async function prepareMinecraftContentPlan(
     const name = minecraftWorldName(
       command.kind === 'world-import' ? command.targetWorld : command.world,
     );
-    // Selection/removal validate the exact target at dispatch. Preparing intent must
-    // not list the same root again before the durable job can run.
+    // Reuse Worlds' trusted observation when available. A cold API caller retains
+    // the regular dispatch inspection; no browser-provided verification is accepted.
     const actual =
       command.kind !== 'world-import'
         ? undefined
@@ -313,6 +316,14 @@ export async function prepareMinecraftContentPlan(
           : minecraftWorldDataVersion(choice.combination.release),
       existing: command.kind !== 'world-import' || actual?.length === 1,
     };
+    if (command.kind === 'world-select') {
+      const inspected = await options.worldPreparation?.read(server, profile.combination_id);
+      if (inspected) {
+        const observation = inspected.worlds.find((world) => world.name === name);
+        if (!observation) throw new DomainError('conflict');
+        result.world.observation = observation;
+      }
+    }
     if (command.kind === 'world-import') {
       if (server.runtime_state === 'running') {
         const properties = parseMinecraftProperties(
@@ -584,6 +595,7 @@ export async function applyMinecraftTextChange(
   context: GameLifecycleContext,
   change: TextChange,
   files?: FilemanReadService,
+  knownPath = false,
 ): Promise<void> {
   textChangeSchema.parse(change);
   if (sha256(change.content) !== change.afterSha256) throw new DomainError('conflict');
@@ -591,19 +603,25 @@ export async function applyMinecraftTextChange(
   if ((await completed(context, step)) || uncertainEffect(context, step)) {
     // Recovery observes once and never blindly replays a possible prior write.
     const current = await measureContent(context, 'text.recovery', () =>
-      readTextSnapshot(context, change.path),
+      readTextSnapshot(context, change.path, undefined, knownPath),
     );
     if (current?.hash !== change.afterSha256) throw new DomainError('operation_uncertain');
     await complete(context, step);
     return;
   }
-  await context.assertStopped();
+  if (!minecraftContentSelectsWorld(context.operation().plan.minecraftContent))
+    await context.assertStopped();
   await context.authorize();
   // Reuse only this pre-effect phase's directory metadata, never its file bytes.
   // Absence needs a fresh listing: an external writer may have created the file.
   // Recovery above also creates a new scope after a possible mutation.
   const current = await measureContent(context, 'text.compare', () =>
-    readTextSnapshot(context, change.path, change.beforeSha256 === null ? undefined : files),
+    readTextSnapshot(
+      context,
+      change.path,
+      change.beforeSha256 === null ? undefined : files,
+      knownPath,
+    ),
   );
   if (current?.hash === change.afterSha256) {
     await complete(context, step);
@@ -650,6 +668,7 @@ async function readTextSnapshot(
   context: GameLifecycleContext,
   path: string,
   fileman?: FilemanReadService,
+  knownPath = false,
 ) {
   safeArchivePath(path);
   const files =
@@ -663,14 +682,16 @@ async function readTextSnapshot(
   // These fixed configuration paths are root files. One shared root observation
   // retains the symlink/case guard; the hash is computed from the bytes we edit.
   if (path.includes('/')) throw new DomainError('validation_failed');
-  const matches = (await files.list('')).filter(
-    (entry) => entry.name.toLowerCase() === path.toLowerCase(),
-  );
-  if (matches.length > 1 || (matches[0] && matches[0].name !== path))
-    throw new DomainError('conflict');
-  const entry = matches[0];
-  if (!entry) return null;
-  if (entry.kind !== 'file' || entry.size > 1024 ** 2) throw new DomainError('conflict');
+  if (!knownPath) {
+    const matches = (await files.list('')).filter(
+      (entry) => entry.name.toLowerCase() === path.toLowerCase(),
+    );
+    if (matches.length > 1 || (matches[0] && matches[0].name !== path))
+      throw new DomainError('conflict');
+    const entry = matches[0];
+    if (!entry) return null;
+    if (entry.kind !== 'file' || entry.size > 1024 ** 2) throw new DomainError('conflict');
+  }
   const bytes = await files.read({ path, maxBytes: 1024 ** 2 });
   if (!bytes) throw new DomainError('not_found');
   const snapshot = () => ({ content: Buffer.from(bytes).toString('utf8'), hash: sha256(bytes) });
@@ -689,6 +710,7 @@ async function applyTextPlan(
   build: (files: FilemanReadService) => Promise<TextChange[]>,
   beforeEffects?: (plan: TextChange[]) => Promise<void>,
   files?: FilemanReadService,
+  knownPath = false,
 ) {
   if (context.operation().plan.minecraftText === undefined) {
     // Builders may persist authority (for example a verified player UUID).
@@ -709,7 +731,7 @@ async function applyTextPlan(
   }
   const plan = z.array(textChangeSchema).max(4).parse(context.operation().plan.minecraftText);
   await beforeEffects?.(plan);
-  for (const change of plan) await applyMinecraftTextChange(context, change, files);
+  for (const change of plan) await applyMinecraftTextChange(context, change, files, knownPath);
 }
 const initialConfigurationSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('pending'), jobId: z.uuid().optional() }).strict(),
@@ -1613,13 +1635,11 @@ async function pendingContent(context: GameLifecycleContext): Promise<PendingCon
     .select('content_state')
     .where('server_id', '=', context.server.id)
     .executeTakeFirstOrThrow();
-  if (
-    row.content_state &&
-    typeof row.content_state === 'object' &&
-    Object.keys(row.content_state).length === 0
-  )
-    return undefined;
-  return pendingContentSchema.parse(row.content_state);
+  return pendingContentState(row.content_state);
+}
+function pendingContentState(state: unknown): PendingContent | undefined {
+  if (state && typeof state === 'object' && Object.keys(state).length === 0) return undefined;
+  return pendingContentSchema.parse(state);
 }
 async function beginContent(
   context: GameLifecycleContext,
@@ -1754,7 +1774,8 @@ async function applyPreparedContent(
   );
   const command = minecraftContentCommandSchema.parse(prepared.command);
   await context.authorize();
-  if (!minecraftContentAllowsOnline(prepared)) await context.assertStopped();
+  if (!minecraftContentAllowsOnline(prepared) && !minecraftContentSelectsWorld(prepared))
+    await context.assertStopped();
   const selectionStep = stepId('modpack-selection', minecraftDigest(prepared));
   assertMinecraftModpackTransition(
     minecraftStoredConfigurationSchema.parse(profile.configuration).modpack,
@@ -1812,7 +1833,10 @@ async function applyPreparedContent(
     )
       throw new DomainError('provenance_mismatch');
   } else await verifyInstalledRuntime(context, options);
-  const pending = await measureContent(context, 'pending.read', () => pendingContent(context));
+  const pending =
+    command.kind === 'world-select'
+      ? pendingContentState(profile.content_state)
+      : await measureContent(context, 'pending.read', () => pendingContent(context));
   if (
     pending &&
     pending.jobId !== context.operation().job_id &&
@@ -1845,6 +1869,7 @@ async function applyPreparedContent(
       options,
       prepared,
       choice,
+      profile.installed_manifest,
       pending,
       verifiedWorldArchive,
       worldFiles,
@@ -2240,6 +2265,7 @@ export async function inspectMinecraftWorlds(
   env: Environment = {},
   signal?: AbortSignal,
   fileman?: FilemanReadService,
+  preparation?: MinecraftContentOptions['worldPreparation'],
 ): Promise<MinecraftWorldSnapshot> {
   const profile = await db
     .selectFrom('minecraft_server_profiles')
@@ -2264,7 +2290,10 @@ export async function inspectMinecraftWorlds(
     compatibility: expectedDataVersion === undefined ? 'unavailable' : 'available',
     worlds: [],
   };
-  if (!snapshot.installed || !snapshot.supported) return snapshot;
+  if (!snapshot.installed || !snapshot.supported) {
+    await preparation?.invalidate(server, profile.combination_id);
+    return snapshot;
+  }
   signal?.throwIfAborted();
   const files =
     fileman ??
@@ -2341,6 +2370,25 @@ export async function inspectMinecraftWorlds(
     { expectedDataVersion, release: choice.combination.release, signal },
   );
   await authorize();
+  // Reuse the root already inspected, including the fixed configuration file's
+  // case/type guard. No later selection needs another directory listing.
+  const propertiesEntries = root.filter(
+    (entry) => entry.name.toLowerCase() === 'server.properties',
+  );
+  if (
+    propertiesEntries.length === 1 &&
+    propertiesEntries[0]?.name === 'server.properties' &&
+    propertiesEntries[0].kind === 'file' &&
+    propertiesEntries[0].size <= 1048576
+  ) {
+    await preparation?.save(server, profile.combination_id, {
+      worlds: snapshot.worlds,
+      properties: {
+        content: Buffer.from(propertiesBytes).toString('utf8'),
+        hash: sha256(propertiesBytes),
+      },
+    });
+  } else await preparation?.invalidate(server, profile.combination_id);
   return snapshot;
 }
 /** Array contract retained for trusted integration scripts. */
@@ -2358,6 +2406,7 @@ async function applyWorldContent(
   options: MinecraftContentOptions,
   prepared: MinecraftPreparedContent,
   choice: Awaited<ReturnType<typeof inspectMinecraftCombination>>,
+  installedManifest: unknown,
   pending?: PendingContent,
   verifiedArchive?: ContentFileVerification,
   preparedFiles?: WorldFileScope,
@@ -2377,17 +2426,53 @@ async function applyWorldContent(
     prepared.world.dataVersion !== minecraftWorldDataVersion(choice.combination.release)
   )
     throw new DomainError('conflict');
-  const profile = await measureContent(context, 'runtimePaths.read', () =>
-    context.db
-      .selectFrom('minecraft_server_profiles')
-      .select('installed_manifest')
-      .where('server_id', '=', context.server.id)
-      .executeTakeFirstOrThrow(),
-  );
-  assertMinecraftRuntimePathsPreserved([target], profile.installed_manifest);
+  assertMinecraftRuntimePathsPreserved([target], installedManifest);
   if (command.kind === 'world-select') {
     if (prepared.world.dataVersion === undefined) throw new DomainError('integration_unavailable');
     const files = worldFileScope(context);
+    if (prepared.world.observation) {
+      const observation = prepared.world.observation;
+      if (observation.name !== target) throw new DomainError('conflict');
+      await applyTextPlan(
+        context,
+        async () => {
+          const cached = await options.worldPreparation?.read(
+            context.server,
+            prepared.combinationId,
+          );
+          const snapshot =
+            cached?.properties ??
+            (await readTextSnapshot(context, 'server.properties', files, true));
+          if (!snapshot) throw new DomainError('not_found');
+          const selected = planMinecraftWorldSelection(
+            snapshot.content,
+            {
+              name: target,
+              verifiedDataVersion: observation.dataVersion,
+              sha256: observation.sha256,
+            },
+            { allowedDataVersions: [prepared.world?.dataVersion ?? -1] },
+          );
+          return [await plannedText(context, 'server.properties', selected.content, snapshot.hash)];
+        },
+        undefined,
+        files,
+        true,
+      );
+      const changes = z
+        .array(textChangeSchema)
+        .max(4)
+        .parse(context.operation().plan.minecraftText);
+      const change = changes.find((item) => item.path === 'server.properties');
+      if (change)
+        await options.worldPreparation?.updateProperties(
+          context.server,
+          prepared.combinationId,
+          change.beforeSha256,
+          change.content,
+        );
+      return true;
+    }
     const [directories, tickets] = await measureContent(context, 'world.prepare', () =>
       Promise.allSettled([
         files.listMany(['', target]),

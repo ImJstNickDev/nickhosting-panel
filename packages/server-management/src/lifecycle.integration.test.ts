@@ -3975,9 +3975,7 @@ describe('Minecraft world selection without telemetry settling', () => {
       return true;
     });
     f.options.processGameContent = async (context) => {
-      await context.assertStopped();
       for (let index = 0; index < 5; index++) await context.authorize();
-      await context.assertStopped();
       await context.effect('minecraft.text.fixture', write);
       return true;
     };
@@ -3985,48 +3983,57 @@ describe('Minecraft world selection without telemetry settling', () => {
     expect(write).toHaveBeenCalledOnce();
     expect(f.adapter.getApplicationServer).toHaveBeenCalledOnce();
     expect(f.adapter.getResources).not.toHaveBeenCalled();
-    expect(f.options.confirmAlreadyStopped).toHaveBeenCalledTimes(2);
+    expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
     expect(f.options.authorizeEffect).not.toHaveBeenCalled();
     expect(f.options.authorizeIntent).toHaveBeenCalledTimes(7);
     expect((await f.operation()).plan.offlineSince).toBeUndefined();
   });
-  it('overlaps preparation host and provider proofs but refreshes the host proof at dispatch', async () => {
+  it('checks host and process once after durable intent with one resource transaction', async () => {
     const f = await fixture('minecraft-content', plan());
-    const providerStarted = Promise.withResolvers<void>();
-    const hostStarted = Promise.withResolvers<void>();
-    f.adapter.getApplicationServer.mockImplementation(async () => {
-      providerStarted.resolve();
-      await hostStarted.promise;
-      return structuredClone(f.remote);
-    });
-    f.options.verifyObservationHost = vi.fn(async () => {
-      hostStarted.resolve();
-      await providerStarted.promise;
-    });
-    const proofs: Parameters<NonNullable<LifecycleOptions['confirmAlreadyStopped']>>[2][] = [];
-    f.options.confirmAlreadyStopped = async (_server, _db, proof) => {
-      proofs.push(proof);
-      await proof?.observerPreflight;
-      return true;
+    const order: string[] = [];
+    const records: LogRecord[] = [];
+    f.options.logger = createLogger((record) => records.push(record), { level: 'debug' });
+    f.options.verifyObservationHost = vi.fn(async () => {});
+    f.options.checkpoint = async (phase) => {
+      if (phase === 'prepared') order.push('prepared');
     };
+    f.options.confirmAlreadyStopped = vi.fn(async (_server, _db, proof) => {
+      expect(proof?.observerPreflight).toBeUndefined();
+      expect(await proof?.providerServer).toMatchObject({ uuid: f.remote.uuid });
+      order.push('physical');
+      return true;
+    });
     f.options.processGameContent = async (context) => {
-      await context.effect('minecraft.text.fixture', async () => {});
+      order.push('read');
+      await context.effect('minecraft.text.fixture', async () => {
+        order.push('write');
+      });
       return true;
     };
     expect(await f.run()).toBe('succeeded');
-    expect(f.options.verifyObservationHost).toHaveBeenCalledOnce();
-    expect(proofs).toHaveLength(2);
-    expect(proofs[0]?.observerPreflight).toBeInstanceOf(Promise);
-    expect(proofs[1]?.observerPreflight).toBeUndefined();
+    expect(order).toEqual(['read', 'prepared', 'physical', 'write']);
+    expect(f.options.verifyObservationHost).not.toHaveBeenCalled();
+    expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
+    const summary = records.find((record) => record.event === 'servers.world_selection_timing')
+      ?.data as { stages: Record<string, { count: number }> };
+    expect(summary.stages['effect.resourceLock']?.count).toBe(1);
+    expect(summary.stages['stop.final']?.count).toBe(1);
+    expect(summary.stages['stop.initial']).toBeUndefined();
   });
-  it.each(['upload', 'installation', 'compute'] as const)(
-    'refuses world selection when a %s reservation appears during preparation',
-    async (kind) => {
+  it.each([
+    ['upload', 'read'],
+    ['installation', 'read'],
+    ['compute', 'read'],
+    ['upload', 'prepared'],
+    ['installation', 'prepared'],
+    ['compute', 'prepared'],
+  ] as const)(
+    'refuses world selection when a %s reservation appears at %s',
+    async (kind, phase) => {
       const f = await fixture('minecraft-content', plan());
       const other = kind === 'installation' ? await fixture('minecraft-content') : undefined;
       const write = vi.fn(async () => {});
-      f.options.confirmAlreadyStopped = vi.fn(async () => true);
-      f.options.processGameContent = async (context) => {
+      const reserve = async () => {
         if (kind === 'upload') await pendingUploadFixture(f.db, f.serverId);
         else if (kind === 'compute') await f.prepareReservation();
         else
@@ -4040,13 +4047,21 @@ describe('Minecraft world selection without telemetry settling', () => {
               cpu_percent: 100,
             })
             .execute();
+      };
+      f.options.confirmAlreadyStopped = vi.fn(async () => true);
+      f.options.checkpoint = async (checkpoint) => {
+        if (phase === 'prepared' && checkpoint === 'prepared') await reserve();
+      };
+      f.options.processGameContent = async (context) => {
+        if (phase === 'read') await reserve();
         await context.effect('minecraft.text.fixture', write);
         return true;
       };
-      expect(await f.run()).toBe('waiting');
+      expect(await f.run()).toBe('failed');
       expect(write).not.toHaveBeenCalled();
       expect((await f.operation()).effect_state).toBe('none');
-      expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
+      expect((await f.server()).active_operation_id).toBeNull();
+      expect(f.options.confirmAlreadyStopped).not.toHaveBeenCalled();
     },
   );
   it.each(['running', 'missing observer'] as const)(
@@ -4059,9 +4074,15 @@ describe('Minecraft world selection without telemetry settling', () => {
         .where('id', '=', f.serverId)
         .execute();
       if (state === 'running') f.options.confirmAlreadyStopped = vi.fn(async () => false);
-      f.options.processGameContent = vi.fn(async () => true);
-      expect(await f.run()).toBe('waiting');
-      expect(f.options.processGameContent).not.toHaveBeenCalled();
+      const write = vi.fn(async () => {});
+      f.options.processGameContent = vi.fn(async (context) => {
+        await context.effect('minecraft.text.fixture', write);
+        return true;
+      });
+      expect(await f.run()).toBe('failed');
+      expect(f.options.processGameContent).toHaveBeenCalledOnce();
+      expect(write).not.toHaveBeenCalled();
+      expect((await f.server()).active_operation_id).toBeNull();
       expect(f.adapter.getResources).not.toHaveBeenCalled();
     },
   );
@@ -4069,9 +4090,14 @@ describe('Minecraft world selection without telemetry settling', () => {
     const f = await fixture('minecraft-content', plan());
     await f.prepareReservation();
     f.options.confirmAlreadyStopped = vi.fn(async () => true);
-    f.options.processGameContent = vi.fn(async () => true);
-    expect(await f.run()).not.toBe('succeeded');
-    expect(f.options.processGameContent).not.toHaveBeenCalled();
+    const write = vi.fn(async () => {});
+    f.options.processGameContent = vi.fn(async (context) => {
+      await context.effect('minecraft.text.fixture', write);
+      return true;
+    });
+    expect(await f.run()).toBe('failed');
+    expect(f.options.processGameContent).toHaveBeenCalledOnce();
+    expect(write).not.toHaveBeenCalled();
     expect(f.options.confirmAlreadyStopped).not.toHaveBeenCalled();
   });
   it.each(['absent directory', 'deleted during read'] as const)(

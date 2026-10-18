@@ -14,6 +14,7 @@ import {
   saveBootstrapConfiguration,
 } from '@nickhosting/database';
 import { renderMail } from '@nickhosting/i18n';
+import { createPrivateTransferCache } from '@nickhosting/jobs';
 import { createTransportCoordinator, validateConnection } from '@nickhosting/pterodactyl-adapter';
 import {
   createDirectoryIdentityCache,
@@ -29,6 +30,7 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
   const database = createDatabase(env.DATABASE_URL);
   const transportCoordinator = createTransportCoordinator();
   const directoryIdentityCache = createDirectoryIdentityCache();
+  let transferCache: ReturnType<typeof createPrivateTransferCache> | undefined;
   try {
     const setup = await database.pool.query('SELECT id FROM instance_setup WHERE id=1');
     const secrets = parseSecretEnvironment(env, { requireSetupToken: setup.rowCount === 0 });
@@ -41,6 +43,14 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
     const logger = createLogger((record) => process.stdout.write(`${JSON.stringify(record)}\n`), {
       level: initial.values.logLevel,
     });
+    if (env.REDIS_URL && env.NH_JOB_PREFIX)
+      transferCache = createPrivateTransferCache({
+        redisUrl: env.REDIS_URL,
+        prefix: env.NH_JOB_PREFIX,
+        databaseUrl: env.DATABASE_URL,
+        codec,
+        logger,
+      });
     let cached: { signature: string; identity: Identity } | undefined;
     const sendMail = async (message: IdentityMail) => {
       if (message.to.endsWith('.invalid')) return;
@@ -127,6 +137,7 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
           logger,
           transportCoordinator,
           directoryIdentityCache,
+          transferCache,
         }),
       logger,
       defaultLocale: async () => (await getSettings(database.db, env)).values.defaultLocale,
@@ -148,11 +159,13 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
         directoryIdentityCache.close();
         await closeViewerArchives(database.db);
         await closeFileViewers(database.db);
+        await transferCache?.close();
         return database.db.destroy();
       },
     };
   } catch (error) {
     directoryIdentityCache.close();
+    await transferCache?.close();
     await database.db.destroy();
     throw error;
   }

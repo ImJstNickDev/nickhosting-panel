@@ -149,7 +149,13 @@ export interface MinecraftPreparedContent {
   planDigest?: string;
   deletePaths?: string[];
   /** Target runtime data version, when known; imported metadata is observed separately. */
-  world?: { archiveSha256?: string; dataVersion?: number; existing: boolean };
+  world?: {
+    archiveSha256?: string;
+    dataVersion?: number;
+    existing: boolean;
+    /** Internal observation from Worlds inspection, never accepted in a public command. */
+    observation?: { name: string; dataVersion: number; sha256: string };
+  };
 }
 
 /** Removing an inactive world is a file operation, independent of process state.

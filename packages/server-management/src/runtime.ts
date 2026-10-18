@@ -21,6 +21,7 @@ import {
   createTransportCoordinator,
   type DirectoryBatchResult,
   type DirectoryBatchSettings,
+  type PrivateTransferCache,
   type PterodactylAdapter,
   PterodactylError,
   relativePath,
@@ -53,6 +54,7 @@ import {
 } from './lifecycle.js';
 import { minecraftContentAllowsOnline } from './minecraft-content-contracts.js';
 import { createMinecraftModuleRuntime } from './minecraft-module.js';
+import { createMinecraftWorldPreparation } from './minecraft-world-preparation.js';
 import type { OperationTiming } from './operation-timing.js';
 import { resolveProviderCredential } from './provider-accounts.js';
 import {
@@ -287,6 +289,7 @@ export interface ManagementOptions {
   adapter?: PterodactylAdapter;
   transportCoordinator?: ReturnType<typeof createTransportCoordinator>;
   directoryIdentityCache?: ReturnType<typeof createDirectoryIdentityCache>;
+  transferCache?: PrivateTransferCache;
   containerObserver?: ContainerObserver;
   cleanupExternal?: (serverId: string, connection: Kysely<Database>) => Promise<void>;
   reconcileExternal?: (
@@ -370,6 +373,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       ? createContainerObserver(values.dockerObserverSocket)
       : undefined);
   const adapterOptions = {
+    transferCache: options.transferCache,
     coordinator: options.transportCoordinator,
     baseURL: values.pterodactylBaseUrl ?? '',
     applicationKey: applicationKey ?? '',
@@ -578,11 +582,15 @@ export async function createManagementRuntime(options: ManagementOptions) {
       throw new DomainError('integration_unavailable');
     return digest;
   }
+  const worldPreparation = options.transferCache
+    ? createMinecraftWorldPreparation(options.transferCache, consoleProviderBinding)
+    : undefined;
   const minecraft = createMinecraftModuleRuntime({
     db,
     codec: options.codec,
     env,
     adapter,
+    worldPreparation,
     observedImageDigest,
     authorizeJob: (connection, jobId, serverId) =>
       authorizeQueuedEffect(connection, jobId, serverId, env, adapter),
@@ -1478,6 +1486,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     lifecycle,
     externalOptions,
     minecraftOptions,
+    worldPreparation,
     assertMinecraftRuntimeImage,
     assertFileMutation,
   };

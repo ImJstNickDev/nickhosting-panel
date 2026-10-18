@@ -1487,6 +1487,35 @@ API contract: the worker prepares a ZIP source and uses the same authenticated
 `/v1/minecraft/sources` upload and `world-import` durable command. No direct
 per-file write or second installation path is exposed for directory input.
 
+### Prepared world selection — 2026-10-18
+
+Opening Worlds performs the inventory inspection once and privately retains verified
+world metadata and the observed `server.properties` snapshot for up to 15 minutes.
+The optional preparation is scoped to provider configuration, managed identity,
+owner, mapping and exact runtime combination. It is encrypted in the existing job
+Redis; neither the properties nor signed transfer grants are added to the response.
+
+A subsequent `world-select` command reuses that trusted observation in its durable
+internal plan. The public command remains `{kind:'world-select',world}` and cannot
+supply verification. Warm selection does not list directories or read/validate
+`level.dat` again. It compares fresh properties against the observed hash, then
+writes the desired change. Confirmed writes update the private properties snapshot
+without extending the original world-inspection expiry. An external properties edit
+still produces a conflict; reopen Worlds to inspect the current value before retrying.
+The observation describes the world at inspection time, not continuous filesystem
+monitoring. Cold callers/expired preparation and previously queued plans retain the
+existing inspection path. Eviction after enqueue needs only a fresh properties
+snapshot, not another world validation.
+
+API and worker share privately prepared, single-use Wings download grants. Consumption
+is atomic and replenishment happens in the background. Missing/expired grants are
+issued on demand through the existing adapter. Selection retains current permissions,
+managed identity, operation/upload/installation/resource exclusions, and one final
+host-bound stopped-process proof immediately before the write. There is no initial
+stopped proof followed by a duplicate final proof. Lost writes remain recoverable
+by their durable desired hash and are never blindly replayed. UI selection changes
+only after confirmed completion; no speculative success state or new notification.
+
 ### Minecraft world catalog acquisition — 2026-10-18
 
 - `GET /v1/servers/:id/minecraft/world-catalog` returns

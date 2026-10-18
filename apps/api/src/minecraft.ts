@@ -470,6 +470,7 @@ export function registerMinecraftRoutes(
               listDirectories: (paths) =>
                 service.fileDirectoryBatch(identifier, server, paths, c.req.raw.signal),
             }),
+            service.worldPreparation,
           ),
       ),
     );

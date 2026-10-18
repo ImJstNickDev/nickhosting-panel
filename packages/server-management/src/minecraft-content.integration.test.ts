@@ -47,6 +47,7 @@ import {
 } from './minecraft-content.js';
 import { minecraftMappingDigest, signMinecraftEvidence } from './minecraft-registry.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
+import { createMinecraftWorldPreparation } from './minecraft-world-preparation.js';
 import { createOperationTiming } from './operation-timing.js';
 import { enqueueServerOperation } from './registry.js';
 import { managementFixture } from './test-fixtures.js';
@@ -523,8 +524,152 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     f.operation.phase = 'planned';
     f.operation.effect_state = 'none';
     f.operation.plan = { minecraftContent: prepared };
-    return { ...f, list, listDirectories, read, download, write, prepare, stopped };
+    return { ...f, providerList, list, listDirectories, read, download, write, prepare, stopped };
   }
+
+  async function observedWorldSelectionFixture() {
+    const f = await worldSelectionFixture();
+    const entries = new Map<string, string>();
+    const cache = {
+      async get(key: string) {
+        return entries.get(key);
+      },
+      async take(key: string) {
+        const value = entries.get(key);
+        entries.delete(key);
+        return value;
+      },
+      async put(key: string, value: string) {
+        entries.set(key, value);
+      },
+      async delete(key: string) {
+        entries.delete(key);
+      },
+    };
+    const apiPreparation = createMinecraftWorldPreparation(cache, 'isolated-provider');
+    await inspectMinecraftWorlds(
+      f.f.db,
+      f.context.adapter,
+      f.serverId,
+      async () => {},
+      f.options.env,
+      undefined,
+      undefined,
+      apiPreparation,
+    );
+    const options = { ...f.options, worldPreparation: apiPreparation, adapter: f.context.adapter };
+    const prepared = await prepareMinecraftContentPlan(
+      f.f.db,
+      f.serverId,
+      { kind: 'world-select', world: 'selected' },
+      options,
+    );
+    expect(prepared.world?.observation?.name).toBe('selected');
+    f.operation.plan = { minecraftContent: prepared };
+    // A separate consumer models the worker; there is no process-local warm state.
+    f.options.worldPreparation = createMinecraftWorldPreparation(cache, 'isolated-provider');
+    for (const spy of [f.list, f.listDirectories, f.read, f.download, f.write, f.prepare])
+      spy.mockClear();
+    return { ...f, entries, options };
+  }
+  it('selects an inspected world with one properties comparison and no world reinspection', async () => {
+    const f = await observedWorldSelectionFixture();
+    expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+    expect(f.list).not.toHaveBeenCalled();
+    expect(f.listDirectories).not.toHaveBeenCalled();
+    expect(f.prepare).not.toHaveBeenCalled();
+    expect(f.read.mock.calls.map((call) => call[1])).toEqual(['server.properties']);
+    expect(f.download).not.toHaveBeenCalled();
+    expect(f.write).toHaveBeenCalledOnce();
+    expect(f.stopped).not.toHaveBeenCalled();
+    expect(f.files.get('server.properties')?.toString()).toContain('level-name=selected');
+    const cached = await f.options.worldPreparation?.read(f.context.server, f.combinationId);
+    expect(cached?.properties.content).toContain('level-name=selected');
+  });
+  it('preserves a concurrent properties edit even when Worlds prepared the selection', async () => {
+    const f = await observedWorldSelectionFixture();
+    f.files.set('server.properties', Buffer.from('motd=External edit\nlevel-name=old_world\n'));
+    await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    expect(f.write).not.toHaveBeenCalled();
+    expect(f.read).toHaveBeenCalledOnce();
+  });
+  it('recovers an observed selection with a lost reply without another world inspection or write', async () => {
+    const f = await observedWorldSelectionFixture();
+    f.write.mockImplementationOnce(async (_identifier, path, content) => {
+      f.files.set(path, Buffer.from(content));
+      throw new Error('lost write reply');
+    });
+    await expect(processMinecraftContent(f.context, f.options)).rejects.toThrow('lost write reply');
+    expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+    expect(f.write).toHaveBeenCalledOnce();
+    expect(f.list).not.toHaveBeenCalled();
+    expect(f.listDirectories).not.toHaveBeenCalled();
+    expect(f.read.mock.calls.map((call) => call[1])).toEqual([
+      'server.properties',
+      'server.properties',
+    ]);
+  });
+  it('keeps an inspected selection usable if optional preparation is evicted before dispatch', async () => {
+    const f = await observedWorldSelectionFixture();
+    f.entries.clear();
+    expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+    expect(f.list).not.toHaveBeenCalled();
+    expect(f.read.mock.calls.map((call) => call[1])).toEqual([
+      'server.properties',
+      'server.properties',
+    ]);
+    expect(f.write).toHaveBeenCalledOnce();
+  });
+  it('does not retain a trusted preparation when the next inventory sees a properties symlink', async () => {
+    const f = await observedWorldSelectionFixture();
+    const providerList = f.providerList;
+    f.list.mockImplementation(async (...args) =>
+      (await providerList(...args)).map((entry) => ({
+        ...entry,
+        is_symlink: entry.name === 'server.properties',
+      })),
+    );
+    await inspectMinecraftWorlds(
+      f.f.db,
+      f.context.adapter,
+      f.serverId,
+      async () => {},
+      f.options.env,
+      undefined,
+      undefined,
+      f.options.worldPreparation,
+    );
+    const prepared = await prepareMinecraftContentPlan(
+      f.f.db,
+      f.serverId,
+      { kind: 'world-select', world: 'selected' },
+      f.options,
+    );
+    expect(prepared.world?.observation).toBeUndefined();
+    f.context.fileman = undefined;
+    f.operation.plan = { minecraftContent: prepared };
+    await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    expect(f.write).not.toHaveBeenCalled();
+  });
+  it('does not accept world verification from a public operation command', async () => {
+    const f = await observedWorldSelectionFixture();
+    await expect(
+      prepareMinecraftContentPlan(
+        f.f.db,
+        f.serverId,
+        {
+          kind: 'world-select',
+          world: 'selected',
+          observation: { dataVersion: 3955 },
+        },
+        f.options,
+      ),
+    ).rejects.toBeDefined();
+  });
 
   it.each([true, false])(
     'selects a compatible world through shared Fileman reads, batch=%s',
@@ -547,7 +692,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       ]);
       expect(f.download).not.toHaveBeenCalled();
       expect(f.write).toHaveBeenCalledOnce();
-      expect(f.stopped).toHaveBeenCalled();
+      expect(f.stopped).not.toHaveBeenCalled();
     },
   );
   it('rejects a forbidden world-selection batch instead of falling back to native reads', async () => {
@@ -581,7 +726,6 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     for (const name of [
       'minecraft.profile.read',
       'minecraft.combination.inspect',
-      'minecraft.pending.read',
       'minecraft.world.prepare',
       'minecraft.world.levelRead',
       'minecraft.world.propertiesRead',

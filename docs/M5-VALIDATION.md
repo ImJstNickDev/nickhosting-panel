@@ -13482,3 +13482,70 @@ was needed. API/worker loaded it through the existing development watchers; both
 and Vite are healthy, with API readiness HTTP 200. The next live
 selection remains Owner-operated. Code rollback is a revert; no persisted data
 or operation history needs to change.
+
+### Reuse Worlds inspection and private transfer preparation — 2026-10-18
+
+The preceding Owner selection at `f245c67` succeeded in **1,712.192 ms** database
+end-to-end / **1,673.052 ms** traced execution. About 505.7 ms was directory/grant
+preparation, 146.6 ms the fresh comparison (including refill wait), 259.2 ms final
+checks/journaling and 260.1 ms the provider write. These are nested/overlapping
+instrumented phases; they are not an additive decomposition. No new live latency
+claim is made for the implementation below.
+
+Opening Worlds now retains the already verified worlds and observed properties in
+an optional private encrypted Redis preparation. Warm selection reuses the trusted
+observation; no root/world listing or `level.dat` download/validation is repeated.
+One fresh properties read protects against concurrent edits, followed by the existing
+write/receipt. Confirmed writes advance the cached properties without renewing the
+world inspection's 15-minute lifetime. The pending state and installed manifest use
+the profile already read by this job. The lifecycle has one resource-exclusion check
+and one final host-bound stopped proof, instead of initial and repeated final proofs.
+Current authorization, managed identity, allocation/host checks and recovery remain.
+
+Signed Wings grants prepared by the API are now usable by the worker through the
+existing Redis, encrypted and atomically consumed. Used grants refill in the
+background. Scoped invalidation preserves unrelated prepared files; the 600-file
+fixture keeps 599 prepared grants after one path invalidation. Cache pressure and
+outages cannot block cache-free mutations or replay a consumed grant. No new API,
+queue, service, dependency, migration, browser authority or notification was added.
+
+Focused commands (provider writes use fixtures only):
+
+```sh
+scripts/dev.sh pnpm exec vitest run packages/server-management/src/minecraft-world-preparation.test.ts packages/server-management/src/minecraft-content.test.ts packages/server-management/src/fileman-read.test.ts apps/api/src/minecraft-worlds.test.ts
+scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/shared-downloads.test.ts packages/pterodactyl-adapter/src/bulk-downloads.test.ts packages/pterodactyl-adapter/src/adapter.test.ts packages/pterodactyl-adapter/src/directory-batch.test.ts packages/server-management/src/scoped-provider-adapter.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/jobs/src/private-transfer-cache.integration.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts -t 'Minecraft world selection|additive Minecraft world imports|Minecraft world removal'
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-content.integration.test.ts packages/server-management/src/runtime.integration.test.ts -t 'selects a compatible world|world.selection|incompatible world without|changed properties source|world removed since selection|properties created after world selection|observed selection|inspected|public operation command|next inventory'
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-content.integration.test.ts -t 'selects a compatible world|world-selection|incompatible world without|changed properties source|world removed since selection|properties created after world selection|observed selection|inspected|public operation command|next inventory|removes an inactive world online|world import|world removal'
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-worlds.browser.test.ts -t 'selects a world after confirmed|imports, selects, downloads and removes|recovers a lost response'
+scripts/dev.sh pnpm exec tsc --noEmit
+```
+
+Final results: **78/78 content/Fileman/API/preparation unit tests**, **207/207
+adapter/pool unit tests**, **5/5 real isolated Redis tests**, **51 lifecycle cases**
+(238 excluded), **20 selection/runtime cases** (120 excluded), **19 final content
+selection/import/removal cases** (54 excluded), and **3 Chromium journeys**
+(13 excluded) passed. Integration command counts overlap and must not be summed.
+Root TypeScript, scoped Biome, staged governance and diff checks passed.
+
+Independent review found and resolved two defects before completion: a warm
+preparation needed invalidation when a later inspection observed unsafe properties
+metadata, and shared grant invalidation must not depend on free local pool capacity.
+Coverage includes both, concurrent properties edits, missing optional preparation,
+lost-write recovery without replay, public forged-observation rejection, atomic
+consumption by two Redis clients and private namespace/key separation. Initial test
+runs also exposed incorrect fixture expectations for the number of physical checks
+and retrieval of a spy's original method; those fixtures were corrected. Failed runs
+are not counted as successful validation.
+
+Development API/worker use the same private cache namespace/key configuration and
+passed health probes after their normal source-watcher reloads. No manual restart,
+image rebuild, live selection, game-file mutation or Blueprint/Panel/Wings change
+was performed. Isolated Redis test keys were removed exactly; no production or
+historical test data was reset. The Gateway already had a failing healthcheck with
+more than 1,300 consecutive failures when inspected; it was not changed or restarted
+by this work. Code rollback is a revert; disposable cache entries expire. Issue #18
+and all independent production-release gates remain unchanged. No full historical
+suite or new visual design is claimed; the three browser journeys exercise existing
+confirmed-only UI behavior, and no layout changed.

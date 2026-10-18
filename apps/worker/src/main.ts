@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLogger, DomainError, encryptionKeyFromBase64, SecretCodec } from '@nickhosting/core';
 import { createDatabase, getSettings } from '@nickhosting/database';
-import { processJob, startJobWorker } from '@nickhosting/jobs';
+import { createPrivateTransferCache, processJob, startJobWorker } from '@nickhosting/jobs';
 import {
   createManagementRuntime,
   createManagementTransportCoordinator,
@@ -22,6 +22,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     throw new DomainError('configuration_invalid');
   const { db, pool } = createDatabase(env.DATABASE_URL);
   const transportCoordinator = createManagementTransportCoordinator();
+  let transferCache: ReturnType<typeof createPrivateTransferCache> | undefined;
   try {
     const settings = await getSettings(db, env);
     const logger = createLogger((record) => process.stdout.write(`${JSON.stringify(record)}\n`), {
@@ -30,15 +31,24 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     const management = async () => {
       if (!env.NH_SECRETS_MASTER_KEY) throw new DomainError('configuration_invalid');
       const keyId = env.NH_SECRETS_KEY_ID ?? 'primary';
+      const codec = new SecretCodec({
+        activeKeyId: keyId,
+        keys: { [keyId]: encryptionKeyFromBase64(env.NH_SECRETS_MASTER_KEY) },
+      });
+      transferCache ??= createPrivateTransferCache({
+        redisUrl: env.REDIS_URL as string,
+        prefix: env.NH_JOB_PREFIX as string,
+        databaseUrl: env.DATABASE_URL as string,
+        codec,
+        logger,
+      });
       return createManagementRuntime({
         db,
         env,
         logger,
         transportCoordinator,
-        codec: new SecretCodec({
-          activeKeyId: keyId,
-          keys: { [keyId]: encryptionKeyFromBase64(env.NH_SECRETS_MASTER_KEY) },
-        }),
+        transferCache,
+        codec,
       });
     };
     const runtime = await startJobWorker({
@@ -157,6 +167,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         try {
           await runtime.close();
         } finally {
+          await transferCache?.close();
           await heartbeat('stopped');
           await db.destroy();
         }
@@ -180,6 +191,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       },
     };
   } catch (error) {
+    await transferCache?.close();
     await db.destroy();
     throw error;
   }

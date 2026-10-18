@@ -934,37 +934,17 @@ export async function processServerOperation(
         }),
       );
     };
-    let worldSelectionObserverPreflight: Promise<void> | undefined;
-    let worldSelectionStopped: Promise<boolean> | undefined;
-    const confirmWorldSelectionStopped = (fresh = false) => {
-      if (fresh || !worldSelectionStopped)
-        worldSelectionStopped = trace(fresh ? 'stop.final' : 'stop.initial', async () => {
-          const stoppedTiming = timing?.child(fresh ? 'stop.final' : 'stop.initial');
-          await requireQuiescentReservation(stoppedTiming);
-          if (!options.confirmAlreadyStopped) return false;
-          const remote = await worldContentProvider();
-          return options.confirmAlreadyStopped(server.id, db, {
-            providerServer: Promise.resolve(remote),
-            timing: stoppedTiming,
-            // Only preparation shares the concurrent host proof. Dispatch always
-            // takes a new physical/host observation after durable intent.
-            ...(fresh ? {} : { observerPreflight: worldSelectionObserverPreflight }),
-          });
+    const confirmWorldSelectionStopped = () =>
+      trace('stop.final', async () => {
+        if (!options.confirmAlreadyStopped) return false;
+        const remote = await worldContentProvider();
+        return options.confirmAlreadyStopped(server.id, db, {
+          providerServer: Promise.resolve(remote),
+          timing: timing?.child('stop.final'),
         });
-      return worldSelectionStopped;
-    };
-    const effect = async <T>(
-      phase: string,
-      perform: (verifiedServer?: ApplicationServer) => Promise<T>,
-      patch?: (result: T) => Record<string, unknown>,
-      preparationServer?: ApplicationServer,
-    ): Promise<boolean> => {
-      await timed('authorization', () =>
-        (offlineWorldSelection || ['power', 'initial_start'].includes(phase)
-          ? (options.authorizeIntent ?? options.authorizeEffect)
-          : options.authorizeEffect)(jobId, server.id, db, { timing: timing?.child('auth') }),
-      );
-      await trace('effect.resources', () =>
+      });
+    const requireEffectResources = () =>
+      trace('effect.resources', () =>
         db.transaction().execute(async (tx) => {
           await trace('effect.resourceLock', () => lockResources(tx));
           await assertNoPendingUpload(tx, server.id);
@@ -980,6 +960,20 @@ export async function processServerOperation(
           if (offlineWorldSelection) await assertQuiescentReservation(tx);
         }),
       );
+    const effect = async <T>(
+      phase: string,
+      perform: (verifiedServer?: ApplicationServer) => Promise<T>,
+      patch?: (result: T) => Record<string, unknown>,
+      preparationServer?: ApplicationServer,
+    ): Promise<boolean> => {
+      await timed('authorization', () =>
+        (offlineWorldSelection || ['power', 'initial_start'].includes(phase)
+          ? (options.authorizeIntent ?? options.authorizeEffect)
+          : options.authorizeEffect)(jobId, server.id, db, { timing: timing?.child('auth') }),
+      );
+      // Selection only reads while preparing. Check all resource exclusions once,
+      // after durable intent, immediately before its final physical stop proof.
+      if (!offlineWorldSelection) await requireEffectResources();
       if (
         !onlineWorldContent &&
         !offlineWorldSelection &&
@@ -1089,7 +1083,8 @@ export async function processServerOperation(
               // This host-bound physical proof also checks the current registry
               // identity and allocations. Do not repeat those reads immediately
               // before it, or authorize while that observation is still pending.
-              if (!(await confirmWorldSelectionStopped(true)))
+              await requireEffectResources();
+              if (!(await confirmWorldSelectionStopped()))
                 throw new DomainError('operation_uncertain');
             } else if (verifiedServer) await verifyManagedIdentity(db, current, verifiedServer);
             // Physical observations can wait; current authority belongs at dispatch.
@@ -1397,11 +1392,6 @@ export async function processServerOperation(
               : options.authorizeEffect)(jobId, server.id, db, { timing: timing?.child('auth') }),
           ),
         assertStopped: async () => {
-          if (offlineWorldSelection) {
-            if (!(await confirmWorldSelectionStopped()))
-              throw new DomainError('operation_uncertain');
-            return;
-          }
           await requireQuiescentReservation();
           if (
             !options.confirmAlreadyStopped ||
@@ -2311,15 +2301,6 @@ export async function processServerOperation(
           remote = identity.value;
           initialResources = status.value;
           await observation(db, server, initialResources, nowOf(options));
-        } else if (offlineWorldSelection && options.verifyObservationHost) {
-          const [identity, host] = await Promise.allSettled([
-            timed('provider_identity', () => ownedRemote(db, server, options)),
-            options.verifyObservationHost(server.id, db, timing?.child('stop.initial.host')),
-          ]);
-          if (identity.status === 'rejected') throw identity.reason;
-          if (host.status === 'rejected') throw host.reason;
-          remote = identity.value;
-          worldSelectionObserverPreflight = Promise.resolve();
         } else {
           remote = await timed('provider_identity', () => ownedRemote(db, server, options));
         }
@@ -2605,15 +2586,9 @@ export async function processServerOperation(
       }
       // The integration checks the selected world at dispatch. An unused folder
       // needs neither process telemetry nor an artificial offline settling period.
-      if (!onlineWorldContent) {
-        if (offlineWorldSelection) {
-          // Cached Panel telemetry has a settling window. World selection needs
-          // current process quiescence, not an arbitrary delay after an offline sample.
-          if (!(await confirmWorldSelectionStopped())) return wait('offline_confirmation');
-        } else {
-          await requireQuiescentReservation();
-          if (!(await offline())) return wait('offline_confirmation');
-        }
+      if (!onlineWorldContent && !offlineWorldSelection) {
+        await requireQuiescentReservation();
+        if (!(await offline())) return wait('offline_confirmation');
       }
       if (operation.action === 'minecraft-content') {
         if (!options.processGameContent) throw new DomainError('configuration_invalid');

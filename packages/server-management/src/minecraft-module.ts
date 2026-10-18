@@ -205,6 +205,7 @@ export const minecraftModule: TrustedGameModule = {
   },
 };
 export interface MinecraftModuleOptions {
+  worldPreparation?: MinecraftContentOptions['worldPreparation'];
   db: Kysely<Database>;
   codec: SecretCodec;
   env: Environment;
@@ -386,6 +387,7 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
       userAgent: minecraft.contentMetadataUserAgent,
       env,
       observedImageDigest,
+      worldPreparation: options.worldPreparation,
       authorizeJob: (connection, jobId, serverId) =>
         options.authorizeJob(connection, jobId, serverId),
     };

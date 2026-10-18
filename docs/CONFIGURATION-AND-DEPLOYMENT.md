@@ -35,6 +35,25 @@ signed URLs. The summary bounds aggregates to 64 labels and its timeline to 128
 labels/256 spans, grouped below the logger's array limit; dropped counters expose
 truncation. No detailed trace is collected at the normal `info` level.
 
+## Private transfer preparation
+
+API and worker optionally share transfer preparation through their existing
+`REDIS_URL`, `NH_JOB_PREFIX`, `DATABASE_URL` and application encryption key. No new
+service, migration, provider setting or credential is needed. The namespace hashes
+the database connection (including schema options) and job prefix. Values are sealed
+with the protected-store codec and key-bound authenticated encryption; provider
+bindings additionally isolate credentials, allowed origins and managed-server identity.
+Signed URLs remain backend-only and are consumed atomically once.
+
+The shared store has native expiry, at most 10,000 entries/64 MiB of encrypted
+payloads, and a maximum lifetime of 16 minutes. World inspection preparation expires
+after 15 minutes; signed grants also retain their provider expiry/safety margin.
+It is disposable performance state, not an authorization source or durable job
+record. Cache failure/eviction uses ordinary reads and fresh grant issuance; it must
+never reuse an ambiguously consumed token. No game file or account data is reset.
+Apply code through the usual API/worker lifecycle; rollback is a code revert, and
+old cache entries expire without cleanup or database rollback.
+
 ## Local environment context (never published)
 
 Keep machine-specific observations in `.codex/local/INFRASTRUCTURE.md`, excluded from Git. AGENTS.md directs Codex to read it before authorized infrastructure work. The local notes preserve the actual host, resolver, external network, current/stale installation paths and deployment hostnames; none are product defaults or approval to change infrastructure. A fresh clone needs Owner-supplied local context before infrastructure access. Never store credentials in documentation.

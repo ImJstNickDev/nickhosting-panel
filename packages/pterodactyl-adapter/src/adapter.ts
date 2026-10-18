@@ -66,6 +66,17 @@ export interface PterodactylOptions extends TransportOptions {
   uploadOrigins?: string[];
   /** Changes whenever the managed provider identity/node or credential revision changes. */
   fileDownloadBinding?: string;
+  /** Server-only, encrypted transient storage shared by API and worker processes. */
+  transferCache?: PrivateTransferCache;
+}
+/** Values remain private backend data. take removes a value atomically across processes.
+ * Refuse capacity rather than evict unexpired values: invalidation fences must
+ * outlive the grants they invalidate. */
+export interface PrivateTransferCache {
+  get(key: string): Promise<string | undefined>;
+  take(key: string): Promise<string | undefined>;
+  put(key: string, value: string, ttlMs: number): Promise<void>;
+  delete(key: string): Promise<void>;
 }
 export interface PreparedUploadBatch {
   expiresAt: number;

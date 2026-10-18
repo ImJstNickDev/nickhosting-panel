@@ -848,7 +848,7 @@ describe('management runtime execution-time authorization', () => {
   });
 
   it.each(['unchanged', 'allocation removed', 'host changed', 'permission revoked'] as const)(
-    'shares world-selection preparation proofs and keeps final authority when %s',
+    'uses one final world-selection proof and keeps current authority when %s',
     async (change) => {
       const queued = await stop();
       await f.db
@@ -884,7 +884,7 @@ describe('management runtime execution-time authorization', () => {
       const observer = {
         preflight: vi.fn(async () => {}),
         stopped: vi.fn(async () => {
-          if (change === 'permission revoked' && observer.stopped.mock.calls.length === 2)
+          if (change === 'permission revoked' && observer.stopped.mock.calls.length === 1)
             await f.db
               .updateTable('operation_jobs')
               .set({ resource_owner_id: f.owner.subjectUserId })
@@ -920,7 +920,6 @@ describe('management runtime execution-time authorization', () => {
               .execute();
         },
         processGameContent: async (context) => {
-          await context.assertStopped();
           await context.authorize();
           if (change === 'unchanged') {
             const files = context.fileman?.readScope?.();
@@ -951,7 +950,7 @@ describe('management runtime execution-time authorization', () => {
         const spans = summary.spanGroups.flat().map((span) => span.name);
         expect(spans).toEqual(
           expect.arrayContaining([
-            'stop.initial.host.binding',
+            'stop.final.host.binding',
             'stop.final.host.preflight',
             'stop.final.process',
             'auth.intent',
@@ -964,9 +963,9 @@ describe('management runtime execution-time authorization', () => {
           expect.objectContaining({ count: expect.any(Number) }),
         );
       }
-      expect(observer.preflight).toHaveBeenCalledTimes(change === 'host changed' ? 1 : 2);
+      expect(observer.preflight).toHaveBeenCalledTimes(change === 'host changed' ? 0 : 1);
       expect(observer.stopped).toHaveBeenCalledTimes(
-        ['unchanged', 'permission revoked'].includes(change) ? 2 : 1,
+        ['unchanged', 'permission revoked'].includes(change) ? 1 : 0,
       );
       const operation = await f.db
         .selectFrom('server_operations')

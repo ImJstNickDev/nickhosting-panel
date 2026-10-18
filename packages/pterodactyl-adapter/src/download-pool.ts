@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import type { FileReadTiming } from './adapter.js';
+import type { FileReadTiming, PrivateTransferCache } from './adapter.js';
 import { allowedOrigin, signedTarget } from './downloads.js';
 import {
   type createTransport,
@@ -44,7 +44,10 @@ interface Pool {
 }
 const pools = new Map<string, Pool>();
 const fetcherIds = new WeakMap<typeof fetch, number>();
+const cacheIds = new WeakMap<PrivateTransferCache, number>();
+const invalidationFences = new WeakMap<PrivateTransferCache, Map<string, Promise<void>>>();
 let nextFetcherId = 0;
+let nextCacheId = 0;
 const MAX_SCOPES = 64;
 const MAX_TOKENS = 10_000;
 const MAX_SCOPE_TOKENS = 5000;
@@ -57,9 +60,14 @@ const MAX_POOL_BYTES = 64 * 1024 * 1024;
 const estimatedTokenBytes = (path: string) => Buffer.byteLength(path) * 4 + 2048;
 const invalid = () => new PterodactylError('invalid_response', 'client', 'rejected');
 
-/** Private process memory only. Digests scope credentials; tokens never escape the adapter. */
+/** Credentials are scoped by digest; one-use grants stay in memory or the injected
+ * encrypted store, never in both. All transfers continue through this adapter. */
 export function createDownloadPool(
-  options: TransportOptions & { downloadOrigins?: string[]; fileDownloadBinding?: string },
+  options: TransportOptions & {
+    downloadOrigins?: string[];
+    fileDownloadBinding?: string;
+    transferCache?: PrivateTransferCache;
+  },
   transport: ReturnType<typeof createTransport>,
 ) {
   const fetcher = options.fetcher ?? fetch;
@@ -72,7 +80,17 @@ export function createDownloadPool(
     validatedBaseURL(options.baseURL).origin,
     ...(options.downloadOrigins ?? []).map((origin) => allowedOrigin(origin, ['http:', 'https:'])),
   ]);
-  const identity = createHash('sha256')
+  const shared = options.transferCache;
+  const fences = shared
+    ? (invalidationFences.get(shared) ?? new Map<string, Promise<void>>())
+    : undefined;
+  if (shared && fences) invalidationFences.set(shared, fences);
+  let cacheId = shared ? cacheIds.get(shared) : undefined;
+  if (shared && !cacheId) {
+    cacheId = ++nextCacheId;
+    cacheIds.set(shared, cacheId);
+  }
+  const sharedIdentity = createHash('sha256')
     .update(
       JSON.stringify([
         validatedBaseURL(options.baseURL).href,
@@ -80,10 +98,68 @@ export function createDownloadPool(
         options.clientKey,
         [...origins].sort(),
         options.fileDownloadBinding,
-        fetcherId,
       ]),
     )
     .digest('hex');
+  const identity = JSON.stringify([sharedIdentity, fetcherId, cacheId]);
+  const sharedKey = (identifier: string, kind: string) =>
+    `download-v1:${sharedIdentity}:${segment(identifier)}:${kind}`;
+  const generationKey = (identifier: string) => sharedKey(identifier, 'generation');
+  const pathGenerationKey = (identifier: string, path: string) =>
+    sharedKey(identifier, `path:${createHash('sha256').update(relativePath(path)).digest('hex')}`);
+  const grantKey = (identifier: string, generation: string, path: string) =>
+    sharedKey(
+      identifier,
+      `${generation}:${createHash('sha256').update(relativePath(path)).digest('hex')}`,
+    );
+  async function generation(identifier: string): Promise<string | undefined> {
+    if (!shared) return undefined;
+    try {
+      await fences?.get(generationKey(identifier));
+      const key = generationKey(identifier);
+      let value = await shared.get(key);
+      if (!value) {
+        await shared.put(key, randomUUID(), 960_000);
+        value = await shared.get(key);
+      }
+      return value && /^[a-f0-9-]{36}$/.test(value) ? value : undefined;
+    } catch {
+      // A failed/ambiguous cache operation never creates local authority for a
+      // grant that might also have been published to another process.
+      return undefined;
+    }
+  }
+  async function pathGeneration(
+    identifier: string,
+    path: string,
+    version: string,
+    memo = new Map<string, Promise<string | undefined>>(),
+  ) {
+    if (!shared) return undefined;
+    try {
+      const parts = relativePath(path).slice(1).split('/');
+      const epochs: Array<string | undefined> = [];
+      for (let offset = 0; offset < parts.length; offset += 32) {
+        const chunk = parts.slice(offset, offset + 32).map((_part, index) => {
+          const key = pathGenerationKey(identifier, parts.slice(0, offset + index + 1).join('/'));
+          let read = memo.get(key);
+          if (!read) {
+            read = shared.get(key);
+            if (memo.size < MAX_SCOPE_TOKENS) memo.set(key, read);
+          }
+          return read;
+        });
+        epochs.push(...(await Promise.all(chunk)));
+      }
+      if (epochs.some((value) => value !== undefined && !/^[a-f0-9-]{36}$/.test(value)))
+        return undefined;
+      return createHash('sha256')
+        .update(JSON.stringify([version, ...epochs]))
+        .digest('hex');
+    } catch {
+      return undefined;
+    }
+  }
   function state(): Pool {
     const existing = pools.get(identity);
     if (existing) {
@@ -177,6 +253,24 @@ export function createDownloadPool(
     pool.settings.set(key, entry);
     entry.pending = (async () => {
       let value: TransferSettings;
+      if (shared && !refresh) {
+        try {
+          const read = () => shared.get(sharedKey(identifier, 'settings'));
+          const cached = timing
+            ? await timing.measure('grant.settings.shared', read)
+            : await read();
+          if (cached) {
+            const parsed = settingsSchema.safeParse(JSON.parse(cached));
+            if (parsed.success) {
+              entry.value = parsed.data;
+              entry.until = Date.now() + SETTINGS_TTL_MS;
+              return parsed.data;
+            }
+          }
+        } catch {
+          /* Optional performance metadata never prevents a provider request. */
+        }
+      }
       try {
         const request = () =>
           transport.json('client', endpoint(identifier, 'transfer-settings'), settingsSchema);
@@ -188,6 +282,10 @@ export function createDownloadPool(
       }
       entry.value = value;
       entry.until = Date.now() + SETTINGS_TTL_MS;
+      if (shared)
+        await shared
+          .put(sharedKey(identifier, 'settings'), JSON.stringify(value), SETTINGS_TTL_MS)
+          .catch(() => {});
       return value;
     })().finally(() => {
       entry.pending = undefined;
@@ -279,6 +377,7 @@ export function createDownloadPool(
     paths: string[],
     timing?: FileReadTiming,
   ): Promise<void> {
+    if (shared) return prefetchShared(identifier, paths, timing);
     const pool = state();
     for (const current of pools.values()) {
       for (const [key, slot] of current.slots) {
@@ -348,7 +447,174 @@ export function createDownloadPool(
     }
     await Promise.all(waiting);
   }
+  function storedToken(value: string | undefined, path: string): Token | undefined {
+    if (value === undefined) return undefined;
+    let token: Token;
+    try {
+      token = z
+        .strictObject({ url: z.string().max(128 * 1024), expiresAt: z.number().int() })
+        .parse(JSON.parse(value));
+    } catch {
+      throw invalid();
+    }
+    if (token.expiresAt <= Date.now()) return undefined;
+    if (
+      token.expiresAt > Date.now() + 930_000 ||
+      Buffer.byteLength(token.url) > estimatedTokenBytes(path)
+    )
+      throw invalid();
+    target(token.url);
+    return token;
+  }
+  async function prefetchShared(identifier: string, paths: string[], timing?: FileReadTiming) {
+    if (!shared) return;
+    const normalized = [...new Set(paths.map((path) => relativePath(path).slice(1)))].slice(
+      0,
+      MAX_SCOPE_TOKENS,
+    );
+    const version = await generation(identifier);
+    if (!version) return;
+    const pool = state();
+    const requested: Array<{ path: string; key: string; slot: Slot; version?: string }> = [];
+    const waiting: Promise<void>[] = [];
+    const finished = Promise.withResolvers<void>();
+    let estimatedBytes = 0;
+    for (const path of normalized) {
+      const key = keyFor(identifier, path);
+      const current = pool.slots.get(key);
+      if (current?.pending) {
+        const pending = current.pending;
+        waiting.push(timing ? timing.measure('grant.pendingWait', () => pending) : pending);
+        continue;
+      }
+      if (current?.error && current.expiresAt > Date.now()) {
+        waiting.push(Promise.reject(current.error));
+        continue;
+      }
+      estimatedBytes += estimatedTokenBytes(path);
+      if (estimatedBytes > PREFETCH_BUDGET) break;
+      remove(pool, key);
+      const slot = reserve(pool, key);
+      if (slot) {
+        slot.pending = finished.promise;
+        requested.push({ path, key, slot });
+      }
+    }
+    if (requested.length) {
+      const prepare = async () => {
+        const missing: typeof requested = [];
+        const markers = new Map<string, Promise<string | undefined>>();
+        // Bound outstanding Redis work as well as provider grant batches.
+        for (let offset = 0; offset < requested.length; offset += 32) {
+          const chunk = requested.slice(offset, offset + 32);
+          const cached = await Promise.all(
+            chunk.map(async (item) => {
+              item.version = await pathGeneration(identifier, item.path, version, markers);
+              return item.version
+                ? shared.get(grantKey(identifier, item.version, item.path)).catch(() => undefined)
+                : undefined;
+            }),
+          );
+          for (let index = 0; index < chunk.length; index++) {
+            const item = chunk[index];
+            if (item?.version && !storedToken(cached[index], item.path)) missing.push(item);
+          }
+        }
+        const tokens = missing.length
+          ? await issue(
+              identifier,
+              missing.map(({ path }) => path),
+              false,
+              timing,
+            )
+          : [];
+        for (let offset = 0; offset < missing.length; offset += 32) {
+          await Promise.all(
+            missing.slice(offset, offset + 32).map(async (item, index) => {
+              const token = tokens?.[offset + index];
+              if (!token || !item.version || pool.slots.get(item.key) !== item.slot) return;
+              const ttl = token.expiresAt - Date.now();
+              if (ttl > 0)
+                await shared
+                  .put(grantKey(identifier, item.version, item.path), JSON.stringify(token), ttl)
+                  .catch(() => {});
+            }),
+          );
+        }
+      };
+      void prepare()
+        .then(finished.resolve, (error: unknown) => {
+          const safe = error instanceof PterodactylError ? error : invalid();
+          for (const { key, slot } of requested) {
+            if (pool.slots.get(key) !== slot) continue;
+            slot.error = safe;
+            slot.expiresAt = Date.now() + Math.max(1000, safe.retryAfterMs ?? 5000);
+          }
+          finished.reject(safe);
+        })
+        .finally(() => {
+          for (const { key, slot } of requested) {
+            slot.pending = undefined;
+            if (pool.slots.get(key) === slot && !slot.error) remove(pool, key);
+          }
+        });
+      waiting.push(finished.promise);
+    }
+    await Promise.all(waiting);
+  }
+  async function nativeGrant(identifier: string, path: string, timing?: FileReadTiming) {
+    const request = () =>
+      transport.entity(
+        'client',
+        `servers/${segment(identifier)}/files/download?file=${encodeURIComponent(relativePath(path))}`,
+        z.object({ url: z.string() }),
+        'GET',
+        undefined,
+        false,
+      );
+    const result = timing ? await timing.measure('grant.fallback', request) : await request();
+    target(result.url);
+    return result.url;
+  }
+  async function takeShared(
+    identifier: string,
+    path: string,
+    timing?: FileReadTiming,
+  ): Promise<string> {
+    const key = keyFor(identifier, path);
+    const pool = state();
+    const current = pool.slots.get(key);
+    if (current?.pending) {
+      const pending = current.pending;
+      if (timing) await timing.measure('grant.pendingWait', () => pending);
+      else await pending;
+    }
+    if (current?.error && current.expiresAt > Date.now()) throw current.error;
+    const serverVersion = await generation(identifier);
+    const version = serverVersion
+      ? await pathGeneration(identifier, path, serverVersion)
+      : undefined;
+    const read = () =>
+      shared && version
+        ? shared.take(grantKey(identifier, version, path)).catch(() => undefined)
+        : Promise.resolve(undefined);
+    const cached = timing ? await timing.measure('grant.shared.take', read) : await read();
+    let token = storedToken(cached, path);
+    if (token) {
+      timing?.measureSync('grant.ready', () => {});
+    } else {
+      // Never retry/retain an ambiguously consumed shared grant. A fresh grant
+      // belongs only to this reader and is not published to the shared store.
+      const tokens = await issue(identifier, [relativePath(path).slice(1)], false, timing);
+      if (tokens === null) return nativeGrant(identifier, path, timing);
+      token = tokens[0];
+      if (!token) throw invalid();
+    }
+    void prefetchShared(identifier, [path]).catch(() => {});
+    return token.url;
+  }
   async function take(identifier: string, path: string, timing?: FileReadTiming): Promise<string> {
+    if (shared) return takeShared(identifier, path, timing);
     const pool = state();
     const key = keyFor(identifier, path);
     for (;;) {
@@ -370,18 +636,7 @@ export function createDownloadPool(
       }
       remove(pool, key);
       if (pool.unsupportedUntil > Date.now()) {
-        const request = () =>
-          transport.entity(
-            'client',
-            `servers/${segment(identifier)}/files/download?file=${encodeURIComponent(relativePath(path))}`,
-            z.object({ url: z.string() }),
-            'GET',
-            undefined,
-            false,
-          );
-        const result = timing ? await timing.measure('grant.fallback', request) : await request();
-        target(result.url);
-        return result.url;
+        return nativeGrant(identifier, path, timing);
       }
       await prefetch(identifier, [path], timing);
       if (!pool.slots.has(key) && pool.unsupportedUntil <= Date.now())
@@ -390,9 +645,37 @@ export function createDownloadPool(
   }
   function invalidate(identifier: string, paths?: string[]): void {
     const pool = pools.get(identity);
-    if (!pool) return;
+    if (!pool && !shared) return;
     const prefix = `${segment(identifier)}:`;
     const normalized = paths?.map((path) => keyFor(identifier, path));
+    if (shared && fences) {
+      const key = generationKey(identifier);
+      const invalidate = async () => {
+        if (!paths) return shared.put(key, randomUUID(), 960_000);
+        try {
+          for (let offset = 0; offset < paths.length; offset += 32)
+            await Promise.all(
+              paths
+                .slice(offset, offset + 32)
+                .map((path) =>
+                  shared.put(pathGenerationKey(identifier, path), randomUUID(), 960_000),
+                ),
+            );
+        } catch {
+          // A full cache can replace the existing server fence without needing
+          // a new slot; scoped invalidation normally preserves unrelated grants.
+          await shared.put(key, randomUUID(), 960_000);
+        }
+      };
+      const pending = (fences.get(key) ?? Promise.resolve()).catch(() => {}).then(invalidate);
+      fences.set(key, pending);
+      void pending
+        .finally(() => {
+          if (fences.get(key) === pending) fences.delete(key);
+        })
+        .catch(() => {});
+    }
+    if (!pool) return;
     for (const key of pool.slots.keys()) {
       if (
         key.startsWith(prefix) &&
