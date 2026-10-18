@@ -29,6 +29,21 @@ interface ArchiveJournal {
   retrySafe?: boolean;
 }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+type ArchiveStage =
+  | 'preflight'
+  | 'authorization'
+  | 'root_listing'
+  | 'quota'
+  | 'upload_token'
+  | 'claim'
+  | 'claim_journal'
+  | 'upload'
+  | 'validation'
+  | 'manifest'
+  | 'commit_journal'
+  | 'before_publish'
+  | 'commit'
+  | 'receipts';
 
 /** One sanitized ZIP stream and one node-side commit. The exact commit request is
  * durable before dispatch: recovery replays only the provider's operation receipt,
@@ -40,50 +55,91 @@ export async function uploadFilemanArchive(
 ) {
   // A grant/auth failure can occur before the producer starts or its caller awaits it.
   void input.completion.catch(() => {});
-  const identifier = context.server.pterodactyl_identifier;
   const jobId = context.operation().job_id;
-  const skeleton = filemanTransferManifestSchema.parse({
-    id: input.id,
-    destinationRoot: input.destinationRoot,
-    files: input.files.map((file) => ({ ...file, sha256: '0'.repeat(64) })),
-  });
-  if (
-    !identifier ||
-    input.destinationRoot.includes('/') ||
-    input.destinationRoot.startsWith('.nickhosting-import-') ||
-    skeleton.files.length > 10000 ||
-    !/^[a-f0-9]{64}$/.test(input.sourceSha256) ||
-    !Number.isSafeInteger(input.contentLength) ||
-    input.contentLength < 22
-  )
-    throw new DomainError('validation_failed');
-  const binding = hash(
-    JSON.stringify({ skeleton, source: input.sourceSha256, bytes: input.contentLength }),
-  );
-  const phase = `fileman.archive.${binding}`;
-  const bytes = skeleton.files.reduce((total, file) => total + file.size, 0);
-  const identity = await providerFileIdentity(context.db, context.server);
-  if (
-    !Number.isSafeInteger(bytes + input.contentLength) ||
-    Buffer.byteLength(
-      JSON.stringify({
-        operationId: jobId,
-        identity,
+  const debug = context.logger?.isEnabled('debug') === true;
+  const began = debug ? performance.now() : 0;
+  const log = (event: string, data: Record<string, unknown>) => {
+    if (!debug) return;
+    try {
+      context.logger?.log('debug', event, { jobId, serverId: context.server.id, ...data });
+    } catch {
+      /* Diagnostics must not change a transfer or its recovery outcome. */
+    }
+  };
+  const timed = async <T>(
+    stage: ArchiveStage,
+    work: () => Promise<T>,
+    concurrentGroup?: 'preflight' | 'transfer',
+  ): Promise<T> => {
+    if (!debug) return work();
+    const started = performance.now();
+    let outcome = 'error';
+    try {
+      const value = await work();
+      outcome = 'ok';
+      return value;
+    } finally {
+      log('servers.file_archive_stage', {
+        stage,
+        outcome,
+        startOffsetMs: Math.round(started - began),
+        durationMs: Math.round(performance.now() - started),
+        measurement: 'wall',
+        ...(concurrentGroup ? { concurrentGroup } : {}),
+        files: input.files.length,
+        archiveBytes: input.contentLength,
+      });
+    }
+  };
+  const { identifier, skeleton, binding, phase, bytes, identity, actor } = await timed(
+    'preflight',
+    async () => {
+      const identifier = context.server.pterodactyl_identifier;
+      const skeleton = filemanTransferManifestSchema.parse({
+        id: input.id,
         destinationRoot: input.destinationRoot,
-        archiveSha256: '0'.repeat(64),
-        files: input.files.map(({ path, size }) => ({ path, size })),
-      }),
-      'utf8',
-    ) > 4194304
-  )
-    throw new DomainError('validation_failed');
-  const actor = await options.authorize();
+        files: input.files.map((file) => ({ ...file, sha256: '0'.repeat(64) })),
+      });
+      if (
+        !identifier ||
+        input.destinationRoot.includes('/') ||
+        input.destinationRoot.startsWith('.nickhosting-import-') ||
+        skeleton.files.length > 10000 ||
+        !/^[a-f0-9]{64}$/.test(input.sourceSha256) ||
+        !Number.isSafeInteger(input.contentLength) ||
+        input.contentLength < 22
+      )
+        throw new DomainError('validation_failed');
+      const binding = hash(
+        JSON.stringify({ skeleton, source: input.sourceSha256, bytes: input.contentLength }),
+      );
+      const phase = `fileman.archive.${binding}`;
+      const bytes = skeleton.files.reduce((total, file) => total + file.size, 0);
+      const identity = await providerFileIdentity(context.db, context.server);
+      if (
+        !Number.isSafeInteger(bytes + input.contentLength) ||
+        Buffer.byteLength(
+          JSON.stringify({
+            operationId: jobId,
+            identity,
+            destinationRoot: input.destinationRoot,
+            archiveSha256: '0'.repeat(64),
+            files: input.files.map(({ path, size }) => ({ path, size })),
+          }),
+          'utf8',
+        ) > 4194304
+      )
+        throw new DomainError('validation_failed');
+      const actor = await options.authorize();
+      return { identifier, skeleton, binding, phase, bytes, identity, actor };
+    },
+  );
   const authorizations = new Set<Promise<void>>();
   const authorize = () => {
-    const work = (async () => {
+    const work = timed('authorization', async () => {
       await options.authorize();
       await input.beforeWrite?.();
-    })();
+    });
     authorizations.add(work);
     const settled = () => {
       authorizations.delete(work);
@@ -96,9 +152,12 @@ export async function uploadFilemanArchive(
     // cancelling that callback's DB query. Keep the connection until it finishes.
     while (authorizations.size) await Promise.allSettled([...authorizations]);
   };
-  const receipt = (manifest: FilemanTransferManifest) => ({
+  const receipt = (
+    manifest: FilemanTransferManifest,
+    digest = filemanTransferDigest(manifest),
+  ) => ({
     id: input.id,
-    digest: filemanTransferDigest(manifest),
+    digest,
     files: manifest.files.length,
     bytes,
     manifest,
@@ -185,59 +244,65 @@ export async function uploadFilemanArchive(
       // Recovery must repeat the current game guard, even if a prior invocation
       // passed it. An existing provider receipt does not authorize a new game state.
       await authorize();
-      await input.beforePublish(manifest);
+      await timed('before_publish', () => input.beforePublish(manifest));
       journal = { ...journal, commitDispatched: true };
-      await persist(journal);
-      const confirmed = await context.adapter.commitFileArchive(identifier, request);
+      await timed('commit_journal', () => persist(journal));
+      const confirmed = await timed('commit', () =>
+        context.adapter.commitFileArchive(identifier, request, debug ? true : undefined),
+      );
+      if (confirmed.timings) log('servers.file_archive_provider', { timings: confirmed.timings });
       if (confirmed.state !== 'confirmed') throw new DomainError('operation_uncertain');
+      const digest = filemanTransferDigest(manifest);
       // Receipt and capacity settlement are atomic. A crash before the final plan
       // update can replay the exact provider receipt and finish without a claim.
-      await context.db.transaction().execute(async (tx) => {
-        await lockResources(tx);
-        const removed = await tx
-          .deleteFrom('upload_ingestion_claims')
-          .where('id', '=', claimId)
-          .where('server_id', '=', context.server.id)
-          .where('scope_hash', '=', journal.claimScopeHash as string)
-          .returning('id')
-          .executeTakeFirst();
-        const step = filemanTransferReceiptStep(filemanTransferDigest(manifest));
-        if (
-          !removed &&
-          !(await tx
-            .selectFrom('job_steps')
-            .select('step')
-            .where('job_id', '=', jobId)
-            .where('step', '=', step)
-            .executeTakeFirst())
-        )
-          throw new DomainError('operation_uncertain');
-        await tx
-          .insertInto('job_steps')
-          .values({ job_id: jobId, step })
-          .onConflict((conflict) => conflict.columns(['job_id', 'step']).doNothing())
-          .execute();
-        if (removed)
-          await recordAudit(tx, actor, 'server.upload.confirmed', {
-            claimId,
-            serverId: context.server.id,
-          });
-      });
-      await context.update({
-        plan: {
-          ...context.operation().plan,
-          fileArchive: { ...journal, completed: true },
-          fileTransfer: {
-            id: input.id,
-            digest: filemanTransferDigest(manifest),
-            completedFiles: manifest.files.length,
-            totalFiles: manifest.files.length,
-            completedBytes: bytes,
-            totalBytes: bytes,
+      await timed('receipts', async () => {
+        await context.db.transaction().execute(async (tx) => {
+          await lockResources(tx);
+          const removed = await tx
+            .deleteFrom('upload_ingestion_claims')
+            .where('id', '=', claimId)
+            .where('server_id', '=', context.server.id)
+            .where('scope_hash', '=', journal.claimScopeHash as string)
+            .returning('id')
+            .executeTakeFirst();
+          const step = filemanTransferReceiptStep(digest);
+          if (
+            !removed &&
+            !(await tx
+              .selectFrom('job_steps')
+              .select('step')
+              .where('job_id', '=', jobId)
+              .where('step', '=', step)
+              .executeTakeFirst())
+          )
+            throw new DomainError('operation_uncertain');
+          await tx
+            .insertInto('job_steps')
+            .values({ job_id: jobId, step })
+            .onConflict((conflict) => conflict.columns(['job_id', 'step']).doNothing())
+            .execute();
+          if (removed)
+            await recordAudit(tx, actor, 'server.upload.confirmed', {
+              claimId,
+              serverId: context.server.id,
+            });
+        });
+        await context.update({
+          plan: {
+            ...context.operation().plan,
+            fileArchive: { ...journal, completed: true },
+            fileTransfer: {
+              id: input.id,
+              digest,
+              completedFiles: manifest.files.length,
+              totalFiles: manifest.files.length,
+              completedBytes: bytes,
+              totalBytes: bytes,
+            },
           },
-        },
+        });
       });
-      return receipt(manifest);
+      return receipt(manifest, digest);
     } finally {
       await sql`select pg_advisory_unlock(hashtextextended(current_schema() || ${lockKey},0))`.execute(
         context.db,
@@ -269,33 +334,61 @@ export async function uploadFilemanArchive(
     !previous?.retrySafe
   )
     throw new DomainError('operation_uncertain');
-  if (serverStorageLimitBytes(context.server.limits.disk) !== null) {
-    const usage = await context.adapter.getResources(identifier);
-    assertServerStorageCapacity(
-      context.server.limits.disk,
-      usage.resources.disk_bytes + bytes + input.contentLength,
-    );
-  }
+  await authorize();
+  const scratch = `.nickhosting-import-${jobId}`;
+  // These authenticated provider reads are independent. A signed URL grants
+  // no write until send() is called. Join every branch even when one fails;
+  // neither body consumption nor admission begins before all gates pass.
+  const ready = await Promise.allSettled([
+    timed(
+      'root_listing',
+      async () => {
+        const root = await context.adapter.listFiles(identifier, '');
+        if (
+          root.some((entry) =>
+            [scratch.toLowerCase(), input.destinationRoot.toLowerCase()].includes(
+              entry.name.toLowerCase(),
+            ),
+          )
+        )
+          throw new DomainError('conflict');
+      },
+      'preflight',
+    ),
+    timed(
+      'quota',
+      async () => {
+        if (serverStorageLimitBytes(context.server.limits.disk) === null) return;
+        const usage = await context.adapter.getResources(identifier);
+        assertServerStorageCapacity(
+          context.server.limits.disk,
+          usage.resources.disk_bytes + bytes + input.contentLength,
+        );
+      },
+      'preflight',
+    ),
+    timed(
+      'upload_token',
+      () => context.adapter.prepareUpload(identifier, `${scratch}/payload.zip`),
+      'preflight',
+    ),
+  ]);
+  for (const outcome of ready) if (outcome.status === 'rejected') throw outcome.reason;
+  const prepared = ready[2];
+  if (prepared.status !== 'fulfilled') throw new DomainError('operation_uncertain');
+  const send = prepared.value;
   let result: ReturnType<typeof receipt> | undefined;
   await context.effect(phase, async () => {
     await authorize();
-    const scratch = `.nickhosting-import-${jobId}`;
-    const root = await context.adapter.listFiles(identifier, '');
-    if (
-      root.some((entry) =>
-        [scratch.toLowerCase(), input.destinationRoot.toLowerCase()].includes(
-          entry.name.toLowerCase(),
-        ),
-      )
-    )
-      throw new DomainError('conflict');
-    const claim = await reserveUploadIngestion(
-      context.db,
-      actor,
-      context.server.id,
-      input.contentLength + bytes,
-      options.env,
-      { operationId: jobId, multipartCount: 1, providerLargestFileBytes: input.contentLength },
+    const claim = await timed('claim', () =>
+      reserveUploadIngestion(
+        context.db,
+        actor,
+        context.server.id,
+        input.contentLength + bytes,
+        options.env,
+        { operationId: jobId, multipartCount: 1, providerLargestFileBytes: input.contentLength },
+      ),
     );
     let dispatched = false;
     let settled = false;
@@ -313,18 +406,20 @@ export async function uploadFilemanArchive(
       if (body && !body.locked) void body.cancel(reason).catch(() => {});
     };
     try {
-      const stored = await context.db
-        .selectFrom('upload_ingestion_claims')
-        .select('scope_hash')
-        .where('id', '=', claim.id)
-        .executeTakeFirstOrThrow();
-      let journal: ArchiveJournal = {
-        binding,
-        claimId: claim.id,
-        claimScopeHash: stored.scope_hash,
-      };
-      await persist(journal);
-      const send = await context.adapter.prepareUpload(identifier, `${scratch}/payload.zip`);
+      let journal = await timed('claim_journal', async () => {
+        const stored = await context.db
+          .selectFrom('upload_ingestion_claims')
+          .select('scope_hash')
+          .where('id', '=', claim.id)
+          .executeTakeFirstOrThrow();
+        const value: ArchiveJournal = {
+          binding,
+          claimId: claim.id,
+          claimScopeHash: stored.scope_hash,
+        };
+        await persist(value);
+        return value;
+      });
       const archiveHash = createHash('sha256');
       let sentBytes = 0;
       body = input.open().pipeThrough(
@@ -340,34 +435,46 @@ export async function uploadFilemanArchive(
         }),
         { signal: controller.signal },
       );
+      // These spans overlap and include backpressure. They are wall-clock
+      // observations, not additive phases or a measure of inflater CPU time.
+      const verifying = timed('validation', () => input.completion, 'transfer');
       dispatched = true;
       // Fail fast: waiting for allSettled hangs when a token/connection failure
       // happens before the sender reads the stream and its completion is pending.
-      sending = send({
-        body,
-        contentLength: input.contentLength,
-        maxBytes: input.contentLength,
-        authorize,
-        signal: controller.signal,
-      });
-      const [, verified] = await Promise.all([sending, input.completion]);
+      const uploadBody = body;
+      sending = timed(
+        'upload',
+        () =>
+          send({
+            body: uploadBody,
+            contentLength: input.contentLength,
+            maxBytes: input.contentLength,
+            authorize,
+            signal: controller.signal,
+          }),
+        'transfer',
+      );
+      const [, verified] = await Promise.all([sending, verifying]);
       await drainAuthorizations();
-      const manifest = checkedManifest({
-        id: input.id,
-        destinationRoot: input.destinationRoot,
-        files: verified.files,
+      const { manifest, request } = await timed('manifest', async () => {
+        const manifest = checkedManifest({
+          id: input.id,
+          destinationRoot: input.destinationRoot,
+          files: verified.files,
+        });
+        if (verified.bytes !== bytes || sentBytes !== input.contentLength)
+          throw new DomainError('conflict');
+        const request: FileArchiveCommit = {
+          operationId: jobId,
+          identity,
+          destinationRoot: input.destinationRoot,
+          archiveSha256: archiveHash.digest('hex'),
+          files: manifest.files.map(({ path, size }) => ({ path, size })),
+        };
+        return { manifest, request };
       });
-      if (verified.bytes !== bytes || sentBytes !== input.contentLength)
-        throw new DomainError('conflict');
-      const request: FileArchiveCommit = {
-        operationId: jobId,
-        identity,
-        destinationRoot: input.destinationRoot,
-        archiveSha256: archiveHash.digest('hex'),
-        files: manifest.files.map(({ path, size }) => ({ path, size })),
-      };
       journal = { ...journal, manifest, request, commitDispatched: false, completed: false };
-      await persist(journal);
+      await timed('commit_journal', () => persist(journal));
       result = await publish(journal);
       settled = true;
     } catch (error) {

@@ -61,9 +61,9 @@ class PackageTests(unittest.TestCase):
         with zipfile.ZipFile(self.output) as archive:
             for name in ('app/Services/TechnicalAccounts.php', 'app/Http/Middleware/TechnicalAccountAccess.php', 'private/migrations/2026_10_12_000003_nickhosting_technical_users.php'):
                 self.assertIn(name, archive.namelist())
-            self.assertIn(b'version: 1.6.0\n', archive.read('conf.yml'))
-            self.assertIn(b"'extensionVersion' => '1.6.0'", archive.read('app/Http/Controllers/CapabilitiesController.php'))
-            self.assertIn(b'<small>1.6.0</small>', archive.read('admin/view.blade.php'))
+            self.assertIn(b'version: 1.6.1\n', archive.read('conf.yml'))
+            self.assertIn(b"'extensionVersion' => '1.6.1'", archive.read('app/Http/Controllers/CapabilitiesController.php'))
+            self.assertIn(b'<small>1.6.1</small>', archive.read('admin/view.blade.php'))
 
     def test_client_upload_route_and_authorization_packaged(self):
         packager.build(self.source, self.output)

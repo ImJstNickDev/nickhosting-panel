@@ -38,11 +38,16 @@ final class ArchiveCommitController
             return new JsonResponse($receipt, 200, ['Cache-Control' => 'no-store']);
         }
         $dispatched = false;
+        // Explicit backend diagnostics only; never part of the durable operation fingerprint.
+        $timings = [];
+        $trace = ($input['trace'] ?? false) === true ? static function (string $stage, float $durationMs) use (&$timings) {
+            $timings[$stage] = round($durationMs, 3);
+        } : null;
         try {
             $this->files->setServer($server)->commitArchive($input['operationId'], $input['destinationRoot'], $manifest, function () use ($operation, &$dispatched) {
                 $operation->update(['state' => 'sent', 'updated_at' => now()]);
                 $dispatched = true;
-            });
+            }, $trace);
         } catch (\Throwable $error) {
             if (!$dispatched) {
                 $status = $error instanceof \Symfony\Component\HttpKernel\Exception\HttpExceptionInterface ? $error->getStatusCode() : 502;
@@ -50,10 +55,12 @@ final class ArchiveCommitController
                 abort($status);
             }
             $operation->update(['state' => 'uncertain', 'updated_at' => now()]);
+            if ($trace !== null) { $receipt['timings'] = $timings; }
             return new JsonResponse($receipt, 200, ['Cache-Control' => 'no-store']);
         }
         $operation->update(['state' => 'confirmed', 'updated_at' => now()]);
         $receipt['state'] = 'confirmed';
+        if ($trace !== null) { $receipt['timings'] = $timings; }
         return new JsonResponse($receipt, 200, ['Cache-Control' => 'no-store']);
     }
 }

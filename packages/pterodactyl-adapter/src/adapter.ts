@@ -355,9 +355,9 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       getFileOperationCapabilities(transport, identifier),
     inspectFileOperation: (identifier: string, input: { target: string; guardFile: string }) =>
       inspectFileOperation(transport, identifier, input),
-    commitFileArchive(identifier: string, input: FileArchiveCommit) {
+    commitFileArchive(identifier: string, input: FileArchiveCommit, trace = false) {
       fileDownloads.invalidate(identifier, [input.destinationRoot]);
-      return commitFileArchive(transport, identifier, input).finally(() =>
+      return commitFileArchive(transport, identifier, input, trace).finally(() =>
         fileDownloads.invalidate(identifier, [input.destinationRoot]),
       );
     },

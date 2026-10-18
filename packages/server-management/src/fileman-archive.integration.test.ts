@@ -1,9 +1,13 @@
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
-import { DomainError } from '@nickhosting/core';
+import { createLogger, DomainError, type LogRecord } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { FilemanJobServices } from '@nickhosting/game-sdk';
-import type { FileArchiveCommit, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
+import type {
+  FileArchiveCommit,
+  FileArchiveReceipt,
+  PterodactylAdapter,
+} from '@nickhosting/pterodactyl-adapter';
 import { sql } from 'kysely';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -12,7 +16,7 @@ import {
 } from '../../pterodactyl-adapter/src/upload-dispatch.js';
 import { uploadFilemanArchive } from './fileman-archive.js';
 import { filemanTransferDigest, filemanTransferReceiptStep } from './fileman-transfers.js';
-import type { GameLifecycleContext } from './lifecycle.js';
+import { type GameLifecycleContext, processServerOperation } from './lifecycle.js';
 import { managementFixture } from './test-fixtures.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
@@ -75,10 +79,16 @@ describe('Fileman archive durable transfer', () => {
       getResources: vi.fn(async () => ({ resources: { disk_bytes: 0 } })),
       listFiles: vi.fn(async () => []),
       prepareUpload: vi.fn(async () => send),
-      commitFileArchive: vi.fn(async (_id: string, request: FileArchiveCommit) => ({
-        ...request,
-        state: 'confirmed' as const,
-      })),
+      commitFileArchive: vi.fn(
+        async (
+          _id: string,
+          request: FileArchiveCommit,
+          _trace?: boolean,
+        ): Promise<FileArchiveReceipt> => ({
+          ...request,
+          state: 'confirmed' as const,
+        }),
+      ),
     };
     const update = vi.fn(async (patch: Parameters<GameLifecycleContext['update']>[0]) => {
       await db
@@ -193,6 +203,270 @@ describe('Fileman archive durable transfer', () => {
       expect(await f.run(replay)).toEqual(receipt);
       expect(replay.open).not.toHaveBeenCalled();
       expect(f.adapter.commitFileArchive).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('overlaps the independent provider checks and token request, but waits for every gate before admission or streaming', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const input = f.input();
+      const entered = new Set<string>();
+      const allEntered = Promise.withResolvers<void>();
+      const roots = Promise.withResolvers<never[]>();
+      const quota = Promise.withResolvers<{ resources: { disk_bytes: number } }>();
+      const token = Promise.withResolvers<typeof f.send>();
+      const mark = (name: string) => {
+        entered.add(name);
+        if (entered.size === 3) allEntered.resolve();
+      };
+      f.adapter.listFiles.mockImplementationOnce(async () => {
+        mark('root');
+        return roots.promise;
+      });
+      f.adapter.getResources.mockImplementationOnce(async () => {
+        mark('quota');
+        return quota.promise;
+      });
+      f.adapter.prepareUpload.mockImplementationOnce(async () => {
+        mark('token');
+        return token.promise;
+      });
+      const running = f.run(input);
+      await allEntered.promise;
+      expect(f.options.authorize).toHaveBeenCalled();
+      expect(input.beforeWrite).toHaveBeenCalled();
+      expect(input.open).not.toHaveBeenCalled();
+      expect(await f.claims()).toEqual([]);
+      roots.resolve([]);
+      token.resolve(f.send);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(input.open).not.toHaveBeenCalled();
+      expect(await f.claims()).toEqual([]);
+      quota.resolve({ resources: { disk_bytes: 0 } });
+      await running;
+      expect(input.open).toHaveBeenCalledOnce();
+      expect(await f.claims()).toEqual([]);
+    });
+  });
+
+  it.each(['root', 'quota', 'token'] as const)(
+    'joins outstanding preflight work after %s fails and permits a proven undispatched retry',
+    async (failed) => {
+      await database.db.connection().execute(async (db) => {
+        const f = await fixture(db);
+        const input = f.input();
+        const failure = new DomainError('conflict');
+        const entered = new Set<string>();
+        const allEntered = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        const read = async (name: string) => {
+          entered.add(name);
+          if (entered.size === 3) allEntered.resolve();
+          if (name === failed) throw failure;
+          await release.promise;
+        };
+        f.adapter.listFiles.mockImplementationOnce(async () => {
+          await read('root');
+          return [];
+        });
+        f.adapter.getResources.mockImplementationOnce(async () => {
+          await read('quota');
+          return { resources: { disk_bytes: 0 } };
+        });
+        f.adapter.prepareUpload.mockImplementationOnce(async () => {
+          await read('token');
+          return f.send;
+        });
+        const running = f.run(input);
+        let finished = false;
+        const observed = running.then(
+          () => {
+            finished = true;
+          },
+          () => {
+            finished = true;
+          },
+        );
+        await allEntered.promise;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(finished).toBe(false);
+        expect(input.open).not.toHaveBeenCalled();
+        expect(await f.claims()).toEqual([]);
+        release.resolve();
+        await expect(running).rejects.toBe(failure);
+        await observed;
+        expect(f.context.effect).not.toHaveBeenCalled();
+        expect(f.adapter.commitFileArchive).not.toHaveBeenCalled();
+        await f.reload();
+        await f.run(f.input());
+        expect(f.send).toHaveBeenCalledOnce();
+      });
+    },
+  );
+
+  it('emits separate debug wall-clock upload/validation spans and optional nested provider timing without file paths', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const logs: LogRecord[] = [];
+      f.context.logger = createLogger((record) => logs.push(record), { level: 'debug' });
+      f.adapter.commitFileArchive.mockImplementationOnce(async (_id, request) => ({
+        ...request,
+        state: 'confirmed',
+        timings: { decompress: 12, rename: 2 },
+      }));
+      await f.run(f.input());
+      const stages = logs
+        .filter((record) => record.event === 'servers.file_archive_stage')
+        .map((record) => record.data as Record<string, unknown>);
+      expect(stages.map((data) => data.stage)).toEqual(
+        expect.arrayContaining([
+          'preflight',
+          'root_listing',
+          'quota',
+          'upload_token',
+          'claim',
+          'claim_journal',
+          'upload',
+          'validation',
+          'manifest',
+          'commit_journal',
+          'before_publish',
+          'commit',
+          'receipts',
+        ]),
+      );
+      for (const data of stages)
+        expect(data).toMatchObject({
+          outcome: 'ok',
+          measurement: 'wall',
+          startOffsetMs: expect.any(Number),
+          durationMs: expect.any(Number),
+          files: 3,
+          archiveBytes: 128,
+        });
+      for (const stage of ['upload', 'validation'])
+        expect(stages.find((data) => data.stage === stage)).toMatchObject({
+          concurrentGroup: 'transfer',
+        });
+      expect(f.adapter.commitFileArchive.mock.calls[0]?.[2]).toBe(true);
+      expect(
+        logs.find((record) => record.event === 'servers.file_archive_provider')?.data,
+      ).toMatchObject({ timings: { decompress: 12, rename: 2 } });
+      expect(JSON.stringify(logs)).not.toContain('new-world');
+      expect(JSON.stringify(logs)).not.toContain('payload.zip');
+    });
+  });
+
+  it('preserves terminal quota rejection in the real lifecycle without preparing an effect or dispatching bytes', async () => {
+    const f = await fixture();
+    const db = database.db;
+    const jobId = f.context.operation().job_id;
+    const server = f.context.server;
+    const input = f.input();
+    await db
+      .updateTable('server_operations')
+      .set({
+        action: 'minecraft-content',
+        phase: 'planned',
+        effect_state: 'none',
+        effect_started_at: null,
+        plan: JSON.stringify({
+          minecraftContent: {
+            command: { kind: 'world-import', archiveRef: jobId, targetWorld: 'new-world' },
+            world: { existing: false },
+            backupBefore: false,
+            deletePaths: [],
+          },
+        }),
+      })
+      .where('job_id', '=', jobId)
+      .execute();
+    const node = await db
+      .selectFrom('managed_nodes')
+      .select('pterodactyl_node_id')
+      .where('id', '=', server.node_id)
+      .executeTakeFirstOrThrow();
+    const allocations = await db
+      .selectFrom('server_allocations')
+      .selectAll()
+      .where('server_id', '=', server.id)
+      .execute();
+    const primary = allocations.find((entry) => entry.is_primary);
+    f.adapter.getResources.mockResolvedValue({
+      resources: { disk_bytes: server.limits.disk * 1048576 },
+    });
+    const adapter = {
+      ...f.adapter,
+      getApplicationServer: vi.fn(async () => ({
+        id: server.pterodactyl_id,
+        uuid: server.pterodactyl_uuid,
+        identifier: server.pterodactyl_identifier,
+        external_id: server.external_id,
+        node: node.pterodactyl_node_id,
+        user: server.provider_user_id,
+        allocation: primary?.pterodactyl_allocation_id,
+        relationships: {
+          allocations: {
+            data: allocations.map((entry) => ({
+              attributes: {
+                id: entry.pterodactyl_allocation_id,
+                assigned: true,
+                ip: entry.address,
+                port: entry.port,
+              },
+            })),
+          },
+        },
+      })),
+    } as unknown as PterodactylAdapter;
+    const checkpoint = vi.fn(async () => {});
+    expect(
+      await processServerOperation(db, jobId, {
+        adapter,
+        authorizeEffect: async () => {},
+        checkpoint,
+        processGameContent: async (context) => {
+          await uploadFilemanArchive(context, f.options, input);
+          return true;
+        },
+      }),
+    ).toBe('failed');
+    expect(
+      await db
+        .selectFrom('operation_jobs')
+        .select(['state', 'error_code'])
+        .where('id', '=', jobId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ state: 'failed', error_code: 'resources_unavailable' });
+    expect(
+      await db
+        .selectFrom('server_operations')
+        .select(['effect_state', 'effect_started_at'])
+        .where('job_id', '=', jobId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ effect_state: 'none', effect_started_at: null });
+    expect(checkpoint).not.toHaveBeenCalled();
+    expect(input.open).not.toHaveBeenCalled();
+    expect(f.adapter.prepareUpload).toHaveBeenCalledOnce();
+    expect(f.adapter.commitFileArchive).not.toHaveBeenCalled();
+    expect(await f.claims()).toEqual([]);
+  });
+
+  it('keeps archive diagnostics disabled at info level and tolerates a failing debug sink', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const sink = vi.fn();
+      f.context.logger = createLogger(sink, { level: 'info' });
+      await f.run(f.input());
+      expect(sink).not.toHaveBeenCalled();
+      expect(f.adapter.commitFileArchive.mock.calls[0]?.[2]).toBeUndefined();
+      f.context.logger = createLogger(
+        () => {
+          throw new Error('sink failed');
+        },
+        { level: 'debug' },
+      );
+      await expect(f.run(f.input())).resolves.toMatchObject({ files: 3 });
     });
   });
 

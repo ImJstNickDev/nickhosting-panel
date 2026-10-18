@@ -58,6 +58,7 @@ type Result =
 export interface GameLifecycleContext {
   /** Scoped Fileman host services for trusted integration file operations. */
   fileman?: FilemanJobServices;
+  logger?: ReturnType<typeof createLogger>;
   db: Kysely<Database>;
   server: Server;
   adapter: PterodactylAdapter;
@@ -1290,6 +1291,7 @@ export async function processServerOperation(
       const context: GameLifecycleContext = {
         db,
         server,
+        logger: options.logger,
         adapter: options.adapter,
         operation: () => operation,
         update,

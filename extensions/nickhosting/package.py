@@ -93,6 +93,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output", type=Path,
-        default=ROOT.parent.parent / "build/blueprint/1.6.0/nickhosting.blueprint",
+        default=ROOT.parent.parent / "build/blueprint/1.6.1/nickhosting.blueprint",
     )
     print(build(ROOT, parser.parse_args().output))

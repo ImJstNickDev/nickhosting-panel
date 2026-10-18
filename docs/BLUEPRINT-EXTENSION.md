@@ -901,3 +901,36 @@ would reintroduce seeding and recursive permission changes during rollback.
 Private configuration copies and exact guarded activation/rollback commands are
 retained locally. No game files, database dump or whole `/app` backup was made.
 See the [validation record](M5-VALIDATION.md#panelwings-mount-separation-validation--2026-10-18).
+
+
+### 1.6.1 — Shared Wings transport for world publication
+
+The previous archive commit created a fresh native Guzzle client for every
+request. Each owned a different cURL multi-handler; waiting on a pair of promises
+therefore drove separate handlers sequentially and discarded reusable connections.
+1.6.1 uses one operation-local client for metadata reads and bounded asynchronous
+mutations, never a cross-server or process-global credential cache. Verification
+refills the existing configured concurrency window as requests finish (default
+`directoryConcurrency=2`), rather than waiting at pair boundaries.
+
+Exact extracted-manifest verification is retained: Wings v1.11.13 can skip
+ignored/denylisted files without failing decompression. Both rename readbacks
+remain because its route can return success for a missing source. The logical
+request count remains `D + 8`, where D includes the staging root and every
+manifest directory. The improvement is actual concurrency and connection reuse,
+not a claim that every verification request was eliminated. Current target
+checks remain observations, not a filesystem compare-and-swap against writers
+outside NickHosting.
+
+`archive-commit` optionally accepts `trace: true`. Only that attempt returns
+`timings` in milliseconds for preflight, decompression, tree verification,
+destination check, rename, readback and cleanup. A receipt replay has no historical
+timings and does not repeat effects. The flag is excluded from the durable
+fingerprint. Core requests it only at debug level, omits it when the additional
+bytes would exceed the existing 4 MiB body limit, and treats malformed diagnostics
+as unavailable rather than invalidating a valid receipt. No credentials, paths or
+file contents enter the diagnostic output. Existing 1.6.0 bridges remain readable.
+
+This patch adds no route, permission, migration or setting. Its bounded updater
+permits only the six reviewed transport/version files and no other package changes;
+see [activation and rollback](../extensions/nickhosting/UPDATE-INSTALLED.md).

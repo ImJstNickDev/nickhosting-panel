@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLogger, DomainError, encryptionKeyFromBase64, SecretCodec } from '@nickhosting/core';
-import { createDatabase } from '@nickhosting/database';
+import { createDatabase, getSettings } from '@nickhosting/database';
 import { processJob, startJobWorker } from '@nickhosting/jobs';
 import {
   createManagementRuntime,
@@ -18,14 +18,15 @@ import { reconcileServers } from './reconcile.js';
 import { pollSchedules } from './schedules.js';
 
 export async function main(env: NodeJS.ProcessEnv = process.env) {
-  const logger = createLogger((record) => {
-    process.stdout.write(`${JSON.stringify(record)}\n`);
-  });
   if (!env.DATABASE_URL || !env.REDIS_URL || !env.NH_JOB_PREFIX)
     throw new DomainError('configuration_invalid');
   const { db, pool } = createDatabase(env.DATABASE_URL);
   const transportCoordinator = createManagementTransportCoordinator();
   try {
+    const settings = await getSettings(db, env);
+    const logger = createLogger((record) => process.stdout.write(`${JSON.stringify(record)}\n`), {
+      level: settings.values.logLevel,
+    });
     const management = async () => {
       if (!env.NH_SECRETS_MASTER_KEY) throw new DomainError('configuration_invalid');
       const keyId = env.NH_SECRETS_KEY_ID ?? 'primary';

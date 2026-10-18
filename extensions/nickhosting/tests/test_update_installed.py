@@ -31,11 +31,11 @@ echo 'passed';
 '''.replace('FUNCTION', function).encode()
         self.assertEqual(u.docker(os.environ['NH_BLUEPRINT_TEST_CONTAINER'], ['php'], source), b'passed')
 
-    def fixture(self):
-        new = {name: (u.HERE / name).read_bytes() for name in u.packager.FILES}
+    def fixture(self, before='1.5.0', after='1.6.0'):
+        new = {name: (u.HERE / name).read_bytes().replace(b'1.6.1',after.encode()) for name in u.packager.FILES}
         baseline = dict(new)
-        baseline['conf.yml'] = baseline['conf.yml'].replace(b'1.6.0', b'1.5.0')
-        prefix = b'@extends(\'layouts.admin\')\n$EXTENSION_ID = "nickhosting";\n$EXTENSION_VERSION = "1.5.0";\n@yield(\'extension.description\')'
+        baseline['conf.yml'] = baseline['conf.yml'].replace(after.encode(),before.encode())
+        prefix = b'@extends(\'layouts.admin\')\n$EXTENSION_ID = "nickhosting";\n$EXTENSION_VERSION = "'+before.encode()+b'";\n@yield(\'extension.description\')'
         installed = {}
         for source, body in baseline.items():
             body = u.expand(body)
@@ -72,6 +72,29 @@ echo 'passed';
         old, new, installed = self.fixture()
         with self.assertRaisesRegex(ValueError, 'Only reviewed'):
             u.make_plan(old, '1.4.0', new, '1.6.0', installed)
+
+    def test_patch_preserves_metadata_and_limits_changed_files(self):
+        old, new, installed = self.fixture('1.6.0','1.6.1')
+        path='app/Services/FileOperationRepository.php'
+        old[path]=b'<?php /* previous reviewed transport */'
+        installed[u.destination(path)]=u.next_state(old[path],None,{'uid':100,'gid':101})
+        plan=u.make_plan(old,'1.6.0',new,'1.6.1',installed)
+        self.assertEqual(set(plan['changes']),{u.STORE,u.ADMIN_VIEW,u.destination(path)})
+        self.assertEqual(plan['after'][u.destination(path)]['mode'],0o644)
+        new['app/Services/TechnicalAccounts.php']+=b'\n// unrelated'
+        with self.assertRaisesRegex(ValueError,'outside reviewed'):
+            u.make_plan(old,'1.6.0',new,'1.6.1',installed)
+
+    def test_patch_rejects_inventory_or_migration_changes(self):
+        old,new,installed=self.fixture('1.6.0','1.6.1')
+        migration='private/migrations/2026_10_18_000005_nickhosting_file_operations.php'
+        new[migration]+=b'\n// changed'
+        with self.assertRaisesRegex(ValueError,'outside reviewed'):
+            u.make_plan(old,'1.6.0',new,'1.6.1',installed)
+        new[migration]=old[migration]
+        old.pop('app/Services/FileOperationPaths.php')
+        with self.assertRaisesRegex(ValueError,'outside reviewed'):
+            u.make_plan(old,'1.6.0',new,'1.6.1',installed)
 
     def test_new_paths_copy_only_owner_and_group(self):
         old, new, installed = self.fixture()
@@ -115,6 +138,7 @@ echo 'passed';
         self.assertNotIn("'view:clear'", source)
         self.assertNotIn("'chown','-R'", source)
         self.assertIn("'--path='+MIGRATION", source)
+        self.assertIn("if report['migration']:", source)
 
 
 if __name__ == '__main__': unittest.main()

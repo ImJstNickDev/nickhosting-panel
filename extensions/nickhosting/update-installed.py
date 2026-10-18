@@ -32,6 +32,11 @@ LINKS = {
     'routes/blueprint/application/nickhosting.php': '../../../.blueprint/extensions/nickhosting/routers/application.php',
 }
 ACTIVATE_LAST = {CAPABILITIES, CLIENT_ROUTES, ADMIN_VIEW, ADMIN_CONTROLLER, STORE}
+PATCH_FILES = {'conf.yml', 'admin/view.blade.php',
+               'app/Http/Controllers/CapabilitiesController.php',
+               'app/Services/FileOperationRepository.php',
+               'app/Http/Controllers/ArchiveCommitController.php',
+               'app/Http/Requests/ArchiveCommitRequest.php'}
 
 
 def sha(data):
@@ -162,10 +167,13 @@ def next_state(contents, existing, owner):
 
 
 def make_plan(baseline, baseline_version, new, new_version, installed):
-    if baseline_version != '1.5.0' or new_version != '1.6.0':
-        raise ValueError('Only reviewed 1.5.0 -> 1.6.0 layout is supported')
+    if (baseline_version, new_version) not in {('1.5.0', '1.6.0'), ('1.6.0', '1.6.1')}:
+        raise ValueError('Only reviewed 1.5.0 -> 1.6.0 and 1.6.0 -> 1.6.1 layouts are supported')
     if set(new) != set(packager.FILES) or not set(baseline).issubset(new):
         raise ValueError('Unexpected package inventory')
+    if new_version == '1.6.1' and (set(baseline) != set(new) or
+            any(baseline[path] != new[path] for path in new if path not in PATCH_FILES)):
+        raise ValueError('Patch changes files outside reviewed import transport scope')
     previous_view = base64.b64decode(installed[ADMIN_VIEW]['contents'])
     prefix = view_prefix(previous_view, baseline['admin/view.blade.php'], baseline_version)
     for source, old in baseline.items():
@@ -181,7 +189,8 @@ def make_plan(baseline, baseline_version, new, new_version, installed):
         path = destination(source)
         body = expand(content)
         if path == ADMIN_VIEW:
-            prefix_new = prefix.replace(b'$EXTENSION_VERSION = "1.5.0";', b'$EXTENSION_VERSION = "1.6.0";')
+            prefix_new = prefix.replace(b'$EXTENSION_VERSION = "' + baseline_version.encode() + b'";',
+                                        b'$EXTENSION_VERSION = "' + new_version.encode() + b'";')
             body = prefix_new + body.rstrip(b'\n') + b'\n@endsection\n'
         updated[path] = next_state(body, installed[path], installed[CAPABILITIES])
     changes = {path: value for path, value in updated.items() if value != installed[path]}
@@ -240,7 +249,7 @@ def main():
         raise ValueError('Installed content/metadata fingerprint changed since review')
     report = {'mode':'apply' if args.apply else 'dry-run','from':before_version,'to':after_version,
               'installedSha256':plan['installedSha256'],'files':list(plan['changes']),
-              'migration':['php','artisan','migrate','--force','--path='+MIGRATION],
+              'migration':['php','artisan','migrate','--force','--path='+MIGRATION] if before_version == '1.5.0' else None,
               'globalCacheClear':False,'restarts':False,'nativeInstaller':False}
     print(json.dumps(report, indent=2),flush=True)
     if not args.apply:
@@ -255,16 +264,17 @@ def main():
     staged = {p:v for p,v in plan['changes'].items() if p not in ACTIVATE_LAST}
     remote(args.container, allowed, 'write', installed, staged)
     # Exactly this additive extension migration, never Panel migrations or install hooks.
-    try:
-        result = docker(args.container,['php','artisan','migrate','--force','--path='+MIGRATION])
-    except subprocess.CalledProcessError as error:
-        private_save(args.backup_dir/'migration-failed.json', {
-            'exitCode': error.returncode,
-            'output': (error.stdout or b'').decode(errors='replace'),
-            'error': (error.stderr or b'').decode(errors='replace'),
-        })
-        raise
-    private_save(args.backup_dir/'migration.json',{'output':result.decode()})
+    if report['migration']:
+        try:
+            result = docker(args.container,report['migration'])
+        except subprocess.CalledProcessError as error:
+            private_save(args.backup_dir/'migration-failed.json', {
+                'exitCode': error.returncode,
+                'output': (error.stdout or b'').decode(errors='replace'),
+                'error': (error.stderr or b'').decode(errors='replace'),
+            })
+            raise
+        private_save(args.backup_dir/'migration.json',{'output':result.decode()})
     expected = {**installed,**staged}
     activated = {p:v for p,v in plan['changes'].items() if p in ACTIVATE_LAST}
     remote(args.container, allowed, 'write', expected, activated)

@@ -10,11 +10,13 @@ Secrets (Better Auth session secret, encryption key, Discord secret, Pterodactyl
 
 Do not use database seeding to create accounts or default live instance data. Migrations create schema only; initial Owner and Pterodactyl connection are created by a one-time protected setup wizard.
 
-The API logger uses the effective `logLevel` setting at process startup (default
-`info`). Detailed upload timings are collected and emitted only at `debug`;
+The API and worker loggers use the effective `logLevel` setting at process startup
+(default `info`). Detailed upload/archive timings are collected and emitted only at `debug`;
 use `NH_LOG_LEVEL=debug` for a temporary diagnostic override, then restore the
 normal level after the investigation. Applying a logger-level change requires an
-API process reload. Normal request errors and durable audit records remain
+reload of the affected process. Archive diagnostics separate concurrent upload
+and validation spans from Blueprint extraction, tree verification and publication;
+overlapping or nested spans must not be added as sequential time. Normal request errors and durable audit records remain
 available without upload timing diagnostics.
 
 ## Local environment context (never published)

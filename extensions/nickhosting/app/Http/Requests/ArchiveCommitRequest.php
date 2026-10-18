@@ -19,7 +19,7 @@ final class ArchiveCommitRequest extends CreateFolderRequest
     }
     public function rules(): array
     {
-        return ['operationId' => ['required', 'uuid'], 'identity' => ['required', 'array:providerId,providerUuid,identifier,externalId,nodeId'],
+        return ['trace' => ['sometimes', 'boolean'], 'operationId' => ['required', 'uuid'], 'identity' => ['required', 'array:providerId,providerUuid,identifier,externalId,nodeId'],
             'identity.providerId' => ['required', 'integer', 'min:1'], 'identity.providerUuid' => ['required', 'uuid'],
             'identity.identifier' => ['required', 'string', 'max:191'], 'identity.externalId' => ['required', 'string', 'max:191'],
             'identity.nodeId' => ['required', 'integer', 'min:1'],

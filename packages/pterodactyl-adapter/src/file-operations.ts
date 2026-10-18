@@ -140,6 +140,20 @@ const archiveReceipt = z.strictObject({
   identity: providerIdentitySchema,
   destinationRoot: pathSchema,
   archiveSha256: digest,
+  // Diagnostics are optional, never proof of completion. Ignore malformed timing
+  // data without turning a valid durable receipt into an uncertain mutation.
+  timings: z
+    .object({
+      preflight: z.number().nonnegative().optional(),
+      decompress: z.number().nonnegative().optional(),
+      verify_tree: z.number().nonnegative().optional(),
+      destination_check: z.number().nonnegative().optional(),
+      rename: z.number().nonnegative().optional(),
+      readback: z.number().nonnegative().optional(),
+      cleanup: z.number().nonnegative().optional(),
+    })
+    .optional()
+    .catch(undefined),
 });
 export type FileArchiveCommit = z.infer<typeof archiveInput>;
 export type FileArchiveReceipt = z.infer<typeof archiveReceipt>;
@@ -147,6 +161,7 @@ export async function commitFileArchive(
   transport: Transport,
   identifier: string,
   input: FileArchiveCommit,
+  trace = false,
 ): Promise<FileArchiveReceipt> {
   const body = parseInput(archiveInput, input);
   if (
@@ -157,12 +172,19 @@ export async function commitFileArchive(
     Buffer.byteLength(JSON.stringify(body), 'utf8') > 4194304
   )
     throw new DomainError('validation_failed');
+  const tracedBody = trace ? { ...body, trace: true } : undefined;
+  // Diagnostics must never push an otherwise valid manifest over the bridge's
+  // raw-body limit after its archive has already been uploaded.
+  const requestBody =
+    tracedBody && Buffer.byteLength(JSON.stringify(tracedBody), 'utf8') <= 4194304
+      ? tracedBody
+      : body;
   const receipt = await transport.json(
     'client',
     endpoint(identifier, 'archive-commit'),
     archiveReceipt,
     'POST',
-    body,
+    requestBody,
     false,
     { timeoutMs: 90000 },
   );

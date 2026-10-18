@@ -173,6 +173,59 @@ describe('Blueprint scoped file operations', () => {
     ).rejects.toMatchObject({ code: 'validation_failed' });
     expect(fetcher).not.toHaveBeenCalled();
   });
+  it('requests optional provider diagnostics only for debug callers without changing the receipt identity', async () => {
+    const fetcher = vi.fn<typeof fetch>(async (_url, init) => {
+      expect(JSON.parse(String(init?.body))).toEqual({ ...archive, trace: true });
+      return Response.json({ ...archiveReceipt, timings: { decompress: 32, verify_tree: 17 } });
+    });
+    const result = await createPterodactylAdapter({ ...options, fetcher }).commitFileArchive(
+      '11111111',
+      archive,
+      true,
+    );
+    expect(result.timings).toEqual({ decompress: 32, verify_tree: 17 });
+    expect(result.state).toBe('confirmed');
+  });
+  it.each([undefined, { decompress: 'invalid' }, { decompress: -1 }])(
+    'accepts a valid receipt without usable diagnostics (%j)',
+    async (timings) => {
+      const adapter = createPterodactylAdapter({
+        ...options,
+        fetcher: async () => Response.json({ ...archiveReceipt, timings }),
+      });
+      const result = await adapter.commitFileArchive('11111111', archive, true);
+      expect(result.state).toBe('confirmed');
+      expect(result.timings).toBeUndefined();
+    },
+  );
+  it('omits optional diagnostics when they would exceed the exact archive request byte limit', async () => {
+    const files = Array.from({ length: 1024 }, (_, i) => ({
+      path: `imported/${i}/`.padEnd(4000, 'x'),
+      size: 0,
+    }));
+    const large = { ...archive, files };
+    let remaining = 4194304 - Buffer.byteLength(JSON.stringify(large));
+    for (const file of files) {
+      const extra = Math.min(4096 - file.path.length, remaining);
+      file.path += 'x'.repeat(extra);
+      remaining -= extra;
+    }
+    expect(remaining).toBe(0);
+    const fetcher = vi.fn<typeof fetch>(async (_url, init) => {
+      expect(Buffer.byteLength(String(init?.body))).toBe(4194304);
+      expect(JSON.parse(String(init?.body)).trace).toBeUndefined();
+      return Response.json(archiveReceipt);
+    });
+    expect(
+      (
+        await createPterodactylAdapter({ ...options, fetcher }).commitFileArchive(
+          '11111111',
+          large,
+          true,
+        )
+      ).state,
+    ).toBe('confirmed');
+  });
   it('uses an operation-specific archive deadline without increasing ordinary request timeouts', async () => {
     const timeout = vi.spyOn(AbortSignal, 'timeout');
     try {

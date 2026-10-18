@@ -2,6 +2,9 @@
 
 namespace Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services;
 
+use GuzzleHttp\ClientInterface;
+use GuzzleHttp\Pool;
+use GuzzleHttp\Promise\Create;
 use GuzzleHttp\Promise\PromiseInterface;
 use GuzzleHttp\Promise\Utils as Promises;
 use GuzzleHttp\Psr7\StreamDecoratorTrait;
@@ -16,55 +19,70 @@ class FileOperationRepository extends DaemonRepository
     public const GUARD_BYTES = 1048576;
     public const DIRECTORY_BYTES = 4194304;
 
-    private function read(string $endpoint, array $query, int $limit): PromiseInterface
+    protected function now(): float { return hrtime(true) / 1e9; }
+
+    private function sink(int $limit, ?float $deadline = null): StreamInterface
     {
-        $sink = new class($limit) implements StreamInterface {
+        return new class($limit, fn () => $deadline !== null && $this->now() >= $deadline) implements StreamInterface {
             use StreamDecoratorTrait;
             private StreamInterface $stream;
             public bool $exceeded = false;
             private int $bytes = 0;
-            public function __construct(private int $limit) { $this->stream = Utils::streamFor(''); }
+            public function __construct(private int $limit, private \Closure $expired) { $this->stream = Utils::streamFor(''); }
             public function write($string): int {
+                if (($this->expired)()) { return 0; }
                 $this->bytes += strlen($string);
                 if ($this->bytes > $this->limit) { $this->exceeded = true; return 0; }
                 return $this->stream->write($string);
             }
         };
-        return $this->getHttpClient()->getAsync(sprintf('/api/servers/%s/files/%s', $this->server->uuid, $endpoint), [
-            'query' => $query, 'timeout' => 8, 'connect_timeout' => 2,
-            'allow_redirects' => false, 'http_errors' => false, 'sink' => $sink,
-            'on_headers' => static function (ResponseInterface $response) use ($limit, $sink) {
-                if ((float) $response->getHeaderLine('Content-Length') > $limit) {
-                    $sink->exceeded = true;
-                    throw new \RuntimeException('Bounded response exceeded');
-                }
-            },
-        ])->then(static function (ResponseInterface $response) use ($sink, $limit): string {
-            try {
-                $status = $response->getStatusCode();
-                abort_unless($status === 200, match ($status) { 404 => 404, 401, 403 => 403, default => 502 });
-                // Mock transports and handler stacks may return an independent body.
-                $body = (string) $response->getBody();
-                abort_if($sink->exceeded || strlen($body) > $limit, 413);
-                return $body;
-            } finally { $sink->close(); }
-        }, static function ($error) use ($sink) {
-            $exceeded = $sink->exceeded;
-            $sink->close();
-            abort($exceeded ? 413 : 502);
-        });
+    }
+
+    private function read(ClientInterface $client, string $endpoint, array $query, int $limit, ?float $deadline = null): PromiseInterface
+    {
+        $remaining = $deadline === null ? 8 : min(8, $deadline - $this->now());
+        abort_if($remaining <= 0, 504);
+        $sink = $this->sink($limit, $deadline);
+        try {
+            return $client->requestAsync('GET', sprintf('/api/servers/%s/files/%s', $this->server->uuid, $endpoint), [
+                'query' => $query, 'timeout' => $remaining, 'connect_timeout' => min(2, $remaining),
+                'allow_redirects' => false, 'http_errors' => false, 'sink' => $sink,
+                'on_headers' => function (ResponseInterface $response) use ($limit, $sink, $deadline) {
+                    abort_if($deadline !== null && $this->now() >= $deadline, 504);
+                    if ((float) $response->getHeaderLine('Content-Length') > $limit) {
+                        $sink->exceeded = true;
+                        throw new \RuntimeException('Bounded response exceeded');
+                    }
+                },
+            ])->then(function (ResponseInterface $response) use ($sink, $limit, $deadline): string {
+                try {
+                    abort_if($deadline !== null && $this->now() >= $deadline, 504);
+                    $status = $response->getStatusCode();
+                    abort_unless($status === 200, match ($status) { 404 => 404, 401, 403 => 403, default => 502 });
+                    // Mock transports and handler stacks may return an independent body.
+                    $body = (string) $response->getBody();
+                    abort_if($sink->exceeded || strlen($body) > $limit, 413);
+                    return $body;
+                } finally { $sink->close(); }
+            }, function ($error) use ($sink, $deadline) {
+                $exceeded = $sink->exceeded;
+                $sink->close();
+                abort($exceeded ? 413 : ($deadline !== null && $this->now() >= $deadline ? 504 : 502));
+            });
+        } catch (\Throwable $error) { $sink->close(); throw $error; }
     }
 
     public function inspect(string $target, string $guard): array
     {
+        $client = $this->getHttpClient();
         $parent = dirname($target);
         $guardParent = dirname($guard);
         $reads = [
-            $this->read('list-directory', ['directory' => $parent === '.' ? '/' : '/' . $parent], self::DIRECTORY_BYTES),
-            $this->read('contents', ['file' => '/' . $guard], self::GUARD_BYTES),
+            $this->read($client, 'list-directory', ['directory' => $parent === '.' ? '/' : '/' . $parent], self::DIRECTORY_BYTES),
+            $this->read($client, 'contents', ['file' => '/' . $guard], self::GUARD_BYTES),
         ];
         if ($guardParent !== $parent) {
-            $reads[] = $this->read('list-directory', ['directory' => $guardParent === '.' ? '/' : '/' . $guardParent], self::DIRECTORY_BYTES);
+            $reads[] = $this->read($client, 'list-directory', ['directory' => $guardParent === '.' ? '/' : '/' . $guardParent], self::DIRECTORY_BYTES);
         }
         $results = Promises::settle($reads)->wait();
         foreach ($results as $result) {
@@ -104,97 +122,144 @@ class FileOperationRepository extends DaemonRepository
         return $entries;
     }
 
-    private function entries(string $directory): array
+    private function entries(ClientInterface $client, string $directory): array
     {
-        return $this->parseEntries($this->read('list-directory', ['directory' => '/' . $directory], self::DIRECTORY_BYTES)->wait());
+        return $this->parseEntries($this->read($client, 'list-directory', ['directory' => '/' . $directory], self::DIRECTORY_BYTES)->wait());
     }
 
-    private function entriesPair(string $first, string $second): array
+    private function entriesPair(ClientInterface $client, string $first, string $second): array
     {
-        $results = Promises::settle(array_map(fn ($directory) => $this->read('list-directory',
+        $results = Promises::settle(array_map(fn ($directory) => $this->read($client, 'list-directory',
             ['directory' => '/' . $directory], self::DIRECTORY_BYTES), [$first, $second]))->wait();
         foreach ($results as $result) { if ($result['state'] !== 'fulfilled') { throw $result['reason']; } }
         return array_map(fn ($result) => $this->parseEntries($result['value']), $results);
     }
 
-    private function mutate(string $method, string $endpoint, array $body): void
+    private function mutate(ClientInterface $client, string $method, string $endpoint, array $body): void
     {
-        $response = $this->getHttpClient()->request($method, sprintf('/api/servers/%s/files/%s', $this->server->uuid, $endpoint), [
-            'json' => $body, 'timeout' => 30, 'connect_timeout' => 2,
-            'allow_redirects' => false, 'http_errors' => false, 'stream' => true,
-        ]);
-        $status = $response->getStatusCode();
-        $response->getBody()->close();
-        if ($status !== 204) { throw new \RuntimeException('Filesystem operation not confirmed'); }
+        // Use the same asynchronous handler/connection pool as the reads. Native
+        // request(stream=true) otherwise bypasses cURL and cannot reuse its socket.
+        $sink = $this->sink(0);
+        try {
+            $response = $client->requestAsync($method, sprintf('/api/servers/%s/files/%s', $this->server->uuid, $endpoint), [
+                'json' => $body, 'timeout' => 30, 'connect_timeout' => 2,
+                'allow_redirects' => false, 'http_errors' => false, 'sink' => $sink,
+                'on_headers' => static function (ResponseInterface $response) {
+                    if ($response->getStatusCode() !== 204) { throw new \RuntimeException('Filesystem operation not confirmed'); }
+                },
+            ])->wait();
+            try {
+                if ($response->getStatusCode() !== 204 || $sink->exceeded || (string) $response->getBody() !== '') {
+                    throw new \RuntimeException('Filesystem operation not confirmed');
+                }
+            } finally { $response->getBody()->close(); }
+        } finally { $sink->close(); }
     }
 
-    public function commitArchive(string $operationId, string $destination, array $files, ?callable $beforeDispatch = null): void
+    private function verifyTree(ClientInterface $client, string $scratch, array $expected): void
     {
+        $deadline = $this->now() + 30;
+        $concurrency = app(Settings::class)->operational(['directoryConcurrency'])['directoryConcurrency'];
+        $failure = null;
+        $requests = function () use ($client, $scratch, $expected, $deadline, &$failure) {
+            foreach ($expected as $directory => $wanted) {
+                yield function () use ($client, $scratch, $directory, $wanted, $deadline, &$failure) {
+                    // Pool refills a free slot immediately. An error halts queued
+                    // reads, but already dispatched requests must settle before return.
+                    if ($failure !== null) { return Create::promiseFor(null); }
+                    try {
+                        return $this->read($client, 'list-directory',
+                            ['directory' => '/' . $scratch . ($directory === '' ? '' : '/' . $directory)],
+                            self::DIRECTORY_BYTES, $deadline)->then(function (string $body) use ($wanted, $deadline) {
+                                $entries = $this->parseEntries($body);
+                                abort_unless(count($entries) === count($wanted), 409);
+                                foreach ($entries as $entry) {
+                                    $item = $wanted[$entry['name']] ?? null;
+                                    abort_unless($item !== null && ($entry['symlink'] ?? true) === false && $entry['file'] === $item['file']
+                                        && (!$item['file'] || $entry['size'] === $item['size']), 409);
+                                    unset($wanted[$entry['name']]);
+                                }
+                                abort_unless($wanted === [], 409);
+                                abort_if($this->now() >= $deadline, 504);
+                            });
+                    } catch (\Throwable $error) { return Create::rejectionFor($error); }
+                };
+            }
+        };
+        (new Pool($client, $requests(), [
+            'concurrency' => $concurrency,
+            'rejected' => static function ($error) use (&$failure) { $failure ??= $error; },
+        ]))->promise()->wait();
+        if ($failure !== null) { throw $failure; }
+    }
+
+    /** Optional request-local timings; no logs or persistent profiling state. */
+    private function stage(string $name, callable $perform, ?callable $onStage): mixed
+    {
+        if ($onStage === null) { return $perform(); }
+        $started = $this->now();
+        try { return $perform(); }
+        finally { $onStage($name, ($this->now() - $started) * 1000); }
+    }
+
+    public function commitArchive(string $operationId, string $destination, array $files, ?callable $beforeDispatch = null, ?callable $onStage = null): void
+    {
+        // DaemonRepository creates a new client on each call. Keep this one local
+        // to the operation, including cleanup; never retain it across setServer().
+        $client = $this->getHttpClient();
         $scratch = '.nickhosting-import-' . $operationId;
         // The source archive is produced by Core's validated streaming ZIP encoder.
         // The digest binds the durable request; it does not cause another archive download.
-        [$root, $scratchEntries] = $this->entriesPair('', $scratch);
-        foreach ($root as $entry) {
-            abort_if(strcasecmp($entry['name'], $destination) === 0, 409);
-            if ($entry['name'] === $scratch) {
-                abort_unless(($entry['file'] ?? null) === false && ($entry['symlink'] ?? null) === false, 409);
-            }
-        }
-        abort_unless(count($scratchEntries) === 1 && $scratchEntries[0]['name'] === 'payload.zip'
-            && ($scratchEntries[0]['file'] ?? null) === true && ($scratchEntries[0]['symlink'] ?? null) === false, 409);
-        $expected = ['' => ['payload.zip' => ['file' => true, 'size' => $scratchEntries[0]['size']], $destination => ['file' => false]]];
-        foreach ($files as $file) {
-            $parts = explode('/', $file['path']);
-            $name = array_pop($parts); $parent = implode('/', $parts);
-            if (isset($expected[$parent][$name])) { abort(422); }
-            $expected[$parent][$name] = ['file' => true, 'size' => $file['size']];
-            while (count($parts) > 1) {
-                $name = array_pop($parts); $parent = implode('/', $parts);
-                if (isset($expected[$parent][$name]) && $expected[$parent][$name]['file']) { abort(422); }
-                $expected[$parent][$name] = ['file' => false];
-            }
-        }
-        if ($beforeDispatch !== null) { $beforeDispatch(); }
-        $this->mutate('POST', 'decompress', ['root' => '/' . $scratch, 'file' => 'payload.zip']);
-        // Account for every extracted entry, including denied/ignored paths and empty artifacts.
-        // The staging root participates in the first two-read batch, without a serial preflight.
-        $deadline = hrtime(true) / 1e9 + 30;
-        foreach (array_chunk(array_keys($expected), 2) as $directories) {
-            abort_if(hrtime(true) / 1e9 >= $deadline, 504);
-            $reads = array_map(fn ($directory) => $this->read('list-directory',
-                ['directory' => '/' . $scratch . ($directory === '' ? '' : '/' . $directory)], self::DIRECTORY_BYTES), $directories);
-            $results = Promises::settle($reads)->wait();
-            foreach ($results as $index => $result) {
-                if ($result['state'] !== 'fulfilled') { throw $result['reason']; }
-                $entries = $this->parseEntries($result['value']);
-                $wanted = $expected[$directories[$index]];
-                abort_unless(is_array($entries) && array_is_list($entries) && count($entries) === count($wanted), 409);
-                foreach ($entries as $entry) {
-                    $item = $wanted[$entry['name']] ?? null;
-                    abort_unless($item !== null && ($entry['symlink'] ?? true) === false && $entry['file'] === $item['file']
-                        && (!$item['file'] || $entry['size'] === $item['size']), 409);
-                    unset($wanted[$entry['name']]);
+        $expected = $this->stage('preflight', function () use ($client, $scratch, $destination, $files) {
+            [$root, $scratchEntries] = $this->entriesPair($client, '', $scratch);
+            foreach ($root as $entry) {
+                abort_if(strcasecmp($entry['name'], $destination) === 0, 409);
+                if ($entry['name'] === $scratch) {
+                    abort_unless(($entry['file'] ?? null) === false && ($entry['symlink'] ?? null) === false, 409);
                 }
-                abort_unless($wanted === [], 409);
             }
-        }
+            abort_unless(count($scratchEntries) === 1 && $scratchEntries[0]['name'] === 'payload.zip'
+                && ($scratchEntries[0]['file'] ?? null) === true && ($scratchEntries[0]['symlink'] ?? null) === false, 409);
+            $expected = ['' => ['payload.zip' => ['file' => true, 'size' => $scratchEntries[0]['size']], $destination => ['file' => false]]];
+            foreach ($files as $file) {
+                $parts = explode('/', $file['path']);
+                $name = array_pop($parts); $parent = implode('/', $parts);
+                if (isset($expected[$parent][$name])) { abort(422); }
+                $expected[$parent][$name] = ['file' => true, 'size' => $file['size']];
+                while (count($parts) > 1) {
+                    $name = array_pop($parts); $parent = implode('/', $parts);
+                    if (isset($expected[$parent][$name]) && $expected[$parent][$name]['file']) { abort(422); }
+                    $expected[$parent][$name] = ['file' => false];
+                }
+            }
+            return $expected;
+        }, $onStage);
+        if ($beforeDispatch !== null) { $beforeDispatch(); }
+        $this->stage('decompress', fn () => $this->mutate($client, 'POST', 'decompress', ['root' => '/' . $scratch, 'file' => 'payload.zip']), $onStage);
+        // Account for every extracted entry, including denied/ignored paths and empty artifacts.
+        // A rolling window avoids waiting for the slowest member of each pair.
+        $this->stage('verify_tree', fn () => $this->verifyTree($client, $scratch, $expected), $onStage);
         // A fresh target check belongs immediately before publish, not before decompression.
-        foreach ($this->entries('') as $entry) { abort_if(strcasecmp($entry['name'], $destination) === 0, 409); }
-        $this->mutate('PUT', 'rename', ['root' => '/', 'files' => [['from' => $scratch . '/' . $destination, 'to' => $destination]]]);
-        [$publishedRoot, $remaining] = $this->entriesPair('', $scratch);
-        $published = false;
-        foreach ($publishedRoot as $entry) {
-            if ($entry['name'] === $destination) { $published = $entry['file'] === false && $entry['symlink'] === false; }
-        }
-        abort_unless($published, 409);
-        // Wings rename can return 204 for a missing source. Check both sides before cleanup.
-        abort_unless(count($remaining) === 1 && $remaining[0]['name'] === 'payload.zip'
-            && $remaining[0]['file'] === true && $remaining[0]['symlink'] === false, 409);
-        $this->deleteDirectory($scratch);
+        $this->stage('destination_check', function () use ($client, $destination) {
+            foreach ($this->entries($client, '') as $entry) { abort_if(strcasecmp($entry['name'], $destination) === 0, 409); }
+        }, $onStage);
+        $this->stage('rename', fn () => $this->mutate($client, 'PUT', 'rename', ['root' => '/', 'files' => [['from' => $scratch . '/' . $destination, 'to' => $destination]]]), $onStage);
+        $this->stage('readback', function () use ($client, $scratch, $destination) {
+            [$publishedRoot, $remaining] = $this->entriesPair($client, '', $scratch);
+            $published = false;
+            foreach ($publishedRoot as $entry) {
+                if ($entry['name'] === $destination) { $published = $entry['file'] === false && $entry['symlink'] === false; }
+            }
+            abort_unless($published, 409);
+            // Wings rename can return 204 for a missing source. Check both sides before cleanup.
+            abort_unless(count($remaining) === 1 && $remaining[0]['name'] === 'payload.zip'
+                && $remaining[0]['file'] === true && $remaining[0]['symlink'] === false, 409);
+        }, $onStage);
+        $this->stage('cleanup', fn () => $this->mutate($client, 'POST', 'delete', ['root' => '/', 'files' => [$scratch]]), $onStage);
     }
 
     public function deleteDirectory(string $path): void
     {
-        $this->mutate('POST', 'delete', ['root' => '/', 'files' => [$path]]);
+        $this->mutate($this->getHttpClient(), 'POST', 'delete', ['root' => '/', 'files' => [$path]]);
     }
 }

@@ -400,12 +400,14 @@ uses Laravel fakes. It exercises transaction rollback, idempotency, encryption,
 authorization, identity invalidation, delivery retry and configuration transforms.
 It is not a MySQL lock-concurrency or real HTTP middleware test. Packaging uses
 an explicit file allowlist, excludes secrets/tests/docs, rejects symlinks and
-existing output, and defaults to ignored `build/blueprint/1.6.0/nickhosting.blueprint`.
+existing output, and defaults to ignored `build/blueprint/1.6.1/nickhosting.blueprint`.
 
-For the already installed 1.5.0 extension, the reviewed deployment needs the
-[extension-only update procedure](UPDATE-INSTALLED.md). Its default is a read-only
-plan; explicit approval is required to apply it. Do not use the native installer
-on this deployment: its ownership housekeeping can traverse mounted game data.
+The [extension-only update procedure](UPDATE-INSTALLED.md) supports the reviewed
+1.5.0 → 1.6.0 and 1.6.0 → 1.6.1 transitions. Its default is a read-only plan;
+explicit approval is required to apply it. The original deployment's native
+installer ownership hazard was removed by the approved Panel/Wings mount
+separation; the original failure remains historical evidence, not a claim that
+the native installer was retested.
 
 Version 1.2.0 introduced bulk upload URLs. Version 1.3.0 adds bulk path-scoped
 download URLs, transfer settings discovery and configurable operational bounds;
@@ -419,6 +421,14 @@ defaults are 48 directories per request and two parallel Wings reads, with an
 eight-second whole-batch deadline. Updating preserves all saved Owner settings;
 the new defaults apply only when a setting is absent or invalid.
 The admin view lists nine responsibilities in English and Italian.
+
+Version 1.6.1 corrects unintended serialization in archive commits and guarded
+file inspections: each operation shares one native Wings client, including
+mutation requests. Directory verification uses a rolling bounded window with
+the existing concurrency setting. Wings can silently skip denylisted archive
+members, so a successful extraction response still requires the exact manifest
+check before publication. Debug callers may request archive phase timings;
+these are diagnostics, never completion evidence or part of the receipt identity.
 
 ## Upstream reference / licensing
 

@@ -12795,3 +12795,65 @@ used as a shortcut. Native Blueprint installation was not repeated, nor were
 game-server commands or file mutations performed. No application code changed,
 so the historical unit/integration suites were not rerun. PR #21 remains open
 and unmerged; SFTPGo #18 and the production release gates are unchanged.
+
+
+## 2026-10-18 — Remove unintended world-import serialization
+
+Owner's latest real-provider baseline was 7,266 ms import (101 files,
+81,259,766-byte source ZIP) and 790 ms deletion. Import's broad `provider_effect`
+span was 5,609 ms; it included preflight, upload/validation, Blueprint extraction,
+verification, publication and receipts, **not just network transfer**. Browser
+upload had already completed before this run. These historical results remain;
+no new live import/delete has been performed by this optimization pass.
+
+Inspection found a concrete transport defect: native Panel `getHttpClient()`
+creates a new Guzzle client each call. The extension constructed one for each
+read, so separate cURL multi-handlers defeated nominal promise-pair concurrency.
+The shared operation-local client now supports actual bounded concurrency,
+rolling refill and connection reuse, including mutation requests. Exact manifest
+verification and publication readback remain because native Wings can skip
+excluded archive members and return rename success for a missing source.
+
+Core overlaps the independent initial listing, finite disk-quota check and upload
+URL preparation after current authorization. No stream/claim starts before these
+prerequisites pass. Recovery returns before fresh preflight and never reuploads.
+One manifest digest is reused during settlement. Optional debug spans separate
+preflight, upload, concurrent validation, commit and receipts; Blueprint reports
+its nested extraction/verification/publication phases. API and worker now both
+honor the effective log level at process startup. This dev already resolves to
+debug; no Owner setting or environment file was changed.
+
+Measurement boundary warning: root listing/token preparation now precede
+`provider_effect`, whereas the 5,609 ms baseline included them. Compare whole
+job/worker duration for improvement; do not attribute a smaller effect span to
+speed alone. Validation overlaps upload; Blueprint timings are nested in commit.
+The three-second target is still unproven until a new real Owner test.
+
+Independent review caught and corrected two intermediate problems before release:
+finite-quota rejection inside the effect would become an uncertain outcome, so
+joined preflight stays before dispatch; adding optional tracing could overflow an
+otherwise valid 4 MiB request, so the adapter omits diagnostics at that boundary.
+Tests retain these cases. Worker-level diagnostics were initially unreachable
+because its logger defaulted to info; startup now uses existing configuration
+precedence once, with no per-job settings query.
+
+Focused final evidence:
+
+- Adapter `file-operations.test.ts`: 27 passed, including exact 4 MiB trace fallback.
+- Worker `main.test.ts`: 2 passed, startup boundary/secret-safe failures.
+- `fileman-archive.integration.test.ts` through isolated `scripts/test-env.ts --m2`: 23/23 passed, including actual lifecycle capacity rejection, joined preflight, cancellation, revoked authority, bound receipts and debug/no-debug behavior.
+- Blueprint vendor-backed SQLite `:memory:`/Guzzle harness: 352 checks passed, no Panel bootstrap or provider mutations. Deferred requests establish real overlap, rolling refill at configured concurrency 1/2/4, deadline clamping and failure draining. In the synthetic six-directory schedule, rolling took 7 virtual seconds versus 9 for pair barriers and 12 serial; these are deterministic fixture values, not live milliseconds. Injected old per-request clients and paired barriers both failed the new regressions.
+- Python package/updater: 27 discovered, 26 passed and one optional live PHP comparison probe skipped. Independent reviewer separately ran the 13 updater cases with that same skip.
+- Targeted Biome and `git diff --check`: passed. Final TypeScript checks include root, WebPanel and browser tests.
+- Independent security/durability/configuration review: no remaining must-fix.
+
+Reviewed package `build/blueprint/1.6.1-reviewed/nickhosting.blueprint` SHA-256
+`356bcc7de9053ab1c3659056f819a1256f2dd72490f769d4e1c8ef718faa9b23`.
+The installed 1.6.0 hash/ownership fingerprint matched during the read-only dry
+run; exactly six files change, with no migration, service restart, native installer
+or global cache clear. API/worker source changes hot-reloaded; both remain healthy,
+as does Panel. No game file, world or production configuration was mutated.
+Blueprint activation and its new end-to-end timing remain pending separate exact
+Owner approval. Scoped rollback retains a private six-file/metadata backup;
+no game/database backup or broad permission operation is involved. PR #21 stays
+open and unmerged; SFTPGo #18 and release boundaries are unchanged.

@@ -1,4 +1,4 @@
-# Reviewed extension-only update: 1.5.0 → 1.6.0
+# Reviewed extension-only updates
 
 `update-installed.py` prepares a bounded update of an **existing, identified**
 NickHosting Blueprint installation. Its default is read-only. Applying it requires
@@ -106,6 +106,27 @@ The rollout is not a multi-file filesystem transaction. A PHP request already in
 flight may complete against the previous code. New classes are available before
 new routes are published, and requests should be checked after activation. No
 claim of production activation is made by a successful dry run.
+
+## Import transport patch: 1.6.0 → 1.6.1
+
+This additional reviewed pair has the same package inventory and changes only
+six files: `FileOperationRepository`, `ArchiveCommitController`,
+`ArchiveCommitRequest`, capabilities, the generated admin version and stored
+`conf.yml`. Other code, migration files and package additions are rejected.
+It applies no migration, restarts no service and clears no shared cache.
+
+Use the same procedure with the hash-pinned 1.6.0 baseline and 1.6.1 package,
+adding `--expected-installed-version 1.6.0`. A fresh installed fingerprint and
+private backup are required for activation. The existing rollback procedure
+restores the six previous files and their individual ownership/modes. Do not
+reuse the previous 1.5.0 → 1.6.0 approval or backup directory.
+
+The patch reuses one native Wings HTTP client per operation and applies the
+existing directory-read concurrency setting (default two) as a rolling window.
+Exact extraction verification, destination checks and both rename readbacks
+remain. Optional `trace: true` requests return phase timings for the current
+attempt only; tracing never changes the durable request fingerprint or replays
+an external effect. Ordinary requests emit no additional logs or timings.
 
 
 ## Post-update game-volume verification
