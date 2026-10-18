@@ -29,7 +29,7 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
   if (!env.DATABASE_URL) throw new DomainError('configuration_invalid');
   const database = createDatabase(env.DATABASE_URL);
   const transportCoordinator = createTransportCoordinator();
-  const directoryIdentityCache = createDirectoryIdentityCache();
+  let directoryIdentityCache: ReturnType<typeof createDirectoryIdentityCache> | undefined;
   let transferCache: ReturnType<typeof createPrivateTransferCache> | undefined;
   try {
     const setup = await database.pool.query('SELECT id FROM instance_setup WHERE id=1');
@@ -51,6 +51,7 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
         codec,
         logger,
       });
+    directoryIdentityCache = createDirectoryIdentityCache(undefined, transferCache);
     let cached: { signature: string; identity: Identity } | undefined;
     const sendMail = async (message: IdentityMail) => {
       if (message.to.endsWith('.invalid')) return;
@@ -156,7 +157,7 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
       logger,
       config: initial.values,
       close: async () => {
-        directoryIdentityCache.close();
+        directoryIdentityCache?.close();
         await closeViewerArchives(database.db);
         await closeFileViewers(database.db);
         await transferCache?.close();
@@ -164,7 +165,7 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
       },
     };
   } catch (error) {
-    directoryIdentityCache.close();
+    directoryIdentityCache?.close();
     await transferCache?.close();
     await database.db.destroy();
     throw error;

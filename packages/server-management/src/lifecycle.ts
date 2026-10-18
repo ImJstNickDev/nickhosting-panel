@@ -104,6 +104,10 @@ export interface LifecycleOptions {
    * every provider mutation. Capability discovery itself grants no authority. */
   supportsManagedFileOperations?: (serverId: string, db: Kysely<Database>) => Promise<boolean>;
   fileman?: (context: GameLifecycleContext) => FilemanJobServices;
+  /** Selection reuses the browsing proof; authorization remains current. */
+  worldSelectionIdentity?: (server: Server, db: Kysely<Database>) => Promise<ApplicationServer>;
+  /** Opening-time stopped observation + current local power revision; no physical read at click. */
+  assertWorldSelectionAccess?: (db: Kysely<Database>, server: Server) => Promise<void>;
   logger?: ReturnType<typeof createLogger>;
   adapter: PterodactylAdapter;
   backupSchemaAvailable?: (db: Kysely<Database>) => Promise<boolean>;
@@ -156,8 +160,8 @@ export interface LifecycleOptions {
       deferFinalIntentCheck?: true;
     },
   ) => Promise<void>;
-  /** Current DB permission/policy only. External effects retain their final physical
-   * and identity proofs; world selection binds these through confirmAlreadyStopped. */
+  /** Current DB permission/policy only. World selection can reuse its opening-time
+   * physical observation; other effects retain their own physical/identity checks. */
   authorizeIntent?: (
     jobId: string,
     serverId: string,
@@ -514,29 +518,43 @@ export async function processServerOperation(
     }
     const token = randomUUID();
     const at = nowOf(options);
-    await trace('load.lease', () =>
-      db
-        .updateTable('server_operations')
-        .set({ lease_token: token, lease_until: new Date(at.getTime() + 120_000), updated_at: at })
-        .where('job_id', '=', jobId)
-        .execute(),
-    );
-    await trace('load.running', () =>
-      db
-        .updateTable('operation_jobs')
-        .set({ state: 'running', updated_at: at })
-        .where('id', '=', jobId)
-        .execute(),
-    );
+    const selectedWorld =
+      operation.action === 'minecraft-content' &&
+      minecraftContentSelectsWorld(operation.plan.minecraftContent);
+    const begin = async (connection: Kysely<Database>) => {
+      await trace('load.lease', () =>
+        connection
+          .updateTable('server_operations')
+          .set({
+            lease_token: token,
+            lease_until: new Date(at.getTime() + 120_000),
+            updated_at: at,
+          })
+          .where('job_id', '=', jobId)
+          .execute(),
+      );
+      await trace('load.running', () =>
+        connection
+          .updateTable('operation_jobs')
+          .set({ state: 'running', updated_at: at })
+          .where('id', '=', jobId)
+          .execute(),
+      );
+    };
+    if (selectedWorld) await trace('load.begin', () => db.transaction().execute(begin));
+    else await begin(db);
 
-    const update = (patch: {
-      phase?: string;
-      effect_state?: Operation['effect_state'];
-      effect_started_at?: Date | null;
-      plan?: Record<string, unknown>;
-    }) =>
+    const update = (
+      patch: {
+        phase?: string;
+        effect_state?: Operation['effect_state'];
+        effect_started_at?: Date | null;
+        plan?: Record<string, unknown>;
+      },
+      connection: Kysely<Database> = db,
+    ) =>
       trace('journal.update', async () => {
-        await db
+        operation = await connection
           .updateTable('server_operations')
           .set({
             ...patch,
@@ -544,15 +562,15 @@ export async function processServerOperation(
             updated_at: nowOf(options),
           })
           .where('job_id', '=', jobId)
-          .execute();
-        operation = await db
-          .selectFrom('server_operations')
-          .selectAll()
-          .where('job_id', '=', jobId)
+          .returningAll()
           .executeTakeFirstOrThrow();
       });
-    const event = async (messageKey: string, data: Record<string, unknown> = {}) => {
-      await db
+    const event = async (
+      messageKey: string,
+      data: Record<string, unknown> = {},
+      connection: Kysely<Database> = db,
+    ) => {
+      await connection
         .insertInto('server_events')
         .values({
           server_id: server.id,
@@ -903,13 +921,17 @@ export async function processServerOperation(
       minecraftContentSelectsWorld(operation.plan.minecraftContent);
     const worldFileContent = onlineWorldContent || offlineWorldSelection;
     let providerFileEffects = false;
-    // Reuse only this locked delivery's identity proof for world file
-    // operations. Long staging refreshes it; no proof crosses jobs or deliveries.
+    // Reuse this delivery's identity for world file operations. Selection can
+    // obtain it from the shared browsing proof; long staging refreshes it.
     let worldContentIdentity: { remote: ApplicationServer; checkedAt: number } | undefined;
     const worldContentProvider = async () => {
       const age = nowOf(options).getTime() - (worldContentIdentity?.checkedAt ?? 0);
       if (!worldContentIdentity || age < 0 || age >= 60_000) {
-        const remote = await timed('provider_identity', () => ownedRemote(db, server, options));
+        const remote = await timed('provider_identity', () =>
+          offlineWorldSelection && options.worldSelectionIdentity
+            ? options.worldSelectionIdentity(server, db)
+            : ownedRemote(db, server, options),
+        );
         worldContentIdentity = { remote, checkedAt: nowOf(options).getTime() };
       }
       return worldContentIdentity.remote;
@@ -936,6 +958,10 @@ export async function processServerOperation(
     };
     const confirmWorldSelectionStopped = () =>
       trace('stop.final', async () => {
+        if (options.assertWorldSelectionAccess) {
+          await options.assertWorldSelectionAccess(db, server);
+          return true;
+        }
         if (!options.confirmAlreadyStopped) return false;
         const remote = await worldContentProvider();
         return options.confirmAlreadyStopped(server.id, db, {
@@ -946,7 +972,7 @@ export async function processServerOperation(
     const requireEffectResources = () =>
       trace('effect.resources', () =>
         db.transaction().execute(async (tx) => {
-          await trace('effect.resourceLock', () => lockResources(tx));
+          if (!offlineWorldSelection) await trace('effect.resourceLock', () => lockResources(tx));
           await assertNoPendingUpload(tx, server.id);
           if (
             await tx
@@ -972,7 +998,7 @@ export async function processServerOperation(
           : options.authorizeEffect)(jobId, server.id, db, { timing: timing?.child('auth') }),
       );
       // Selection only reads while preparing. Check all resource exclusions once,
-      // after durable intent, immediately before its final physical stop proof.
+      // after durable intent, alongside its final local stopped-state guard.
       if (!offlineWorldSelection) await requireEffectResources();
       if (
         !onlineWorldContent &&
@@ -1008,30 +1034,50 @@ export async function processServerOperation(
               ? await timed('provider_identity', () => ownedRemote(db, server, options))
               : undefined));
       await trace('effect.prepare', async () => {
-        await update({
-          phase,
-          effect_state: 'prepared',
-          effect_started_at: nowOf(options),
-          plan: {
-            ...operation.plan,
-            acknowledged: false,
-            // Backup completion, retention and resume are distinct effects. A
-            // rejected earlier phase cannot label an admitted resume as rejected.
-            ...(operation.action === 'backup' ? { rejected: false, rejectionCode: undefined } : {}),
-            waitReason: null,
-            effectAttempts: { ...attempts, [phase]: attempt },
-            ...(['power', 'initial_start'].includes(phase) ? { powerEffectPrepared: true } : {}),
-            ...(['provision', 'reinstall'].includes(phase)
-              ? { installationEffectPrepared: true }
-              : {}),
-          },
-        });
-        await db
-          .updateTable('operation_jobs')
-          .set({ attempts: sql<number>`greatest(attempts, ${attempt})` })
-          .where('id', '=', jobId)
-          .execute();
-        await event('servers.operation.effect_prepared', { phase });
+        const prepare = async (connection: Kysely<Database>) => {
+          await update(
+            {
+              phase,
+              effect_state: 'prepared',
+              effect_started_at: nowOf(options),
+              plan: {
+                ...operation.plan,
+                acknowledged: false,
+                // Backup completion, retention and resume are distinct effects. A
+                // rejected earlier phase cannot label an admitted resume as rejected.
+                ...(operation.action === 'backup'
+                  ? { rejected: false, rejectionCode: undefined }
+                  : {}),
+                waitReason: null,
+                effectAttempts: { ...attempts, [phase]: attempt },
+                ...(['power', 'initial_start'].includes(phase)
+                  ? { powerEffectPrepared: true }
+                  : {}),
+                ...(['provision', 'reinstall'].includes(phase)
+                  ? { installationEffectPrepared: true }
+                  : {}),
+              },
+            },
+            connection,
+          );
+          await connection
+            .updateTable('operation_jobs')
+            .set({ attempts: sql<number>`greatest(attempts, ${attempt})` })
+            .where('id', '=', jobId)
+            .execute();
+          await event('servers.operation.effect_prepared', { phase }, connection);
+        };
+        if (offlineWorldSelection) {
+          const before = operation;
+          try {
+            await db.transaction().execute(prepare);
+          } catch (error) {
+            // The journal never became durable. Do not send a rolled-back
+            // in-memory "prepared" value into external-effect recovery.
+            operation = before;
+            throw error;
+          }
+        } else await prepare(db);
         await options.checkpoint?.('prepared', operation);
       });
       const minecraftProvision =
@@ -1080,10 +1126,11 @@ export async function processServerOperation(
             )
               throw new DomainError('conflict');
             if (offlineWorldSelection) {
-              // This host-bound physical proof also checks the current registry
-              // identity and allocations. Do not repeat those reads immediately
-              // before it, or authorize while that observation is still pending.
+              // The server lock and active job exclude new power/upload work.
+              // Check local claims, without waiting for the global admission lock.
               await requireEffectResources();
+              if (options.assertWorldSelectionAccess && verifiedServer)
+                await verifyManagedIdentity(db, current, verifiedServer);
               if (!(await confirmWorldSelectionStopped()))
                 throw new DomainError('operation_uncertain');
             } else if (verifiedServer) await verifyManagedIdentity(db, current, verifiedServer);
@@ -2302,7 +2349,11 @@ export async function processServerOperation(
           initialResources = status.value;
           await observation(db, server, initialResources, nowOf(options));
         } else {
-          remote = await timed('provider_identity', () => ownedRemote(db, server, options));
+          remote = await timed('provider_identity', () =>
+            offlineWorldSelection && options.worldSelectionIdentity
+              ? options.worldSelectionIdentity(server, db)
+              : ownedRemote(db, server, options),
+          );
         }
       } catch (error) {
         if (

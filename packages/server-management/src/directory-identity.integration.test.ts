@@ -5,6 +5,7 @@ import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import {
   type ApplicationServer,
+  type PrivateTransferCache,
   type PterodactylAdapter,
   PterodactylError,
 } from '@nickhosting/pterodactyl-adapter';
@@ -27,6 +28,8 @@ describe('directory browsing identity proof reuse', () => {
     return value;
   }
   let cache: ReturnType<typeof createDirectoryIdentityCache>;
+  let sharedCaches: ReturnType<typeof createDirectoryIdentityCache>[];
+  let restoreWallClock: (() => void) | undefined;
   const codec = new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } });
   const remote = vi.fn<() => Promise<ApplicationServer>>();
   const listing = vi.fn<PterodactylAdapter['listFiles']>(async () => []);
@@ -104,6 +107,7 @@ describe('directory browsing identity proof reuse', () => {
     serverId = await f.server();
     clock = 0;
     deferredProofs = [];
+    sharedCaches = [];
     cache = createDirectoryIdentityCache(() => clock);
     remote.mockReset().mockImplementation(identity);
     listing.mockReset().mockResolvedValue([]);
@@ -114,10 +118,174 @@ describe('directory browsing identity proof reuse', () => {
   });
   afterEach(async () => {
     cache?.close();
+    for (const instance of sharedCaches) instance.close();
+    restoreWallClock?.();
+    restoreWallClock = undefined;
     vi.useRealTimers();
     for (const proof of deferredProofs ?? []) proof.resolve(await identity());
     if (deferredProofs?.length) await delay(30);
     await database?.destroy();
+  });
+
+  async function sharedFixture() {
+    const wallClock = vi.spyOn(Date, 'now').mockImplementation(() => 1_800_000_000_000 + clock);
+    restoreWallClock = () => wallClock.mockRestore();
+    const values = new Map<string, string>();
+    const shared: PrivateTransferCache = {
+      get: vi.fn(async (key) => values.get(key)),
+      take: vi.fn(async (key) => {
+        const value = values.get(key);
+        values.delete(key);
+        return value;
+      }),
+      put: vi.fn(async (key, value) => {
+        values.set(key, value);
+      }),
+      delete: vi.fn(async (key) => {
+        values.delete(key);
+      }),
+    };
+    const base = await identity();
+    const complete: ApplicationServer = {
+      ...base,
+      name: 'identity fixture',
+      description: null,
+      suspended: false,
+      limits: { memory: 256, disk: 1024, cpu: 100, swap: 0, io: 500, threads: null },
+      feature_limits: { databases: 0, allocations: 1, backups: 0 },
+      nest: 1,
+      egg: 1,
+      container: {
+        startup_command: 'run',
+        image: 'fixture/game',
+        installed: true,
+        environment: { SECRET: 'do-not-serialize' },
+      },
+      relationships: {
+        allocations: { object: 'list', data: base.relationships?.allocations?.data ?? [] },
+      },
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    };
+    remote.mockResolvedValue(complete);
+    cache.close();
+    cache = createDirectoryIdentityCache(() => clock, shared);
+    const next = () => {
+      const instance = createDirectoryIdentityCache(() => clock + 100_000, shared);
+      sharedCaches.push(instance);
+      return instance;
+    };
+    const server = () =>
+      f.db
+        .selectFrom('managed_servers')
+        .selectAll()
+        .where('id', '=', serverId)
+        .executeTakeFirstOrThrow();
+    const verify = async (instance = cache, binding = 'private-provider-scope') =>
+      instance.verify(f.db, await server(), binding, remote);
+    return { shared, values, next, verify, complete };
+  }
+
+  it('shares a schema-validated remote proof across instances without extending its original expiry', async () => {
+    const shared = await sharedFixture();
+    expect(await shared.verify()).toEqual(shared.complete);
+    const first = vi.mocked(shared.shared.put).mock.calls[0];
+    expect(first?.[0]).toMatch(/^fileman\.identity\.v1:[a-f0-9]{64}$/);
+    expect(first?.[0]).not.toContain('private-provider-scope');
+    expect(first?.[1]).not.toContain('do-not-serialize');
+    expect(first?.[2]).toBe(60_000);
+    clock = 20_000;
+    expect((await shared.verify(shared.next())).uuid).toBe(shared.complete.uuid);
+    expect(remote).toHaveBeenCalledOnce();
+    expect(shared.shared.put).toHaveBeenCalledOnce();
+    clock = 60_000;
+    await shared.verify(shared.next());
+    expect(remote).toHaveBeenCalledTimes(2);
+  });
+
+  it('obtains a new shared proof after scope changes or explicit local invalidation', async () => {
+    const shared = await sharedFixture();
+    await shared.verify();
+    await shared.verify(shared.next(), 'different-provider');
+    expect(remote).toHaveBeenCalledTimes(2);
+    cache.invalidate(serverId);
+    await shared.verify();
+    expect(remote).toHaveBeenCalledTimes(3);
+    await f.db
+      .updateTable('managed_servers')
+      .set({ pterodactyl_identifier: 'different-server' })
+      .where('id', '=', serverId)
+      .execute();
+    await expect(shared.verify(shared.next())).rejects.toThrow('provenance_mismatch');
+    expect(remote).toHaveBeenCalledTimes(4);
+  });
+
+  it('uses the provider when shared data is corrupt, unrelated, unavailable, or cannot be written', async () => {
+    const shared = await sharedFixture();
+    await shared.verify();
+    const original = [...shared.values.values()][0];
+    if (!original) throw new Error('Missing shared fixture');
+    const parsed = JSON.parse(original);
+    for (const value of [
+      '{',
+      JSON.stringify({ ...parsed, scope: 'a'.repeat(64) }),
+      JSON.stringify({ ...parsed, remote: { ...parsed.remote, uuid: randomUUID() } }),
+      JSON.stringify({ ...parsed, expiresAt: Date.now() + 61_000 }),
+    ]) {
+      vi.mocked(shared.shared.get).mockResolvedValueOnce(value);
+      expect((await shared.verify(shared.next())).uuid).toBe(shared.complete.uuid);
+    }
+    vi.mocked(shared.shared.get).mockRejectedValueOnce(new Error('cache private failure'));
+    vi.mocked(shared.shared.put).mockRejectedValueOnce(new Error('cache private failure'));
+    expect((await shared.verify(shared.next())).uuid).toBe(shared.complete.uuid);
+    expect(remote).toHaveBeenCalledTimes(6);
+  });
+
+  it('does not reuse interactive authority when another runtime has a shared proof', async () => {
+    const shared = await sharedFixture();
+    await browse();
+    expect(remote).toHaveBeenCalledOnce();
+    const service = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      directoryIdentityCache: shared.next(),
+    });
+    await f.db
+      .updateTable('session')
+      .set({ expiresAt: new Date(0) })
+      .where('id', '=', f.context[authSessionId] as string)
+      .execute();
+    await expect(service.listFiles(f.context, serverId, '')).rejects.toMatchObject({
+      code: 'unauthenticated',
+    });
+    expect(remote).toHaveBeenCalledOnce();
+    expect(listing).toHaveBeenCalledOnce();
+  });
+
+  it('rejects an identity-invalidated change feed before restoring a shared proof', async () => {
+    const shared = await sharedFixture();
+    await shared.verify();
+    const account = await f.db
+      .selectFrom('provider_accounts')
+      .selectAll()
+      .where('user_id', '=', f.context.subjectUserId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .insertInto('provider_server_projections')
+      .values({
+        server_id: serverId,
+        instance_id: account.instance_id as string,
+        revision: '1',
+        payload: {},
+        valid: true,
+        synchronized_at: new Date(),
+        identity_invalidated: true,
+      })
+      .execute();
+    await expect(shared.verify(shared.next())).rejects.toThrow('provenance_mismatch');
+    expect(shared.shared.get).toHaveBeenCalledOnce();
+    expect(remote).toHaveBeenCalledOnce();
   });
 
   it('reuses identity across newly constructed runtimes and folders without caching their listing', async () => {

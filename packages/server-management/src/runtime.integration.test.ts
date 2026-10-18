@@ -9,8 +9,9 @@ import {
 } from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
-import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
+import type { ApplicationServer, PrivateTransferCache } from '@nickhosting/pterodactyl-adapter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createDirectoryIdentityCache } from './directory-identity.js';
 import { processServerOperation } from './lifecycle.js';
 import {
   createManagedServer,
@@ -973,6 +974,172 @@ describe('management runtime execution-time authorization', () => {
         .where('job_id', '=', queued.job)
         .executeTakeFirstOrThrow();
       expect(operation.effect_state).toBe(change === 'unchanged' ? 'confirmed' : 'none');
+    },
+  );
+
+  it.each([
+    'unchanged',
+    'running',
+    'host changed',
+    'observer override changed',
+    'new power job',
+    'permission revoked',
+    'cache missing',
+  ] as const)(
+    'reuses Worlds-opening preparation without physical or provider reads at Select: %s',
+    async (change) => {
+      const queued = await stop();
+      await f.db
+        .updateTable('server_operations')
+        .set({
+          action: 'minecraft-content',
+          plan: JSON.stringify({
+            minecraftContent: {
+              combinationId: randomUUID(),
+              command: { kind: 'world-select', world: 'selected_world' },
+              world: { existing: true, dataVersion: 3955 },
+              backupBefore: false,
+            },
+          }),
+        })
+        .where('job_id', '=', queued.job)
+        .execute();
+      // Fixture installs the selection job first; expose the same pre-enqueue
+      // state that Worlds observes in production, then restore its active job.
+      await f.db
+        .updateTable('managed_servers')
+        .set({ active_operation_id: null })
+        .where('id', '=', queued.server)
+        .execute();
+      const values = new Map<string, string>();
+      const cache: PrivateTransferCache = {
+        get: async (key) => values.get(key),
+        take: async (key) => {
+          const result = values.get(key);
+          values.delete(key);
+          return result;
+        },
+        put: async (key, value) => {
+          values.set(key, value);
+        },
+        delete: async (key) => {
+          values.delete(key);
+        },
+      };
+      const identityCache = createDirectoryIdentityCache(undefined, cache);
+      const remote = await providerIdentity(queued.server);
+      const getApplicationServer = vi.fn(async () => remote);
+      const prepareFileWrite = vi.fn(async () => {});
+      Object.assign(f.adapter, { getApplicationServer, prepareFileWrite });
+      const observer = { preflight: vi.fn(async () => {}), stopped: vi.fn(async () => true) };
+      const runtime = await createManagementRuntime({
+        db: f.db,
+        codec,
+        adapter: f.adapter,
+        directoryIdentityCache: identityCache,
+        transferCache: cache,
+        containerObserver: observer,
+        env: { NH_OBSERVER_ID: 'isolated-observer' },
+      });
+      try {
+        const sessionId = randomUUID();
+        await database.pool.query(
+          `INSERT INTO session (id, token, "userId", "expiresAt", "createdAt", "updatedAt") VALUES ($1,$2,$3,now()+interval '1 hour',now(),now())`,
+          [sessionId, randomUUID(), f.context.actorUserId],
+        );
+        await runtime.fileReadAccess(
+          { ...f.context, [authSessionId]: sessionId },
+          queued.server,
+          async (_id, connection, _actor, server) => {
+            await runtime.prepareWorldSelection(server, connection);
+          },
+        );
+        expect(observer.stopped).toHaveBeenCalledOnce();
+        expect(prepareFileWrite).toHaveBeenCalledWith(remote.identifier, 'server.properties');
+        expect(getApplicationServer).toHaveBeenCalledOnce();
+        if (change === 'new power job') {
+          const newStop = await stop(f.context, queued.server);
+          await f.db
+            .updateTable('operation_jobs')
+            .set({ state: 'succeeded', completed_at: new Date() })
+            .where('id', '=', newStop.job)
+            .execute();
+        }
+        await f.db
+          .updateTable('managed_servers')
+          .set({
+            active_operation_id: queued.job,
+            ...(change === 'running' ? { runtime_state: 'running' as const } : {}),
+          })
+          .where('id', '=', queued.server)
+          .execute();
+        if (change === 'cache missing') values.clear();
+        let lifecycle = runtime.lifecycle;
+        if (change === 'observer override changed') {
+          const host = await f.db
+            .selectFrom('physical_hosts')
+            .selectAll()
+            .where('id', '=', f.hostId)
+            .executeTakeFirstOrThrow();
+          const changed = await createManagementRuntime({
+            db: f.db,
+            codec,
+            adapter: f.adapter,
+            directoryIdentityCache: identityCache,
+            transferCache: cache,
+            containerObserver: observer,
+            env: {
+              NH_OBSERVER_ID: 'isolated-observer',
+              NH_HOST_POLICIES: JSON.stringify({
+                [host.id]: {
+                  name: host.name,
+                  memoryLimitMiB: host.memory_limit_mib,
+                  cpuLimitPercent: host.cpu_limit_percent,
+                  storagePoolMiB: Number(host.storage_pool_mib),
+                  memoryHeadroomMiB: host.memory_headroom_mib,
+                  cpuHeadroomPercent: host.cpu_headroom_percent,
+                  diskHeadroomMiB: Number(host.disk_headroom_mib),
+                  localDiskPath: host.local_disk_path,
+                  observerId: 'another-observer',
+                  enabled: true,
+                },
+              }),
+            },
+          });
+          lifecycle = changed.lifecycle;
+        }
+        const write = vi.fn(async () => {});
+        const result = await processServerOperation(f.db, queued.job, {
+          ...lifecycle,
+          checkpoint: async (phase) => {
+            if (phase !== 'prepared') return;
+            if (change === 'host changed')
+              await f.db
+                .updateTable('physical_hosts')
+                .set({ observer_id: 'different-host' })
+                .where('id', '=', f.hostId)
+                .execute();
+            if (change === 'permission revoked')
+              await f.db
+                .updateTable('operation_jobs')
+                .set({ resource_owner_id: f.owner.subjectUserId })
+                .where('id', '=', queued.job)
+                .execute();
+          },
+          processGameContent: async (context) => {
+            await context.authorize();
+            await context.effect('minecraft.text.fixture', write);
+            return true;
+          },
+        });
+        expect(result).toBe(change === 'unchanged' ? 'succeeded' : 'failed');
+        expect(write).toHaveBeenCalledTimes(change === 'unchanged' ? 1 : 0);
+        expect(getApplicationServer).toHaveBeenCalledOnce();
+        expect(observer.stopped).toHaveBeenCalledOnce();
+        expect(observer.preflight).toHaveBeenCalledOnce();
+      } finally {
+        identityCache.close();
+      }
     },
   );
 

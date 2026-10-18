@@ -454,24 +454,30 @@ export function registerMinecraftRoutes(
       await service.fileReadAccess(
         context,
         serverId,
-        async (identifier, connection, current, server) =>
-          inspectMinecraftWorlds(
-            connection,
-            service.adapter,
-            serverId,
-            () => service.authorizeTransfer(current, serverId, false, connection),
-            env,
-            c.req.raw.signal,
-            createFilemanReadService({
-              adapter: service.adapter,
-              identifier,
-              signal: c.req.raw.signal,
-              authorize: () => service.authorizeTransfer(current, serverId, false, connection),
-              listDirectories: (paths) =>
-                service.fileDirectoryBatch(identifier, server, paths, c.req.raw.signal),
-            }),
-            service.worldPreparation,
-          ),
+        async (identifier, connection, current, server) => {
+          const results = await Promise.allSettled([
+            service.prepareWorldSelection(server, connection),
+            inspectMinecraftWorlds(
+              connection,
+              service.adapter,
+              serverId,
+              () => service.authorizeTransfer(current, serverId, false, connection),
+              env,
+              c.req.raw.signal,
+              createFilemanReadService({
+                adapter: service.adapter,
+                identifier,
+                signal: c.req.raw.signal,
+                authorize: () => service.authorizeTransfer(current, serverId, false, connection),
+                listDirectories: (paths) =>
+                  service.fileDirectoryBatch(identifier, server, paths, c.req.raw.signal),
+              }),
+              service.worldPreparation,
+            ),
+          ]);
+          if (results[1].status === 'rejected') throw results[1].reason;
+          return results[1].value;
+        },
       ),
     );
   });

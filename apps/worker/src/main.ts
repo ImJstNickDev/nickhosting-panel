@@ -5,6 +5,7 @@ import { createLogger, DomainError, encryptionKeyFromBase64, SecretCodec } from 
 import { createDatabase, getSettings } from '@nickhosting/database';
 import { createPrivateTransferCache, processJob, startJobWorker } from '@nickhosting/jobs';
 import {
+  createDirectoryIdentityCache,
   createManagementRuntime,
   createManagementTransportCoordinator,
   ensureProviderAccounts,
@@ -22,6 +23,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     throw new DomainError('configuration_invalid');
   const { db, pool } = createDatabase(env.DATABASE_URL);
   const transportCoordinator = createManagementTransportCoordinator();
+  let directoryIdentityCache: ReturnType<typeof createDirectoryIdentityCache> | undefined;
   let transferCache: ReturnType<typeof createPrivateTransferCache> | undefined;
   try {
     const settings = await getSettings(db, env);
@@ -42,12 +44,14 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         codec,
         logger,
       });
+      directoryIdentityCache ??= createDirectoryIdentityCache(undefined, transferCache);
       return createManagementRuntime({
         db,
         env,
         logger,
         transportCoordinator,
         transferCache,
+        directoryIdentityCache,
         codec,
       });
     };
@@ -167,6 +171,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         try {
           await runtime.close();
         } finally {
+          directoryIdentityCache?.close();
           await transferCache?.close();
           await heartbeat('stopped');
           await db.destroy();
@@ -191,6 +196,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       },
     };
   } catch (error) {
+    directoryIdentityCache?.close();
     await transferCache?.close();
     await db.destroy();
     throw error;

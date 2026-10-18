@@ -13549,3 +13549,69 @@ by this work. Code rollback is a revert; disposable cache entries expire. Issue 
 and all independent production-release gates remain unchanged. No full historical
 suite or new visual design is claimed; the three browser journeys exercise existing
 confirmed-only UI behavior, and no layout changed.
+
+## Worlds Select: opening-time observation and direct prepared write — 2026-10-18
+
+Owner requested physical stopped verification at Worlds opening rather than Select,
+and a target of at most 300 ms. The preceding real Owner test at `7afd7fe` completed
+successfully in **1,074.369 ms** DB end-to-end / **1,034.661 ms** traced execution.
+Its additive phases were provider identity239.748ms, fresh properties44.462ms,
+final physical stop234.753ms, remaining effect preparation/resources/auth141.267ms,
+provider write236.476ms and other trace work137.955ms. No new real Select was run
+by the agent; the 300 ms target is not claimed as measured.
+
+Worlds now prepares the physical stop observation and an exact-path upload grant
+alongside inventory. Select uses local current offline state, power-job revision,
+host/observer binding, permissions and upload/install/compute exclusions under the
+existing server lock. A start since opening, a missing/expired observation or host
+change rejects selection without adding Docker work back to the click. This is an
+opening-time observation: an external Panel start can precede local state updates.
+API/worker reuse the existing identity proof for its original60-second lifetime.
+The fresh properties comparison remains; the prepared write goes straight to Wings
+through Fileman's multipart transport. Missing grants retain the Panel path, with no
+fallback/replay after a dispatched Wings request. Selected job writes are grouped
+into durable transactions and read-only resource exclusions skip the unrelated
+global resource lock. Reservation-changing locks remain unchanged.
+
+Focused validation commands:
+
+```sh
+scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/prepared-file-writes.test.ts packages/pterodactyl-adapter/src/adapter.test.ts packages/pterodactyl-adapter/src/bulk-uploads.test.ts
+scripts/dev.sh pnpm exec vitest run apps/api/src/minecraft-worlds.test.ts packages/server-management/src/scoped-provider-adapter.test.ts packages/server-management/src/minecraft-world-preparation.test.ts
+scripts/dev.sh pnpm exec vitest run apps/api/src/minecraft-worlds.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/directory-identity.integration.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/directory-identity.integration.test.ts -t 'shared proof|schema-validated remote|shared data|interactive authority|shared proof'
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/world-selection-access.integration.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/runtime.integration.test.ts -t 'world.selection|Worlds.opening'
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/runtime.integration.test.ts -t 'observer override changed'
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts -t 'Minecraft world selection|additive Minecraft world imports|Minecraft world removal'
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts -t 'Minecraft world selection'
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-worlds.browser.test.ts -t 'selects a world after confirmed|imports, selects, downloads and removes|recovers a lost response'
+scripts/dev.sh pnpm exec tsc --noEmit
+```
+
+Adapter132/132, initial API/cache/scoped56/56, final API5/5, access-helper6/6,
+runtime10/10 plus override regression1/1, initial lifecycle51/51 and rollback-pass
+selection21/21, and Chromium3/3 passed. Counts overlap and must not be summed.
+Identity's initial full run was91/92: a test attempted to edit an immutable allocation;
+its fixture was corrected, then all5 shared-cache cases passed. Runtime's first6
+new cases lacked a session; after fixing that fixture5/6 passed, then correcting a
+missing completed_at in the power-job fixture produced the10/10 final result.
+These failed attempts are retained and are not full-suite passes.
+
+Independent read-only review identified and resolved journal rollback retaining
+uncommitted in-memory attempt state, missing observer-override binding, and an
+unbounded latest-power query. An isolated PostgreSQL trigger regression proves a
+rolled-back journal never becomes an uncertain external write or consumes its
+attempt budget. No must-fix findings remain from that review. Browser tests use
+isolated handlers/provider fixtures; no visual layout changed. No real game-file
+mutation, server power command, Blueprint/Panel/Wings change, migration, rebuild or
+manual restart occurred. Existing dev API/worker remained healthy after watcher
+reloads, restart counters0; HTTPS200. Temporary test schemas are cleaned by the
+fixture harness; historical data is preserved. Production deployment and issue#18
+remain outside scope. Next evidence needed: Owner reopens Worlds and selects once
+for a real end-to-end trace on this revision.
+
+The complete lifecycle suite also passed **290/290** on the final transaction code.
+Root TypeScript, scoped Biome, staged governance and diff checks passed.

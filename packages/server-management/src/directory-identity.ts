@@ -1,7 +1,13 @@
+import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
-import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
+import {
+  type ApplicationServer,
+  applicationServerSchema,
+  type PrivateTransferCache,
+} from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, type Selectable, sql } from 'kysely';
+import { z } from 'zod';
 import { verifyManagedIdentity } from './lifecycle.js';
 
 type Server = Selectable<Database['managed_servers']>;
@@ -53,29 +59,52 @@ async function scope(db: Kysely<Database>, server: Server, providerBinding: stri
   return JSON.stringify([providerBinding, directoryServerIdentity(server), row]);
 }
 
-/** API-process scoped, bounded and non-sliding. Never an authorization or file-content cache. */
-export function createDirectoryIdentityCache(now: () => number = () => performance.now()) {
+const sharedProofSchema = z
+  .object({
+    scope: z.string().regex(/^[a-f0-9]{64}$/),
+    expiresAt: z.number().int().positive().safe(),
+    remote: applicationServerSchema,
+  })
+  .strict();
+
+/** Bounded, non-sliding identity proofs, optionally shared through the private transfer cache.
+ * Never an authorization, file-content, or process-state cache. */
+export function createDirectoryIdentityCache(
+  now: () => number = () => performance.now(),
+  shared?: PrivateTransferCache,
+) {
   const ttlMs = 60_000;
   type Entry = {
     scope: string;
     expiresAt: number;
-    proof: Promise<void>;
+    proof: Promise<ApplicationServer>;
+    sharedKey: string;
     used: boolean;
     timer?: ReturnType<typeof setTimeout>;
     refresh?: Promise<void>;
     refreshFailed?: boolean;
   };
   const entries = new Map<string, Entry>();
+  const skipShared = new Set<string>();
   let closed = false;
   function invalidate(serverId: string) {
-    clearTimeout(entries.get(serverId)?.timer);
+    const entry = entries.get(serverId);
+    clearTimeout(entry?.timer);
     entries.delete(serverId);
+    if (shared && entry) {
+      // Even if deletion fails, this process must obtain a new remote proof.
+      if (skipShared.size >= 1024) skipShared.delete(skipShared.values().next().value as string);
+      skipShared.add(serverId);
+      void shared.delete(entry.sharedKey).catch(() => {});
+    }
   }
   return {
     invalidate,
     close() {
       closed = true;
-      for (const id of entries.keys()) invalidate(id);
+      for (const entry of entries.values()) clearTimeout(entry.timer);
+      entries.clear();
+      skipShared.clear();
     },
     async verify(
       db: Kysely<Database>,
@@ -87,20 +116,76 @@ export function createDirectoryIdentityCache(now: () => number = () => performan
       if (closed) throw new DomainError('integration_unavailable');
       const binding = await scope(db, server, providerBinding);
       if (closed) throw new DomainError('integration_unavailable');
-      function prepare(connection: Kysely<Database>, used: boolean): Entry {
-        const entry: Entry = {
+      const bindingHash = createHash('sha256').update(binding).digest('hex');
+      const sharedKey = `fileman.identity.v1:${bindingHash}`;
+      function prepare(
+        connection: Kysely<Database>,
+        used: boolean,
+        allowShared: boolean,
+        previous?: Entry,
+      ): Entry {
+        const absoluteExpiry = Date.now() + ttlMs;
+        const entry = {
           scope: binding,
           expiresAt: now() + ttlMs,
-          proof: Promise.resolve(),
+          sharedKey,
           used,
-        };
+        } as Entry;
         entry.proof = (async () => {
-          await verifyManagedIdentity(connection, server, await read());
+          let remote: ApplicationServer | undefined;
+          let restored = false;
+          if (shared && allowShared) {
+            try {
+              const encoded = await shared.get(sharedKey);
+              if (encoded && Buffer.byteLength(encoded) <= 1024 ** 2) {
+                const value = sharedProofSchema.safeParse(JSON.parse(encoded));
+                const remaining = value.success ? value.data.expiresAt - Date.now() : 0;
+                if (
+                  value.success &&
+                  value.data.scope === bindingHash &&
+                  remaining > 0 &&
+                  remaining <= ttlMs
+                ) {
+                  await verifyManagedIdentity(connection, server, value.data.remote);
+                  remote = value.data.remote;
+                  entry.expiresAt = now() + (value.data.expiresAt - Date.now());
+                  restored = true;
+                }
+              }
+            } catch {
+              // Optional cache failures use the ordinary authenticated provider read.
+            }
+          }
+          remote ??= await read();
+          if (!restored) await verifyManagedIdentity(connection, server, remote);
+          const currentEntry = () =>
+            entries.get(server.id) === entry ||
+            (previous !== undefined && entries.get(server.id) === previous);
           if (
             (await scope(connection, server, providerBinding)) !== binding ||
-            entry.expiresAt <= now()
+            entry.expiresAt <= now() ||
+            closed ||
+            !currentEntry()
           )
             throw new DomainError('conflict');
+          if (shared && !restored) {
+            const parsed = applicationServerSchema.safeParse(remote);
+            const remaining = absoluteExpiry - Date.now();
+            if (parsed.success && remaining > 0 && remaining <= ttlMs) {
+              const value = JSON.stringify({
+                scope: bindingHash,
+                expiresAt: absoluteExpiry,
+                remote: parsed.data,
+              });
+              if (Buffer.byteLength(value) <= 1024 ** 2)
+                await shared.put(sharedKey, value, remaining).catch(() => {});
+            }
+          }
+          if (closed || !currentEntry() || entry.expiresAt <= now()) {
+            if (shared && !restored) await shared.delete(sharedKey).catch(() => {});
+            throw new DomainError('conflict');
+          }
+          return remote;
         })();
         return entry;
       }
@@ -131,7 +216,7 @@ export function createDirectoryIdentityCache(now: () => number = () => performan
             (await scope(backgroundDb, current, providerBinding)) !== binding
           )
             throw new DomainError('conflict');
-          const replacement = prepare(backgroundDb, false);
+          const replacement = prepare(backgroundDb, false, false, entry);
           await replacement.proof;
           if (entries.get(server.id) !== entry) throw new DomainError('conflict');
           entries.set(server.id, replacement);
@@ -151,26 +236,28 @@ export function createDirectoryIdentityCache(now: () => number = () => performan
       }
       const cached = entries.get(server.id);
       if (cached?.scope === binding && !(cached.expiresAt <= now() && cached.refreshFailed)) {
-        await cached.proof;
+        const remote = await cached.proof;
         if (entries.get(server.id)?.scope !== binding) throw new DomainError('conflict');
         cached.used = true;
         if (cached.expiresAt - now() <= 5_000) refresh(cached);
-        if (cached.expiresAt > now()) return;
+        if (cached.expiresAt > now()) return remote;
         await cached.refresh;
         const renewed = entries.get(server.id);
         if (renewed?.scope !== binding || renewed.expiresAt <= now())
           throw new DomainError('conflict');
         renewed.used = true;
-        return;
+        return renewed.proof;
       }
       invalidate(server.id);
       if (entries.size >= 1024) invalidate(entries.keys().next().value as string);
-      const entry = prepare(db, true);
+      const allowShared = !skipShared.delete(server.id);
+      const entry = prepare(db, true, allowShared);
       entries.set(server.id, entry);
       try {
-        await entry.proof;
+        const remote = await entry.proof;
         if (entries.get(server.id) !== entry) throw new DomainError('conflict');
         arm(entry);
+        return remote;
       } catch (error) {
         if (entries.get(server.id) === entry) invalidate(server.id);
         throw error;

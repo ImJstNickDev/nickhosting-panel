@@ -76,6 +76,7 @@ import { createStoragePolicyService } from './storage-policy.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 import type { UploadTiming } from './upload-timing.js';
 import { assertAutoWakeAllowed } from './wake-policy.js';
+import { createWorldSelectionAccess } from './world-selection-access.js';
 
 /** A queued operation retains attribution, never a permanently elevated authorization snapshot. */
 export async function authorizeQueuedEffect(
@@ -341,7 +342,9 @@ export async function createManagementRuntime(options: ManagementOptions) {
     }
   }
   const { db } = options;
-  const directoryIdentityCache = options.directoryIdentityCache ?? createDirectoryIdentityCache();
+  const directoryIdentityCache =
+    options.directoryIdentityCache ??
+    createDirectoryIdentityCache(undefined, options.transferCache);
   const env = options.env ?? {};
   const [{ values }, applicationKey] = await Promise.all([
     getSettings(db, env),
@@ -585,6 +588,36 @@ export async function createManagementRuntime(options: ManagementOptions) {
   const worldPreparation = options.transferCache
     ? createMinecraftWorldPreparation(options.transferCache, consoleProviderBinding)
     : undefined;
+  const worldSelectionAccess = options.transferCache
+    ? createWorldSelectionAccess(
+        options.transferCache,
+        JSON.stringify([
+          consoleProviderBinding,
+          values.dockerObserverSocket,
+          env.NH_OBSERVER_ID,
+          env.NH_HOST_POLICIES,
+        ]),
+      )
+    : undefined;
+  async function prepareWorldSelection(
+    server: Awaited<ReturnType<typeof authorizeServer>>,
+    connection: Kysely<Database>,
+  ) {
+    // Opening Worlds overlaps this physical observation and grant preparation
+    // with the inventory. Neither performs a game-file mutation.
+    await Promise.all([
+      worldSelectionAccess?.prepare(connection, server, async () => {
+        await verifyObservationHost(server.id, connection);
+        if (!containerObserver || !server.pterodactyl_uuid) return false;
+        return containerObserver.stopped(server.pterodactyl_uuid, 'server');
+      }),
+      server.pterodactyl_identifier
+        ? adapter
+            .prepareFileWrite(server.pterodactyl_identifier, 'server.properties')
+            .catch(() => {})
+        : undefined,
+    ]);
+  }
   const minecraft = createMinecraftModuleRuntime({
     db,
     codec: options.codec,
@@ -717,6 +750,24 @@ export async function createManagementRuntime(options: ManagementOptions) {
     verifyGameRestore: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.verifyRestore(context) ?? true,
     verifyObservationHost,
+    ...(worldSelectionAccess
+      ? {
+          assertWorldSelectionAccess: worldSelectionAccess.assert,
+          worldSelectionIdentity: (
+            server: Awaited<ReturnType<typeof authorizeServer>>,
+            connection: Kysely<Database>,
+          ) => {
+            if (!server.pterodactyl_id) throw new DomainError('conflict');
+            return directoryIdentityCache.verify(
+              connection,
+              server,
+              consoleProviderBinding,
+              () => adapter.getApplicationServer(server.pterodactyl_id as number),
+              db,
+            );
+          },
+        }
+      : {}),
     confirmAlreadyStopped: async (
       serverId: string,
       connection: Kysely<Database>,
@@ -1487,6 +1538,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     externalOptions,
     minecraftOptions,
     worldPreparation,
+    prepareWorldSelection,
     assertMinecraftRuntimeImage,
     assertFileMutation,
   };

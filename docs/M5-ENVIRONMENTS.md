@@ -1682,3 +1682,17 @@ login form without page errors and received Vite's connected message over WSS.
 Independent review verified the before/after snapshots and found no activation
 blockers. Existing SFTPGo#18 and the previously documented Gateway route condition
 are not changed or reclassified by this activation.
+
+### Worlds selection preparation — 2026-10-18
+
+API and worker reuse the existing encrypted private-transfer Redis namespace for
+opening-time stop observations, 60-second managed identity proofs, and exact-path
+single-use text upload grants. No migration, extra service, setting, dependency or
+Blueprint update is required. Opening Worlds prepares in parallel; Select uses
+local offline/power-revision checks and the existing direct Wings upload transport.
+Missing/expired stopped observations require refreshing Worlds. External Panel
+power actions are not continuously observed by this cached proof; local known
+state changes still reject selection. Missing upload grants retain the Panel write,
+and a dispatched direct write never falls back or retries. See M5 API contracts.
+Development activation uses the existing API/worker source watchers. Code rollback
+is a revert; disposable preparation expires without persistent-data cleanup.

@@ -21,6 +21,7 @@ import {
 } from './file-operations.js';
 import { confirmInstallation } from './installation.js';
 import { type StopConfirmationOptions, stopWithConfirmation } from './power.js';
+import { createPreparedFileWrites } from './prepared-file-writes.js';
 import { createTransferGuard, type TransferOptions } from './transfer-guard.js';
 import {
   createTransport,
@@ -97,6 +98,7 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
   const download = createDownloadProxy(options);
   const upload = createUploadProxy(options);
   const fileDownloads = createDownloadPool(options, transport);
+  const fileWrites = createPreparedFileWrites(options, transport, fileDownloads.settings);
   const uploadOrigins = new Set(
     (options.uploadOrigins ?? []).map((origin) => allowedOrigin(origin, ['http:', 'https:'])),
   );
@@ -468,12 +470,45 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         : await fileDownloads.take(identifier, path);
       return readEditorDownload(options, url, maxBytes, timing);
     },
+    /** Optional exact-path grant preparation; never mutates a server file. */
+    prepareFileWrite: fileWrites.prepare,
     writeFile(identifier: string, path: string, contents: string, timing?: FileReadTiming) {
       if (typeof contents !== 'string' || Buffer.byteLength(contents, 'utf8') > 1048576)
         throw new DomainError('validation_failed');
       const endpoint = `${clientServer(identifier)}/files/write?file=${filePath(path)}`;
-      const request = () => transport.empty('client', endpoint, 'POST', contents, true);
-      return timing ? timing.measure('file.write.http', request) : request();
+      const panelWrite = () => transport.empty('client', endpoint, 'POST', contents, true);
+      const measure = (request: () => Promise<void>) =>
+        timing ? timing.measure('file.write.http', request) : request();
+      if (!options.transferCache) return measure(panelWrite);
+      return (async () => {
+        const take = () => fileWrites.take(identifier, path);
+        const grant = timing ? await timing.measure('file.write.prepared', take) : await take();
+        if (!grant) return measure(panelWrite);
+        const bytes = Buffer.from(contents, 'utf8');
+        try {
+          // The one-use grant has already left shared storage. Never replay or
+          // fall back to Panel after dispatch, including an uncertain response.
+          await measure(() =>
+            uploadHandoff(
+              grant.url,
+              path,
+              grant.expiresAt,
+            )({
+              body: new ReadableStream<Uint8Array>({
+                start(controller) {
+                  controller.enqueue(bytes);
+                  controller.close();
+                },
+              }),
+              contentLength: bytes.byteLength,
+              maxBytes: 1048576,
+            }),
+          );
+        } finally {
+          // A new grant is preparation only; keep it detached from this trace.
+          void fileWrites.prepare(identifier, path);
+        }
+      })();
     },
     deleteFiles(identifier: string, root: string, files: string[]) {
       const rootPath = relativePath(root, true);

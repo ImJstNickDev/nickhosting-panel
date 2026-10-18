@@ -39,9 +39,11 @@ function fixture(connection = db) {
   const authorizeTransfer = vi.fn(async () => {});
   const access = vi.fn(async (_actor, _server, work) => work('provider', connection, actor));
   const readFileForEditor = vi.fn(async () => Buffer.from('motd=Fixture\nmax-players=20\n'));
+  const prepareWorldSelection = vi.fn(async () => {});
   const service = {
     adapter: { readFileForEditor },
     fileReadAccess: access,
+    prepareWorldSelection,
     authorizeTransfer,
   } as unknown as ManagementRuntime;
   const management = vi.fn(async () => service);
@@ -52,7 +54,7 @@ function fixture(connection = db) {
     body: async (c) => c.req.json(),
     management,
   });
-  return { app, access, management, authorizeTransfer, readFileForEditor };
+  return { app, access, management, authorizeTransfer, readFileForEditor, prepareWorldSelection };
 }
 beforeEach(() => {
   vi.mocked(authorizeServer)
@@ -72,6 +74,21 @@ describe('world snapshot HTTP access contract', () => {
     const authorize = vi.mocked(inspectMinecraftWorlds).mock.calls[0]?.[3];
     await authorize?.();
     expect(f.authorizeTransfer).toHaveBeenCalledExactlyOnceWith(actor, 'server', false, db);
+  });
+  it('overlaps opening preparation with inventory and tolerates unavailable preparation', async () => {
+    const f = fixture();
+    const preparation = Promise.withResolvers<void>();
+    f.prepareWorldSelection.mockReturnValueOnce(preparation.promise);
+    const inspected = Promise.withResolvers<void>();
+    vi.mocked(inspectMinecraftWorlds).mockImplementationOnce(async () => {
+      inspected.resolve();
+      return snapshot;
+    });
+    const response = f.app.request('/v1/servers/server/minecraft/worlds');
+    await inspected.promise;
+    expect(f.prepareWorldSelection).toHaveBeenCalledOnce();
+    preparation.reject(new Error('optional preparation unavailable'));
+    expect((await response).status).toBe(200);
   });
   it('opens Settings through Fileman identity access and one direct signed read', async () => {
     const profile = { combination_id: 'choice', configuration: {}, installed: true };

@@ -3988,6 +3988,38 @@ describe('Minecraft world selection without telemetry settling', () => {
     expect(f.options.authorizeIntent).toHaveBeenCalledTimes(7);
     expect((await f.operation()).plan.offlineSince).toBeUndefined();
   });
+  it('rolls back selection journal failures without inventing an uncertain external write', async () => {
+    const f = await fixture('minecraft-content', plan());
+    const write = vi.fn(async () => {});
+    f.options.confirmAlreadyStopped = async () => true;
+    f.options.processGameContent = async (context) => {
+      await context.effect('minecraft.text.fixture', write);
+      return true;
+    };
+    await database.pool.query(`
+      CREATE FUNCTION fail_selection_journal() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.message_key = 'servers.operation.effect_prepared' AND NEW.job_id = '${f.jobId}' THEN
+          RAISE EXCEPTION 'isolated journal insertion failure';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER selection_journal_failure BEFORE INSERT ON server_events
+        FOR EACH ROW EXECUTE FUNCTION fail_selection_journal();
+    `);
+    try {
+      await f.run();
+      expect(write).not.toHaveBeenCalled();
+      const operation = await f.operation();
+      expect(operation.effect_state).toBe('none');
+      expect(operation.plan.waitReason).toBe('provider_unavailable');
+      expect(operation.plan.effectAttempts).toBeUndefined();
+    } finally {
+      await database.pool.query(
+        'DROP TRIGGER selection_journal_failure ON server_events; DROP FUNCTION fail_selection_journal();',
+      );
+    }
+  });
   it('checks host and process once after durable intent with one resource transaction', async () => {
     const f = await fixture('minecraft-content', plan());
     const order: string[] = [];
@@ -4016,7 +4048,7 @@ describe('Minecraft world selection without telemetry settling', () => {
     expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
     const summary = records.find((record) => record.event === 'servers.world_selection_timing')
       ?.data as { stages: Record<string, { count: number }> };
-    expect(summary.stages['effect.resourceLock']?.count).toBe(1);
+    expect(summary.stages['effect.resourceLock']).toBeUndefined();
     expect(summary.stages['stop.final']?.count).toBe(1);
     expect(summary.stages['stop.initial']).toBeUndefined();
   });

@@ -26,6 +26,7 @@ const identifierArguments: Partial<Record<keyof PterodactylAdapter, number>> = {
   prefetchDownloads: 0,
   invalidateFileDownloads: 0,
   writeFile: 0,
+  prepareFileWrite: 0,
   deleteFiles: 0,
   createDirectory: 0,
   renameFiles: 0,

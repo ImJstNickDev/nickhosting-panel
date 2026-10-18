@@ -1510,9 +1510,24 @@ snapshot, not another world validation.
 API and worker share privately prepared, single-use Wings download grants. Consumption
 is atomic and replenishment happens in the background. Missing/expired grants are
 issued on demand through the existing adapter. Selection retains current permissions,
-managed identity, operation/upload/installation/resource exclusions, and one final
-host-bound stopped-process proof immediately before the write. There is no initial
-stopped proof followed by a duplicate final proof. Lost writes remain recoverable
+managed identity and operation/upload/installation/resource exclusions. The stopped
+process is observed when Worlds opens, in parallel with inventory and private upload
+grant preparation. Select checks only the cached observation and current local offline
+state, host/observer binding and power-job revision under its existing server lock.
+An intervening start/stop/restart or expired/missing preparation requires refreshing
+Worlds. The observation does not continuously monitor actions performed outside
+NickHosting; an external Panel start can precede local state updates. No Docker read
+is performed by a prepared Select. API and worker share the existing 60-second
+identity proof without extending its original expiry; current local ownership,
+allocations, credential/feed invalidations and authorization still apply.
+
+A prepared exact-path upload grant lets the existing adapter write properties straight
+to Wings using the same multipart transport as Fileman. The grant is private, atomic
+and single-use; it refills in the background. A missing grant uses the existing Panel
+write. A dispatched Wings write is never retried through Panel. Selection groups its
+lease/state and effect-journal writes into transactions and skips the unrelated global
+resource lock for its read-only exclusions; reservation-changing locks remain.
+Lost writes remain recoverable
 by their durable desired hash and are never blindly replayed. UI selection changes
 only after confirmed completion; no speculative success state or new notification.
 
