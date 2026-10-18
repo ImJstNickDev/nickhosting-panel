@@ -214,6 +214,27 @@ describe('Fileman durable integration transfers', () => {
       expect(await f.claims()).toEqual([]);
     });
   });
+  it('rejects a destination created during effect preparation without taking ownership or uploading', async () => {
+    const f = await fixture();
+    f.context.effect.mockImplementationOnce(async (_phase, perform) => {
+      // Another provider writer creates this tree after all job preflight work.
+      f.directories.add('new-world');
+      await perform();
+      return true;
+    });
+    await expect(f.files.uploadStaged(f.input())).rejects.toMatchObject({ code: 'conflict' });
+    expect(f.adapter.listFiles).toHaveBeenCalledTimes(1);
+    expect(f.adapter.createDirectory).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
+    const steps = await database.db
+      .selectFrom('job_steps')
+      .select('step')
+      .where('job_id', '=', f.context.operation().job_id)
+      .where('step', 'like', 'fileman.transfer.%')
+      .execute();
+    expect(steps).toEqual([]);
+    expect(await f.claims()).toEqual([]);
+  });
   it('lets native uploads create nested parents without preparatory descendant requests', async () => {
     await database.db.connection().execute(async (db) => {
       const f = await fixture(db);

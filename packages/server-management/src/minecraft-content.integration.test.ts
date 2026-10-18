@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ZipFile } from 'yazl';
 import { canonicalMinecraftJarSha256 } from '../../../games/minecraft/src/generated-launcher.js';
 import { planMinecraftPlayerList } from '../../../games/minecraft/src/management.js';
+import * as minecraftWorld from '../../../games/minecraft/src/world.js';
 import * as contentDisk from '../../content-providers/src/disk.js';
 import {
   createFilemanJobServices,
@@ -696,13 +697,19 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     },
   );
 
-  it.each([
-    { label: 'matching', field: 'DataVersion', value: 3955, status: 'verified' },
-    { label: 'different version', field: 'DataVersion', value: 4786, status: 'incompatible' },
-    { label: 'legacy Anvil', field: 'version', value: 19133, status: 'unknown' },
-  ])(
-    'imports a $label world online without selecting it or overwriting collisions',
-    async ({ field, value, status }) => {
+  it.each(
+    [
+      { label: 'matching', field: 'DataVersion', value: 3955, status: 'verified' },
+      { label: 'different version', field: 'DataVersion', value: 4786, status: 'incompatible' },
+      { label: 'legacy Anvil', field: 'version', value: 19133, status: 'unknown' },
+    ].flatMap((version) =>
+      (version.status === 'verified' ? ['none', 'staging', 'checkpoint'] : ['none', 'staging']).map(
+        (collision) => ({ ...version, collision }),
+      ),
+    ),
+  )(
+    'imports a $label world online without selecting it or overwriting collisions ($collision)',
+    async ({ field, value, status, collision }) => {
       const f = await minecraftFixture(undefined, true);
       const root = `./mountdata/test-assets/world-online-${randomUUID()}`;
       const env = {
@@ -900,7 +907,131 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
         expect(f.context.adapter.uploadFile).not.toHaveBeenCalled();
         f.files.set('server.properties', Buffer.from('level-name=world\n'));
         vi.mocked(f.context.assertStopped).mockClear();
-        expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+        const stageWorld = minecraftWorld.stageMinecraftWorld;
+        const stageSpy = vi.spyOn(minecraftWorld, 'stageMinecraftWorld');
+        if (collision !== 'none') {
+          if (collision === 'staging')
+            stageSpy.mockImplementationOnce(async (...args) => {
+              const result = await stageWorld(...args);
+              f.files.set('new_world/foreign.txt', Buffer.from('keep'));
+              return result;
+            });
+          const server = await f.f.db
+            .selectFrom('managed_servers')
+            .selectAll()
+            .where('id', '=', f.serverId)
+            .executeTakeFirstOrThrow();
+          const allocations = await f.f.db
+            .selectFrom('server_allocations')
+            .selectAll()
+            .where('server_id', '=', f.serverId)
+            .execute();
+          const remote = {
+            id: server.pterodactyl_id,
+            uuid: server.pterodactyl_uuid,
+            identifier: server.pterodactyl_identifier,
+            external_id: server.external_id,
+            node: f.f.providerNodeId,
+            user: server.provider_user_id,
+            egg: 1,
+            allocation: allocations.find((item) => item.is_primary)?.pterodactyl_allocation_id,
+            status: null,
+            suspended: false,
+            container: { installed: true },
+            limits: server.limits,
+            relationships: {
+              allocations: {
+                data: allocations.map((item) => ({
+                  attributes: {
+                    id: item.pterodactyl_allocation_id,
+                    ip: item.address,
+                    port: item.port,
+                    assigned: true,
+                  },
+                })),
+              },
+            },
+          } as ApplicationServer;
+          f.context.adapter.getApplicationServer = vi.fn(async () => remote);
+          const checkpoint = vi.fn(async (stage: string) => {
+            if (collision === 'checkpoint' && stage === 'prepared')
+              f.files.set('new_world/foreign.txt', Buffer.from('keep'));
+          });
+          const result = await processServerOperation(f.f.db, f.operation.job_id, {
+            adapter: f.context.adapter,
+            env,
+            authorizeEffect: async () => {},
+            authorizeIntent: async () => {},
+            checkpoint,
+            processGameContent: (context) => processMinecraftContent(context, f.options),
+            fileman: (context) =>
+              createFilemanJobServices(context, { env, authorize: async () => f.f.context }),
+          });
+          expect(result).toBe('waiting');
+          expect(checkpoint).toHaveBeenCalledWith('prepared', expect.anything());
+          expect(f.context.adapter.createDirectory).not.toHaveBeenCalled();
+          expect(f.context.adapter.uploadFile).not.toHaveBeenCalled();
+          expect(f.files.get('new_world/foreign.txt')?.toString()).toBe('keep');
+          const operation = await f.f.db
+            .selectFrom('server_operations')
+            .select(['effect_state', 'plan'])
+            .where('job_id', '=', f.operation.job_id)
+            .executeTakeFirstOrThrow();
+          expect(operation.effect_state).toBe('uncertain');
+          expect(operation.plan.waitReason).toBe('remote_outcome_unknown');
+          expect(
+            await f.f.db
+              .selectFrom('job_steps')
+              .select('step')
+              .where('job_id', '=', f.operation.job_id)
+              .where('step', 'like', 'fileman.transfer.%')
+              .execute(),
+          ).toEqual([]);
+          expect(
+            (
+              await f.f.db
+                .selectFrom('minecraft_server_profiles')
+                .select('content_state')
+                .where('server_id', '=', f.serverId)
+                .executeTakeFirstOrThrow()
+            ).content_state,
+          ).toMatchObject({ jobId: f.operation.job_id });
+          return;
+        }
+        vi.mocked(f.context.adapter.listFiles).mockClear();
+        const staged = Promise.withResolvers<void>();
+        const reading = Promise.withResolvers<void>();
+        stageSpy.mockImplementation(async (...args) => {
+          const result = await stageWorld(...args);
+          staged.resolve();
+          return result;
+        });
+        const read = f.context.adapter.readFileForEditor;
+        vi.spyOn(f.context.adapter, 'readFileForEditor').mockImplementation(async (...args) => {
+          if (args[1] === 'server.properties') await reading.promise;
+          return read(...args);
+        });
+        const importing = processMinecraftContent(f.context, f.options);
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            staged.promise,
+            new Promise<never>((_, reject) => {
+              timeout = setTimeout(() => reject(new Error('Staging waits for properties')), 2000);
+            }),
+          ]);
+          expect(f.context.adapter.uploadFile).not.toHaveBeenCalled();
+        } finally {
+          clearTimeout(timeout);
+          reading.resolve();
+          await importing;
+        }
+        expect(await importing).toBe(true);
+        expect(f.context.adapter.listFiles).toHaveBeenCalledTimes(2);
+        expect(f.context.adapter.listFiles).toHaveBeenCalledWith(
+          f.context.server.pterodactyl_identifier,
+          '',
+        );
         expect(f.files.get('new_world/level.dat')).toEqual(level);
         expect(f.files.get('new_world/region/r.0.0.mca')).toEqual(Buffer.from('region fixture'));
         expect(f.context.assertStopped).not.toHaveBeenCalled();

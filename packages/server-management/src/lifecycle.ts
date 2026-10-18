@@ -39,10 +39,7 @@ import {
   recoverProvisionGateway,
 } from './gateway-provision.js';
 import { currentInteractiveContext } from './interactive-context.js';
-import {
-  minecraftContentAllowsOnline,
-  minecraftContentRemovesInactiveWorld,
-} from './minecraft-content-contracts.js';
+import { minecraftContentAllowsOnline } from './minecraft-content-contracts.js';
 import { assertGatewaySleepFence, revokeGatewayRoutesForDeletion } from './registry.js';
 import { assertIdleSleepAllowed } from './sleep-policy.js';
 import { consumeStopEscalation, stopEscalation } from './stop-escalation.js';
@@ -854,12 +851,17 @@ export async function processServerOperation(
     const onlineWorldContent =
       operation.action === 'minecraft-content' &&
       minecraftContentAllowsOnline(operation.plan.minecraftContent);
-    const inactiveWorldRemoval =
-      operation.action === 'minecraft-content' &&
-      minecraftContentRemovesInactiveWorld(operation.plan.minecraftContent);
-    // One provider identity proof for this short, locked file operation. Other
-    // lifecycle workflows continue to take fresh proofs at their effect boundary.
-    let worldRemovalProvider: ApplicationServer | undefined;
+    // Reuse only this locked delivery's identity proof for inactive-world file
+    // operations. Long staging refreshes it; no proof crosses jobs or deliveries.
+    let worldContentIdentity: { remote: ApplicationServer; checkedAt: number } | undefined;
+    const worldContentProvider = async () => {
+      const age = nowOf(options).getTime() - (worldContentIdentity?.checkedAt ?? 0);
+      if (!worldContentIdentity || age < 0 || age >= 60_000) {
+        const remote = await timed('provider_identity', () => ownedRemote(db, server, options));
+        worldContentIdentity = { remote, checkedAt: nowOf(options).getTime() };
+      }
+      return worldContentIdentity.remote;
+    };
     const requireQuiescentReservation = async () => {
       await db.transaction().execute(async (tx) => {
         await lockResources(tx);
@@ -921,7 +923,7 @@ export async function processServerOperation(
       let verifiedServer = finalPowerIdentity
         ? undefined
         : (preparationServer ??
-          (inactiveWorldRemoval ? worldRemovalProvider : undefined) ??
+          (onlineWorldContent ? await worldContentProvider() : undefined) ??
           (operation.action !== 'provision' || server.pterodactyl_id !== null
             ? await timed('provider_identity', () => ownedRemote(db, server, options))
             : undefined));
@@ -959,7 +961,7 @@ export async function processServerOperation(
           .executeTakeFirst()) !== undefined;
       if (
         finalPowerIdentity ||
-        inactiveWorldRemoval ||
+        onlineWorldContent ||
         ((operation.plan.gatewayAutomation !== undefined ||
           operation.plan.scheduleAutomation !== undefined ||
           minecraftProvision) &&
@@ -971,7 +973,23 @@ export async function processServerOperation(
         try {
           if (operation.plan.gatewayAutomation !== undefined)
             assertGatewaySleepFence(operation.plan, nowOf(options));
-          if (inactiveWorldRemoval) {
+          if (onlineWorldContent) {
+            // Revalidate current local identity and policy after durable intent.
+            // A changed mapping/ownership cannot borrow an earlier remote proof.
+            verifiedServer = await worldContentProvider();
+            const current = await db
+              .selectFrom('managed_servers')
+              .selectAll()
+              .where('id', '=', server.id)
+              .executeTakeFirstOrThrow();
+            if (
+              current.active_operation_id !== jobId ||
+              current.deleted_at ||
+              current.owner_id !== server.owner_id ||
+              current.mapping_id !== server.mapping_id
+            )
+              throw new DomainError('conflict');
+            await verifyManagedIdentity(db, current, verifiedServer);
             await (options.authorizeIntent ?? options.authorizeEffect)(jobId, server.id, db);
           } else if (leanStart) {
             await timed('authorization', () =>
@@ -2170,7 +2188,8 @@ export async function processServerOperation(
         }
         throw error;
       }
-      if (inactiveWorldRemoval) worldRemovalProvider = remote;
+      if (onlineWorldContent)
+        worldContentIdentity = { remote, checkedAt: nowOf(options).getTime() };
       if (['start', 'stop', 'restart'].includes(operation.action)) {
         const action = operation.action as 'start' | 'stop' | 'restart';
         const observedStop = await completeObservedStop();

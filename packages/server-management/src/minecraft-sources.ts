@@ -196,7 +196,12 @@ async function hashSource(
       Object.keys({ ...hashes, sha256: '' }).map((name) => [name, createHash(name)]),
     );
     let bytes = 0;
-    for await (const chunk of file.createReadStream({ autoClose: false, highWaterMark: 65536 })) {
+    // Local source hashing benefits from larger bounded reads. This does not
+    // change browser/provider upload buffering or authority refresh intervals.
+    for await (const chunk of file.createReadStream({
+      autoClose: false,
+      highWaterMark: 1024 ** 2,
+    })) {
       await authorize();
       bytes += chunk.length;
       if (bytes > Number(row.declared_bytes)) throw new DomainError('conflict');

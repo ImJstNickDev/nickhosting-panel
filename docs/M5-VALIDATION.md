@@ -12506,3 +12506,87 @@ No game-server files, Panel/Wings/Blueprint configuration, credentials, DNS or
 production resources were mutated. Tests use isolated schemas and disposable
 fixtures. SFTPGo #18 remains a separate release gate. Real-provider timings after
 this pass require the Owner's next import; no live test import was performed.
+
+### 2026-10-18 — World preparation: shared reads and parallel preflight
+
+The Owner's next real run on `fbb4a3f` succeeded in **8.090 s**, one delivery,
+101 files / 116,278,134 bytes, without retries. The inactive-world deletion took
+**1.009 s**, including a 281 ms provider effect. Import phases from existing logs
+and private receipt timestamps were:
+
+| Interval | Observed time before this pass |
+| --- | ---: |
+| Job creation to transfer effect | 4.600 s |
+| Effect start to first sent receipt | 0.982 s |
+| First sent receipt to last confirmed file | 2.219 s |
+| Last confirmed file to job completion | 0.289 s |
+
+The sent marker precedes HTTP dispatch; these intervals include local bookkeeping
+and are not pure network measurements. Staging timestamps place approximately
+2.180 s between the first extracted file's timestamp and manifest publication.
+They do not isolate individual decompression, hashing or filesystem operations.
+Compared with the preceding 11.812 s import, the observed total improved 31.5%;
+these are historical real-provider results, not results of the changes below.
+
+This pass removes the second remote identity request for additive world imports.
+The proof belongs to the current locked job delivery, expires at 60 seconds and
+is refreshed when staging or durable preparation exceeds that bound. Current
+local owner, mapping, UUID/node/allocations, active operation and permissions are
+checked again before dispatch. Power, backup and replacement paths retain their
+existing behavior. No cross-job authorization cache was added.
+
+Source verification overlaps root metadata and private read-ticket preparation;
+reading properties overlaps local extraction. All parallel work settles before
+effects or failure returns, and staging is the only transaction-bearing task in
+its overlap. Tickets do not read bytes before the metadata/symlink guard. The same
+root/ticket overlap shortens inactive-world deletion. Fileman owns the final fresh
+destination collision check; additive import removes the earlier duplicate check,
+reducing root requests from three to two. Replacement/backup keeps its separate
+pre-deletion checks. Upload concurrency, signed-stream scheduling and per-file
+receipts are unchanged.
+
+An independent review rejected an intermediate proposal that passed a one-second
+destination snapshot across durable preparation: a concurrent external directory
+creation could escape detection. That snapshot API was removed, with regression
+coverage for collisions during staging and at the prepared effect boundary.
+No cached directory observation now replaces Fileman's final check.
+
+Local source hashing now reads bounded 1 MiB blocks instead of 64 KiB. Two
+interleaved runs per size on an 81,747,167-byte synthetic ZIP produced identical
+digests: mean elapsed **182.66 → 115.08 ms**, CPU **231.96 → 172.01 ms**,
+1,248 → 78 chunks. Elapsed ranges were 142.48–222.83 ms and 114.34–115.82 ms.
+This is a local hash benchmark, not a prediction for the complete import.
+Larger inflater output blocks gave no stable advantage. A proposed public yauzl
+reader also failed to improve the actual helper (mean 1,205.80 → 1,249.63 ms)
+and was discarded; the existing archive reader and extraction algorithm remain.
+Synthetic benchmark data was removed.
+
+Targeted evidence (52 relevant cases passed, across the checks below):
+
+- `scripts/dev.sh pnpm exec vitest run packages/server-management/src/minecraft-content.test.ts -t 'world|removal|authorization is lost|properties ticket'`: **17 passed / 27 excluded**; root/ticket overlap, symlink guard, current active-world checks and backup revalidation.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts -t 'additive Minecraft world imports|inactive Minecraft world removal'`: **15 passed / 238 excluded**; one identity request, expiry during staging/prepared, current revocation/UUID/mapping/allocation drift and fresh proof on redelivery.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-sources.integration.test.ts -t 'streams exact binary|retains per-server scope|bounds upload|quick hash|final upload chunk|stalled body|resolves a server-scoped|charged uncertain claim'`: **10 passed / 11 excluded** after the local hash block change.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-content.integration.test.ts -t 'imports a .* world online'`: **7 passed / 45 excluded** on the revised final collision path. Three successful compatible/different/legacy imports use two root listings; three staging collisions and one real lifecycle prepared-checkpoint collision cause no mkdir/upload/ownership receipt and preserve foreign bytes. The existing late-collision uncertain/pending state is retained, never reported as success or automatically replayed.
+- The unchanged two online-removal integration cases passed earlier in this pass with `-t 'imports a .* world online|removes an inactive world online through'` (five cases at that point). Only the affected import cases were rerun after review.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/fileman-transfers.integration.test.ts -t 'destination created during effect preparation'`: **1 passed / 9 excluded**, explicitly covering the reviewed handoff race.
+
+Backend typecheck, changed-source Biome, whitespace and governance checks passed.
+Formatting feedback on two edited files was corrected. An initial lifecycle test
+fixture attempted to update immutable allocation identity; the fixture was corrected
+to remove a claim in its isolated schema, preserving the product invariant.
+No full historical suite was repeated. Independent re-review confirmed the collision
+finding resolved and found no remaining must-fix.
+
+Existing watchers loaded the changes; API/worker health remained healthy, worker
+quota remained 2 CPU / 512 MiB, HTTPS returned 200 and unauthenticated `/v1/me` 401.
+No explicit container restart, migration or infrastructure change was needed.
+Pre-existing periodic reconciliation-unavailable warnings were observed before
+and after this pass; they are not evidence of a new successful reconciliation.
+Tests used isolated schemas/fixtures. No real game-server files or provider
+configuration were mutated, and no real import/delete was run by the agent.
+SFTPGo #18 remains a separate release gate.
+
+The requested five-second total remains a real-provider measurement target, not
+an established result or a general bound for arbitrary world sizes. The Owner's
+next import/delete will verify total latency using the existing logs/receipts;
+no extra timetrace logging was added.

@@ -3939,6 +3939,107 @@ describe('additive Minecraft world imports', () => {
         .executeTakeFirst(),
     ).toEqual({ state: 'running' });
     expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledOnce();
+  });
+  it('refreshes the delivery identity when world preparation takes a minute', async () => {
+    const f = await fixture('minecraft-content', plan());
+    const write = vi.fn(async () => {});
+    f.options.processGameContent = async (context) => {
+      f.tick(60_000);
+      await context.effect('minecraft.import.fixture', write);
+      return true;
+    };
+    expect(await f.run()).toBe('succeeded');
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+    expect(write).toHaveBeenCalledOnce();
+  });
+  it('rejects an expired proof that changes after durable preparation without dispatching', async () => {
+    const f = await fixture('minecraft-content', plan());
+    const write = vi.fn(async () => {});
+    f.options.checkpoint = async (phase) => {
+      if (phase !== 'prepared') return;
+      f.tick(60_000);
+      f.remote.uuid = randomUUID();
+    };
+    f.options.processGameContent = async (context) => {
+      await context.effect('minecraft.import.fixture', write);
+      return true;
+    };
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+    expect(write).not.toHaveBeenCalled();
+    expect((await f.operation()).effect_state).toBe('none');
+  });
+  it.each(['revocation', 'uuid', 'mapping', 'allocation'] as const)(
+    'rejects local %s changes after durable preparation while reusing remote identity',
+    async (change) => {
+      const f = await fixture('minecraft-content', plan());
+      const write = vi.fn(async () => {});
+      let revoked = false;
+      f.options.authorizeIntent = async () => {
+        if (revoked) throw new DomainError('forbidden');
+      };
+      f.options.checkpoint = async (phase) => {
+        if (phase !== 'prepared') return;
+        if (change === 'revocation') revoked = true;
+        else if (change === 'uuid')
+          await f.db
+            .updateTable('managed_servers')
+            .set({ pterodactyl_uuid: randomUUID() })
+            .where('id', '=', f.serverId)
+            .execute();
+        else if (change === 'allocation')
+          await f.db.deleteFrom('server_allocations').where('server_id', '=', f.serverId).execute();
+        else {
+          const previous = await f.db
+            .selectFrom('runtime_egg_mappings')
+            .selectAll()
+            .where('id', '=', (await f.server()).mapping_id)
+            .executeTakeFirstOrThrow();
+          const replacement = randomUUID();
+          await f.db
+            .insertInto('runtime_egg_mappings')
+            .values({
+              ...previous,
+              id: replacement,
+              runtime_id: 'replacement-fixture',
+              environment: JSON.stringify(previous.environment),
+              port_roles: JSON.stringify(previous.port_roles),
+              feature_limits: JSON.stringify(previous.feature_limits),
+            })
+            .execute();
+          await f.db
+            .updateTable('managed_servers')
+            .set({ mapping_id: replacement })
+            .where('id', '=', f.serverId)
+            .execute();
+        }
+      };
+      f.options.processGameContent = async (context) => {
+        await context.effect('minecraft.import.fixture', write);
+        return true;
+      };
+      expect(await f.run()).toBe('failed');
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledOnce();
+      expect(write).not.toHaveBeenCalled();
+      expect((await f.operation()).effect_state).toBe('none');
+    },
+  );
+  it('takes a new identity proof on another delivery even inside the reuse window', async () => {
+    const f = await fixture('minecraft-content', plan());
+    const write = vi.fn(async () => {});
+    f.options.processGameContent = vi
+      .fn<NonNullable<LifecycleOptions['processGameContent']>>()
+      .mockResolvedValueOnce(false)
+      .mockImplementation(async (context) => {
+        await context.effect('minecraft.import.fixture', write);
+        return true;
+      });
+    expect(await f.run()).toBe('waiting');
+    f.tick(5_000);
+    expect(await f.run()).toBe('succeeded');
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+    expect(write).toHaveBeenCalledOnce();
   });
   it('imports an inactive folder during a power transition without reading process telemetry', async () => {
     const f = await fixture('minecraft-content', plan());

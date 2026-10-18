@@ -58,6 +58,7 @@ import {
 import { assessMinecraftWorldCompatibility } from '../../../games/minecraft/src/world-version.js';
 import type {
   FilemanDirectoryResult,
+  FilemanEntry,
   FilemanReadService,
 } from '../../game-sdk/src/fileman-read.js';
 import type { Environment } from './admission.js';
@@ -1326,6 +1327,48 @@ function targetsConfiguredMinecraftWorld(configured: string, target: string): bo
   );
 }
 
+/** One authorized metadata scope per world preflight. The durable effect checks
+ * current authority again after local staging, before any provider mutation. */
+function worldFileScope(context: GameLifecycleContext): FilemanReadService {
+  let authorized: Promise<void> | undefined;
+  return createFilemanReadService({
+    adapter: context.adapter,
+    identifier: context.server.pterodactyl_identifier ?? '',
+    authorize: () => (authorized ??= context.authorize()),
+  });
+}
+
+async function prepareWorldRoot(files: FilemanReadService) {
+  // Ticket preparation touches no file bytes and reuses an existing valid ticket.
+  // The caller still validates metadata before reading server.properties.
+  const [root, prepared] = await Promise.allSettled([
+    files.list(''),
+    files.prepare(['server.properties']),
+  ]);
+  if (root.status === 'rejected') throw root.reason;
+  if (prepared.status === 'rejected') throw prepared.reason;
+  return root.value;
+}
+
+interface WorldFileScope {
+  files: FilemanReadService;
+  entries: readonly FilemanEntry[];
+}
+async function prepareWorldFiles(context: GameLifecycleContext): Promise<WorldFileScope> {
+  const files = worldFileScope(context);
+  return { files, entries: await prepareWorldRoot(files) };
+}
+
+function worldDirectoryEntry(entries: readonly FilemanEntry[], target: string) {
+  const matches = entries.filter((entry) => entry.name.toLowerCase() === target.toLowerCase());
+  if (
+    matches.length > 1 ||
+    matches.some((entry) => entry.name !== target || entry.kind !== 'directory')
+  )
+    throw new DomainError('conflict');
+  return matches[0];
+}
+
 /** A world-folder removal is one acknowledged provider effect. It does not
  * reinstall/configure Minecraft, so it needs no binary/EULA/level.dat audit. */
 export async function applyMinecraftWorldRemoval(
@@ -1351,17 +1394,8 @@ export async function applyMinecraftWorldRemoval(
     return true;
   }
   async function assertInactiveTarget() {
-    let authorized: Promise<void> | undefined;
-    const files = createFilemanReadService({
-      adapter: context.adapter,
-      identifier: context.server.pterodactyl_identifier ?? '',
-      authorize: () => (authorized ??= context.authorize()),
-    });
-    const entries = await files.list('');
-    const matches = entries.filter((entry) => entry.name.toLowerCase() === target.toLowerCase());
-    if (matches.length !== 1) throw new DomainError(matches.length ? 'conflict' : 'not_found');
-    if (matches[0]?.name !== target || matches[0]?.kind !== 'directory')
-      throw new DomainError('conflict');
+    const { files, entries } = await prepareWorldFiles(context);
+    if (!worldDirectoryEntry(entries, target)) throw new DomainError('not_found');
     const properties = entries.filter((entry) => entry.name.toLowerCase() === 'server.properties');
     if (
       properties.length !== 1 ||
@@ -1669,6 +1703,7 @@ async function applyPreparedContent(
     await completed(context, selectionStep),
   );
   let verifiedWorldArchive: ContentFileVerification | undefined;
+  let worldFiles: WorldFileScope | undefined;
   if (prepared.archivePath) {
     if (!prepared.archiveRef) throw new DomainError('configuration_invalid');
     const actor = await options.authorizeJob(
@@ -1680,10 +1715,19 @@ async function applyPreparedContent(
       authorize: (connection) =>
         options.authorizeJob(connection, context.operation().job_id, context.server.id),
     });
-    const source =
-      command.kind === 'world-import'
-        ? await sources.worldArchiveResolver(prepared.archiveRef, context.server.id)
-        : { path: await sources.archiveResolver(prepared.archiveRef, context.server.id) };
+    let source: { path: string; sha256?: string; verified?: ContentFileVerification };
+    if (command.kind === 'world-import') {
+      // Source verification uses local bytes; root/ticket reads use the provider.
+      // Settle both before staging so neither outlives a failed preflight.
+      const [resolved, scoped] = await Promise.allSettled([
+        sources.worldArchiveResolver(prepared.archiveRef, context.server.id),
+        prepareWorldFiles(context),
+      ]);
+      if (resolved.status === 'rejected') throw resolved.reason;
+      if (scoped.status === 'rejected') throw scoped.reason;
+      source = resolved.value;
+      worldFiles = scoped.value;
+    } else source = { path: await sources.archiveResolver(prepared.archiveRef, context.server.id) };
     if (
       source.path !== prepared.archivePath ||
       ('sha256' in source && source.sha256 !== prepared.archiveSha256)
@@ -1737,7 +1781,15 @@ async function applyPreparedContent(
     command.kind === 'world-select' ||
     command.kind === 'world-remove'
   )
-    return applyWorldContent(context, options, prepared, choice, pending, verifiedWorldArchive);
+    return applyWorldContent(
+      context,
+      options,
+      prepared,
+      choice,
+      pending,
+      verifiedWorldArchive,
+      worldFiles,
+    );
   if (
     command.kind === 'player' &&
     choice.supportAuthority === 'integration' &&
@@ -2264,6 +2316,7 @@ async function applyWorldContent(
   choice: Awaited<ReturnType<typeof inspectMinecraftCombination>>,
   pending?: PendingContent,
   verifiedArchive?: ContentFileVerification,
+  preparedFiles?: WorldFileScope,
 ): Promise<boolean> {
   const command = prepared.command;
   if (
@@ -2317,12 +2370,12 @@ async function applyWorldContent(
     return true;
   }
   const onlineImport = minecraftContentAllowsOnline(prepared);
-  const properties = parseMinecraftProperties(await textFile(context, 'server.properties'));
-  const activeTarget = targetsConfiguredMinecraftWorld(properties['level-name'] ?? 'world', target);
-  // Even a missing folder is the running world's target when level-name points
-  // to it; importing there would race the game's own writes.
-  if (onlineImport && activeTarget) await context.assertStopped();
-  const assertWritable = onlineImport && !activeTarget ? context.authorize : context.assertStopped;
+  const { files, entries: rootEntries } = preparedFiles ?? (await prepareWorldFiles(context));
+  const originalTarget = worldDirectoryEntry(rootEntries, target);
+  if (context.operation().plan.minecraftWorldPrepared !== true) {
+    if (Boolean(originalTarget) !== prepared.world.existing) throw new DomainError('conflict');
+    planMinecraftWorldReplacement(target, Boolean(originalTarget), command.replace);
+  }
   if (!prepared.archivePath || !prepared.world.archiveSha256)
     throw new DomainError('configuration_invalid');
   const stageOptions = {
@@ -2344,33 +2397,52 @@ async function applyWorldContent(
       }),
     )
     .digest('hex');
-  try {
-    await lstat(join(stageOptions.mountdataRoot, 'world-staging', stageOptions.jobId, 'plan.json'));
-    await recoverMinecraftWorldStageLock({
-      ...stageOptions,
-      expectedPlanDigest: digest,
-      assertExclusiveJob: context.authorize,
-    });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-  // Complete ZIP, hash and NBT validation must precede optional backup and deletion.
-  const staged = await stageMinecraftWorld(prepared.archivePath, {
-    ...stageOptions,
-    verifiedArchive,
-    // Reuse the staging inventory instead of parsing the ZIP once more just to
-    // count bytes. Reservation still precedes extraction and every remote write.
-    reserve: async (expandedBytes) => {
-      await reserveMinecraftStaging(
-        context.db,
-        await options.authorizeJob(context.db, stageOptions.jobId, context.server.id),
-        stageOptions.jobId,
-        context.server.id,
-        expandedBytes,
-        options.env,
+  const archivePath = prepared.archivePath;
+  const stage = async () => {
+    try {
+      await lstat(
+        join(stageOptions.mountdataRoot, 'world-staging', stageOptions.jobId, 'plan.json'),
       );
-    },
-  });
+      await recoverMinecraftWorldStageLock({
+        ...stageOptions,
+        expectedPlanDigest: digest,
+        assertExclusiveJob: context.authorize,
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    return stageMinecraftWorld(archivePath, {
+      ...stageOptions,
+      verifiedArchive,
+      // Count/reserve once from the validated inventory, before extracting files.
+      reserve: async (expandedBytes) => {
+        await reserveMinecraftStaging(
+          context.db,
+          await options.authorizeJob(context.db, stageOptions.jobId, context.server.id),
+          stageOptions.jobId,
+          context.server.id,
+          expandedBytes,
+          options.env,
+        );
+      },
+    });
+  };
+  // The root already guards the properties path. Read its small payload while
+  // preparing the independent local archive, settling both before any effect.
+  const [propertiesResult, stageResult] = await Promise.allSettled([
+    readTextSnapshot(context, 'server.properties', files),
+    stage(),
+  ]);
+  if (propertiesResult.status === 'rejected') throw propertiesResult.reason;
+  if (stageResult.status === 'rejected') throw stageResult.reason;
+  if (propertiesResult.value === null) throw new DomainError('not_found');
+  const properties = parseMinecraftProperties(propertiesResult.value.content);
+  const activeTarget = targetsConfiguredMinecraftWorld(properties['level-name'] ?? 'world', target);
+  // Even a missing folder is the running world's target when level-name points
+  // to it; importing there would race the game's own writes.
+  if (onlineImport && activeTarget) await context.assertStopped();
+  const assertWritable = onlineImport && !activeTarget ? context.authorize : context.assertStopped;
+  const staged = stageResult.value;
   // Replacing the selected folder would activate its data on the next start.
   // Cross-version imports belong in an inactive folder, without conversion.
   if (
@@ -2387,17 +2459,20 @@ async function applyWorldContent(
     destinationRoot: target,
     files: staged.manifest.map(({ path, size, sha256 }) => ({ path, size, sha256 })),
   };
+  // Additive online imports have no game-specific destructive preflight. Fileman
+  // checks their destination after the durable effect checkpoint, immediately
+  // before creation. An earlier observation must not cross that checkpoint.
+  const additiveOnline =
+    onlineImport && !activeTarget && !prepared.world.existing && !prepared.backupBefore;
   if (context.operation().plan.minecraftWorldPrepared !== true) {
-    const actual = await remoteEntry(context, target);
-    if (Boolean(actual) !== prepared.world.existing || actual?.is_file)
-      throw new DomainError('conflict');
-    planMinecraftWorldReplacement(target, Boolean(actual), command.replace);
-    if (
-      prepared.backupBefore &&
-      context.operation().plan.backupComplete !== true &&
-      !(await context.backup())
-    )
-      return false;
+    if (!additiveOnline) {
+      const currentTarget = worldDirectoryEntry(await worldFileScope(context).list(''), target);
+      if (Boolean(currentTarget) !== prepared.world.existing) throw new DomainError('conflict');
+      planMinecraftWorldReplacement(target, Boolean(currentTarget), command.replace);
+    }
+    if (prepared.backupBefore && context.operation().plan.backupComplete !== true) {
+      if (!(await context.backup())) return false;
+    }
     await context.update({ plan: { ...context.operation().plan, minecraftWorldPrepared: true } });
   }
   await beginContent(

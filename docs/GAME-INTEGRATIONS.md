@@ -489,6 +489,9 @@ from ViewerEngine's browser presentation extensions.
   controls streams. One lane takes large files while remaining lanes drain small
   ones. Bulk grants use windows of at most 500 and renew only unused grants.
   Destination ancestors retain collision checks and a durable root marker.
+  Fileman owns the fresh destination check immediately before creating the tree;
+  integrations do not repeat that check for additive imports or supply cached
+  directory metadata across durable effect preparation.
   Descendant directories are created by Wings' existing native upload path,
   without separate mkdir requests. This is verified against Wings 1.11.13:
   `Filesystem.Write` calls `UnixFS.Touch`, which creates missing parents using
@@ -521,7 +524,8 @@ online-additive versus stopped-replacement distinction.
 World import preparation shares the validated ZIP inventory with staging
 reservation instead of scanning it again to count expanded bytes. Source-store
 authorization is coalesced over 500 ms (including stalled-transfer revocation)
-and checked freshly at completion, never once per 64 KiB chunk. Each resolution
+and checked freshly at completion, never once per stream chunk. Local source
+hashing uses bounded 1 MiB reads; network upload buffering is unchanged. Each resolution
 still verifies the source hash. Within one worker delivery, staging reuses that
 verification using an ephemeral proof bound to the exact path, digest and file
 identity. It rechecks inode/size/nanosecond modification metadata before and after
@@ -534,8 +538,16 @@ reused within the job; disk
 headroom is checked at bounded file/byte/time boundaries. A confirmed world-only
 transfer does not reread the unrelated root EULA. Additive inactive imports need
 no process/host observation, including during a power transition; current local
-authority, fresh provider identity at the effect boundary, staging/storage
+authority, provider identity, staging/storage
 admission and normalized active-world protection remain enforced.
+Their provider identity proof is reused only within the same locked delivery for
+less than 60 seconds, then refreshed if necessary. Current local ownership,
+mapping, UUID/node/allocations and authorization are checked before dispatch.
+Root metadata and read-ticket preparation overlap source hashing; properties
+bytes overlap local extraction, with all work settled before external effects.
+For additive imports, Fileman's final destination check replaces the integration's
+redundant post-staging listing. Replacement/backup paths retain their independent
+fresh checks before deletion and after mutation.
 
 The Worlds UI shows confirmed transfer counts and follows the current server job
 after remount. Completion refreshes the inventory; accepted/uncertain/failed jobs
@@ -550,8 +562,10 @@ runtime JAR, verify EULA, parse `level.dat`, or wait for an offline settling tim
 Preparation records intent without listing the root. Dispatch reads one root
 snapshot and the current `server.properties` through Fileman; it rejects aliases,
 symlinks and the configured world, its enclosing folder and sibling dimension
-folders. A single provider identity proof is shared within that locked delivery;
-current local permissions are checked again immediately before dispatch.
+folders. Private read-ticket preparation overlaps the root request, but file bytes
+are read only after metadata validation. A single provider identity proof is shared
+within that locked delivery for less than 60 seconds; current local identity and
+permissions are checked again immediately before dispatch.
 
 The provider's successful delete response is the completion receipt. A missing
 acknowledgement permits one absence check on recovery, never a blind repeated

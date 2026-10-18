@@ -588,6 +588,29 @@ describe('UUID-bound existing Minecraft player changes', () => {
     expect(f.assertStopped).not.toHaveBeenCalled();
     expect(f.files.has('spare/region/r.0.0.mca')).toBe(false);
   });
+  it('prepares the properties ticket during root discovery without reading a symlink', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
+    const listed = Promise.withResolvers<void>();
+    const prepared = Promise.withResolvers<void>();
+    const list = f.adapter.listFiles.getMockImplementation();
+    if (!list) throw new Error('Missing listing fixture');
+    f.symlinks.add('server.properties');
+    f.adapter.listFiles.mockImplementation(async (...args) => {
+      await listed.promise;
+      return list(...args);
+    });
+    f.adapter.prefetchDownloads.mockImplementation(async () => {
+      prepared.resolve();
+    });
+    const removing = applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false });
+    const rejected = expect(removing).rejects.toMatchObject({ code: 'conflict' });
+    await prepared.promise;
+    expect(f.adapter.readFileForEditor).not.toHaveBeenCalled();
+    listed.resolve();
+    await rejected;
+    expect(f.adapter.readFileForEditor).not.toHaveBeenCalled();
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+  });
   it.each(['world', 'world_nether', 'world_the_end', 'WORLD'])(
     'does not remove configured world or its runtime dimensions: %s',
     async (target) => {
@@ -714,6 +737,20 @@ describe('UUID-bound existing Minecraft player changes', () => {
     await expect(
       applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
     ).rejects.toMatchObject({ code: 'forbidden' });
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+  });
+  it('discards the pre-backup world snapshot before deciding whether deletion remains safe', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
+    f.context.backup = vi.fn(async () => {
+      f.operation.plan = { backupComplete: true };
+      f.files.set('server.properties', 'level-name=spare\n');
+      return true;
+    });
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: true }),
+    ).rejects.toMatchObject({ details: { reason: 'minecraft_world_selected' } });
+    expect(f.adapter.listFiles).toHaveBeenCalledTimes(2);
+    expect(f.adapter.readFileForEditor).toHaveBeenCalledTimes(2);
     expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
   });
 });
