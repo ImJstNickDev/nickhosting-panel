@@ -22,7 +22,7 @@ import {
 import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources, physicalMemoryMiB } from './admission.js';
-import { assertServerBackendAllocations, canonicalAllocationAddress } from './allocation-pool.js';
+import { assertServerBackendAllocations } from './allocation-pool.js';
 import {
   backupOptionsSchema,
   backupRetentionSchema,
@@ -39,6 +39,7 @@ import {
   recoverProvisionGateway,
 } from './gateway-provision.js';
 import { currentInteractiveContext } from './interactive-context.js';
+import { assertManagedIdentity, readManagedIdentity } from './managed-identity.js';
 import {
   minecraftContentAllowsOnline,
   minecraftContentSelectsWorld,
@@ -317,45 +318,7 @@ export async function verifyManagedIdentity(
   remote: ApplicationServer,
   provisioning = false,
 ): Promise<void> {
-  const node = await db
-    .selectFrom('managed_nodes')
-    .selectAll()
-    .where('id', '=', server.node_id)
-    .executeTakeFirstOrThrow();
-  const allocations = await db
-    .selectFrom('server_allocations')
-    .selectAll()
-    .where('server_id', '=', server.id)
-    .execute();
-  const primary = allocations.find((allocation) => allocation.is_primary);
-  const reported = remote.relationships?.allocations?.data.map((item) => item.attributes);
-  const expected = allocations.map((allocation) => allocation.pterodactyl_allocation_id);
-  if (
-    !primary ||
-    !reported ||
-    reported.length !== expected.length ||
-    allocations.some(
-      (claim) =>
-        !reported.some(
-          (allocation) =>
-            allocation.id === claim.pterodactyl_allocation_id &&
-            allocation.assigned &&
-            canonicalAllocationAddress(allocation.ip) !== '' &&
-            canonicalAllocationAddress(allocation.ip) === claim.address &&
-            allocation.port === claim.port,
-        ),
-    ) ||
-    remote.external_id !== server.external_id ||
-    remote.node !== node.pterodactyl_node_id ||
-    remote.user !== server.provider_user_id ||
-    remote.allocation !== primary.pterodactyl_allocation_id ||
-    (!provisioning &&
-      (remote.id !== server.pterodactyl_id ||
-        remote.uuid !== server.pterodactyl_uuid ||
-        remote.identifier !== server.pterodactyl_identifier))
-  ) {
-    throw new DomainError('provenance_mismatch');
-  }
+  assertManagedIdentity(server, remote, await readManagedIdentity(db, server), provisioning);
 }
 
 async function ownedRemote(db: Kysely<Database>, server: Server, options: LifecycleOptions) {
@@ -486,16 +449,45 @@ export async function processServerOperation(
       outcome: 'acquired',
       durationMs: Math.round(performance.now() - lockStarted),
     });
-    let operation = await trace('load.operation', () =>
+    // One fresh snapshot under the server lock. Keep native timestamp decoding;
+    // JSON-wrapping entire rows would turn the job's dates into strings.
+    const loaded = await trace('load.operationJob', () =>
       db
-        .selectFrom('server_operations')
-        .selectAll()
-        .where('job_id', '=', jobId)
+        .selectFrom('server_operations as operation')
+        .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+        .selectAll('operation')
+        .select([
+          'job.state as job_state',
+          'job.next_attempt_at as job_next_attempt_at',
+          'job.actor_id as job_actor_id',
+          'job.subject_id as job_subject_id',
+          'job.support_session_id as job_support_session_id',
+          'job.max_attempts as job_max_attempts',
+          'job.command as job_command',
+        ])
+        .where('operation.job_id', '=', jobId)
         .executeTakeFirstOrThrow(),
     );
-    const job = await trace('load.job', () =>
-      db.selectFrom('operation_jobs').selectAll().where('id', '=', jobId).executeTakeFirstOrThrow(),
-    );
+    const {
+      job_state,
+      job_next_attempt_at,
+      job_actor_id,
+      job_subject_id,
+      job_support_session_id,
+      job_max_attempts,
+      job_command,
+      ...loadedOperation
+    } = loaded;
+    let operation: Operation = loadedOperation;
+    const job = {
+      state: job_state,
+      next_attempt_at: job_next_attempt_at,
+      actor_id: job_actor_id,
+      subject_id: job_subject_id,
+      support_session_id: job_support_session_id,
+      max_attempts: job_max_attempts,
+      command: job_command,
+    };
     if (job.state === 'succeeded' || job.state === 'failed') return 'duplicate';
     if (job.next_attempt_at > nowOf(options)) {
       log('servers.operation_deferred', {
@@ -921,6 +913,7 @@ export async function processServerOperation(
       minecraftContentSelectsWorld(operation.plan.minecraftContent);
     const worldFileContent = onlineWorldContent || offlineWorldSelection;
     let providerFileEffects = false;
+    let worldSelectionReadAuthorized = false;
     // Reuse this delivery's identity for world file operations. Selection can
     // obtain it from the shared browsing proof; long staging refreshes it.
     let worldContentIdentity: { remote: ApplicationServer; checkedAt: number } | undefined;
@@ -992,11 +985,16 @@ export async function processServerOperation(
       patch?: (result: T) => Record<string, unknown>,
       preparationServer?: ApplicationServer,
     ): Promise<boolean> => {
-      await timed('authorization', () =>
-        (offlineWorldSelection || ['power', 'initial_start'].includes(phase)
-          ? (options.authorizeIntent ?? options.authorizeEffect)
-          : options.authorizeEffect)(jobId, server.id, db, { timing: timing?.child('auth') }),
-      );
+      // Prepared selection has just authorized its file read. No external effect
+      // occurs in the journal work below; current authority is checked again at
+      // dispatch. Other callers (including recovery without a read) keep this guard.
+      if (!offlineWorldSelection || !worldSelectionReadAuthorized)
+        await timed('authorization', () =>
+          (offlineWorldSelection || ['power', 'initial_start'].includes(phase)
+            ? (options.authorizeIntent ?? options.authorizeEffect)
+            : options.authorizeEffect)(jobId, server.id, db, { timing: timing?.child('auth') }),
+        );
+      worldSelectionReadAuthorized = false;
       // Selection only reads while preparing. Check all resource exclusions once,
       // after durable intent, alongside its final local stopped-state guard.
       if (!offlineWorldSelection) await requireEffectResources();
@@ -1432,12 +1430,14 @@ export async function processServerOperation(
         effect,
         event,
         backup,
-        authorize: () =>
-          trace('auth.read', () =>
+        authorize: async () => {
+          await trace('auth.read', () =>
             (worldFileContent
               ? (options.authorizeIntent ?? options.authorizeEffect)
               : options.authorizeEffect)(jobId, server.id, db, { timing: timing?.child('auth') }),
-          ),
+          );
+          if (offlineWorldSelection) worldSelectionReadAuthorized = true;
+        },
         assertStopped: async () => {
           await requireQuiescentReservation();
           if (

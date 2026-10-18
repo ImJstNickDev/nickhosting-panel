@@ -13615,3 +13615,69 @@ for a real end-to-end trace on this revision.
 
 The complete lifecycle suite also passed **290/290** on the final transaction code.
 Root TypeScript, scoped Biome, staged governance and diff checks passed.
+
+## Worlds Select: fewer SQL round trips and overlapping preparation — 2026-10-19
+
+The Owner's last Select on `2059be0` succeeded in **372.861 ms** from job creation
+until its stored completion timestamp, with **296.895 ms** of traced execution.
+Publishing-to-worker delivery took 8 ms; creation-to-publication was about 35 ms and
+included transaction/outbox work. These are backend timings, not browser
+click-to-paint latency. The prior 1,074.369 ms sample remains preserved above.
+
+The prepared Select path now omits its unrelated modpack receipt query and an
+adjacent duplicate read authorization. Lifecycle omits the pre-journal selection
+authorization only after successful authorization in this delivery, consumes that
+reuse flag, and still rechecks current authority immediately before dispatch.
+Operation/job loading is one joined query with native timestamp types. The local
+stopped-state check includes latest power-job identity in one SQL snapshot.
+Managed identity comparison is a shared pure function: directory proofs reuse
+node/allocation rows already read by scope; final effects obtain both together in
+one current query. Cold/shared identity proofs use two scope queries instead of
+four local queries; warm process-local reuse remains one. Provider identity checks,
+absolute expiry, invalidation and the second scope drift check are retained.
+
+The fresh properties read overlaps local desired-plan construction/persistence.
+Writing waits for the comparison, committed plan and final guards. A cache miss
+uses that same live read as the builder source, preserving unrelated current
+properties without a second download. Pending reads are settled on build/persist
+failure; recovery always reads fresh bytes and never blindly repeats a write.
+No runtime-settings cache, queue polling change, new Blueprint endpoint or service
+was introduced. The observed pre-trace initialization interval was not attributed
+to object construction alone, so it does not justify freezing settings/credentials.
+
+Validation commands (isolated provider fixtures and test-only PostgreSQL schemas):
+
+```sh
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts packages/server-management/src/world-selection-access.integration.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/directory-identity.integration.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-content.integration.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/runtime.integration.test.ts -t 'world.selection|Worlds.opening|observer override changed'
+scripts/dev.sh pnpm exec vitest run packages/server-management/src/directory-identity.test.ts packages/server-management/src/minecraft-world-preparation.test.ts
+scripts/dev.sh pnpm exec vitest run packages/server-management/src/minecraft-content.test.ts
+scripts/dev.sh pnpm exec tsc --noEmit
+```
+
+Independent technical review found no remaining must-fix findings. New regression
+cases cover both completion orders, failures during build/persistence/read, one-read
+cache eviction preserving current properties, retry with a persisted plan, and
+revoked authority after an authorized read. Existing conflicting-content and lost
+write-response recovery cases remain. No visual layout changed. Real Select timing
+on this revision remains to be measured by the Owner; the 300 ms target is not claimed
+as achieved by fixture tests.
+
+Results on final code: complete lifecycle/access **297/297**, complete directory
+identity **93/93**, complete Minecraft content integration **79/79**, targeted
+runtime **11/11** (63 unrelated cases excluded), identity/preparation units
+**25/25**, and content units **55/55** passed. The content unit command was repeated
+after the final cache-miss adjustment; overlapping runs are not summed. Root
+TypeScript, scoped Biome, indexed governance and diff checks passed. The complete
+historical M1–M5 matrix and browser tests were not rerun for this backend-only pass.
+
+Existing development API/worker source watchers loaded the changes; both containers
+remain healthy with restart counters 0 and public development HTTPS returns 200.
+No manual restart/rebuild, migration, Panel/Wings/Blueprint modification, DNS write,
+real game-file mutation or power command occurred. Tests used existing isolated
+services and disposable schemas, cleaned by their harness; no live test assets
+were created or removed. Rollback: revert this code commit and retain all durable
+jobs/data; existing cache formats/expiry remain compatible. PR #21 stays open and
+unmerged; independent production-release gates, including issue #18, are unchanged.

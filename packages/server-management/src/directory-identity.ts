@@ -6,9 +6,9 @@ import {
   applicationServerSchema,
   type PrivateTransferCache,
 } from '@nickhosting/pterodactyl-adapter';
-import { type Kysely, type Selectable, sql } from 'kysely';
+import type { Kysely, Selectable } from 'kysely';
 import { z } from 'zod';
-import { verifyManagedIdentity } from './lifecycle.js';
+import { assertManagedIdentity, managedIdentityClaims } from './managed-identity.js';
 
 type Server = Selectable<Database['managed_servers']>;
 
@@ -50,13 +50,15 @@ async function scope(db: Kysely<Database>, server: Server, providerBinding: stri
       'p.revision',
       'p.valid',
       'p.identity_invalidated',
-      sql<unknown>`(select jsonb_agg(to_jsonb(claim) order by claim.pterodactyl_allocation_id)
-        from server_allocations claim where claim.server_id = ${server.id})`.as('claims'),
+      managedIdentityClaims(server.id).as('claims'),
     ])
     .where('n.id', '=', server.node_id)
     .executeTakeFirstOrThrow();
   if (row.identity_invalidated) throw new DomainError('provenance_mismatch');
-  return JSON.stringify([providerBinding, directoryServerIdentity(server), row]);
+  return {
+    binding: JSON.stringify([providerBinding, directoryServerIdentity(server), row]),
+    identity: { pterodactyl_node_id: row.pterodactyl_node_id, allocations: row.claims ?? [] },
+  };
 }
 
 const sharedProofSchema = z
@@ -114,7 +116,8 @@ export function createDirectoryIdentityCache(
       backgroundDb: Kysely<Database> = db,
     ) {
       if (closed) throw new DomainError('integration_unavailable');
-      const binding = await scope(db, server, providerBinding);
+      const snapshot = await scope(db, server, providerBinding);
+      const binding = snapshot.binding;
       if (closed) throw new DomainError('integration_unavailable');
       const bindingHash = createHash('sha256').update(binding).digest('hex');
       const sharedKey = `fileman.identity.v1:${bindingHash}`;
@@ -146,7 +149,7 @@ export function createDirectoryIdentityCache(
                   remaining > 0 &&
                   remaining <= ttlMs
                 ) {
-                  await verifyManagedIdentity(connection, server, value.data.remote);
+                  assertManagedIdentity(server, value.data.remote, snapshot.identity);
                   remote = value.data.remote;
                   entry.expiresAt = now() + (value.data.expiresAt - Date.now());
                   restored = true;
@@ -157,12 +160,12 @@ export function createDirectoryIdentityCache(
             }
           }
           remote ??= await read();
-          if (!restored) await verifyManagedIdentity(connection, server, remote);
+          if (!restored) assertManagedIdentity(server, remote, snapshot.identity);
           const currentEntry = () =>
             entries.get(server.id) === entry ||
             (previous !== undefined && entries.get(server.id) === previous);
           if (
-            (await scope(connection, server, providerBinding)) !== binding ||
+            (await scope(connection, server, providerBinding)).binding !== binding ||
             entry.expiresAt <= now() ||
             closed ||
             !currentEntry()
@@ -213,7 +216,7 @@ export function createDirectoryIdentityCache(
           if (
             !current ||
             directoryServerIdentity(current) !== directoryServerIdentity(server) ||
-            (await scope(backgroundDb, current, providerBinding)) !== binding
+            (await scope(backgroundDb, current, providerBinding)).binding !== binding
           )
             throw new DomainError('conflict');
           const replacement = prepare(backgroundDb, false, false, entry);

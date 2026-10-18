@@ -596,6 +596,7 @@ export async function applyMinecraftTextChange(
   change: TextChange,
   files?: FilemanReadService,
   knownPath = false,
+  comparison?: Promise<Awaited<ReturnType<typeof readTextSnapshot>>>,
 ): Promise<void> {
   textChangeSchema.parse(change);
   if (sha256(change.content) !== change.afterSha256) throw new DomainError('conflict');
@@ -611,18 +612,28 @@ export async function applyMinecraftTextChange(
   }
   if (!minecraftContentSelectsWorld(context.operation().plan.minecraftContent))
     await context.assertStopped();
-  await context.authorize();
-  // Reuse only this pre-effect phase's directory metadata, never its file bytes.
+  const preparedWorldSelection =
+    knownPath &&
+    change.path === 'server.properties' &&
+    minecraftContentSelectsWorld(context.operation().plan.minecraftContent);
+  // This selection owns a new Fileman scope whose first read authorizes itself.
+  // Other paths keep their existing outer authorization; effect() checks again.
+  if (!preparedWorldSelection) await context.authorize();
+  // Directory metadata belongs to this pre-effect phase; comparison bytes come
+  // from this attempt's live read, never an earlier request or preparation.
   // Absence needs a fresh listing: an external writer may have created the file.
   // Recovery above also creates a new scope after a possible mutation.
-  const current = await measureContent(context, 'text.compare', () =>
-    readTextSnapshot(
-      context,
-      change.path,
-      change.beforeSha256 === null ? undefined : files,
-      knownPath,
-    ),
-  );
+  const current =
+    preparedWorldSelection && comparison
+      ? await comparison
+      : await measureContent(context, 'text.compare', () =>
+          readTextSnapshot(
+            context,
+            change.path,
+            change.beforeSha256 === null ? undefined : files,
+            knownPath,
+          ),
+        );
   if (current?.hash === change.afterSha256) {
     await complete(context, step);
     return;
@@ -711,6 +722,7 @@ async function applyTextPlan(
   beforeEffects?: (plan: TextChange[]) => Promise<void>,
   files?: FilemanReadService,
   knownPath = false,
+  comparison?: Promise<Awaited<ReturnType<typeof readTextSnapshot>>>,
 ) {
   if (context.operation().plan.minecraftText === undefined) {
     // Builders may persist authority (for example a verified player UUID).
@@ -731,7 +743,8 @@ async function applyTextPlan(
   }
   const plan = z.array(textChangeSchema).max(4).parse(context.operation().plan.minecraftText);
   await beforeEffects?.(plan);
-  for (const change of plan) await applyMinecraftTextChange(context, change, files, knownPath);
+  for (const change of plan)
+    await applyMinecraftTextChange(context, change, files, knownPath, comparison);
 }
 const initialConfigurationSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('pending'), jobId: z.uuid().optional() }).strict(),
@@ -1780,7 +1793,7 @@ async function applyPreparedContent(
   assertMinecraftModpackTransition(
     minecraftStoredConfigurationSchema.parse(profile.configuration).modpack,
     prepared,
-    await completed(context, selectionStep),
+    command.kind === 'world-select' ? false : await completed(context, selectionStep),
   );
   let verifiedWorldArchive: ContentFileVerification | undefined;
   let worldFiles: WorldFileScope | undefined;
@@ -2433,32 +2446,51 @@ async function applyWorldContent(
     if (prepared.world.observation) {
       const observation = prepared.world.observation;
       if (observation.name !== target) throw new DomainError('conflict');
-      await applyTextPlan(
-        context,
-        async () => {
-          const cached = await options.worldPreparation?.read(
-            context.server,
-            prepared.combinationId,
-          );
-          const snapshot =
-            cached?.properties ??
-            (await readTextSnapshot(context, 'server.properties', files, true));
-          if (!snapshot) throw new DomainError('not_found');
-          const selected = planMinecraftWorldSelection(
-            snapshot.content,
-            {
-              name: target,
-              verifiedDataVersion: observation.dataVersion,
-              sha256: observation.sha256,
-            },
-            { allowedDataVersions: [prepared.world?.dataVersion ?? -1] },
-          );
-          return [await plannedText(context, 'server.properties', selected.content, snapshot.hash)];
-        },
-        undefined,
-        files,
-        true,
-      );
+      // Overlap fresh provider bytes with local intent construction/persistence.
+      // Persisted plans and uncertain effects retain their fresh recovery reads.
+      const comparison =
+        context.operation().plan.minecraftText === undefined &&
+        context.operation().effect_state === 'none'
+          ? measureContent(context, 'text.compare', () =>
+              readTextSnapshot(context, 'server.properties', files, true),
+            )
+          : undefined;
+      // The read may reject while local preparation is still running. Observe it
+      // immediately, then await its actual result before an effect or on failure.
+      void comparison?.catch(() => {});
+      try {
+        await applyTextPlan(
+          context,
+          async () => {
+            const cached = await options.worldPreparation?.read(
+              context.server,
+              prepared.combinationId,
+            );
+            const snapshot =
+              cached?.properties ??
+              (await (comparison ?? readTextSnapshot(context, 'server.properties', files, true)));
+            if (!snapshot) throw new DomainError('not_found');
+            const selected = planMinecraftWorldSelection(
+              snapshot.content,
+              {
+                name: target,
+                verifiedDataVersion: observation.dataVersion,
+                sha256: observation.sha256,
+              },
+              { allowedDataVersions: [prepared.world?.dataVersion ?? -1] },
+            );
+            return [
+              await plannedText(context, 'server.properties', selected.content, snapshot.hash),
+            ];
+          },
+          undefined,
+          files,
+          true,
+          comparison,
+        );
+      } finally {
+        await comparison?.catch(() => {});
+      }
       const changes = z
         .array(textChangeSchema)
         .max(4)

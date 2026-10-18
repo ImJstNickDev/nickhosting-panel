@@ -574,6 +574,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
   }
   it('selects an inspected world with one properties comparison and no world reinspection', async () => {
     const f = await observedWorldSelectionFixture();
+    const queries = vi.spyOn(f.context.db, 'selectFrom');
     expect(await processMinecraftContent(f.context, f.options)).toBe(true);
     expect(f.list).not.toHaveBeenCalled();
     expect(f.listDirectories).not.toHaveBeenCalled();
@@ -582,9 +583,136 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     expect(f.download).not.toHaveBeenCalled();
     expect(f.write).toHaveBeenCalledOnce();
     expect(f.stopped).not.toHaveBeenCalled();
+    // Only the text-write receipt is relevant; selection cannot change a modpack.
+    expect(queries.mock.calls.filter(([table]) => table === 'job_steps')).toHaveLength(1);
     expect(f.files.get('server.properties')?.toString()).toContain('level-name=selected');
     const cached = await f.options.worldPreparation?.read(f.context.server, f.combinationId);
     expect(cached?.properties.content).toContain('level-name=selected');
+  });
+  it.each(['read', 'persist'] as const)(
+    'overlaps the fresh comparison and plan persistence, waiting for both before final authorization (%s first)',
+    async (first) => {
+      const f = await observedWorldSelectionFixture();
+      const reading = Promise.withResolvers<void>();
+      const persisting = Promise.withResolvers<void>();
+      const events: string[] = [];
+      const update = f.context.update;
+      const effect = f.context.effect;
+      const authorize = vi.fn(async () => {});
+      f.context.authorize = authorize;
+      f.read.mockImplementation(async (_identifier, path) => {
+        events.push('read.start');
+        await reading.promise;
+        events.push('read.done');
+        return f.files.get(path) ?? Buffer.alloc(0);
+      });
+      f.context.update = async (patch) => {
+        if (patch.plan?.minecraftText) {
+          events.push('persist.start');
+          await persisting.promise;
+        }
+        await update(patch);
+        events.push('persist.done');
+      };
+      f.context.effect = async (...args) => {
+        expect(events).toContain('read.done');
+        expect(events).toContain('persist.done');
+        expect(f.operation.plan.minecraftText).toBeDefined();
+        // Model the lifecycle's final authorization at the mutation boundary.
+        await f.context.authorize();
+        events.push('effect');
+        return effect(...args);
+      };
+      const selecting = processMinecraftContent(f.context, f.options);
+      try {
+        await vi.waitFor(() => {
+          expect(events).toContain('read.start');
+          expect(events).toContain('persist.start');
+        });
+        expect(f.write).not.toHaveBeenCalled();
+        (first === 'read' ? reading : persisting).resolve();
+        await vi.waitFor(() => expect(events).toContain(`${first}.done`));
+        expect(f.write).not.toHaveBeenCalled();
+        expect(events).not.toContain('effect');
+      } finally {
+        reading.resolve();
+        persisting.resolve();
+        await selecting;
+      }
+      expect(await selecting).toBe(true);
+      expect(f.read).toHaveBeenCalledOnce();
+      expect(f.write).toHaveBeenCalledOnce();
+      // Entry, fresh Fileman scope, final effect: no adjacent outer read check.
+      expect(authorize).toHaveBeenCalledTimes(3);
+    },
+  );
+  it.each(['build', 'persist'] as const)(
+    'settles an in-flight fresh comparison after local %s failure without writing',
+    async (failurePoint) => {
+      const f = await observedWorldSelectionFixture();
+      const reading = Promise.withResolvers<void>();
+      const failed = Promise.withResolvers<void>();
+      const failure = new Error(`isolated ${failurePoint} failure`);
+      let readFinished = false;
+      let selectionFinished = false;
+      f.read.mockImplementation(async (_identifier, path) => {
+        await reading.promise;
+        readFinished = true;
+        return f.files.get(path) ?? Buffer.alloc(0);
+      });
+      if (failurePoint === 'build') {
+        const preparation = f.options.worldPreparation;
+        if (!preparation) throw new Error('Missing preparation fixture');
+        vi.spyOn(preparation, 'read').mockImplementationOnce(async () => {
+          failed.resolve();
+          throw failure;
+        });
+      } else {
+        f.context.update = async () => {
+          failed.resolve();
+          throw failure;
+        };
+      }
+      const selecting = processMinecraftContent(f.context, f.options).then(
+        () => {
+          selectionFinished = true;
+          return undefined;
+        },
+        (error: unknown) => {
+          selectionFinished = true;
+          return error;
+        },
+      );
+      try {
+        await failed.promise;
+        await vi.waitFor(() => expect(f.read).toHaveBeenCalledOnce());
+        expect(selectionFinished).toBe(false);
+        expect(f.write).not.toHaveBeenCalled();
+      } finally {
+        reading.resolve();
+      }
+      expect(await selecting).toBe(failure);
+      expect(readFinished).toBe(true);
+      expect(f.write).not.toHaveBeenCalled();
+      expect(f.operation.effect_state).toBe('none');
+    },
+  );
+  it('keeps the persisted plan after a failed speculative read and retries with fresh bytes', async () => {
+    const f = await observedWorldSelectionFixture();
+    const failure = new PterodactylError('unavailable', 'client', 'rejected');
+    f.read.mockRejectedValueOnce(failure);
+    await expect(processMinecraftContent(f.context, f.options)).rejects.toBe(failure);
+    const persisted = f.operation.plan.minecraftText;
+    expect(persisted).toBeDefined();
+    expect(f.operation.effect_state).toBe('none');
+    expect(f.write).not.toHaveBeenCalled();
+    expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+    expect(f.operation.plan.minecraftText).toBe(persisted);
+    expect(f.read.mock.calls.map((call) => call[1])).toEqual([
+      'server.properties',
+      'server.properties',
+    ]);
+    expect(f.write).toHaveBeenCalledOnce();
   });
   it('preserves a concurrent properties edit even when Worlds prepared the selection', async () => {
     const f = await observedWorldSelectionFixture();
@@ -614,13 +742,24 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
   it('keeps an inspected selection usable if optional preparation is evicted before dispatch', async () => {
     const f = await observedWorldSelectionFixture();
     f.entries.clear();
+    f.files.set('server.properties', Buffer.from('motd=New source\nlevel-name=old_world\n'));
     expect(await processMinecraftContent(f.context, f.options)).toBe(true);
     expect(f.list).not.toHaveBeenCalled();
-    expect(f.read.mock.calls.map((call) => call[1])).toEqual([
-      'server.properties',
-      'server.properties',
-    ]);
+    expect(f.read.mock.calls.map((call) => call[1])).toEqual(['server.properties']);
     expect(f.write).toHaveBeenCalledOnce();
+    expect(f.files.get('server.properties')?.toString()).toContain('motd=New source');
+    expect(f.files.get('server.properties')?.toString()).toContain('level-name=selected');
+  });
+  it('does not build or write from a failed fresh source when optional preparation is missing', async () => {
+    const f = await observedWorldSelectionFixture();
+    f.entries.clear();
+    const failure = new PterodactylError('unavailable', 'client', 'rejected');
+    f.read.mockRejectedValueOnce(failure);
+    await expect(processMinecraftContent(f.context, f.options)).rejects.toBe(failure);
+    expect(f.operation.plan.minecraftText).toBeUndefined();
+    expect(f.operation.effect_state).toBe('none');
+    expect(f.read).toHaveBeenCalledOnce();
+    expect(f.write).not.toHaveBeenCalled();
   });
   it('does not retain a trusted preparation when the next inventory sees a properties symlink', async () => {
     const f = await observedWorldSelectionFixture();

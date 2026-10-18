@@ -11,6 +11,7 @@ import {
 } from '@nickhosting/pterodactyl-adapter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDirectoryIdentityCache } from './directory-identity.js';
+import { assertManagedIdentity, readManagedIdentity } from './managed-identity.js';
 import { createProject, setProjectMember } from './registry.js';
 import { createManagementRuntime } from './runtime.js';
 import { managementFixture, pendingUploadFixture } from './test-fixtures.js';
@@ -201,6 +202,38 @@ describe('directory browsing identity proof reuse', () => {
     clock = 60_000;
     await shared.verify(shared.next());
     expect(remote).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses only the two scope queries for cold and shared proofs, and one for a warm local proof', async () => {
+    const shared = await sharedFixture();
+    const server = await f.db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    let queries = 0;
+    const measured = f.db.withPlugin({
+      transformQuery(args) {
+        queries++;
+        return args.node;
+      },
+      async transformResult(args) {
+        return args.result;
+      },
+    });
+    const snapshot = await readManagedIdentity(measured, server);
+    expect(queries).toBe(1);
+    expect(() => assertManagedIdentity(server, shared.complete, snapshot)).not.toThrow();
+    queries = 0;
+    await cache.verify(measured, server, 'scope-query-fixture', remote);
+    expect(queries).toBe(2);
+    queries = 0;
+    await cache.verify(measured, server, 'scope-query-fixture', remote);
+    expect(queries).toBe(1);
+    queries = 0;
+    await shared.next().verify(measured, server, 'scope-query-fixture', remote);
+    expect(queries).toBe(2);
+    expect(remote).toHaveBeenCalledOnce();
   });
 
   it('obtains a new shared proof after scope changes or explicit local invalidation', async () => {

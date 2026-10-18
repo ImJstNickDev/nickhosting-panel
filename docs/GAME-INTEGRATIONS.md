@@ -499,18 +499,24 @@ Deleting the selected world is unavailable. World ZIP download reuses the generi
 Fileman streaming archive endpoint; the UI offers it when stopped. It is a file
 export, not an atomic snapshot or replacement for the Backups workflow.
 
-World selection uses the existing live process-stopped observation and quiescent
-resource reservations, rather than waiting for the generic cached-telemetry
-settling window. Its delivery shares the managed-provider identity and Fileman
-read scope, validates only the selected world's metadata, and reads that metadata
-alongside `server.properties`. Root and selected-directory metadata are requested
-in one configured Blueprint batch while signed download URLs are prepared.
-The final properties comparison reuses that phase's root metadata but reads new
-file bytes. An initially missing properties file requires a fresh listing so an
-external creation is detected; existing files do not repeat the root listing.
-The properties write retains its fresh source-hash
-comparison, current authorization and final stopped proof; uncertain replies
-reconcile the persisted after-image without replaying the write.
+Worlds opening prepares the process-stopped observation, world inventory and an
+exact-path properties upload grant. Prepared selection reuses that observation and
+world metadata; it checks current local offline state, latest power-job revision,
+host binding and quiescent reservations rather than repeating physical observation
+or directory/NBT reads on the click. Missing/expired observations require refreshing
+Worlds. An external Panel start may precede local state updates: this is an
+opening-time observation, not continuous physical-state monitoring.
+
+Selection reuses Fileman's bounded identity proof; its current node/allocation
+snapshot is also used for the identity comparison, without duplicate queries.
+After acquiring the server lock, operation/job metadata is read together, and the
+local stopped-state/recent-power check uses one database snapshot. A fresh properties
+read overlaps local desired-content construction and plan persistence. The write
+waits for both, preserves the source-hash comparison and final current authorization,
+and uses Fileman's prepared Wings upload transport. Adjacent duplicate selection
+checks and unrelated modpack receipts are omitted. An initially missing properties
+file still requires a fresh listing to detect external creation. Uncertain replies
+read fresh bytes to reconcile the persisted after-image without replaying the write.
 After confirmed job success, the UI changes `selectedWorld` in the already loaded
 inventory and cancels older reads. Selection does not trigger another world scan;
 acceptance alone never changes the selection. Explicit refresh/reopening the tab

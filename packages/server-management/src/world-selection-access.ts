@@ -24,6 +24,29 @@ export function createWorldSelectionAccess(cache: PrivateTransferCache, provider
       .innerJoin('physical_hosts as host', 'host.id', 'node.physical_host_id')
       .selectAll('server')
       .select(['host.id as host_id', 'host.observer_id'])
+      .select((eb) =>
+        eb
+          .selectFrom('server_operations as operation')
+          .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+          .select('job.id')
+          .whereRef('operation.server_id', '=', 'server.id')
+          .where('operation.action', 'in', [
+            'provision',
+            'start',
+            'stop',
+            'restart',
+            'reinstall',
+            'wipe',
+            'restore',
+            'backup',
+            'configure',
+            'delete',
+          ])
+          .orderBy('job.created_at', 'desc')
+          .orderBy('job.id', 'desc')
+          .limit(1)
+          .as('latest_power_id'),
+      )
       .where('server.id', '=', server.id)
       .executeTakeFirstOrThrow();
     if (
@@ -34,28 +57,7 @@ export function createWorldSelectionAccess(cache: PrivateTransferCache, provider
       current.mapping_id !== server.mapping_id
     )
       throw new DomainError('conflict');
-    const power = await db
-      .selectFrom('server_operations as operation')
-      .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
-      .select(['job.id', 'job.created_at'])
-      .where('operation.server_id', '=', server.id)
-      .where('operation.action', 'in', [
-        'provision',
-        'start',
-        'stop',
-        'restart',
-        'reinstall',
-        'wipe',
-        'restore',
-        'backup',
-        'configure',
-        'delete',
-      ])
-      .orderBy('job.created_at', 'desc')
-      .orderBy('job.id', 'desc')
-      .limit(1)
-      .executeTakeFirst();
-    return JSON.stringify([current.host_id, current.observer_id, power?.id ?? null]);
+    return JSON.stringify([current.host_id, current.observer_id, current.latest_power_id ?? null]);
   }
   return {
     async prepare(db: Kysely<Database>, server: Server, observe: () => Promise<boolean>) {

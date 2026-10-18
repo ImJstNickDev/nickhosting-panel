@@ -3985,8 +3985,27 @@ describe('Minecraft world selection without telemetry settling', () => {
     expect(f.adapter.getResources).not.toHaveBeenCalled();
     expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
     expect(f.options.authorizeEffect).not.toHaveBeenCalled();
-    expect(f.options.authorizeIntent).toHaveBeenCalledTimes(7);
+    expect(f.options.authorizeIntent).toHaveBeenCalledTimes(6);
     expect((await f.operation()).plan.offlineSince).toBeUndefined();
+  });
+  it('rechecks revoked authority after an authorized selection read, before any write', async () => {
+    const f = await fixture('minecraft-content', plan());
+    let revoked = false;
+    const write = vi.fn(async () => {});
+    f.options.authorizeIntent = vi.fn(async () => {
+      if (revoked) throw new DomainError('forbidden');
+    });
+    f.options.confirmAlreadyStopped = async () => true;
+    f.options.processGameContent = async (context) => {
+      await context.authorize();
+      revoked = true;
+      await context.effect('minecraft.text.fixture', write);
+      return true;
+    };
+    expect(await f.run()).toBe('failed');
+    expect(f.options.authorizeIntent).toHaveBeenCalledTimes(2);
+    expect(write).not.toHaveBeenCalled();
+    expect((await f.operation()).effect_state).toBe('none');
   });
   it('rolls back selection journal failures without inventing an uncertain external write', async () => {
     const f = await fixture('minecraft-content', plan());
