@@ -769,6 +769,9 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
         const zip = new ZipFile();
         zip.addBuffer(level, 'map/level.dat');
         zip.addBuffer(Buffer.from('region fixture'), 'map/region/r.0.0.mca');
+        // Published map packages include artwork/docs alongside the single world.
+        zip.addBuffer(Buffer.from('cover fixture'), 'cover.png');
+        zip.addBuffer(Buffer.from('installation instructions'), 'docs/readme.txt');
         zip.end();
         const chunks: Buffer[] = [];
         for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
@@ -1062,6 +1065,9 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
           expect(f.context.adapter.createDirectory).not.toHaveBeenCalled();
           expect(f.files.get('new_world/level.dat')).toEqual(level);
           expect(f.files.get('new_world/region/r.0.0.mca')).toEqual(Buffer.from('region fixture'));
+          expect([...f.files.keys()].some((path) => /cover\.png|readme\.txt/.test(path))).toBe(
+            false,
+          );
           expect(
             await f.f.db
               .selectFrom('upload_ingestion_claims')
@@ -1115,6 +1121,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
         );
         expect(f.files.get('new_world/level.dat')).toEqual(level);
         expect(f.files.get('new_world/region/r.0.0.mca')).toEqual(Buffer.from('region fixture'));
+        expect([...f.files.keys()].some((path) => /cover\.png|readme\.txt/.test(path))).toBe(false);
         expect(f.context.assertStopped).not.toHaveBeenCalled();
         expect(downloads.mock.calls.some(([, path]) => path === 'server.jar')).toBe(false);
         expect(downloads.mock.calls.some(([, path]) => path === 'eula.txt')).toBe(false);

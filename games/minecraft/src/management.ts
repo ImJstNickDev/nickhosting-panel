@@ -423,10 +423,12 @@ export function planMinecraftWorldImport(
     .map((entry) => entry.path.slice(0, -'level.dat'.length));
   if (roots.length !== 1 || roots[0] === undefined) return invalid('minecraft_world_level_data');
   const sourceRoot = roots[0];
+  // Download packages may include artwork and instructions beside the world.
+  // Validate the whole inventory above, then promote only the unique level.dat root.
+  // sourceRoot includes its trailing slash (or is empty for a root-level world).
   const files = entries
-    .filter((entry) => entry.type === 'file')
+    .filter((entry) => entry.type === 'file' && entry.path.startsWith(sourceRoot))
     .map((entry) => {
-      if (!entry.path.startsWith(sourceRoot)) return invalid('minecraft_world_multiple_roots');
       const relative = entry.path.slice(sourceRoot.length);
       // Never promote runnable code, properties, symlinks or files outside the isolated world root.
       if (
@@ -439,7 +441,7 @@ export function planMinecraftWorldImport(
   return {
     targetWorld,
     sourceRoot,
-    totalBytes,
+    totalBytes: files.reduce((sum, file) => sum + file.size, 0),
     files,
     requiresStoppedServer: true,
     requiresNbtValidation: true,

@@ -14,6 +14,7 @@ import { ZipFile } from 'yazl';
 import {
   discoverMinecraftWorlds,
   inspectMinecraftLevelDat,
+  inspectMinecraftWorldTransfer,
   planMinecraftWorldReplacement,
   recoverMinecraftWorldStageLock,
   stageMinecraftWorld,
@@ -311,6 +312,77 @@ describe('bounded Java level.dat validation', () => {
   });
 });
 describe('streamed isolated world staging', () => {
+  it('selects the same wrapped world for compressed transfer and staging, excluding package companions', async () => {
+    const { root } = await environment();
+    const sourceRoot = 'Package/DIVERSITY 3 v1.6.6 - for 1.14.4';
+    const level = levelDat(1976, '1.14.4');
+    const region = Buffer.from('region fixture');
+    const archive = await makeZip(root, {
+      'D3_screen_1600x900.png': Buffer.from('cover fixture'),
+      'Package/Instructions.txt': Buffer.from('instructions'),
+      [`${sourceRoot}/level.dat`]: level,
+      [`${sourceRoot}/region/r.0.0.mca`]: region,
+      [`${sourceRoot}/session.lock`]: Buffer.from('ephemeral lock'),
+      [`${sourceRoot}-extras/readme.txt`]: Buffer.from('not part of the world'),
+      'tools/install.sh': Buffer.from('not imported'),
+    });
+    const verifiedArchive = {
+      path: archive.path,
+      sha256: archive.sha256,
+      identity: await lstat(archive.path, { bigint: true }),
+    };
+    const transfer = await inspectMinecraftWorldTransfer(archive.path, {
+      targetWorld: 'imported',
+      verifiedArchive,
+    });
+    expect(transfer.mappings).toEqual([
+      { source: `${sourceRoot}/level.dat`, target: 'imported/level.dat' },
+      { source: `${sourceRoot}/region/r.0.0.mca`, target: 'imported/region/r.0.0.mca' },
+    ]);
+    expect(transfer.validation).toMatchObject({ dataVersion: 1976, versionName: '1.14.4' });
+    const reserve = vi.fn(async (_bytes: number) => {});
+    const staged = await stageMinecraftWorld(archive.path, {
+      ...options(root, archive.sha256),
+      verifiedArchive,
+      reserve,
+    });
+    expect(reserve).toHaveBeenCalledExactlyOnceWith(level.length + region.length);
+    expect(staged.manifest.map((file) => file.path)).toEqual(
+      transfer.mappings.map((mapping) => mapping.target),
+    );
+    expect(await readFile(join(staged.directory, 'imported/level.dat'))).toEqual(level);
+    expect(await readFile(join(staged.directory, 'imported/region/r.0.0.mca'))).toEqual(region);
+    expect(staged.validation).toMatchObject(transfer.validation);
+    for (const path of ['D3_screen_1600x900.png', 'Instructions.txt', 'session.lock', 'install.sh'])
+      await expect(lstat(join(staged.directory, 'imported', path))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+  });
+  it.each([
+    { extra: 'other/level.dat', reason: 'minecraft_world_level_data' },
+    { extra: 'source/start.sh', reason: 'minecraft_world_protected_file' },
+  ])('rejects $extra in both import paths', async ({ extra, reason }) => {
+    const { root } = await environment();
+    const archive = await makeZip(root, {
+      'cover.png': Buffer.from('cover'),
+      'source/level.dat': levelDat(),
+      [extra]: levelDat(),
+    });
+    const verifiedArchive = {
+      path: archive.path,
+      sha256: archive.sha256,
+      identity: await lstat(archive.path, { bigint: true }),
+    };
+    await expect(
+      inspectMinecraftWorldTransfer(archive.path, { targetWorld: 'imported', verifiedArchive }),
+    ).rejects.toMatchObject({ details: { reason } });
+    await expect(
+      stageMinecraftWorld(archive.path, { ...options(root, archive.sha256), verifiedArchive }),
+    ).rejects.toMatchObject({ details: { reason } });
+    await expect(lstat(join(root, 'world-staging/job-one/files'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
   it('reuses a trusted current source hash while inflating exact world bytes', async () => {
     const { root } = await environment();
     const region = randomBytes(2 * 1024 ** 2);

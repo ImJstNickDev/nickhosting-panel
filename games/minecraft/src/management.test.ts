@@ -233,6 +233,75 @@ describe('Minecraft isolated world plans', () => {
     expect(plan.requiresNbtValidation).toBe(true);
     expect(plan.totalBytes).toBe(1200);
   });
+  it.each(['source/', 'Map package/DIVERSITY 3 v1.6.6 - for 1.14.4/'])(
+    'selects only the unique world root %s and ignores package companions',
+    (root) => {
+      const plan = planMinecraftWorldImport(
+        [
+          ...world.map((entry) => ({ ...entry, path: `${root}${entry.path.slice(7)}` })),
+          { path: 'cover.png', size: 250, compressedSize: 250, type: 'file' },
+          { path: 'Map package/Instructions.txt', size: 50, compressedSize: 50, type: 'file' },
+          {
+            path: `${root.slice(0, -1)}-extras/readme.txt`,
+            size: 25,
+            compressedSize: 25,
+            type: 'file',
+          },
+          { path: 'tools/install.sh', size: 10, compressedSize: 10, type: 'file' },
+        ],
+        { targetWorld: 'survival', maxBytes: 10_000 },
+      );
+      expect(plan.sourceRoot).toBe(root);
+      expect(plan.files).toEqual([
+        { source: `${root}level.dat`, target: 'survival/level.dat', size: 100 },
+        { source: `${root}region/r.0.0.mca`, target: 'survival/region/r.0.0.mca', size: 1000 },
+      ]);
+      expect(plan.totalBytes).toBe(1100);
+    },
+  );
+  it('preserves a world stored directly at the archive root', () => {
+    const plan = planMinecraftWorldImport(
+      world.map((entry) => ({ ...entry, path: entry.path.slice('source/'.length) })),
+      { targetWorld: 'survival', maxBytes: 10_000 },
+    );
+    expect(plan.sourceRoot).toBe('');
+    expect(plan.files).toEqual([
+      { source: 'level.dat', target: 'survival/level.dat', size: 100 },
+      { source: 'region/r.0.0.mca', target: 'survival/region/r.0.0.mca', size: 1000 },
+    ]);
+    expect(plan.totalBytes).toBe(1100);
+  });
+  it('still validates skipped package entries before selecting the world', () => {
+    for (const addition of [
+      { path: '../outside.txt', size: 1, compressedSize: 1, type: 'file' as const },
+      { path: 'outside/link', size: 1, compressedSize: 1, type: 'symlink' as const },
+      { path: 'outside/bomb.png', size: 1000, compressedSize: 1, type: 'file' as const },
+      { path: 'outside/large.png', size: 10000, compressedSize: 10000, type: 'file' as const },
+    ])
+      expect(() =>
+        planMinecraftWorldImport([...world, addition], { targetWorld: 'safe', maxBytes: 10000 }),
+      ).toThrow();
+    const companion = { path: 'cover.png', size: 1, compressedSize: 1, type: 'file' as const };
+    expect(() =>
+      planMinecraftWorldImport([...world, companion, { ...companion, path: 'COVER.PNG' }], {
+        targetWorld: 'safe',
+        maxBytes: 10000,
+      }),
+    ).toThrow();
+    expect(() =>
+      planMinecraftWorldImport([...world, companion, { ...companion, path: 'cover.png/child' }], {
+        targetWorld: 'safe',
+        maxBytes: 10000,
+      }),
+    ).toThrow();
+    expect(() =>
+      planMinecraftWorldImport([...world, companion], {
+        targetWorld: 'safe',
+        maxBytes: 10000,
+        maxEntries: 2,
+      }),
+    ).toThrow();
+  });
   it.each([
     '../other/level.dat',
     '/level.dat',

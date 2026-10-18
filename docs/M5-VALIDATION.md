@@ -13253,3 +13253,45 @@ No Docker restart/rebuild, migration, Blueprint/Wings/NPM/DNS change, provider
 mutation or game-server file write occurred. SFTPGo #18 remains a separate release
 blocker. PR #21 remains open and unmerged. Code rollback is a revert of this fix;
 retain the recovered source and its audit history.
+
+
+### Packaged world import regression — 2026-10-18
+
+The next Owner attempt downloaded Diversity 3 successfully and sealed the ready
+source, but its import job failed before any external effect. A read-only replay
+of archive inspection identified `minecraft_world_multiple_roots`: cover images
+and instructions alongside the single world directory were incorrectly treated
+as additional world roots. The previous CDN fix remains successful; its diagnostic
+download did not exercise this separate package-selection stage.
+
+The shared world planner now selects descendants of the unique `level.dat` root
+and ignores companion files outside that subtree. Full-inventory path, duplicate,
+collision, expansion and archive-budget checks remain; multiple `level.dat` roots
+still reject ambiguous packages. Selected-world protected-file checks remain.
+Staging reserves only the selected world bytes. Both the streaming Fileman path
+and the local staging fallback consume the same selection.
+
+Validation: 64 management/world unit tests passed; 11 targeted database integration
+cases passed across matching, mismatched and historical worlds, both transfer
+paths, collision handling and recovery. Their ZIP fixture now includes cover/docs
+and verifies those files are not published. 45 unrelated tests in that integration
+file were intentionally skipped by the name filter; no full-suite claim is made.
+Root TypeScript, scoped Biome, governance and diff checks passed. Independent
+technical review found no must-fix.
+
+Read-only inspection plus complete compressed-transfer consumption of the actual
+staged Diversity 3 archive succeeded: 1,686 selected files, 321,527,462 expanded
+bytes and 121,115,361 streamed bytes, matching the calculated wire length. Per-file
+CRC/size/SHA checks completed; metadata reports DataVersion 1976 and release 1.14.4.
+Artwork was excluded and every destination stayed under the chosen world root.
+Inspection took 762 ms and complete local read/validation 11,654 ms; these are not
+live import latency measurements. No game files were written or source bytes
+changed. The ready source remains reusable without a new CurseForge download.
+
+The failed job remains honestly failed with no external effect, active server
+operation, pending content or staging claim. It was not replayed automatically;
+the Owner controls the next import. Development watchers loaded the source fix;
+no container restart, Blueprint/Wings change, migration or production mutation
+was performed. Disposable integration fixtures were cleaned. No UI was changed.
+Rollback is a code revert with source/job history retained. PR #21 remains open
+and unmerged; SFTPGo #18 remains an independent production-release blocker.

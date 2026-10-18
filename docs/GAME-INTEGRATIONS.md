@@ -555,8 +555,12 @@ identity corroboration remain in force. Unconfirmed installation, explicit audit
 restore and runtime-changing content paths retain artifact verification.
 Worlds overlaps properties/root reads, batches candidate directories and prepares
 download URLs only for actual `level.dat` files. Additive world imports use `uploadArchive` when Blueprint declares the capability.
-The integration reads only `level.dat` and selects canonical members; Fileman
-streams one sanitized ZIP to Wings without recompression or expanded local staging.
+The integration locates the unique `level.dat` root and imports only that world
+subtree. Package artwork/instructions outside it are excluded; archives containing
+multiple worlds remain ambiguous and are rejected. Every archive entry still
+passes path, duplicate and size checks, while staging reserves only selected world
+bytes. The integration reads only `level.dat` and selects canonical members;
+Fileman streams one sanitized ZIP to Wings without recompression or expanded local staging.
 CRC, decoded sizes and per-file hashes are checked while bytes flow, before the
 terminal ZIP record. One Blueprint request extracts into an operation-specific
 scratch directory, verifies expected metadata, publishes the destination and removes
