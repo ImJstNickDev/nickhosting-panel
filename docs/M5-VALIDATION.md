@@ -13050,3 +13050,41 @@ compatibility is preserved by retaining the old single-server inventory operatio
 restore Gateway before removing the new Core bulk endpoint. Preserve logs,
 configuration, networks and all persistent data. No database migration is involved.
 PR #21 remains open/unmerged; no production deployment is authorized by these checks.
+
+
+### Owner world test after Gateway batching — 2026-10-18
+
+The Owner repeated import/delete at 15:44 UTC on implementation `75ccd14`
+(documentation HEAD `e0bdaca`). Both durable jobs succeeded on their first attempt,
+with no error code. Worker times are **5,268 ms import / 878 ms delete**, compared
+with 5,189 / 789 ms previously. A single sample pair establishes neither a speedup
+nor a performance regression. Durable creation-to-completion is 5,307 / 898 ms;
+Redis publication-to-worker delays are 6 / 4 ms. Browser source upload, API work
+before job creation and final UI refresh are outside these clocks.
+
+For the same 101 files / 81,251,294-byte archive, import divides into approximately
+1,133 ms before Fileman, 425 ms pre-stream preparation, 2,264 ms streaming, 51 ms
+publication preparation, 1,289 ms commit and 106 ms receipts/completion. Validation
+(2,165 ms) overlaps streaming; listing 280 / quota 309 / token 254 ms overlap each other.
+Do not add these nested/concurrent timings to the wall total. The commit includes
+959.075 ms Wings decompression; all reported internal phases total 1,036.831 ms,
+leaving approximately 252 ms in the surrounding request path.
+
+Delete divides into approximately 602 ms preparation, 260 ms provider effect and
+16 ms completion. The complete operation remains above the sub-300 ms target;
+import remains above the three-second target. Eliminating Gateway request
+amplification did not materially shorten these particular job measurements.
+
+Saved API/worker/Gateway logs from 15:41:04 through 15:45:42 UTC contain **no 429 or
+rate-limit records**. There is one Gateway `backend_active_binding` observation
+failure during import, plus its paired warning: an active operation makes the
+sleeping route effectively blocked, re-enabling full backend observation while
+the process is stopped. It returns to sleeping after the job; no snapshot error
+or lease expiration was recorded. This is not a zero-error Gateway claim or a
+client reachability measurement. The unrelated fourth route remains withheld,
+with the previously documented aggregate unhealthy state.
+
+Read-only database verification confirms the tested server is offline/sleeping
+with no active operation remaining. Independent timing review checked overlap,
+outcomes and limitations. Only existing logs and selected development records
+were read; no new instrumentation, test mutation or restart occurred.
