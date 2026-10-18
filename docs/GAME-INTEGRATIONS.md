@@ -499,6 +499,18 @@ Deleting the selected world is unavailable. World ZIP download reuses the generi
 Fileman streaming archive endpoint; the UI offers it when stopped. It is a file
 export, not an atomic snapshot or replacement for the Backups workflow.
 
+World selection uses the existing live process-stopped observation and quiescent
+resource reservations, rather than waiting for the generic cached-telemetry
+settling window. Its delivery shares the managed-provider identity and Fileman
+read scope, validates only the selected world's metadata, and reads that metadata
+alongside `server.properties`. The properties write retains its fresh source-hash
+comparison, current authorization and final stopped proof; uncertain replies
+reconcile the persisted after-image without replaying the write.
+After confirmed job success, the UI changes `selectedWorld` in the already loaded
+inventory and cancels older reads. Selection does not trigger another world scan;
+acceptance alone never changes the selection. Explicit refresh/reopening the tab
+continues to discover external file changes.
+
 Read-only collaborators can browse/download within their existing file permission;
 managed mutations require `server:manage`. No custom-map catalog, Owner presets,
 new runtime support or Blueprint extension update is introduced by this UI pass.

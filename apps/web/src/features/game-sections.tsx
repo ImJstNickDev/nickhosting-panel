@@ -490,6 +490,7 @@ export function GameSections({
     serverId: string;
     id: string;
     confirmedUpdate?: GameSectionAcceptedOptions['confirmedUpdate'];
+    refetchSectionOnSuccess?: boolean;
     quickUntil?: number;
   }>();
   const [operationEventsConnected, setOperationEventsConnected] = useState(false);
@@ -504,6 +505,7 @@ export function GameSections({
       serverId,
       id,
       confirmedUpdate: options?.confirmedUpdate,
+      refetchSectionOnSuccess: options?.refetchSectionOnSuccess,
       quickUntil: options?.quickCompletion ? Date.now() + 5000 : undefined,
     });
   const [completedOperationId, setCompletedOperationId] = useState<string>();
@@ -626,7 +628,7 @@ export function GameSections({
         patchedOperation.current !== operationId
       ) {
         const queryKey = ['game-section', serverId, gameId, sectionId];
-        // An older inventory response must not resurrect the confirmed removal.
+        // An older inventory response must not undo a confirmed change.
         await queryClient.cancelQueries({ queryKey, exact: true });
         if (cancelled) return;
         patchedOperation.current = operationId;
@@ -634,8 +636,16 @@ export function GameSections({
           current ? update(current) : current,
         );
       }
-      const [sectionResult, serverResult] = await Promise.all([loaded.refetch(), server.refetch()]);
-      if (cancelled || sectionResult.error || serverResult.error) return;
+      const sectionAlreadyUpdated =
+        operationState === 'succeeded' &&
+        effectState === 'confirmed' &&
+        patchedOperation.current === operationId &&
+        trackedOperation?.refetchSectionOnSuccess === false;
+      const [sectionResult, serverResult] = await Promise.all([
+        sectionAlreadyUpdated ? undefined : loaded.refetch(),
+        server.refetch(),
+      ]);
+      if (cancelled || sectionResult?.error || serverResult.error) return;
       refreshedOperation.current = operationId;
       refreshedOutcome.current = `${operationState}:${effectState}`;
       setRefreshToken((previous) => previous + 1);

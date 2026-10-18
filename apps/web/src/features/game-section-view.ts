@@ -3,6 +3,8 @@ import type { UiSectionData } from '@nickhosting/game-sdk/ui';
 export interface GameSectionAcceptedOptions {
   /** Apply only after the durable job confirms its external effect. */
   confirmedUpdate?: (current: UiSectionData) => UiSectionData;
+  /** Skip rediscovery when the confirmed update fully describes the section change. */
+  refetchSectionOnSuccess?: boolean;
   /** Short-lived fast observation for a small interactive operation. */
   quickCompletion?: boolean;
 }

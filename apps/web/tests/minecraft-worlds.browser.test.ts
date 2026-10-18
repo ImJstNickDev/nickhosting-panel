@@ -67,7 +67,9 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
   const route = () => `${fixture.origin}/servers/${provider.ids.serverId}/game/worlds`;
 
   beforeAll(async () => {
-    fixture = await browserHarness();
+    fixture = await browserHarness({
+      browser: process.env.NH_BROWSER === 'firefox' ? 'firefox' : 'chromium',
+    });
     identities = await prepareJourneyIdentities(fixture);
     user = identities.user;
     for (const page of [user, identities.peer])
@@ -260,6 +262,74 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
       release();
       await user.unroute(endpoint);
       await provider.adapter.deleteFiles(identifier, '', ['world_nether', 'world_the_end']);
+    }
+  });
+
+  it('selects a world after confirmed success without rediscovering worlds or accepting a stale inventory', async () => {
+    const world = 'selection-target';
+    const files = await provider.files();
+    const original = files.get('server.properties');
+    await provider.adapter.createDirectory(identifier, '', world);
+    files.set(`${world}/level.dat`, browserLevelDat());
+    files.set('server.properties', Buffer.from('level-name=world\n'));
+    await user.goto(route());
+    const row = user
+      .locator('.minecraft-world')
+      .filter({ has: user.getByText(world, { exact: true }) });
+    await browserExpect(row).toBeVisible();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const snapshots: string[] = [];
+    const endpoint = `${fixture.origin}${api()}/worlds`;
+    await user.route(endpoint, async (request) => {
+      const response = await request.fetch();
+      const body = await response.json();
+      snapshots.push(body.selectedWorld);
+      await gate;
+      await request.fulfill({ response, json: body }).catch(() => {});
+    });
+    try {
+      await user.getByRole('button', { name: 'Refresh worlds', exact: true }).click();
+      await expect.poll(() => snapshots).toEqual(['world']);
+      const dialog = await choose('Select world', world);
+      const accepted = user.waitForResponse(
+        (result) =>
+          result.request().method() === 'POST' && result.url().endsWith(`${api()}/operations`),
+      );
+      await dialog.getByRole('button', { name: 'Select world', exact: true }).click();
+      expect((await accepted).status()).toBe(202);
+      // Acknowledgement alone does not change the selection or unlock mutations.
+      await browserExpect(row.locator('.minecraft-world-selected')).toHaveCount(0);
+      await browserExpect(
+        user.getByRole('button', { name: 'Import world', exact: true }),
+      ).toBeDisabled();
+      expect(files.get('server.properties')?.toString()).toBe('level-name=world\n');
+      await provider.processPending();
+      await browserExpect(row.locator('.minecraft-world-selected')).toHaveText('Selected');
+      await browserExpect(
+        user.getByRole('button', { name: `Delete world: ${world}`, exact: true }),
+      ).toBeDisabled();
+      await browserExpect(
+        user.getByRole('button', { name: 'Import world', exact: true }),
+      ).toBeEnabled();
+      expect(files.get('server.properties')?.toString()).toContain(`level-name=${world}`);
+      await screenshot(user, 'minecraft-worlds-selection-confirmed-desktop-en');
+      await accessible();
+      // No second inventory request is necessary: selection changes only level-name.
+      expect(snapshots).toEqual(['world']);
+      release();
+      await user.getByRole('button', { name: 'Import world', exact: true }).click();
+      await user.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await browserExpect(row.locator('.minecraft-world-selected')).toHaveText('Selected');
+      expect(snapshots).toEqual(['world']);
+    } finally {
+      release();
+      await user.unroute(endpoint);
+      if (original) files.set('server.properties', original);
+      else files.delete('server.properties');
+      await provider.adapter.deleteFiles(identifier, '', [world]);
     }
   });
 

@@ -3902,6 +3902,126 @@ it('retains resumed compute after a rejected backup create without inheriting it
   ).toEqual({ state: 'running' });
 });
 
+describe('Minecraft world selection without telemetry settling', () => {
+  const plan = () => ({
+    minecraftContent: {
+      combinationId: randomUUID(),
+      command: { kind: 'world-select', world: 'selected_world' },
+      world: { existing: true, dataVersion: 3955 },
+      backupBefore: false,
+    },
+  });
+  it('selects in one delivery with shared identity, local read authorization and fresh physical stop proof', async () => {
+    const f = await fixture('minecraft-content', plan());
+    const write = vi.fn(async () => {});
+    f.options.authorizeIntent = vi.fn(async () => {});
+    f.options.authorizeEffect = vi.fn(async () => {});
+    f.options.confirmAlreadyStopped = vi.fn(async (_server, _db, proof) => {
+      expect(await proof?.providerServer).toMatchObject({ uuid: f.remote.uuid });
+      return true;
+    });
+    f.options.processGameContent = async (context) => {
+      await context.assertStopped();
+      for (let index = 0; index < 5; index++) await context.authorize();
+      await context.assertStopped();
+      await context.effect('minecraft.text.fixture', write);
+      return true;
+    };
+    expect(await f.run()).toBe('succeeded');
+    expect(write).toHaveBeenCalledOnce();
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledOnce();
+    expect(f.adapter.getResources).not.toHaveBeenCalled();
+    expect(f.options.confirmAlreadyStopped).toHaveBeenCalledTimes(2);
+    expect(f.options.authorizeEffect).toHaveBeenCalledOnce();
+    expect(f.options.authorizeIntent).toHaveBeenCalledTimes(7);
+    expect((await f.operation()).plan.offlineSince).toBeUndefined();
+  });
+  it.each(['running', 'missing observer'] as const)(
+    'does not trust cached offline state when %s',
+    async (state) => {
+      const f = await fixture('minecraft-content', plan());
+      await f.db
+        .updateTable('managed_servers')
+        .set({ runtime_state: 'offline' })
+        .where('id', '=', f.serverId)
+        .execute();
+      if (state === 'running') f.options.confirmAlreadyStopped = vi.fn(async () => false);
+      f.options.processGameContent = vi.fn(async () => true);
+      expect(await f.run()).toBe('waiting');
+      expect(f.options.processGameContent).not.toHaveBeenCalled();
+      expect(f.adapter.getResources).not.toHaveBeenCalled();
+    },
+  );
+  it('does not select while a compute reservation remains', async () => {
+    const f = await fixture('minecraft-content', plan());
+    await f.prepareReservation();
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.options.processGameContent = vi.fn(async () => true);
+    expect(await f.run()).not.toBe('succeeded');
+    expect(f.options.processGameContent).not.toHaveBeenCalled();
+    expect(f.options.confirmAlreadyStopped).not.toHaveBeenCalled();
+  });
+  it.each(['absent directory', 'deleted during read'] as const)(
+    'releases a stale selection without writes when its target is %s',
+    async (missing) => {
+      const f = await fixture('minecraft-content', plan());
+      const write = vi.fn(async () => {});
+      f.options.confirmAlreadyStopped = vi.fn(async () => true);
+      f.options.processGameContent = async (context) => {
+        if (missing === 'absent directory') {
+          const files = await context.adapter.listFiles(
+            context.server.pterodactyl_identifier ?? '',
+          );
+          if (!files.some((file) => file.name === 'selected_world'))
+            throw new DomainError('not_found');
+        } else throw new PterodactylError('not_found', 'client', 'rejected', 404);
+        await context.effect('minecraft.text.fixture', write);
+        return true;
+      };
+      expect(await f.run()).toBe('failed');
+      expect(write).not.toHaveBeenCalled();
+      expect((await f.server()).active_operation_id).toBeNull();
+      expect((await f.operation()).effect_state).toBe('none');
+      expect(
+        await f.db
+          .selectFrom('operation_jobs')
+          .select(['state', 'error_code'])
+          .where('id', '=', f.jobId)
+          .executeTakeFirstOrThrow(),
+      ).toEqual({ state: 'failed', error_code: 'not_found' });
+    },
+  );
+  it.each(['process restarted', 'permission revoked', 'provider replaced'] as const)(
+    'refuses world selection when %s after preparation',
+    async (change) => {
+      const f = await fixture('minecraft-content', plan());
+      let changed = false;
+      const write = vi.fn(async () => {});
+      f.options.confirmAlreadyStopped = vi.fn(
+        async () => change !== 'process restarted' || !changed,
+      );
+      f.options.authorizeIntent = async () => {
+        if (change === 'permission revoked' && changed) throw new DomainError('forbidden');
+      };
+      f.options.checkpoint = async (phase) => {
+        if (phase !== 'prepared') return;
+        changed = true;
+        if (change === 'provider replaced') {
+          f.tick(60_000);
+          f.remote.uuid = randomUUID();
+        }
+      };
+      f.options.processGameContent = async (context) => {
+        await context.effect('minecraft.text.fixture', write);
+        return true;
+      };
+      expect(await f.run()).toBe('failed');
+      expect(write).not.toHaveBeenCalled();
+      expect((await f.operation()).effect_state).toBe('none');
+    },
+  );
+});
+
 describe('additive Minecraft world imports', () => {
   const plan = () => ({
     minecraftContent: {

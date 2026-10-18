@@ -326,11 +326,16 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
         intent.command.kind === 'world-remove' && typeof intent.command.world === 'string'
           ? intent.command.world
           : undefined;
+      const selectedWorld =
+        intent.command.kind === 'world-select' && typeof intent.command.world === 'string'
+          ? intent.command.world
+          : undefined;
       props.onAccepted(
         result.jobId,
-        removedWorld
+        removedWorld || selectedWorld
           ? {
               quickCompletion: true,
+              refetchSectionOnSuccess: !selectedWorld,
               confirmedUpdate: (current) => {
                 const worlds = current.metadata?.worlds as MinecraftWorlds | undefined;
                 if (!worlds) return current;
@@ -340,7 +345,10 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
                     ...current.metadata,
                     worlds: {
                       ...worlds,
-                      worlds: worlds.worlds.filter((world) => world.name !== removedWorld),
+                      selectedWorld: selectedWorld ?? worlds.selectedWorld,
+                      worlds: removedWorld
+                        ? worlds.worlds.filter((world) => world.name !== removedWorld)
+                        : worlds.worlds,
                     },
                   },
                 };

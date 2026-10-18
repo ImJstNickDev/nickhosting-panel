@@ -39,7 +39,10 @@ import {
   recoverProvisionGateway,
 } from './gateway-provision.js';
 import { currentInteractiveContext } from './interactive-context.js';
-import { minecraftContentAllowsOnline } from './minecraft-content-contracts.js';
+import {
+  minecraftContentAllowsOnline,
+  minecraftContentSelectsWorld,
+} from './minecraft-content-contracts.js';
 import { assertGatewaySleepFence, revokeGatewayRoutesForDeletion } from './registry.js';
 import { assertIdleSleepAllowed } from './sleep-policy.js';
 import { consumeStopEscalation, stopEscalation } from './stop-escalation.js';
@@ -858,8 +861,12 @@ export async function processServerOperation(
     const onlineWorldContent =
       operation.action === 'minecraft-content' &&
       minecraftContentAllowsOnline(operation.plan.minecraftContent);
+    const offlineWorldSelection =
+      operation.action === 'minecraft-content' &&
+      minecraftContentSelectsWorld(operation.plan.minecraftContent);
+    const worldFileContent = onlineWorldContent || offlineWorldSelection;
     let providerFileEffects = false;
-    // Reuse only this locked delivery's identity proof for inactive-world file
+    // Reuse only this locked delivery's identity proof for world file
     // operations. Long staging refreshes it; no proof crosses jobs or deliveries.
     let worldContentIdentity: { remote: ApplicationServer; checkedAt: number } | undefined;
     const worldContentProvider = async () => {
@@ -882,6 +889,19 @@ export async function processServerOperation(
         )
           throw new DomainError('operation_uncertain');
       });
+    };
+    let worldSelectionStopped: Promise<boolean> | undefined;
+    const confirmWorldSelectionStopped = (fresh = false) => {
+      if (fresh || !worldSelectionStopped)
+        worldSelectionStopped = (async () => {
+          await requireQuiescentReservation();
+          if (!options.confirmAlreadyStopped) return false;
+          const remote = await worldContentProvider();
+          return options.confirmAlreadyStopped(server.id, db, {
+            providerServer: Promise.resolve(remote),
+          });
+        })();
+      return worldSelectionStopped;
     };
     const effect = async <T>(
       phase: string,
@@ -935,7 +955,7 @@ export async function processServerOperation(
         finalPowerIdentity || guardedDirectoryEffect
           ? undefined
           : (preparationServer ??
-            (onlineWorldContent ? await worldContentProvider() : undefined) ??
+            (worldFileContent ? await worldContentProvider() : undefined) ??
             (operation.action !== 'provision' || server.pterodactyl_id !== null
               ? await timed('provider_identity', () => ownedRemote(db, server, options))
               : undefined));
@@ -973,7 +993,7 @@ export async function processServerOperation(
           .executeTakeFirst()) !== undefined;
       if (
         finalPowerIdentity ||
-        onlineWorldContent ||
+        worldFileContent ||
         ((operation.plan.gatewayAutomation !== undefined ||
           operation.plan.scheduleAutomation !== undefined ||
           minecraftProvision) &&
@@ -985,7 +1005,7 @@ export async function processServerOperation(
         try {
           if (operation.plan.gatewayAutomation !== undefined)
             assertGatewaySleepFence(operation.plan, nowOf(options));
-          if (onlineWorldContent) {
+          if (worldFileContent) {
             // Revalidate current local identity and policy after durable intent.
             // A changed mapping/ownership cannot borrow an earlier remote proof.
             if (!guardedDirectoryEffect) verifiedServer = await worldContentProvider();
@@ -1009,6 +1029,12 @@ export async function processServerOperation(
               throw new DomainError('conflict');
             if (verifiedServer) await verifyManagedIdentity(db, current, verifiedServer);
             await (options.authorizeIntent ?? options.authorizeEffect)(jobId, server.id, db);
+            if (offlineWorldSelection) {
+              if (!(await confirmWorldSelectionStopped(true)))
+                throw new DomainError('operation_uncertain');
+              // The physical observation can wait; keep current authority at dispatch.
+              await (options.authorizeIntent ?? options.authorizeEffect)(jobId, server.id, db);
+            }
           } else if (leanStart) {
             await timed('authorization', () =>
               options.authorizeEffect(jobId, server.id, db, {
@@ -1299,10 +1325,15 @@ export async function processServerOperation(
         event,
         backup,
         authorize: () =>
-          (onlineWorldContent
+          (worldFileContent
             ? (options.authorizeIntent ?? options.authorizeEffect)
             : options.authorizeEffect)(jobId, server.id, db),
         assertStopped: async () => {
+          if (offlineWorldSelection) {
+            if (!(await confirmWorldSelectionStopped()))
+              throw new DomainError('operation_uncertain');
+            return;
+          }
           await requireQuiescentReservation();
           if (
             !options.confirmAlreadyStopped ||
@@ -2227,8 +2258,7 @@ export async function processServerOperation(
         }
         throw error;
       }
-      if (onlineWorldContent)
-        worldContentIdentity = { remote, checkedAt: nowOf(options).getTime() };
+      if (worldFileContent) worldContentIdentity = { remote, checkedAt: nowOf(options).getTime() };
       if (['start', 'stop', 'restart'].includes(operation.action)) {
         const action = operation.action as 'start' | 'stop' | 'restart';
         const observedStop = await completeObservedStop();
@@ -2499,8 +2529,14 @@ export async function processServerOperation(
       // The integration checks the selected world at dispatch. An unused folder
       // needs neither process telemetry nor an artificial offline settling period.
       if (!onlineWorldContent) {
-        await requireQuiescentReservation();
-        if (!(await offline())) return wait('offline_confirmation');
+        if (offlineWorldSelection) {
+          // Cached Panel telemetry has a settling window. World selection needs
+          // current process quiescence, not an arbitrary delay after an offline sample.
+          if (!(await confirmWorldSelectionStopped())) return wait('offline_confirmation');
+        } else {
+          await requireQuiescentReservation();
+          if (!(await offline())) return wait('offline_confirmation');
+        }
       }
       if (operation.action === 'minecraft-content') {
         if (!options.processGameContent) throw new DomainError('configuration_invalid');
@@ -2837,6 +2873,18 @@ export async function processServerOperation(
         return finish(false, false, code);
       if (operation.effect_state === 'prepared' || operation.effect_state === 'uncertain')
         return wait('remote_outcome_unknown', code);
+      if (
+        offlineWorldSelection &&
+        operation.effect_state === 'none' &&
+        ((error instanceof DomainError && error.code === 'not_found') ||
+          (error instanceof PterodactylError &&
+            error.reason === 'not_found' &&
+            error.outcome === 'rejected' &&
+            error.upstreamStatus === 404))
+      )
+        // Selection discovers the target at dispatch. A stale selection is a
+        // terminal pre-effect failure, not an unavailable provider to poll forever.
+        return finish(false, false, 'not_found');
       if (
         error instanceof DomainError &&
         [

@@ -291,10 +291,10 @@ export async function prepareMinecraftContentPlan(
     const name = minecraftWorldName(
       command.kind === 'world-import' ? command.targetWorld : command.world,
     );
-    // Removal validates the exact target at dispatch. Preparing its intent must
+    // Selection/removal validate the exact target at dispatch. Preparing intent must
     // not list the same root again before the durable job can run.
     const actual =
-      command.kind === 'world-remove'
+      command.kind !== 'world-import'
         ? undefined
         : (await options.adapter.listFiles(server.pterodactyl_identifier)).filter(
             (entry) => entry.name.toLowerCase() === name.toLowerCase(),
@@ -311,7 +311,7 @@ export async function prepareMinecraftContentPlan(
         command.kind === 'world-select'
           ? worldDataVersion(choice)
           : minecraftWorldDataVersion(choice.combination.release),
-      existing: command.kind === 'world-remove' || actual?.length === 1,
+      existing: command.kind !== 'world-import' || actual?.length === 1,
     };
     if (command.kind === 'world-import') {
       if (server.runtime_state === 'running') {
@@ -668,16 +668,18 @@ async function applyTextPlan(
   context: GameLifecycleContext,
   build: (files: FilemanReadService) => Promise<TextChange[]>,
   beforeEffects?: (plan: TextChange[]) => Promise<void>,
+  files?: FilemanReadService,
 ) {
   if (context.operation().plan.minecraftText === undefined) {
     // Builders may persist authority (for example a verified player UUID).
     // Read the latest plan only after they finish; an earlier spread loses it.
     const changes = await build(
-      createFilemanReadService({
-        adapter: context.adapter,
-        identifier: context.server.pterodactyl_identifier ?? '',
-        authorize: context.authorize,
-      }),
+      files ??
+        createFilemanReadService({
+          adapter: context.adapter,
+          identifier: context.server.pterodactyl_identifier ?? '',
+          authorize: context.authorize,
+        }),
     );
     await context.update({ plan: { ...context.operation().plan, minecraftText: changes } });
   }
@@ -2190,21 +2192,6 @@ export async function processMinecraftContent(
   return applyPreparedContent(context, options, prepared);
 }
 
-async function readWorldLevel(
-  context: Pick<GameLifecycleContext, 'adapter' | 'server' | 'authorize'>,
-  world: string,
-  maxBytes = 8 * 1024 ** 2,
-  signal?: AbortSignal,
-) {
-  const bytes = await createFilemanReadService({
-    adapter: context.adapter,
-    identifier: context.server.pterodactyl_identifier ?? '',
-    authorize: context.authorize,
-    signal,
-  }).read({ path: `${minecraftWorldName(world)}/level.dat`, maxBytes });
-  if (!bytes) throw new DomainError('not_found');
-  return bytes;
-}
 export interface MinecraftWorldSnapshot {
   installed: boolean;
   supported: boolean;
@@ -2367,22 +2354,45 @@ async function applyWorldContent(
   assertMinecraftRuntimePathsPreserved([target], profile.installed_manifest);
   if (command.kind === 'world-select') {
     if (prepared.world.dataVersion === undefined) throw new DomainError('integration_unavailable');
-    if (!(await remoteEntry(context, `${target}/level.dat`))) throw new DomainError('not_found');
-    const validation = validateMinecraftLevelDat(
-      await readWorldLevel(context, target),
-      prepared.world.dataVersion,
-      { release: choice.combination.release },
+    const files = worldFileScope(context);
+    const [root] = await Promise.all([
+      files.list(''),
+      files.prepare(['server.properties', `${target}/level.dat`]),
+    ]);
+    if (!worldDirectoryEntry(root, target)) throw new DomainError('not_found');
+    const level = (await files.list(target)).filter(
+      (entry) => entry.name.toLowerCase() === 'level.dat',
     );
-    await applyTextPlan(context, async () => {
-      const snapshot = await textSnapshot(context, 'server.properties', '');
-      const source = snapshot.content;
-      const selected = planMinecraftWorldSelection(
-        source,
-        { name: target, verifiedDataVersion: validation.dataVersion, sha256: validation.sha256 },
-        { allowedDataVersions: [prepared.world?.dataVersion ?? -1] },
-      );
-      return [await plannedText(context, 'server.properties', selected.content, snapshot.hash)];
+    if (
+      level.length !== 1 ||
+      level[0]?.name !== 'level.dat' ||
+      level[0].kind !== 'file' ||
+      level[0].size < 1 ||
+      level[0].size > 8 * 1024 ** 2
+    )
+      throw new DomainError('conflict');
+    const [bytes, snapshot] = await Promise.all([
+      files.read({ path: `${target}/level.dat`, maxBytes: level[0].size }),
+      textSnapshot(context, 'server.properties', '', files),
+    ]);
+    if (!bytes) throw new DomainError('not_found');
+    const validation = validateMinecraftLevelDat(bytes, prepared.world.dataVersion, {
+      release: choice.combination.release,
     });
+    await applyTextPlan(
+      context,
+      async () => {
+        const source = snapshot.content;
+        const selected = planMinecraftWorldSelection(
+          source,
+          { name: target, verifiedDataVersion: validation.dataVersion, sha256: validation.sha256 },
+          { allowedDataVersions: [prepared.world?.dataVersion ?? -1] },
+        );
+        return [await plannedText(context, 'server.properties', selected.content, snapshot.hash)];
+      },
+      undefined,
+      files,
+    );
     return true;
   }
   if (command.kind === 'world-remove') {

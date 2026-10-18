@@ -13295,3 +13295,68 @@ no container restart, Blueprint/Wings change, migration or production mutation
 was performed. Disposable integration fixtures were cleaned. No UI was changed.
 Rollback is a code revert with source/job history retained. PR #21 remains open
 and unmerged; SFTPGo #18 remains an independent production-release blocker.
+
+### World selection latency — 2026-10-18
+
+Read-only inspection of the Owner's completed selection found 32.022 seconds
+from job creation to completion, including only 329 ms for the properties write.
+The generic offline path imposed a 21-second telemetry settling window; scheduled
+retries stretched the interval between first and final delivery to 27.655 seconds.
+Queue delivery itself took 2–6 ms. The browser then waited for another complete
+world inventory before releasing its controls.
+
+Selection now uses the existing live stopped-process proof and empty compute
+reservations, with a fresh stopped/authorization check at the write handoff.
+The worker shares its delivery-local identity proof and Fileman read scope,
+eliminates preparation-time directory discovery and redundant selected-file
+traversal, and overlaps bounded selected-world metadata/properties reads. It
+retains exact compatibility validation, fresh properties hash comparison and
+durable lost-response reconciliation. Other offline-only operations keep their
+existing lifecycle behavior.
+
+After `succeeded/confirmed`, the browser updates only `selectedWorld` in the
+loaded inventory. It cancels older in-flight reads and does not request another
+world scan, including in the background. HTTP 202 alone cannot alter the selected
+badge or unlock mutations. Import/removal keep their previous refresh policy.
+
+Independent backend review found one additional pre-effect edge case: a world
+removed since the inventory loaded could leave selection in provider retries.
+Missing targets now fail terminally and release the active-operation claim;
+prepared/uncertain writes retain reconciliation. The reviewer verified the fix
+and found no remaining must-fix. Independent frontend and rendered-state review
+also found no must-fix.
+
+Focused backend validation: **55 unit tests and 45 database integration tests
+passed**, with 294 unrelated integration cases excluded. Coverage includes live
+stopped-state versus cached offline state, missing observer, compute reservation,
+permission/process/provider changes, compatible and incompatible metadata,
+concurrent properties edits, lost write replies, missing worlds, and regressions
+for additive imports/inactive-world removal. Initial new-fixture runs exposed an
+undeclared test-only NBT import and inherited provision/installation state; these
+fixtures were corrected without changing product guards. Final combined run passed.
+Commands:
+
+```sh
+scripts/dev.sh pnpm exec vitest run packages/server-management/src/minecraft-content.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts packages/server-management/src/minecraft-content.integration.test.ts -t 'world selection|selects a compatible world|world-selection|incompatible world without|changed properties source|world removed since selection|additive Minecraft world imports|inactive Minecraft world removal'
+```
+
+Root and Web TypeScript checks, scoped Biome, governance and diff checks passed.
+No full historical suite claim is made.
+
+Browser validation: four targeted Chromium cases passed (12 excluded), covering
+selection without rediscovery, stale responses, active-world protection,
+import/select/download/delete and lost-response recovery. Three were repeated
+successfully before adding the explicit browser selector to this suite. The
+final new selection regression also passed in Firefox (15 excluded), including
+keyboard Cancel focus, axe and overflow checks. The test uses real application
+handlers, disposable PostgreSQL state and an isolated in-memory provider, not a
+live game server. [Confirmed selection](screenshots/m5/minecraft-worlds-selection-confirmed-desktop-en.png)
+was captured from the running browser and reviewed; no new visual layout or copy.
+
+The API, worker and Vite loaded changes through the existing development watchers;
+API readiness is HTTP 200 and all three containers are healthy. No Docker
+restart/rebuild, migration, Blueprint/Panel/Wings modification, provider mutation
+or live game-file write was performed. The Owner controls the next live selection;
+no post-fix live latency is claimed. Disposable test state is cleaned by the
+harness. Code rollback is a revert, retaining all operation/history data.

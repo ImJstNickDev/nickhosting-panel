@@ -168,6 +168,22 @@ export function minecraftContentRemovesInactiveWorld(input: unknown): boolean {
   );
 }
 
+/** Selection changes only level-name, but always requires a live stopped proof.
+ * This is deliberately separate from operations allowed while online. */
+export function minecraftContentSelectsWorld(input: unknown): boolean {
+  if (!input || typeof input !== 'object') return false;
+  const plan = input as Partial<MinecraftPreparedContent>;
+  const command = minecraftContentCommandSchema.safeParse(plan.command);
+  return (
+    command.success &&
+    command.data.kind === 'world-select' &&
+    plan.backupBefore === false &&
+    plan.world?.existing === true &&
+    Number.isSafeInteger(plan.world.dataVersion) &&
+    (plan.world.dataVersion ?? 0) > 0
+  );
+}
+
 /** Derived from a trusted prepared plan, never a client-controlled online flag. */
 export function minecraftContentAllowsOnline(input: unknown): boolean {
   if (minecraftContentRemovesInactiveWorld(input)) return true;
