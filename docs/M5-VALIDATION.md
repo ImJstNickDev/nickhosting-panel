@@ -12157,3 +12157,37 @@ This focused follow-up does not supersede the historical full/targeted results
 above, nor remove the independent SFTPGo #18 release gate.
 Final staged governance passed: 1135 text files, 463 review PNGs, 925 relative
 links, four TOML files and 44 ignore cases. `git diff --cached --check` passed.
+
+### Folder upload interrupted by development dependency discovery — 2026-10-18
+
+The Owner's first folder upload exposed a development-only gap in the previous
+browser evidence: those tests did not exercise a cold Vite dependency cache with
+HMR enabled. At 08:04:13 UTC the existing dev Vite log recorded late optimization
+of `@noble/hashes/sha2.js`, followed by `optimized dependencies changed. reloading`.
+Folder preparation reaches the shared hash worker before source upload; discovering
+its dependency at that point can fail the worker and discard the selection on
+page reload. The importer itself contains no page-reload operation.
+
+The actual Vite configuration now includes the existing hash dependency in initial
+optimization, alongside the other explicitly prepared worker dependencies. No
+hash algorithm, source upload, world job, API, package or infrastructure settings
+changed. `scripts/dev.sh pnpm exec vitest run apps/web/vite-network.test.ts`
+passed 18/18, including the actual loaded configuration assertion. Scoped Biome
+and whitespace checks passed. Vite's existing source/config watcher automatically
+restarted its process; no manual container restart or rebuild was performed.
+Read-only checks returned frontend HTTP 200 and a healthy dev Vite container.
+
+`scripts/dev.sh pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/world-folder-cold.browser.test.ts`
+passed 1/1 in Firefox with the actual Vite config, a fresh temporary dependency
+cache and a confirmed HMR connection. Real folder and hash workers produced the
+expected SHA-256; no full-reload message or additional navigation occurred and
+the edited draft remained intact. This test needs no database or provider access.
+The initial harness attempt failed because Vitest transformed dynamic imports
+inside the serialized browser function; using browser source text corrected that
+test-only issue. No runtime workaround was added. Temporary cache is removed in
+`finally`. Independent review found no must-fix in this scoped correction.
+Negative control: temporarily removing only the hash dependency from the test's
+loaded config reproduced `web.errors.fileRead` from the actual hash worker in
+12.54 s. The temporary override was removed; the committed test is the identical
+passing version (11.50 s). WebPanel typecheck and test-file Biome also passed.
+No real upload or world mutation was used to reproduce this failure.

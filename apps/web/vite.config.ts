@@ -48,7 +48,9 @@ export default defineConfig(({ command }) => ({
       'src/features/viewer-engine/builtin-viewers/markdown/worker.ts',
       'src/features/viewer-engine/builtin-viewers/markdown/bibliography-worker.ts',
     ],
-    include: ['mediabunny'],
+    // Hashing starts only after a file/folder is chosen. Discovering this worker
+    // import then would force a full-page reload and discard the selected files.
+    include: ['mediabunny', '@noble/hashes/sha2.js'],
     exclude: ['mermaid'],
   },
   server: {

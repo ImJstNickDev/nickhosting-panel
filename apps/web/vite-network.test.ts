@@ -108,6 +108,7 @@ describe('development Vite transport', () => {
         'runner',
       );
       expect(loaded?.config.cacheDir).toBe('/tmp/nickhosting-vite-test-cache');
+      expect(loaded?.config.optimizeDeps?.include).toContain('@noble/hashes/sha2.js');
       expect(loaded?.dependencies).toContain(resolve('apps/web/vite-network.ts'));
     } finally {
       vi.unstubAllEnvs();
