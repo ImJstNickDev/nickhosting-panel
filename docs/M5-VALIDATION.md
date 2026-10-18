@@ -12730,3 +12730,68 @@ creation occurred in this audit. No application test suite was needed for this
 read-only infrastructure check. Documentation now explicitly includes this
 post-update verification step. PR #21 remains open and unmerged; SFTPGo #18 remains
 unchanged.
+
+### Panel/Wings mount separation validation — 2026-10-18
+
+After explicit Owner approval, the existing Panel service was recreated with a
+dedicated `/app/var` bind and the same image and named `/app` volume. The old data
+tree remains in place for Wings and rollback. Only small configuration copies,
+container configuration records and database fingerprints were saved privately;
+there was no game/server-data backup, database dump or reset.
+
+Preflight compared resolved Compose with the running container, pinned the local
+image ID, checked paths for symlinks and reviewed entrypoint, supervisor and
+Blueprint housekeeping. Normal startup would migrate/seed existing eggs, invoke
+a second seeder and potentially recurse through bind mounts changing ownership.
+The reviewed controlled startup disables these actions. Its archive listener
+retains future events but skips initial rsync, whose dry run would overwrite a
+staged extension archive. Scoped inspection of installed extension code found
+no direct dependency on the removed local game path; world management uses the
+Wings repository. This is static scoped evidence, not exhaustive third-party
+runtime testing.
+
+Executed checks and outcome:
+
+- Both proposed and rollback Compose configurations parse; their normalized
+  deltas contain only Panel entrypoint/command and `/app/var` source. Shell syntax
+  and private Python orchestration compile checks passed. Compose dry run targeted
+  only Panel.
+- `docker compose … up --no-start --no-deps --no-build --pull never panel`
+  recreated only Panel. Before startup, actual image, environment, mount bindings
+  and effective shell entrypoint were verified. The exact existing `.env` was
+  installed at `100:101/0640` and read back byte-for-byte. nginx can read it.
+- `docker compose … start --wait --wait-timeout 120 panel` started Panel but
+  returned failure while waiting on the database's **pre-existing unhealthy
+  healthcheck**. Direct Panel health and HTTP checks passed; no database repair
+  or rollback was performed. The retained start/rollback helper now starts and
+  waits on Panel alone, avoiding that unrelated dependency wait.
+- Panel is healthy with zero restarts. PHP-FPM, nginx, queue worker, cron and
+  extension watcher run; the two seed/permission programs remain stopped.
+  Panel login HTTPS and NickHosting development HTTPS return 200.
+- Fingerprints for 16 configuration/identity tables match before and after,
+  including eggs, egg variables, nests, servers, nodes, allocations, users, API
+  keys, settings, migrations and extension links. Request `updated_at` and
+  `last_used_at` fields were excluded. The application-key file is byte-identical.
+- All 111 other container definitions retain IDs, images and mounts. Running
+  services retain start times/restart counts; three unrelated containers were
+  already in restart loops and remain separate baseline conditions. No game
+  container, Wings, database/cache or NickHosting service was recreated.
+- Panel networks and their IDs, published ports and existing named volume are
+  unchanged. `/app/var/lib` and the former Wings paths are absent from Panel.
+- Authenticated adapter discovery reports extension 1.6.0 and file-operation
+  capabilities. A real read-only inspection matches the managed provider identity
+  and reads its guard file through Wings (499 ms; not a mutation benchmark).
+- Before/after no-follow metadata scans through the existing read-only viewer
+  mount see the same **3,410,081 objects across 28 game roots**, all `988:988`, with
+  identical type counts. Both scans encounter the same 16 permission-denied
+  directories and return nonzero for that coverage limit. They do not replace
+  the earlier complete 3,410,085-object audit or prove the unvisited descendants'
+  current permissions. No permission changes were made to expand access.
+
+Independent read-only review cleared the mount delta, existing-installation
+startup, pre-start verification and rollback. The rollback retains controlled
+startup even when restoring the old mount; the original entrypoint must not be
+used as a shortcut. Native Blueprint installation was not repeated, nor were
+game-server commands or file mutations performed. No application code changed,
+so the historical unit/integration suites were not rerun. PR #21 remains open
+and unmerged; SFTPGo #18 and the production release gates are unchanged.

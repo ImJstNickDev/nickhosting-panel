@@ -6,8 +6,12 @@ operation-specific Owner approval of the printed plan, archive hashes, installed
 fingerprint, exact Panel container and backup location. It is not a replacement
 for general Blueprint installation or upgrades.
 
-The native installer is unsuitable for this deployment: its recursive ownership
-housekeeping can traverse game volumes below the Panel root. This updater never
+The native installer was unsuitable for the original deployment: its recursive
+ownership housekeeping could traverse game volumes below the Panel root. The
+Owner-approved [mount separation](../../docs/BLUEPRINT-EXTENSION.md#panelwings-mount-separation--2026-10-18)
+removed that exposure on 2026-10-18. The original incident and this bounded update
+remain historical evidence; no native installation was rerun to test the separation.
+This updater never
 invokes Blueprint, extension install/configure hooks, recursive ownership changes,
 Panel configuration edits, shared cache clearing or a service restart.
 

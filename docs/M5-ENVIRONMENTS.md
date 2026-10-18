@@ -1565,3 +1565,16 @@ took 356 ms; this is inspection latency only, not a deletion benchmark, and is
 additional evidence against claiming an already proven 300 ms end-to-end bound.
 No game mutation or new test world was performed. Existing development services
 remain healthy. The next Owner test can use the activated path immediately.
+
+### Existing Panel mount correction — 2026-10-18
+
+The Owner subsequently authorized separating Panel state from Wings data so
+native Blueprint ownership housekeeping cannot reach game volumes through
+`/app/var`. The [deployment record](BLUEPRINT-EXTENSION.md#panelwings-mount-separation--2026-10-18)
+documents the dedicated Panel bind and controlled startup, including explicit
+migrations for future image upgrades and safe rollback to the former mount.
+Only the existing Panel service was recreated. The NickHosting development
+environment, Wings, database/cache services, game containers, ports and networks
+were preserved. Panel and development HTTPS, authenticated extension discovery
+and read-only Wings-backed file inspection passed. No application deployment,
+native extension update, game-data backup or database dump was performed.

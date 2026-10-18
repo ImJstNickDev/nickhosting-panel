@@ -813,6 +813,10 @@ interactive test. The earlier not-installed statement records the pre-approval s
 
 ### Deployment blocker: Panel tree contains Wings data
 
+**Resolved for the inspected deployment on 2026-10-18:** the approved
+[mount separation](#panelwings-mount-separation--2026-10-18) below removes the
+traversal into Wings data. The following paragraph records the original incident.
+
 The 2026-10-17 SFTP investigation confirmed that native Blueprint ownership
 housekeeping traverses the deployment's `/app/var` bind mount into Wings volumes,
 changing game files to the Panel's nginx user. See the
@@ -862,3 +866,38 @@ no native installer, global cache clearing or restart ran. A private rollback
 manifest preserves original contents and ownership. The native-installer
 deployment blocker above remains in force. No live extraction is proven by
 activation itself.
+
+### Panel/Wings mount separation — 2026-10-18
+
+The Owner approved correcting the inspected deployment, with no game-data or
+database backup. Only the Panel container was recreated, using its existing image
+and named `/app` volume. Its `/app/var` bind now points to a dedicated `panel-var`
+directory containing the exact existing `.env`. The original `var` tree, Wings
+data paths, game mounts and SFTP mounts were not moved or modified. No Panel UI
+setting, node configuration or game-server path needed changing.
+
+Inspection found that the image's normal entrypoint unconditionally runs
+`migrate --seed --force`, whose egg seeder can update existing default eggs.
+Supervisord also starts a seeder and a recursive bind-mount ownership helper.
+The private Compose configuration therefore supplies a controlled startup for
+this **existing installation**: require the existing key and nginx configuration,
+wait for the database, start cron and the usual PHP/nginx/queue services, but do
+not initialize, migrate, seed or repair permissions. Original image scripts and
+Panel/framework code remain unchanged. The extension-directory watcher still
+runs; its initial archive-overwrite rsync is skipped. Future file events continue
+to stage archives, and native Blueprint commands remain available.
+
+This startup is not a first-install bootstrap. Future Panel/database upgrades
+must explicitly review and apply their required migrations; starting the container
+will not do so. A framework/image change requires reviewing the startup against
+the new image. The mount separation removes the observed game-file ownership
+hazard, but does not authorize an arbitrary extension install or guarantee every
+third-party hook is safe. No native installer was rerun during this change.
+
+Rollback preserves the previous image, named volume and original `var` directory.
+Restore the old `/app/var` binding **while retaining controlled startup**, then
+recreate only Panel. Do not blindly restore the original entrypoint: doing so
+would reintroduce seeding and recursive permission changes during rollback.
+Private configuration copies and exact guarded activation/rollback commands are
+retained locally. No game files, database dump or whole `/app` backup was made.
+See the [validation record](M5-VALIDATION.md#panelwings-mount-separation-validation--2026-10-18).
