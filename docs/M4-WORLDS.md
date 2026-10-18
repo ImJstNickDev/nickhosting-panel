@@ -1,5 +1,9 @@
 # M4 Minecraft world staging and validation
 
+The [2026-10-18 world-format investigation](MINECRAFT-WORLD-FORMATS.md) records
+historical metadata gaps and proposes a later compatibility model. It is research
+only; the implementation behavior described below has not changed as a result.
+
 World imports are authorized durable jobs. The public request identifies an uploaded archive; it never supplies a local path or chooses a world DataVersion. Core resolves the immutable archive reference to a trusted file under project `mountdata`, obtains its recorded SHA-256, and passes the selected release's integration-owned world DataVersion to the Minecraft package. Neither release spelling nor Owner configuration is accepted as evidence of the world format.
 
 ## Implementation boundary
