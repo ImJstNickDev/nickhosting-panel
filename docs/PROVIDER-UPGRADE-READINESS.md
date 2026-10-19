@@ -4,6 +4,10 @@ Read-only assessment, 2026-10-19. Tracked in
 [issue #27](https://github.com/ImJstNickDev/nickhosting-panel/issues/27), under M5
 PR #21. This is an assessment, not an executed upgrade or an activation runbook.
 
+The subsequent [API compatibility assessment](PROVIDER-API-COMPATIBILITY.md)
+covers the entire consumed provider boundary, including upload cancellation,
+WebSocket throttling and HTTP cooldown changes beyond the Blueprint extension.
+
 ## Directory ownership defect
 
 The inspected Wings 1.11.13 implementation runs as root and assigns the game
