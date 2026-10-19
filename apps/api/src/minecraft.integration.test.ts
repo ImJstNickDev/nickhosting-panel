@@ -25,6 +25,7 @@ import { registerServerRoutes } from './servers.js';
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
 let fixture: Awaited<ReturnType<typeof managementFixture>>;
 let app: Hono<{ Variables: Variables }>;
+let routeEnv: Record<string, string>;
 let actor: Awaited<ReturnType<typeof managementFixture>>['context'];
 const management = vi.fn<() => Promise<ManagementRuntime>>();
 const env = { NH_MINECRAFT_EVIDENCE_KEY: '1'.repeat(64) };
@@ -59,6 +60,7 @@ beforeEach(async () => {
     .where('id', '=', fixture.nodeId)
     .execute();
   actor = fixture.context;
+  routeEnv = {};
   management.mockReset().mockRejectedValue(new DomainError('integration_unavailable'));
   app = new Hono<{ Variables: Variables }>();
   app.onError((error, c) =>
@@ -69,14 +71,14 @@ beforeEach(async () => {
   );
   registerMinecraftRoutes(app, {
     db: fixture.db,
-    env: {},
+    env: routeEnv,
     principal: async () => actor,
     body: async (c) => c.req.json(),
     management,
   });
   registerServerRoutes(app, {
     db: fixture.db,
-    env: {},
+    env: routeEnv,
     principal: async () => actor,
     management,
     acquireUploadSlot: () => () => {},
@@ -957,9 +959,25 @@ describe('Minecraft backend API authorization and user projection', () => {
   });
   it('creates Fabric from the independent catalog and preserves retry identity across installer updates', async () => {
     const id = await eligibleChoice(false);
+    Object.assign(routeEnv, {
+      NH_GATEWAY_ENABLED: 'true',
+      NH_GATEWAY_ID: randomUUID(),
+      NH_GATEWAY_PHYSICAL_HOST_ID: fixture.hostId,
+    });
+    // Match a Gateway-only deployment: no public direct endpoint is configured.
+    await fixture.db
+      .updateTable('managed_nodes')
+      .set({
+        backend_allocation_pool: JSON.stringify(fixture.backendAllocationPool),
+      })
+      .where('id', '=', fixture.nodeId)
+      .execute();
     await fixture.db
       .updateTable('runtime_egg_mappings')
-      .set({ runtime_id: 'fabric' })
+      .set({
+        runtime_id: 'fabric',
+        port_roles: JSON.stringify([{ role: 'game', protocols: ['tcp'], primary: true }]),
+      })
       .where('id', '=', fixture.mappingId)
       .execute();
     const mapping = await fixture.db
@@ -1015,7 +1033,9 @@ describe('Minecraft backend API authorization and user projection', () => {
       .execute();
     const choiceId = `fabric:${fixture.mappingId}:1.21.1`;
     const choices = await (await app.request('/v1/minecraft/choices')).json();
-    expect(choices.some((choice: { id: string }) => choice.id === choiceId)).toBe(true);
+    expect(choices.find((choice: { id: string }) => choice.id === choiceId)).toMatchObject({
+      capabilities: { gateway: true, sleepWake: true },
+    });
     const input = {
       ...createInput(choiceId),
       minecraft: { ...createInput(choiceId).minecraft, loaderVersion: '0.16.10' },
@@ -1030,6 +1050,21 @@ describe('Minecraft backend API authorization and user projection', () => {
       .where('server_id', '=', created.serverId)
       .executeTakeFirstOrThrow();
     expect(profile.combination_id).toBe(id);
+    expect(
+      await fixture.db
+        .selectFrom('managed_servers')
+        .select('connection_mode')
+        .where('id', '=', created.serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ connection_mode: 'gateway' });
+    expect(
+      await fixture.db
+        .selectFrom('gateway_routes')
+        .select(['enabled', 'transport'])
+        .where('server_id', '=', created.serverId)
+        .execute(),
+    ).toEqual([{ enabled: false, transport: 'tcp' }]);
+
     await fixture.db
       .updateTable('minecraft_metadata_sync')
       .set({

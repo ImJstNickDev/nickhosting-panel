@@ -183,6 +183,17 @@ export const minecraftCapabilityDeclaration = {
   version: 2,
 } as const;
 
+export const minecraftGatewayDeclarations = {
+  vanilla: minecraftCapabilityDeclaration,
+  fabric: { id: 'minecraft/fabric', version: 1 },
+} as const;
+
+export function minecraftGatewayDeclaration(profile: MinecraftCombination['profile']) {
+  return profile === 'vanilla' || profile === 'fabric'
+    ? minecraftGatewayDeclarations[profile]
+    : undefined;
+}
+
 export function minecraftGatewaySupported(
   combination: Pick<
     MinecraftCombination,
@@ -190,10 +201,12 @@ export function minecraftGatewaySupported(
   >,
 ): boolean {
   return (
-    combination.profile === 'vanilla' &&
+    minecraftGatewayDeclaration(combination.profile) !== undefined &&
     combination.protocolId !== null &&
     (combination.family === 'netty' ||
-      (combination.family === 'legacy' && minecraftLegacyGatewaySupported(combination.release)))
+      (combination.profile === 'vanilla' &&
+        combination.family === 'legacy' &&
+        minecraftLegacyGatewaySupported(combination.release)))
   );
 }
 

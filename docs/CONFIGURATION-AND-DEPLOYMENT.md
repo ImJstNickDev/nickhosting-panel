@@ -105,6 +105,18 @@ Gateway reachability: M3 must check the actual container bindings and its own
 network namespace, plus public-listener collisions against unrelated direct
 allocations, before any listener bind. No existing network is changed by M2.
 
+### Minecraft Fabric Gateway delivery
+
+Fabric uses the existing Minecraft TCP Gateway for resolved modern protocol
+versions, including sleep/wake and automatic route provisioning after installation.
+It uses the same Owner-configured backend allocation pool as Vanilla; a direct
+endpoint is unnecessary while Gateway is enabled. No extra allocation range,
+provider egg change or network change is needed to enable this capability.
+
+A genuinely unsupported protocol, or an explicitly disabled Gateway, still requires
+an Owner-configured `directEndpoint` to use direct delivery. Never infer public
+reachability from a private backend allocation.
+
 Browser uploads require a separate trusted Wings origin allowlist
 (`NH_PTERODACTYL_UPLOAD_ORIGINS`) and a verified per-host `uploadPolicy`.
 Migration 008 leaves uploads disabled until the Owner supplies the provider's

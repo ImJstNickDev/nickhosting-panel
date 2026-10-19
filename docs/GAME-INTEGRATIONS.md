@@ -121,8 +121,8 @@ fails if that major has no image rule. Fabric's current guide recommends Java 17
 for 1.17; the integration follows that recommendation for stable 1.17/1.17.1,
 while Vanilla retains its Java 16 baseline and snapshots retain their metadata
 requirements. This affects new resolutions, not existing immutable bindings. Installer-image Java is separate from runtime Java.
-Fabric remains behind its existing exact binding/evidence/rollout gates; this change
-does not enable public creation or install mods. Owner catalog registration supports Vanilla and Fabric; registration alone does not enable Fabric creation.
+Fabric creation follows the local catalog policy described below. Exact egg binding,
+rollout and resource admission still apply; image selection does not install mods.
 
 Sources checked 2026-10-19: [Mojang manifest and linked version metadata](https://piston-meta.mojang.com/mc/game/version_manifest_v2.json),
 [Fabric Java 16 transition](https://fabricmc.net/2021/05/27/117-for-developers.html),
@@ -162,7 +162,7 @@ Top-level steps always `Choose a game → Configure → Resources → Create`; `
 
 Minecraft example:
 
-- Show Owner-enabled runtime/version choices supported by the compiled integration and locally validated against the selected egg. Vanilla installation/direct access does not require a signed test for each mapping. Gateway/sleep/wake are separate declared capabilities. Paper/Folia/Fabric/Forge retain their existing evidence/private-testing controls; they are not promoted by Vanilla support.
+- Show Owner-enabled runtime/version choices supported by the compiled integration and locally validated against the selected egg. Vanilla installation/direct access does not require a signed test for each mapping. Gateway/sleep/wake are separate declared capabilities. Paper/Folia/Forge retain their existing evidence/private-testing controls; they are not promoted by Vanilla support.
 - If user **selects a modpack**, detect loader and Minecraft version from modpack metadata and skip redundant runtime/version selection. Still ask operators/whitelist and relevant gameplay options.
 - Players/OP UI may use MCHeads renders via `https://api.mcheads.org/head/{player}/{size}` but must verify account UUID/identity separately and handle cache/errors.
 - Existing-server modpack install triggers explicit wipe warning and pre-wipe verified backup option, never a silent merge.
@@ -807,8 +807,21 @@ FabricUpdated binds `MC_VERSION`, `LOADER_VERSION`, `FABRIC_VERSION` and optiona
 The installer produces `server.jar` as the Fabric launcher and
 `minecraft-server.jar` as the Mojang server, with `fabric-server-launcher.properties`
 pointing to the latter. Installation verification runs on installation completion;
-it does not download JARs at every start. Support for installation/direct connection
-does not automatically declare Gateway, sleep/wake or real-client verification.
+it does not download JARs at every start.
+
+Fabric declares Gateway, readiness, player-idle detection and sleep/wake for known
+modern (`netty`) protocols through `minecraft/fabric` version 1. It reuses the
+Minecraft protocol adapter and automatic Gateway route provisioning. Vanilla's
+existing declaration and historical route identities remain valid. Unknown protocol
+metadata and Fabric legacy combinations are not promoted. Mods that change the
+wire protocol or hide player counts are not certified by this declaration; unknown
+player occupancy never authorizes automatic sleep.
+
+The local wizard catalog reuses already resolved protocol facts in one bulk DB
+read; it does not fetch metadata per version. Versions without a local protocol
+fact retain unknown capabilities until exact creation resolves the pinned metadata.
+Declaration support does not claim a real-client test of every Minecraft/Loader
+pair. Signed reports remain Owner diagnostics.
 
 Legacy Owner registration endpoints remain available for diagnostic integrations;
 they are not called by the Fabric wizard or required by Owner version management.

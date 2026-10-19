@@ -12,7 +12,7 @@ import {
   gatewayMinecraftProtocolSchema,
   gatewaySnapshotSchema,
 } from '@nickhosting/game-sdk';
-import { minecraftCapabilityDeclaration } from '@nickhosting/minecraft';
+import { minecraftGatewayDeclaration } from '@nickhosting/minecraft';
 import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
 import { type DB, type Environment, lockResources } from './admission.js';
@@ -73,7 +73,8 @@ export async function requireMinecraftGatewayProtocol(
     choice.combination.protocolId === null
   )
     throw unavailable();
-  if (!choice.capabilities.gateway) throw unavailable();
+  const declaration = minecraftGatewayDeclaration(choice.combination.profile);
+  if (!choice.capabilities.gateway || !declaration) throw unavailable();
   const { values } = await getSettings(db, env);
   return gatewayMinecraftProtocolSchema.parse({
     ...(values.minecraftGatewayResponses ? { responses: values.minecraftGatewayResponses } : {}),
@@ -85,8 +86,8 @@ export async function requireMinecraftGatewayProtocol(
     choiceId: choice.row.id,
     choiceDigest: choice.row.identity_digest,
     supportSource: 'integration',
-    declarationId: minecraftCapabilityDeclaration.id,
-    declarationVersion: minecraftCapabilityDeclaration.version,
+    declarationId: declaration.id,
+    declarationVersion: declaration.version,
   });
 }
 

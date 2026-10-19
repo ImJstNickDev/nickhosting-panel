@@ -728,3 +728,43 @@ it('does not grant creation through a disabled mapping or fabricated assisted co
   expect(source.read).not.toHaveBeenCalled();
   expect(egg).not.toHaveBeenCalled();
 });
+
+it('reuses local protocol facts in the Fabric catalog without remote per-version reads', async () => {
+  const resolved = await resolveFabricCreationChoice(
+    f.db,
+    await provider(),
+    f.context,
+    creation(),
+    {},
+    { metadata: metadata(), protocols },
+  );
+  try {
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({
+        combination: JSON.stringify({ ...resolved.combination, family: 'netty', protocolId: 767 }),
+      })
+      .where('id', '=', resolved.row.id)
+      .execute();
+    protocols.mockClear();
+    egg.mockClear();
+    const choices = (await minecraftCatalog(f.db, f.context)).filter((choice) =>
+      choice.id.startsWith(`fabric:${f.mappingId}:`),
+    );
+    expect(choices.find((choice) => choice.version === '1.21.1')?.capabilities).toMatchObject({
+      gateway: true,
+      sleepWake: true,
+    });
+    expect(choices.find((choice) => choice.version === '1.21')?.capabilities).toMatchObject({
+      gateway: false,
+    });
+    expect(protocols).not.toHaveBeenCalled();
+    expect(egg).not.toHaveBeenCalled();
+  } finally {
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({ combination: JSON.stringify(resolved.combination) })
+      .where('id', '=', resolved.row.id)
+      .execute();
+  }
+});

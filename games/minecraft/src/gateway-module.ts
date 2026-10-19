@@ -4,7 +4,7 @@ import {
   type GatewayRoute,
   gatewayMinecraftProtocolSchema,
 } from '@nickhosting/game-sdk';
-import { minecraftCapabilityDeclaration, minecraftGatewaySupported } from './compatibility.js';
+import { minecraftGatewayDeclarations, minecraftGatewaySupported } from './compatibility.js';
 import { createMinecraftProtocolAdapter, minecraftReadinessSource } from './protocol.js';
 
 /** Local trusted module for NH_GATEWAY_PROTOCOL_MODULES. No registry/network reads or provider keys. */
@@ -32,14 +32,24 @@ export function createMinecraftGatewayModuleAdapter(
         declaration.release === '26.1' &&
         declaration.family === 'netty' &&
         declaration.protocolId === 775;
+      const runtime = (
+        Object.keys(minecraftGatewayDeclarations) as Array<
+          keyof typeof minecraftGatewayDeclarations
+        >
+      ).find((profile) => {
+        const expected = minecraftGatewayDeclarations[profile];
+        return (
+          declaration.declarationId === expected.id &&
+          declaration.declarationVersion === expected.version
+        );
+      });
       if (
         !historical &&
-        (declaration.declarationId !== minecraftCapabilityDeclaration.id ||
-          declaration.declarationVersion !== minecraftCapabilityDeclaration.version ||
+        (!runtime ||
           !minecraftGatewaySupported({
             release: declaration.release,
             releaseType: 'release',
-            profile: 'vanilla',
+            profile: runtime,
             family: declaration.family,
             protocolId: declaration.protocolId,
           }))

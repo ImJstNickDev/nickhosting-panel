@@ -76,6 +76,40 @@ describe('production Minecraft Gateway module', () => {
     }
   });
 
+  it('routes Fabric through the shared protocol with an exact runtime declaration', () => {
+    const adapter = createMinecraftGatewayModuleAdapter();
+    const selected = route();
+    selected.protocol.minecraft = {
+      release: '1.21.1',
+      protocolId: 767,
+      family: 'netty',
+      transfer: false,
+      acceptsTransfers: false,
+      choiceId: randomUUID(),
+      choiceDigest: 'a'.repeat(64),
+      supportSource: 'integration',
+      declarationId: 'minecraft/fabric',
+      declarationVersion: 1,
+    };
+    expect(adapter.supports(selected)).toBe(true);
+    const context = { route: selected, signal: new AbortController().signal };
+    const status = adapter.createSession?.(context);
+    expect(status?.classify(hello(1)).kind).toBe('continue');
+    expect(status?.classify(frameMinecraftPacket(0)).kind).toBe('status');
+    expect(status?.response('sleeping').bytes?.length).toBeGreaterThan(0);
+    const join = adapter.createSession?.(context);
+    expect(join?.classify(hello(2)).kind).toBe('continue');
+    expect(join?.classify(frameMinecraftPacket(0, Buffer.from([1, 120]))).kind).toBe('join');
+    expect(join?.response('waking').bytes?.length).toBeGreaterThan(0);
+    selected.protocol.minecraft.declarationVersion = 2;
+    expect(adapter.supports(selected)).toBe(false);
+    selected.protocol.minecraft.declarationVersion = 1;
+    selected.protocol.gameVersion = selected.protocol.minecraft.release = '1.6.4';
+    selected.protocol.minecraft.family = 'legacy';
+    selected.protocol.minecraft.protocolId = 78;
+    expect(adapter.supports(selected)).toBe(false);
+  });
+
   it('accepts only exact compiled declarations without claiming a local evidence run', () => {
     const adapter = createMinecraftGatewayModuleAdapter({ now: () => now });
     const selected = route();

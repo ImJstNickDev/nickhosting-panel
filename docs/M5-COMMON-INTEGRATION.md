@@ -24,8 +24,11 @@ Minecraft and Loader catalogs, with Installer latest resolved at creation. Fabri
 installation/direct capabilities are declared by the integration; signed per-pair
 reports and preregistered combinations are no longer creation prerequisites. Mapping,
 node, rollout, identity, admission and permission checks remain authoritative.
-Optional Gateway capabilities are not declared by this change. Other undeclared
-runtimes retain their existing controls; no claim of testing every pair is made.
+The subsequent Owner correction explicitly enables Fabric Gateway/sleep/wake for
+known modern protocols through the shared Minecraft adapter and automatic route
+provisioning. Backend-only pools are valid; no direct endpoint is required while
+Gateway is enabled. Other undeclared runtimes retain their existing controls; no
+claim of testing every pair is made.
 See [Fabric creation](GAME-INTEGRATIONS.md#fabric-creation-snapshots) and the dated
 validation report. Historical evidence-gate text below is preserved as baseline.
 

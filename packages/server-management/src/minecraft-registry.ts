@@ -292,7 +292,7 @@ async function assertFabricCreationAccess(db: DB, context: AuthContext, mappingI
 }
 
 async function fabricCreationCatalog(db: DB) {
-  const [catalog, mappings, releases] = await Promise.all([
+  const [catalog, mappings, releases, protocols] = await Promise.all([
     getFabricCatalog(db),
     db
       .selectFrom('runtime_egg_mappings as mapping')
@@ -305,10 +305,27 @@ async function fabricCreationCatalog(db: DB) {
       .orderBy('mapping.id')
       .execute(),
     db.selectFrom('minecraft_release_metadata').select(['id', 'release_time']).execute(),
+    // Reuse protocol facts already resolved locally, across runtimes. This is one
+    // bulk read, never a metadata request (or a query) for every catalog version.
+    db
+      .selectFrom('minecraft_combinations')
+      .select('combination')
+      .distinctOn(sql<string>`combination->>'release'`)
+      .where(sql<string>`combination->>'family'`, '=', 'netty')
+      .where(sql<string>`combination->>'protocolId'`, 'is not', null)
+      .orderBy(sql<string>`combination->>'release'`)
+      .orderBy('created_at', 'desc')
+      .execute(),
   ]);
   if (!catalog.synced || !catalog.latestInstallerVersion || !catalog.loaders.length) return [];
   const dates = new Map(
     releases.map((release) => [release.id, release.release_time?.toISOString() ?? null]),
+  );
+  const knownProtocols = new Map(
+    protocols.map(({ combination }) => {
+      const known = minecraftCombinationSchema.parse(combination);
+      return [known.release, known] as const;
+    }),
   );
   return mappings.flatMap((mapping) =>
     catalog.games.map((game) => ({
@@ -321,8 +338,8 @@ async function fabricCreationCatalog(db: DB) {
         profile: 'fabric',
         release: game.version,
         releaseType: game.stable ? 'release' : 'snapshot',
-        family: 'unknown',
-        protocolId: null,
+        family: knownProtocols.get(game.version)?.family ?? 'unknown',
+        protocolId: knownProtocols.get(game.version)?.protocolId ?? null,
       }),
     })),
   );

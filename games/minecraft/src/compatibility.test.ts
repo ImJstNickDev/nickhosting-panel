@@ -43,16 +43,28 @@ const evidence: MinecraftEvidence = {
 };
 const now = new Date('2026-10-09T13:00:00Z');
 describe('Minecraft compatibility evidence', () => {
-  it('declares Fabric installation and direct access without promoting gateway compatibility', () => {
+  it('declares Fabric installation and Gateway sleep/wake for known modern protocols', () => {
     const fabric = { ...combination, profile: 'fabric' as const };
     expect(minecraftDeclaredCapabilities(fabric)).toMatchObject({
       installation: true,
       directConnection: true,
       playerManagement: true,
-      gateway: false,
-      wake: false,
-      sleepWake: false,
+      gateway: true,
+      wake: true,
+      sleepWake: true,
     });
+    for (const unsupported of [
+      { ...fabric, family: 'unknown' as const },
+      { ...fabric, protocolId: null },
+      { ...fabric, family: 'legacy' as const, release: '1.6.4' },
+      ...(['paper', 'folia', 'forge'] as const).map((profile) => ({ ...fabric, profile })),
+    ]) {
+      expect(minecraftDeclaredCapabilities(unsupported)).toMatchObject({
+        gateway: false,
+        wake: false,
+        sleepWake: false,
+      });
+    }
     expect(() =>
       assertMinecraftChoice({
         combination: fabric,

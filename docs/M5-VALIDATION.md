@@ -14522,3 +14522,48 @@ from a new live installer. The Owner's next creation is the end-to-end installat
 server was created, started, reinstalled or modified; no Wings, DNS, proxy,
 production Compose or installer-flow changes were made. Existing issue18 remains
 an independent production-release gate; PR21 remains open and unmerged.
+
+### 2026-10-19 — Fabric Gateway capability and ownership correction
+
+- Corrected Fabric's compiled capabilities: known modern protocols use the shared
+  Minecraft Gateway, readiness and player-idle/sleep/wake path. Exact declaration
+  `minecraft/fabric` v1 is emitted by Core and accepted by the Gateway module;
+  existing Vanilla/historical identities remain unchanged. Unknown protocols and
+  undeclared runtimes are not promoted.
+- Reproduced the creation error: Fabric was incorrectly forced into direct mode
+  against a backend-only allocation pool. Regression coverage creates Fabric via
+  the real API handler in an isolated database without direct endpoints, reserves
+  the Gateway route, checks idempotent retries, and exercises post-installation
+  automatic route/policy activation. No live game server was created for testing.
+- Wizard capabilities reuse already-resolved local protocol facts in one bulk
+  query, without per-version queries or remote discovery. Exact immutable runtime
+  resolution remains authoritative at creation.
+- Validation: 19 protocol/capability unit tests; 56 focused database/API integration
+  tests (15 Fabric registration, 28 Minecraft API, 13 Gateway registration and
+  automatic activation); repository/backend/frontend TypeScript checks; Biome on
+  changed TypeScript and `git diff --check` all passed. Provider effects in those
+  tests use isolated fixtures. Independent review findings were corrected.
+- Live read-only confirmation: selected Fabric Minecraft 26.1 / Loader 0.19.5,
+  protocol 775 now resolves to Gateway with the existing 2,000-allocation pool and
+  zero direct endpoints. API/worker reloaded through their watchers; only the dev
+  Gateway container was explicitly restarted under standing Owner approval.
+  Network membership/port configuration were preserved; HTTPS returned 200.
+- Gateway control remains available with the same three admitted routes. Its
+  overall readiness remains false for two pre-existing routes lacking initial
+  backend-binding proof, as recorded during the provider upgrade. No server power
+  command was sent to manufacture that evidence.
+- Owner-authorized ownership repair corrected exactly 203 previously identified
+  entries to Wings UID/GID, using a private manifest and guarded non-recursive
+  descriptor-based changes with a durable rollback journal. All modes were
+  preserved. The temporary helper was removed. Final metadata scan covered 29
+  roots and 3,413,483 entries with zero scan errors and no ownership anomalies.
+  One unrelated `server.properties` inode replacement coincided with a successful
+  application world-selection job; all other paths/types/inodes/modes matched.
+- No Panel/Wings restart, Blueprint update, allocation/mapping change, new test
+  server, game power command, DNS/network edit, database migration or production
+  NickHosting deployment was performed in this correction. Existing test ledgers
+  and data were retained. SFTPGo issue #18 and other release gates remain separate.
+- Rollback: revert the capability/catalog change and reload dev API/worker/Gateway;
+  reconcile any subsequently created Fabric Gateway servers before reverting.
+  Ownership rollback, if needed, must use only the reviewed manifest/journal and
+  unchanged inode identities, never recursive chown or a game-data reset.

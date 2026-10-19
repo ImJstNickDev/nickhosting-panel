@@ -330,3 +330,19 @@ Small private code/configuration/database backups, the old application volume an
 old images remain available for rollback. Do not blindly restore the pre-upgrade
 database after user writes resume. Keep SFTP issue #18 and the M5 production-release
 gate independent of this provider update. PR #21 remains open and unmerged.
+
+### Subsequent Owner-authorized ownership correction — 2026-10-19
+
+After the upgrade verification, the Owner separately authorized repair of the
+203 pre-existing root-owned entries. An independently reviewed, manifest-specific
+helper changed only their UID/GID to Wings' configured identity, preserving modes,
+without recursion, symlink traversal, service restart or content writes. A private
+durable journal and exact inode metadata support scoped rollback. The helper was
+removed after success.
+
+A second full scan covered the same 29 roots and 3,413,483 entries: exactly 203
+ownership corrections, no remaining ownership anomaly, and unchanged modes/types.
+One concurrent application world-selection job replaced `server.properties` with
+correct ownership/mode; its worker event explains the sole additional inode change.
+This follow-up does not change the earlier evidence that the provider upgrade
+itself preserved the game metadata. See the dated M5 validation record.
