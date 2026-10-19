@@ -5,6 +5,53 @@ import {
 import type { GameUiClient, UiOption, UiValues } from '@nickhosting/game-sdk/ui';
 import { z } from 'zod';
 import { minecraftContentCapabilities } from '../content-capabilities.js';
+import {
+  type MinecraftDatapackChange,
+  type MinecraftDatapackSnapshot,
+  minecraftDatapackApplySchema,
+  minecraftDatapackChangeSchema,
+} from '../datapack-contracts.js';
+
+export type MinecraftDatapacks = MinecraftDatapackSnapshot;
+const datapackMetadataSchema = z.object({
+  description: z.string(),
+  formatMin: z.tuple([z.number(), z.number()]).nullable(),
+  formatMax: z.tuple([z.number(), z.number()]).nullable(),
+  compatibility: z.enum(['compatible', 'incompatible', 'unknown', 'invalid']),
+  features: z.array(z.string()),
+});
+const datapackSnapshotSchema: z.ZodType<MinecraftDatapackSnapshot> = z.object({
+  world: z.string(),
+  selectedWorld: z.string().nullable(),
+  worlds: z.array(z.object({ name: z.string(), selected: z.boolean() })),
+  running: z.boolean(),
+  version: z.string(),
+  supported: z.boolean(),
+  installed: z.boolean(),
+  packs: z.array(
+    z.object({
+      id: z.string(),
+      path: z.string(),
+      name: z.string(),
+      kind: z.enum(['zip', 'directory']),
+      state: z.enum(['enabled', 'disabled', 'pending']),
+      nativeState: z.enum(['enabled', 'disabled', 'unknown']),
+      metadata: datapackMetadataSchema.nullable(),
+      compatibility: datapackMetadataSchema.shape.compatibility,
+    }),
+  ),
+  changes: z.array(
+    z.object({
+      id: z.string(),
+      action: z.enum(['install', 'enable', 'disable', 'delete']),
+      name: z.string(),
+      state: z.enum(['preparing', 'ready', 'failed', 'uncertain']),
+      error: z.string().optional(),
+      cancellable: z.boolean().optional(),
+    }),
+  ),
+  reload: z.object({ state: z.enum(['not_required', 'required', 'requested', 'uncertain']) }),
+});
 
 export type {
   WorldCatalogFile,
@@ -295,8 +342,12 @@ export function minecraftCatalogOptions(
 }
 /** Same-origin NickHosting only; no provider URL/token or arbitrary API path is accepted. */
 export function createMinecraftUiController(client: GameUiClient) {
-  const request = (path: string, method: 'GET' | 'POST', body?: unknown, signal?: AbortSignal) =>
-    client.request(path, { method, ...(body === undefined ? {} : { body }), signal });
+  const request = (
+    path: string,
+    method: 'GET' | 'POST' | 'DELETE',
+    body?: unknown,
+    signal?: AbortSignal,
+  ) => client.request(path, { method, ...(body === undefined ? {} : { body }), signal });
   const serverPath = (id: string, suffix = '') =>
     `/v1/servers/${uuid.parse(id)}/minecraft${suffix}`;
   const profile = async (serverId: string, signal?: AbortSignal) =>
@@ -364,6 +415,147 @@ export function createMinecraftUiController(client: GameUiClient) {
             serverPath(serverId, '/players/actions'),
             'POST',
             minecraftPlayerActionSchema.parse(action),
+            signal,
+          ),
+        );
+    },
+    async inspectDatapack(serverId: string, world: string, path: string, signal?: AbortSignal) {
+      const params = new URLSearchParams({ world, path });
+      return z
+        .object({
+          metadata: datapackMetadataSchema.nullable(),
+          reason: z.literal('too_large').optional(),
+        })
+        .parse(
+          await request(
+            serverPath(serverId, `/datapacks/inspect?${params}`),
+            'GET',
+            undefined,
+            signal,
+          ),
+        );
+    },
+    async recoverDatapacks(serverId: string, world: string, signal?: AbortSignal) {
+      return request(serverPath(serverId, '/datapacks/recover'), 'POST', { world }, signal);
+    },
+    async datapackCatalog(serverId: string, signal?: AbortSignal) {
+      return z
+        .object({ providers: z.array(z.object({ id: provider, available: z.boolean() })) })
+        .parse(await request(serverPath(serverId, '/datapacks/catalog'), 'GET', undefined, signal));
+    },
+    async searchDatapacks(
+      serverId: string,
+      input: { provider: 'modrinth' | 'curseforge'; query: string; offset: number },
+      signal?: AbortSignal,
+    ) {
+      const values = z
+        .object({ provider, query: z.string().max(256), offset: z.number().int().min(0).max(9980) })
+        .parse(input);
+      const params = new URLSearchParams({
+        provider: values.provider,
+        query: values.query,
+        offset: String(values.offset),
+      });
+      return worldCatalogProjectsSchema.parse(
+        await request(
+          serverPath(serverId, `/datapacks/catalog/search?${params}`),
+          'GET',
+          undefined,
+          signal,
+        ),
+      );
+    },
+    async datapackCatalogFiles(
+      serverId: string,
+      providerId: 'modrinth' | 'curseforge',
+      projectId: string,
+      offset = 0,
+      signal?: AbortSignal,
+    ) {
+      return worldCatalogFilesSchema.parse(
+        await request(
+          serverPath(
+            serverId,
+            `/datapacks/catalog/${provider.parse(providerId)}/${encodeURIComponent(key.parse(projectId))}/files?offset=${z.number().int().min(0).max(9980).parse(offset)}`,
+          ),
+          'GET',
+          undefined,
+          signal,
+        ),
+      );
+    },
+    async acquireDatapack(
+      serverId: string,
+      input: {
+        provider: 'modrinth' | 'curseforge';
+        projectId: string;
+        versionId: string;
+        world: string;
+        idempotencyKey: string;
+      },
+      signal?: AbortSignal,
+    ) {
+      const body = z
+        .object({
+          provider,
+          projectId: key,
+          versionId: key,
+          world: minecraftDatapackChangeSchema.shape.world,
+          idempotencyKey: key,
+        })
+        .strict()
+        .parse(input);
+      return z
+        .object({ changeId: z.string(), state: z.string() })
+        .parse(
+          await request(serverPath(serverId, '/datapacks/catalog/acquire'), 'POST', body, signal),
+        );
+    },
+    async datapacks(
+      serverId: string,
+      world?: string,
+      signal?: AbortSignal,
+    ): Promise<MinecraftDatapackSnapshot> {
+      return datapackSnapshotSchema.parse(
+        await request(
+          serverPath(serverId, `/datapacks${world ? `?world=${encodeURIComponent(world)}` : ''}`),
+          'GET',
+          undefined,
+          signal,
+        ),
+      );
+    },
+    async datapackChange(serverId: string, input: MinecraftDatapackChange, signal?: AbortSignal) {
+      return request(
+        serverPath(serverId, '/datapacks/changes'),
+        'POST',
+        minecraftDatapackChangeSchema.parse(input),
+        signal,
+      );
+    },
+    async cancelDatapackChange(serverId: string, changeId: string, signal?: AbortSignal) {
+      return request(
+        serverPath(serverId, `/datapacks/changes/${uuid.parse(changeId)}`),
+        'DELETE',
+        undefined,
+        signal,
+      );
+    },
+    async applyDatapacks(
+      serverId: string,
+      input: { world: string; idempotencyKey: string },
+      signal?: AbortSignal,
+    ) {
+      return z
+        .object({
+          state: z.string(),
+          reload: z.enum(['not_required', 'required', 'requested', 'uncertain']),
+        })
+        .parse(
+          await request(
+            serverPath(serverId, '/datapacks/apply'),
+            'POST',
+            minecraftDatapackApplySchema.parse(input),
             signal,
           ),
         );
@@ -462,7 +654,7 @@ export function createMinecraftUiController(client: GameUiClient) {
     },
     source,
     async uploadSource(input: {
-      kind: 'world' | 'modpack';
+      kind: 'world' | 'modpack' | 'datapack';
       serverId?: string;
       idempotencyKey: string;
       file: Blob;
@@ -474,7 +666,7 @@ export function createMinecraftUiController(client: GameUiClient) {
         throw new MinecraftUiError('integration_unavailable', 'upload_unavailable');
       const reservation = z
         .object({
-          kind: z.enum(['world', 'modpack']),
+          kind: z.enum(['world', 'modpack', 'datapack']),
           serverId: uuid.optional(),
           idempotencyKey: key,
           bytes: z

@@ -1449,6 +1449,21 @@ export async function createManagementRuntime(options: ManagementOptions) {
   ) {
     return withAccess(context, serverId, false, work, 'directory', timing);
   }
+  /** A fresh request-local Fileman phase for an already-authorized managed
+   * access callback. It reuses the configured batch directory transport. */
+  function fileReadPhase(
+    identifier: string,
+    server: Awaited<ReturnType<typeof authorizeServer>>,
+    signal?: AbortSignal,
+  ) {
+    return createFilemanReadService({
+      adapter,
+      identifier,
+      authorize: async () => {},
+      signal,
+      listDirectories: (directories) => fileDirectoryBatch(identifier, server, directories, signal),
+    });
+  }
   /** One private read phase: initial managed access plus a final authorization
    * boundary before returning bytes, rather than repeated checks for each file. */
   function fileReadScope<T>(
@@ -1462,14 +1477,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
   ) {
     signal?.throwIfAborted();
     return fileReadAccess(context, serverId, async (identifier, connection, current, server) => {
-      const files = createFilemanReadService({
-        adapter,
-        identifier,
-        authorize: async () => {},
-        signal,
-        listDirectories: (directories) =>
-          fileDirectoryBatch(identifier, server, directories, signal),
-      });
+      const files = fileReadPhase(identifier, server, signal);
       const result = await work(files, identifier, connection, current, server);
       signal?.throwIfAborted();
       await authorizeTransfer(current, serverId, false, connection, undefined, server);
@@ -1593,6 +1601,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     listFiles,
     listDirectories,
     fileReadAccess,
+    fileReadPhase,
     fileReadScope,
     prepareFileWrites,
     fileMutationAccess,

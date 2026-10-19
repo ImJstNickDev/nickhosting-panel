@@ -1,5 +1,5 @@
-import { inspectModpack, ModrinthProvider } from '@nickhosting/content-providers';
-import { type AuthContext, DomainError } from '@nickhosting/core';
+import { type ContentHttp, inspectModpack, ModrinthProvider } from '@nickhosting/content-providers';
+import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
 import { type createDatabase, getSettings, registerGame } from '@nickhosting/database';
 import {
   createMinecraftIdentityProvider,
@@ -39,6 +39,7 @@ import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import { minecraftStoredConfigurationSchema } from '../../../packages/server-management/src/minecraft-content-contracts.js';
 import type { Variables } from './app.js';
+import { registerMinecraftDatapackRoutes } from './minecraft-datapacks.js';
 import { registerMinecraftPlayerRoutes } from './minecraft-players.js';
 
 type C = Context<{ Variables: Variables }>;
@@ -55,9 +56,12 @@ export function registerMinecraftRoutes(
     principal: (c: C, regularOnly?: boolean) => Promise<AuthContext>;
     body: (c: Context) => Promise<unknown>;
     management: () => Promise<ManagementRuntime>;
+    codec?: SecretCodec;
+    contentHttp?: ContentHttp;
   },
 ) {
   registerMinecraftPlayerRoutes(app, options);
+  registerMinecraftDatapackRoutes(app, options);
   const { db, env, principal, body, management } = options;
   const owner = async (c: C) => {
     const context = await principal(c, true);

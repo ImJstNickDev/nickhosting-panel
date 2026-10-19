@@ -19,14 +19,17 @@ export interface WorldFolderArchiveProgress {
   totalBytes: number;
 }
 /** Only metadata is inspected here. File bytes and checksums stay off the UI thread. */
-export function planMinecraftWorldFolder(files: readonly File[]): WorldFolderArchiveInput {
+export function planMinecraftWorldFolder(
+  files: readonly File[],
+  marker: 'level.dat' | 'pack.mcmeta' = 'level.dat',
+): WorldFolderArchiveInput {
   try {
     const plan = planFolderUpload(files, '');
     const entries = plan.entries.map(({ file, path }) => ({
       file,
       path: path.slice(plan.root.length + 1),
     }));
-    if (!entries.some(({ path }) => path === 'level.dat'))
+    if (!entries.some(({ path }) => path === marker))
       throw new WorldFolderArchiveError('invalid_folder');
     return { root: plan.root, entries };
   } catch (error) {
@@ -42,6 +45,7 @@ export function prepareMinecraftWorldFolder(
   files: readonly File[],
   options: {
     signal?: AbortSignal;
+    marker?: 'level.dat' | 'pack.mcmeta';
     onProgress?: (progress: WorldFolderArchiveProgress) => void;
   } = {},
 ): Promise<File> {
@@ -52,7 +56,7 @@ export function prepareMinecraftWorldFolder(
     }
     let input: WorldFolderArchiveInput;
     try {
-      input = planMinecraftWorldFolder(files);
+      input = planMinecraftWorldFolder(files, options.marker);
     } catch (error) {
       reject(error);
       return;

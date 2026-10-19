@@ -622,6 +622,8 @@ export function createApp(options: Options) {
   registerMinecraftRoutes(app, {
     db,
     env,
+    codec: options.codec,
+    contentHttp: options.minecraftContentHttp,
     principal,
     body,
     management:

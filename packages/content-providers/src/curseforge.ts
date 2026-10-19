@@ -11,6 +11,7 @@ import {
   unavailable,
   validateContentPlan,
 } from './contracts.js';
+import { type DatapackCatalogFiles, datapackCatalogFilesSchema } from './datapack-catalog.js';
 import {
   type WorldCatalogFiles,
   type WorldCatalogProjects,
@@ -124,7 +125,7 @@ export class CurseForgeProvider {
   readonly #key: string;
   private readonly base: string;
   private readonly limits: ContentLimits;
-  private worldClass: Promise<number> | undefined;
+  private readonly catalogClasses = new Map<string, Promise<number>>();
   constructor(
     readonly http: ContentHttp,
     options: { apiKey: string; apiBase?: string; limits?: Partial<ContentLimits> },
@@ -145,10 +146,12 @@ export class CurseForgeProvider {
   private async get(path: string, signal?: AbortSignal): Promise<unknown> {
     return (await this.request(path, signal)).data;
   }
-  private getWorldClass(signal?: AbortSignal): Promise<number> {
+  private getCatalogClass(kind: 'worlds' | 'data-packs', signal?: AbortSignal): Promise<number> {
     signal?.throwIfAborted();
-    // Resolve the provider's current class once; no guessed class ID or request per result.
-    this.worldClass ??= this.get('/categories?gameId=432&classesOnly=true', signal)
+    const cached = this.catalogClasses.get(kind);
+    if (cached) return cached;
+    // Provider classes are discovered, not guessed from historical numeric IDs.
+    const pending = this.get('/categories?gameId=432&classesOnly=true', signal)
       .then((data) => {
         const classes = z
           .array(
@@ -165,20 +168,25 @@ export class CurseForgeProvider {
             (category) =>
               category.gameId === minecraftGameId &&
               category.isClass === true &&
-              category.slug === 'worlds',
+              category.slug === kind,
           );
-        if (classes.length !== 1 || !classes[0]) unavailable('curseforge_worlds_class');
+        if (classes.length !== 1 || !classes[0]) unavailable(`curseforge_${kind}_class`);
         return classes[0].id;
       })
       .catch((error) => {
-        this.worldClass = undefined;
+        this.catalogClasses.delete(kind);
         throw error;
       });
-    return this.worldClass;
+    this.catalogClasses.set(kind, pending);
+    return pending;
   }
-  private async worldProject(projectId: number, signal?: AbortSignal) {
+  private async catalogProject(
+    kind: 'worlds' | 'data-packs',
+    projectId: number,
+    signal?: AbortSignal,
+  ) {
     const [classId, raw] = await Promise.all([
-      this.getWorldClass(signal),
+      this.getCatalogClass(kind, signal),
       this.get(`/mods/${projectId}`, signal),
     ]);
     const project = worldProjectSchema.parse(raw);
@@ -190,7 +198,8 @@ export class CurseForgeProvider {
       fail('curseforge_world_identity');
     return project;
   }
-  async searchWorlds(
+  private async searchCatalog(
+    kind: 'worlds' | 'data-packs',
     query: string,
     offset = 0,
     gameVersion?: string,
@@ -202,7 +211,7 @@ export class CurseForgeProvider {
       (gameVersion !== undefined && (!gameVersion || gameVersion.length > 80))
     )
       fail('search');
-    const classId = await this.getWorldClass(signal);
+    const classId = await this.getCatalogClass(kind, signal);
     const params = new URLSearchParams({
       gameId: String(minecraftGameId),
       classId: String(classId),
@@ -227,7 +236,7 @@ export class CurseForgeProvider {
           id: String(project.id),
           name: project.name,
           summary: project.summary,
-          websiteUrl: `https://www.curseforge.com/minecraft/worlds/${project.slug}`,
+          websiteUrl: `https://www.curseforge.com/minecraft/${kind}/${project.slug}`,
           ...(image && ['media.forgecdn.net', 'mediafilez.forgecdn.net'].includes(image.hostname)
             ? { imageUrl: image.href }
             : {}),
@@ -237,21 +246,22 @@ export class CurseForgeProvider {
       }),
     });
   }
-  async worldFiles(
+  private async catalogFiles(
+    kind: 'worlds' | 'data-packs',
     projectId: string,
     offset = 0,
     signal?: AbortSignal,
-  ): Promise<WorldCatalogFiles> {
+  ): Promise<DatapackCatalogFiles> {
     worldOffset(offset);
     const pid = worldId(projectId);
     const [project, response] = await Promise.all([
-      this.worldProject(pid, signal),
+      this.catalogProject(kind, pid, signal),
       this.request(`/mods/${pid}/files?index=${offset}&pageSize=${worldPageSize}`, signal),
     ]);
     const files = z.array(worldFileSchema).max(worldPageSize).parse(response.data);
     if (files.some((file) => file.gameId !== minecraftGameId || file.modId !== pid))
       fail('curseforge_world_identity');
-    return worldCatalogFilesSchema.parse({
+    return (kind === 'data-packs' ? datapackCatalogFilesSchema : worldCatalogFilesSchema).parse({
       ...worldPagination(response.pagination, offset, files.length),
       items: files.map((file) => ({
         id: String(file.id),
@@ -265,11 +275,29 @@ export class CurseForgeProvider {
           project.isAvailable &&
           project.allowModDistribution !== false &&
           file.isAvailable &&
-          Boolean(worldFileIntegrity(file)),
+          Boolean(worldFileIntegrity(file)) &&
+          (kind !== 'data-packs' ||
+            !file.dependencies.some((dependency) => [3, 5].includes(dependency.relationType))),
+        ...(kind === 'data-packs'
+          ? {
+              unavailableReason:
+                !project.isAvailable ||
+                project.allowModDistribution === false ||
+                !file.isAvailable ||
+                !file.downloadUrl
+                  ? 'distribution'
+                  : file.dependencies.some((dependency) => [3, 5].includes(dependency.relationType))
+                    ? 'dependencies'
+                    : !worldFileIntegrity(file)
+                      ? 'archive'
+                      : undefined,
+            }
+          : {}),
       })),
     });
   }
-  async worldArchive(
+  private async catalogArchive(
+    kind: 'worlds' | 'data-packs',
     projectId: string,
     fileId: string,
     signal?: AbortSignal,
@@ -277,7 +305,7 @@ export class CurseForgeProvider {
     const pid = worldId(projectId);
     const fid = worldId(fileId);
     const [project, raw] = await Promise.all([
-      this.worldProject(pid, signal),
+      this.catalogProject(kind, pid, signal),
       this.get(`/mods/${pid}/files/${fid}`, signal),
     ]);
     const file = worldFileSchema.parse(raw);
@@ -290,6 +318,11 @@ export class CurseForgeProvider {
       !file.downloadUrl
     )
       unavailable('distribution_unavailable');
+    if (
+      kind === 'data-packs' &&
+      file.dependencies.some((dependency) => [3, 5].includes(dependency.relationType))
+    )
+      unavailable('datapack_dependencies');
     const sha1 = worldFileIntegrity(file);
     if (!sha1) fail('curseforge_integrity');
     return {
@@ -302,6 +335,46 @@ export class CurseForgeProvider {
       kind: 'override',
       serverSide: 'required',
     };
+  }
+  searchWorlds(
+    query: string,
+    offset = 0,
+    gameVersion?: string,
+    signal?: AbortSignal,
+  ): Promise<WorldCatalogProjects> {
+    return this.searchCatalog('worlds', query, offset, gameVersion, signal);
+  }
+  worldFiles(projectId: string, offset = 0, signal?: AbortSignal): Promise<WorldCatalogFiles> {
+    return this.catalogFiles('worlds', projectId, offset, signal);
+  }
+  worldArchive(
+    projectId: string,
+    versionId: string,
+    signal?: AbortSignal,
+  ): Promise<ContentArtifact> {
+    return this.catalogArchive('worlds', projectId, versionId, signal);
+  }
+  searchDatapacks(
+    query: string,
+    offset = 0,
+    gameVersion?: string,
+    signal?: AbortSignal,
+  ): Promise<WorldCatalogProjects> {
+    return this.searchCatalog('data-packs', query, offset, gameVersion, signal);
+  }
+  datapackFiles(
+    projectId: string,
+    offset = 0,
+    signal?: AbortSignal,
+  ): Promise<DatapackCatalogFiles> {
+    return this.catalogFiles('data-packs', projectId, offset, signal);
+  }
+  datapackArchive(
+    projectId: string,
+    versionId: string,
+    signal?: AbortSignal,
+  ): Promise<ContentArtifact> {
+    return this.catalogArchive('data-packs', projectId, versionId, signal);
   }
   async search(query: string, target: ContentTarget): Promise<unknown> {
     if (query.length > 256) fail('search');

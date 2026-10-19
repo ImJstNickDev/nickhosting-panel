@@ -43,6 +43,28 @@ describe('Minecraft folder import ZIP preparation', () => {
     expect(archive.name).toBe('My world.zip');
     expect(progress.mock.calls.at(-1)?.[0]).toEqual({ processedBytes: 7, totalBytes: 7 });
   });
+  it('uses the same Fileman ZIP writer for datapack folders without including the source root', async () => {
+    const files = [
+      file('Example/pack.mcmeta', '{"pack":{"pack_format":15,"description":"Fixture"}}'),
+      file('Example/data/demo/function/test.mcfunction', 'say fixture'),
+    ];
+    const plan = planMinecraftWorldFolder(files, 'pack.mcmeta');
+    expect(plan.entries.map((entry) => entry.path)).toEqual([
+      'pack.mcmeta',
+      'data/demo/function/test.mcfunction',
+    ]);
+    expect(() => planMinecraftWorldFolder(files)).toThrow(WorldFolderArchiveError);
+    expect(() =>
+      planMinecraftWorldFolder([file('Example/nested/pack.mcmeta')], 'pack.mcmeta'),
+    ).toThrow(WorldFolderArchiveError);
+    const archive = await createWorldFolderZip(plan);
+    const found: string[] = [];
+    await visitArchive(new Uint8Array(await archive.arrayBuffer()), async (entry) => {
+      found.push(entry.path);
+      await readArchiveFile(entry, 1000);
+    });
+    expect(found).toEqual(['pack.mcmeta', 'data/demo/function/test.mcfunction']);
+  });
   it('requires the actual world root and rejects ambiguous, escaping, conflicting selections before reads', () => {
     for (const files of [
       [],

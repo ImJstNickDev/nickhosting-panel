@@ -13838,3 +13838,70 @@ Rollback is a code revert preserving durable jobs/data. PR #21 stays open and
 unmerged; issue #18 remains independent. No new release approval is implied.
 Actual production-provider latency is not established by fixture timings; the
 Owner's next Settings/Players/Worlds actions provide that measurement.
+
+## 2026-10-19 — Minecraft datapack preparation and explicit Apply
+
+The dedicated Datapacks section replaces the generic content placeholder. It
+lists packs by world, supports Modrinth/CurseForge discovery and ZIP/folder uploads,
+and keeps acquisition/inspection/upload separate from publication. Ready ZIPs are
+ignored `.pending` files; Apply uses batched renames and a shared directory receipt,
+then requests one reload for the active running world. Disabled folders stay
+outside Minecraft's scanned directory. No success claim is inferred from the
+asynchronous `Reloading!` message. See [contracts and limits](M5-MINECRAFT-DATAPACKS.md).
+
+Validation used actual Core handlers, authentication, isolated PostgreSQL and the
+real ManagementRuntime with synthetic provider file/HTTP fixtures. No live game
+server, world, datapack or Pterodactyl/Blueprint resource was changed by these tests.
+
+Focused unit commands:
+
+```sh
+scripts/dev.sh pnpm exec vitest run games/minecraft/src/datapacks.test.ts games/minecraft/src/world.test.ts
+scripts/dev.sh pnpm exec vitest run packages/content-providers/src/datapacks.test.ts packages/content-providers/src/curseforge-worlds.test.ts games/minecraft/src/ui/ui.test.ts apps/web/src/integrations/minecraft/world-folder-archive.test.ts
+scripts/dev.sh pnpm exec vitest run packages/server-management/src/minecraft-datapacks.test.ts apps/api/src/minecraft-datapacks.test.ts packages/server-management/src/fileman-read.test.ts apps/api/src/minecraft-worlds.test.ts
+```
+
+These runs passed **71 + 109 + 31 = 211 tests**, without counting preliminary runs
+twice. A separate targeted provider regression passed 13 tests. An exploratory
+broader provider run hit three pre-existing free-space-floor fixture failures
+(available approximately 81.03 GB versus required 81.15 GB); the global free-space
+policy was not weakened and no unrelated storage was cleaned.
+
+The production WebPanel build passed, with existing large-chunk warnings.
+Typecheck and English/Italian/pseudolocale completeness passed. The full historical
+M1–M5 matrix was not rerun for this scoped feature.
+
+Independent source review required fixes for interrupted-preparation discard,
+partial replacement recovery, disabled-state preservation and deferred cleanup
+ownership. UI/content review of the real desktop EN/mobile IT screenshots found
+no must-fix layout/content issue. The screenshots and evidence boundaries are
+linked from the Datapacks document; they do not establish live Minecraft loading
+or production-provider latency.
+
+Final isolated integration/browser commands:
+
+```sh
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-datapacks.integration.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-datapacks.browser.test.ts
+scripts/dev.sh pnpm typecheck
+scripts/dev.sh pnpm i18n:check
+scripts/dev.sh pnpm build
+```
+
+Final outcomes: **20/20 database/runtime tests**, **8/8 real browser tests**.
+Coverage includes permissions/revocation, single-batch Apply, idempotency, explicit
+reload dispatch, inactive worlds, interrupted upload discard, missing-effect 204,
+partial replacement recovery, disabled replacement preservation and delayed cleanup
+versus a failed retry. Browser tests also hold the inventory response after Apply
+to prove confirmed drafts disappear immediately without duplicate dispatch.
+Axe checks passed on desktop EN, prepared EN and mobile IT; no horizontal overflow
+or page errors. Keyboard checks cover initial Cancel focus and Escape, not a full
+manual accessibility certification. Independent final review has no remaining
+must-fix findings.
+
+Migration 044 activation remains subject to specific Owner approval. Current dev
+API/worker/Vite are healthy, restart counters zero, public HTTPS health is 200.
+Only project source watchers have consumed changes; no manual restart, image
+rebuild, dev migration or live game mutation has yet been performed in this pass.
+Rollback preserves additive tables and durable receipts. PR #21 stays OPEN and
+unmerged; SFTPGo #18 remains an independent production-release gate.

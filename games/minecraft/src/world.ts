@@ -181,7 +181,14 @@ export function inspectMinecraftLevelDat(
   input: Uint8Array,
   options: { release?: string; limits?: Partial<MinecraftNbtLimits> } = {},
 ): MinecraftWorldValidation {
-  const limits = nbtLimits(options.limits);
+  const { data, bytes, compressed } = decodeMinecraftLevelData(input, options.limits);
+  return inspectLevelData(data, bytes, compressed);
+}
+
+/** The same bounded NBT decoder serves world identity and saved datapack
+ * selection; neither path maintains its own unbounded parser. */
+function decodeMinecraftLevelData(input: Uint8Array, options?: Partial<MinecraftNbtLimits>) {
+  const limits = nbtLimits(options);
   if (input.byteLength < 4 || input.byteLength > limits.maxCompressedBytes) fail('level_data');
   const compressed = Buffer.from(input.buffer, input.byteOffset, input.byteLength);
   let bytes: Buffer;
@@ -203,6 +210,36 @@ export function inspectMinecraftLevelDat(
   }
   const data = parsed.value.Data;
   if (data?.type !== 'compound') fail('level_data');
+  return { data, bytes, compressed };
+}
+
+/** Saved selection only. A running server may not yet have persisted its live
+ * selection; callers must not present this as confirmation of a completed reload. */
+export function inspectMinecraftDatapackSelection(
+  input: Uint8Array,
+): { enabled: string[]; disabled: string[] } | undefined {
+  const { data } = decodeMinecraftLevelData(input);
+  const packs = data.value.DataPacks;
+  if (!packs) return undefined;
+  if (packs.type !== 'compound') fail('datapack_selection');
+  const read = (name: 'Enabled' | 'Disabled'): string[] => {
+    const list = packs.value[name];
+    if (list?.type !== 'list' || list.value.value.length > 4096) return fail('datapack_selection');
+    if (list.value.value.length === 0) return [];
+    if (list.value.type !== 'string') return fail('datapack_selection');
+    const strings = list.value.value as string[];
+    if (strings.some((id) => typeof id !== 'string' || id.length > 1024 || /\p{C}/u.test(id)))
+      fail('datapack_selection');
+    return strings;
+  };
+  return { enabled: read('Enabled'), disabled: read('Disabled') };
+}
+
+function inspectLevelData(
+  data: ReturnType<typeof decodeMinecraftLevelData>['data'],
+  bytes: Buffer,
+  compressed: Buffer,
+): MinecraftWorldValidation {
   const version = data.value.DataVersion;
   if (version && (version.type !== 'int' || version.value < 1)) fail('data_version');
   const storage = data.value.version;

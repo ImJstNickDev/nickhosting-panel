@@ -22,6 +22,7 @@ const entry = (
   name: file.name,
   kind: file.is_symlink ? 'symlink' : file.is_file ? 'file' : 'directory',
   size: file.size,
+  modifiedAt: file.modified_at,
 });
 async function parallel<T, R>(items: readonly T[], work: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);

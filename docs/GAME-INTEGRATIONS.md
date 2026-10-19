@@ -702,5 +702,16 @@ existing tracked installation inventory by path; Modpacks retains the complete
 pack inventory. They do not scan manually uploaded files or add installation,
 discovery, update or version-compatibility behavior. Datapacks is an inventory-only
 section at this stage, including on historical versions: its presence does not
-claim that such versions can install or run datapacks. Category-specific workflows
-and version eligibility will be addressed individually under Owner direction.
+claim that such versions can install or run datapacks. This paragraph describes
+the initial navigation split; the Datapacks placeholder is superseded below.
+Other category-specific workflows remain separate work.
+
+### World-scoped datapacks
+
+Datapacks now has a dedicated world-scoped inventory and preparation/apply flow,
+reusing Fileman reads and transfers. Catalog acquisition and ZIP validation happen
+before Apply; prepared `.pending` files are published in batches, with a single
+reload for ordinary changes to the active running world. Disabled ZIPs use
+`.disabled`; disabled folders must live outside the scanned datapacks directory.
+Filesystem state, saved native selection and reload dispatch are distinct.
+See [datapack workflow, limits and contracts](M5-MINECRAFT-DATAPACKS.md).

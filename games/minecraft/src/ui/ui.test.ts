@@ -84,6 +84,71 @@ describe('Minecraft browser module and exact API contracts', () => {
       minecraftUiModule.descriptor.sections.find((section) => section.id === 'datapacks')?.forms,
     ).toEqual([]);
   });
+  it('loads datapacks from world-scoped inventory instead of tracked content receipts', async () => {
+    const client = clientFixture();
+    const snapshot = {
+      world: 'world',
+      selectedWorld: 'world',
+      worlds: [{ name: 'world', selected: true }],
+      running: true,
+      version: '26.1',
+      supported: true,
+      installed: true,
+      packs: [],
+      changes: [],
+      reload: { state: 'not_required' },
+    };
+    client.request.mockResolvedValue(snapshot);
+    expect(
+      minecraftUiModule.descriptor.sections.find((section) => section.id === 'datapacks'),
+    ).toMatchObject({ loader: 'datapacks', renderer: 'minecraft-datapacks' });
+    const data = await minecraftUiModule.handlers.datapacks?.(client, { serverId, values: {} });
+    expect(data).toMatchObject({ metadata: { datapacks: snapshot } });
+    expect(client.request).toHaveBeenCalledOnce();
+    expect(client.request).toHaveBeenCalledWith(
+      `/v1/servers/${serverId}/minecraft/datapacks`,
+      expect.objectContaining({ method: 'GET' }),
+    );
+  });
+  it('keeps datapack preparation separate from apply and validates mutation bodies', async () => {
+    const client = clientFixture();
+    const controller = createMinecraftUiController(client);
+    await controller.datapackChange(serverId, {
+      world: 'world',
+      action: 'disable',
+      path: 'world/datapacks/test.zip',
+      idempotencyKey: 'prepare-1',
+    });
+    expect(client.request).toHaveBeenLastCalledWith(
+      `/v1/servers/${serverId}/minecraft/datapacks/changes`,
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.objectContaining({ action: 'disable' }),
+      }),
+    );
+    client.request.mockResolvedValueOnce({ state: 'published', reload: 'required' });
+    await controller.applyDatapacks(serverId, { world: 'world', idempotencyKey: 'apply-1' });
+    expect(client.request).toHaveBeenLastCalledWith(
+      `/v1/servers/${serverId}/minecraft/datapacks/apply`,
+      expect.objectContaining({
+        method: 'POST',
+        body: { world: 'world', idempotencyKey: 'apply-1' },
+      }),
+    );
+    await controller.cancelDatapackChange(serverId, jobId);
+    expect(client.request).toHaveBeenLastCalledWith(
+      `/v1/servers/${serverId}/minecraft/datapacks/changes/${jobId}`,
+      expect.objectContaining({ method: 'DELETE' }),
+    );
+    await expect(
+      controller.datapackChange(serverId, {
+        world: '../world',
+        action: 'delete',
+        idempotencyKey: 'bad',
+      }),
+    ).rejects.toThrow();
+    expect(client.request).toHaveBeenCalledTimes(3);
+  });
   it('projects the existing tracked inventory without scanning files or duplicating requests', async () => {
     const client = clientFixture();
     const paths = [
@@ -100,7 +165,6 @@ describe('Minecraft browser module and exact API contracts', () => {
     for (const [sectionId, expected] of [
       ['mods', [paths[0]]],
       ['plugins', [paths[1]]],
-      ['datapacks', [paths[2]]],
       ['modpacks', paths],
     ] as const) {
       client.request.mockClear();

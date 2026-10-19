@@ -64,7 +64,7 @@ const sourceSealSchema = z.strictObject({
 });
 type SourceSeal = z.infer<typeof sourceSealSchema>;
 export const minecraftSourceUploadSchema = z.strictObject({
-  kind: z.enum(['world', 'modpack']),
+  kind: z.enum(['world', 'modpack', 'datapack']),
   serverId: z.uuid().optional(),
   idempotencyKey: identifier,
   bytes: z
@@ -809,6 +809,59 @@ export function createMinecraftSourceStore(
         signal,
       );
     },
+    async acquireDatapack(input: unknown, signal?: AbortSignal) {
+      const value = parse(
+        z.strictObject({
+          provider: z.enum(['modrinth', 'curseforge']),
+          projectId: identifier,
+          versionId: identifier,
+          serverId: z.uuid(),
+          idempotencyKey: identifier,
+        }),
+        input,
+      );
+      await authorizeScope(db, await reauthorize(), value.serverId);
+      const { values } = await getSettings(db, env);
+      const policy = contentPolicyValues(values, 'minecraft');
+      if (!options.http && !values.contentMetadataUserAgent)
+        throw new DomainError('configuration_invalid');
+      const http =
+        options.http ??
+        new SafeContentHttp({
+          allowedOrigins: ['https://api.modrinth.com', ...policy.downloadOrigins],
+          userAgent: values.contentMetadataUserAgent as string,
+          maxDownloadBytes: Math.min(policy.sourceGlobalBytes, policy.sourceUserBytes),
+        });
+      const provider =
+        value.provider === 'modrinth' ? new ModrinthProvider(http) : options.curseforge;
+      if (!provider) throw new DomainError('integration_unavailable');
+      const artifact = await provider.datapackArchive(value.projectId, value.versionId, signal);
+      if (
+        !Number.isSafeInteger(artifact.size) ||
+        artifact.size < 1 ||
+        artifact.size > Number.MAX_SAFE_INTEGER - 65536
+      )
+        throw new DomainError('validation_failed');
+      const row = await reserve({
+        ...value,
+        origin: value.provider,
+        kind: 'datapack',
+        bytes: artifact.size,
+        hashes: artifact.hashes,
+        projectId: artifact.projectId,
+        versionId: artifact.versionId,
+      });
+      const source = await executeTransfer(
+        row.id,
+        async (current, abort) => {
+          const path = sourcePath(current);
+          const result = await provider.http.download(artifact, path, { signal: abort });
+          return { path, sha256: result.sha256, identity: await lstat(path, { bigint: true }) };
+        },
+        signal,
+      );
+      return { ...source, filename: artifact.path.split('/').at(-1) ?? `${value.projectId}.zip` };
+    },
     async acquireWorldCatalog(input: unknown, signal?: AbortSignal) {
       const value = parse(minecraftSourceWorldCatalogSchema, input);
       const actor = await reauthorize();
@@ -872,6 +925,8 @@ export function createMinecraftSourceStore(
     },
     archiveResolver: async (reference: string, serverId: string) =>
       (await resolveSource(reference, 'modpack', serverId)).path,
+    datapackArchiveResolver: (reference: string, serverId: string) =>
+      resolveSource(reference, 'datapack', serverId),
     worldArchiveResolver: (reference: string, serverId: string) =>
       resolveSource(reference, 'world', serverId),
     resolveForCreation: (reference: string) => resolveSource(reference, 'modpack'),

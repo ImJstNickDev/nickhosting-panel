@@ -4,6 +4,8 @@ export interface FilemanEntry {
   name: string;
   kind: 'file' | 'directory' | 'symlink';
   size: number;
+  /** Provider metadata, not a content digest. Shared directory snapshots include this without extra I/O. */
+  modifiedAt?: string;
 }
 export type FilemanDirectoryResult =
   | { directory: string; files: readonly FilemanEntry[] }

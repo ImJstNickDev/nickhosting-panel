@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  type ContentArtifact,
   type ContentHttp,
   type ContentLimits,
   type ContentPlan,
@@ -7,9 +8,13 @@ import {
   contentLimits,
   fail,
   hashesSchema,
+  safeArchivePath,
   safeContentPath,
+  unavailable,
   validateContentPlan,
 } from './contracts.js';
+import { type DatapackCatalogFiles, datapackCatalogFilesSchema } from './datapack-catalog.js';
+import { type WorldCatalogProjects, worldCatalogProjectsSchema } from './world-catalog.js';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 const projectSchema = z.object({
@@ -75,6 +80,39 @@ function serverSupported(project: ModrinthProject, version: ModrinthVersion): bo
   }
   return project.server_side === 'required' || project.server_side === 'optional';
 }
+function datapackPage(offset: number): void {
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > 9980) fail('search');
+}
+function datapackFile(version: ModrinthVersion) {
+  const primary = version.files.filter((file) => file.primary);
+  const file =
+    primary.length === 1 ? primary[0] : version.files.length === 1 ? version.files[0] : undefined;
+  if (
+    !file ||
+    !/\.zip$/i.test(file.filename) ||
+    file.filename.includes('/') ||
+    !Number.isSafeInteger(file.size)
+  )
+    return undefined;
+  try {
+    safeArchivePath(file.filename);
+    const url = new URL(file.url);
+    if (url.protocol !== 'https:' || url.username || url.password || url.hash) return undefined;
+    return file;
+  } catch {
+    return undefined;
+  }
+}
+function datapackUnavailable(version: ModrinthVersion): 'dependencies' | 'archive' | undefined {
+  if (
+    version.dependencies.some((dependency) =>
+      ['required', 'incompatible'].includes(dependency.dependency_type),
+    )
+  )
+    return 'dependencies';
+  if (!datapackFile(version)) return 'archive';
+  return undefined;
+}
 export class ModrinthProvider {
   readonly origin: string;
   constructor(
@@ -85,6 +123,162 @@ export class ModrinthProvider {
     this.limits = contentLimits(options.limits);
   }
   private readonly limits: ContentLimits;
+  async searchDatapacks(
+    query: string,
+    offset = 0,
+    gameVersion?: string,
+    signal?: AbortSignal,
+  ): Promise<WorldCatalogProjects> {
+    datapackPage(offset);
+    if (
+      query.length > 256 ||
+      (gameVersion !== undefined && (!gameVersion || gameVersion.length > 80))
+    )
+      fail('search');
+    // Projects may publish both mods and datapacks; primary project_type is insufficient.
+    const facets = [['all_project_types:datapack']];
+    if (gameVersion) facets.push([`versions:${gameVersion}`]);
+    const params = new URLSearchParams({
+      query,
+      facets: JSON.stringify(facets),
+      offset: String(offset),
+      limit: '20',
+    });
+    const result = z
+      .object({
+        hits: z
+          .array(
+            z.object({
+              project_id: id,
+              slug: id,
+              title: z.string(),
+              description: z.string(),
+              author: z.string(),
+              downloads: z.number().nonnegative(),
+              icon_url: z.string().nullable().optional(),
+            }),
+          )
+          .max(20),
+        offset: z.number().int(),
+        limit: z.literal(20),
+        total_hits: z.number().int().nonnegative(),
+      })
+      .parse(await this.http.json(`${this.origin}/search?${params}`, { signal }));
+    if (result.offset !== offset || result.total_hits < result.hits.length)
+      fail('modrinth_pagination');
+    return worldCatalogProjectsSchema.parse({
+      offset,
+      limit: 20,
+      total: result.total_hits,
+      items: result.hits.map((project) => {
+        let imageUrl: string | undefined;
+        try {
+          const image = new URL(project.icon_url ?? '');
+          if (
+            image.protocol === 'https:' &&
+            image.hostname === 'cdn.modrinth.com' &&
+            !image.username &&
+            !image.password &&
+            !image.hash
+          )
+            imageUrl = image.href;
+        } catch {
+          /* Missing or untrusted artwork is optional. */
+        }
+        return {
+          id: project.project_id,
+          name: project.title,
+          summary: project.description,
+          websiteUrl: `https://modrinth.com/datapack/${project.slug}`,
+          ...(imageUrl ? { imageUrl } : {}),
+          authors: [project.author],
+          downloads: project.downloads,
+        };
+      }),
+    });
+  }
+  async datapackFiles(
+    projectId: string,
+    offset = 0,
+    signal?: AbortSignal,
+  ): Promise<DatapackCatalogFiles> {
+    datapackPage(offset);
+    const project = await this.project(projectId, signal);
+    const params = new URLSearchParams({ loaders: JSON.stringify(['datapack']) });
+    const versions = z
+      .array(versionSchema)
+      .max(10000)
+      .parse(
+        await this.http.json(
+          `${this.origin}/project/${encodeURIComponent(project.id)}/version?${params}`,
+          { signal },
+        ),
+      );
+    if (
+      versions.some(
+        (version) => version.project_id !== project.id || !version.loaders.includes('datapack'),
+      )
+    )
+      fail('datapack_identity');
+    versions.sort(
+      (a, b) => b.date_published.localeCompare(a.date_published) || a.id.localeCompare(b.id),
+    );
+    return datapackCatalogFilesSchema.parse({
+      offset,
+      limit: 20,
+      total: versions.length,
+      items: versions.slice(offset, offset + 20).map((version) => {
+        const file = datapackFile(version) ?? version.files[0];
+        if (!file) fail('artifact_ambiguous');
+        const unavailableReason = datapackUnavailable(version);
+        return {
+          id: version.id,
+          projectId: project.id,
+          name: version.name,
+          filename: file.filename,
+          gameVersions: version.game_versions,
+          publishedAt: version.date_published,
+          bytes: file.size,
+          available: unavailableReason === undefined,
+          ...(unavailableReason ? { unavailableReason } : {}),
+        };
+      }),
+    });
+  }
+  async datapackArchive(
+    projectId: string,
+    versionId: string,
+    signal?: AbortSignal,
+  ): Promise<ContentArtifact> {
+    const [project, version] = await Promise.all([
+      this.project(projectId, signal),
+      this.version(versionId, signal),
+    ]);
+    if (
+      version.project_id !== project.id ||
+      version.id !== versionId ||
+      !version.loaders.includes('datapack')
+    )
+      fail('datapack_identity');
+    if (
+      version.dependencies.some((dependency) =>
+        ['required', 'incompatible'].includes(dependency.dependency_type),
+      )
+    )
+      unavailable('datapack_dependencies');
+    const file = datapackFile(version);
+    if (!file) fail('artifact_ambiguous');
+    return {
+      path: 'config/input.zip',
+      urls: [file.url],
+      size: file.size,
+      hashes: file.hashes,
+      kind: 'override',
+      serverSide: 'required',
+      projectId: project.id,
+      versionId: version.id,
+    };
+  }
   async search(
     query: string,
     target: ContentTarget,
@@ -125,16 +319,16 @@ export class ModrinthProvider {
     if (versions.some((version) => version.project_id !== project.id)) fail('modpack_identity');
     return versions;
   }
-  async project(projectId: string): Promise<ModrinthProject> {
+  async project(projectId: string, signal?: AbortSignal): Promise<ModrinthProject> {
     id.parse(projectId);
     return projectSchema.parse(
-      await this.http.json(`${this.origin}/project/${encodeURIComponent(projectId)}`),
+      await this.http.json(`${this.origin}/project/${encodeURIComponent(projectId)}`, { signal }),
     );
   }
-  async version(versionId: string): Promise<ModrinthVersion> {
+  async version(versionId: string, signal?: AbortSignal): Promise<ModrinthVersion> {
     id.parse(versionId);
     return versionSchema.parse(
-      await this.http.json(`${this.origin}/version/${encodeURIComponent(versionId)}`),
+      await this.http.json(`${this.origin}/version/${encodeURIComponent(versionId)}`, { signal }),
     );
   }
   async versions(projectId: string, target: ContentTarget): Promise<ModrinthVersion[]> {

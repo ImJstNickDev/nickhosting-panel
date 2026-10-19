@@ -15,6 +15,7 @@ import {
   minecraftCatalogOptions,
   minecraftContentCapabilities,
 } from './controller.js';
+import { minecraftDatapacksMessages } from './datapacks-catalog.js';
 import { minecraftPlayersMessages } from './players-catalog.js';
 import { minecraftWorldsMessages } from './worlds-catalog.js';
 
@@ -26,6 +27,7 @@ const namespace = 'games.minecraft';
 const k = (name: string) => `${namespace}.${name}`;
 const translated: Record<string, [string, string]> = {
   ...minecraftPlayersMessages,
+  ...minecraftDatapacksMessages,
   ...minecraftWorldsMessages,
   'messages.disconnected': ['Failed to connect to the server', 'Connessione al server fallita'],
   'messages.back': ['Back to Server List', 'Torna alla lista dei server'],
@@ -484,7 +486,8 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
     {
       id: 'datapacks',
       titleKey: k('sections.datapacks'),
-      loader: 'content',
+      renderer: 'minecraft-datapacks',
+      loader: 'datapacks',
       requiredPermissions: ['server:read'],
       requiredCapabilities: ['files'],
       columns: [
@@ -773,6 +776,14 @@ export const minecraftUiModule = defineTrustedGameUiModule({
         },
         context.signal,
       );
+    },
+    datapacks: async (client, context): Promise<UiSectionData> => {
+      const datapacks = await createMinecraftUiController(client).datapacks(
+        server(context),
+        undefined,
+        context.signal,
+      );
+      return { values: {}, rows: [], metadata: { datapacks, installed: datapacks.installed } };
     },
     worlds: async (client, context): Promise<UiSectionData> => {
       const worlds = await createMinecraftUiController(client).worlds(

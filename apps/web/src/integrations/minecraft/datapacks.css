@@ -1,0 +1,296 @@
+.minecraft-datapacks {
+  width: 100%;
+  max-width: 1080px;
+  margin-inline: auto;
+  container-type: inline-size;
+}
+.datapack-toolbar,
+.datapack-tools,
+.datapack-row,
+.datapack-row-actions,
+.datapack-change,
+.datapack-upload,
+.datapack-apply,
+.datapack-pages {
+  display: flex;
+  align-items: center;
+}
+.datapack-toolbar {
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+.datapack-world {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.datapack-world select {
+  max-width: 240px;
+  min-height: 38px;
+}
+.datapack-search {
+  position: relative;
+  flex: 1;
+  min-width: 170px;
+}
+.datapack-search > svg {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  pointer-events: none;
+}
+.datapack-search input {
+  width: 100%;
+  padding-left: 38px;
+  min-height: 38px;
+  background: var(--surface);
+}
+.datapack-tools,
+.datapack-row-actions {
+  gap: 3px;
+}
+.datapack-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+}
+.datapack-action:hover:not(:disabled) {
+  background: var(--surface-subtle, #f1f3f5);
+  color: var(--blue);
+}
+.datapack-action--danger:hover:not(:disabled) {
+  color: var(--danger, #a13226);
+}
+.datapack-action:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.datapack-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.datapack-row {
+  flex-wrap: wrap;
+  gap: 14px;
+  min-height: 84px;
+  padding: 14px 18px;
+}
+.datapack-row + .datapack-row {
+  border-top: 1px solid var(--line);
+}
+.datapack-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  background: var(--surface-subtle, #f1f3f5);
+  color: var(--muted);
+}
+.datapack-identity {
+  flex: 1;
+  min-width: 0;
+}
+.datapack-identity strong {
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+.datapack-identity p {
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.datapack-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 4px;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.datapack-compatibility--incompatible,
+.datapack-compatibility--invalid {
+  color: var(--danger, #a13226);
+}
+.datapack-note {
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--muted);
+  margin: 10px 0;
+}
+.datapack-empty {
+  padding: 38px 20px;
+  text-align: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.datapack-changes {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  background: var(--surface-subtle, #f1f3f5);
+}
+.datapack-change {
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+}
+.datapack-change + .datapack-change {
+  border-top: 1px solid var(--line);
+}
+.datapack-change > span,
+.datapack-upload > span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+  font-size: 0.82rem;
+}
+.datapack-change small,
+.datapack-upload small {
+  color: var(--muted);
+  font-size: 0.73rem;
+}
+.datapack-upload {
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.datapack-upload progress {
+  width: 100px;
+  height: 5px;
+  accent-color: var(--blue);
+}
+.datapack-apply {
+  justify-content: space-between;
+  gap: 20px;
+  margin-top: 18px;
+  min-height: 44px;
+}
+.datapack-apply p {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 0 0 5px;
+}
+.datapack-apply a {
+  font-size: 0.78rem;
+}
+.datapack-apply > button {
+  margin-left: auto;
+  white-space: nowrap;
+}
+.datapack-pages {
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 14px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+@container (max-width: 620px) {
+  .datapack-world {
+    flex-basis: 100%;
+  }
+  .datapack-world select {
+    flex: 1;
+    max-width: none;
+  }
+  .datapack-row {
+    padding: 14px;
+    gap: 10px;
+  }
+  .datapack-apply {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+}
+@container (max-width: 420px) {
+  .datapack-row {
+    flex-wrap: wrap;
+  }
+  .datapack-identity {
+    flex-basis: calc(100% - 50px);
+  }
+  .datapack-row-actions {
+    margin-left: 46px;
+  }
+  .datapack-search {
+    min-width: 130px;
+  }
+  .datapack-toolbar {
+    gap: 8px;
+  }
+  .datapack-action {
+    width: 34px;
+  }
+  .datapack-upload {
+    flex-wrap: wrap;
+  }
+}
+.datapack-inspection {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-left: 50px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+.datapack-inspection p {
+  margin: 0;
+}
+.datapack-inspection-skeleton {
+  height: 16px;
+  width: 180px;
+  border-radius: 4px;
+  background: var(--line);
+  opacity: 0.5;
+}
+
+.datapack-skeleton {
+  display: grid;
+  gap: 1px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  min-height: 252px;
+  background: var(--surface);
+}
+.datapack-skeleton > span {
+  height: 84px;
+  background: var(--line);
+  opacity: 0.25;
+}
