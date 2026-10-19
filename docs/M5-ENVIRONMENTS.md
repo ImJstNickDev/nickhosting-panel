@@ -1769,8 +1769,12 @@ The [installation experience](INSTALLATION-EXPERIENCE.md) uses the existing API,
 worker, PostgreSQL and encrypted Redis cache. There is no new mount, public port,
 service, dependency or NickHosting database migration. Source watchers load the
 application changes. Blueprint 1.7 adds a narrowly scoped installer WebSocket
-credential route and committed installation notifications; its native update is
-a separate approval and must retain the Panel/Wings mount separation above.
+credential route and committed installation notifications. Its separately
+approved native update completed on 2026-10-19, retaining the Panel/Wings mount
+separation above. No container restart, image rebuild or new migration was needed.
+Discovery and a read-only authenticated Wings installation relay passed; real
+installer delivery remains for the Owner's subsequent creation test. See the
+[activation evidence](M5-VALIDATION.md#native-blueprint-170-activation--2026-10-19).
 
 Rollback application sources together, retaining operation history and all user
 data. The previous UI can ignore the additive progress fields. Restore the saved

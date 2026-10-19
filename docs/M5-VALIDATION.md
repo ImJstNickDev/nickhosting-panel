@@ -14473,7 +14473,52 @@ certification or proof of live installer delivery.
 No server was created, started, reinstalled or modified for these tests. Existing
 dev source watchers load the application changes. Live frontend HTTPS returned
 200; API/worker/Vite were healthy without an explicit restart. The new Blueprint
-package requires a separately approved native update and scoped rollback before
-the Owner's creation can validate real installer delivery. No new dependency,
-migration, network, port or persistent service is required. Issue18 remains an
+package's separately approved native update and scoped rollback evidence is
+recorded below; the Owner's creation will validate real installer delivery. No new
+dependency, migration, network, port or persistent service is required. Issue18 remains an
 independent production-release gate and PR21 remains open/unmerged.
+
+### Native Blueprint 1.7.0 activation — 2026-10-19
+
+After explicit Owner approval, the normal native Blueprint installer upgraded
+only the NickHosting extension from 1.6.1 to 1.7.0. Reviewed source: `d7a6ff3`;
+package SHA-256:
+`e7cf603396b5a9dadb72a830a431f3850039482b371bdcb9f7f99b9da976dbef`.
+It completed in **4.468 seconds**, exit 0, with **Nothing to migrate**. Private
+code/configuration rollback copies were fully readable and matched all 45 prior
+installed file hashes before staging. No game data or database dump was copied.
+
+- All **48 installed files** matched: 47 after identifier substitution and the
+  admin view with its native Blueprint wrapper/version. Both staged archives
+  matched the approved artifact.
+- Standard adapter discovery reported 1.7.0 and both installation capabilities.
+  Credential issuance returned 200/no-store with the exact managed UUID and only
+  `websocket.connect` / `admin.websocket.install`. The read-only relay authenticated
+  against Wings using one credential request, without errors or commands.
+  Anonymous access returned **401**; a foreign-owner server returned **403**.
+- Panel and development HTTPS returned **200**. Vite served the transformed
+  Console and provisioning modules. Panel, API, worker and Vite remained healthy
+  with unchanged container identities and zero restarts. Mounts, images, networks
+  and port bindings of all 112 observed containers were unchanged. Three unrelated
+  containers were already in restart loops before the operation and continued
+  restarting; no action was taken on them.
+- Full no-follow metadata scans covered **28 game roots / 3,413,482 entries**
+  before and after, with zero read errors. The initial homogeneous-owner assertion
+  exposed **201 pre-existing root-owned imported-world directories**. Their exact
+  metadata was retained, not repaired or accepted as a new blanket exception.
+  This is a separate import-ownership finding, not an effect of this update.
+  All ownership/mode/type histograms were identical and 27 roots had identical
+  full metadata. In the remaining active root, seven BlueMap files changed only
+  inode and one Spark temporary file rotated; UID/GID and modes were unchanged.
+- Fifteen configuration/identity table fingerprints and the Panel environment
+  hash were unchanged. Only the settings aggregate changed, as can occur during
+  native cache maintenance; there was no per-key baseline to attribute it more
+  narrowly. Native Panel cache/ownership housekeeping and PHP queue signaling
+  occurred through the existing installer, whose workflow was not modified.
+
+Independent activation review verified the saved evidence with no remaining
+must-fix findings. This verifies activation and transport, not receipt of output
+from a new live installer. The Owner's next creation is the end-to-end installation check. No game
+server was created, started, reinstalled or modified; no Wings, DNS, proxy,
+production Compose or installer-flow changes were made. Existing issue18 remains
+an independent production-release gate; PR21 remains open and unmerged.

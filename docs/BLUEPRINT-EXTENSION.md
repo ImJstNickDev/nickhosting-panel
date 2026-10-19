@@ -975,6 +975,11 @@ The allowlisted package and in-memory PHP tests cover native JWT signing,
 ownership/policy denial, event capture, unrelated-state exclusion and transaction
 rollback. Adapter tests cover the dedicated route, origin/UUID pinning, output
 filtering, command denial and completion semantics. These are local contract
-checks, not evidence of a live installation. Native activation remains a
-separately approved operation with the existing separated mounts and scoped
-code/configuration rollback.
+checks, not evidence of a live installation. The separately approved native
+activation completed on 2026-10-19 in 4.468 seconds, with no pending migration.
+All 48 installed package files and both staged archives were verified. Discovery,
+restricted credential issuance and an authenticated read-only Wings relay passed;
+anonymous and foreign-server requests returned 401 and 403 respectively. No game
+installation was triggered. The separated mounts and scoped code/configuration
+rollback were preserved; future upgrades still require their own approval. See
+the [activation evidence](M5-VALIDATION.md#native-blueprint-170-activation--2026-10-19).
