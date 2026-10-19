@@ -95,6 +95,47 @@ Vanilla, Paper, Folia, Fabric and Forge. The generic SDK also supports literal
 version ranges and fixed-image games. Image requirements do **not** certify those
 runtimes; Vanilla remains the only M4 real-server-verified profile.
 
+Fabric shares the integration's existing Minecraft Java baseline with Vanilla,
+then takes `max(Minecraft baseline, exact loader launcherMeta.min_java_version)`.
+The range fallback is available when older release metadata omits Java; hash-verified
+Mojang metadata must agree with known release baselines. Snapshots use metadata,
+not release-name sorting. Missing loader metadata is not treated as Java 8.
+
+For Fabric's integration-managed mode, the image family is
+`ghcr.io/ptero-eggs/yolks:java_<major>` (FabricUpdated); the declared majors are
+8, 11, 16, 17, 21, 22, 23, 24 and 25. Other profiles retain their existing
+`ghcr.io/pterodactyl/yolks` policy. The public manifest and runtime resolver share
+the same profile-policy selector. The egg still must allow the exact selected
+image. No automatic egg edits, registry substitution or mapping conversion occurs.
+
+| Minecraft release with Fabric | Base Java | Fabric image suffix |
+| --- | --- | --- |
+| 1.14–1.16.5 | 8 | `java_8` |
+| 1.17–1.17.1 | 16 | `java_16` |
+| 1.18–1.20.4 | 17 | `java_17` |
+| 1.20.5–1.21.11 | 21 | `java_21` |
+| 26.1 onward, while metadata agrees | 25 | `java_25` |
+
+These are base requirements, not guarantees for arbitrary mods or old loaders.
+A higher exact loader requirement selects the corresponding declared image, or
+fails if that major has no image rule. Fabric's current guide recommends Java 17
+for 1.17; the minimum is Java 16, retained here rather than upgrading all historic
+loader combinations implicitly. Installer-image Java is separate from runtime Java.
+Fabric remains behind its existing exact binding/evidence/rollout gates; this change
+does not enable public creation or install mods. Catalog scanning remains Vanilla-only.
+
+Sources checked 2026-10-19: [Mojang manifest and linked version metadata](https://piston-meta.mojang.com/mc/game/version_manifest_v2.json),
+[Fabric Java 16 transition](https://fabricmc.net/2021/05/27/117-for-developers.html),
+[Java 17 transition](https://fabricmc.net/2021/11/30/118.html),
+[current server recommendation](https://wiki.fabricmc.net/install),
+[Java 25 guide](https://docs.fabricmc.net/players/installing-java/windows),
+[exact loader metadata example](https://meta.fabricmc.net/v2/versions/loader/26.1/0.19.5),
+[loader Java minimum declaration](https://github.com/FabricMC/fabric-loader/blob/master/src/main/resources/fabric-installer.json),
+and [ptero-eggs build matrix](https://github.com/ptero-eggs/yolks/blob/main/.github/workflows/java.yml).
+Live read-only metadata checks covered the nine release boundaries in this table
+(including 1.17.1) and loader 0.19.5 for seven release pairs; its reported minimum
+was Java 8. These checks did not run game servers or establish gameplay compatibility.
+
 References for the declared image families: [upstream Java build matrix](https://raw.githubusercontent.com/pterodactyl/yolks/master/.github/workflows/java.yml)
 and [Java 25 image definition](https://raw.githubusercontent.com/pterodactyl/yolks/master/java/25/Dockerfile).
 No image was pulled/run to establish new game support in this change.

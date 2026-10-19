@@ -229,7 +229,7 @@ export async function resolveMinecraftRuntime(
   if (release.id !== request.release) return fail('minecraft_release_mismatch');
   if (!release.downloads.server) return fail('minecraft_server_download_unavailable');
   let javaMajor =
-    request.profile === 'vanilla'
+    request.profile === 'vanilla' || request.profile === 'fabric'
       ? vanillaJavaMajor(request.release, entry.type, release.javaVersion?.majorVersion)
       : (release.javaVersion?.majorVersion ?? fail('minecraft_java_unknown'));
   let upstreamSupport: string | undefined;
@@ -329,6 +329,8 @@ export async function resolveMinecraftRuntime(
       new TextDecoder().decode((await read(`${url}.sha256`)).bytes).trim(),
     );
     artifacts.push({ role: 'installer', url, sha256: hash.toLowerCase() });
+    // Fabric uses Minecraft's Java baseline (including legacy metadata fallback),
+    // then raises it for the exact loader. Do not copy Vanilla's ranges here.
     javaMajor = Math.max(javaMajor, pair.launcherMeta.min_java_version);
     installation = {
       kind: 'fabric-installer',

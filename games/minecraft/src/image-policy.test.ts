@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveMinecraftImage } from './image-policy.js';
+import { minecraftRuntimeImagePolicy, resolveMinecraftImage } from './image-policy.js';
 import { minecraftManifest } from './manifest.js';
 import type { ResolvedMinecraftRuntime } from './runtime.js';
 
@@ -40,9 +40,20 @@ describe('Minecraft integration-owned images', () => {
     for (const major of [26, 20, 0, Number.NaN])
       expect(() => resolveMinecraftImage(runtime(major))).toThrow();
   });
+  it('uses only the FabricUpdated image family and declared majors for Fabric', () => {
+    for (const major of [8, 11, 16, 17, 21, 22, 23, 24, 25])
+      expect(resolveMinecraftImage(runtime(major, 'fixture', 'fabric')).image).toBe(
+        `ghcr.io/ptero-eggs/yolks:java_${major}`,
+      );
+    for (const major of [18, 19, 20, 26])
+      expect(() => resolveMinecraftImage(runtime(major, 'fixture', 'fabric'))).toThrow();
+  });
   it('declares image policies for all profiles without advertising verified versions', () => {
     for (const profile of minecraftManifest.runtimes) {
       expect(profile.imagePolicy?.mode).toBe('rules');
+      expect(profile.imagePolicy).toEqual(
+        minecraftRuntimeImagePolicy(profile.id as ResolvedMinecraftRuntime['profile']),
+      );
       expect(profile.supportedGameVersions).toEqual([]);
     }
   });

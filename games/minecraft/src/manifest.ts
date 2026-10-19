@@ -2,7 +2,7 @@ import { gameManifestSchema } from '@nickhosting/game-sdk';
 import { minecraftProfiles } from './compatibility.js';
 import { minecraftContentCapabilities } from './content-capabilities.js';
 import { minecraftGatewayMessages } from './gateway-messages.js';
-import { minecraftImagePolicy } from './image-policy.js';
+import { minecraftRuntimeImagePolicy } from './image-policy.js';
 
 /** Public capabilities are implemented backend contracts, not a release support matrix. */
 export const minecraftManifest = gameManifestSchema.parse({
@@ -35,7 +35,7 @@ export const minecraftManifest = gameManifestSchema.parse({
     id,
     nameKey: `games.minecraft.runtimes.${id}`,
     supportedGameVersions: [],
-    imagePolicy: minecraftImagePolicy,
+    imagePolicy: minecraftRuntimeImagePolicy(id),
     supports: minecraftContentCapabilities(id),
   })),
   wizard: {

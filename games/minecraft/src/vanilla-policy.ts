@@ -1,6 +1,6 @@
 import { DomainError } from '@nickhosting/core';
 
-/** Vanilla's supported Java baseline. Loader profiles resolve their own requirements.
+/** Minecraft's Java baseline, shared by Vanilla and Fabric. Fabric adds its loader minimum.
  * A server artifact and local egg support remain separate installation prerequisites. */
 export const vanillaJavaRanges = [
   { min: '1.0', max: '1.16.5', javaMajor: 8 },

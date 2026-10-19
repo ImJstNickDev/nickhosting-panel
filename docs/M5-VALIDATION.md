@@ -14020,3 +14020,33 @@ failures (225/230 passed): the host's available fraction was below the fixtures'
 10% floor. No disk cleanup or production storage mutation was attempted; the focused
 resolver/catalog tests pass independently. Production build retains the existing
 large-chunk warnings. SFTPGo #18 and all production-release boundaries remain.
+
+### Fabric integration-owned Java images (2026-10-19)
+
+Fabric now reuses the Vanilla Minecraft Java baseline, including the known-release
+fallback if Java metadata is absent, then applies the exact loader's higher minimum.
+Its manifest and resolver both select the FabricUpdated `ptero-eggs/yolks` family
+with declared majors 8/11/16/17/21/22/23/24/25; other profiles are unchanged.
+[Sources and version table](GAME-INTEGRATIONS.md#integration-owned-container-image-selection)
+distinguish required Java 16 for 1.17 from Fabric's current Java 17 recommendation.
+
+```sh
+scripts/dev.sh pnpm exec vitest run games/minecraft/src/runtime.test.ts games/minecraft/src/image-policy.test.ts games/minecraft/src/vanilla-policy.test.ts games/minecraft/src/vanilla-egg.test.ts packages/game-sdk/src/runtime-images.test.ts
+scripts/dev.sh pnpm typecheck
+```
+
+**44/44 tests** and root/web typecheck passed. Scoped Biome and diff checks passed;
+independent source review found no must-fix. Coverage includes range boundaries,
+snapshot metadata, missing old Java metadata, a synthetic higher loader minimum,
+missing loader pairs, unsupported image majors, and identical manifest/resolver
+policies. Runtime resolution still performs six distinct metadata requests in the
+Fabric fixtures; image selection adds no network calls. Real upstream metadata was
+read, but no containers/images/game servers were created or started for these tests.
+No UI change, migration, manual restart, mapping mutation or Blueprint change.
+Development API, worker and Vite remain healthy after hot reload.
+
+This prepares image selection only: Fabric still needs its existing exact egg
+binding and evidence/rollout eligibility; the ordinary catalog scan remains
+Vanilla-only. Installer-image Java and arbitrary mod requirements are separate.
+Existing persisted bindings retain their image. Rollback is a source revert;
+no database or game-data rollback is required. SFTPGo #18 remains a release gate.

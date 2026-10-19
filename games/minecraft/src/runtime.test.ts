@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { resolveMinecraftImage } from './image-policy.js';
 import {
   createRuntimeMetadataClient,
   type MinecraftRuntimeMapping,
@@ -14,12 +15,17 @@ const serverUrl = 'https://piston-data.mojang.com/v1/objects/fixture/server.jar'
 const userAgent = 'NickHosting-Panel/Test (https://github.com/ImJstNickDev/nickhosting-panel)';
 function fixture(
   extra: Record<string, unknown> = {},
-  options: { java?: number; corrupt?: boolean; release?: string } = {},
+  options: {
+    java?: number | null;
+    corrupt?: boolean;
+    release?: string;
+    releaseType?: 'release' | 'snapshot';
+  } = {},
 ) {
   const release = options.release ?? '26.1';
   const version = JSON.stringify({
     id: release,
-    javaVersion: { majorVersion: options.java ?? 25 },
+    ...(options.java === null ? {} : { javaVersion: { majorVersion: options.java ?? 25 } }),
     downloads: { server: { url: serverUrl, size: 1000, sha1: 'a'.repeat(40) } },
   });
   const responses: Record<string, unknown> = {
@@ -28,7 +34,7 @@ function fixture(
         { id: '1.14 Pre-Release 1', type: 'snapshot', url: releaseUrl, sha1: 'a'.repeat(40) },
         {
           id: release,
-          type: 'release',
+          type: options.releaseType ?? 'release',
           url: releaseUrl,
           sha1: options.corrupt ? '0'.repeat(40) : createHash('sha1').update(version).digest('hex'),
         },
@@ -155,6 +161,59 @@ describe('Minecraft exact runtime metadata', () => {
     expect(runtime.artifacts).toHaveLength(2);
     expect(runtime.artifacts[1]?.sha256).toBe('c'.repeat(64));
   });
+  it.each([
+    ['1.14', null, 8, 8, '0.14.25', 'release'],
+    ['1.16.5', 8, 8, 8, '0.19.5', 'release'],
+    ['1.17', 16, 8, 16, '0.11.3', 'release'],
+    ['1.17.1', 16, 8, 16, '0.19.5', 'release'],
+    ['1.18', 17, 8, 17, '0.12.5', 'release'],
+    ['1.20.4', 17, 8, 17, '0.19.5', 'release'],
+    ['1.20.5', 21, 8, 21, '0.19.5', 'release'],
+    ['1.21.11', 21, 8, 21, '0.19.5', 'release'],
+    ['26.1', 25, 8, 25, '0.19.5', 'release'],
+    ['26.2', 25, 8, 25, '0.19.5', 'release'],
+    ['25w03a', 21, 8, 21, '0.19.5', 'snapshot'],
+    // Synthetic loader minimum proves that the exact metadata overrides the base.
+    ['1.16.5', 8, 17, 17, '0.19.5', 'release'],
+  ] as const)(
+    'selects Fabric %s / loader Java %s,%s as Java %s (%s, %s)',
+    async (release, java, loaderJava, expected, loader, releaseType) => {
+      const installer =
+        'https://maven.fabricmc.net/net/fabricmc/fabric-installer/1.1.2/fabric-installer-1.1.2.jar';
+      const base = `https://meta.fabricmc.net/v2/versions/loader/${release}/${loader}`;
+      const { client, requests } = fixture(
+        {
+          [base]: {
+            loader: { version: loader },
+            intermediary: { version: release },
+            launcherMeta: { min_java_version: loaderJava },
+          },
+          [`${base}/server/json`]: {
+            inheritsFrom: release,
+            mainClass: 'net.fabricmc.loader.impl.launch.server.FabricServerLauncher',
+          },
+          'https://meta.fabricmc.net/v2/versions/installer': [{ version: '1.1.2', url: installer }],
+          [`${installer}.sha256`]: 'c'.repeat(64),
+        },
+        { release, java, releaseType },
+      );
+      const request = {
+        release,
+        profile: 'fabric',
+        loaderVersion: loader,
+        installerVersion: '1.1.2',
+      } as const;
+      const resolved = await resolveMinecraftRuntime(request, client);
+      expect(resolved.javaMajor).toBe(expected);
+      expect(resolveMinecraftImage(resolved).image).toBe(
+        `ghcr.io/ptero-eggs/yolks:java_${expected}`,
+      );
+      expect(requests).toHaveLength(6);
+      expect(new Set(requests).size).toBe(requests.length);
+      const unavailable = fixture({}, { release, java, releaseType });
+      await expect(resolveMinecraftRuntime(request, unavailable.client)).rejects.toThrow();
+    },
+  );
   it('requires Forge exact release-coordinate membership and installer checksum', async () => {
     const installer =
       'https://maven.minecraftforge.net/net/minecraftforge/forge/1.21.4-54.1.16/forge-1.21.4-54.1.16-installer.jar';
