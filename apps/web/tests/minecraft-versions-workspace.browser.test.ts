@@ -14,6 +14,7 @@ import { minecraftManifest } from '../../../games/minecraft/src/index.js';
 
 const mappingId = '00000000-0000-4000-8000-000000000001';
 const otherMappingId = '00000000-0000-4000-8000-000000000002';
+const fabricMappingId = '00000000-0000-4000-8000-000000000003';
 const makeChoice = (n: number, release = '26.1', enabled = true) => ({
   id: `00000000-0000-4000-8000-${String(100 + n).padStart(12, '0')}`,
   mappingId,
@@ -57,6 +58,7 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
     errors: string[];
   let multipleMappings: boolean, bulkFails: boolean;
   let fabricSynced: boolean, fabricSyncFails: boolean, fabricQueued: boolean;
+  let fabricMapping: boolean, fabricRegistrationFails: boolean;
   beforeAll(async () => {
     vite = await createServer({
       root: `${process.cwd()}/apps/web`,
@@ -87,6 +89,8 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
     errors = [];
     multipleMappings = false;
     bulkFails = false;
+    fabricMapping = false;
+    fabricRegistrationFails = false;
     fabricQueued = false;
     fabricSynced = false;
     fabricSyncFails = false;
@@ -152,6 +156,25 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
           },
         });
       }
+      if (path === '/v1/owner/minecraft/fabric/combinations') {
+        if (fabricRegistrationFails)
+          return route.fulfill({ status: 503, json: { code: 'integration_unavailable' } });
+        const body = route.request().postDataJSON() as { release: string; loaderVersion: string };
+        const base = makeChoice(99, body.release, false);
+        const registered = {
+          ...base,
+          mappingId: fabricMappingId,
+          supportAuthority: 'signed-evidence',
+          combination: {
+            ...base.combination,
+            profile: 'fabric',
+            loaderVersion: body.loaderVersion,
+          },
+          capabilities: { ...base.capabilities, installation: false },
+        };
+        choices = [registered];
+        return response({ id: registered.id });
+      }
       if (path === '/v1/owner/game-modules')
         return response([{ id: 'minecraft', manifest: minecraftManifest }]);
       if (path === '/v1/platform/owner/games')
@@ -172,7 +195,11 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
           enabled: true,
         };
         return response(
-          multipleMappings ? [mapping, { ...mapping, id: otherMappingId, egg_id: 3 }] : [mapping],
+          fabricMapping
+            ? [mapping, { ...mapping, id: fabricMappingId, runtime_id: 'fabric', egg_id: 4 }]
+            : multipleMappings
+              ? [mapping, { ...mapping, id: otherMappingId, egg_id: 3 }]
+              : [mapping],
         );
       }
       if (path === '/v1/owner/nodes') return response([{ id: 'node-one', pterodactyl_node_id: 7 }]);
@@ -185,6 +212,7 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
         return response([
           { id: 2, name: 'Vanilla server' },
           { id: 3, name: 'Alternative server' },
+          { id: 4, name: 'FabricUpdated' },
         ]);
       if (path === '/v1/owner/settings')
         return response({ config: { values: { minecraftProtocolSource: {} }, lockedKeys: [] } });
@@ -338,6 +366,196 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
     await check(page.getByLabel('Minecraft version', { exact: true })).toHaveValue('');
     await check(page.locator('.fabric-catalog-table tbody tr')).toHaveCount(25);
     await check(page.locator('.fabric-catalog-table tbody tr').first()).toContainText('0.19.130');
+  });
+  it('registers a discovered Fabric pair against its mapping without an installer input', async () => {
+    fabricSynced = true;
+    fabricMapping = true;
+    await page.goto(
+      `${origin}owner/integrations/minecraft/versions?runtime=fabric&fabricKind=loaders&fabricGame=1.21.130`,
+    );
+    const register = page.getByRole('button', {
+      name: 'Register Minecraft 1.21.130 with Loader 0.19.128',
+      exact: true,
+    });
+    await check(register).toBeEnabled();
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/fabric-registration-desktop-en.png',
+      fullPage: true,
+    });
+    await axe();
+    fabricRegistrationFails = true;
+    await register.click();
+    await check(register).toBeEnabled();
+    await check(page.locator('.fabric-catalog-table')).toBeVisible();
+    fabricRegistrationFails = false;
+    await register.click();
+    await check(
+      page.getByRole('button', { name: 'Registered combinations', exact: true }),
+    ).toHaveAttribute('aria-pressed', 'true');
+    await check(page.getByRole('dialog', { name: '1.21.130', exact: true })).toBeVisible();
+    expect(writes.map((write) => write.body)).toEqual(
+      [0, 1].map(() => ({
+        mappingId: fabricMappingId,
+        release: '1.21.130',
+        loaderVersion: '0.19.128',
+      })),
+    );
+    expect(writes.every((write) => write.path === '/v1/owner/minecraft/fabric/combinations')).toBe(
+      true,
+    );
+    await axe();
+  });
+  it('blocks pair registration without a Fabric mapping and preserves usable mobile discovery', async () => {
+    fabricSynced = true;
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.addInitScript(() => localStorage.setItem('nh.locale', 'it'));
+    await page.goto(
+      `${origin}owner/integrations/minecraft/versions?runtime=fabric&fabricKind=loaders&fabricGame=1.21.130`,
+    );
+    await check(page.locator('.fabric-catalog-table tbody button')).toBeDisabled();
+    expect(writes).toHaveLength(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(
+      true,
+    );
+    expect(
+      await page
+        .locator('.fabric-catalog-table tbody .version-catalog-badge')
+        .evaluate((element) => element.clientHeight),
+    ).toBeLessThan(60);
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/fabric-registration-mobile-it.png',
+      fullPage: true,
+    });
+    await axe();
+  });
+  it('imports recommended Fabric pairs with bounded pages and resumes without enabling them', async () => {
+    fabricSynced = true;
+    fabricMapping = true;
+    const batches: Record<string, unknown>[] = [];
+    let fail = true;
+    await page.route('**/v1/owner/minecraft/fabric/combinations/sync', async (route) => {
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      batches.push(body);
+      if (body.cursor === 1 && fail) {
+        fail = false;
+        return route.fulfill({ status: 503, json: { code: 'integration_unavailable' } });
+      }
+      return route.fulfill({
+        json: {
+          items: [
+            {
+              version: body.cursor === 1 ? '1.21.129' : '1.21.130',
+              releaseType: 'release',
+              status: 'registered',
+            },
+          ],
+          total: 2,
+          nextCursor: body.cursor === 1 ? null : 1,
+        },
+      });
+    });
+    await page.goto(
+      `${origin}owner/integrations/minecraft/versions?runtime=fabric&fabricView=registered`,
+    );
+    await page.getByRole('button', { name: 'Sync versions', exact: true }).click();
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Sync versions', exact: true })
+      .click();
+    await check(page.getByRole('button', { name: 'Resume discovery', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Resume discovery', exact: true }).click();
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Resume discovery', exact: true })
+      .click();
+    await check.poll(() => batches.length).toBe(3);
+    expect(batches).toEqual(
+      [0, 1, 1].map((cursor) => ({ mappingId: fabricMappingId, all: false, cursor, limit: 5 })),
+    );
+    await page.getByRole('button', { name: 'View scan log', exact: true }).click();
+    await check(page.getByRole('log')).toContainText('1.21.130');
+    await check(page.getByRole('log')).toContainText('1.21.129');
+    await axe();
+  });
+  it('does not navigate back to Fabric when a registration completes after leaving the runtime', async () => {
+    fabricSynced = true;
+    fabricMapping = true;
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let requested = false;
+    let replied = false;
+    await page.route('**/v1/owner/minecraft/fabric/combinations', async (route) => {
+      requested = true;
+      await held;
+      await route.fulfill({ json: { id: makeChoice(99).id } });
+      replied = true;
+    });
+    await page.goto(
+      `${origin}owner/integrations/minecraft/versions?runtime=fabric&fabricKind=loaders&fabricGame=1.21.130`,
+    );
+    await page
+      .getByRole('button', {
+        name: 'Register Minecraft 1.21.130 with Loader 0.19.128',
+        exact: true,
+      })
+      .click();
+    await check.poll(() => requested).toBe(true);
+    await page.getByRole('button', { name: 'Vanilla', exact: true }).click();
+    release?.();
+    await check.poll(() => replied).toBe(true);
+    await check(page.getByRole('button', { name: 'Vanilla', exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await check(page.getByRole('dialog')).toHaveCount(0);
+    expect(new URL(page.url()).searchParams.get('combination')).toBeFalsy();
+  });
+  it('clears a Fabric scan cursor when switching runtime', async () => {
+    fabricSynced = true;
+    fabricMapping = true;
+    let fabricCalls = 0;
+    const vanillaBatches: Record<string, unknown>[] = [];
+    await page.route('**/v1/owner/minecraft/fabric/combinations/sync', async (route) => {
+      fabricCalls++;
+      if (fabricCalls > 1)
+        return route.fulfill({ status: 503, json: { code: 'integration_unavailable' } });
+      return route.fulfill({
+        json: {
+          items: [{ version: '26.1', releaseType: 'release', status: 'registered' }],
+          total: 10,
+          nextCursor: 5,
+        },
+      });
+    });
+    await page.route('**/v1/owner/minecraft/catalog/sync', async (route) => {
+      vanillaBatches.push(route.request().postDataJSON() as Record<string, unknown>);
+      return route.fulfill({ json: { items: [], total: 0, nextCursor: null } });
+    });
+    await page.goto(
+      `${origin}owner/integrations/minecraft/versions?runtime=fabric&fabricView=registered`,
+    );
+    await page.getByRole('button', { name: 'Sync versions', exact: true }).click();
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Sync versions', exact: true })
+      .click();
+    await check(page.getByRole('button', { name: 'Resume discovery', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Vanilla', exact: true }).click();
+    await page.getByRole('button', { name: 'Sync versions', exact: true }).click();
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Sync versions', exact: true })
+      .click();
+    await check.poll(() => vanillaBatches.length).toBe(1);
+    expect(vanillaBatches[0]).toEqual({
+      mappingId,
+      all: false,
+      cursor: 0,
+      enableSupported: false,
+      limit: 20,
+    });
   });
   it('keeps the last catalog visible after a failed refresh and exposes registered Fabric view', async () => {
     fabricSynced = true;

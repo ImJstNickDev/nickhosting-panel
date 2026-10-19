@@ -1736,3 +1736,15 @@ The previous running image is retained locally as
 `nickhosting-dev-app:before-fabric-associations-20261019`; source mounts must also
 be reverted for image rollback to restore application behavior. Do not down/reset
 the stack or drop persistent data. See the corresponding M5 validation entry.
+
+### Fabric registered-combination bridge (2026-10-19)
+
+This source-only update adds Owner registration routes and UI controls; it needs
+no migration, package installation, image rebuild or new infrastructure. Existing
+dev API/Vite watchers load the update. Catalog browsing remains local; explicit
+registration can read official runtime metadata and the selected egg.
+
+Rollback: revert this update’s source, preserving registered combinations and all
+existing data. No schema downgrade or provider cleanup is needed. Valid old
+combination identities remain reusable; new mapping-sensitive identities are
+opaque to older readers. No provider servers are created by registration.

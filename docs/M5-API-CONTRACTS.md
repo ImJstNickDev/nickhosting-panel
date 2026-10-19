@@ -1595,3 +1595,25 @@ set. Missing relations in an older snapshot mean associations are not yet loaded
 not that the global Loader list is compatible with every Minecraft version.
 See [discovery policy](GAME-INTEGRATIONS.md#fabric-version-discovery) for bounded
 incremental refresh, daily full revalidation and installer-latest semantics.
+
+### Fabric catalog → registered combinations
+
+Both routes require current interactive Owner authority and an enabled Minecraft
+Fabric runtime/egg mapping. They never create or modify Pterodactyl servers.
+
+- `POST /v1/owner/minecraft/fabric/combinations`: strict
+  `{ mappingId, release, loaderVersion }`; HTTP201 `{ id }`. The pair must occur
+  in cached associations; Installer is the latest cached version, resolved exactly.
+  Repeated registration returns the same existing ID without re-enabling it.
+- `POST /v1/owner/minecraft/fabric/combinations/sync`: strict
+  `{ mappingId, all?: boolean, cursor?: number, limit?: number }`. Defaults are
+  false/0/5; limit is 1–20 and cursor 0–2000. HTTP200 returns
+  `{ items, nextCursor, total }`; each item contains `version`, `releaseType`,
+  `status: registered | unavailable`, and `id` or `reason`. Picks one recommended
+  associated Loader per game, not every pair. Non-stable games require `all`.
+
+One snapshot fixes the Installer and associations throughout a bounded request.
+Metadata/egg reads are shared within that request; existing registrations need no
+provider access. Expected unsupported combinations appear as unavailable items;
+authorization, conflicts and unexpected errors stop the scan. Registration does
+not bypass Fabric’s existing creation/evidence gates or add an enable flag.

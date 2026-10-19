@@ -38,7 +38,10 @@ export function MinecraftCatalogScan() {
     mappings.data?.filter((m) => m.game_id === 'minecraft' && m.runtime_id === runtime) ?? [];
   const mapping = eligible.find((m) => m.id === params.get('mapping')) ?? eligible[0];
   const lastScope = useRef('');
-  const scope = `${mapping?.id ?? ''}:${all}`;
+  const scope = `${runtime}:${mapping?.id ?? ''}:${all}`;
+  const currentScope = useRef(scope);
+  currentScope.current = scope;
+  const runScope = useRef('');
   const fabricDiscovery = runtime === 'fabric' && params.get('fabricView') !== 'registered';
   useLayoutEffect(() => {
     if (fabricDiscovery) {
@@ -68,14 +71,16 @@ export function MinecraftCatalogScan() {
     return () => observer?.disconnect();
   }, [location.pathname, fabricDiscovery]);
   useEffect(() => {
-    if (!busy && lastScope.current !== scope) {
+    if (lastScope.current !== scope) {
+      controller.current?.abort();
       lastScope.current = scope;
       setBatch(undefined);
       setMeasurement(undefined);
       setCancelled(false);
       setFailure(undefined);
+      setRunLabel('');
     }
-  }, [scope, busy]);
+  }, [scope]);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -88,10 +93,17 @@ export function MinecraftCatalogScan() {
     void queryClient.invalidateQueries({ queryKey: ['creation'] });
   };
   async function sync() {
-    if (!mapping || mapping.enabled === false || runtime !== 'vanilla' || controller.current)
+    if (
+      !mapping ||
+      mapping.enabled === false ||
+      !['vanilla', 'fabric'].includes(runtime) ||
+      controller.current
+    )
       return;
     const active = new AbortController();
     controller.current = active;
+    const activeScope = scope;
+    runScope.current = scope;
     setRunLabel(mappingLabel(mapping));
     setBusy(true);
     setCancelled(false);
@@ -104,17 +116,26 @@ export function MinecraftCatalogScan() {
         previous: batch,
         signal: active.signal,
         request: (cursor, signal) =>
-          api<CatalogBatch>('/v1/owner/minecraft/catalog/sync', {
-            signal,
-            body: { mappingId: mapping.id, all, enableSupported: false, cursor, limit: 20 },
-          }),
+          api<CatalogBatch>(
+            runtime === 'fabric'
+              ? '/v1/owner/minecraft/fabric/combinations/sync'
+              : '/v1/owner/minecraft/catalog/sync',
+            {
+              signal,
+              body:
+                runtime === 'fabric'
+                  ? { mappingId: mapping.id, all, cursor, limit: 5 }
+                  : { mappingId: mapping.id, all, enableSupported: false, cursor, limit: 20 },
+            },
+          ),
         progress: (result, measured) => {
+          if (!mounted.current || currentScope.current !== activeScope) return;
           setBatch(result);
           setMeasurement(measured);
         },
       });
     } catch (error) {
-      if (mounted.current) {
+      if (mounted.current && currentScope.current === activeScope) {
         if (!active.signal.aborted) setFailure(error);
         else setCancelled(true);
       }
@@ -143,7 +164,7 @@ export function MinecraftCatalogScan() {
     <>
       {createPortal(
         <>
-          {runtime === 'vanilla' && (
+          {['vanilla', 'fabric'].includes(runtime) && (
             <button
               type="button"
               className="secondary minecraft-detect"
@@ -185,7 +206,13 @@ export function MinecraftCatalogScan() {
                     {t('versions.allVersions')}
                   </button>
                 </fieldset>
-                <p className="muted">{t('versions.scanDescription')}</p>
+                <p className="muted">
+                  {t(
+                    runtime === 'fabric'
+                      ? 'fabricCatalog.scanDescription'
+                      : 'versions.scanDescription',
+                  )}
+                </p>
                 <button
                   type="button"
                   disabled={!mapping || mapping.enabled === false || busy}
@@ -206,7 +233,10 @@ export function MinecraftCatalogScan() {
       {createPortal(
         <>
           {failure !== undefined && <ErrorNotice error={failure} />}
-          {(busy || batch || cancelled || failure !== undefined) && (
+          {((busy && runScope.current === scope) ||
+            batch ||
+            cancelled ||
+            failure !== undefined) && (
             <div className="minecraft-scan-summary">
               <span className="minecraft-scan-run">{runLabel}</span>
               <div className="minecraft-scan-line">

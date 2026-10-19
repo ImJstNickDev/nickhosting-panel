@@ -122,7 +122,7 @@ for 1.17; the integration follows that recommendation for stable 1.17/1.17.1,
 while Vanilla retains its Java 16 baseline and snapshots retain their metadata
 requirements. This affects new resolutions, not existing immutable bindings. Installer-image Java is separate from runtime Java.
 Fabric remains behind its existing exact binding/evidence/rollout gates; this change
-does not enable public creation or install mods. Catalog scanning remains Vanilla-only.
+does not enable public creation or install mods. Owner catalog registration supports Vanilla and Fabric; registration alone does not enable Fabric creation.
 
 Sources checked 2026-10-19: [Mojang manifest and linked version metadata](https://piston-meta.mojang.com/mc/game/version_manifest_v2.json),
 [Fabric Java 16 transition](https://fabricmc.net/2021/05/27/117-for-developers.html),
@@ -762,8 +762,15 @@ See [datapack workflow, limits and contracts](M5-MINECRAFT-DATAPACKS.md).
 Owner → Integrations → Minecraft → Versions → Fabric exposes supported Minecraft,
 Loader and Installer versions. Selecting a Minecraft row opens its compatible Loader
 list. Search, pagination and all association filters read the local snapshot only.
-Registered provisioning combinations remain separate: discovery does not register
-a Cartesian product, modify mappings or make Fabric eligible for creation.
+Discovery refresh and provisioning registration are separate operations. Discovery
+does not register a Cartesian product, modify mappings or enable Fabric creation.
+From a Minecraft version’s compatible Loader list, **Register** adds that exact pair
+to the selected existing runtime/egg mapping. In **Registered combinations**,
+**Sync versions** registers one recommended associated Loader per Minecraft version
+(first stable Loader in upstream order, otherwise the first associated Loader).
+The release filter applies; additional Loaders remain individually registrable.
+The scan processes five versions per request, with progress, cancellation and resume.
+Automatic 15-minute discovery refresh does not run this registration scan.
 
 `GET /v1/owner/minecraft/fabric/catalog` is a local-only Owner read.
 `POST` to the same path accepts `{}`, durably queues a refresh and immediately
@@ -807,3 +814,20 @@ upstream entry, irrespective of that recommendation flag. This discovery does no
 introduce an installer pinning control or change the existing exact provisioning
 contracts; selecting Minecraft/Loader during creation is a separate integration
 step. Existing launcher-format, rollout and runtime support boundaries remain.
+
+### Fabric catalog registration
+
+Registration resolves the latest Installer from the accepted local catalog and
+freezes its exact version in the immutable combination. The FabricUpdated contract
+automatically binds `MC_VERSION`, `LOADER_VERSION`, `FABRIC_VERSION` and optional
+`SERVER_JARFILE=server.jar`; extra egg variables require explicit mapping values.
+Integration-managed Java/image selection still uses the Minecraft/Loader rules.
+Custom eggs retain the existing explicit advanced binding path.
+
+Each bounded scan shares one catalog snapshot, metadata reads and egg metadata.
+Existing matching combinations return immediately without provider/upstream reads,
+including combinations explicitly disabled by the Owner. Mapping revisions produce
+a new identity; valid legacy identities retain their IDs and associated evidence.
+No server, egg or mapping is mutated. Missing associations, unsupported metadata or
+egg contracts remain reported failures; Fabric’s existing evidence/rollout and
+installed-launcher-format requirements are unchanged.

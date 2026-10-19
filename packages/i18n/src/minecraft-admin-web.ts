@@ -1,6 +1,16 @@
 export const minecraftAdminWebMessages: Record<string, readonly [string, string]> = {
   'versions.minecraftVersions': ['Minecraft versions', 'Versioni Minecraft'],
   'fabricCatalog.queued': ['Queued…', 'In coda…'],
+  'fabricCatalog.register': ['Register', 'Registra'],
+  'fabricCatalog.registering': ['Registering…', 'Registrazione…'],
+  'fabricCatalog.registerPair': [
+    'Register Minecraft {game} with Loader {loader}',
+    'Registra Minecraft {game} con Loader {loader}',
+  ],
+  'fabricCatalog.scanDescription': [
+    'Registers one recommended Loader per Minecraft version from the local catalog. Does not enable server creation.',
+    'Registra un Loader consigliato per ogni versione Minecraft dal catalogo locale. Non abilita la creazione dei server.',
+  ],
   'fabricCatalog.gameVersion': ['Minecraft version', 'Versione Minecraft'],
   'fabricCatalog.allLoaders': ['All Loaders', 'Tutti i Loader'],
   'fabricCatalog.loadersFor': ['Loaders for {version}', 'Loader per {version}'],
@@ -32,7 +42,10 @@ export const minecraftAdminWebMessages: Record<string, readonly [string, string]
     'The Fabric catalog has not been synced yet.',
     'Il catalogo Fabric non è ancora stato sincronizzato.',
   ],
-  'fabricCatalog.count': ['{count, number} versions', '{count, number} versioni'],
+  'fabricCatalog.count': [
+    '{count, plural, one {# version} other {# versions}}',
+    '{count, plural, one {# versione} other {# versioni}}',
+  ],
   'fabricCatalog.installerPolicy': [
     'Installer: latest available ({version})',
     'Installer: ultima versione disponibile ({version})',

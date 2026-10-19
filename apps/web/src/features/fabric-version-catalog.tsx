@@ -5,6 +5,7 @@ import { useSearchParams } from 'react-router';
 import { api, queryClient } from '../api/client.js';
 import { useT } from '../app/i18n.js';
 import { ErrorNotice, Loading, Select, Time } from '../components/ui.js';
+import type { Mapping } from './minecraft-admin-model.js';
 import { MinecraftAdminIcon } from './minecraft-admin-presentation.js';
 import { VersionCatalogFrame } from './version-catalog-frame.js';
 
@@ -12,13 +13,19 @@ const endpoint = '/v1/owner/minecraft/fabric/catalog';
 const queryKey = ['owner-fabric-catalog'];
 const pageSize = 25;
 
-/** Discovery is independent of egg mappings and registered creation choices. */
+/** Catalog reads stay local; registration binds a chosen pair to an Owner mapping. */
 export function FabricVersionCatalog({
   navigation,
   kind,
+  mapping,
+  mappingContext,
+  onRegistered,
 }: {
   navigation: ReactNode;
   kind: 'games' | 'loaders' | 'installers';
+  mapping?: Mapping;
+  mappingContext: ReactNode;
+  onRegistered: (id: string, mappingId: string) => void;
 }) {
   const t = useT();
   const [params, setParams] = useSearchParams();
@@ -39,6 +46,21 @@ export function FabricVersionCatalog({
   const [page, setPage] = useState(1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>();
+  const [registrationError, setRegistrationError] = useState<unknown>();
+  const [registering, setRegistering] = useState<string | null>(null);
+  const registrationLock = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const registrationScope = `${mapping?.id ?? ''}:${requestedGame}:${kind}`;
+  const currentRegistrationScope = useRef(registrationScope);
+  currentRegistrationScope.current = registrationScope;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: A registration error belongs to its mapping and selected game.
+  useEffect(() => setRegistrationError(undefined), [registrationScope]);
   const lock = useRef(false);
   const table = useRef<HTMLElement>(null);
   const previousKind = useRef(kind);
@@ -86,6 +108,31 @@ export function FabricVersionCatalog({
   const compatibleLoaders = new Set(
     loaderSetIndex === undefined ? [] : (data?.relations?.loaderSets[loaderSetIndex] ?? []),
   );
+  async function register(loaderVersion: string) {
+    if (!game || !mapping || mapping.enabled === false || registrationLock.current) return;
+    const scope = registrationScope;
+    registrationLock.current = true;
+    setRegistering(loaderVersion);
+    setRegistrationError(undefined);
+    try {
+      const result = await api<{ id: string }>('/v1/owner/minecraft/fabric/combinations', {
+        method: 'POST',
+        body: { mappingId: mapping.id, release: game, loaderVersion },
+      });
+      void queryClient.invalidateQueries({ queryKey: ['owner-minecraft-compatibility'] });
+      void queryClient.invalidateQueries({ queryKey: ['owner-minecraft-detail', result.id] });
+      void queryClient.invalidateQueries({ queryKey: ['creation'] });
+      if (mounted.current && currentRegistrationScope.current === scope)
+        onRegistered(result.id, mapping.id);
+    } catch (failure) {
+      if (mounted.current && currentRegistrationScope.current === scope)
+        setRegistrationError(failure);
+    } finally {
+      registrationLock.current = false;
+      if (mounted.current) setRegistering(null);
+    }
+  }
+  const registrationVisible = kind === 'loaders' && Boolean(game);
   function chooseGame(version: string) {
     focusLoaders.current = kind !== 'loaders';
     setParams((previous) => {
@@ -205,19 +252,25 @@ export function FabricVersionCatalog({
           </div>
         }
         status={
-          <div className="fabric-catalog-status muted">
-            <span>
-              {t('fabricCatalog.installerPolicy', { version: data?.latestInstallerVersion ?? '—' })}
-            </span>
-            {data?.status.lastSuccessAt && (
+          <>
+            {registrationVisible && mappingContext}
+            <div className="fabric-catalog-status muted">
               <span>
-                {t('fabricCatalog.lastSync')} <Time value={data.status.lastSuccessAt} />
-                {data.status.stale && ` · ${t('fabricCatalog.stale')}`}
+                {t('fabricCatalog.installerPolicy', {
+                  version: data?.latestInstallerVersion ?? '—',
+                })}
               </span>
-            )}
-          </div>
+              {data?.status.lastSuccessAt && (
+                <span>
+                  {t('fabricCatalog.lastSync')} <Time value={data.status.lastSuccessAt} />
+                  {data.status.stale && ` · ${t('fabricCatalog.stale')}`}
+                </span>
+              )}
+            </div>
+          </>
         }
       >
+        {registrationError !== undefined && <ErrorNotice error={registrationError} />}
         {(error || catalog.error) && (
           <ErrorNotice
             error={error || catalog.error}
@@ -248,12 +301,17 @@ export function FabricVersionCatalog({
           {catalog.isPending ? (
             <Loading />
           ) : (
-            <table>
+            <table className={registrationVisible ? 'fabric-register-table' : undefined}>
               <caption className="visually-hidden">{t(`fabricCatalog.${kind}`)}</caption>
               <thead>
                 <tr>
                   <th scope="col">{t('fabricCatalog.version')}</th>
                   <th scope="col">{t('fabricCatalog.channel')}</th>
+                  {registrationVisible && (
+                    <th scope="col" className="fabric-register-column">
+                      <span className="visually-hidden">{t('web.actions')}</span>
+                    </th>
+                  )}
                 </tr>
               </thead>
               <tbody>
@@ -290,11 +348,31 @@ export function FabricVersionCatalog({
                         '—'
                       )}
                     </td>
+                    {registrationVisible && (
+                      <td className="fabric-register-column">
+                        <button
+                          type="button"
+                          className="secondary fabric-register"
+                          disabled={!mapping || mapping.enabled === false || registering !== null}
+                          aria-label={t('fabricCatalog.registerPair', {
+                            game,
+                            loader: item.version,
+                          })}
+                          onClick={() => void register(item.version)}
+                        >
+                          {t(
+                            registering === item.version
+                              ? 'fabricCatalog.registering'
+                              : 'fabricCatalog.register',
+                          )}
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))}
                 {!items.length && (
                   <tr>
-                    <td colSpan={2} className="fabric-catalog-empty">
+                    <td colSpan={registrationVisible ? 3 : 2} className="fabric-catalog-empty">
                       {t(data?.synced ? 'fabricCatalog.noMatches' : 'fabricCatalog.notSynced')}
                     </td>
                   </tr>

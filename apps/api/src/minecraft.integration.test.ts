@@ -732,12 +732,110 @@ describe('Minecraft backend API authorization and user projection', () => {
     );
     expect(management).not.toHaveBeenCalled();
   });
+  it('validates discovered Fabric registrations locally before constructing the provider', async () => {
+    actor = fixture.owner;
+    const endpoint = '/v1/owner/minecraft/fabric/combinations';
+    expect((await app.request(endpoint, { method: 'POST', body: '{}' })).status).toBe(400);
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({
+        last_success_at: new Date(),
+        manifest_json: JSON.stringify({
+          games: [{ version: '1.21.1', stable: true }],
+          loaders: [{ version: '0.16.10', stable: true }],
+          installers: [{ version: '1.1.2', stable: true }],
+          relations: {
+            checkedAt: new Date().toISOString(),
+            loaderSets: [['0.16.10']],
+            gameLoaderSets: { '1.21.1': 0 },
+          },
+        }),
+      })
+      .where('id', '=', 'fabric')
+      .execute();
+    const rejected = await app.request(endpoint, {
+      method: 'POST',
+      body: JSON.stringify({
+        mappingId: fixture.mappingId,
+        release: '1.21.1',
+        loaderVersion: 'unknown',
+      }),
+    });
+    expect(rejected.status).toBe(400);
+    expect(await rejected.json()).toEqual({ code: 'validation_failed' });
+    const sync = await app.request(`${endpoint}/sync`, {
+      method: 'POST',
+      body: JSON.stringify({ mappingId: fixture.mappingId, limit: 21 }),
+    });
+    expect(sync.status).toBe(400);
+    expect(management).not.toHaveBeenCalled();
+    await fixture.db
+      .insertInto('game_integrations')
+      .values({ id: 'minecraft', version: '1.0.0', manifest: '{}' })
+      .onConflict((c) => c.column('id').doNothing())
+      .execute();
+    await fixture.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'minecraft', runtime_id: 'fabric', enabled: true })
+      .where('id', '=', fixture.mappingId)
+      .execute();
+    const mapping = await fixture.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', fixture.mappingId)
+      .executeTakeFirstOrThrow();
+    const id = randomUUID();
+    await fixture.db
+      .insertInto('minecraft_combinations')
+      .values({
+        id,
+        mapping_id: mapping.id,
+        identity_digest: 'a'.repeat(64),
+        mapping_digest: minecraftMappingDigest(mapping),
+        combination: JSON.stringify({
+          profile: 'fabric',
+          release: '1.21.1',
+          loaderVersion: '0.16.10',
+          installerVersion: '1.1.2',
+        }),
+        resolved_runtime: '{}',
+        binding: '{}',
+        enabled: false,
+      })
+      .execute();
+    const registered = await app.request(endpoint, {
+      method: 'POST',
+      body: JSON.stringify({ mappingId: mapping.id, release: '1.21.1', loaderVersion: '0.16.10' }),
+    });
+    expect(registered.status).toBe(201);
+    expect(await registered.json()).toEqual({ id });
+    const repeatedSync = await app.request(`${endpoint}/sync`, {
+      method: 'POST',
+      body: JSON.stringify({ mappingId: mapping.id }),
+    });
+    expect(repeatedSync.status).toBe(200);
+    expect(await repeatedSync.json()).toMatchObject({
+      items: [{ id, status: 'registered' }],
+      total: 1,
+      nextCursor: null,
+    });
+    expect(management).not.toHaveBeenCalled();
+    await fixture.db.deleteFrom('minecraft_combinations').where('id', '=', id).execute();
+    // Do not leak this fixture into local-catalog tests in the same suite.
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({ manifest_json: null, last_success_at: null })
+      .where('id', '=', 'fabric')
+      .execute();
+  });
   it('rejects user access to every technical compatibility administration route', async () => {
     const id = randomUUID();
     for (const [method, path] of [
       ['GET', '/v1/owner/minecraft/manifest'],
       ['GET', '/v1/owner/minecraft/fabric/catalog'],
       ['POST', '/v1/owner/minecraft/fabric/catalog'],
+      ['POST', '/v1/owner/minecraft/fabric/combinations'],
+      ['POST', '/v1/owner/minecraft/fabric/combinations/sync'],
       ['GET', '/v1/owner/minecraft/compatibility'],
       ['POST', '/v1/owner/minecraft/compatibility'],
       ['POST', '/v1/owner/minecraft/catalog/sync'],

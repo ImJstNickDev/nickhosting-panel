@@ -4,6 +4,7 @@ import { type Database, getSettings, recordAudit } from '@nickhosting/database';
 import { evaluateGameAccess } from '@nickhosting/game-sdk';
 import {
   assertMinecraftChoice,
+  fabricEggBinding,
   fetchMinecraftProtocols,
   minecraftCombinationSchema,
   minecraftDeclaredCapabilities,
@@ -93,7 +94,10 @@ export async function registerMinecraftCombination(
   context: AuthContext,
   input: unknown,
   env: Environment = {},
-  options: { metadata?: RuntimeMetadataClient; protocols?: typeof fetchMinecraftProtocols } = {},
+  options: {
+    metadata?: RuntimeMetadataClient;
+    protocols?: typeof fetchMinecraftProtocols;
+  } = {},
 ) {
   ownerOnly(context);
   const value = parse(
@@ -126,7 +130,7 @@ export async function registerMinecraftCombination(
   const egg = await adapter.getEgg(mapping.nest_id, mapping.egg_id);
   const suppliedBinding =
     value.binding ??
-    vanillaEggBinding({
+    (runtime.profile === 'fabric' ? fabricEggBinding : vanillaEggBinding)({
       runtime,
       variables: egg.relationships?.variables?.data.map((entry) => entry.attributes) ?? [],
       environment: mapping.environment,
@@ -190,8 +194,11 @@ export async function registerMinecraftCombination(
     }),
     protocolSource: protocols.source,
   });
-  const identity = minecraftDigest({ combination, binding });
+  const legacyIdentity = minecraftDigest({ combination, binding });
   const mappingDigest = minecraftMappingDigest(mapping);
+  // New registrations include the mapping revision. Old matching records retain
+  // their identity and signed reports; changed mappings produce a fresh record.
+  const identity = minecraftDigest({ combination, binding, mappingDigest });
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
     const current = await currentInteractiveContext(tx, context, env);
@@ -206,7 +213,8 @@ export async function registerMinecraftCombination(
       .selectFrom('minecraft_combinations')
       .select('id')
       .where('mapping_id', '=', mapping.id)
-      .where('identity_digest', '=', identity)
+      .where('mapping_digest', '=', mappingDigest)
+      .where('identity_digest', 'in', [identity, legacyIdentity])
       .executeTakeFirst();
     if (existing) return existing;
     const id = randomUUID();

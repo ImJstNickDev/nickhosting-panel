@@ -14201,3 +14201,49 @@ Live development evidence (existing Owner authorization for migrations/restarts)
 Rollback and migration handling are in [M5 environments](M5-ENVIRONMENTS.md#fabric-association-queue-migration-2026-10-19).
 Fabric creation/installer-format work remains a separate next step; discovery does
 not silently enable unverified runtimes.
+
+### Fabric catalog registration bridge (2026-10-19)
+
+Scope: register a selected cached Minecraft/Loader pair, or scan one recommended
+associated Loader per Minecraft, using the existing Owner mapping and latest
+Installer. No bulk Cartesian registration and no automatic Fabric enablement.
+
+Evidence:
+
+- `scripts/dev.sh pnpm exec vitest run games/minecraft/src/fabric-egg.test.ts`: 9/9.
+- Isolated integration runner (`scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts`) with
+  `packages/server-management/src/fabric-registration.integration.test.ts`,
+  `minecraft-registry.integration.test.ts`, `minecraft-catalog.integration.test.ts`
+  and `apps/api/src/minecraft.integration.test.ts`: 46/46. Covers authority,
+  association validation, exact Installer, metadata reuse, disablement preservation,
+  concurrent idempotence, mapping revisions, valid legacy identity reuse and
+  publication of a new catalog during a bounded registration request.
+- Same isolated runner with `--config vitest.browser.config.ts
+  apps/web/tests/minecraft-versions-workspace.browser.test.ts`: 16/16 in Firefox.
+  Real rendered UI with isolated API responses: registration failure/retry, missing
+  mapping, bounded scan/resume, runtime switches, late request completion, EN/IT,
+  desktop/mobile, focus and axe WCAG checks.
+- `pnpm typecheck`, production `pnpm build`, `pnpm i18n:check` (2471 EN/IT/pseudo
+  keys), scoped Biome and `git diff --check`: passed. Existing lazy chunk-size
+  warning remains; no new dependencies.
+- Independent backend and rendered UI/content/accessibility review: no remaining
+  must-fix findings. Fixed mapping-revision identity reuse, catalog snapshot drift
+  inside a batch and an overly narrow mobile recommendation badge.
+- Sanitized screenshots: `.codex/local/m5-browser/screenshots/fabric-registration-desktop-en.png`
+  and `fabric-registration-mobile-it-reviewed.png`.
+
+Live dev Owner API smoke used the existing FabricUpdated mapping and real read-only
+egg/runtime metadata. Registering Minecraft26.1 / Loader0.19.5 resolved Installer1.1.2
+and Java25 (`ghcr.io/ptero-eggs/yolks:java_25`), with automatic
+MC_VERSION/LOADER_VERSION/FABRIC_VERSION bindings. HTTP201 took981ms; repeated
+registration took29ms and returned the identical registry ID. These are single
+smoke observations, not latency guarantees. The registry row remains disabled.
+No game server was provisioned or changed; Owner session and existing data remain.
+Private sanitized result: `.codex/local/fabric-registration-live.jsonl`.
+
+No migration, image rebuild or explicit service restart was required; API/Vite
+source watchers loaded the change. No Pterodactyl/Wings/Blueprint/DNS writes, new
+game test assets or production deployment. Isolated test schemas were cleaned.
+Rollback preserves registry rows as described in M5 environments. PR21 stays
+open/unmerged; Fabric creation/launcher verification remains separate and issue18
+is unchanged.

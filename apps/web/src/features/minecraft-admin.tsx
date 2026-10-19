@@ -290,7 +290,9 @@ export function OwnerMinecraftPage() {
             <span className="muted">{t('gameAdmin.mapping')}</span>
             <strong>{mappingLabel(mapping, false)}</strong>
           </span>
-        ) : null}
+        ) : (
+          <span className="muted">{t('gameAdmin.noMapping')}</span>
+        )}
       </div>
       {mapping?.enabled === false && (
         <span id="minecraft-mapping-disabled" className="muted">
@@ -436,7 +438,15 @@ export function OwnerMinecraftPage() {
         ))}
       </fieldset>
       {fabricDiscovery ? (
-        <FabricVersionCatalog kind={fabricKind} navigation={catalogNavigation} />
+        <FabricVersionCatalog
+          kind={fabricKind}
+          navigation={catalogNavigation}
+          mapping={mapping}
+          mappingContext={mappingContext}
+          onRegistered={(id, mappingId) =>
+            update({ fabricView: 'registered', mapping: mappingId, combination: id }, true)
+          }
+        />
       ) : (
         <>
           <VersionCatalogFrame

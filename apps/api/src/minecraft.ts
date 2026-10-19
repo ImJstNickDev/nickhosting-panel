@@ -30,11 +30,13 @@ import {
   parse,
   prepareMinecraftContentPlan,
   prepareMinecraftCreationConfig,
+  registerFabricCatalogCombination,
   registerMinecraftCombination,
   requestFabricCatalogRefresh,
   requireMinecraftChoice,
   setMinecraftAvailability,
   setMinecraftBulkAvailability,
+  syncFabricRegisteredCatalog,
   syncMinecraftCatalog,
 } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
@@ -104,6 +106,31 @@ export function registerMinecraftRoutes(
     if (!games.some((game) => game.id === 'minecraft')) throw new DomainError('forbidden');
     c.header('Cache-Control', 'no-store');
     return c.json(await getFabricCatalog(db));
+  });
+  app.post('/v1/owner/minecraft/fabric/combinations', async (c) => {
+    const context = await owner(c);
+    return c.json(
+      await registerFabricCatalogCombination(
+        db,
+        async () => (await management()).adapter,
+        context,
+        await body(c),
+        env,
+      ),
+      201,
+    );
+  });
+  app.post('/v1/owner/minecraft/fabric/combinations/sync', async (c) => {
+    const context = await owner(c);
+    return c.json(
+      await syncFabricRegisteredCatalog(
+        db,
+        async () => (await management()).adapter,
+        context,
+        await body(c),
+        env,
+      ),
+    );
   });
   app.post('/v1/owner/minecraft/catalog/sync', async (c) => {
     const context = await owner(c);
