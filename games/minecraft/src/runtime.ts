@@ -329,9 +329,12 @@ export async function resolveMinecraftRuntime(
       new TextDecoder().decode((await read(`${url}.sha256`)).bytes).trim(),
     );
     artifacts.push({ role: 'installer', url, sha256: hash.toLowerCase() });
-    // Fabric uses Minecraft's Java baseline (including legacy metadata fallback),
-    // then raises it for the exact loader. Do not copy Vanilla's ranges here.
-    javaMajor = Math.max(javaMajor, pair.launcherMeta.min_java_version);
+    // Fabric recommends Java 17 for 1.17–1.20.4. The shared Minecraft baseline
+    // already selects 17 for 1.18–1.20.4; only stable 1.17/1.17.1 need an override.
+    // Snapshot requirements remain metadata-led. https://wiki.fabricmc.net/install
+    const recommendedJava =
+      entry.type === 'release' && /^1\.17(?:\.1)?$/.test(request.release) ? 17 : javaMajor;
+    javaMajor = Math.max(javaMajor, recommendedJava, pair.launcherMeta.min_java_version);
     installation = {
       kind: 'fabric-installer',
       args: [

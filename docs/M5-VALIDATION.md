@@ -14050,3 +14050,11 @@ binding and evidence/rollout eligibility; the ordinary catalog scan remains
 Vanilla-only. Installer-image Java and arbitrary mod requirements are separate.
 Existing persisted bindings retain their image. Rollback is a source revert;
 no database or game-data rollback is required. SFTPGo #18 remains a release gate.
+
+Fabric recommendation follow-up: at the Owner's request, stable Fabric 1.17 and
+1.17.1 select Java 17, extending the existing Java 17 choice through 1.20.4.
+Vanilla retains Java 16 for 1.17; snapshots use their exact metadata. Higher loader
+minimums still win. The same five-file focused command above passes **47/47 tests**,
+including missing Java metadata, a 1.17 prerelease and a higher loader requirement.
+Typecheck, scoped Biome and independent review passed. No infrastructure or
+persisted binding changes; no additional network requests.

@@ -96,7 +96,7 @@ version ranges and fixed-image games. Image requirements do **not** certify thos
 runtimes; Vanilla remains the only M4 real-server-verified profile.
 
 Fabric shares the integration's existing Minecraft Java baseline with Vanilla,
-then takes `max(Minecraft baseline, exact loader launcherMeta.min_java_version)`.
+then takes `max(Minecraft baseline, Fabric recommendation, exact loader launcherMeta.min_java_version)`.
 The range fallback is available when older release metadata omits Java; hash-verified
 Mojang metadata must agree with known release baselines. Snapshots use metadata,
 not release-name sorting. Missing loader metadata is not treated as Java 8.
@@ -111,16 +111,16 @@ image. No automatic egg edits, registry substitution or mapping conversion occur
 | Minecraft release with Fabric | Base Java | Fabric image suffix |
 | --- | --- | --- |
 | 1.14–1.16.5 | 8 | `java_8` |
-| 1.17–1.17.1 | 16 | `java_16` |
-| 1.18–1.20.4 | 17 | `java_17` |
+| 1.17–1.20.4 | 17 | `java_17` |
 | 1.20.5–1.21.11 | 21 | `java_21` |
 | 26.1 onward, while metadata agrees | 25 | `java_25` |
 
 These are base requirements, not guarantees for arbitrary mods or old loaders.
 A higher exact loader requirement selects the corresponding declared image, or
 fails if that major has no image rule. Fabric's current guide recommends Java 17
-for 1.17; the minimum is Java 16, retained here rather than upgrading all historic
-loader combinations implicitly. Installer-image Java is separate from runtime Java.
+for 1.17; the integration follows that recommendation for stable 1.17/1.17.1,
+while Vanilla retains its Java 16 baseline and snapshots retain their metadata
+requirements. This affects new resolutions, not existing immutable bindings. Installer-image Java is separate from runtime Java.
 Fabric remains behind its existing exact binding/evidence/rollout gates; this change
 does not enable public creation or install mods. Catalog scanning remains Vanilla-only.
 

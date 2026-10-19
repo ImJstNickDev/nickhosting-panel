@@ -164,8 +164,9 @@ describe('Minecraft exact runtime metadata', () => {
   it.each([
     ['1.14', null, 8, 8, '0.14.25', 'release'],
     ['1.16.5', 8, 8, 8, '0.19.5', 'release'],
-    ['1.17', 16, 8, 16, '0.11.3', 'release'],
-    ['1.17.1', 16, 8, 16, '0.19.5', 'release'],
+    ['1.17', 16, 8, 17, '0.11.3', 'release'],
+    ['1.17.1', 16, 8, 17, '0.19.5', 'release'],
+    ['1.17.1', null, 8, 17, '0.19.5', 'release'],
     ['1.18', 17, 8, 17, '0.12.5', 'release'],
     ['1.20.4', 17, 8, 17, '0.19.5', 'release'],
     ['1.20.5', 21, 8, 21, '0.19.5', 'release'],
@@ -173,8 +174,10 @@ describe('Minecraft exact runtime metadata', () => {
     ['26.1', 25, 8, 25, '0.19.5', 'release'],
     ['26.2', 25, 8, 25, '0.19.5', 'release'],
     ['25w03a', 21, 8, 21, '0.19.5', 'snapshot'],
+    ['1.17-rc1', 16, 8, 16, '0.19.5', 'snapshot'],
     // Synthetic loader minimum proves that the exact metadata overrides the base.
     ['1.16.5', 8, 17, 17, '0.19.5', 'release'],
+    ['1.17.1', 16, 21, 21, '0.19.5', 'release'],
   ] as const)(
     'selects Fabric %s / loader Java %s,%s as Java %s (%s, %s)',
     async (release, java, loaderJava, expected, loader, releaseType) => {
