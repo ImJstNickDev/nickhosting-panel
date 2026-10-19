@@ -25,7 +25,10 @@ export function MinecraftDatapackCatalog({
   release?: string;
   disabled: boolean;
   onClose(): void;
-  preparations: ReadonlyMap<string, 'queued' | 'preparing' | 'ready' | 'failed'>;
+  preparations: ReadonlyMap<
+    string,
+    'queued' | 'preparing' | 'ready' | 'failed' | 'blocked' | 'review'
+  >;
   onQueue(input: {
     provider: 'modrinth' | 'curseforge';
     projectId: string;
@@ -242,7 +245,9 @@ export function MinecraftDatapackCatalog({
                             ? 'preparing'
                             : preparation === 'queued'
                               ? 'queued'
-                              : 'catalog.choose',
+                              : preparation === 'blocked' || preparation === 'review'
+                                ? preparation
+                                : 'catalog.choose',
                       ),
                     )}
                   </button>

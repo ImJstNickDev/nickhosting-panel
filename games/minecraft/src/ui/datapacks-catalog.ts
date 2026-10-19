@@ -1,5 +1,55 @@
 /** The Minecraft integration owns its datapack vocabulary. */
 export const minecraftDatapacksMessages: Record<string, [string, string]> = {
+  'datapacks.dependencies.dependency': ['Dependency', 'Dipendenza'],
+  'datapacks.dependencies.hide': ['Hide preparation', 'Nascondi preparazione'],
+  'datapacks.dependencies.removeQueue': ['Remove from queue', 'Rimuovi dalla coda'],
+  'datapacks.blocked': ['Missing requirements', 'Requisiti mancanti'],
+  'datapacks.review': ['Conflict to resolve', 'Conflitto da risolvere'],
+  'datapacks.dependencies.details': ['Dependencies', 'Dipendenze'],
+  'datapacks.dependencies.optional': ['Optional additions', 'Aggiunte facoltative'],
+  'datapacks.dependencies.conflicts': ['Conflicts', 'Conflitti'],
+  'datapacks.dependencies.disableExplanation': [
+    'These packs will be disabled when you apply changes. Their files will be kept.',
+    'Questi pack verranno disabilitati quando applichi le modifiche. I file saranno conservati.',
+  ],
+  'datapacks.dependencies.back': ['Back', 'Indietro'],
+  'datapacks.dependencies.retry': ['Check again', 'Verifica di nuovo'],
+  'datapacks.dependencies.prepareSelection': ['Prepare selection', 'Prepara selezione'],
+  'datapacks.dependencies.disableAndPrepare': [
+    'Disable conflicts and prepare',
+    'Disabilita i conflitti e prepara',
+  ],
+  'datapacks.dependencies.disposition.install': ['Prepare', 'Da preparare'],
+  'datapacks.dependencies.disposition.reuse': ['Already available', 'Già disponibile'],
+  'datapacks.dependencies.disposition.enable': ['Enable', 'Da abilitare'],
+  'datapacks.dependencies.blocker.native_disabled': [
+    'Enable this pack in Minecraft before preparing these changes.',
+    'Abilita questo pack in Minecraft prima di preparare queste modifiche.',
+  ],
+  'datapacks.dependencies.blocker.prepared_conflict': [
+    'Discard the conflicting prepared change before continuing.',
+    'Scarta la modifica preparata in conflitto prima di continuare.',
+  ],
+  'datapacks.dependencies.blocker.mod_required': [
+    'Requires a compatible installed mod. Mods are not installed from this tab.',
+    'Richiede una mod compatibile installata. Le mod non si installano da questa scheda.',
+  ],
+  'datapacks.dependencies.blocker.version_unavailable': [
+    'No compatible version is available for this selection.',
+    'Non è disponibile una versione compatibile con questa selezione.',
+  ],
+  'datapacks.dependencies.blocker.dependency_conflict': [
+    'Conflicts with another required or installed component. Change the selection to continue.',
+    'È in conflitto con un altro componente richiesto o installato. Modifica la selezione per continuare.',
+  ],
+  'datapacks.dependencies.blocker.unknown_dependency': [
+    'The provider does not identify a dependency that can be resolved.',
+    'Il provider non identifica una dipendenza risolvibile.',
+  ],
+  'datapacks.dependencies.blocker.archive_unavailable': [
+    'No supported archive is available for automatic download.',
+    'Non è disponibile un archivio supportato per il download automatico.',
+  ],
   'datapacks.loading': ['Loading datapacks', 'Caricamento datapack'],
   'datapacks.applyFirst': ['Apply other changes first', 'Applica prima le altre modifiche'],
   'datapacks.nativeOffline': [

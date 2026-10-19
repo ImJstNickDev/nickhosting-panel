@@ -133,16 +133,17 @@ describe('Modrinth datapacks', () => {
     });
   });
   it.each(['required', 'incompatible'])(
-    'does not silently drop %s dependency contracts',
+    'lets graph resolution handle %s dependency contracts',
     async (dependency_type) => {
       const { provider } = modrinth({
         dependencies: [{ project_id: 'dependency', dependency_type }],
       });
       expect((await provider.datapackFiles('pack')).items[0]).toMatchObject({
-        available: false,
-        unavailableReason: 'dependencies',
+        available: true,
       });
-      await expect(provider.datapackArchive('pack', 'release')).rejects.toThrow();
+      await expect(provider.datapackArchive('pack', 'release')).resolves.toMatchObject({
+        projectId: 'pack',
+      });
     },
   );
   it('permits embedded and optional dependencies without a second download', async () => {
@@ -200,17 +201,15 @@ describe('CurseForge datapacks', () => {
     });
     expect(JSON.stringify(results)).not.toContain('private-fixture-key');
   });
-  it.each([3, 5])(
-    'keeps dependency relation %s unavailable rather than silently installing',
-    async (relationType) => {
-      const { provider } = curseforge({ dependencies: [{ modId: 99, relationType }] });
-      expect((await provider.datapackFiles('101')).items[0]).toMatchObject({
-        available: false,
-        unavailableReason: 'dependencies',
-      });
-      await expect(provider.datapackArchive('101', '202')).rejects.toThrow();
-    },
-  );
+  it.each([3, 5])('lets graph resolution handle dependency relation %s', async (relationType) => {
+    const { provider } = curseforge({ dependencies: [{ modId: 99, relationType }] });
+    expect((await provider.datapackFiles('101')).items[0]).toMatchObject({
+      available: true,
+    });
+    await expect(provider.datapackArchive('101', '202')).resolves.toMatchObject({
+      projectId: '101',
+    });
+  });
   it.each([
     { downloadUrl: null },
     { isAvailable: false },

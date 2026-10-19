@@ -79,6 +79,12 @@ export const en = {
   'errors.integration_unavailable': 'This integration is unavailable.',
   'errors.resources_unavailable': 'There is not enough available capacity to start this server.',
   'errors.storage_exhausted': 'There is not enough available storage.',
+  'errors.content_dependency_missing':
+    'A required dependency is missing or disabled. Restore it or remove the content that requires it before applying changes.',
+  'errors.content_dependency_conflict':
+    'The selection contains conflicting content. Resolve the conflict before applying changes.',
+  'errors.content_plan_expired':
+    'The preparation plan has expired. Check the selection again to continue.',
   'errors.operation_uncertain': 'The result is being checked. Do not repeat the operation.',
   'errors.allocation_unavailable': 'The required ports are unavailable.',
   'errors.provenance_mismatch': 'The server identity could not be verified.',
@@ -207,6 +213,12 @@ export const it: Record<MessageKey, string> = {
   'errors.resources_unavailable':
     'La capacità disponibile non è sufficiente per avviare questo server.',
   'errors.storage_exhausted': 'Lo spazio di archiviazione disponibile non è sufficiente.',
+  'errors.content_dependency_missing':
+    'Una dipendenza necessaria è assente o disabilitata. Ripristinala oppure rimuovi il contenuto che la richiede prima di applicare le modifiche.',
+  'errors.content_dependency_conflict':
+    'La selezione contiene contenuti in conflitto. Risolvi il conflitto prima di applicare le modifiche.',
+  'errors.content_plan_expired':
+    'Il piano di preparazione è scaduto. Verifica di nuovo la selezione per continuare.',
   'errors.operation_uncertain': "L'esito è in verifica. Non ripetere l'operazione.",
   'errors.allocation_unavailable': 'Le porte richieste non sono disponibili.',
   'errors.provenance_mismatch': "Impossibile verificare l'identità del server.",

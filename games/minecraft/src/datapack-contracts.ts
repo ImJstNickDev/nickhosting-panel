@@ -53,3 +53,37 @@ export interface MinecraftDatapackSnapshot {
   }[];
   reload: { state: 'not_required' | 'required' | 'requested' | 'uncertain' };
 }
+
+const catalogProviderSchema = z.enum(['modrinth', 'curseforge']);
+export const minecraftDatapackCatalogPlanSchema = z.strictObject({
+  planId: z.uuid(),
+  expiresAt: z.iso.datetime(),
+  items: z.array(
+    z.strictObject({
+      provider: catalogProviderSchema,
+      projectId: z.string(),
+      versionId: z.string(),
+      name: z.string(),
+      disposition: z.enum(['install', 'reuse', 'enable']),
+      dependency: z.boolean(),
+    }),
+  ),
+  optional: z.array(z.strictObject({ projectId: z.string(), name: z.string() })),
+  conflicts: z.array(z.strictObject({ path: z.string(), name: z.string(), projectId: z.string() })),
+  blockers: z.array(
+    z.strictObject({
+      projectId: z.string(),
+      name: z.string(),
+      reason: z.enum([
+        'mod_required',
+        'version_unavailable',
+        'dependency_conflict',
+        'prepared_conflict',
+        'native_disabled',
+        'unknown_dependency',
+        'archive_unavailable',
+      ]),
+    }),
+  ),
+});
+export type MinecraftDatapackCatalogPlan = z.infer<typeof minecraftDatapackCatalogPlanSchema>;

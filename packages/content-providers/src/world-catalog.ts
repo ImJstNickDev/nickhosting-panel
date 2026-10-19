@@ -50,3 +50,49 @@ export const datapackCatalogFilesSchema = worldCatalogFilesSchema.extend({
   items: z.array(datapackCatalogFileSchema).max(20),
 });
 export type DatapackCatalogFiles = z.infer<typeof datapackCatalogFilesSchema>;
+
+const datapackDependencyRefSchema = z
+  .object({
+    projectId: z.string().min(1).max(128),
+    versionId: z.string().min(1).max(128).optional(),
+  })
+  .strict();
+const datapackDependencyNoticeSchema = datapackDependencyRefSchema.extend({
+  name: z.string().min(1).max(512),
+  requiredBy: z.string().min(1).max(128),
+});
+export const datapackDependencyPlanSchema = z
+  .object({
+    provider: z.enum(['modrinth', 'curseforge']),
+    root: datapackDependencyRefSchema.extend({ versionId: z.string().min(1).max(128) }),
+    gameVersion: z.string().min(1).max(80),
+    items: z
+      .array(
+        datapackDependencyRefSchema.extend({
+          versionId: z.string().min(1).max(128),
+          name: z.string().min(1).max(512),
+          filename: z.string().min(1).max(512),
+          required: z.array(datapackDependencyRefSchema).max(512),
+          conflicts: z.array(datapackDependencyRefSchema).max(512),
+        }),
+      )
+      .max(512),
+    optional: z.array(datapackDependencyNoticeSchema).max(512),
+    embedded: z.array(datapackDependencyNoticeSchema).max(512),
+    blocked: z
+      .array(
+        datapackDependencyNoticeSchema.extend({
+          reason: z.enum([
+            'mod',
+            'incompatible-version',
+            'unavailable',
+            'unresolved',
+            'version-conflict',
+            'conflict',
+          ]),
+        }),
+      )
+      .max(512),
+  })
+  .strict();
+export type DatapackDependencyPlan = z.infer<typeof datapackDependencyPlanSchema>;

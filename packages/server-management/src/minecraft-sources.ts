@@ -659,6 +659,15 @@ export function createMinecraftSourceStore(
       return {
         path: verified.path,
         sha256: verified.sha256,
+        ...(kind === 'datapack'
+          ? {
+              catalogSource: {
+                provider: row.origin,
+                projectId: row.provider_project_id,
+                versionId: row.provider_version_id,
+              },
+            }
+          : {}),
         // Only world staging consumes this in-process proof. It is not stored
         // in a job plan or exposed by the public source metadata projection.
         ...(kind === 'world' ? { verified } : {}),
@@ -809,7 +818,11 @@ export function createMinecraftSourceStore(
         signal,
       );
     },
-    async acquireDatapack(input: unknown, signal?: AbortSignal) {
+    async acquireDatapack(
+      input: unknown,
+      signal?: AbortSignal,
+      resolvedArtifact?: ContentArtifact,
+    ) {
       const value = parse(
         z.strictObject({
           provider: z.enum(['modrinth', 'curseforge']),
@@ -835,7 +848,11 @@ export function createMinecraftSourceStore(
       const provider =
         value.provider === 'modrinth' ? new ModrinthProvider(http) : options.curseforge;
       if (!provider) throw new DomainError('integration_unavailable');
-      const artifact = await provider.datapackArchive(value.projectId, value.versionId, signal);
+      const artifact =
+        resolvedArtifact ??
+        (await provider.datapackArchive(value.projectId, value.versionId, signal));
+      if (artifact.projectId !== value.projectId || artifact.versionId !== value.versionId)
+        throw new DomainError('provenance_mismatch');
       if (
         !Number.isSafeInteger(artifact.size) ||
         artifact.size < 1 ||

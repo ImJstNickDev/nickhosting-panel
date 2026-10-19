@@ -10,10 +10,13 @@ import {
   type MinecraftDatapackChange,
   type MinecraftDatapackSnapshot,
   minecraftDatapackApplySchema,
+  minecraftDatapackCatalogPlanSchema,
   minecraftDatapackChangeSchema,
 } from '../datapack-contracts.js';
 
 export type MinecraftDatapacks = MinecraftDatapackSnapshot;
+export type { MinecraftDatapackCatalogPlan } from '../datapack-contracts.js';
+
 const datapackMetadataSchema = z.object({
   description: z.string(),
   formatMin: z.tuple([z.number(), z.number()]).nullable(),
@@ -485,6 +488,30 @@ export function createMinecraftUiController(client: GameUiClient) {
         ),
       );
     },
+    async planDatapack(
+      serverId: string,
+      input: {
+        provider: 'modrinth' | 'curseforge';
+        projectId: string;
+        versionId: string;
+        world: string;
+        optionalProjectIds?: string[];
+      },
+      signal?: AbortSignal,
+    ) {
+      const body = z
+        .strictObject({
+          provider,
+          projectId: key,
+          versionId: key,
+          world: minecraftDatapackChangeSchema.shape.world,
+          optionalProjectIds: z.array(key).max(512).optional(),
+        })
+        .parse(input);
+      return minecraftDatapackCatalogPlanSchema.parse(
+        await request(serverPath(serverId, '/datapacks/catalog/plan'), 'POST', body, signal),
+      );
+    },
     async acquireDatapack(
       serverId: string,
       input: {
@@ -493,6 +520,8 @@ export function createMinecraftUiController(client: GameUiClient) {
         versionId: string;
         world: string;
         idempotencyKey: string;
+        planId?: string;
+        disablePaths?: string[];
       },
       signal?: AbortSignal,
     ) {
@@ -503,6 +532,8 @@ export function createMinecraftUiController(client: GameUiClient) {
           versionId: key,
           world: minecraftDatapackChangeSchema.shape.world,
           idempotencyKey: key,
+          planId: uuid.optional(),
+          disablePaths: z.array(z.string().max(512)).max(512).optional(),
         })
         .strict()
         .parse(input);

@@ -49,9 +49,9 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
   });
   const json = vi.fn<ContentHttp['json']>(async (url) => {
     const address = new URL(url);
-    const version = (id: string) => ({
+    const version = (id: string, projectId = 'catalog-pack') => ({
       id,
-      project_id: 'catalog-pack',
+      project_id: projectId,
       name: `Pack ${id}`,
       version_number: id,
       game_versions: ['26.1'],
@@ -66,7 +66,21 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
           primary: true,
         },
       ],
-      dependencies: [],
+      dependencies:
+        id === 'first'
+          ? [{ project_id: 'library', version_id: 'lib-v1', dependency_type: 'required' }]
+          : id === 'blocked'
+            ? [{ project_id: 'required-mod', version_id: null, dependency_type: 'required' }]
+            : id === 'second'
+              ? [
+                  {
+                    project_id: 'optional-pack',
+                    version_id: 'optional-v1',
+                    dependency_type: 'optional',
+                  },
+                  { project_id: 'opponent', version_id: null, dependency_type: 'incompatible' },
+                ]
+              : [],
     });
     if (address.pathname === '/v2/search')
       return {
@@ -91,6 +105,27 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
         title: 'Catalog pack',
         project_type: 'mod',
       };
+    for (const [projectId, versionId] of [
+      ['opponent', 'opponent-v1'],
+      ['optional-pack', 'optional-v1'],
+    ] as const) {
+      if (address.pathname === `/v2/project/${projectId}`)
+        return {
+          id: projectId,
+          title: projectId === 'opponent' ? 'Conflicting pack' : 'Optional pack',
+          project_type: 'datapack',
+        };
+      if (address.pathname === `/v2/project/${projectId}/version`)
+        return [version(versionId, projectId)];
+      if (address.pathname === `/v2/version/${versionId}`) return version(versionId, projectId);
+    }
+    if (address.pathname === '/v2/project/library')
+      return { id: 'library', title: 'Shared library', project_type: 'datapack' };
+    if (address.pathname === '/v2/project/required-mod')
+      return { id: 'required-mod', title: 'Required mod', project_type: 'mod' };
+    if (address.pathname === '/v2/project/required-mod/version')
+      return [{ ...version('mod-v1', 'required-mod'), loaders: ['fabric'] }];
+    if (address.pathname === '/v2/project/library/version') return [version('lib-v1', 'library')];
     if (address.pathname === '/v2/project/catalog-pack/version')
       return [
         version('first'),
@@ -103,7 +138,10 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
         },
       ];
     if (address.pathname.startsWith('/v2/version/'))
-      return version(address.pathname.split('/').at(-1) ?? 'first');
+      return version(
+        address.pathname.split('/').at(-1) ?? 'first',
+        address.pathname.endsWith('/lib-v1') ? 'library' : 'catalog-pack',
+      );
     throw new Error(`Unexpected fixture request ${address.pathname}`);
   });
   const route = () => `${fixture.origin}/servers/${provider.ids.serverId}/game/datapacks`;
@@ -321,38 +359,12 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
       const dialog = user.getByRole('dialog', { name: 'Find datapacks', exact: true });
       await dialog.getByRole('button', { name: /Catalog pack/ }).click();
       const files = user.getByRole('dialog', { name: 'Catalog pack', exact: true });
-      await browserExpect(
-        files.getByText(
-          'This version declares dependencies or conflicts that automatic installation does not yet handle.',
-          { exact: true },
-        ),
-      ).toBeVisible();
-      await browserExpect(
-        files
-          .getByRole('listitem')
-          .filter({ hasText: 'Pack blocked' })
-          .getByRole('button', { name: 'Prepare this file', exact: true }),
-      ).toBeDisabled();
       await files
         .getByRole('listitem')
         .filter({ hasText: 'Pack first' })
         .getByRole('button', { name: 'Prepare this file', exact: true })
         .click();
-      await user.screenshot({
-        path: resolve(
-          '.codex/local/m5-browser/screenshots/minecraft-datapacks-catalog-unavailable-en.png',
-        ),
-        fullPage: true,
-      });
       await expect.poll(() => download.mock.calls.length).toBe(1);
-      await files
-        .getByRole('listitem')
-        .filter({ hasText: 'Pack second' })
-        .getByRole('button', { name: 'Prepare this file', exact: true })
-        .click();
-      await browserExpect(
-        files.getByRole('button', { name: 'Queued for preparation', exact: true }),
-      ).toBeVisible();
       await files.getByRole('button', { name: 'Back to results', exact: true }).click();
       await browserExpect(
         user.getByRole('dialog', { name: 'Find datapacks', exact: true }),
@@ -376,13 +388,15 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
           .getByRole('region', { name: 'Pending changes', exact: true })
           .locator('.datapack-change'),
       ).toHaveCount(2);
-      expect((await provider.files()).has('world/datapacks/catalog-pack-first.zip')).toBe(false);
+      expect((await provider.files()).has('world/datapacks/modrinth-catalog-pack-first.zip')).toBe(
+        false,
+      );
       await user.screenshot({
         path: resolve('.codex/local/m5-browser/screenshots/minecraft-datapacks-prepared-en.png'),
         fullPage: true,
       });
       await accessible();
-      for (const name of ['catalog-pack-first.zip', 'catalog-pack-second.zip']) {
+      for (const { name } of (await snapshot()).changes as { name: string }[]) {
         await user.getByRole('button', { name: `Discard change: ${name}`, exact: true }).click();
         await browserExpect(
           user.getByRole('button', { name: `Discard change: ${name}`, exact: true }),
@@ -392,6 +406,130 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
       release();
       downloadGate = undefined;
     }
+  });
+  it('explains required mods without downloading or changing the runtime', async () => {
+    await user.reload();
+    const before = download.mock.calls.length;
+    await user.getByRole('button', { name: 'Find datapacks', exact: true }).click();
+    await user
+      .getByRole('dialog', { name: 'Find datapacks', exact: true })
+      .getByRole('button', { name: /Catalog pack/ })
+      .click();
+    const files = user.getByRole('dialog', { name: 'Catalog pack', exact: true });
+    await files
+      .getByRole('listitem')
+      .filter({ hasText: 'Pack blocked' })
+      .getByRole('button', { name: 'Prepare this file', exact: true })
+      .click();
+    await browserExpect(
+      files.getByRole('button', { name: 'Missing requirements', exact: true }),
+    ).toBeVisible();
+    await files.getByRole('button', { name: 'Missing requirements', exact: true }).click();
+    const details = user.getByRole('dialog', { name: 'Pack blocked', exact: true });
+    await browserExpect(details.getByText('Required mod', { exact: true })).toBeVisible();
+    await browserExpect(
+      details.getByText(
+        'Requires a compatible installed mod. Mods are not installed from this tab.',
+        { exact: true },
+      ),
+    ).toBeVisible();
+    expect(download.mock.calls.length).toBe(before);
+    await accessible();
+    await user.screenshot({
+      path: resolve('.codex/local/m5-browser/screenshots/minecraft-datapacks-dependencies-en.png'),
+      fullPage: true,
+    });
+    await user.keyboard.press('Escape');
+    await user
+      .getByRole('button', { name: 'Remove from queue: Pack blocked', exact: true })
+      .click();
+  });
+  it('offers optional dependencies and stages conflicting-pack disable only after explicit approval', async () => {
+    const root = {
+      provider: 'modrinth',
+      projectId: 'opponent',
+      versionId: 'opponent-v1',
+      world: 'world',
+    };
+    const seedPlan = await journeyRequest<{ planId: string }>(
+      fixture,
+      user,
+      `${base()}/catalog/plan`,
+      root,
+    );
+    await journeyRequest(fixture, user, `${base()}/catalog/acquire`, {
+      ...root,
+      planId: seedPlan.planId,
+      idempotencyKey: 'seed-opponent',
+    });
+    await journeyRequest(fixture, user, `${base()}/apply`, {
+      world: 'world',
+      idempotencyKey: 'apply-opponent',
+    });
+    const opponent = (await snapshot()).packs.find((pack: { name: string }) =>
+      pack.name.startsWith('modrinth-opponent-'),
+    ) as { name: string; path: string };
+    expect(opponent).toBeDefined();
+    await user.reload();
+    await user.getByRole('button', { name: 'Find datapacks', exact: true }).click();
+    await user
+      .getByRole('dialog', { name: 'Find datapacks', exact: true })
+      .getByRole('button', { name: /Catalog pack/ })
+      .click();
+    const catalog = user.getByRole('dialog', { name: 'Catalog pack', exact: true });
+    await catalog
+      .getByRole('listitem')
+      .filter({ hasText: 'Pack second' })
+      .getByRole('button', { name: 'Prepare this file', exact: true })
+      .click();
+    await catalog.getByRole('button', { name: 'Conflict to resolve', exact: true }).click();
+    let details = user.getByRole('dialog', { name: 'Pack second', exact: true });
+    await browserExpect(
+      details.getByRole('button', { name: 'Optional pack', exact: true }),
+    ).toHaveAttribute('aria-pressed', 'false');
+    expect((await snapshot()).changes).toHaveLength(0);
+    await details.getByRole('button', { name: 'Optional pack', exact: true }).click();
+    await details.getByRole('button', { name: 'Prepare selection', exact: true }).click();
+    await user.getByRole('button', { name: 'Dependencies: Pack second', exact: true }).click();
+    details = user.getByRole('dialog', { name: 'Pack second', exact: true });
+    await browserExpect(
+      details.getByRole('button', { name: 'Optional pack', exact: true }),
+    ).toHaveAttribute('aria-pressed', 'true');
+    await accessible();
+    await user.screenshot({
+      path: resolve('.codex/local/m5-browser/screenshots/minecraft-datapacks-conflicts-en.png'),
+      fullPage: true,
+    });
+    await details
+      .getByRole('button', { name: 'Disable conflicts and prepare', exact: true })
+      .click();
+    await browserExpect(
+      user.getByRole('button', { name: 'Apply changes', exact: true }),
+    ).toBeEnabled({ timeout: 20000 });
+    const staged = await snapshot();
+    expect(
+      staged.changes.filter((change: { action: string }) => change.action === 'install'),
+    ).toHaveLength(2);
+    expect(
+      staged.changes.filter((change: { action: string }) => change.action === 'disable'),
+    ).toHaveLength(1);
+    expect((await provider.files()).has(opponent.path)).toBe(true);
+    const providerReads = json.mock.calls.length;
+    await user.getByRole('button', { name: 'Apply changes', exact: true }).click();
+    await browserExpect(
+      user.getByRole('button', {
+        name: `Disable: ${staged.changes.find((change: { name: string; action: string }) => change.action === 'install' && change.name.startsWith('modrinth-catalog-pack-')).name}`,
+        exact: true,
+      }),
+    ).toBeEnabled();
+    expect((await provider.files()).has(`${opponent.path}.disabled`)).toBe(true);
+    expect(
+      [...(await provider.files()).keys()].some(
+        (path) =>
+          path.startsWith('world/datapacks/modrinth-optional-pack-') && path.endsWith('.zip'),
+      ),
+    ).toBe(true);
+    expect(json.mock.calls.length).toBe(providerReads);
   });
   it('allows discarding an interrupted preparation after refresh without publishing the pack', async () => {
     await user.locator('input[type=file]:not([webkitdirectory])').setInputFiles({
@@ -443,6 +581,36 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
     await browserExpect(
       user.getByText('Nessun datapack corrispondente.', { exact: true }),
     ).toBeVisible();
+    await user.getByRole('button', { name: 'Trova datapack', exact: true }).click();
+    await user
+      .getByRole('dialog', { name: 'Trova datapack', exact: true })
+      .getByRole('button', { name: /Catalog pack/ })
+      .click();
+    const catalog = user.getByRole('dialog', { name: 'Catalog pack', exact: true });
+    await catalog
+      .getByRole('listitem')
+      .filter({ hasText: 'Pack blocked' })
+      .getByRole('button', { name: 'Prepara questo file', exact: true })
+      .click();
+    await catalog.getByRole('button', { name: 'Requisiti mancanti', exact: true }).click();
+    const details = user.getByRole('dialog', { name: 'Pack blocked', exact: true });
+    await browserExpect(
+      details.getByText(
+        'Richiede una mod compatibile installata. Le mod non si installano da questa scheda.',
+        { exact: true },
+      ),
+    ).toBeVisible();
+    await accessible();
+    expect(await details.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+      true,
+    );
+    await user.screenshot({
+      path: resolve(
+        '.codex/local/m5-browser/screenshots/minecraft-datapacks-dependencies-mobile-it.png',
+      ),
+      fullPage: true,
+    });
+    await user.keyboard.press('Escape');
     expect(pageErrors).toEqual([]);
     await user.evaluate(() => localStorage.setItem('nh.locale', 'en'));
     await journeyRequest(fixture, user, '/api/auth/update-user', { locale: 'en' });

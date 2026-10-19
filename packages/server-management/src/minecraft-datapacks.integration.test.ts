@@ -1,7 +1,8 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Readable } from 'node:stream';
+import type { ContentHttp, ModrinthProvider } from '@nickhosting/content-providers';
 import { authSessionId, SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import {
@@ -11,6 +12,7 @@ import {
 } from '@nickhosting/pterodactyl-adapter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ZipFile } from 'yazl';
+import { createMinecraftDatapackCatalogService } from './minecraft-datapack-catalog.js';
 import { createMinecraftDatapackService } from './minecraft-datapacks.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
 import { createManagementRuntime } from './runtime.js';
@@ -285,6 +287,276 @@ describe('Minecraft datapack durable preparation and publication', () => {
       draft,
     };
   }
+
+  async function catalogFixture() {
+    const f = await fixture(false);
+    const zip = new ZipFile();
+    zip.addBuffer(
+      Buffer.from('{"pack":{"pack_format":48,"description":"Dependency fixture"}}'),
+      'pack.mcmeta',
+    );
+    zip.end();
+    const chunks: Buffer[] = [];
+    for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
+    const bytes = Buffer.concat(chunks),
+      sha256 = createHash('sha256').update(bytes).digest('hex');
+    const download = vi.fn(async (_artifact: unknown, path: string) => {
+      await writeFile(path, bytes);
+      return { sha256, size: bytes.length };
+    });
+    const http = { download } as unknown as ContentHttp;
+    const provider = {
+      resolveDatapackPlan: vi.fn(async () => ({
+        plan: {
+          provider: 'modrinth' as const,
+          root: { projectId: 'root', versionId: 'r1' },
+          gameVersion: '1.21.1',
+          items: [
+            {
+              projectId: 'root',
+              versionId: 'r1',
+              name: 'Root',
+              filename: 'root.zip',
+              required: [{ projectId: 'dep', versionId: 'd1' }],
+              conflicts: [],
+            },
+            {
+              projectId: 'dep',
+              versionId: 'd1',
+              name: 'Dependency',
+              filename: 'dep.zip',
+              required: [],
+              conflicts: [],
+            },
+          ],
+          optional: [],
+          embedded: [],
+          blocked: [],
+        },
+        artifacts: ['root', 'dep'].map((projectId) => ({
+          projectId,
+          versionId: projectId === 'root' ? 'r1' : 'd1',
+          path: `${projectId}.zip`,
+          urls: [`https://cdn.example.test/${projectId}.zip`],
+          size: bytes.length,
+          hashes: { sha256 },
+          kind: 'override' as const,
+          serverSide: 'required' as const,
+        })),
+      })),
+    } as unknown as ModrinthProvider;
+    const catalog = createMinecraftDatapackCatalogService({
+      db: f.db,
+      runtime: f.runtime,
+      env: f.env,
+      http,
+    });
+    const request = {
+      provider: 'modrinth' as const,
+      projectId: 'root',
+      versionId: 'r1',
+      world: 'world',
+    };
+    return { ...f, download, provider, catalog, request };
+  }
+  it('resolves then stages complete graph, reuses drafts and applies without metadata or download requests', async () => {
+    const f = await catalogFixture();
+    const plan = await f.catalog.plan(f.context, f.serverId, f.request, f.provider);
+    expect(plan.items.map((item) => item.disposition)).toEqual(['install', 'install']);
+    const prepared = await f.catalog.acquire(f.context, f.serverId, {
+      ...f.request,
+      planId: plan.planId,
+      idempotencyKey: 'graph',
+    });
+    expect(prepared.changes).toHaveLength(2);
+    expect(f.download).toHaveBeenCalledTimes(2);
+    const again = await f.catalog.plan(f.context, f.serverId, f.request, f.provider);
+    expect(again.items.map((item) => item.disposition)).toEqual(['reuse', 'reuse']);
+    await f.catalog.acquire(f.context, f.serverId, {
+      ...f.request,
+      planId: again.planId,
+      idempotencyKey: 'graph-again',
+    });
+    expect(f.download).toHaveBeenCalledTimes(2);
+    vi.mocked(f.provider.resolveDatapackPlan).mockClear();
+    f.download.mockClear();
+    await f.service.apply(f.context, f.serverId, { world: 'world', idempotencyKey: 'publish' });
+    expect(f.provider.resolveDatapackPlan).not.toHaveBeenCalled();
+    expect(f.download).not.toHaveBeenCalled();
+    expect(f.renameFiles).toHaveBeenCalledTimes(1);
+    expect(f.renameFiles.mock.calls[0]?.[2]).toHaveLength(2);
+    // More than the former 2,000-row cutoff must not erase current dependency identities.
+    await f.db
+      .insertInto('minecraft_datapack_changes')
+      .values(
+        Array.from({ length: 2001 }, () => ({
+          id: randomUUID(),
+          server_id: f.serverId,
+          actor_user_id: f.context.actorUserId,
+          world: 'world',
+          name: 'noise.zip',
+          action: 'install' as const,
+          state: 'applied' as const,
+          idempotency_key: randomUUID(),
+          source_id: null,
+          plan: JSON.stringify({
+            from: 'world/datapacks/noise.pending',
+            to: 'world/datapacks/noise.zip',
+            kind: 'zip',
+            size: 1,
+            metadata: null,
+          }),
+          error: null,
+        })),
+      )
+      .execute();
+    const installed = await f.catalog.plan(f.context, f.serverId, f.request, f.provider);
+    expect(installed.items.map((item) => item.disposition)).toEqual(['reuse', 'reuse']);
+  });
+  it('rejects foreign/expired plans and does not publish a root whose required draft was cancelled', async () => {
+    const f = await catalogFixture();
+    const plan = await f.catalog.plan(f.context, f.serverId, f.request, f.provider);
+    await expect(
+      f.catalog.acquire({ ...f.context, subjectUserId: randomUUID() }, f.serverId, {
+        ...f.request,
+        planId: plan.planId,
+        idempotencyKey: 'foreign',
+      }),
+    ).rejects.toMatchObject({ code: 'content_plan_expired' });
+    const prepared = await f.catalog.acquire(f.context, f.serverId, {
+      ...f.request,
+      planId: plan.planId,
+      idempotencyKey: 'graph',
+    });
+    const dep = prepared.changes.at(-1);
+    if (!dep) throw new Error('missing dependency');
+    await f.service.cancel(f.context, f.serverId, dep.changeId);
+    await expect(
+      f.service.apply(f.context, f.serverId, { world: 'world', idempotencyKey: 'broken' }),
+    ).rejects.toMatchObject({ code: 'content_dependency_missing' });
+    expect(f.renameFiles).not.toHaveBeenCalled();
+    const retry = await f.catalog.plan(f.context, f.serverId, f.request, f.provider);
+    expect(retry.items.map((item) => item.disposition)).toEqual(['reuse', 'install']);
+    await f.catalog.acquire(f.context, f.serverId, {
+      ...f.request,
+      planId: retry.planId,
+      idempotencyKey: 'retry',
+    });
+    await f.service.apply(f.context, f.serverId, { world: 'world', idempotencyKey: 'recovered' });
+    expect(f.renameFiles).toHaveBeenCalledTimes(1);
+  });
+  it('reports a conflicting unpublished draft as a discard requirement, not an impossible disable', async () => {
+    const f = await catalogFixture();
+    const plan = await f.catalog.plan(f.context, f.serverId, f.request, f.provider);
+    await f.catalog.acquire(f.context, f.serverId, {
+      ...f.request,
+      planId: plan.planId,
+      idempotencyKey: 'graph',
+    });
+    const original = await f.provider.resolveDatapackPlan('root', 'r1', '1.21.1');
+    const other = {
+      ...original,
+      plan: {
+        ...original.plan,
+        root: { projectId: 'other', versionId: 'o1' },
+        items: [
+          {
+            projectId: 'other',
+            versionId: 'o1',
+            name: 'Other',
+            filename: 'other.zip',
+            required: [],
+            conflicts: [{ projectId: 'root' }],
+          },
+        ],
+      },
+    };
+    vi.mocked(f.provider.resolveDatapackPlan).mockResolvedValue(other);
+    const request = { ...f.request, projectId: 'other', versionId: 'o1' };
+    const next = await f.catalog.plan(f.context, f.serverId, request, f.provider);
+    expect(next.conflicts).toEqual([]);
+    expect(next.blockers).toContainEqual(
+      expect.objectContaining({ projectId: 'root', reason: 'prepared_conflict' }),
+    );
+    await expect(
+      f.catalog.acquire(f.context, f.serverId, {
+        ...request,
+        planId: next.planId,
+        idempotencyKey: 'blocked',
+      }),
+    ).rejects.toMatchObject({ code: 'content_dependency_missing' });
+    expect(f.download).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not reuse a pack explicitly disabled by Minecraft native selection', async () => {
+    const f = await catalogFixture();
+    const plan = await f.catalog.plan(f.context, f.serverId, f.request, f.provider);
+    await f.catalog.acquire(f.context, f.serverId, {
+      ...f.request,
+      planId: plan.planId,
+      idempotencyKey: 'graph',
+    });
+    await f.service.apply(f.context, f.serverId, { world: 'world', idempotencyKey: 'publish' });
+    const dependency = await f.db
+      .selectFrom('minecraft_datapack_changes')
+      .select('name')
+      .where('server_id', '=', f.serverId)
+      .where('state', '=', 'applied')
+      .where('name', 'like', 'modrinth-dep-%')
+      .executeTakeFirstOrThrow();
+    const text = (value: string) => {
+      const bytes = Buffer.from(value);
+      const length = Buffer.alloc(2);
+      length.writeUInt16BE(bytes.length);
+      return Buffer.concat([length, bytes]);
+    };
+    f.files.set(
+      'world/level.dat',
+      Buffer.concat([
+        Buffer.from([10, 0, 0, 10]),
+        text('Data'),
+        Buffer.from([10]),
+        text('DataPacks'),
+        Buffer.from([9]),
+        text('Disabled'),
+        Buffer.from([8, 0, 0, 0, 1]),
+        text(`file/${dependency.name}`),
+        Buffer.from([9]),
+        text('Enabled'),
+        Buffer.from([8, 0, 0, 0, 0]),
+        Buffer.from([0, 0, 0]),
+      ]),
+    );
+    const next = await f.catalog.plan(f.context, f.serverId, f.request, f.provider);
+    expect(next.blockers).toContainEqual(
+      expect.objectContaining({ projectId: 'dep', reason: 'native_disabled' }),
+    );
+  });
+
+  it('prevents using a catalog source to bypass dependency planning through generic preparation', async () => {
+    const f = await catalogFixture();
+    const plan = await f.catalog.plan(f.context, f.serverId, f.request, f.provider);
+    await f.catalog.acquire(f.context, f.serverId, {
+      ...f.request,
+      planId: plan.planId,
+      idempotencyKey: 'graph',
+    });
+    const source = await f.db
+      .selectFrom('minecraft_sources')
+      .select('id')
+      .where('server_id', '=', f.serverId)
+      .where('provider_project_id', '=', 'root')
+      .executeTakeFirstOrThrow();
+    await expect(
+      f.service.prepare(f.context, f.serverId, {
+        world: 'world',
+        action: 'install',
+        sourceId: source.id,
+        name: 'bypass.zip',
+        idempotencyKey: 'bypass',
+      }),
+    ).rejects.toMatchObject({ code: 'content_dependency_missing' });
+  });
 
   it('does not probe absent optional inventory directories and preserves failures for existing directories', async () => {
     const f = await fixture();

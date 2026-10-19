@@ -163,7 +163,10 @@ export class SafeContentHttp implements ContentHttp {
               reject(new RetryableResponse());
             else
               reject(
-                new DomainError('integration_unavailable', 503, { reason: 'content_http_refused' }),
+                new DomainError('integration_unavailable', 503, {
+                  reason: 'content_http_refused',
+                  providerStatus: res.statusCode,
+                }),
               );
             return;
           }

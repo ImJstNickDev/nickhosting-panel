@@ -13955,3 +13955,64 @@ fixtures and verifies the blocked action plus successful background preparation.
 shows available and blocked releases together. No live datapack was downloaded,
 installed or reloaded. Dependency resolution remains unsupported, not bypassed.
 Independent final source and screenshot review found no must-fix findings.
+
+### Datapack dependency preparation and conflict decisions (2026-10-19)
+
+The catalog now resolves required datapacks recursively before transfer, offers
+optional additions explicitly, skips separate embedded downloads and reuses
+compatible installed/prepared versions. Explicit version pins override that reuse.
+Provider metadata requests are memoized within a bounded resolution. Required mods
+are checked against identified installed content; this tab never installs mods or
+changes the runtime. Missing/unsupported requirements are named in the UI.
+
+Conflicting installed packs require an explicit decision to stage disabling at
+Apply; unpublished conflicting drafts must be discarded instead. Optional packs
+remain removable. The existing durable JSON receipts retain graph provenance, and
+Apply checks the final selection against a shared directory observation without
+catalog calls or downloads. Cancellation of a required draft, stale content,
+reverse conflicts, pinned versions and dependencies disabled in Minecraft are
+covered. Latest-per-path SQL selection preserves active receipts after more than
+2000 historical operations. No migration, new dependency or Blueprint update.
+
+Focused commands:
+
+```sh
+scripts/dev.sh pnpm exec vitest run games/minecraft/src/ui/ui.test.ts packages/content-providers/src/datapacks.test.ts packages/content-providers/src/datapack-resolution.test.ts packages/server-management/src/minecraft-datapack-dependencies.test.ts apps/api/src/minecraft-datapacks.test.ts packages/core/src/core.test.ts packages/i18n/src/i18n.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-datapacks.integration.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-datapacks.browser.test.ts
+scripts/dev.sh pnpm typecheck
+scripts/dev.sh pnpm i18n:check
+scripts/dev.sh pnpm build
+```
+
+Results: **143/143 focused unit tests**, **27 database integration cases covered**
+(26 in the full targeted run, followed by the new native-selection case), and
+**10/10 browser tests** passed. Root/web typecheck, production build, scoped Biome,
+diff checks and all **2438 EN/IT/pseudolocale keys** passed. Independent final
+technical and rendered desktop/mobile review found no remaining must-fix findings.
+
+Activation remains pending: the development API watcher stalled during graceful
+shutdown and ingress returns HTTP 502. The worker and Vite remain healthy. Only
+`docker restart --time 20 nickhosting-dev-api-1` is proposed, subject to explicit
+Owner approval; no rebuild, migration or Blueprint update is needed. Rollback is a
+revert of this feature commit and an approved API restart, preserving data and
+prepared changes. No live game-server mutation or new live test asset was made.
+
+The browser uses actual application/auth handlers and real provider adapter parsing
+with isolated metadata, archive and game-file fixtures. It exercises automatic
+required preparation, a missing mod, optional selection, explicit conflict disabling,
+publication, no provider metadata requests during Apply, and EN/IT layouts. Axe and
+dialog/page reflow checks pass; keyboard Escape returns to the datapack inventory.
+This is not evidence of arbitrary packs loading in a live Minecraft process.
+
+Screenshots: [missing mod](screenshots/m5/minecraft-datapacks-dependencies-en.png),
+[conflict and optional selection](screenshots/m5/minecraft-datapacks-conflicts-en.png),
+[Italian mobile details](screenshots/m5/minecraft-datapacks-dependencies-mobile-it.png).
+Independent review found and resolved cross-world local queue dismissal, stale retry
+errors, disabled-replacement graph state, staged conflicts and history truncation.
+
+A broader provider-only unit run also attempted by the subagent had five disk-headroom
+failures (225/230 passed): the host's available fraction was below the fixtures'
+10% floor. No disk cleanup or production storage mutation was attempted; the focused
+resolver/catalog tests pass independently. Production build retains the existing
+large-chunk warnings. SFTPGo #18 and all production-release boundaries remain.

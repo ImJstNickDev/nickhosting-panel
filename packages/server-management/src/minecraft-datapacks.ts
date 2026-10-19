@@ -25,6 +25,13 @@ import {
   minecraftSupportsDatapacks,
 } from '../../../games/minecraft/src/datapacks.js';
 import type { Environment } from './admission.js';
+import {
+  assertDatapackDependencyGraph,
+  type DatapackProvenance,
+  datapackProvenanceSchema,
+  datapackReceipts,
+  datapackStateRows,
+} from './minecraft-datapack-dependencies.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
 import { parse } from './registry.js';
@@ -33,6 +40,7 @@ import { assertServerStorageCapacity, serverStorageLimitBytes } from './storage-
 import { reserveUploadIngestion } from './upload-admission.js';
 
 const planSchema = z.object({
+  catalog: datapackProvenanceSchema.optional(),
   from: z.string(),
   to: z.string().nullable(),
   kind: z.enum(['zip', 'directory']),
@@ -256,14 +264,7 @@ export function createMinecraftDatapackService(options: {
     }
   }
   async function changeRows(connection: Kysely<Database>, serverId: string, world: string) {
-    return connection
-      .selectFrom('minecraft_datapack_changes')
-      .selectAll()
-      .where('server_id', '=', serverId)
-      .where('world', '=', world)
-      .orderBy('created_at', 'desc')
-      .limit(2000)
-      .execute();
+    return datapackStateRows(connection, serverId, world);
   }
   const cleanupTasks = new Set<Promise<void>>();
   function queueCleanup(context: AuthContext, serverId: string, applyId: string) {
@@ -618,7 +619,12 @@ export function createMinecraftDatapackService(options: {
         },
       );
     },
-    async prepare(context: AuthContext, serverId: string, input: unknown) {
+    async prepare(
+      context: AuthContext,
+      serverId: string,
+      input: unknown,
+      catalog?: DatapackProvenance,
+    ) {
       const value = parse(minecraftDatapackChangeSchema, input);
       // Resolve and inspect source before taking the short exclusive provider lock.
       let archive:
@@ -635,6 +641,15 @@ export function createMinecraftDatapackService(options: {
           value.sourceId,
           serverId,
         );
+        if (
+          archive.catalogSource &&
+          archive.catalogSource.provider !== 'upload' &&
+          (!catalog ||
+            catalog.provider !== archive.catalogSource.provider ||
+            catalog.projectId !== archive.catalogSource.projectId ||
+            catalog.versionId !== archive.catalogSource.versionId)
+        )
+          throw new DomainError('content_dependency_missing');
         const info = await profile(db, serverId);
         metadata = await inspectMinecraftDatapackArchive(archive.path, info.version);
         sourceSize = (await stat(archive.path)).size;
@@ -693,6 +708,7 @@ export function createMinecraftDatapackService(options: {
               size: sourceSize,
               metadata,
               metadataRelease: info.version,
+              ...(catalog ? { catalog } : {}),
               ...(existing
                 ? {
                     replacement: {
@@ -708,6 +724,9 @@ export function createMinecraftDatapackService(options: {
           } else {
             if (!value.path) throw new DomainError('validation_failed');
             const sourcePath = value.path;
+            const receipt = datapackReceipts(
+              await changeRows(connection, serverId, value.world),
+            ).find((item) => item.path === sourcePath);
             const roots = [directory(value.world), disabledRoot(value.world)];
             if (!roots.includes(parent(value.path))) throw new DomainError('validation_failed');
             const entry = (await listOptional(files, parent(value.path))).find(
@@ -751,6 +770,12 @@ export function createMinecraftDatapackService(options: {
               size: entry.size,
               modifiedAt: entry.modifiedAt,
               metadata: null,
+              ...(receipt &&
+              receipt.size === entry.size &&
+              receipt.modifiedAt &&
+              receipt.modifiedAt === entry.modifiedAt
+                ? { catalog: receipt.catalog }
+                : {}),
               ...(nativeEnable ? { nativeEnable: true } : {}),
             };
             if (
@@ -932,7 +957,8 @@ export function createMinecraftDatapackService(options: {
             if (previous.world !== value.world) throw new DomainError('conflict');
             return { state: previous.state, reload: previous.reload };
           }
-          const changes = (await changeRows(connection, serverId, value.world)).filter((change) =>
+          const allChanges = await changeRows(connection, serverId, value.world);
+          const changes = allChanges.filter((change) =>
             activeStates.includes(change.state as (typeof activeStates)[number]),
           );
           if (changes.some((change) => change.state !== 'ready') || changes.length > 1000)
@@ -981,11 +1007,57 @@ export function createMinecraftDatapackService(options: {
           // Prepare only absent destination parents; all network work happens before
           // the dispatch fence. No archive download/extraction/inspection during Apply.
           // Destination directories were prepared alongside the draft, not here.
-          const before = moves.length
-            ? await files.listMany([
-                ...new Set(moves.flatMap((move) => [parent(move.from), parent(move.to)])),
-              ])
+          const receipts = datapackReceipts(allChanges);
+          const catalogs = [
+            ...receipts.map((receipt) => receipt.catalog),
+            ...plans.flatMap((plan) => (plan.catalog ? [plan.catalog] : [])),
+          ];
+          const modSchema = z.object({
+            provider: z.string(),
+            projectId: z.string(),
+            versionId: z.string(),
+            incompatible: z
+              .array(
+                z.object({
+                  provider: z.string(),
+                  projectId: z.string(),
+                  versionId: z.string().optional(),
+                }),
+              )
+              .optional(),
+          });
+          const mods = catalogs.length
+            ? (
+                await connection
+                  .selectFrom('minecraft_content_items')
+                  .selectAll()
+                  .where('server_id', '=', serverId)
+                  .execute()
+              ).flatMap((row) => {
+                const parsed = modSchema.safeParse(row.artifact);
+                return parsed.success && /^mods\/[^/]+\.jar$/.test(row.path)
+                  ? [{ ...parsed.data, path: row.path }]
+                  : [];
+              })
             : [];
+          const graphPaths = [
+            ...mods.map((mod) => mod.path),
+            ...receipts.map((receipt) => receipt.path),
+            ...catalogs.flatMap((catalog) => catalog.mods.map((mod) => mod.path)),
+          ];
+          const directories = [
+            ...new Set([
+              ...moves.flatMap((move) => [parent(move.from), parent(move.to)]),
+              ...graphPaths.map(parent),
+            ]),
+          ];
+          const before = directories.length ? await files.listMany(directories) : [];
+          const graphEntries = new Map<string, FilemanEntry>();
+          for (const listing of before)
+            if ('files' in listing)
+              for (const entry of listing.files)
+                graphEntries.set(`${listing.directory}/${entry.name}`, entry);
+          assertDatapackDependencyGraph(receipts, changes, graphEntries, mods);
           for (const move of moves) {
             const from = before.find((result) => result.directory === parent(move.from));
             const to = before.find((result) => result.directory === parent(move.to));

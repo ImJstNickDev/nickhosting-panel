@@ -1,5 +1,6 @@
 import {
   createMinecraftUiController,
+  type MinecraftDatapackCatalogPlan,
   type MinecraftDatapacks,
   type WorldCatalogFile,
 } from '@nickhosting/minecraft/ui';
@@ -14,6 +15,7 @@ import { ConfirmDialog, ErrorNotice } from '../../components/ui.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { gameUiClient } from '../../features/integrations.js';
 import { MinecraftDatapackCatalog } from './datapack-catalog.js';
+import { DatapackDependencies } from './datapack-dependencies.js';
 import { prepareMinecraftWorldFolder } from './world-folder-archive.js';
 import './datapacks.css';
 
@@ -27,7 +29,10 @@ type Preparation = {
   provider: 'modrinth' | 'curseforge';
   projectId: string;
   file: WorldCatalogFile;
-  state: 'queued' | 'preparing' | 'ready' | 'failed';
+  state: 'queued' | 'preparing' | 'ready' | 'failed' | 'blocked' | 'review';
+  plan?: MinecraftDatapackCatalogPlan;
+  optionalProjectIds?: string[];
+  disablePaths?: string[];
   requestKey: string;
 };
 export function DatapackIcon({
@@ -95,6 +100,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
   const [inspected, setInspected] = useState<string>();
   const [page, setPage] = useState(0);
   const [catalog, setCatalog] = useState(false);
+  const [dependencyDetails, setDependencyDetails] = useState<string>();
   const [preparations, setPreparations] = useState<Preparation[]>([]);
   const preparationQueue = useRef<Preparation[]>([]);
   const preparingCatalog = useRef(false);
@@ -152,7 +158,10 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
         world === data.selectedWorld)) &&
     !disabled &&
     !progress &&
-    !preparing;
+    !preparing &&
+    !preparations.some(
+      (item) => item.world === world && ['blocked', 'review', 'failed'].includes(item.state),
+    );
   const visible = (data?.packs ?? []).filter((pack) =>
     pack.name.toLowerCase().includes(search.trim().toLowerCase()),
   );
@@ -187,16 +196,35 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
         next.state = 'preparing';
         publishPreparations();
         try {
-          const result = await controller.acquireDatapack(props.serverId, {
+          // Resolve metadata once during preparation, never from the Apply handler.
+          const plan = await controller.planDatapack(props.serverId, {
             provider: next.provider,
             projectId: next.projectId,
             versionId: next.file.id,
             world: next.world,
-            idempotencyKey: next.requestKey,
+            optionalProjectIds: next.optionalProjectIds,
           });
-          if (result.state !== 'ready')
-            throw new ApiError('integration_unavailable', key('failed'));
-          next.state = 'ready';
+          next.plan = plan;
+          if (plan.blockers.length) {
+            next.state = 'blocked';
+          } else if (
+            plan.conflicts.some((conflict) => !next.disablePaths?.includes(conflict.path))
+          ) {
+            next.state = 'review';
+          } else {
+            const result = await controller.acquireDatapack(props.serverId, {
+              provider: next.provider,
+              projectId: next.projectId,
+              versionId: next.file.id,
+              world: next.world,
+              idempotencyKey: next.requestKey,
+              planId: plan.planId,
+              disablePaths: next.disablePaths,
+            });
+            if (result.state !== 'ready')
+              throw new ApiError('integration_unavailable', key('failed'));
+            next.state = 'ready';
+          }
         } catch (failure) {
           next.state = 'failed';
           if (alive.current) setError(failure);
@@ -223,8 +251,17 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
     )
       return;
     const identity = `${input.provider}:${input.projectId}:${input.file.id}`;
-    if (preparationQueue.current.some((item) => item.world === world && item.identity === identity))
+    const existing = preparationQueue.current.find(
+      (item) => item.world === world && item.identity === identity,
+    );
+    if (existing) {
+      if (existing.plan) {
+        setCatalog(false);
+        setDependencyDetails(identity);
+      } else if (existing.state === 'failed')
+        revisePreparation(identity, existing.optionalProjectIds ?? [], existing.disablePaths ?? []);
       return;
+    }
     preparationQueue.current.push({
       ...input,
       identity,
@@ -233,6 +270,24 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
       requestKey: idempotencyKey(),
     });
     publishPreparations();
+    void drainPreparations();
+  }
+  function revisePreparation(
+    identity: string,
+    optionalProjectIds: string[],
+    disablePaths: string[],
+  ) {
+    const item = preparationQueue.current.find(
+      (candidate) => candidate.identity === identity && candidate.world === world,
+    );
+    if (!item || disabled || ['queued', 'preparing'].includes(item.state)) return;
+    setError(undefined);
+    item.optionalProjectIds = optionalProjectIds;
+    item.disablePaths = disablePaths;
+    item.requestKey = idempotencyKey();
+    item.state = 'queued';
+    publishPreparations();
+    setDependencyDetails(undefined);
     void drainPreparations();
   }
   async function refresh() {
@@ -496,29 +551,92 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
               )}
             </div>
           )}
-          {preparations.some((item) => item.world === world && item.state !== 'ready') && (
+          {preparations.some(
+            (item) =>
+              item.world === world && (item.state !== 'ready' || item.plan?.optional.length),
+          ) && (
             <section className="datapack-changes" aria-label={t(key('preparations'))}>
               {preparations
-                .filter((item) => item.world === world && item.state !== 'ready')
+                .filter(
+                  (item) =>
+                    item.world === world && (item.state !== 'ready' || item.plan?.optional.length),
+                )
                 .map((item) => (
                   <div className="datapack-change" key={item.identity}>
                     <span>
                       <strong>{item.file.name}</strong>
                       <small>{t(key(item.state))}</small>
+                      {item.plan?.blockers.map((blocker) => (
+                        <small key={`${blocker.projectId}:${blocker.reason}`}>
+                          {blocker.name}: {t(key(`dependencies.blocker.${blocker.reason}`))}
+                        </small>
+                      ))}
                     </span>
+                    {item.plan && (
+                      <Tooltip content={t(key('dependencies.details'))}>
+                        <button
+                          type="button"
+                          className="datapack-action"
+                          aria-label={t(key('actionFor'), {
+                            action: t(key('dependencies.details')),
+                            name: item.file.name,
+                          })}
+                          disabled={['queued', 'preparing'].includes(item.state)}
+                          onClick={() => {
+                            setCatalog(false);
+                            setDependencyDetails(item.identity);
+                          }}
+                        >
+                          <DatapackIcon name="inspect" />
+                        </button>
+                      </Tooltip>
+                    )}
+                    {item.state === 'failed' && (
+                      <Tooltip content={t(key('dependencies.retry'))}>
+                        <button
+                          type="button"
+                          className="datapack-action"
+                          aria-label={t(key('dependencies.retry'))}
+                          onClick={() =>
+                            revisePreparation(
+                              item.identity,
+                              item.optionalProjectIds ?? [],
+                              item.disablePaths ?? [],
+                            )
+                          }
+                        >
+                          <DatapackIcon name="refresh" />
+                        </button>
+                      </Tooltip>
+                    )}
                     {item.state !== 'preparing' && (
-                      <Tooltip content={t(key('discard'))}>
+                      <Tooltip
+                        content={t(
+                          key(
+                            item.state === 'ready' || item.state === 'failed'
+                              ? 'dependencies.hide'
+                              : 'dependencies.removeQueue',
+                          ),
+                        )}
+                      >
                         <button
                           className="datapack-action"
                           type="button"
                           aria-label={t(key('actionFor'), {
-                            action: t(key('discard')),
+                            action: t(
+                              key(
+                                item.state === 'ready' || item.state === 'failed'
+                                  ? 'dependencies.hide'
+                                  : 'dependencies.removeQueue',
+                              ),
+                            ),
                             name: item.file.name,
                           })}
                           onClick={() => {
                             preparationQueue.current = preparationQueue.current.filter(
                               (candidate) =>
-                                candidate !== item && candidate.identity !== item.identity,
+                                candidate.identity !== item.identity ||
+                                candidate.world !== item.world,
                             );
                             publishPreparations();
                           }}
@@ -802,6 +920,21 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
           )}
         </>
       )}
+      {(() => {
+        const item = preparations.find(
+          (candidate) => candidate.identity === dependencyDetails && candidate.world === world,
+        );
+        return item?.plan ? (
+          <DatapackDependencies
+            name={item.file.name}
+            plan={item.plan}
+            selectedOptional={item.optionalProjectIds ?? []}
+            busy={disabled || ['queued', 'preparing'].includes(item.state)}
+            onClose={() => setDependencyDetails(undefined)}
+            onPrepare={(optional, disables) => revisePreparation(item.identity, optional, disables)}
+          />
+        ) : null;
+      })()}
       <ConfirmDialog
         open={Boolean(remove)}
         title={t(key('deleteTitle'), { name: remove?.name ?? '' })}

@@ -149,6 +149,52 @@ describe('Minecraft browser module and exact API contracts', () => {
     ).rejects.toThrow();
     expect(client.request).toHaveBeenCalledTimes(3);
   });
+  it('keeps dependency decisions explicit and rejects malformed plan receipts', async () => {
+    const client = clientFixture(),
+      controller = createMinecraftUiController(client);
+    const request = {
+      provider: 'modrinth' as const,
+      projectId: 'pack',
+      versionId: 'v1',
+      world: 'world',
+      optionalProjectIds: ['optional'],
+    };
+    const plan = {
+      planId: sourceId,
+      expiresAt: '2026-10-19T12:00:00.000Z',
+      items: [],
+      optional: [],
+      conflicts: [{ path: 'world/datapacks/conflict.zip', name: 'Conflict', projectId: 'other' }],
+      blockers: [{ projectId: 'mod', name: 'Required mod', reason: 'mod_required' }],
+    };
+    client.request.mockResolvedValueOnce(plan);
+    expect(await controller.planDatapack(serverId, request)).toEqual(plan);
+    expect(client.request).toHaveBeenLastCalledWith(
+      `/v1/servers/${serverId}/minecraft/datapacks/catalog/plan`,
+      expect.objectContaining({ method: 'POST', body: request }),
+    );
+    client.request.mockResolvedValueOnce({ changeId: jobId, state: 'ready' });
+    await controller.acquireDatapack(serverId, {
+      provider: request.provider,
+      projectId: request.projectId,
+      versionId: request.versionId,
+      world: request.world,
+      planId: sourceId,
+      disablePaths: ['world/datapacks/conflict.zip'],
+      idempotencyKey: 'acquire',
+    } as Parameters<typeof controller.acquireDatapack>[1]);
+    expect(client.request).toHaveBeenLastCalledWith(
+      `/v1/servers/${serverId}/minecraft/datapacks/catalog/acquire`,
+      expect.objectContaining({
+        body: expect.objectContaining({
+          planId: sourceId,
+          disablePaths: ['world/datapacks/conflict.zip'],
+        }),
+      }),
+    );
+    client.request.mockResolvedValueOnce({ ...plan, downloadUrl: 'https://private.invalid' });
+    await expect(controller.planDatapack(serverId, request)).rejects.toThrow();
+  });
   it.each(['curseforge', 'modrinth'] as const)(
     'keeps mixed %s datapack results and explains unavailable releases without weakening world schemas',
     async (provider) => {

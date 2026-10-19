@@ -13,6 +13,11 @@ import {
 } from './contracts.js';
 import { type DatapackCatalogFiles, datapackCatalogFilesSchema } from './datapack-catalog.js';
 import {
+  type DatapackCandidate,
+  dependencyMemo,
+  resolveDatapackGraph,
+} from './datapack-resolution.js';
+import {
   type WorldCatalogFiles,
   type WorldCatalogProjects,
   worldCatalogFilesSchema,
@@ -275,9 +280,7 @@ export class CurseForgeProvider {
           project.isAvailable &&
           project.allowModDistribution !== false &&
           file.isAvailable &&
-          Boolean(worldFileIntegrity(file)) &&
-          (kind !== 'data-packs' ||
-            !file.dependencies.some((dependency) => [3, 5].includes(dependency.relationType))),
+          Boolean(worldFileIntegrity(file)),
         ...(kind === 'data-packs'
           ? {
               unavailableReason:
@@ -286,11 +289,9 @@ export class CurseForgeProvider {
                 !file.isAvailable ||
                 !file.downloadUrl
                   ? 'distribution'
-                  : file.dependencies.some((dependency) => [3, 5].includes(dependency.relationType))
-                    ? 'dependencies'
-                    : !worldFileIntegrity(file)
-                      ? 'archive'
-                      : undefined,
+                  : !worldFileIntegrity(file)
+                    ? 'archive'
+                    : undefined,
             }
           : {}),
       })),
@@ -318,11 +319,6 @@ export class CurseForgeProvider {
       !file.downloadUrl
     )
       unavailable('distribution_unavailable');
-    if (
-      kind === 'data-packs' &&
-      file.dependencies.some((dependency) => [3, 5].includes(dependency.relationType))
-    )
-      unavailable('datapack_dependencies');
     const sha1 = worldFileIntegrity(file);
     if (!sha1) fail('curseforge_integrity');
     return {
@@ -375,6 +371,130 @@ export class CurseForgeProvider {
     signal?: AbortSignal,
   ): Promise<ContentArtifact> {
     return this.catalogArchive('data-packs', projectId, versionId, signal);
+  }
+  async resolveDatapackPlan(
+    projectId: string,
+    versionId: string,
+    gameVersion: string,
+    signal?: AbortSignal,
+    optionalProjectIds: string[] = [],
+    installedVersions: ReadonlyMap<string, string> = new Map(),
+  ) {
+    worldId(projectId);
+    worldId(versionId);
+    for (const value of optionalProjectIds) worldId(value);
+    const memo = dependencyMemo(this.limits.maxDependencies);
+    const classId = await this.getCatalogClass('data-packs', signal);
+    return resolveDatapackGraph({
+      provider: 'curseforge',
+      projectId,
+      versionId,
+      gameVersion,
+      signal,
+      optionalProjectIds,
+      maxDependencies: this.limits.maxDependencies,
+      load: (pid, vid) =>
+        memo(`candidate:${pid}:${vid ?? ''}`, async (): Promise<DatapackCandidate> => {
+          if (!pid) fail('dependency_identity');
+          worldId(pid);
+          if (vid) worldId(vid);
+          const metadata = await memo(`project:${pid}`, async () =>
+            worldProjectSchema.parse(await this.get(`/mods/${pid}`, signal)),
+          );
+          if (String(metadata.id) !== pid || metadata.gameId !== minecraftGameId)
+            fail('dependency_identity');
+          const isDatapack = metadata.classId === classId;
+          let file: z.infer<typeof worldFileSchema> | undefined;
+          if (vid)
+            file = await memo(`file:${pid}:${vid}`, async () =>
+              worldFileSchema.parse(await this.get(`/mods/${pid}/files/${vid}`, signal)),
+            );
+          else {
+            const preferredId = installedVersions.get(pid);
+            if (preferredId) {
+              worldId(preferredId);
+              const preferred = await memo(`file:${pid}:${preferredId}`, async () =>
+                worldFileSchema.parse(await this.get(`/mods/${pid}/files/${preferredId}`, signal)),
+              );
+              if (
+                String(preferred.modId) !== pid ||
+                String(preferred.id) !== preferredId ||
+                preferred.gameId !== minecraftGameId
+              )
+                fail('dependency_identity');
+              if (preferred.gameVersions.includes(gameVersion)) file = preferred;
+              // Preserve incompatible installed mod evidence so it cannot satisfy a requirement.
+              else if (!isDatapack) file = preferred;
+            }
+          }
+          if (!file && isDatapack && !vid)
+            file = await memo(`versions:${pid}`, async () => {
+              const params = new URLSearchParams({ gameVersion, pageSize: '50', index: '0' });
+              const files = z
+                .array(worldFileSchema)
+                .max(50)
+                .parse(await this.get(`/mods/${pid}/files?${params}`, signal));
+              if (
+                files.some(
+                  (entry) => String(entry.modId) !== pid || entry.gameId !== minecraftGameId,
+                )
+              )
+                fail('dependency_identity');
+              return files
+                .filter((entry) => entry.gameVersions.includes(gameVersion))
+                .sort((a, b) => b.fileDate.localeCompare(a.fileDate) || b.id - a.id)[0];
+            });
+          if (
+            file &&
+            (String(file.modId) !== pid ||
+              file.gameId !== minecraftGameId ||
+              (vid && String(file.id) !== vid))
+          )
+            fail('dependency_identity');
+          const sha1 = file ? worldFileIntegrity(file) : undefined;
+          const allowed =
+            metadata.isAvailable &&
+            metadata.allowModDistribution !== false &&
+            file?.isAvailable &&
+            file.downloadUrl;
+          return {
+            projectId: pid,
+            ...(file ? { versionId: String(file.id), filename: file.fileName } : {}),
+            name: metadata.name,
+            kind: isDatapack ? 'datapack' : metadata.classId === 6 ? 'mod' : 'unknown',
+            compatible: Boolean(file?.gameVersions.includes(gameVersion)),
+            dependencies:
+              file?.dependencies.map((dependency) => {
+                const relation = (
+                  {
+                    1: 'embedded',
+                    2: 'optional',
+                    3: 'required',
+                    4: 'optional',
+                    5: 'incompatible',
+                    6: 'embedded',
+                  } as const
+                )[dependency.relationType as 1 | 2 | 3 | 4 | 5 | 6];
+                if (!relation) fail('dependency_relation');
+                return { projectId: String(dependency.modId), relation };
+              }) ?? [],
+            ...(isDatapack && allowed && sha1 && file?.downloadUrl
+              ? {
+                  artifact: {
+                    path: 'config/input.zip',
+                    urls: [file.downloadUrl],
+                    size: file.fileLength,
+                    hashes: { sha1 },
+                    projectId: pid,
+                    versionId: String(file.id),
+                    kind: 'override' as const,
+                    serverSide: 'required' as const,
+                  },
+                }
+              : {}),
+          };
+        }),
+    });
   }
   async search(query: string, target: ContentTarget): Promise<unknown> {
     if (query.length > 256) fail('search');

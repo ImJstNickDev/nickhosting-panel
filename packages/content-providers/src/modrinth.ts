@@ -10,10 +10,14 @@ import {
   hashesSchema,
   safeArchivePath,
   safeContentPath,
-  unavailable,
   validateContentPlan,
 } from './contracts.js';
 import { type DatapackCatalogFiles, datapackCatalogFilesSchema } from './datapack-catalog.js';
+import {
+  type DatapackCandidate,
+  dependencyMemo,
+  resolveDatapackGraph,
+} from './datapack-resolution.js';
 import { type WorldCatalogProjects, worldCatalogProjectsSchema } from './world-catalog.js';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
@@ -22,6 +26,7 @@ const projectSchema = z.object({
   slug: z.string().optional(),
   title: z.string(),
   project_type: z.enum(['mod', 'plugin', 'modpack', 'resourcepack', 'shader', 'datapack']),
+  loaders: z.array(z.string()).optional(),
   server_side: z.enum(['required', 'optional', 'unsupported', 'unknown']).optional(),
   environment: z.union([z.string(), z.array(z.string()).max(32)]).optional(),
 });
@@ -103,13 +108,7 @@ function datapackFile(version: ModrinthVersion) {
     return undefined;
   }
 }
-function datapackUnavailable(version: ModrinthVersion): 'dependencies' | 'archive' | undefined {
-  if (
-    version.dependencies.some((dependency) =>
-      ['required', 'incompatible'].includes(dependency.dependency_type),
-    )
-  )
-    return 'dependencies';
+function datapackUnavailable(version: ModrinthVersion): 'archive' | undefined {
   if (!datapackFile(version)) return 'archive';
   return undefined;
 }
@@ -260,12 +259,6 @@ export class ModrinthProvider {
       !version.loaders.includes('datapack')
     )
       fail('datapack_identity');
-    if (
-      version.dependencies.some((dependency) =>
-        ['required', 'incompatible'].includes(dependency.dependency_type),
-      )
-    )
-      unavailable('datapack_dependencies');
     const file = datapackFile(version);
     if (!file) fail('artifact_ambiguous');
     return {
@@ -278,6 +271,111 @@ export class ModrinthProvider {
       projectId: project.id,
       versionId: version.id,
     };
+  }
+  async resolveDatapackPlan(
+    projectId: string,
+    versionId: string,
+    gameVersion: string,
+    signal?: AbortSignal,
+    optionalProjectIds: string[] = [],
+    installedVersions: ReadonlyMap<string, string> = new Map(),
+  ) {
+    id.parse(projectId);
+    id.parse(versionId);
+    for (const value of optionalProjectIds) id.parse(value);
+    const memo = dependencyMemo(this.limits.maxDependencies);
+    const project = (pid: string) => memo(`project:${pid}`, () => this.project(pid, signal));
+    const version = (vid: string) => memo(`version:${vid}`, () => this.version(vid, signal));
+    const versions = (pid: string) =>
+      memo(`versions:${pid}`, async () => {
+        const params = new URLSearchParams({ game_versions: JSON.stringify([gameVersion]) });
+        const result = z
+          .array(versionSchema)
+          .max(10000)
+          .parse(
+            await this.http.json(
+              `${this.origin}/project/${encodeURIComponent(pid)}/version?${params}`,
+              { signal },
+            ),
+          );
+        if (result.some((entry) => entry.project_id !== pid)) fail('dependency_identity');
+        return result
+          .filter((entry) => entry.game_versions.includes(gameVersion))
+          .sort(
+            (a, b) => b.date_published.localeCompare(a.date_published) || a.id.localeCompare(b.id),
+          );
+      });
+    return resolveDatapackGraph({
+      provider: 'modrinth',
+      projectId,
+      versionId,
+      gameVersion,
+      signal,
+      optionalProjectIds,
+      maxDependencies: this.limits.maxDependencies,
+      load: (pid, vid) =>
+        memo(`candidate:${pid ?? ''}:${vid ?? ''}`, async (): Promise<DatapackCandidate> => {
+          const pinned = vid ? await version(vid) : undefined;
+          if (pinned && pid && pinned.project_id !== pid) fail('dependency_identity');
+          const actualId = pinned?.project_id ?? pid;
+          if (!actualId) fail('unresolved_dependency');
+          const metadata = await project(actualId);
+          if (metadata.id !== actualId) fail('dependency_identity');
+          const preferredId = !pinned ? installedVersions.get(actualId) : undefined;
+          const preferred = preferredId ? await version(preferredId) : undefined;
+          if (preferred && preferred.project_id !== actualId) fail('dependency_identity');
+          const usablePreferred =
+            preferred &&
+            (preferred.game_versions.includes(gameVersion) ||
+              !preferred.loaders.includes('datapack'))
+              ? preferred
+              : undefined;
+          const releases = pinned || usablePreferred ? [] : await versions(actualId);
+          const selected =
+            pinned ??
+            usablePreferred ??
+            releases.find((entry) => entry.loaders.includes('datapack')) ??
+            releases[0];
+          const isDatapack =
+            selected?.loaders.includes('datapack') ??
+            (metadata.project_type === 'datapack' ||
+              metadata.loaders?.includes('datapack') === true);
+          const file = selected && isDatapack ? datapackFile(selected) : undefined;
+          return {
+            projectId: actualId,
+            ...(selected ? { versionId: selected.id } : {}),
+            name: metadata.title,
+            ...(file ? { filename: file.filename } : {}),
+            kind: isDatapack
+              ? 'datapack'
+              : ['mod', 'plugin'].includes(metadata.project_type)
+                ? 'mod'
+                : 'unknown',
+            compatible: Boolean(selected?.game_versions.includes(gameVersion)),
+            dependencies:
+              selected?.dependencies.map((dependency) => ({
+                ...(dependency.project_id ? { projectId: dependency.project_id } : {}),
+                ...(dependency.version_id ? { versionId: dependency.version_id } : {}),
+                ...(dependency.file_name ? { name: dependency.file_name } : {}),
+                relation: dependency.dependency_type,
+              })) ?? [],
+            ...(file && selected
+              ? {
+                  artifact: {
+                    path: 'config/input.zip',
+                    urls: [file.url],
+                    size: file.size,
+                    hashes: file.hashes,
+                    kind: 'override' as const,
+                    serverSide: 'required' as const,
+                    projectId: actualId,
+                    versionId: selected.id,
+                  },
+                }
+              : {}),
+          };
+        }),
+    });
   }
   async search(
     query: string,

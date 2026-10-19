@@ -5,15 +5,11 @@ import {
 } from '@nickhosting/content-providers';
 import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
 import type { createDatabase } from '@nickhosting/database';
-import {
-  authorizeServer,
-  createMinecraftSourceStore,
-  type ManagementRuntime,
-  parse,
-} from '@nickhosting/server-management';
+import { authorizeServer, type ManagementRuntime, parse } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import { minecraftDatapackWorldSchema } from '../../../games/minecraft/src/datapack-contracts.js';
+import { createMinecraftDatapackCatalogService } from '../../../packages/server-management/src/minecraft-datapack-catalog.js';
 import { createMinecraftDatapackService } from '../../../packages/server-management/src/minecraft-datapacks.js';
 import { minecraftContentProviders } from '../../../packages/server-management/src/minecraft-world-catalog.js';
 import type { Variables } from './app.js';
@@ -110,46 +106,51 @@ export function registerMinecraftDatapackRoutes(
     if (!provider) throw new DomainError('integration_unavailable');
     return c.json(await provider.datapackFiles(id, offset, c.req.raw.signal));
   });
+  const planRequest = z.strictObject({
+    provider: providerId,
+    projectId,
+    versionId: projectId,
+    world: minecraftDatapackWorldSchema,
+    optionalProjectIds: z.array(projectId).max(512).optional(),
+  });
+  app.post(`${base}/catalog/plan`, async (c) => {
+    const value = parse(planRequest, await body(c));
+    const { content, context, runtime, modrinth } = await catalog(c);
+    const serverId = c.req.param('id');
+    await authorizeServer(db, context, serverId, 'server:manage');
+    const provider = value.provider === 'modrinth' ? modrinth : content.curseforge;
+    if (!provider) throw new DomainError('integration_unavailable');
+    return c.json(
+      await createMinecraftDatapackCatalogService({ db, env, runtime, ...content }).plan(
+        context,
+        serverId,
+        value,
+        provider,
+        c.req.raw.signal,
+      ),
+    );
+  });
   app.post(`${base}/catalog/acquire`, async (c) => {
     const value = parse(
-      z.strictObject({
-        provider: providerId,
-        projectId,
-        versionId: projectId,
-        world: minecraftDatapackWorldSchema,
+      planRequest.extend({
+        planId: z.uuid().optional(),
+        disablePaths: z.array(z.string().max(512)).max(512).optional(),
         idempotencyKey: projectId,
         name: z.string().max(128).optional(),
         path: z.string().max(512).optional(),
       }),
       await body(c),
     );
-    const { content, context, runtime } = await catalog(c);
+    const { content, context, runtime, modrinth } = await catalog(c);
     const serverId = c.req.param('id');
     await authorizeServer(db, context, serverId, 'server:manage');
-    const store = createMinecraftSourceStore(db, context, env, {
-      http: content.http,
-      curseforge: content.curseforge,
-    });
-    const source = await store.acquireDatapack(
-      {
-        provider: value.provider,
-        projectId: value.projectId,
-        versionId: value.versionId,
-        serverId,
-        idempotencyKey: value.idempotencyKey,
-      },
-      c.req.raw.signal,
-    );
-    return c.json(
-      await createMinecraftDatapackService({ db, env, runtime }).prepare(context, serverId, {
-        world: value.world,
-        action: 'install',
-        sourceId: source.id,
-        name: value.name ?? `${value.projectId}-${value.versionId}.zip`,
-        path: value.path,
-        idempotencyKey: value.idempotencyKey,
-      }),
-      201,
-    );
+    const service = createMinecraftDatapackCatalogService({ db, env, runtime, ...content });
+    let planId = value.planId;
+    if (!planId) {
+      const provider = value.provider === 'modrinth' ? modrinth : content.curseforge;
+      if (!provider) throw new DomainError('integration_unavailable');
+      planId = (await service.plan(context, serverId, value, provider, c.req.raw.signal)).planId;
+    }
+    return c.json(await service.acquire(context, serverId, { ...value, planId }), 201);
   });
 }

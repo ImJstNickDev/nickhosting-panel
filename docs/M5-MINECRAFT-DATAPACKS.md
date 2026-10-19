@@ -76,10 +76,46 @@ unsupported.
 Modrinth discovery uses `all_project_types:datapack`, including projects whose
 primary type is `mod`, and selects versions with the `datapack` loader. CurseForge
 resolves its `data-packs` class from the categories API. Both retain archive
-hashes, provenance and distribution restrictions. Required/incompatible dependency
-resolution is not yet implemented for datapacks: such catalog files are explicitly
-unavailable, rather than installed without their dependencies. Local uploads do
-not manufacture provider dependency metadata.
+hashes, provenance and distribution restrictions. Catalog files remain browsable
+when they declare dependencies. Selecting one resolves a bounded, memoized graph
+for the server release before any archive transfer. Required datapacks are prepared
+automatically, optional dependencies are opt-in, and embedded dependencies are not
+fetched separately. Explicit version pins, cycles, shared dependencies and mutually
+incompatible requirements are handled without one request per repeated edge.
+Provider-declared restrictions are not waived by dependency resolution.
+
+The plan prefers known compatible installed or prepared versions for unpinned
+requirements; an explicit provider pin takes precedence. Dependencies disabled on disk are staged for enabling. A pack explicitly disabled
+in Minecraft’s saved selection must first be enabled through its existing native
+enable action; it is not silently treated as active. Conflicting installed datapacks require explicit approval
+to stage their disable; they are not deleted. Mods are never installed from this
+tab and the runtime is never changed: a mod requirement can only be satisfied by
+a compatible, identified installed mod with verified bytes. Files larger than the
+64 MiB bounded identity read remain unverified rather than assumed compatible. Unknown local files
+are not matched by filename. Local uploads do not manufacture provider dependency
+metadata, so undeclared relationships cannot be inferred.
+
+Plans use a bounded server-side cache, scoped to the actor, subject, server and
+world, with a ten-minute lifetime. A stale plan is resolved again during preparation.
+Each prepared/installed receipt persists provider identity, dependency and conflict
+information in the existing JSON plan; no new database migration is required.
+Apply uses these receipts and a shared filesystem observation to validate the final
+selection. Cancelling a required preparation, removing/disabling a required pack,
+or introducing a conflict cannot silently publish a broken graph. Apply does not
+resolve provider metadata, download archives or rehash installed mods. Removing a
+consumer does not automatically remove its dependencies. Opting into an optional
+pack does not convert it into a mandatory dependency; it remains removable.
+Current receipts are selected per filesystem path in PostgreSQL rather than
+truncated with audit history. A conflict with an unpublished draft asks the user
+to discard that draft; it never offers to disable a nonexistent published path.
+
+The protected `POST /v1/servers/:id/minecraft/datapacks/catalog/plan` returns public
+items, optional additions, conflicts and named blockers, never download URLs. The
+existing `/catalog/acquire` accepts its `planId` and explicit `disablePaths` decisions
+and prepares the graph through the same source store and Fileman service. Both
+operations retain current server-management authorization. Expected failures use
+localized `content_dependency_missing`, `content_dependency_conflict`, and
+`content_plan_expired` errors.
 
 Manual ZIP metadata is inspected on demand, rather than downloading every pack
 while listing a world (ZIP inspection is bounded to 8 MiB). Prepared metadata
@@ -103,6 +139,7 @@ automatic rollback action. Existing worlds and live game files are not migrated.
 ## References
 
 - [Minecraft 1.21.9 pack-format changes](https://www.minecraft.net/en-us/article/minecraft-java-edition-1-21-9)
+- [Modrinth dependency metadata](https://docs.modrinth.com/api/operations/getdependencies/)
 - [Modrinth project search](https://docs.modrinth.com/api/operations/searchprojects/)
 - [CurseForge REST API](https://docs.curseforge.com/rest-api/)
 - [Wings batch rename implementation](https://github.com/pterodactyl/wings/blob/v1.11.13/router/router_server_files.go#L89-L149)
@@ -117,11 +154,13 @@ does not claim real-client testing of every historical release.
 - [Desktop inventory](screenshots/m5/minecraft-datapacks-desktop-en.png)
 - [Italian mobile inventory](screenshots/m5/minecraft-datapacks-mobile-it.png)
 - [Prepared catalog changes](screenshots/m5/minecraft-datapacks-prepared-en.png)
+- [Required mod not installed](screenshots/m5/minecraft-datapacks-dependencies-en.png)
+- [Italian mobile dependency details](screenshots/m5/minecraft-datapacks-dependencies-mobile-it.png)
+- [Optional dependencies and explicit conflict decision](screenshots/m5/minecraft-datapacks-conflicts-en.png)
 - [Available and unavailable catalog releases](screenshots/m5/minecraft-datapacks-catalog-unavailable-en.png)
 
-Catalog releases carry their individual availability reason: unsupported dependency
-or conflict handling, provider distribution restrictions, or no supported verifiable
-ZIP. One unavailable release does not invalidate the rest of the project list.
+Catalog releases carry individual distribution/archive availability reasons.
+Dependency blockers and conflict decisions are returned by the preparation plan. One unavailable release does not invalidate the rest of the project list.
 The UI and backend consume the same strict datapack receipt schema; world catalogs
 retain their separate strict contract. These reasons do not bypass installation guards.
 
