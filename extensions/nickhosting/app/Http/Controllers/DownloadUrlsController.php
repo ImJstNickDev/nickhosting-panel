@@ -8,6 +8,7 @@ use Pterodactyl\Models\Server;
 use Pterodactyl\Services\Nodes\NodeJWTService;
 use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Http\Requests\DownloadUrlsRequest;
 use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\ManagedTransferAccess;
+use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\NativeTokenScope;
 
 final class DownloadUrlsController
 {
@@ -20,10 +21,11 @@ final class DownloadUrlsController
         $expiresAt = CarbonImmutable::now()->addSeconds($request->transferSettings()['signedUrlTtlSeconds']);
         $node = $server->node;
         $address = $node->getConnectionAddress();
+        $signer = NativeTokenScope::apply($this->jwtService, 'download');
         $urls = [];
         foreach ($paths as $path) {
             // Native path-specific claims and one-use unique_id; no filesystem or Wings reads.
-            $token = $this->jwtService->setExpiresAt($expiresAt)->setUser($user)
+            $token = $signer->setExpiresAt($expiresAt)->setUser($user)
                 ->setClaims(['file_path' => '/' . $path, 'server_uuid' => $server->uuid])
                 ->handle($node, $user->id . $server->uuid);
             $urls[] = sprintf('%s/download/file?token=%s', $address, $token->toString());

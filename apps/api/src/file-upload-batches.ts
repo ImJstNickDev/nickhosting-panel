@@ -4,6 +4,7 @@ import { getSettings } from '@nickhosting/database';
 import {
   isUploadCancelled,
   isUploadNotDispatched,
+  isUploadNotPublished,
   relativePath,
   type ServerFile,
 } from '@nickhosting/pterodactyl-adapter';
@@ -180,7 +181,7 @@ export function registerUploadBatchRoutes(
               service.adapter.getResources(identifier),
               getSettings(connection, options.env),
               urls.warm(cacheKey, files, (paths) =>
-                service.adapter.prepareUploadBatch(identifier, paths),
+                service.adapter.prepareUploadBatch(identifier, paths, { readDirectory: listFiles }),
               ),
             ]);
             const [prepared, observed, configured, tickets] = results;
@@ -448,6 +449,7 @@ async function runBatchUpload(
             if (!received) {
               if (isUploadNotDispatched(error)) await lease.rejectBeforeDispatch();
               else if (isUploadCancelled(error)) await lease.cancelConfirmed();
+              else if (isUploadNotPublished(error)) await lease.rejectBeforePublication();
               else await lease.uncertain();
             }
             throw error;

@@ -78,6 +78,94 @@ async function setup() {
 }
 
 describe('backend console mediation over a real isolated WebSocket', () => {
+  it('reuses a valid grant for another authenticated connection without another issuance', async () => {
+    const fixture = await setup();
+    const token = `header.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 600 })).toString('base64url')}.signature`;
+    fixture.fetcher.mockImplementation(async (url) =>
+      String(url).endsWith('/websocket')
+        ? Response.json({ data: { token, socket: `${fixture.origin}/api/servers/${uuid}/ws` } })
+        : Response.json({ attributes: client }),
+    );
+    for (let i = 0; i < 2; i++)
+      relays.push(
+        await fixture.adapter.relayConsole('f729c8a1', {
+          authorize: async () => true,
+          onEvent() {},
+        }),
+      );
+    expect(
+      fixture.fetcher.mock.calls.filter(([url]) => String(url).endsWith('/websocket')),
+    ).toHaveLength(1);
+    await expect(
+      fixture.adapter.relayConsole('f729c8a1', { authorize: async () => false, onEvent() {} }),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    expect(fixture.incoming.filter((event) => event.event === 'auth')).toHaveLength(2);
+    fixture.send('jwt error', ['invalidated by Wings restart']);
+    // Wait for the rejecting connection to close before requesting its replacement.
+    await vi.waitFor(() =>
+      expect(
+        [...(servers.at(-1)?.clients ?? [])].filter((socket) => socket.readyState === 1),
+      ).toHaveLength(1),
+    );
+    relays.push(
+      await fixture.adapter.relayConsole('f729c8a1', { authorize: async () => true, onEvent() {} }),
+    );
+    expect(
+      fixture.fetcher.mock.calls.filter(([url]) => String(url).endsWith('/websocket')),
+    ).toHaveLength(2);
+  });
+
+  it('rejects oversized encoded commands before sending and applies the native log request budget', async () => {
+    const fixture = await setup();
+    const relay = await fixture.adapter.relayConsole('f729c8a1', {
+      authorize: async () => true,
+      canSendCommands: true,
+      onEvent() {},
+    });
+    relays.push(relay);
+    for (const command of ['a'.repeat(4096), '🌍'.repeat(1024), '\\'.repeat(2048)])
+      await expect(relay.sendCommand(command)).rejects.toMatchObject({ code: 'validation_failed' });
+    const overhead = Buffer.byteLength(JSON.stringify({ event: 'send command', args: [''] }));
+    await relay.sendCommand('a'.repeat(4096 - overhead));
+    await relay.requestLogs();
+    await relay.requestLogs();
+    await expect(relay.requestLogs()).rejects.toMatchObject({
+      reason: 'rate_limited',
+      outcome: 'rejected',
+    });
+    await vi.waitFor(() => expect(fixture.incoming).toHaveLength(4));
+    expect(Buffer.byteLength(JSON.stringify(fixture.incoming[1]))).toBe(4096);
+  });
+
+  it.each(['global', 'send command', 'auth', 'send stats'])(
+    'reports Wings throttling (%s) and never replays a dispatched command',
+    async (scope) => {
+      const fixture = await setup();
+      const events: ConsoleEvent[] = [];
+      const relay = await fixture.adapter.relayConsole('f729c8a1', {
+        authorize: async () => true,
+        canSendCommands: true,
+        onEvent: (event) => events.push(event),
+      });
+      relays.push(relay);
+      await relay.sendCommand('list');
+      fixture.send('throttled', [scope]);
+      await vi.waitFor(() => expect(events).toContainEqual({ type: 'closed' }));
+      expect(events).toContainEqual({
+        type: 'error',
+        code: 'integration_unavailable',
+        reason: 'rate_limited',
+      });
+      await expect(relay.sendCommand('stop')).rejects.toMatchObject({
+        reason: 'rate_limited',
+        outcome: 'unknown',
+      });
+      expect(fixture.incoming.filter((event) => event.event === 'send command')).toEqual([
+        { event: 'send command', args: ['list'] },
+      ]);
+    },
+  );
+
   it('uses one restricted Blueprint request for installation logs without a blocked Client identity fetch', async () => {
     const fixture = await setup();
     const events: ConsoleEvent[] = [];

@@ -5,6 +5,7 @@ import { type createDatabase, recordAudit } from '@nickhosting/database';
 import {
   isUploadCancelled,
   isUploadNotDispatched,
+  isUploadNotPublished,
   type PrivateTransferCache,
   relativePath,
   type ServerFile,
@@ -666,6 +667,7 @@ export function registerServerRoutes(
         try {
           await measure('providerMs', () =>
             service.adapter.uploadFile(id, path, {
+              readDirectory: async () => files,
               body:
                 c.req.raw.body ??
                 new ReadableStream({
@@ -683,14 +685,17 @@ export function registerServerRoutes(
         } catch (error) {
           if (isUploadNotDispatched(error)) await claim.rejectBeforeDispatch();
           else if (isUploadCancelled(error)) await claim.cancelConfirmed();
+          else if (isUploadNotPublished(error)) await claim.rejectBeforePublication();
           await recordAudit(connection, current, 'server.files.incomplete', {
             ...metadata,
             completed: 0,
-            outcome: isUploadNotDispatched(error)
-              ? 'failed'
-              : isUploadCancelled(error)
-                ? 'cancelled'
-                : 'uncertain',
+            outcome:
+              isUploadNotDispatched(error) ||
+              (isUploadNotPublished(error) && !isUploadCancelled(error))
+                ? 'failed'
+                : isUploadCancelled(error)
+                  ? 'cancelled'
+                  : 'uncertain',
           });
           throw error;
         } finally {

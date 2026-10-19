@@ -22,6 +22,7 @@ FILES = (
     'app/Http/Controllers/DownloadUrlsController.php',
     'app/Http/Controllers/TransferSettingsController.php',
     'app/Services/ManagedTransferAccess.php',
+    'app/Services/NativeTokenScope.php',
     'app/Http/Requests/InstallationWebsocketRequest.php',
     'app/Http/Controllers/InstallationWebsocketController.php',
     'app/Services/InstallationEvents.php',
@@ -32,7 +33,10 @@ FILES = (
     'app/Http/Requests/ArchiveCommitRequest.php',
     'app/Http/Controllers/FileOperationController.php',
     'app/Http/Controllers/ArchiveCommitController.php',
+    'app/Http/Controllers/UploadPublicationController.php',
+    'app/Http/Requests/UploadPublicationRequest.php',
     'private/migrations/2026_10_18_000005_nickhosting_file_operations.php',
+    'private/migrations/2026_10_19_000006_nickhosting_file_operation_recovery.php',
     'app/Services/DirectoryListingRepository.php',
     'app/Http/Requests/ClientDirectorySettings.php',
     'app/Http/Requests/DirectoryListRequest.php',
@@ -96,6 +100,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output", type=Path,
-        default=ROOT.parent.parent / "build/blueprint/1.7.0/nickhosting.blueprint",
+        default=ROOT.parent.parent / "build/blueprint/1.8.0/nickhosting.blueprint",
     )
     print(build(ROOT, parser.parse_args().output))

@@ -14,6 +14,8 @@ const fixtureAdapter = (fetcher: typeof fetch) =>
   createPterodactylAdapter({
     ...options,
     fetcher: (url, init) => {
+      if (new URL(String(url)).pathname.endsWith('/files/list'))
+        return Promise.resolve(Response.json({ object: 'list', data: [] }));
       if (new URL(String(url)).pathname.endsWith('/transfer-settings'))
         return Promise.resolve(
           Response.json({
@@ -49,6 +51,13 @@ describe('Blueprint bulk upload credentials', () => {
     const paths = Array.from({ length: 49 }, (_, index) => `world/file-${index}.bin`);
     const fetcher = vi.fn<typeof fetch>(async (url, init) => {
       const target = new URL(String(url));
+      if (target.pathname.endsWith('/files/rename')) {
+        const { files } = JSON.parse(String(init?.body));
+        expect(files).toHaveLength(1);
+        expect(files[0].from).toMatch(/^world\/\.nh-upload-[a-f0-9-]+\.pending$/);
+        destinations.push(files[0].to);
+        return new Response(null, { status: 204 });
+      }
       if (target.origin === panel) {
         issuance++;
         expect(target.pathname).toBe(
@@ -71,7 +80,7 @@ describe('Blueprint bulk upload credentials', () => {
       used.add(token);
       const text = await new Response(init?.body).text();
       const filename = /filename="([^"]+)"/.exec(text)?.[1];
-      destinations.push(`world/${filename}`);
+      expect(filename).toMatch(/^\.nh-upload-[a-f0-9-]+\.pending$/);
       return new Response(null, { status: 204 });
     });
     const adapter = fixtureAdapter(fetcher);
@@ -89,7 +98,7 @@ describe('Blueprint bulk upload credentials', () => {
     const send = batch.uploads[0];
     if (!send) throw new Error('Missing handoff');
     await expect(send(body())).rejects.toSatisfy(isUploadNotDispatched);
-    expect(fetcher).toHaveBeenCalledTimes(50);
+    expect(fetcher).toHaveBeenCalledTimes(99);
   });
 
   it('returns null only when the older extension has no bulk endpoint', async () => {
@@ -208,6 +217,8 @@ describe('configurable Blueprint upload batches', () => {
     const settings = { downloadBatchLimit: 2500, uploadBatchLimit: 2, signedUrlTtlSeconds: 60 };
     let sequence = 0;
     const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+      if (new URL(String(url)).pathname.endsWith('/files/list'))
+        return Response.json({ object: 'list', data: [] });
       if (new URL(String(url)).pathname.endsWith('/transfer-settings'))
         return Response.json(settings);
       const { count } = JSON.parse(String(init?.body)) as { count: number };
@@ -237,6 +248,8 @@ describe('configurable Blueprint upload batches', () => {
     let sequence = 0;
     const counts: number[] = [];
     const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+      if (new URL(String(url)).pathname.endsWith('/files/list'))
+        return Response.json({ object: 'list', data: [] });
       if (new URL(String(url)).pathname.endsWith('/transfer-settings'))
         return Response.json({
           downloadBatchLimit: 2500,

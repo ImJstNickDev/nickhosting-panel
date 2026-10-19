@@ -57,17 +57,41 @@ Old Wings parses the multipart request before writing uploaded files. New Wings
 streams parts into the filesystem. Its `WriteFrom` opens the destination with
 truncation and removes that path on a failed stream.
 
-NickHosting currently uploads directly to the final filename and recognizes a
-particular multipart-parse HTTP 400 as evidence that nothing was written. That
-assumption cannot be carried forward: cancelling an overwrite can truncate/remove
-the previous destination; multi-part failures can also occur after earlier parts
-were written. Even fresh-file cancellation can follow a different error path.
+The previous adapter uploaded directly to the final filename and treated a
+particular multipart-parse HTTP 400 as evidence that nothing was written. The
+upgrade adaptation removes that assumption. Every streamed or bounded text write
+now uses a unique sibling `.nh-upload-<operation UUID>.pending`. Publication starts
+only after the complete upload and final authorization; cancellation before that
+point never truncates the requested destination. Browser cancellation closes a
+valid shortened multipart body, waits for Wings to acknowledge its isolated
+staging write, then deletes that exact stage before releasing the claim. This
+works with both buffered and streamed Wings implementations. Token rejection
+also permits scoped cleanup. Lost responses and HTTP 5xx/timeout responses remain
+uncertain: a proxy failure must not race a potentially still-running writer with
+cleanup.
 
-Adapt transfer publication/cancellation semantics before activation. Tests must
-prove that cancelling or disconnecting an overwrite preserves the previous file,
-new partial files are handled deliberately, completed parts are not blindly
-replayed, and successful uploads retain existing behavior. This is not solved by
-changing an error label. Sources:
+**Native Wings rename refuses existing destinations in both tested versions.**
+The adapter uses native rename for new paths and the extension's existing durable
+file-operation ledger for replacements: record intent and recovery paths, rename the previous file
+to `.nh-upload-<UUID>.previous`, publish the stage, verify both sides, confirm,
+then clean the backup. This is not an atomic replacement across the two renames.
+An interrupted/uncertain publication preserves recoverable files and is never
+blindly replayed. A confirmed publication whose cleanup fails may leave its backup.
+There is no fallback to an unsafe direct overwrite. Additive extension migration
+`000006` adds nullable `recovery_context` to that existing ledger, preserving old
+receipts. Source/destination/backup paths and the pre-rename metadata observations
+remain available after process failure; keep this column on code rollback.
+
+Permission metadata is read once per parent directory during preparation, reusing
+an existing caller preflight when available. Prepared text grants carry the same
+metadata. Staged replacements retain the original mode. Restrictive modes such as
+`0600` require an empty native write and chmod **before** streaming sensitive bytes;
+other nondefault modes such as `0755` require chmod before publication. Ordinary
+new files remain `0644`. This adds one publication request after upload; existing
+file replacement performs two bounded directory reads, two renames and backup
+deletion inside the extension. Staging also needs room for old and new content
+simultaneously: a full disk may reject a replacement that in-place truncation
+would previously have accepted. Sources:
 [upload handler](https://github.com/pterodactyl/wings/blob/v1.13.4/router/router_server_files.go),
 [filesystem writer](https://github.com/pterodactyl/wings/blob/v1.13.4/server/filesystem/filesystem.go).
 
@@ -107,9 +131,12 @@ and test recovery without weakening the upstream limits. Sources:
 ### Prepared URLs, optional identifiers and operation eligibility
 
 - New Wings can reject signed transfer URLs issued before its startup or user
-  revocation. Prepared URL pools need deliberate invalidation/reissuance on
-  confirmed pre-effect authentication rejection. Never blindly retry a write
-  after an uncertain response. Exercise this across a Wings restart.
+  revocation. Prepared download pools now invalidate and reissue once after a
+  401/403/404 response before exposing bytes to their consumer. Arbitrary streaming
+  writes are never replayed. A bounded in-memory text write may use one staged
+  native fallback only after a cached-token rejection and confirmed cleanup;
+  publication failures or lost responses never select that fallback. Test fixtures
+  exercise revoked grants; a live restart smoke test remains separate evidence.
 - Keep the new `PTERODACTYL_USE_SERVER_IDENTIFIERS` feature disabled unless a
   separate identifier migration is designed. It defaults off; enabling it changes
   Client `identifier` behavior and could invalidate stored provider identities.
@@ -126,6 +153,12 @@ and test recovery without weakening the upstream limits. Sources:
   stricter destination checks; verify private endpoints only if actually used.
   Native `files/pull` is not used by the inspected NickHosting content pipeline,
   so its new restrictions do not justify adding an allowlist to that pipeline.
+- The implemented backup preflight reads `.pteroignore` once when exclusions are
+  omitted, validates its byte/pattern/wildcard limits, and sends that snapshot
+  explicitly. Empty/absent files use a comment-only exclusion string so Wings
+  cannot reread a subsequently changed file. Non-404 read failures block creation.
+  This requires `file.read-content` as well as `backup.create`; NickHosting's
+  technical owners have both, but a future backup-only provider subuser does not.
 - Provider owner transfer now queues SFTP access revocation instead of completing
   it synchronously. Do not treat the details PATCH response as proof that every
   old provider SFTP session was already closed. This does not replace NickHosting's
@@ -146,10 +179,11 @@ upgrade regressions; no direct product caller was identified in this audit.
 
 ## Evidence and remaining work
 
-Evidence is a comparison of exact official tagged source archives with local
-adapter callers, validators and parsers, plus a read-only inspection of current
-cached rate-limit settings. No target application was run and no production API
-mutation, game operation, image update or restart occurred.
+The initial assessment compared exact official tagged source archives with local
+adapter callers, validators and parsers, plus read-only inspection of cached
+rate-limit settings. That initial audit did not run the target application or
+mutate production. Subsequent isolated adaptation evidence is recorded below;
+live upgrade/deployment evidence belongs to the separate upgrade report.
 
 Old mock tests passing would not prove target compatibility. Before activation,
 test the actual new PHP dependencies/signers, Wings streaming cancellation and
@@ -157,3 +191,23 @@ overwrite behavior, WebSocket limits/events, credential/resource cooldowns,
 prepared-URL revocation, and the representative server/file/backup journeys.
 Then run the approved bounded live smoke tests under the coordinated rollback
 plan. Unchanged source contracts are useful evidence, not an end-to-end guarantee.
+
+
+### Transfer adaptation evidence
+
+Focused adapter tests cover replacement/new-file publication, cancellation,
+permission preservation, uncertain receipts, scoped cleanup, one-use grants and
+read-only refresh. Isolated PostgreSQL integration tests cover upload admission
+and batch claims, including release after proven pre-publication rejection (34
+passing checks). They use the existing test services and fresh isolated schemas;
+they do not touch dev application state or historical schemas.
+
+An isolated container compiled the actual Wings **1.13.4** filesystem package and
+ran three added test-only cases. These demonstrated native `WriteFrom` truncation
+and removal on interrupted overwrite, preservation of the original when staging,
+valid shortened multipart cancellation followed by scoped cleanup, retention of
+`0600` applied before streaming, refusal of rename-overwrite, successful
+backup-then-publication, and recursive creation owned by UID/GID 988. The container
+had only the private downloaded source/test-cache mount, no Docker socket, game
+volumes or published ports. These tests do not establish live provider behavior
+or make the two-rename replacement atomic.

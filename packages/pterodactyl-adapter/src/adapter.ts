@@ -1,6 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 import { allocationInventory } from './allocations.js';
+import { backupIgnoredSchema } from './backup-limits.js';
+import { providerIdentitySchema } from './blueprint.js';
 import { type ConsoleRelayOptions, createConsoleRelay } from './console.js';
 import { getDirectoryBatchSettings, listDirectoriesBatch } from './directory-batch.js';
 import { createDownloadPool } from './download-pool.js';
@@ -18,6 +21,7 @@ import {
   getFileOperationCapabilities,
   guardedDeleteDirectory,
   inspectFileOperation,
+  publishStagedUpload,
 } from './file-operations.js';
 import { confirmInstallation, type InstallationConfirmationOptions } from './installation.js';
 import { type StopConfirmationOptions, stopWithConfirmation } from './power.js';
@@ -55,7 +59,13 @@ import {
   type StartupUpdate,
   userSchema,
 } from './types.js';
-import { uploadNotDispatched } from './upload-dispatch.js';
+import {
+  isUploadNotDispatched,
+  isUploadNotPublished,
+  uploadCancelled,
+  uploadNotDispatched,
+  uploadNotPublished,
+} from './upload-dispatch.js';
 import { createUploadProxy, type UploadProxyOptions } from './uploads.js';
 
 export interface PterodactylOptions extends TransportOptions {
@@ -67,6 +77,8 @@ export interface PterodactylOptions extends TransportOptions {
   uploadOrigins?: string[];
   /** Changes whenever the managed provider identity/node or credential revision changes. */
   fileDownloadBinding?: string;
+  /** Local managed-registry identity for durable file replacement; never browser supplied. */
+  managedProviderIdentity?: z.infer<typeof providerIdentitySchema>;
   /** Server-only, encrypted transient storage shared by API and worker processes. */
   transferCache?: PrivateTransferCache;
 }
@@ -88,6 +100,14 @@ export interface PreparedUploadBatch {
   expiresAt: number;
   uploads: Array<(input: UploadProxyOptions) => Promise<void>>;
 }
+export interface UploadDestination {
+  mode: string;
+  exists: boolean;
+}
+export interface UploadPreparationOptions extends TransferOptions {
+  /** Reuse the caller's already-authorized parent-directory preflight. */
+  readDirectory?: (root: string) => Promise<z.infer<typeof fileSchema>[]>;
+}
 /** Optional caller-owned debug timing; the adapter never logs or starts its own clock. */
 export interface FileReadTiming {
   measure<T>(name: string, work: () => Promise<T>): Promise<T>;
@@ -103,7 +123,76 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
   const download = createDownloadProxy(options);
   const upload = createUploadProxy(options);
   const fileDownloads = createDownloadPool(options, transport);
-  const fileWrites = createPreparedFileWrites(options, transport, fileDownloads.settings);
+  const fileWrites = createPreparedFileWrites(
+    options,
+    transport,
+    fileDownloads.settings,
+    async (identifier, path) =>
+      (await uploadDestinations(identifier, [path]))[0] as UploadDestination,
+  );
+  async function uploadDestinations(
+    identifier: string,
+    paths: string[],
+    input: UploadPreparationOptions = {},
+  ): Promise<UploadDestination[]> {
+    const directories = new Map<string, Promise<z.infer<typeof fileSchema>[]>>();
+    const normalizedPaths = paths.map((path) => relativePath(path).slice(1));
+    const roots = [
+      ...new Set(
+        normalizedPaths.map((path) => path.slice(0, path.lastIndexOf('/') + 1).replace(/\/$/, '')),
+      ),
+    ];
+    for (let offset = 0; offset < roots.length; offset += 4) {
+      const results = await Promise.allSettled(
+        roots.slice(offset, offset + 4).map((root) => {
+          const listing = (
+            input.readDirectory ? input.readDirectory(root) : adapter.listFiles(identifier, root)
+          ).catch((error: unknown) => {
+            // The native writer may create a missing parent; no previous file can
+            // have permissions there. Permission/network errors are not absence.
+            if (error instanceof PterodactylError && error.reason === 'not_found') return [];
+            throw error;
+          });
+          directories.set(root, listing);
+          return listing;
+        }),
+      );
+      const rejected = results.find((result) => result.status === 'rejected');
+      if (rejected?.status === 'rejected') throw rejected.reason;
+    }
+    return Promise.all(
+      normalizedPaths.map(async (normalized) => {
+        const directory = normalized.slice(0, normalized.lastIndexOf('/') + 1).replace(/\/$/, '');
+        const listing = directories.get(directory) as Promise<z.infer<typeof fileSchema>[]>;
+        const existing = (await listing).find(
+          (file) => file.name === normalized.slice(normalized.lastIndexOf('/') + 1),
+        );
+        if (!existing) return { mode: '644', exists: false };
+        const identity = options.managedProviderIdentity;
+        if (!identity || identity.identifier !== identifier)
+          throw new DomainError('provenance_mismatch');
+        parseInput(providerIdentitySchema, identity);
+        if (!existing.is_file || existing.is_symlink) throw new DomainError('conflict');
+        let bits = existing.mode_bits;
+        if (bits === undefined) {
+          // mode_bits is optional in older Panel transformers. The symbolic mode
+          // has the same rwx bits; do not invent broader permissions if malformed.
+          const symbolic = existing.mode.replace(/^-/, '');
+          if (/^[r-][w-][xsS-][r-][w-][xsS-][r-][w-][xtT-]$/.test(symbolic)) {
+            let permissions = 0;
+            for (let index = 0; index < 9; index++) {
+              if (!['-', 'S', 'T'].includes(symbolic[index] as string))
+                permissions |= 1 << (8 - index);
+            }
+            bits = permissions.toString(8);
+          }
+        }
+        if (!bits || !/^[0-7]{1,3}$/.test(bits))
+          throw new PterodactylError('invalid_response', 'client', 'rejected');
+        return { mode: Number.parseInt(bits, 8).toString(8), exists: true };
+      }),
+    );
+  }
   const uploadOrigins = new Set(
     (options.uploadOrigins ?? []).map((origin) => allowedOrigin(origin, ['http:', 'https:'])),
   );
@@ -113,8 +202,111 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       throw new PterodactylError('invalid_response', 'client', 'rejected');
     return target;
   };
-  const uploadHandoff = (url: string, path: string, expiresAt?: number) => {
+  const publishUpload = async (
+    identifier: string,
+    path: string,
+    destination: UploadDestination,
+    body: TransferOptions,
+    send: (temporary: string) => Promise<void>,
+  ) => {
+    const normalized = relativePath(path).slice(1);
+    const { mode, exists } = destination;
+    // Wings 1.13 streams with O_TRUNC and removes an incomplete destination.
+    // A unique sibling keeps the previous file intact until a complete upload
+    // is published. Native rename refuses existing targets; replacements use
+    // the existing Blueprint durable operation ledger and preserve a backup.
+    const parent = normalized.slice(0, normalized.lastIndexOf('/') + 1);
+    const operationId = randomUUID();
+    const temporary = `${parent}.nh-upload-${operationId}.pending`;
+    let publishing = false;
+    let prepared = false;
+    let transferCompleted = false;
+    const restrictBeforeWriting = (0o644 & ~Number.parseInt(mode, 8)) !== 0;
+    const setMode = () =>
+      transport.empty('client', `${clientServer(identifier)}/files/chmod`, 'POST', {
+        root: '/',
+        files: [{ file: temporary, mode }],
+      });
+    try {
+      if (restrictBeforeWriting) {
+        try {
+          if (body.signal?.aborted) throw new PterodactylError('unavailable', 'client', 'rejected');
+          await body.authorize?.();
+        } catch (error) {
+          throw uploadNotDispatched(error);
+        }
+        // An empty precreated file contains no sensitive bytes. Wings retains
+        // its mode when truncating, so a 0600 overwrite is never staged as 0644.
+        prepared = true;
+        await transport.empty(
+          'client',
+          `${clientServer(identifier)}/files/write?file=${filePath(temporary)}`,
+          'POST',
+          '',
+          true,
+        );
+        await setMode();
+      }
+      await send(temporary);
+      transferCompleted = true;
+      if (body.signal?.aborted) throw new PterodactylError('unavailable', 'client', 'rejected');
+      await body.authorize?.();
+      if (mode !== '644' && !restrictBeforeWriting) await setMode();
+      if (body.signal?.aborted) throw new PterodactylError('unavailable', 'client', 'rejected');
+      publishing = true;
+      if (exists) {
+        const receipt = await publishStagedUpload(transport, identifier, {
+          operationId,
+          identity: options.managedProviderIdentity as z.infer<typeof providerIdentitySchema>,
+          source: temporary,
+          destination: normalized,
+        });
+        if (receipt.state !== 'confirmed')
+          throw new PterodactylError('unavailable', 'client', 'unknown');
+      } else {
+        await adapter.renameFiles(identifier, '', [{ from: temporary, to: normalized }]);
+      }
+    } catch (error) {
+      if (publishing || (!prepared && isUploadNotDispatched(error))) throw error;
+      // A lost response can leave a writer still running upstream. Deleting an
+      // apparently absent stage cannot prove that it will not be created later.
+      // Gateway 5xx/timeout replies can also precede completion. Preserve
+      // uncertainty; successful shortened multipart is the cancellation proof.
+      if (
+        !transferCompleted &&
+        error instanceof PterodactylError &&
+        error.outcome === 'unknown' &&
+        (error.upstreamStatus === undefined ||
+          error.upstreamStatus >= 500 ||
+          error.upstreamStatus === 408)
+      )
+        throw error;
+      // Never touch the final path, replay a body, or remove a publication
+      // whose response was lost. Cleanup names only this handoff's own file.
+      try {
+        await transport.empty('client', `${clientServer(identifier)}/files/delete`, 'POST', {
+          root: '/',
+          files: [temporary],
+        });
+      } catch {
+        // An unconfirmed cleanup remains uncertain for existing recovery.
+        throw new PterodactylError('unavailable', 'client', 'unknown');
+      }
+      const failure = uploadNotPublished(
+        error instanceof Error ? error : new PterodactylError('unavailable', 'client', 'rejected'),
+      );
+      throw body.signal?.aborted ? uploadCancelled(failure) : failure;
+    }
+  };
+  const uploadHandoff = (
+    identifier: string,
+    url: string,
+    path: string,
+    destination: UploadDestination,
+    expiresAt?: number,
+  ) => {
     uploadTarget(url);
+    relativePath(path);
     let used = false;
     return async (body: UploadProxyOptions) => {
       if (used || (expiresAt !== undefined && Date.now() >= expiresAt)) {
@@ -122,9 +314,32 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         throw uploadNotDispatched(new DomainError('conflict'));
       }
       used = true;
-      return upload(url, path, body);
+      return publishUpload(identifier, path, destination, body, (temporary) =>
+        upload(url, temporary, body),
+      );
     };
   };
+  const staleDownloadGrant = (error: unknown) =>
+    error instanceof PterodactylError && [401, 403, 404].includes(error.upstreamStatus ?? 0);
+  async function readWithFreshGrant<T>(
+    identifier: string,
+    path: string,
+    read: (url: string) => Promise<T>,
+    timing?: FileReadTiming,
+  ): Promise<T> {
+    const url = timing
+      ? await timing.measure('file.signedUrl', () => fileDownloads.take(identifier, path, timing))
+      : await fileDownloads.take(identifier, path);
+    try {
+      return await read(url);
+    } catch (error) {
+      // Rejections happen before returning a response body to the consumer.
+      // A restart/revocation can invalidate every prepared grant for this server.
+      if (!staleDownloadGrant(error)) throw error;
+      fileDownloads.invalidate(identifier);
+      return read(await fileDownloads.fresh(identifier, path, timing));
+    }
+  }
   const adapter = {
     getAccount: () =>
       transport.entity(
@@ -470,18 +685,31 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       timing?: FileReadTiming,
     ): Promise<Uint8Array> {
       parseInput(z.number().int().min(1).max(1048576), maxBytes);
-      const url = timing
-        ? await timing.measure('file.signedUrl', () => fileDownloads.take(identifier, path, timing))
-        : await fileDownloads.take(identifier, path);
-      return readEditorDownload(options, url, maxBytes, timing);
+      return readWithFreshGrant(
+        identifier,
+        path,
+        (url) => readEditorDownload(options, url, maxBytes, timing),
+        timing,
+      );
     },
     /** Optional exact-path grant preparation; never mutates a server file. */
     prepareFileWrite: fileWrites.prepare,
     writeFile(identifier: string, path: string, contents: string, timing?: FileReadTiming) {
       if (typeof contents !== 'string' || Buffer.byteLength(contents, 'utf8') > 1048576)
         throw new DomainError('validation_failed');
-      const endpoint = `${clientServer(identifier)}/files/write?file=${filePath(path)}`;
-      const panelWrite = () => transport.empty('client', endpoint, 'POST', contents, true);
+      filePath(path);
+      const panelWrite = async () => {
+        const destination = (await uploadDestinations(identifier, [path]))[0] as UploadDestination;
+        return publishUpload(identifier, path, destination, {}, (temporary) =>
+          transport.empty(
+            'client',
+            `${clientServer(identifier)}/files/write?file=${filePath(temporary)}`,
+            'POST',
+            contents,
+            true,
+          ),
+        );
+      };
       const measure = (request: () => Promise<void>) =>
         timing ? timing.measure('file.write.http', request) : request();
       if (!options.transferCache) return measure(panelWrite);
@@ -495,8 +723,10 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
           // fall back to Panel after dispatch, including an uncertain response.
           await measure(() =>
             uploadHandoff(
+              identifier,
               grant.url,
               path,
+              grant.destination,
               grant.expiresAt,
             )({
               body: new ReadableStream<Uint8Array>({
@@ -509,6 +739,11 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
               maxBytes: 1048576,
             }),
           );
+        } catch (error) {
+          // Text is bounded and already available in memory. Only a confirmed
+          // pre-publication token rejection permits the existing native fallback.
+          if (!isUploadNotPublished(error) || !staleDownloadGrant(error)) throw error;
+          await measure(panelWrite);
         } finally {
           // A new grant is preparation only; keep it detached from this trace.
           void fileWrites.prepare(identifier, path);
@@ -615,18 +850,36 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     },
     getBackup: (identifier: string, backupId: string) =>
       transport.entity('client', backupPath(identifier, backupId), backupSchema),
-    createBackup(
+    async createBackup(
       identifier: string,
       input: { name: string; ignored?: string; is_locked?: boolean },
     ) {
       const body = parseInput(
         z.strictObject({
           name: z.string().min(1).max(191),
-          ignored: z.string().max(16384).optional(),
+          ignored: backupIgnoredSchema.optional(),
           is_locked: z.boolean().optional(),
         }),
         input,
       );
+      if (!body.ignored) {
+        // Wings otherwise silently ignores an invalid .pteroignore. Validate a
+        // bounded snapshot and send it explicitly so the backup uses that copy.
+        let ignored = '';
+        try {
+          const response = await transport.request(
+            'client',
+            `${clientServer(identifier)}/files/contents?file=${filePath('.pteroignore')}`,
+          );
+          ignored = Buffer.from(await readBounded(response, 32_768)).toString('utf8');
+        } catch (error) {
+          if (error instanceof ResponseTooLargeError)
+            throw new DomainError('validation_failed', 413);
+          if (!(error instanceof PterodactylError && error.upstreamStatus === 404)) throw error;
+        }
+        // A nonempty comment prevents Wings rereading a subsequently changed file.
+        body.ignored = parseInput(backupIgnoredSchema, ignored) || '# No exclusion patterns';
+      }
       return transport.entity(
         'client',
         `${clientServer(identifier)}/backups`,
@@ -659,37 +912,45 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     async downloadFile(identifier: string, path: string, input: DownloadProxyOptions) {
       if (input.signal?.aborted) throw new PterodactylError('unavailable', 'client', 'rejected');
       await input.authorize?.();
-      const url = await fileDownloads.take(identifier, path);
-      return download(url, input);
+      return readWithFreshGrant(identifier, path, (url) => download(url, input));
     },
     /** Private, single-use upload handoff. URL lookup may overlap read-only
      * preflight; no Wings mutation occurs until the returned function is called. */
     async prepareUpload(
       identifier: string,
       path: string,
-      input: TransferOptions = {},
+      input: UploadPreparationOptions = {},
     ): Promise<(body: UploadProxyOptions) => Promise<void>> {
       let result: { url: string };
+      let destination: UploadDestination = { mode: '644', exists: false };
       try {
         relativePath(path);
         const guard = createTransferGuard(input, 'rejected');
         try {
           await guard.run(() => guard.authorize(true));
-          result = await guard.run(() =>
-            transport.entity(
-              'client',
-              `${clientServer(identifier)}/files/upload`,
-              z.object({ url: z.string() }),
-              'GET',
-              undefined,
-              // This GET issues a single-use credential, not a shareable observation.
-              false,
+          const [grant, permissions] = await Promise.allSettled([
+            guard.run(() =>
+              transport.entity(
+                'client',
+                `${clientServer(identifier)}/files/upload`,
+                z.object({ url: z.string() }),
+                'GET',
+                undefined,
+                // This GET issues a single-use credential, not a shareable observation.
+                false,
+              ),
             ),
-          );
+            guard.run(() => uploadDestinations(identifier, [path], input)),
+          ]);
+          if (grant.status === 'rejected') throw grant.reason;
+          uploadTarget(grant.value.url);
+          if (permissions.status === 'rejected') throw permissions.reason;
+          result = grant.value;
+          destination = permissions.value[0] as UploadDestination;
         } finally {
           guard.close();
         }
-        return uploadHandoff(result.url, path);
+        return uploadHandoff(identifier, result.url, path, destination);
       } catch (error) {
         throw uploadNotDispatched(error);
       }
@@ -699,7 +960,7 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     async prepareUploadBatch(
       identifier: string,
       paths: string[],
-      input: TransferOptions = {},
+      input: UploadPreparationOptions = {},
     ): Promise<PreparedUploadBatch | null> {
       try {
         const normalized = parseInput(z.array(z.string()).min(1).max(500), paths).map((path) =>
@@ -770,17 +1031,28 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
             throw new PterodactylError('invalid_response', 'client', 'rejected');
           tokens.add(token);
         }
+        const destinations = await uploadDestinations(identifier, normalized, input);
         return {
           expiresAt,
           uploads: normalized.map((path, index) =>
-            uploadHandoff(result.urls[index] as string, path, expiresAt),
+            uploadHandoff(
+              identifier,
+              result.urls[index] as string,
+              path,
+              destinations[index] as UploadDestination,
+              expiresAt,
+            ),
           ),
         };
       } catch (error) {
         throw uploadNotDispatched(error);
       }
     },
-    async uploadFile(identifier: string, path: string, input: UploadProxyOptions): Promise<void> {
+    async uploadFile(
+      identifier: string,
+      path: string,
+      input: UploadProxyOptions & UploadPreparationOptions,
+    ): Promise<void> {
       let prepared: (body: UploadProxyOptions) => Promise<void>;
       try {
         prepared = await adapter.prepareUpload(identifier, path, input);

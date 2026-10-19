@@ -20,7 +20,7 @@ final class FileOperationController
     public function capabilities(TransferSettingsRequest $request, Server $server): JsonResponse
     {
         app(ManagedTransferAccess::class)->authorize($request, $server);
-        return $this->response(['inspection' => true, 'guardedDelete' => true, 'archiveCommit' => true]);
+        return $this->response(['inspection' => true, 'guardedDelete' => true, 'archiveCommit' => true, 'uploadPublication' => true]);
     }
 
     public function inspect(FileInspectionRequest $request, Server $server): JsonResponse

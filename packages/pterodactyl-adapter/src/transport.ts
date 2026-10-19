@@ -163,6 +163,26 @@ function retryDelay(value: string | null, now: number): number {
   else if (value !== null && /^[A-Za-z]{3}, /.test(value)) duration = Date.parse(value) - now;
   return Number.isFinite(duration) ? Math.min(300_000, Math.max(1000, duration)) : 60_000;
 }
+/** These routes also have server-wide limits in Panel, independent of the API
+ * credential. Headers do not identify which nested limiter returned a 429. An
+ * ambiguous resource response therefore cannot freeze unrelated Client traffic;
+ * a 429 from an ordinary route still establishes the credential-wide cooldown. */
+function resourceLimit(path: string, method: string): string | undefined {
+  const match = /^servers\/([^/?]+)\/(.+?)(?:\?.*)?$/.exec(path);
+  if (!match) return;
+  const [, server, resource] = match;
+  if (method === 'GET' && resource === 'websocket') return `${server}:websocket`;
+  if (method !== 'POST') return;
+  if (/^backups\/[^/]+\/restore$/.test(resource ?? '')) return `${server}:backup-restore`;
+  // Backup creation has its own service-level throttle, separate from restore.
+  if (resource === 'backups') return `${server}:backup-create`;
+  if (
+    ['databases', 'files/pull', 'schedules', 'network/allocations', 'users'].includes(
+      resource ?? '',
+    )
+  )
+    return `${server}:${resource}`;
+}
 export function createTransport(options: TransportOptions) {
   const base = validatedBaseURL(options.baseURL);
   const timeoutMs = parseInput(z.number().int().min(1).max(120000), options.timeoutMs ?? 10000);
@@ -190,7 +210,17 @@ export function createTransport(options: TransportOptions) {
     const key = scope === 'application' ? options.applicationKey : options.clientKey;
     if (!key) throw new PterodactylError('credential_missing', scope, 'rejected');
     const requestScope = state(scope);
-    const remaining = requestScope.cooldownUntil - Date.now();
+    const resource = scope === 'client' ? resourceLimit(path, method) : undefined;
+    const resourceScope = resource
+      ? coordinator.scope(
+          createHash('sha256')
+            .update(JSON.stringify([base.href, 'resource', resource]))
+            .digest('hex'),
+          scope,
+        )
+      : undefined;
+    const remaining =
+      Math.max(requestScope.cooldownUntil, resourceScope?.cooldownUntil ?? 0) - Date.now();
     if (remaining > 0)
       throw new PterodactylError('rate_limited', scope, 'rejected', 429, remaining);
     const mutating = method !== 'GET';
@@ -234,11 +264,13 @@ export function createTransport(options: TransportOptions) {
       const status = response.status;
       const retryAfterMs =
         status === 429 ? retryDelay(response.headers.get('retry-after'), Date.now()) : undefined;
-      if (retryAfterMs !== undefined)
-        requestScope.cooldownUntil = Math.max(
-          requestScope.cooldownUntil,
+      if (retryAfterMs !== undefined) {
+        const limitedScope = resourceScope ?? requestScope;
+        limitedScope.cooldownUntil = Math.max(
+          limitedScope.cooldownUntil,
           Date.now() + retryAfterMs,
         );
+      }
       await response.body?.cancel();
       const reason =
         status === 401 || status === 403

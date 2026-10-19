@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import type { PrivateTransferCache, PterodactylOptions } from './adapter.js';
+import type { PrivateTransferCache, PterodactylOptions, UploadDestination } from './adapter.js';
 import type { TransferSettings } from './download-pool.js';
 import { allowedOrigin, signedTarget } from './downloads.js';
 import { type createTransport, relativePath, segment, validatedBaseURL } from './transport.js';
@@ -13,6 +13,7 @@ let pendingCount = 0;
 const grantSchema = z.strictObject({
   url: z.string().min(1).max(8192),
   expiresAt: z.number().int().positive(),
+  destination: z.strictObject({ mode: z.string().regex(/^[0-7]{1,3}$/), exists: z.boolean() }),
 });
 type Grant = z.infer<typeof grantSchema>;
 
@@ -22,6 +23,7 @@ export function createPreparedFileWrites(
   options: PterodactylOptions,
   transport: ReturnType<typeof createTransport>,
   settings: (identifier: string) => Promise<TransferSettings>,
+  destinationState: (identifier: string, path: string) => Promise<UploadDestination>,
 ) {
   const cache = options.transferCache;
   const origins = new Set(
@@ -83,17 +85,24 @@ export function createPreparedFileWrites(
       const current = await cache.get(key);
       if (current && valid(JSON.parse(current))) return;
       await settings(identifier);
-      const result = await transport.json(
-        'client',
-        `extensions/nickhosting/servers/${segment(identifier)}/upload-urls`,
-        z.strictObject({
-          expiresAt: z.string().datetime({ offset: true }),
-          urls: z.array(z.string().min(1).max(8192)).length(1),
-        }),
-        'POST',
-        { count: 1 },
-      );
-      const grant = valid({ url: result.urls[0], expiresAt: Date.parse(result.expiresAt) });
+      const [result, destination] = await Promise.all([
+        transport.json(
+          'client',
+          `extensions/nickhosting/servers/${segment(identifier)}/upload-urls`,
+          z.strictObject({
+            expiresAt: z.string().datetime({ offset: true }),
+            urls: z.array(z.string().min(1).max(8192)).length(1),
+          }),
+          'POST',
+          { count: 1 },
+        ),
+        destinationState(identifier, path),
+      ]);
+      const grant = valid({
+        url: result.urls[0],
+        expiresAt: Date.parse(result.expiresAt),
+        destination,
+      });
       if (!grant) return;
       await cache.put(key, JSON.stringify(grant), grant.expiresAt - Date.now() - EARLY_EXPIRY_MS);
     })()

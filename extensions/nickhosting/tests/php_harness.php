@@ -25,6 +25,8 @@ $capsule->setEventDispatcher(new Illuminate\Events\Dispatcher($app));
 $capsule->setAsGlobal(); $capsule->bootEloquent();
 $app->instance('db', $capsule->getDatabaseManager());
 $app->instance('db.schema', $capsule->schema());
+$app->instance('events', $capsule->getEventDispatcher());
+$app->instance('request', Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR'=>'127.0.0.1']));
 $capsule->getConnection()->setTransactionManager(new Illuminate\Database\DatabaseTransactionsManager());
 Facade::setFacadeApplication($app);
 $presence = new Illuminate\Validation\DatabasePresenceVerifier($capsule->getDatabaseManager());
@@ -34,6 +36,13 @@ Request::macro('validate', function (array $rules) use ($validator) { return $va
 $schemaMigration->up();
 $backupMigration->up();
 $fileOperationMigration->up();
+DB::table('nickhosting_file_operations')->insert(['operation_id'=>'12345678-1234-4234-8234-000000000000',
+    'server_uuid'=>'12345678-1234-4234-8234-000000000001','owner_id'=>1,'fingerprint'=>str_repeat('a',64),
+    'state'=>'uncertain','created_at'=>'2026-10-19 00:00:00','updated_at'=>'2026-10-19 00:00:00']);
+$legacyFileReceipt=(array) DB::table('nickhosting_file_operations')->first();
+$fileOperationRecoveryMigration->up();
+$migratedFileReceipt=(array) DB::table('nickhosting_file_operations')->first();
+DB::table('nickhosting_file_operations')->delete();
 
 Schema::create('settings', function ($t) { $t->string('key')->primary(); $t->text('value'); });
 $settings = new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Services\Settings();
@@ -45,9 +54,29 @@ Schema::create('servers', function ($t) {
 });
 Schema::create('users', function ($t) { $t->increments('id'); $t->string('uuid'); $t->string('external_id'); $t->boolean('root_admin'); $t->boolean('use_totp')->default(false); $t->string('totp_secret')->nullable(); foreach (['username','email','password','name_first','name_last','language'] as $field) { $t->string($field)->nullable(); } $t->timestamps(); });
 Schema::create('api_keys', function ($t) { $t->increments('id'); $t->integer('user_id'); $t->integer('key_type'); $t->string('identifier'); $t->text('token'); $t->text('memo'); $t->text('allowed_ips'); $t->timestamps(); });
+// Panel 1.15 records native user creation too: prepare the real activity model
+// tables before invoking UserCreationService, not only in the later backup tests.
+Schema::create('activity_logs', function ($t) {
+    $t->bigIncrements('id'); $t->string('event'); $t->string('ip'); $t->text('properties');
+    $t->uuid('batch')->nullable(); $t->text('description')->nullable();
+    $t->string('actor_type')->nullable(); $t->unsignedInteger('actor_id')->nullable();
+    $t->unsignedInteger('api_key_id')->nullable(); $t->timestamp('timestamp')->useCurrent();
+});
+Schema::create('activity_log_subjects', function ($t) {
+    $t->bigIncrements('id'); $t->unsignedBigInteger('activity_log_id');
+    $t->unsignedInteger('subject_id'); $t->string('subject_type');
+});
+$anonymousAuth = new class implements Illuminate\Contracts\Auth\Factory {
+    public function guard($name=null) { return new class { public function user() { return null; } }; }
+    public function shouldUse($name) {}
+};
+Pterodactyl\Facades\Activity::swap(new Pterodactyl\Services\Activity\ActivityLogService(
+    $anonymousAuth, new Pterodactyl\Services\Activity\ActivityLogBatchService(),
+    new Pterodactyl\Services\Activity\ActivityLogTargetableService(), $capsule->getConnection()));
 $technicalMigration->up();
 $count = 0;
 function check(bool $value, string $name): void { global $count; if (!$value) { throw new RuntimeException('FAIL ' . $name); } $count++; echo 'PASS ' . $name . "\n"; }
+check($migratedFileReceipt===($legacyFileReceipt+['recovery_context'=>null]),'recovery migration preserves legacy receipts with nullable context');
 function denied(callable $fn, int $code, string $name): void { try { $fn(); } catch (Symfony\Component\HttpKernel\Exception\HttpException $e) { check($e->getStatusCode() === $code, $name); return; } throw new RuntimeException('Expected denial ' . $name); }
 function req(array $data = [], string $method = 'POST', int $type = 2, int $permissions = 3, int $keyId = 1): Request {
     $request = Request::create('/', $method, $data);
@@ -148,6 +177,12 @@ $registered = nickhostingProviderConfig($configuration, false);
 check(str_contains($registered, 'nickhosting-provider-begin'), 'provider registration added');
 check(nickhostingProviderConfig($registered, false)===$registered,'provider registration idempotent');
 check(nickhostingProviderConfig($registered,true)===$configuration,'provider removal preserves unrelated configuration');
+$nativeConfiguration = nickhostingProviderConfig(file_get_contents('/app/config/app.php'), true);
+$nativeRegistered = nickhostingProviderConfig($nativeConfiguration, false);
+token_get_all($nativeRegistered, TOKEN_PARSE);
+check(nickhostingProviderConfig($nativeRegistered, false) === $nativeRegistered
+    && nickhostingProviderConfig($nativeRegistered, true) === $nativeConfiguration,
+    'provider hook supports actual Panel configuration layout without modifying it');
 try { nickhostingProviderConfig('<?php return [];',false); throw new LogicException('not rejected'); }
 catch (RuntimeException $e) { check(true,'unknown configuration layout rejected'); }
 $temporary = tempnam(sys_get_temp_dir(), 'nh-config-test-');
@@ -217,7 +252,8 @@ foreach (['downloadBatchLimit'=>2501,'uploadBatchLimit'=>501,'signedUrlTtlSecond
     catch (Illuminate\Validation\ValidationException $e) { check($settings->origin()==='https://retained.example', 'invalid setting rejected before origin changes '.$name); }
 }
 $settings->saveOperational($defaults);
-DB::table('settings')->where('key','nickhosting::downloadBatchLimit')->update(['value'=>'invalid']);
+app(Pterodactyl\BlueprintFramework\Libraries\ExtensionLibrary\Admin\BlueprintAdminLibrary::class)
+    ->dbSet('nickhosting', 'downloadBatchLimit', 'invalid');
 check($settings->transfer()['downloadBatchLimit']===2500, 'invalid stored setting falls back to safe default');
 $settings->saveOperational($defaults);
 // Compile/render the actual Blade with framework directives, escaped input and both locales.
@@ -279,6 +315,9 @@ check(str_starts_with($technical->username,'nh-') && strlen($technical->username
 check(str_ends_with($technical->email,'@accounts.nickhosting.invalid') && !isset($created['password']),'opaque technical email and no password response');
 check(str_starts_with($technical->password,'$2y$') && $notifications->count===1 && $notifications->creationProtected,'native creation hashes password and dispatches notification');
 check($controller->provisionUser(req(),$instance,$nickTechnical)->getData(true)===$created && $notifications->count===1,'lost response retry returns same account without another notification');
+check(DB::table('activity_logs')->where('event','user:user.create')->count()
+    === (method_exists(Pterodactyl\Services\Nodes\NodeJWTService::class, 'setScopes') ? 1 : 0),
+    'native account audit retained once on the target Panel generation');
 check($accounts->managed($technical) && !$accounts->managed(Pterodactyl\Models\User::query()->find(1)),'exact technical ledger only');
 $before=DB::table('users')->count();
 DB::beginTransaction();
@@ -298,7 +337,9 @@ check($middleware->handle($r,fn()=>true)===true,'real account API token permitte
 $r=Request::create('/'); $r->setUserResolver(fn()=>$technical);
 denied(fn () => $middleware->handle($r,fn()=>true),403,'API token does not grant browser access');
 $router=new Illuminate\Routing\Router(new Illuminate\Events\Dispatcher($app),$app); $app->instance('router',$router);
-$app->instance('events',new Illuminate\Events\Dispatcher($app));
+// Native account Activity may already have resolved the Event facade. Keep the
+// same dispatcher for Eloquent, the facade and notification/access assertions.
+Illuminate\Support\Facades\Event::swap($capsule->getEventDispatcher());
 $provider=new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Providers\BridgeServiceProvider($app); $provider->boot();
 $event=new Illuminate\Notifications\Events\NotificationSending($technical,new Pterodactyl\Notifications\AccountCreated($technical),'mail');
 check($app['events']->until($event)===false,'queued technical account email suppressed');
@@ -371,12 +412,13 @@ function transferRequest(string $kind, array $data, $server, $user, mixed $token
         'file-inspection' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\FileInspectionRequest::class,
         'guarded-delete' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\GuardedDeleteRequest::class,
         'archive-commit' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\ArchiveCommitRequest::class,
+        'upload-publication' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\UploadPublicationRequest::class,
         'directory-settings' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\DirectorySettingsRequest::class,
         'installation-websocket' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\InstallationWebsocketRequest::class,
     };
     $method=str_ends_with($kind,'settings') ? 'GET' : 'POST';
     $r=$class::create('/api/client/extensions/nickhosting/servers/'.$server->uuidShort.'/'.$kind, $method, $data);
-    if (in_array($kind, ['directory-list','file-inspection','guarded-delete','archive-commit'], true)) {
+    if (in_array($kind, ['directory-list','file-inspection','guarded-delete','archive-commit','upload-publication'], true)) {
         $r=$class::create($r->getUri(),$method,[],[],[],['CONTENT_TYPE'=>'application/json'],json_encode($data,JSON_THROW_ON_ERROR));
         (new Pterodactyl\Http\Middleware\TrimStrings())->handle($r,fn()=>null);
         (new Illuminate\Foundation\Http\Middleware\ConvertEmptyStringsToNull())->handle($r,fn()=>null);
@@ -398,7 +440,13 @@ function uploadRequest(array $data, $server, $user, mixed $tokenType = 1) {
 function downloadRequest(array $data, $server, $user, mixed $tokenType = 1) {
     return transferRequest('download-urls', $data, $server, $user, $tokenType);
 }
-$uploads = new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\UploadUrlsController(new Pterodactyl\Services\Nodes\NodeJWTService());
+$sharedSigner = new Pterodactyl\Services\Nodes\NodeJWTService();
+$uploads = new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\UploadUrlsController($sharedSigner);
+$scopedTokens = method_exists($sharedSigner, 'setScopes');
+function tokenScope($token, string $scope): bool {
+    global $scopedTokens;
+    return $scopedTokens ? $token->claims()->get('scope') === $scope : !$token->claims()->has('scope');
+}
 $uploadReq = uploadRequest(['count'=>49], $uploadServer, $uploadUser);
 check($uploadReq->authorize(), 'bulk upload authorizes native account token and file-create permission');
 check(!uploadRequest(['count'=>1], $uploadServer, $uploadUser, 2)->authorize(), 'bulk upload rejects Application token');
@@ -438,6 +486,7 @@ foreach ($body['urls'] as $url) {
     if (!$config->validator()->validate($jwt,new Lcobucci\JWT\Validation\Constraint\SignedWith($config->signer(),$config->signingKey()))
         || $jwt->claims()->get('server_uuid')!==$uploadServer->uuid
         || $jwt->claims()->get('user_uuid')!==$uploadUser->uuid
+        || !tokenScope($jwt, 'file-upload')
         || $jwt->claims()->get('exp')->getTimestamp()!==strtotime($body['expiresAt'])
         || !str_starts_with($url,'https://wings.example:443/upload/file?token=')) { throw new RuntimeException('invalid native upload token'); }
     $unique[]=$jwt->claims()->get('unique_id');
@@ -446,7 +495,7 @@ check(count(array_unique($unique))===49, 'bulk upload native signatures claims e
 $ttl=strtotime($body['expiresAt'])-time();
 check($ttl>=898 && $ttl<=900, 'bulk upload URLs expire after native 15 minutes');
 check(count($uploads(uploadRequest(['count'=>500],$uploadServer,$uploadUser),$uploadServer)->getData(true)['urls'])===500,'bulk upload supports bounded 500-file group');
-$downloads = new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\DownloadUrlsController(new Pterodactyl\Services\Nodes\NodeJWTService());
+$downloads = new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\DownloadUrlsController($sharedSigner);
 $transferSettingsController = new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\TransferSettingsController();
 $paths=['world/level.dat','server.properties','config/hello world.json','config/città.json'];
 $downloadReq=downloadRequest(['paths'=>$paths],$uploadServer,$uploadUser);
@@ -483,6 +532,7 @@ foreach ($downloadBody['urls'] as $index=>$url) {
         && $jwt->claims()->get('file_path')==='/'.$paths[$index]
         && $jwt->claims()->get('server_uuid')===$uploadServer->uuid
         && $jwt->claims()->get('user_uuid')===$uploadUser->uuid
+        && tokenScope($jwt, 'file-download')
         && $jwt->claims()->get('exp')->getTimestamp()===strtotime($downloadBody['expiresAt'])
         && str_starts_with($url,'https://wings.example:443/download/file?token='), 'native file token signature exact path server owner expiry and ordering');
     $downloadUnique[]=$jwt->claims()->get('unique_id');
@@ -509,6 +559,9 @@ check($ttl>=58 && $ttl<=60, 'validated request preserves one settings snapshot f
 $lowerUploadBody=$uploads(uploadRequest(['count'=>2],$uploadServer,$uploadUser),$uploadServer)->getData(true);
 $ttl=strtotime($lowerUploadBody['expiresAt'])-time();
 check($ttl>=118 && $ttl<=120, 'upload signing uses configurable lifetime');
+parse_str(parse_url($lowerUploadBody['urls'][0], PHP_URL_QUERY), $scopeQuery);
+check(tokenScope($config->parser()->parse($scopeQuery['token']), 'file-upload'),
+    'reused native signer replaces the preceding download scope, never accumulates scopes');
 $settings->saveOperational($defaults);
 eval($installationHarness);
 eval($directoryHarness);

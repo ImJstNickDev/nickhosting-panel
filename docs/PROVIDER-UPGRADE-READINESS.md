@@ -138,3 +138,90 @@ test-server mutation was performed during this assessment.
 
 Machine-specific paths, identifiers, manifests, credentials and eventual backups
 belong only in ignored private infrastructure state.
+
+## Coordinated upgrade preparation, 2026-10-19
+
+The Owner authorized the coordinated update and selected **only NickHosting**
+for reinstallation. The live activation is not yet complete. The earlier
+read-only assessment above describes its original evidence boundary; the work
+below includes isolated rehearsal and application compatibility changes.
+
+### Extension inventory
+
+| Extension | Previous version | Upgrade disposition |
+| --- | --- | --- |
+| NickHosting | 1.7.0 | Reinstall reviewed 1.8.0 |
+| Subdomain Manager | 1.0.2 | Do not reinstall; retain code, archives and database state |
+| Minecraft World Manager | 3.1.1 | Do not reinstall; retain code, archives and database state |
+| AddressConfigurator | 1.0 | Do not reinstall; retain installed source and database state |
+| Minecraft Modpack Installer | 3.4.2 | Do not reinstall; retain code, archives and database state |
+| Egg Changer | 1.1.0 | Do not reinstall; retain code, archives and database state |
+| MC Logs | 1.6 | Do not reinstall; retain code, archives and database state |
+
+This is an explicit Owner choice, not a claim that the six excluded extensions
+are compatible. Rehearsal identified an old Modpack Installer controller that
+would remove new native node authorization checks; no third-party patch is
+being applied. Retaining an extension's database tables does not enable it.
+
+### Rehearsal and compatibility evidence
+
+- Copied Panel application code and a consistent small database dump into an
+  isolated installation without game mounts, Docker socket or published ports.
+  Game data was not backed up or copied.
+- Followed the official [Panel update](https://blueprint.zip/guides/admin/updatepanel)
+  and [Blueprint update](https://blueprint.zip/guides/admin/updateblueprint)
+  procedures: pinned Panel archive, production Composer dependencies, explicit
+  migrations without default egg seeding, then native framework update.
+  Updating from beta-2025-09 required a second native `blueprint -upgrade`
+  invocation; the resulting CLI reports beta-2026-08.
+- Native `blueprint -install nickhosting` installed the final 1.8.0 artifact
+  successfully. Its SHA256 is
+  `1628eea75493d5b1a9fa23d4f420bae1c5c903802af28da75f99c490b2492108`.
+  This replaces the earlier intermediate 1.8.0 test artifact.
+- NickHosting migration `000006` adds a nullable recovery-context column to the
+  existing file-operation ledger. It preserves original receipts and records
+  the paths needed to recover interrupted upload publication.
+- Restored the old database into an emptied **isolated** schema, demonstrating
+  that target-only tables are removed on rollback; reapplied native and
+  extension migrations successfully afterward.
+- Native PHP checks passed against both Panel generations, including scoped
+  tokens, managed-resource authorization and interrupted publication. Actual
+  Wings 1.13.4 filesystem tests exercised upload failure, rename behavior,
+  restrictive file modes and nested-directory ownership.
+- Prepared application changes cover streamed upload staging/publication,
+  bounded token renewal, WebSocket limits and shared credentials, scoped HTTP
+  cooldowns and backup exclusion validation. See
+  [API compatibility](PROVIDER-API-COMPATIBILITY.md) for guarantees and limits.
+
+### Activation and rollback constraints discovered in rehearsal
+
+Laravel maintenance mode also blocks Wings `/api/remote`. Before starting the
+new Wings, bring Laravel up behind a temporary write freeze that permits native
+authenticated remote routes; keep queue workers and cron disabled until
+verification finishes. The ingress rule must use the normalized path, survive
+the PHP internal redirect, and reject traversal and prefix-confusion bypasses.
+Sixteen isolated Nginx/PHP routing checks cover this behavior. Restore the exact
+original ingress configuration afterward.
+
+Drain **all** provider operations and queues, not only NickHosting jobs. Verify
+Docker state against Wings' persisted states immediately before stopping it.
+Wings 1.13.4 creates missing registered-server containers during bootstrap,
+unlike the previous boot path; it also attempts image pulls for these containers.
+The observed installation has 15 missing containers for pre-existing servers.
+Their data roots exist and all persisted states are offline, but creating them
+requires specific Owner approval before activation. The private proposal lists
+exact identities, commands and rollback; no such containers have been created.
+
+Use a new application code volume and retain the old volume and exact images.
+Keep provider database/cache services, game mounts, UID/GID, networks and ports
+unchanged. Preserve prior effective API limits explicitly and disable the new
+machine-ID mount behavior in Wings. The Wings healthcheck must use its actual
+configured listener; listener liveness alone is not an authenticated readiness
+test.
+
+Before opening writes, rollback restores the matching old code, configurations,
+images and final quiesced Panel database. Remove only newly created, still-stopped
+containers identified in the activation ledger, without deleting volumes.
+Once writes reopen, reconcile subsequent actions before any database restore.
+Source-mounted NickHosting compatibility changes also belong to the rollback;
+reverting only a container image does not revert those sources.

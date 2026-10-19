@@ -1,10 +1,11 @@
 import { DomainError } from '@nickhosting/core';
 import type { GameBackupPolicy } from '@nickhosting/game-sdk';
+import { backupIgnoredSchema } from '@nickhosting/pterodactyl-adapter';
 import { z } from 'zod';
 
 export const backupOptionsSchema = z.strictObject({
   name: z.string().trim().min(1).max(191).optional(),
-  ignored: z.string().max(16_384).optional(),
+  ignored: backupIgnoredSchema.optional(),
   isLocked: z.boolean().default(false),
   mode: z.enum(['auto', 'offline', 'live']).default('auto'),
 });

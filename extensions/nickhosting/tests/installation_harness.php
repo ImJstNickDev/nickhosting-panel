@@ -2,7 +2,7 @@
 use Illuminate\Support\Facades\DB;
 use Pterodactyl\BlueprintFramework\Extensions\nickhosting\Services\Protocol;
 // Native request policy/JWT and Eloquent update events, SQLite memory only.
-$installationController = new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\InstallationWebsocketController(new Pterodactyl\Services\Nodes\NodeJWTService());
+$installationController = new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\InstallationWebsocketController($sharedSigner);
 $installationRequest = transferRequest('installation-websocket', [], $uploadServer, $uploadUser);
 check($installationRequest->authorize(), 'installer socket permits linked Client account native websocket permission');
 foreach ([2, new Laravel\Sanctum\TransientToken(), null] as $tokenType) {
@@ -17,6 +17,7 @@ check($installResponse->headers->get('Cache-Control') === 'no-store, private'
     && $config->validator()->validate($installToken, new Lcobucci\JWT\Validation\Constraint\SignedWith($config->signer(), $config->signingKey()))
     && $installToken->claims()->get('server_uuid') === $uploadServer->uuid
     && $installToken->claims()->get('user_uuid') === $uploadUser->uuid
+    && tokenScope($installToken, 'websocket')
     && $installToken->claims()->get('permissions') === ['websocket.connect', 'admin.websocket.install'],
     'installer token works while installing and carries only exact server read permissions');
 $installTtl = $installToken->claims()->get('exp')->getTimestamp() - time();
@@ -41,6 +42,11 @@ DB::table('nickhosting_servers')->where('uuid', $uploadServer->uuid)->update(['v
 denied(fn () => $installationController($installationRequest, $uploadServer), 409, 'installer socket refuses invalidated managed link');
 DB::table('nickhosting_servers')->where('uuid', $uploadServer->uuid)->update(['valid' => true]);
 $uploadServer->status = null;
+$afterInstall = $uploads(uploadRequest(['count'=>1], $uploadServer, $uploadUser), $uploadServer)->getData(true);
+parse_str(parse_url($afterInstall['urls'][0], PHP_URL_QUERY), $afterInstallQuery);
+$afterInstallToken = $config->parser()->parse($afterInstallQuery['token']);
+check(tokenScope($afterInstallToken, 'file-upload') && !$afterInstallToken->claims()->has('permissions'),
+    'signer reuse after installer socket removes websocket scope and permissions');
 
 // Exercise the actual native observer dispatch, without Installed or any email configuration.
 // BridgeServiceProvider was already booted by the shared harness.

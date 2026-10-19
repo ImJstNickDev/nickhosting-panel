@@ -438,7 +438,7 @@ export async function claimUploadBatchEntry(
         if (file?.state !== 'active') throw new DomainError('conflict');
         file.state = state;
         if (state === 'cancelled')
-          file.auditOutcome = action === 'server.upload.not_dispatched' ? 'failed' : 'cancelled';
+          file.auditOutcome = action === 'server.upload.cancelled' ? 'cancelled' : 'failed';
       },
       timing,
       'settlement',
@@ -454,7 +454,9 @@ export async function claimUploadBatchEntry(
     complete: () => settle('complete', 'server.upload.confirmed'),
     /** Only after adapter proof that the external upload was never invoked. */
     rejectBeforeDispatch: () => settle('cancelled', 'server.upload.not_dispatched'),
-    /** Only after the adapter receives Wings' rejection of our incomplete multipart. */
+    /** Only after staging cleanup and proof that final publication was never attempted. */
+    rejectBeforePublication: () => settle('cancelled', 'server.upload.not_published'),
+    /** Only after the adapter proves cancellation before publication and staging cleanup. */
     cancelConfirmed: () => settle('cancelled', 'server.upload.cancelled'),
     uncertain: () => settle('uncertain', 'server.upload.uncertain'),
     /** Process loss before settlement retains an active claim, never replayable. */

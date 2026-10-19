@@ -5,7 +5,7 @@ import {
   type PrivateTransferCache,
   type PterodactylOptions,
 } from './adapter.js';
-import { isUploadNotDispatched } from './upload-dispatch.js';
+import { isUploadNotDispatched, isUploadNotPublished } from './upload-dispatch.js';
 
 const panel = 'https://panel.example.test';
 const wings = 'https://wings.example.test';
@@ -41,6 +41,10 @@ function fixture() {
   function process(name: string, overrides: Partial<PterodactylOptions> = {}) {
     const fetcher = vi.fn<typeof fetch>(async (url, init) => {
       const target = new URL(String(url));
+      if (target.pathname.endsWith('/files/list'))
+        return Response.json({ object: 'list', data: [] });
+      if (target.pathname.endsWith('/files/rename') || target.pathname.endsWith('/files/delete'))
+        return new Response(null, { status: 204 });
       if (target.pathname.endsWith('/transfer-settings')) {
         events.push(`${name}:settings`);
         return Response.json(settings);
@@ -114,7 +118,9 @@ describe('prepared exact-path text writes', () => {
       );
       expect(uploaded?.url.searchParams.get('token')).toBe('private-1');
       expect(uploaded?.headers.has('authorization')).toBe(false);
-      expect(uploaded?.body).toContain('name="files"; filename="server.properties"\r\n');
+      expect(uploaded?.body).toMatch(
+        /name="files"; filename="\.nh-upload-[a-f0-9-]+\.pending"\r\n/,
+      );
       expect(uploaded?.body.split('\r\n\r\n')[1]?.split('\r\n--nh-')[0]).toBe(content);
       expect(uploaded?.body.match(/Content-Disposition:/g)).toHaveLength(1);
       await vi.waitFor(() => expect(f.events).toContain('worker:issue'));
@@ -302,7 +308,7 @@ describe('prepared exact-path text writes', () => {
   });
 
   it.each(['lost-ack', 'http-error'])(
-    'preserves an uncertain Wings write without replay or Panel fallback (%s)',
+    'rejects an unpublished staged write without replay or Panel fallback (%s)',
     async (failure) => {
       const f = fixture();
       await f.process('api').prepareFileWrite('server', 'server.properties');
@@ -312,6 +318,7 @@ describe('prepared exact-path text writes', () => {
       };
       const result = f.process('worker').writeFile('server', 'server.properties', 'changed');
       await expect(result).rejects.toMatchObject({ outcome: 'unknown' });
+      await expect(result).rejects.not.toSatisfy(isUploadNotPublished);
       await expect(result).rejects.not.toSatisfy(isUploadNotDispatched);
       expect(f.uploads).toHaveLength(1);
       expect(f.writes).toHaveLength(0);
@@ -324,6 +331,16 @@ describe('prepared exact-path text writes', () => {
     await expect(
       f.process('worker').writeFile('server', 'server.properties', 'content'),
     ).rejects.toMatchObject({ reason: 'permission_denied', upstreamStatus: 403 });
+  });
+  it('replaces a rejected cached token through one staged native write, never by replaying an upload', async () => {
+    const f = fixture();
+    await f.process('api').prepareFileWrite('server', 'server.properties');
+    f.hooks.upload = async () => new Response(null, { status: 404 });
+    await f.process('worker').writeFile('server', 'server.properties', 'new content');
+    expect(f.uploads).toHaveLength(1);
+    expect(f.writes).toHaveLength(1);
+    expect(f.writes[0]?.path).toMatch(/^\/\.nh-upload-[a-f0-9-]+\.pending$/);
+    expect(f.writes[0]?.body).toBe('new content');
   });
 
   it.each([

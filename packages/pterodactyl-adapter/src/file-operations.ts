@@ -46,6 +46,7 @@ const capabilitySchema = z.strictObject({
   inspection: z.literal(true),
   guardedDelete: z.literal(true),
   archiveCommit: z.literal(true),
+  uploadPublication: z.literal(true).optional(),
 });
 export type FileOperationInspection = z.infer<typeof inspectionSchema>;
 export type GuardedDirectoryDelete = z.infer<typeof deletionInput>;
@@ -192,6 +193,49 @@ export async function commitFileArchive(
     receipt.operationId !== body.operationId ||
     receipt.destinationRoot !== body.destinationRoot ||
     receipt.archiveSha256 !== body.archiveSha256 ||
+    Object.entries(body.identity).some(
+      ([key, value]) => receipt.identity[key as keyof typeof receipt.identity] !== value,
+    )
+  )
+    throw new PterodactylError('invalid_response', 'client', 'unknown');
+  return receipt;
+}
+
+const uploadPublicationInput = z.strictObject({
+  operationId: z.uuid(),
+  identity: providerIdentitySchema,
+  source: pathSchema,
+  destination: pathSchema,
+});
+const uploadPublicationReceipt = z.strictObject({
+  operationId: z.uuid(),
+  identity: providerIdentitySchema,
+  destination: pathSchema,
+  state: z.enum(['confirmed', 'uncertain']),
+});
+/** Reuses the bridge's durable ledger. Native Wings rename cannot replace files. */
+export async function publishStagedUpload(
+  transport: Transport,
+  identifier: string,
+  input: z.infer<typeof uploadPublicationInput>,
+) {
+  const body = parseInput(uploadPublicationInput, input);
+  const parent = body.destination.slice(0, body.destination.lastIndexOf('/') + 1);
+  if (
+    body.identity.identifier !== identifier ||
+    body.source !== `${parent}.nh-upload-${body.operationId}.pending`
+  )
+    throw new DomainError('validation_failed');
+  const receipt = await transport.json(
+    'client',
+    endpoint(identifier, 'upload-publication'),
+    uploadPublicationReceipt,
+    'POST',
+    body,
+  );
+  if (
+    receipt.operationId !== body.operationId ||
+    receipt.destination !== body.destination ||
     Object.entries(body.identity).some(
       ([key, value]) => receipt.identity[key as keyof typeof receipt.identity] !== value,
     )

@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { allowedOrigin, signedTarget } from './downloads.js';
 import { createTransferGuard, type TransferOptions } from './transfer-guard.js';
-import { PterodactylError, readBounded, relativePath, type TransportOptions } from './transport.js';
-import { isUploadCancelled, uploadCancelled, uploadNotDispatched } from './upload-dispatch.js';
+import { PterodactylError, relativePath, type TransportOptions } from './transport.js';
+import { uploadNotDispatched } from './upload-dispatch.js';
 
 export interface UploadProxyOptions extends TransferOptions {
   body: ReadableStream<Uint8Array>;
@@ -42,8 +42,9 @@ export function createUploadProxy(options: TransportOptions & { uploadOrigins?: 
       const suffix = Buffer.from(`\r\n--${boundary}--\r\n`);
       const length = prefix.length + input.contentLength + suffix.length;
       if (!Number.isSafeInteger(length)) throw new DomainError('validation_failed');
-      // Browser cancellation ends an incomplete multipart body and waits for
-      // Wings' parser rejection. Revocation/inactivity still abort the socket.
+      // Browser cancellation finishes a valid, shortened multipart body and waits
+      // for Wings to close its staging writer. The caller MUST
+      // supply an isolated staging path, not an existing destination.
       const guard = createTransferGuard({ ...input, signal: undefined }, 'unknown');
       let reader: ReadableStreamDefaultReader<Uint8Array>;
       try {
@@ -134,8 +135,14 @@ export function createUploadProxy(options: TransportOptions & { uploadOrigins?: 
         cancel();
         if (!closed) {
           closed = true;
-          // No terminal multipart boundary. Wings parses the whole form before
-          // writing a file, and reports 400 for the deliberate unexpected EOF.
+          // The destination is an isolated stage. A valid shortened multipart
+          // lets old/new Wings close its writer and acknowledge completion before
+          // the caller removes the stage; never depend on a proxy/error response.
+          if (!sentPrefix) {
+            sentPrefix = true;
+            output?.enqueue(prefix);
+          }
+          output?.enqueue(suffix);
           output?.close();
         }
         guard.progress();
@@ -160,30 +167,17 @@ export function createUploadProxy(options: TransportOptions & { uploadOrigins?: 
           dispatched = true;
           return fetcher(target, init);
         });
-        // Only the native parser's exact rejection establishes the no-write
-        // result. An arbitrary proxy/provider 400 is not cancellation proof.
-        if (cancelled && !complete && response.status === 400) {
-          let rejected = false;
-          try {
-            const content = await guard.run(() => readBounded(response, 1024));
-            const result: unknown = JSON.parse(Buffer.from(content).toString('utf8'));
-            rejected =
-              typeof result === 'object' &&
-              result !== null &&
-              'error' in result &&
-              result.error === 'Failed to get multipart form data from request.';
-          } catch {}
-          if (rejected)
-            throw uploadCancelled(new PterodactylError('unavailable', 'client', 'rejected', 400));
-          throw guard.failure();
-        }
         // Never expose provider response bodies or mistake an early response for a complete upload.
         await response.body?.cancel();
-        if (!response.ok || !complete) throw guard.failure();
+        if (!response.ok)
+          throw new PterodactylError('unavailable', 'client', 'unknown', response.status);
+        if (cancelled)
+          throw new PterodactylError('unavailable', 'client', 'rejected', response.status);
+        if (!complete) throw guard.failure();
         await guard.run(() => guard.authorize(true));
       } catch (error) {
         guard.abort();
-        if (isUploadCancelled(error)) throw error;
+        if (error instanceof PterodactylError) throw error;
         throw guard.failure();
       } finally {
         guard.close();

@@ -52,6 +52,7 @@ export async function validateConnection(
 }
 
 export * from './adapter.js';
+export { backupIgnoredSchema } from './backup-limits.js';
 export * from './blueprint.js';
 export type { ConsoleEvent, ConsoleRelay, ConsoleRelayOptions, ConsoleStats } from './console.js';
 export { type ContainerObserver, createContainerObserver } from './container-observer.js';
@@ -70,5 +71,9 @@ export type { TransferOptions } from './transfer-guard.js';
 export type { CredentialScope, RemoteOutcome } from './transport.js';
 export { createTransportCoordinator, PterodactylError, relativePath } from './transport.js';
 export * from './types.js';
-export { isUploadCancelled, isUploadNotDispatched } from './upload-dispatch.js';
+export {
+  isUploadCancelled,
+  isUploadNotDispatched,
+  isUploadNotPublished,
+} from './upload-dispatch.js';
 export type { UploadProxyOptions } from './uploads.js';

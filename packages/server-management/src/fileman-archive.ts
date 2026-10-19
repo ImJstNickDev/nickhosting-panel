@@ -7,6 +7,7 @@ import {
   type FileArchiveCommit,
   isUploadCancelled,
   isUploadNotDispatched,
+  isUploadNotPublished,
 } from '@nickhosting/pterodactyl-adapter';
 import { sql } from 'kysely';
 import { z } from 'zod';
@@ -490,8 +491,14 @@ export async function uploadFilemanArchive(
         uploadFailure = outcome;
       }
       await drainAuthorizations();
-      if (!dispatched || isUploadNotDispatched(uploadFailure) || isUploadCancelled(uploadFailure)) {
+      if (
+        !dispatched ||
+        isUploadNotDispatched(uploadFailure) ||
+        isUploadNotPublished(uploadFailure) ||
+        isUploadCancelled(uploadFailure)
+      ) {
         if (isUploadCancelled(uploadFailure)) await claim.cancelConfirmed();
+        else if (isUploadNotPublished(uploadFailure)) await claim.rejectBeforePublication();
         else await claim.rejectBeforeDispatch();
         settled = true;
         await persist({ binding, retrySafe: true });

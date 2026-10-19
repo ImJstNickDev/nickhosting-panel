@@ -662,16 +662,28 @@ describe('files and backup credential isolation', () => {
   it('writes raw bounded bytes, handles a root wipe as explicit names, and renames safely', async () => {
     const fetcher = vi
       .fn<typeof fetch>()
-      .mockImplementation(async () => new Response(null, { status: 204 }));
+      .mockImplementation(async (url) =>
+        String(url).includes('/files/list')
+          ? Response.json({ object: 'list', data: [] })
+          : new Response(null, { status: 204 }),
+      );
     const adapter = createPterodactylAdapter({ ...config, fetcher });
     await adapter.writeFile('f729c8a1', 'config/server.properties', 'fixture=true');
     await adapter.deleteFiles('f729c8a1', '', ['fixture.txt', 'fixture-dir']);
     await adapter.renameFiles('f729c8a1', 'config', [{ from: 'old.txt', to: 'new.txt' }]);
-    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+    expect(
+      fetcher.mock.calls.find(([url]) => String(url).includes('/files/write'))?.[1],
+    ).toMatchObject({
       body: 'fixture=true',
       headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     });
-    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+    expect(
+      JSON.parse(
+        String(
+          fetcher.mock.calls.find(([url]) => String(url).includes('/files/delete'))?.[1]?.body,
+        ),
+      ),
+    ).toEqual({
       root: '/',
       files: ['fixture.txt', 'fixture-dir'],
     });
@@ -682,7 +694,10 @@ describe('files and backup credential isolation', () => {
     'times writes without changing raw bytes or error outcomes (%s)',
     async (status) => {
       const trace = fileReadTiming();
-      const fetcher = vi.fn<typeof fetch>(async () => {
+      const fetcher = vi.fn<typeof fetch>(async (url) => {
+        if (String(url).includes('/files/list')) return Response.json({ object: 'list', data: [] });
+        if (String(url).includes('/files/rename') || String(url).includes('/files/delete'))
+          return new Response(null, { status: 204 });
         trace.advance(31);
         return new Response(null, { status });
       });
@@ -697,12 +712,14 @@ describe('files and backup credential isolation', () => {
       else
         await expect(written).rejects.toMatchObject({
           reason: status === 403 ? 'permission_denied' : 'unavailable',
-          outcome: status === 403 ? 'rejected' : 'unknown',
+          outcome: status === 500 ? 'unknown' : 'rejected',
           upstreamStatus: status,
         });
       expect(trace.durations).toEqual({ 'file.write.http': 31 });
-      expect(fetcher).toHaveBeenCalledTimes(1);
-      expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+      expect(fetcher).toHaveBeenCalledTimes(status === 500 ? 2 : 3);
+      expect(
+        fetcher.mock.calls.find(([url]) => String(url).includes('/files/write'))?.[1],
+      ).toMatchObject({
         method: 'POST',
         body: 'private=true',
         headers: { 'Content-Type': 'text/plain; charset=utf-8' },
@@ -713,7 +730,7 @@ describe('files and backup credential isolation', () => {
       expect(() =>
         adapter.writeFile('f729c8a1', 'large', 'x'.repeat(1048577), trace.timing),
       ).toThrow();
-      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(fetcher).toHaveBeenCalledTimes(status === 500 ? 2 : 3);
     },
   );
   it.each([false, true])(

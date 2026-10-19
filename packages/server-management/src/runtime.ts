@@ -397,9 +397,15 @@ export async function createManagementRuntime(options: ManagementOptions) {
         const read = () =>
           db
             .selectFrom('managed_servers')
-            .selectAll()
-            .where('pterodactyl_identifier', '=', identifier)
-            .where('deleted_at', 'is', null)
+            .innerJoin(
+              'managed_nodes as transfer_node',
+              'transfer_node.id',
+              'managed_servers.node_id',
+            )
+            .selectAll('managed_servers')
+            .select('transfer_node.pterodactyl_node_id as transfer_node_id')
+            .where('managed_servers.pterodactyl_identifier', '=', identifier)
+            .where('managed_servers.deleted_at', 'is', null)
             .executeTakeFirst();
         const server = timing ? await timing.measure('file.serverRead', read) : await read();
         if (!server) throw new DomainError('provenance_mismatch');
@@ -414,9 +420,20 @@ export async function createManagementRuntime(options: ManagementOptions) {
           createPterodactylAdapter({
             ...adapterOptions,
             clientKey: credential.clientApiKey,
+            managedProviderIdentity: {
+              providerId: server.pterodactyl_id as number,
+              providerUuid: server.pterodactyl_uuid as string,
+              identifier: server.pterodactyl_identifier as string,
+              externalId: server.external_id,
+              nodeId: server.transfer_node_id,
+            },
             fileDownloadBinding: createHash('sha256')
               .update(
-                JSON.stringify([directoryServerIdentity(server), credential.credentialRevision]),
+                JSON.stringify([
+                  directoryServerIdentity(server),
+                  server.transfer_node_id,
+                  credential.credentialRevision,
+                ]),
               )
               .digest('hex'),
           });

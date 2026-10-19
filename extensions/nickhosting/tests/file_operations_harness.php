@@ -5,6 +5,7 @@ use Pterodactyl\BlueprintFramework\Extensions\nickhosting\Services\Protocol;
 use Pterodactyl\BlueprintFramework\Extensions\nickhosting\Services\FileOperationRepository;
 use Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\FileOperationController;
 use Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\ArchiveCommitController;
+use Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\UploadPublicationController;
 
 class MemoryFileOperationRepository extends FileOperationRepository
 {
@@ -20,12 +21,13 @@ class MemoryFileOperationRepository extends FileOperationRepository
         return new GuzzleHttp\Client($config);
     }
 }
-function operationRepo(array $responses, array &$requests): MemoryFileOperationRepository {
+function operationRepo(array $responses, array &$requests, ?callable $observe = null): MemoryFileOperationRepository {
     global $app, $uploadServer;
     $mock = new GuzzleHttp\Handler\MockHandler($responses);
     $repository = new MemoryFileOperationRepository($app);
-    $repository->client = new GuzzleHttp\Client(['handler' => function ($request, $options) use ($mock, &$requests) {
+    $repository->client = new GuzzleHttp\Client(['handler' => function ($request, $options) use ($mock, &$requests, $observe) {
         $requests[] = ['request' => $request, 'options' => $options];
+        if ($observe !== null) { $observe($request); }
         return $mock($request, $options);
     }]);
     $repository->setServer($uploadServer);
@@ -355,3 +357,109 @@ $traceCount=count($operationRequests);
 $traceReplay=$traceController(operationRequest('archive-commit',$traceInput),$uploadServer)->getData(true);
 check($traceReplay['state']==='uncertain' && !isset($traceReplay['timings']) && count($operationRequests)===$traceCount,
     'uncertain trace replay preserves stage and has no repeated work or historical timing');
+
+// Native Wings rename refuses overwrites. Publication keeps the old file until
+// both rename sides have been observed, and persists intent before the first write.
+$publicationNumber = 300;
+function publicationInput(string $destination = 'world/level.dat'): array {
+    global $uploadServer, $publicationNumber;
+    $operationId = '12345678-1234-4234-8234-' . str_pad((string) ++$publicationNumber, 12, '0', STR_PAD_LEFT);
+    return ['operationId' => $operationId, 'identity' => Protocol::identity($uploadServer),
+        'source' => (dirname($destination) === '.' ? '' : dirname($destination) . '/') . '.nh-upload-' . $operationId . '.pending',
+        'destination' => $destination];
+}
+function publicationEntries(array $input, bool $published = false): array {
+    $stage = array_replace(operationEntry(basename($input['source']), true, 100), ['mode'=>'-r--------','mode_bits'=>'0400']);
+    $old = array_replace(operationEntry(basename($input['destination']), true, 40), ['mode'=>'-r--------','mode_bits'=>'400']);
+    return $published ? [array_replace($stage, ['name'=>basename($input['destination']), 'created'=>'2026-10-19T12:00:00Z']),
+        array_replace($old, ['name'=>'.nh-upload-'.$input['operationId'].'.previous','created'=>'2026-10-19T12:00:00Z'])] : [$stage,$old];
+}
+function publicationResponses(array $input): array {
+    return [operationListing(publicationEntries($input)), new GuzzleHttp\Psr7\Response(204),
+        new GuzzleHttp\Psr7\Response(204), operationListing(publicationEntries($input,true)), new GuzzleHttp\Psr7\Response(204)];
+}
+$publishInput=publicationInput(); $operationRequests=[];
+$publishController=new UploadPublicationController(operationRepo([], $operationRequests));
+foreach ([2,new Laravel\Sanctum\TransientToken(),null] as $badToken) {
+    check(!transferRequest('upload-publication',$publishInput,$uploadServer,$uploadUser,$badToken)->authorize(), 'publication rejects nonaccount token');
+}
+denied(fn()=>$publishController(operationRequest('upload-publication',$publishInput,$adminUser),$uploadServer),403,'publication refuses admin credential');
+denied(fn()=>$publishController(operationRequest('upload-publication',$publishInput,$unrelatedUser),$uploadServer),403,'publication refuses unrelated owner');
+$foreignPublication=$publishInput; $foreignPublication['identity']['providerId']++;
+denied(fn()=>$publishController(operationRequest('upload-publication',$foreignPublication),$uploadServer),409,'publication refuses mismatched managed identity');
+check($operationRequests===[] && !DB::table('nickhosting_file_operations')->where('operation_id',$publishInput['operationId'])->exists(), 'publication denial has no I/O or receipt');
+foreach ([['source'=>'world/ordinary-file'],['source'=>'elsewhere/'.basename($publishInput['source'])],['destination'=>'../file'],
+    ['destination'=>'world/.nh-upload-'.$publishInput['operationId'].'.previous'],['source'=>'/world/'.basename($publishInput['source'])]] as $invalid) {
+    try { operationRequest('upload-publication',array_replace($publishInput,$invalid)); throw new LogicException('Expected publication path rejection'); }
+    catch (Illuminate\Validation\ValidationException $error) { check(true,'publication requires unique canonical sibling staging'); }
+}
+$operationRequests=[]; $publicationStates=[]; $publicationContexts=[];
+$publishRepo=operationRepo(publicationResponses($publishInput),$operationRequests,function ($request) use ($publishInput,&$publicationStates,&$publicationContexts) {
+    if ($request->getMethod()!=='GET') {
+        $publicationStates[]=DB::table('nickhosting_file_operations')->where('operation_id',$publishInput['operationId'])->value('state');
+        $publicationContexts[]=json_decode(DB::table('nickhosting_file_operations')->where('operation_id',$publishInput['operationId'])->value('recovery_context'),true);
+    }
+});
+$publishController=new UploadPublicationController($publishRepo);
+$published=$publishController(operationRequest('upload-publication',$publishInput),$uploadServer)->getData(true);
+check($publicationStates===['sent','sent','confirmed'],'publication persists intent before each rename and confirmation before cleanup');
+check(count(array_filter($publicationContexts,fn($context)=>$context['schemaVersion']===1 && $context['kind']==='upload-publication'
+    && $context['source']===$publishInput['source'] && $context['destination']===$publishInput['destination']
+    && $context['backup']==='world/.nh-upload-'.$publishInput['operationId'].'.previous'
+    && $context['originalMetadata']['size']===40 && $context['stagedMetadata']['size']===100
+    && $context['originalMetadata']['mode']===0400 && $context['stagedMetadata']['mode']===0400))===3,
+    'durable exact paths and preflight metadata precede all publication effects');
+check($published===['operationId'=>$publishInput['operationId'],'state'=>'confirmed','identity'=>$publishInput['identity'],'destination'=>$publishInput['destination']], 'publication returns exact confirmed identity and destination');
+check(DB::table('nickhosting_file_operations')->where('operation_id',$publishInput['operationId'])->value('state')==='confirmed', 'publication stores confirmed receipt');
+check($publishRepo->clientCalls===1 && count($operationRequests)===5, 'publication reuses one client for two reads and three mutations');
+$publishBodies=array_map(fn($item)=>json_decode((string)$item['request']->getBody(),true),$operationRequests);
+$backup='world/.nh-upload-'.$publishInput['operationId'].'.previous';
+check($publishBodies[1]===['root'=>'/','files'=>[['from'=>'world/level.dat','to'=>$backup]]]
+    && $publishBodies[2]===['root'=>'/','files'=>[['from'=>$publishInput['source'],'to'=>'world/level.dat']]]
+    && $publishBodies[4]===['root'=>'/','files'=>[$backup]], 'publication saves original then stages final and deletes only its backup');
+check($publishController(operationRequest('upload-publication',$publishInput),$uploadServer)->getData(true)===$published && count($operationRequests)===5,
+    'confirmed publication receipt never repeats renames or cleanup');
+$changedPublication=$publishInput; $changedPublication['destination']='world/other.dat';
+denied(fn()=>$publishController(operationRequest('upload-publication',$changedPublication),$uploadServer),409,'publication UUID cannot change destination');
+
+foreach (['mode','backup','symlink','directory','alias','missing-stage','missing-destination'] as $invalid) {
+    $input=publicationInput(); $entries=publicationEntries($input);
+    if ($invalid==='mode') { $entries[0]['mode_bits']='644'; }
+    if ($invalid==='backup') { $entries[]=operationEntry('.nh-upload-'.$input['operationId'].'.previous',true); }
+    if ($invalid==='symlink') { $entries[1]['symlink']=true; }
+    if ($invalid==='directory') { $entries[0]['file']=false; }
+    if ($invalid==='alias') { $entries[]=array_replace($entries[1],['name'=>'LEVEL.DAT']); }
+    if ($invalid==='missing-stage') { array_shift($entries); }
+    if ($invalid==='missing-destination') { array_pop($entries); }
+    $operationRequests=[]; $controller=new UploadPublicationController(operationRepo([operationListing($entries)],$operationRequests));
+    denied(fn()=>$controller(operationRequest('upload-publication',$input),$uploadServer),409,'publication rejects unsafe preflight '.$invalid);
+    check(count($operationRequests)===1 && DB::table('nickhosting_file_operations')->where('operation_id',$input['operationId'])->value('state')==='rejected',
+        'preflight rejection preserves original without any mutation '.$invalid);
+    denied(fn()=>$controller(operationRequest('upload-publication',$input),$uploadServer),409,'publication rejected replay stays rejected');
+    check(count($operationRequests)===1,'rejected publication does no replay I/O');
+}
+foreach (['original-rename','stage-rename','readback','missing-stage-rename','wrong-final','lost-backup'] as $failure) {
+    $input=publicationInput(); $responses=publicationResponses($input);
+    if ($failure==='original-rename') { $responses[1]=new GuzzleHttp\Psr7\Response(500); }
+    if ($failure==='stage-rename') { $responses[2]=new GuzzleHttp\Psr7\Response(409); }
+    if ($failure==='readback') { $responses[3]=new GuzzleHttp\Psr7\Response(500); }
+    if ($failure==='missing-stage-rename') { $responses[3]=operationListing(publicationEntries($input)); }
+    if ($failure==='wrong-final') { $entries=publicationEntries($input,true); $entries[0]['size']++; $responses[3]=operationListing($entries); }
+    if ($failure==='lost-backup') { $responses[3]=operationListing([publicationEntries($input,true)[0]]); }
+    $operationRequests=[]; $controller=new UploadPublicationController(operationRepo($responses,$operationRequests));
+    check($controller(operationRequest('upload-publication',$input),$uploadServer)->getData(true)['state']==='uncertain','publication preserves uncertain '.$failure);
+    check(count(array_filter($operationRequests,fn($r)=>$r['request']->getMethod()==='POST'))===0, 'uncertain publication never deletes old bytes '.$failure);
+    $publicationRequestCount=count($operationRequests);
+    check($controller(operationRequest('upload-publication',$input),$uploadServer)->getData(true)['state']==='uncertain' && count($operationRequests)===$publicationRequestCount,
+        'uncertain publication is never blindly repeated '.$failure);
+    foreach (['prepared','sent'] as $crashed) {
+        DB::table('nickhosting_file_operations')->where('operation_id',$input['operationId'])->update(['state'=>$crashed]);
+        check($controller(operationRequest('upload-publication',$input),$uploadServer)->getData(true)['state']==='uncertain' && count($operationRequests)===$publicationRequestCount,
+            'crashed publication preserves remnants without replay '.$crashed);
+    }
+}
+$input=publicationInput('root-file'); $responses=publicationResponses($input); $responses[4]=new GuzzleHttp\Psr7\Response(500);
+$operationRequests=[]; $controller=new UploadPublicationController(operationRepo($responses,$operationRequests));
+check($controller(operationRequest('upload-publication',$input),$uploadServer)->getData(true)['state']==='confirmed'
+    && DB::table('nickhosting_file_operations')->where('operation_id',$input['operationId'])->value('state')==='confirmed',
+    'failed backup cleanup keeps confirmed publication and recoverable original');

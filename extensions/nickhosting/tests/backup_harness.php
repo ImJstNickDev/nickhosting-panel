@@ -8,14 +8,6 @@ Schema::create('backups', function ($t) {
     $t->unsignedBigInteger('bytes')->default(0); $t->timestamp('completed_at')->nullable();
     $t->timestamps(); $t->softDeletes();
 });
-Schema::create('activity_logs', function ($t) {
-    $t->bigIncrements('id'); $t->string('event'); $t->string('ip'); $t->text('properties');
-    $t->timestamp('timestamp')->useCurrent();
-});
-Schema::create('activity_log_subjects', function ($t) {
-    $t->bigIncrements('id'); $t->unsignedBigInteger('activity_log_id');
-    $t->unsignedInteger('subject_id'); $t->string('subject_type');
-});
 $app->instance('events', $capsule->getEventDispatcher());
 $backupFeed = new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Services\BackupEvents();
 Illuminate\Support\Facades\Event::listen(Pterodactyl\Events\ActivityLogged::class, fn ($event) => $backupFeed->capture($event));

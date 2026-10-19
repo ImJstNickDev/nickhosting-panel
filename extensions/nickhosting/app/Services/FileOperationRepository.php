@@ -262,4 +262,44 @@ class FileOperationRepository extends DaemonRepository
     {
         $this->mutate($this->getHttpClient(), 'POST', 'delete', ['root' => '/', 'files' => [$path]]);
     }
+
+    /** Wings refuses rename-overwrite. Preserve the original until the staged
+     * file's publication is observed; never recover an uncertain write by retry. */
+    public function publishUpload(string $operationId, string $source, string $destination, callable $beforeDispatch, callable $confirmed): void
+    {
+        $client = $this->getHttpClient();
+        $parent = dirname($source);
+        $directory = $parent === '.' ? '' : $parent;
+        $backup = ($directory === '' ? '' : $directory . '/') . '.nh-upload-' . $operationId . '.previous';
+        $find = static function (array $entries, string $name): ?array {
+            $matches = array_values(array_filter($entries, fn ($entry) => isset($entry['name']) && strcasecmp($entry['name'], $name) === 0));
+            abort_if(count($matches) > 1 || (count($matches) === 1 && $matches[0]['name'] !== $name), 409);
+            return $matches[0] ?? null;
+        };
+        $metadata = static function (?array $entry): array {
+            abort_unless($entry !== null && ($entry['file'] ?? null) === true && ($entry['symlink'] ?? null) === false
+                && is_string($entry['mode'] ?? null) && str_starts_with($entry['mode'], '-')
+                && is_string($entry['mode_bits'] ?? null) && preg_match('/^[0-7]{1,4}$/D', $entry['mode_bits'])
+                && is_int($entry['size'] ?? null) && $entry['size'] >= 0 && is_string($entry['modified'] ?? null), 409);
+            // Rename changes ctime, not mtime. This is an observation, not inode/CAS proof.
+            return ['mode' => octdec($entry['mode_bits']), 'size' => $entry['size'], 'modified' => $entry['modified']];
+        };
+        $entries = $this->entries($client, $directory);
+        $staged = $metadata($find($entries, basename($source)));
+        $original = $metadata($find($entries, basename($destination)));
+        abort_unless($staged['mode'] === $original['mode'] && $find($entries, basename($backup)) === null, 409);
+        $rename = fn ($from, $to) => $this->mutate($client, 'PUT', 'rename', ['root' => '/', 'files' => [['from' => $from, 'to' => $to]]]);
+        $beforeDispatch(['stagedMetadata' => $staged, 'originalMetadata' => $original]);
+        $rename($destination, $backup);
+        $rename($source, $destination);
+        // Native rename also returns 204 when a source is absent. Observe both
+        // sides before deleting any old bytes; ambiguous outcomes preserve all.
+        $entries = $this->entries($client, $directory);
+        abort_unless($find($entries, basename($source)) === null
+            && $metadata($find($entries, basename($destination))) === $staged
+            && $metadata($find($entries, basename($backup))) === $original, 409);
+        $confirmed();
+        try { $this->mutate($client, 'POST', 'delete', ['root' => '/', 'files' => [$backup]]); }
+        catch (\Throwable $error) { /* Confirmed publication; retain recoverable old bytes. */ }
+    }
 }

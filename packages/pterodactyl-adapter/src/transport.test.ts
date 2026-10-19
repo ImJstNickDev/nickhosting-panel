@@ -11,6 +11,74 @@ const schema = z.object({ value: z.number() });
 afterEach(() => vi.useRealTimers());
 
 describe('Pterodactyl request coordination', () => {
+  it('isolates an ambiguous websocket 429 to that server, including other credentials', async () => {
+    const coordinator = createTransportCoordinator();
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 429,
+          headers: { 'Retry-After': '60', 'X-RateLimit-Limit': '5' },
+        }),
+      )
+      .mockImplementation(async () => Response.json({ value: 1 }));
+    const first = createTransport({ ...config, coordinator, fetcher });
+    const otherUser = createTransport({
+      ...config,
+      clientKey: 'another-user',
+      coordinator,
+      fetcher,
+    });
+    await expect(first.json('client', 'servers/one/websocket', schema)).rejects.toMatchObject({
+      reason: 'rate_limited',
+    });
+    await expect(otherUser.json('client', 'servers/one/websocket', schema)).rejects.toMatchObject({
+      reason: 'rate_limited',
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await first.json('client', 'servers/one/resources', schema);
+    await first.json('client', 'servers/two/websocket', schema);
+    await first.empty('client', 'servers/one/power', 'POST', { signal: 'stop' });
+    expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+
+  it('learns a credential-wide cooldown from an ordinary route after an ambiguous resource 429', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementation(
+        async () => new Response(null, { status: 429, headers: { 'Retry-After': '60' } }),
+      );
+    const transport = createTransport({ ...config, fetcher });
+    await expect(transport.json('client', 'servers/one/websocket', schema)).rejects.toMatchObject({
+      reason: 'rate_limited',
+    });
+    await expect(transport.json('client', 'servers/one/resources', schema)).rejects.toMatchObject({
+      reason: 'rate_limited',
+    });
+    await expect(transport.json('client', 'servers/two/websocket', schema)).rejects.toMatchObject({
+      reason: 'rate_limited',
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares backup-restore limits within a server without blocking reads, creation or another server', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(null, { status: 429, headers: { 'Retry-After': '900' } }))
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    const transport = createTransport({ ...config, fetcher });
+    await expect(
+      transport.empty('client', 'servers/one/backups/a/restore', 'POST', {}),
+    ).rejects.toMatchObject({ reason: 'rate_limited', retryAfterMs: 300_000 });
+    await expect(
+      transport.empty('client', 'servers/one/backups/b/restore', 'POST', {}),
+    ).rejects.toMatchObject({ reason: 'rate_limited' });
+    await transport.empty('client', 'servers/one/backups', 'GET');
+    await transport.empty('client', 'servers/one/backups', 'POST', {});
+    await transport.empty('client', 'servers/two/backups/a/restore', 'POST', {});
+    expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+
   it.each([
     ['2', 2000],
     ['Sun, 11 Oct 2026 12:00:04 GMT', 4000],

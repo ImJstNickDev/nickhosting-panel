@@ -4,6 +4,7 @@ import { PterodactylError } from './transport.js';
 // stays internal to the adapter; consumers may only inspect it through the barrel.
 const notDispatched = new WeakSet<Error>();
 const cancelled = new WeakSet<Error>();
+const notPublished = new WeakSet<Error>();
 
 export function uploadNotDispatched(error: unknown): Error {
   const failure =
@@ -17,8 +18,29 @@ export function isUploadNotDispatched(error: unknown): error is Error {
   return error instanceof Error && notDispatched.has(error);
 }
 
-/** Internal proof: Wings rejected our deliberately incomplete multipart form
- * before entering filesystem writes. Never infer this from a browser abort alone. */
+/** Internal proof: the adapter never attempted publication of its isolated
+ * temporary upload. The requested destination has not been modified. */
+export function uploadNotPublished(error: Error): Error {
+  const failure =
+    error instanceof PterodactylError
+      ? new PterodactylError(
+          error.reason,
+          error.scope,
+          'rejected',
+          error.upstreamStatus,
+          error.retryAfterMs,
+        )
+      : error;
+  notPublished.add(failure);
+  return failure;
+}
+
+export function isUploadNotPublished(error: unknown): error is Error {
+  return error instanceof Error && notPublished.has(error);
+}
+
+/** Internal proof: cancellation occurred before publication. Upload data may
+ * have reached only the adapter's unique temporary file, never the destination. */
 export function uploadCancelled(error: Error): Error {
   cancelled.add(error);
   return error;

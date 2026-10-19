@@ -8,6 +8,7 @@ use Pterodactyl\Models\Server;
 use Pterodactyl\Services\Nodes\NodeJWTService;
 use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Http\Requests\InstallationWebsocketRequest;
 use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\ManagedTransferAccess;
+use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\NativeTokenScope;
 
 final class InstallationWebsocketController
 {
@@ -22,7 +23,8 @@ final class InstallationWebsocketController
         // also allows ordinary output in Wings; the backend relay filters it out.
         abort_if($server->isSuspended() || $node->isUnderMaintenance()
             || $server->status === Server::STATUS_RESTORING_BACKUP || !is_null($server->transfer), 409);
-        $token = $this->jwtService->setExpiresAt(CarbonImmutable::now()->addMinutes(10))
+        $token = NativeTokenScope::apply($this->jwtService, 'installation')
+            ->setExpiresAt(CarbonImmutable::now()->addMinutes(10))
             ->setUser($user)->setClaims(['server_uuid' => $server->uuid,
                 'permissions' => ['websocket.connect', 'admin.websocket.install']])
             ->handle($node, $user->id . $server->uuid);

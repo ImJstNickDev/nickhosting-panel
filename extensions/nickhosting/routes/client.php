@@ -34,3 +34,5 @@ Route::post('/servers/{server}/guarded-delete', [\Pterodactyl\BlueprintFramework
     ->middleware(AuthenticateServerAccess::class);
 Route::post('/servers/{server}/archive-commit', \Pterodactyl\BlueprintFramework\Extensions\{identifier}\Http\Controllers\ArchiveCommitController::class)
     ->middleware(AuthenticateServerAccess::class);
+Route::post('/servers/{server}/upload-publication', \Pterodactyl\BlueprintFramework\Extensions\{identifier}\Http\Controllers\UploadPublicationController::class)
+    ->middleware(AuthenticateServerAccess::class);

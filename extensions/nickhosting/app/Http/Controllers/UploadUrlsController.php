@@ -8,6 +8,7 @@ use Pterodactyl\Models\Server;
 use Pterodactyl\Services\Nodes\NodeJWTService;
 use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Http\Requests\UploadUrlsRequest;
 use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\ManagedTransferAccess;
+use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\NativeTokenScope;
 
 final class UploadUrlsController
 {
@@ -20,10 +21,11 @@ final class UploadUrlsController
         $expiresAt = CarbonImmutable::now()->addSeconds($request->transferSettings()['signedUrlTtlSeconds']);
         $node = $server->node;
         $address = $node->getConnectionAddress();
+        $signer = NativeTokenScope::apply($this->jwtService, 'upload');
         $urls = [];
         for ($i = 0; $i < $count; $i++) {
             // Native signing supplies a distinct unique_id consumed once by Wings.
-            $token = $this->jwtService->setExpiresAt($expiresAt)->setUser($user)
+            $token = $signer->setExpiresAt($expiresAt)->setUser($user)
                 ->setClaims(['server_uuid' => $server->uuid])->handle($node, $user->id . $server->uuid);
             $urls[] = sprintf('%s/upload/file?token=%s', $address, $token->toString());
         }

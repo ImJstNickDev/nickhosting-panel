@@ -13,7 +13,7 @@
     $italian = str_starts_with(app()->getLocale(), 'it');
 @endphp
 <div class="box box-primary">
-    <div class="box-header with-border"><h3 class="box-title">NickHosting <small>1.7.0</small></h3></div>
+    <div class="box-header with-border"><h3 class="box-title">NickHosting <small>1.8.0</small></h3></div>
     <div class="box-body">
         <ul>
             <li>{{ $italian ? 'Crea account tecnici Pterodactyl separati per gli utenti NickHosting.' : 'Creates separate Pterodactyl technical accounts for NickHosting users.' }}</li>

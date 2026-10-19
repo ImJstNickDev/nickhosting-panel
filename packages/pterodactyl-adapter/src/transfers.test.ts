@@ -60,6 +60,8 @@ describe('real HTTP streaming transfers', () => {
       uploadOrigins: [base],
       coordinator,
       fetcher: async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url).includes('/files/list')) return Response.json({ object: 'list', data: [] });
+        if (String(url).endsWith('/files/rename')) return new Response(null, { status: 204 });
         if (String(url).includes('/api/client/')) {
           const token = String(++lookups);
           await delay(15);
@@ -93,6 +95,8 @@ describe('real HTTP streaming transfers', () => {
       baseURL: base,
       uploadOrigins: [base],
       fetcher: async (url, init) => {
+        if (String(url).includes('/files/list')) return Response.json({ object: 'list', data: [] });
+        if (String(url).endsWith('/files/rename')) return new Response(null, { status: 204 });
         if (String(url).includes('/api/client/')) {
           lookups++;
           return Response.json({
@@ -231,7 +235,7 @@ describe('real HTTP streaming transfers', () => {
   });
 
   it.each(['parser-400', 'other-400', 'server-500', 'lost-response'])(
-    'cancels an active multipart stream without a file write and trusts only confirmed parser rejection: %s',
+    'raw transport does not infer no filesystem writes from multipart rejection: %s',
     async (reply) => {
       const controller = new AbortController();
       let cancelled = false,
@@ -289,10 +293,10 @@ describe('real HTTP streaming transfers', () => {
             signal: controller.signal,
             idleTimeoutMs: 1000,
           }).catch((error: unknown) => error);
-          expect(parsed).toBe(true);
-          expect(writes).toBe(0);
+          expect(parsed).toBe(false);
+          expect(writes).toBe(1);
           expect(cancelled).toBe(true);
-          expect(isUploadCancelled(result)).toBe(reply === 'parser-400');
+          expect(isUploadCancelled(result)).toBe(false);
           expect(isUploadNotDispatched(result)).toBe(false);
           if (reply !== 'parser-400') expect(result).toMatchObject({ outcome: 'unknown' });
           expect(String(result)).not.toContain('private');
@@ -336,8 +340,9 @@ describe('real HTTP streaming transfers', () => {
           },
         }).catch((error: unknown) => error);
         expect(checks).toBe(2);
-        expect(writes).toBe(0);
-        expect(isUploadCancelled(result)).toBe(true);
+        expect(writes).toBe(1);
+        expect(result).toMatchObject({ outcome: 'rejected', upstreamStatus: 204 });
+        expect(isUploadCancelled(result)).toBe(false);
       },
     );
   });
@@ -424,7 +429,7 @@ describe('real HTTP streaming transfers', () => {
           signal: controller.signal,
           idleTimeoutMs: 1000,
         }).catch((error: unknown) => error);
-        expect(isUploadCancelled(result)).toBe(true);
+        expect(isUploadCancelled(result)).toBe(false);
       },
     );
   });
@@ -650,8 +655,7 @@ describe('stream validation and provider isolation', () => {
         Response.json({ attributes: { url: 'https://wings.example.test/upload/file' } }),
       );
       await delay(1);
-      expect(fetcher).toHaveBeenCalledOnce();
-      expect(fetcher.mock.calls[0]?.[1]?.method).toBe('GET');
+      expect(fetcher.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
       expect(cancel).toHaveBeenCalledOnce();
     },
   );
@@ -831,7 +835,7 @@ describe('stream validation and provider isolation', () => {
     await expect(
       adapter.uploadFile('fixture', 'file.bin', { body: bytes(1), contentLength: 1, maxBytes: 1 }),
     ).rejects.toMatchObject({ reason: 'unavailable' });
-    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
   it.each([1, 3])('rejects upload length mismatch with actual size %i', async (size) => {
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async (_, init) => {

@@ -220,7 +220,11 @@ export async function reserveUploadIngestion(
   }
   let released = false;
   async function settle(
-    action: 'server.upload.confirmed' | 'server.upload.not_dispatched' | 'server.upload.cancelled',
+    action:
+      | 'server.upload.confirmed'
+      | 'server.upload.not_dispatched'
+      | 'server.upload.not_published'
+      | 'server.upload.cancelled',
   ) {
     if (released) throw new DomainError('conflict');
     await connection.transaction().execute(async (tx) => {
@@ -244,7 +248,11 @@ export async function reserveUploadIngestion(
     async rejectBeforeDispatch() {
       await settle('server.upload.not_dispatched');
     },
-    /** Only after Wings confirms rejection of the deliberately incomplete multipart. */
+    /** Only after staging cleanup and proof that final publication was never attempted. */
+    async rejectBeforePublication() {
+      await settle('server.upload.not_published');
+    },
+    /** Only after the adapter proves cancellation before publication and staging cleanup. */
     async cancelConfirmed() {
       await settle('server.upload.cancelled');
     },

@@ -50,6 +50,7 @@ const auditCategories: Record<string, (typeof activityCategories)[number]> = {
   'server.upload.started': 'files',
   'server.upload.confirmed': 'files',
   'server.upload.not_dispatched': 'files',
+  'server.upload.not_published': 'files',
   'server.upload.cancelled': 'files',
   'server.upload.uncertain': 'files',
   'server.upload.entry_cancelled': 'files',

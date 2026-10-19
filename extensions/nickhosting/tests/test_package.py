@@ -61,9 +61,11 @@ class PackageTests(unittest.TestCase):
         with zipfile.ZipFile(self.output) as archive:
             for name in ('app/Services/TechnicalAccounts.php', 'app/Http/Middleware/TechnicalAccountAccess.php', 'private/migrations/2026_10_12_000003_nickhosting_technical_users.php'):
                 self.assertIn(name, archive.namelist())
-            self.assertIn(b'version: 1.7.0\n', archive.read('conf.yml'))
-            self.assertIn(b"'extensionVersion' => '1.7.0'", archive.read('app/Http/Controllers/CapabilitiesController.php'))
-            self.assertIn(b'<small>1.7.0</small>', archive.read('admin/view.blade.php'))
+            self.assertIn(b'version: 1.8.0\n', archive.read('conf.yml'))
+            self.assertIn(b'target: beta-2026-08\n', archive.read('conf.yml'))
+            self.assertIn(b"'extensionVersion' => '1.8.0'", archive.read('app/Http/Controllers/CapabilitiesController.php'))
+            self.assertIn(b"'panel' => '1.15.1'", archive.read('app/Http/Controllers/CapabilitiesController.php'))
+            self.assertIn(b'<small>1.8.0</small>', archive.read('admin/view.blade.php'))
 
     def test_client_upload_route_and_authorization_packaged(self):
         packager.build(self.source, self.output)
@@ -82,10 +84,11 @@ class PackageTests(unittest.TestCase):
             route = archive.read('routes/client.php').decode()
             self.assertIn('/servers/{server}/download-urls', route)
             self.assertIn('/servers/{server}/transfer-settings', route)
-            self.assertEqual(route.count('->middleware(AuthenticateServerAccess::class)'), 9)
+            self.assertEqual(route.count('->middleware(AuthenticateServerAccess::class)'), 10)
+            self.assertIn("'/servers/{server}/upload-publication'", route)
             for name in ('app/Http/Requests/ClientTransferSettings.php', 'app/Http/Requests/DownloadUrlsRequest.php',
                          'app/Http/Requests/TransferSettingsRequest.php', 'app/Http/Controllers/DownloadUrlsController.php',
-                         'app/Http/Controllers/TransferSettingsController.php', 'app/Services/ManagedTransferAccess.php'):
+                         'app/Http/Controllers/TransferSettingsController.php', 'app/Services/ManagedTransferAccess.php', 'app/Services/NativeTokenScope.php'):
                 self.assertIn(name, archive.namelist())
             self.assertIn(b"'bulkDownloadUrls' => true", archive.read('app/Http/Controllers/CapabilitiesController.php'))
 
@@ -109,7 +112,7 @@ class PackageTests(unittest.TestCase):
             self.assertIn(b"'installationConsole' => true", archive.read('app/Http/Controllers/CapabilitiesController.php'))
             self.assertIn(b'/installation-websocket', archive.read('routes/client.php'))
             self.assertNotIn(b'Server\\Installed', archive.read('app/Providers/BridgeServiceProvider.php'))
-            self.assertEqual(sum(name.startswith('private/migrations/') for name in archive.namelist()), 5)
+            self.assertEqual(sum(name.startswith('private/migrations/') for name in archive.namelist()), 6)
 
     def test_scoped_file_operations_and_durable_receipts_packaged(self):
         packager.build(self.source, self.output)
@@ -118,7 +121,9 @@ class PackageTests(unittest.TestCase):
                          'app/Http/Requests/FileInspectionRequest.php', 'app/Http/Requests/GuardedDeleteRequest.php',
                          'app/Http/Requests/ArchiveCommitRequest.php', 'app/Http/Controllers/FileOperationController.php',
                          'app/Http/Controllers/ArchiveCommitController.php',
-                         'private/migrations/2026_10_18_000005_nickhosting_file_operations.php'):
+                         'app/Http/Requests/UploadPublicationRequest.php', 'app/Http/Controllers/UploadPublicationController.php',
+                         'private/migrations/2026_10_18_000005_nickhosting_file_operations.php',
+                         'private/migrations/2026_10_19_000006_nickhosting_file_operation_recovery.php'):
                 self.assertIn(name, archive.namelist())
             routes = archive.read('routes/client.php').decode()
             for path in ('file-operation-capabilities', 'file-inspection', 'guarded-delete', 'archive-commit'):
@@ -144,7 +149,7 @@ class PackageTests(unittest.TestCase):
                          'Http/Controllers/DirectorySettingsController.php'):
                 self.assertIn('app/' + name, archive.namelist())
             self.assertIn(b"'bulkDirectoryListings' => true", archive.read('app/Http/Controllers/CapabilitiesController.php'))
-            self.assertEqual(sum(name.startswith('private/migrations/') for name in archive.namelist()), 5)
+            self.assertEqual(sum(name.startswith('private/migrations/') for name in archive.namelist()), 6)
 
     def test_rejects_source_symlink(self):
         config = self.source / "conf.yml"

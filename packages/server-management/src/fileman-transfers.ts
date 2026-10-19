@@ -9,6 +9,7 @@ import {
 import {
   type DirectoryBatchResult,
   isUploadNotDispatched,
+  isUploadNotPublished,
   relativePath,
 } from '@nickhosting/pterodactyl-adapter';
 import type { Environment } from './admission.js';
@@ -288,7 +289,7 @@ export function createFilemanJobServices(
                     });
                   } catch (error) {
                     failure ??= error;
-                    if (sent && isUploadNotDispatched(error)) {
+                    if (sent && (isUploadNotDispatched(error) || isUploadNotPublished(error))) {
                       await forgetDispatch(file.path);
                     } else if (sent) uncertain = true;
                   } finally {

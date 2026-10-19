@@ -684,5 +684,14 @@ export function createDownloadPool(
         remove(pool, key);
     }
   }
-  return { prefetch, take, invalidate, settings };
+  async function fresh(identifier: string, path: string, timing?: FileReadTiming): Promise<string> {
+    // Bypass detached refill and shared cache after a token rejection. Reads are
+    // safe to retry once; never obtain the same prepared credential a second time.
+    const tokens = await issue(identifier, [relativePath(path).slice(1)], false, timing);
+    if (tokens === null) return nativeGrant(identifier, path, timing);
+    const token = tokens[0];
+    if (!token) throw invalid();
+    return token.url;
+  }
+  return { prefetch, take, fresh, invalidate, settings };
 }

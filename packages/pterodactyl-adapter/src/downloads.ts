@@ -78,7 +78,7 @@ export function createDownloadProxy(options: TransportOptions & { downloadOrigin
         await response.body?.cancel();
         if (response.status === 404)
           throw new PterodactylError('not_found', 'client', 'rejected', 404);
-        throw guard.failure();
+        throw new PterodactylError('unavailable', 'client', 'rejected', response.status);
       }
       const encoding = response.headers.get('content-encoding');
       const rawLength = response.headers.get('content-length');

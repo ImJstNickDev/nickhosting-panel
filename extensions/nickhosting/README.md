@@ -1,7 +1,9 @@
 # NickHosting Blueprint bridge
 
-Version **1.6.0**, targeting Pterodactyl **1.11.11** and Blueprint
-**beta-2025-09**. The monorepo is the source of truth; `.blueprint/dev` is optional
+Version **1.8.0**, targeting Pterodactyl **1.15.1** and Blueprint
+**beta-2026-08**. Native PHP contracts retain compatibility with Panel **1.11.11**
+for coordinated rollback; the framework target and live deployment evidence are
+separate from that library-level compatibility. The monorepo is the source of truth; `.blueprint/dev` is optional
 Blueprint build staging. Do not use `-build` on production as a development loop.
 Actual deployment evidence is recorded in [the extension report](../../docs/BLUEPRINT-EXTENSION.md).
 
@@ -129,7 +131,7 @@ the real Panel still follows the Owner-approved Blueprint workflow.
 
 Capability discovery adds `fileOperations:true`. Per-server
 `GET /api/client/extensions/nickhosting/servers/{server}/file-operation-capabilities`
-returns `{inspection:true,guardedDelete:true,archiveCommit:true}`. Older versions
+returns `{inspection:true,guardedDelete:true,archiveCommit:true,uploadPublication:true}`. Older versions
 return 404; callers choose their existing stock-provider fallback before starting
 an operation, never after an uncertain effect.
 
@@ -179,6 +181,34 @@ remains uncertain. Recovery must inspect and resolve it; neither method blindly
 replays. A pre-dispatch validation rejection is preserved as a rejection. No DB
 transaction stays open during node I/O. Receipts must not be pruned while Core
 can still retry the operation; rollback preserves this table.
+
+Version 1.8.0 adds `POST .../upload-publication` for replacement uploads. It accepts
+`{operationId,identity,source,destination}` and returns
+`{operationId,identity,destination,state:"confirmed"|"uncertain"}`. Native
+`file.update`, account-token and managed-owner checks remain required. Source is
+the unique sibling `.nh-upload-<operationId>.pending`; destination is an existing
+regular file. Core finishes the upload and preserves the original permission
+mode on the stage before publication. New files still use native rename directly.
+
+Wings refuses rename over an existing destination. The extension therefore checks
+one bounded parent listing, records dispatch intent in the existing receipt table,
+renames the original to `.nh-upload-<operationId>.previous`, then renames the stage
+to its destination. One readback must show the stage absent, the new file present
+with its staged metadata and the backup with the old metadata. Only then does it
+persist confirmation and delete that one backup. Failed cleanup leaves recoverable
+old bytes without repeating publication. Migration
+`2026_10_19_000006_nickhosting_file_operation_recovery` adds one nullable JSON
+column to the existing receipt table. It retains the exact source, destination,
+backup and observed original/staged metadata before the first rename, allowing
+an administrator to identify the recoverable files after process loss. Existing
+receipts remain valid with NULL context; preserve the column on code rollback.
+
+This is recoverable publication, not an atomic filesystem replacement. A timeout,
+crash or failed readback keeps the stage/backup as observed and returns uncertainty;
+the same operation UUID never replays a rename, deletes remnants or guesses a
+rollback. Recovery must inspect the retained files and exact operation receipt.
+Cancellation before publication removes only the private stage; after dispatch,
+Core preserves uncertain artifacts. No operation truncates the old file first.
 
 Native limitations remain explicit: directory observations are metadata hashes,
 not inode identities; guard checks and deletion are not filesystem compare-and-
@@ -400,7 +430,7 @@ uses Laravel fakes. It exercises transaction rollback, idempotency, encryption,
 authorization, identity invalidation, delivery retry and configuration transforms.
 It is not a MySQL lock-concurrency or real HTTP middleware test. Packaging uses
 an explicit file allowlist, excludes secrets/tests/docs, rejects symlinks and
-existing output, and defaults to ignored `build/blueprint/1.7.0/nickhosting.blueprint`.
+existing output, and defaults to ignored `build/blueprint/1.8.0/nickhosting.blueprint`.
 
 The [extension-only update procedure](UPDATE-INSTALLED.md) supports the reviewed
 1.5.0 → 1.6.0 and 1.6.0 → 1.6.1 transitions. Its default is a read-only plan;
@@ -441,10 +471,48 @@ these are diagnostics, never completion evidence or part of the receipt identity
 - [Pterodactyl events](https://github.com/pterodactyl/panel/blob/v1.11.11/app/Observers/ServerObserver.php)
 - [Native upload URL controller](https://github.com/pterodactyl/panel/blob/v1.11.11/app/Http/Controllers/Api/Client/Servers/FileUploadController.php)
 - [Native node JWT service](https://github.com/pterodactyl/panel/blob/v1.11.11/app/Services/Nodes/NodeJWTService.php)
+- [Scoped node JWT service](https://github.com/pterodactyl/panel/blob/v1.15.1/app/Services/Nodes/NodeJWTService.php)
+- [Blueprint coordinated update guide](https://blueprint.zip/guides/admin/updatepanel)
+- [Blueprint extension install/update command](https://blueprint.zip/docs/cli/commands)
 
 Implementation independently uses existing public framework/model contracts.
 No Blueprint/PteroCA/closed-source implementation is copied or bundled; no new
 repository license decision is introduced.
+
+### Provider compatibility — 1.8.0
+
+The three token issuers use the native Panel signer with exactly one scope on
+Panel 1.15.1: `FileUpload`, `FileDownload` or `Websocket`. Scope selection happens
+once per batch and replaces the previous scope if a signer is reused. Path,
+server/user identity, expiry, one-use identifiers and installation-only
+permissions are unchanged. Panel 1.11.11 has no scope setter or enum: the helper
+preserves its native signer and does not resolve the newer enum. If a scope setter
+exists but its enum is incomplete, issuance fails rather than silently omitting scope.
+This does not make an old Panel/new Wings pairing supported: all native Panel
+token issuers must also match Wings.
+
+The in-memory harness uses each Panel generation's actual native signer,
+permission policies, account/key services and ActivityLogService. It checks
+signed scopes and restricted claims, native account auditing, transaction
+rollback and the existing directory/transfer/event contracts. Activity tables
+are prepared before native account creation because the target Panel now emits
+an account-creation activity. No live database or game data is used. Library
+tests do not replace the coordinated HTTP/WebSocket/Wings smoke tests.
+
+Compatibility validation on 2026-10-19: **379 checks passed on each native Panel
+generation**, plus **28 packaging/update-planner tests**. The target image uses
+PHP 8.3.33, Laravel 12.64.0, Sanctum 4.3.3, Carbon 3.13.1 and lcobucci/jwt 5.6.0.
+The target harness ran without network access or live mounts; the legacy harness
+loaded installed libraries without bootstrapping the Panel. Both exercised the
+provider registration transform against the actual `config/app.php` text without
+writing it. This evidence does not certify other installed Blueprint extensions.
+
+No extension migration or custom installation path is added. Package normally
+and update with `blueprint -install nickhosting` after preserving the existing
+extension state and reviewing the coordinated provider rollback. The historical
+`update-installed.py` remains limited to its already documented 1.5/1.6 layouts;
+it is not an alternative installer for 1.8.0. The provider upgrade must separately
+handle Wings streaming-upload cancellation, token invalidation and rate limits.
 
 
 ### Installation transport — 1.7.0
