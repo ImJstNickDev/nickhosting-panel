@@ -62,6 +62,12 @@ Public examples use localhost or reserved example addresses/domains. Keep the pu
 
 ## Compose and bind mounts
 
+For the inspected provider directory-ownership defect and the prerequisites for
+a coordinated Panel/Wings/Blueprint upgrade, see
+[provider upgrade readiness](PROVIDER-UPGRADE-READINESS.md). Updating a container
+image alone is not sufficient when Panel application code lives in a persistent
+volume; preserve the matching database and code rollback boundary.
+
 - Project-owned Docker Compose files can be authored in the repo but **not deployed to live host without approval** if they change live services/ports/networks/configuration.
 - Use project-local persistent bind mounts exclusively under `./mountdata/`: e.g. `./mountdata/postgres/`, `./mountdata/redis/`, `./mountdata/sftpgo/`, `./mountdata/uploads/`, `./mountdata/test-assets/` and project logs if needed. `mountdata/` is gitignored, never initialize it with real secrets in Git.
 - Redis should use AOF persistence. Postgres backups and recovery procedure must be documented, with volumes isolated from existing Pterodactyl data.
