@@ -1256,3 +1256,23 @@ on narrow screens and keyboard-accessible. Existing Content bookmarks redirect
 to Modpacks. This is a navigation and inventory separation, without category
 redesign, new catalogues or installation claims; see the [scope and capability
 boundary](GAME-INTEGRATIONS.md#minecraft-content-navigation-split--m5-2026-10-18).
+
+### Owner version catalog presentation
+
+Vanilla and Fabric share `VersionCatalogFrame`: runtime selection sits above one
+catalog surface with dataset/action header, search and filters, bounded table,
+pagination and quiet metadata footer. Fabric's Minecraft/Loader/Installer lists
+and registered combinations use one dataset selector, with the actionable
+registered view visually separated. The dataset persists in the query string;
+switching datasets clears the local search/page without fetching the upstream
+catalog again. Release filtering is explicit. Provider recommendations remain
+attributed to Fabric and do not imply creation eligibility.
+
+A single mapping appears in the footer; multiple mappings keep their selector
+above results because it changes the scope of operations. Technical settings and
+manual registration remain under Advanced. Both primary controls say Sync versions,
+but Vanilla retains its scoped scan dialog and Fabric retains its cached refresh.
+On mobile the registered list prioritizes version/date and creation availability;
+Java/capability details remain in the detail panel, and an Order control preserves
+all four existing sort modes. Error notices remain compact while loading/empty
+states retain space. This is a presentation change, with unchanged APIs and gates.

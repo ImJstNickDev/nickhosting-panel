@@ -18,6 +18,7 @@ import {
 import { PendingCatalogSearch } from './minecraft-admin-navigation.js';
 import { CreationState, MinecraftAdminIcon } from './minecraft-admin-presentation.js';
 import { RegisterCombination } from './minecraft-admin-register.js';
+import { VersionCatalogFrame } from './version-catalog-frame.js';
 
 export { MinecraftCatalogScan } from './minecraft-admin-scan.js';
 
@@ -80,6 +81,12 @@ export function OwnerMinecraftPage() {
   const runtime =
     runtimes.find((r) => r.id === params.get('runtime'))?.id ?? runtimes[0]?.id ?? 'vanilla';
   const fabricDiscovery = runtime === 'fabric' && params.get('fabricView') !== 'registered';
+  const fabricKind =
+    params.get('fabricKind') === 'loaders'
+      ? 'loaders'
+      : params.get('fabricKind') === 'installers'
+        ? 'installers'
+        : 'games';
   const eligible =
     mappings.data?.filter((m) => m.game_id === 'minecraft' && m.runtime_id === runtime) ?? [];
   const mapping = eligible.find((m) => m.id === params.get('mapping')) ?? eligible[0];
@@ -235,6 +242,183 @@ export function OwnerMinecraftPage() {
     );
   };
   const pages = Math.max(1, Math.ceil((catalog.data?.total ?? 0) / 25));
+  const catalogNavigation =
+    runtime === 'fabric' ? (
+      <fieldset className="version-catalog-datasets" aria-label={t('fabricCatalog.view')}>
+        {(['games', 'loaders', 'installers', 'registered'] as const).map((view) => (
+          <button
+            type="button"
+            key={view}
+            className={view === 'registered' ? 'version-catalog-registered' : undefined}
+            aria-pressed={
+              view === 'registered' ? !fabricDiscovery : fabricDiscovery && fabricKind === view
+            }
+            disabled={bulkBusy}
+            onClick={() =>
+              update({
+                fabricView: view === 'registered' ? 'registered' : 'discovery',
+                ...(view === 'registered' ? {} : { fabricKind: view }),
+                combination: '',
+              })
+            }
+          >
+            {t(`fabricCatalog.${view}`)}
+          </button>
+        ))}
+      </fieldset>
+    ) : (
+      <h2>{t('versions.minecraftVersions')}</h2>
+    );
+  const mappingContext = (
+    <div className="minecraft-versions-context">
+      <div className="minecraft-versions-mapping">
+        {eligible.length > 1 ? (
+          <Select
+            label={t('gameAdmin.mapping')}
+            disabled={bulkBusy}
+            value={mapping?.id ?? ''}
+            onChange={(e) => update({ mapping: e.target.value }, true)}
+          >
+            {eligible.map((m) => (
+              <option key={m.id} value={m.id}>
+                {mappingLabel(m, false)}
+              </option>
+            ))}
+          </Select>
+        ) : mapping ? (
+          <span>
+            <span className="muted">{t('gameAdmin.mapping')}</span>
+            <strong>{mappingLabel(mapping, false)}</strong>
+          </span>
+        ) : null}
+      </div>
+      {mapping?.enabled === false && (
+        <span id="minecraft-mapping-disabled" className="muted">
+          {t('versions.mappingDisabled')}
+        </span>
+      )}
+      <Tooltip content={t('versions.configureMapping')}>
+        <Link
+          className="minecraft-icon-button"
+          aria-label={t('versions.configureMapping')}
+          to={{
+            pathname: '/owner/integrations/minecraft/runtime',
+            search: `?runtime=${encodeURIComponent(runtime)}`,
+          }}
+        >
+          <MinecraftAdminIcon kind="settings" />
+        </Link>
+      </Tooltip>
+    </div>
+  );
+  const advancedMenu = (
+    <div className="minecraft-versions-advanced" ref={menuRef}>
+      <Tooltip content={t('versions.advanced')}>
+        <button
+          type="button"
+          className="minecraft-icon-button"
+          aria-label={t('versions.advanced')}
+          aria-expanded={advanced === 'menu'}
+          onClick={() => setAdvanced(advanced === 'menu' ? null : 'menu')}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              setAdvanced(null);
+              e.stopPropagation();
+            }
+          }}
+        >
+          <MinecraftAdminIcon kind="more" />
+        </button>
+      </Tooltip>
+      {advanced === 'menu' && (
+        <fieldset
+          className="minecraft-versions-menu"
+          aria-label={t('versions.advanced')}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              setAdvanced(null);
+              menuRef.current?.querySelector('button')?.focus();
+            }
+          }}
+        >
+          <button type="button" onClick={() => setAdvanced('register')}>
+            {t('gameAdmin.advancedRegistration')}
+          </button>
+          <button type="button" onClick={() => setAdvanced('protocol')}>
+            {t('integrationConfig.protocolSource')}
+          </button>
+        </fieldset>
+      )}
+    </div>
+  );
+  const filters = (
+    <>
+      {eligible.length > 1 && mappingContext}
+      <div className="minecraft-versions-toolbar">
+        <label className="minecraft-versions-search">
+          <span className="visually-hidden">{t('versions.search')}</span>
+          <input
+            disabled={bulkBusy}
+            type="search"
+            maxLength={200}
+            value={search}
+            placeholder={t('versions.search')}
+            onChange={(e) => update({ catalogSearch: e.target.value }, true)}
+          />
+        </label>
+        <Select
+          label={t('catalog.releaseType')}
+          disabled={bulkBusy}
+          value={releaseType}
+          onChange={(e) => update({ 'catalog-releaseType': e.target.value }, true)}
+        >
+          <option value="">{t('versions.allTypes')}</option>
+          {['release', 'snapshot', 'old_beta', 'old_alpha', 'unknown'].map((type) => (
+            <option key={type} value={type}>
+              {t(`catalog.type.${type}`)}
+            </option>
+          ))}
+        </Select>
+        <Select
+          label={t('gameAdmin.availability')}
+          disabled={bulkBusy}
+          value={availability}
+          onChange={(e) => update({ 'catalog-availability': e.target.value }, true)}
+        >
+          <option value="">{t('versions.allAvailability')}</option>
+          <option value="enabled">{t('web.enabled')}</option>
+          <option value="disabled">{t('web.disabled')}</option>
+        </Select>
+        <div className="version-catalog-mobile-order">
+          <Select
+            label={t('catalog.order')}
+            value={order}
+            disabled={bulkBusy}
+            onChange={(event) => update({ catalogOrder: event.target.value }, true)}
+          >
+            {['newest', 'oldest', 'name-asc', 'name-desc'].map((value) => (
+              <option key={value} value={value}>
+                {t(`catalog.order.${value}`)}
+              </option>
+            ))}
+          </Select>
+        </div>
+      </div>
+    </>
+  );
+  const metadataStatus = catalog.data?.metadataStatus && (
+    <div className="minecraft-metadata-status">
+      {!catalog.data.metadataStatus.lastSuccessAt ? (
+        <Notice>{t('catalog.metadataMissing')}</Notice>
+      ) : catalog.data.metadataStatus.stale ? (
+        <Notice>{t('catalog.metadataStale')}</Notice>
+      ) : (
+        <span className="muted">
+          {t('catalog.metadataUpdated')}: <Time value={catalog.data.metadataStatus.lastSuccessAt} />
+        </span>
+      )}
+    </div>
+  );
   return (
     <div className="minecraft-versions-workspace">
       <fieldset className="integration-runtime-selector" aria-label={t('ownerIntegration.runtime')}>
@@ -251,388 +435,268 @@ export function OwnerMinecraftPage() {
           </button>
         ))}
       </fieldset>
-      {runtime === 'fabric' && (
-        <fieldset className="fabric-catalog-tabs" aria-label={t('fabricCatalog.view')}>
-          {(['discovery', 'registered'] as const).map((view) => (
-            <button
-              type="button"
-              className="secondary"
-              key={view}
-              aria-pressed={fabricDiscovery === (view === 'discovery')}
-              onClick={() => update({ fabricView: view, combination: '' })}
-            >
-              {t(`fabricCatalog.${view}`)}
-            </button>
-          ))}
-        </fieldset>
-      )}
       {fabricDiscovery ? (
-        <FabricVersionCatalog />
+        <FabricVersionCatalog kind={fabricKind} navigation={catalogNavigation} />
       ) : (
         <>
-          <div className="minecraft-versions-context">
-            <div className="minecraft-versions-mapping">
-              {eligible.length > 1 ? (
-                <Select
-                  label={t('gameAdmin.mapping')}
-                  disabled={bulkBusy}
-                  value={mapping?.id ?? ''}
-                  onChange={(e) => update({ mapping: e.target.value }, true)}
-                >
-                  {eligible.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {mappingLabel(m, false)}
-                    </option>
-                  ))}
-                </Select>
-              ) : mapping ? (
-                <span>
-                  <span className="muted">{t('gameAdmin.mapping')}</span>
-                  <strong>{mappingLabel(mapping, false)}</strong>
-                </span>
-              ) : null}
-            </div>
-            {mapping?.enabled === false && (
-              <span id="minecraft-mapping-disabled" className="muted">
-                {t('versions.mappingDisabled')}
-              </span>
+          <VersionCatalogFrame
+            navigation={catalogNavigation}
+            actions={
+              <>
+                <span id="minecraft-catalog-scan-trigger" className="minecraft-scan-trigger" />
+                {advancedMenu}
+              </>
+            }
+            filters={filters}
+            status={
+              <>
+                {eligible.length <= 1 && mappingContext}
+                {metadataStatus}
+              </>
+            }
+          >
+            {mappings.error && (
+              <ErrorNotice error={mappings.error} retry={() => void mappings.refetch()} />
             )}
-            <Tooltip content={t('versions.configureMapping')}>
-              <Link
-                className="minecraft-icon-button"
-                aria-label={t('versions.configureMapping')}
-                to={{
-                  pathname: '/owner/integrations/minecraft/runtime',
-                  search: `?runtime=${encodeURIComponent(runtime)}`,
-                }}
-              >
-                <MinecraftAdminIcon kind="settings" />
-              </Link>
-            </Tooltip>
-          </div>
-          {mappings.error && (
-            <ErrorNotice error={mappings.error} retry={() => void mappings.refetch()} />
-          )}
-          {modules.error && (
-            <ErrorNotice error={modules.error} retry={() => void modules.refetch()} />
-          )}
-          <div className="minecraft-versions-toolbar">
-            <label className="minecraft-versions-search">
-              <span className="visually-hidden">{t('versions.search')}</span>
-              <input
-                disabled={bulkBusy}
-                type="search"
-                maxLength={200}
-                value={search}
-                placeholder={t('versions.search')}
-                onChange={(e) => update({ catalogSearch: e.target.value }, true)}
-              />
-            </label>
-            <Select
-              label={t('catalog.releaseType')}
-              disabled={bulkBusy}
-              value={releaseType}
-              onChange={(e) => update({ 'catalog-releaseType': e.target.value }, true)}
-            >
-              <option value="">{t('versions.allTypes')}</option>
-              {['release', 'snapshot', 'old_beta', 'old_alpha', 'unknown'].map((type) => (
-                <option key={type} value={type}>
-                  {t(`catalog.type.${type}`)}
-                </option>
-              ))}
-            </Select>
-            <Select
-              label={t('gameAdmin.availability')}
-              disabled={bulkBusy}
-              value={availability}
-              onChange={(e) => update({ 'catalog-availability': e.target.value }, true)}
-            >
-              <option value="">{t('versions.allAvailability')}</option>
-              <option value="enabled">{t('web.enabled')}</option>
-              <option value="disabled">{t('web.disabled')}</option>
-            </Select>
-            <span id="minecraft-catalog-scan-trigger" className="minecraft-scan-trigger" />
-            <div className="minecraft-versions-advanced" ref={menuRef}>
-              <Tooltip content={t('versions.advanced')}>
-                <button
-                  type="button"
-                  className="minecraft-icon-button"
-                  aria-label={t('versions.advanced')}
-                  aria-expanded={advanced === 'menu'}
-                  onClick={() => setAdvanced(advanced === 'menu' ? null : 'menu')}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Escape') {
-                      setAdvanced(null);
-                      e.stopPropagation();
-                    }
-                  }}
-                >
-                  <MinecraftAdminIcon kind="more" />
-                </button>
-              </Tooltip>
-              {advanced === 'menu' && (
-                <fieldset
-                  className="minecraft-versions-menu"
-                  aria-label={t('versions.advanced')}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Escape') {
-                      setAdvanced(null);
-                      menuRef.current?.querySelector('button')?.focus();
-                    }
-                  }}
-                >
-                  <button type="button" onClick={() => setAdvanced('register')}>
-                    {t('gameAdmin.advancedRegistration')}
-                  </button>
-                  <button type="button" onClick={() => setAdvanced('protocol')}>
-                    {t('integrationConfig.protocolSource')}
-                  </button>
-                </fieldset>
-              )}
-            </div>
-          </div>
-          <div id="minecraft-catalog-scan-progress" />
-          {bulkError !== undefined && <ErrorNotice error={bulkError} />}
-          {selected.size > 0 && (
-            <section
-              className="minecraft-versions-selection"
-              aria-label={t('versions.selectionActions')}
-            >
-              <strong>{t('versions.selected', { count: selected.size })}</strong>
-              <button
-                type="button"
-                className="secondary"
-                disabled={busy}
-                onClick={() => void bulk(true)}
-              >
-                {t('versions.enable')}
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                disabled={busy}
-                onClick={() => void bulk(false)}
-              >
-                {t('versions.disable')}
-              </button>
-              <Tooltip content={t('versions.clearSelection')}>
-                <button
-                  type="button"
-                  className="minecraft-icon-button"
-                  disabled={bulkBusy}
-                  aria-label={t('versions.clearSelection')}
-                  onClick={() => setSelected(new Set())}
-                >
-                  <MinecraftAdminIcon kind="close" />
-                </button>
-              </Tooltip>
-              {bulkBusy && <span role="status">{t('web.loading')}</span>}
-            </section>
-          )}
-          {!mapping && !mappings.isPending ? (
-            <Empty text={t('gameAdmin.noMapping')} />
-          ) : catalog.isPending || mappings.isPending ? (
-            <Loading />
-          ) : catalog.error ? (
-            <ErrorNotice error={catalog.error} retry={() => void catalog.refetch()} />
-          ) : (
-            <>
+            {modules.error && (
+              <ErrorNotice error={modules.error} retry={() => void modules.refetch()} />
+            )}
+            <div id="minecraft-catalog-scan-progress" />
+            {bulkError !== undefined && <ErrorNotice error={bulkError} />}
+            {selected.size > 0 && (
               <section
-                ref={tableRef}
-                className="minecraft-versions-table"
-                aria-label={t('gameAdmin.combinations')}
-                // biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard users need to scroll the bounded catalog.
-                tabIndex={0}
-                aria-busy={catalog.isFetching}
+                className="minecraft-versions-selection"
+                aria-label={t('versions.selectionActions')}
               >
-                <table>
-                  <thead>
-                    <tr>
-                      <th className="minecraft-selection-cell">
-                        <input
-                          type="checkbox"
-                          aria-label={t('versions.selectPage')}
-                          checked={ids.length > 0 && ids.every((id) => selected.has(id))}
-                          disabled={busy || !ids.length}
-                          ref={(element) => {
-                            if (element)
-                              element.indeterminate =
-                                ids.some((id) => selected.has(id)) &&
-                                !ids.every((id) => selected.has(id));
-                          }}
-                          onChange={(e) => choose(ids, e.target.checked)}
-                        />
-                      </th>
-                      <th
-                        aria-sort={
-                          order === 'name-asc'
-                            ? 'ascending'
-                            : order === 'name-desc'
-                              ? 'descending'
-                              : 'none'
-                        }
-                      >
-                        <button type="button" disabled={bulkBusy} onClick={() => sort('name')}>
-                          {t('gameAdmin.version')}
-                          {order.startsWith('name-') && (
-                            <span aria-hidden="true">{order === 'name-asc' ? '↑' : '↓'}</span>
-                          )}
-                        </button>
-                      </th>
-                      <th
-                        aria-sort={
-                          order === 'newest'
-                            ? 'descending'
-                            : order === 'oldest'
-                              ? 'ascending'
-                              : 'none'
-                        }
-                      >
-                        <button type="button" disabled={bulkBusy} onClick={() => sort('date')}>
-                          {t('versions.published')}
-                          {(order === 'newest' || order === 'oldest') && (
-                            <span aria-hidden="true">{order === 'newest' ? '↓' : '↑'}</span>
-                          )}
-                        </button>
-                      </th>
-                      <th>{t('versions.java')}</th>
-                      <th>{t('versions.features')}</th>
-                      <th>{t('versions.creation')}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {items.length ? (
-                      items.map((group) => (
-                        <Fragment key={group.release}>
-                          <tr
-                            data-release={group.release}
-                            data-expanded={expanded.has(group.release) || undefined}
-                          >
-                            <td className="minecraft-selection-cell">
-                              {group.choice && (
-                                <input
-                                  type="checkbox"
-                                  aria-label={t('versions.selectVersion', {
-                                    version: group.release,
-                                  })}
-                                  disabled={busy}
-                                  checked={selected.has(group.choice.id)}
-                                  onChange={(e) => {
-                                    if (group.choice) choose([group.choice.id], e.target.checked);
-                                  }}
-                                />
-                              )}
-                            </td>
-                            <td>
-                              <button
-                                type="button"
-                                className="minecraft-version-name"
-                                aria-expanded={
-                                  group.variantCount > 1 ? expanded.has(group.release) : undefined
-                                }
-                                onClick={() => {
-                                  if (group.choice) update({ combination: group.choice.id });
-                                  else
-                                    setExpanded((old) => {
-                                      const next = new Set(old);
-                                      if (next.has(group.release)) next.delete(group.release);
-                                      else next.add(group.release);
-                                      return next;
-                                    });
-                                }}
-                              >
-                                <span>
-                                  {group.variantCount > 1 && <MinecraftAdminIcon kind="chevron" />}
-                                  {group.release}
-                                </span>
-                                <small>{t(`catalog.type.${group.releaseType}`)}</small>
-                              </button>
-                            </td>
-                            <td>
-                              <ReleaseDate value={group.releaseTime} />
-                            </td>
-                            {group.choice ? (
-                              <>
-                                <td>{group.choice.combination.javaMajor}</td>
-                                <td>
-                                  <FeatureIndicators choice={group.choice} />
-                                </td>
-                                <td>
-                                  <CreationState choice={group.choice} />
-                                </td>
-                              </>
-                            ) : (
-                              <td colSpan={3} className="muted">
-                                {t('versions.variants', { count: group.variantCount })}
-                              </td>
-                            )}
-                          </tr>
-                          {expanded.has(group.release) && mapping && (
-                            <VariantRows
-                              release={group.release}
-                              mappingId={mapping.id}
-                              runtime={runtime}
-                              availability={availability}
-                              releaseType={releaseType}
-                              onVisible={(ids) =>
-                                setVisibleVariants((old) => ({ ...old, [group.release]: ids }))
-                              }
-                              selected={selected}
-                              busy={busy}
-                              choose={choose}
-                              open={(id) => update({ combination: id })}
-                            />
-                          )}
-                        </Fragment>
-                      ))
-                    ) : (
-                      <tr>
-                        <td colSpan={6} className="minecraft-empty">
-                          {t('web.empty')}
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+                <strong>{t('versions.selected', { count: selected.size })}</strong>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={busy}
+                  onClick={() => void bulk(true)}
+                >
+                  {t('versions.enable')}
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={busy}
+                  onClick={() => void bulk(false)}
+                >
+                  {t('versions.disable')}
+                </button>
+                <Tooltip content={t('versions.clearSelection')}>
+                  <button
+                    type="button"
+                    className="minecraft-icon-button"
+                    disabled={bulkBusy}
+                    aria-label={t('versions.clearSelection')}
+                    onClick={() => setSelected(new Set())}
+                  >
+                    <MinecraftAdminIcon kind="close" />
+                  </button>
+                </Tooltip>
+                {bulkBusy && <span role="status">{t('web.loading')}</span>}
               </section>
-              <footer className="minecraft-versions-footer">
-                <span>{t('versions.count', { count: catalog.data?.total ?? 0 })}</span>
-                <nav aria-label={t('versions.pagination')}>
-                  <button
-                    type="button"
-                    className="secondary"
-                    disabled={bulkBusy || page <= 1 || catalog.isFetching}
-                    onClick={() => update({ catalogPage: String(page - 1) })}
-                  >
-                    {t('web.previous')}
-                  </button>
-                  <span>{t('versions.page', { page, pages })}</span>
-                  <button
-                    type="button"
-                    className="secondary"
-                    disabled={bulkBusy || page >= pages || catalog.isFetching}
-                    onClick={() => update({ catalogPage: String(page + 1) })}
-                  >
-                    {t('web.next')}
-                  </button>
-                </nav>
-              </footer>
-            </>
-          )}
-          {catalog.data?.metadataStatus && (
-            <div className="minecraft-metadata-status">
-              {!catalog.data.metadataStatus.lastSuccessAt ? (
-                <Notice>{t('catalog.metadataMissing')}</Notice>
-              ) : catalog.data.metadataStatus.stale ? (
-                <Notice>{t('catalog.metadataStale')}</Notice>
-              ) : (
-                <span className="muted">
-                  {t('catalog.metadataUpdated')}:{' '}
-                  <Time value={catalog.data.metadataStatus.lastSuccessAt} />
-                </span>
-              )}
-            </div>
-          )}
+            )}
+            {!mapping && !mappings.isPending ? (
+              <Empty text={t('gameAdmin.noMapping')} />
+            ) : catalog.isPending || mappings.isPending ? (
+              <div className="version-catalog-loading">
+                <Loading />
+              </div>
+            ) : catalog.error ? (
+              <ErrorNotice error={catalog.error} retry={() => void catalog.refetch()} />
+            ) : (
+              <>
+                <section
+                  ref={tableRef}
+                  className="minecraft-versions-table"
+                  aria-label={t('gameAdmin.combinations')}
+                  // biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard users need to scroll the bounded catalog.
+                  tabIndex={0}
+                  aria-busy={catalog.isFetching}
+                >
+                  <table>
+                    <thead>
+                      <tr>
+                        <th className="minecraft-selection-cell">
+                          <input
+                            type="checkbox"
+                            aria-label={t('versions.selectPage')}
+                            checked={ids.length > 0 && ids.every((id) => selected.has(id))}
+                            disabled={busy || !ids.length}
+                            ref={(element) => {
+                              if (element)
+                                element.indeterminate =
+                                  ids.some((id) => selected.has(id)) &&
+                                  !ids.every((id) => selected.has(id));
+                            }}
+                            onChange={(e) => choose(ids, e.target.checked)}
+                          />
+                        </th>
+                        <th
+                          aria-sort={
+                            order === 'name-asc'
+                              ? 'ascending'
+                              : order === 'name-desc'
+                                ? 'descending'
+                                : 'none'
+                          }
+                        >
+                          <button type="button" disabled={bulkBusy} onClick={() => sort('name')}>
+                            {t('gameAdmin.version')}
+                            {order.startsWith('name-') && (
+                              <span aria-hidden="true">{order === 'name-asc' ? '↑' : '↓'}</span>
+                            )}
+                          </button>
+                        </th>
+                        <th
+                          aria-sort={
+                            order === 'newest'
+                              ? 'descending'
+                              : order === 'oldest'
+                                ? 'ascending'
+                                : 'none'
+                          }
+                        >
+                          <button type="button" disabled={bulkBusy} onClick={() => sort('date')}>
+                            {t('versions.published')}
+                            {(order === 'newest' || order === 'oldest') && (
+                              <span aria-hidden="true">{order === 'newest' ? '↓' : '↑'}</span>
+                            )}
+                          </button>
+                        </th>
+                        <th>{t('versions.java')}</th>
+                        <th>{t('versions.features')}</th>
+                        <th>{t('versions.creation')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {items.length ? (
+                        items.map((group) => (
+                          <Fragment key={group.release}>
+                            <tr
+                              data-release={group.release}
+                              data-expanded={expanded.has(group.release) || undefined}
+                            >
+                              <td className="minecraft-selection-cell">
+                                {group.choice && (
+                                  <input
+                                    type="checkbox"
+                                    aria-label={t('versions.selectVersion', {
+                                      version: group.release,
+                                    })}
+                                    disabled={busy}
+                                    checked={selected.has(group.choice.id)}
+                                    onChange={(e) => {
+                                      if (group.choice) choose([group.choice.id], e.target.checked);
+                                    }}
+                                  />
+                                )}
+                              </td>
+                              <td>
+                                <button
+                                  type="button"
+                                  className="minecraft-version-name"
+                                  aria-expanded={
+                                    group.variantCount > 1 ? expanded.has(group.release) : undefined
+                                  }
+                                  onClick={() => {
+                                    if (group.choice) update({ combination: group.choice.id });
+                                    else
+                                      setExpanded((old) => {
+                                        const next = new Set(old);
+                                        if (next.has(group.release)) next.delete(group.release);
+                                        else next.add(group.release);
+                                        return next;
+                                      });
+                                  }}
+                                >
+                                  <span>
+                                    {group.variantCount > 1 && (
+                                      <MinecraftAdminIcon kind="chevron" />
+                                    )}
+                                    {group.release}
+                                  </span>
+                                  <small>{t(`catalog.type.${group.releaseType}`)}</small>
+                                  <small className="version-catalog-mobile-date">
+                                    <ReleaseDate value={group.releaseTime} />
+                                  </small>
+                                </button>
+                              </td>
+                              <td>
+                                <ReleaseDate value={group.releaseTime} />
+                              </td>
+                              {group.choice ? (
+                                <>
+                                  <td>{group.choice.combination.javaMajor}</td>
+                                  <td>
+                                    <FeatureIndicators choice={group.choice} />
+                                  </td>
+                                  <td>
+                                    <CreationState choice={group.choice} />
+                                  </td>
+                                </>
+                              ) : (
+                                <td colSpan={3} className="muted">
+                                  {t('versions.variants', { count: group.variantCount })}
+                                </td>
+                              )}
+                            </tr>
+                            {expanded.has(group.release) && mapping && (
+                              <VariantRows
+                                release={group.release}
+                                mappingId={mapping.id}
+                                runtime={runtime}
+                                availability={availability}
+                                releaseType={releaseType}
+                                onVisible={(ids) =>
+                                  setVisibleVariants((old) => ({ ...old, [group.release]: ids }))
+                                }
+                                selected={selected}
+                                busy={busy}
+                                choose={choose}
+                                open={(id) => update({ combination: id })}
+                              />
+                            )}
+                          </Fragment>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={6} className="minecraft-empty">
+                            {t('web.empty')}
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </section>
+                <footer className="minecraft-versions-footer">
+                  <span>{t('versions.count', { count: catalog.data?.total ?? 0 })}</span>
+                  <nav aria-label={t('versions.pagination')}>
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={bulkBusy || page <= 1 || catalog.isFetching}
+                      onClick={() => update({ catalogPage: String(page - 1) })}
+                    >
+                      {t('web.previous')}
+                    </button>
+                    <span>{t('versions.page', { page, pages })}</span>
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={bulkBusy || page >= pages || catalog.isFetching}
+                      onClick={() => update({ catalogPage: String(page + 1) })}
+                    >
+                      {t('web.next')}
+                    </button>
+                  </nav>
+                </footer>
+              </>
+            )}
+          </VersionCatalogFrame>
           {selectedId && (
             <Dialog
               open

@@ -267,18 +267,22 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
     const height = await page.locator('.fabric-catalog-table').evaluate((el) => el.clientHeight);
     await page.getByRole('button', { name: 'Next', exact: true }).click();
     await check(page.locator('.fabric-catalog-table tbody tr')).toHaveCount(25);
+    await page.getByLabel('Version type', { exact: true }).selectOption('all');
+    await check(page.getByText('130 versions', { exact: true })).toBeVisible();
+    await page.getByLabel('Version type', { exact: true }).selectOption('release');
+    await check(page.getByText('87 versions', { exact: true })).toBeVisible();
     await page.getByRole('searchbox').fill('1.21.130');
     await check(page.locator('.fabric-catalog-table tbody tr')).toHaveCount(1);
-    await page.getByRole('searchbox').clear();
     await page.getByRole('button', { name: 'Loader', exact: true }).click();
     await check(
       page.locator('.fabric-catalog-table').getByText('0.19.130', { exact: true }),
     ).toBeVisible();
+    await check(page.getByRole('searchbox')).toHaveValue('');
     await page.getByRole('button', { name: 'Installer', exact: true }).click();
     await check(
       page.locator('.fabric-catalog-table tbody tr').filter({ hasText: '1.1.2' }),
     ).toBeVisible();
-    await check(page.locator('.fabric-latest')).toHaveText('latest');
+    await check(page.locator('.fabric-latest')).toHaveText('Latest');
     expect(await page.locator('.fabric-catalog-table').evaluate((el) => el.clientHeight)).toBe(
       height,
     );
@@ -291,7 +295,7 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
       fullPage: true,
     });
     await page.getByRole('button', { name: 'Vanilla', exact: true }).click();
-    await check(page.getByRole('button', { name: 'Detect versions', exact: true })).toBeVisible();
+    await check(page.getByRole('button', { name: 'Sync versions', exact: true })).toBeVisible();
   });
   it('keeps the last catalog visible after a failed refresh and exposes registered Fabric view', async () => {
     fabricSynced = true;
@@ -302,11 +306,22 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
     await check(
       page.getByText('Sync failed. The last saved catalog is shown, if available.'),
     ).toBeVisible();
+    expect(
+      await page
+        .getByText('Sync failed. The last saved catalog is shown, if available.')
+        .evaluate((el) => el.clientHeight),
+    ).toBeLessThan(80);
     await check(page.locator('.fabric-catalog-table tbody tr')).toHaveCount(25);
     await page.getByRole('button', { name: 'Registered combinations', exact: true }).click();
     await check(page.locator('.fabric-version-catalog')).toHaveCount(0);
-    await page.getByRole('button', { name: 'Discovery', exact: true }).click();
-    await check(page.locator('.fabric-catalog-table tbody tr')).toHaveCount(25);
+    await page.getByRole('button', { name: 'Loader', exact: true }).click();
+    await check(page.locator('.fabric-catalog-table tbody tr').first()).toContainText('0.19.130');
+    await page.reload();
+    await check(page.getByRole('button', { name: 'Loader', exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await check(page.locator('.fabric-catalog-table tbody tr').first()).toContainText('0.19.130');
   });
   it('renders Italian Fabric discovery on mobile with bounded rows and keyboard controls', async () => {
     fabricSynced = true;
@@ -439,6 +454,12 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );
+    await page.getByLabel('Ordina per', { exact: true }).selectOption('oldest');
+    await check
+      .poll(() => reads.filter((u) => u.searchParams.get('order') === 'oldest').length)
+      .toBeGreaterThan(0);
+    await check(page.locator('tr[data-release="26.1"] .version-catalog-mobile-date')).toBeVisible();
+    await check(page.locator('tr[data-release="26.1"] .minecraft-creation-state')).toBeInViewport();
     await page.screenshot({
       path: '.codex/local/m5-browser/screenshots/versions-catalog-mobile-it.png',
       fullPage: true,
@@ -481,10 +502,10 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
       });
     });
     await open();
-    await page.getByRole('button', { name: 'Detect versions', exact: true }).click();
+    await page.getByRole('button', { name: 'Sync versions', exact: true }).click();
     await page
       .getByRole('dialog')
-      .getByRole('button', { name: 'Detect versions', exact: true })
+      .getByRole('button', { name: 'Sync versions', exact: true })
       .click();
     await check(page.getByRole('button', { name: 'Resume discovery', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Resume discovery', exact: true }).click();

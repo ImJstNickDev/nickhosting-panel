@@ -14113,3 +14113,39 @@ Rollback: revert the feature source and, if needed, restore the retained dev ima
 `nickhosting-dev-app:before-fabric-discovery-20261019`. Retain migration 045 and its
 cache row/history: older code only reads the Mojang row, so destructive rollback
 is unnecessary. No production migrations, deployment, DNS or game-server changes.
+
+### Unified Vanilla/Fabric version UI (2026-10-19)
+
+Replaced Fabric's stacked navigation strips and inconsistent table with the same
+catalog frame used by registered Vanilla versions. Runtime, dataset, filters and
+actions have distinct hierarchy. Shared density, bounded scrolling, status/footer,
+explicit release filtering and mobile version/date/creation presentation preserve
+the existing authorization and data contracts. Multi-mapping selection remains
+above results; single-mapping context moves to the footer. No backend changes.
+
+Validation: **9/9 real Firefox browser tests** with isolated API responses; desktop
+EN/mobile IT screenshots and axe checks pass. Coverage includes bulk scope,
+resumable Vanilla scans, detail focus recovery, no-mapping Fabric discovery,
+release filtering, failed-refresh retention/compact error, local dataset changes,
+registered-to-Loader navigation/reload, and mobile sorting/creation visibility.
+Independent source/accessibility/visual/content review found no remaining must-fix.
+Typecheck, production build, scoped Biome, EN/IT/pseudolocale completeness (2462 keys)
+and diff checks pass. Build retains the existing large-chunk warnings.
+
+```sh
+scripts/dev.sh pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-versions-workspace.browser.test.ts
+scripts/dev.sh pnpm typecheck
+scripts/dev.sh pnpm build
+scripts/dev.sh pnpm i18n:check
+```
+
+Screenshots: [Vanilla desktop](screenshots/m5/versions-catalog-desktop-en.png),
+[Vanilla mobile](screenshots/m5/versions-catalog-mobile-it.png),
+[Fabric desktop](screenshots/m5/fabric-discovery-desktop-en.png),
+[Fabric mobile](screenshots/m5/fabric-discovery-mobile-it.png),
+[scan](screenshots/m5/versions-scan-desktop-en.png),
+[details](screenshots/m5/versions-detail-mobile-it.png).
+Live dev HTTPS and all three changed/new source-module transformations return 200
+without import errors. Changes use Vite hot reload: no migrations, rebuild/restart
+of containers, production operations or game test assets. Rollback is a source
+revert. PR21 remains open/unmerged; SFTPGo #18 is unchanged.
