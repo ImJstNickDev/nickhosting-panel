@@ -14373,3 +14373,27 @@ Blueprint, network or persistent infrastructure changes. Temporary private brows
 authentication was removed. Test schemas were isolated and cleaned by their harness;
 no new live test assets. Rollback is a source revert; existing holds still expire
 normally. PR21 remains open/unmerged; issue18 remains an independent release gate.
+
+## 2026-10-19 — generated addresses use the local registry
+
+Follow-up to the address-step redesign: the Owner treats the three-word generated
+namespace as platform-managed. Suggestions, availability rechecks and Next
+reservations for exactly three existing generator-vocabulary words use only the
+PostgreSQL hostname registry and configured blacklist/domain policy. This also
+applies if that same generated-format name is typed manually. Other custom labels
+retain Cloudflare availability checks. No extra cache, table, migration or public
+API shape is introduced. Existing atomic claims prevent local assignment races;
+publication still refuses foreign DNS records rather than overwriting them.
+
+Focused isolated API/service tests: **10 passed**, 142 unrelated skipped (24.37s),
+using the same two-file `wizard DNS|protects DNS` command above. Assertions cover
+zero provider calls through suggestion/availability/reservation, unavailable
+provider independence, local assigned/held/cooldown names, expiry, concurrent
+reservation, blacklist, custom-name remote checks, auth/CSRF and provider429 for
+custom names. Full TypeScript and scoped Biome passed; independent review found
+no must-fix. Browser/build suites were not repeated: no UI, dependency or build
+configuration changed. No new live-provider test was needed.
+
+No UI layout changed. No production/DNS/game-server mutations, infrastructure
+changes or live test assets are required. Rollback: source revert. PR21 stays
+open/unmerged; the separate issue18 production-release gate is unchanged.

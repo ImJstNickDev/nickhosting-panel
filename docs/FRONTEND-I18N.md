@@ -1283,7 +1283,7 @@ states retain space. This is a presentation change, with unchanged APIs and gate
 
 The shared SDK address step renders the subdomain and domain as one centered
 control, with a quiet regenerate action for personal-subdomain integrations.
-It proposes a checked name on entry; typing remains available during that request
+It proposes a locally checked name on entry; typing remains available during that request
 and a late result never replaces edited input. Clearing a name does not generate
 another one automatically. Shared/fixed host modes keep their declared behavior.
 Availability occupies a stable status area: checking, available, taken, invalid,

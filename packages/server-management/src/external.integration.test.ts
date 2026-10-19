@@ -2420,66 +2420,94 @@ describe('wizard DNS availability and reservations', () => {
       .execute();
     return f;
   }
-  it('suggests a real available name without reserving or publishing it, then reuses the availability cache', async () => {
+  it('suggests and reserves generated names using only local claims, even if the DNS provider is unavailable', async () => {
     const f = await ready();
-    f.options.env = { ...f.options.env, NH_CLOUDFLARE_API_TOKEN: randomUUID() };
+    const provider = vi.fn(() => {
+      throw new Error('must not contact DNS');
+    });
+    f.options.dnsFactory = provider;
     const result = await suggestGameConnection(f.db, f.context, f.gameId, {}, f.options);
     expect(result).toMatchObject({ available: true, domainId: 'legacy' });
     expect(result.subdomain.split('-')).toHaveLength(3);
     expect(result.hostname).toBe(`${result.subdomain}.example.test`);
-    expect(f.dnsCalls).toEqual(['GET', 'GET']);
     expect(f.records.size).toBe(0);
     expect(await f.db.selectFrom('dns_hostname_reservations').selectAll().execute()).toEqual([]);
     expect(await f.db.selectFrom('dns_assignments').selectAll().execute()).toEqual([]);
+    const selection = { domainId: result.domainId, subdomain: result.subdomain };
+    const held = await reserveGameConnection(f.db, f.context, f.gameId, selection, f.options);
+    expect(held.hostname).toBe(result.hostname);
+    expect(
+      await getGameConnectionAvailability(f.db, f.context, f.gameId, selection, f.options),
+    ).toEqual({ available: true, hostname: result.hostname });
+    expect(
+      await getGameConnectionAvailability(f.db, f.other, f.gameId, selection, f.options),
+    ).toEqual({ available: false, hostname: result.hostname });
+    await expect(
+      reserveGameConnection(f.db, f.other, f.gameId, selection, f.options),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    expect(provider).not.toHaveBeenCalled();
+    expect(f.dnsCalls).toEqual([]);
+  });
+  it('keeps generated-name claims, reuse cooldowns and reservation races authoritative locally', async () => {
+    const f = await ready();
+    const provider = vi.fn(() => {
+      throw new Error('must not contact DNS');
+    });
+    f.options.dnsFactory = provider;
+    const subdomain = 'cute-panda-bag';
+    const hostname = `${subdomain}.example.test`;
+    const check = () =>
+      getGameConnectionAvailability(f.db, f.context, f.gameId, { subdomain }, f.options);
+    await f.db
+      .insertInto('dns_hostname_reservations')
+      .values({
+        hostname,
+        owner_id: f.serverId,
+        release_after: null,
+      })
+      .execute();
+    expect((await check()).available).toBe(false);
+    await f.db
+      .updateTable('dns_hostname_reservations')
+      .set({ release_after: new Date((f.options.now?.() ?? new Date()).getTime() + 60_000) })
+      .where('hostname', '=', hostname)
+      .execute();
+    expect((await check()).available).toBe(false);
+    await f.db
+      .updateTable('dns_hostname_reservations')
+      .set({ release_after: new Date(0) })
+      .where('hostname', '=', hostname)
+      .execute();
+    expect((await check()).available).toBe(true);
+    const attempts = await Promise.allSettled(
+      [f.context, f.other].map((context) =>
+        reserveGameConnection(f.db, context, f.gameId, { subdomain }, f.options),
+      ),
+    );
+    expect(attempts.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const failed = attempts.find((r) => r.status === 'rejected');
+    expect(failed?.status === 'rejected' && failed.reason).toMatchObject({ code: 'conflict' });
+    expect(provider).not.toHaveBeenCalled();
+  });
+  it('checks custom labels remotely even when they contain three words', async () => {
+    const f = await ready();
+    f.options.env = { ...f.options.env, NH_CLOUDFLARE_API_TOKEN: randomUUID() };
     await getGameConnectionAvailability(
       f.db,
       f.context,
       f.gameId,
-      { subdomain: result.subdomain },
+      { subdomain: 'my-custom-server' },
       f.options,
     );
-    expect(f.dnsCalls).toHaveLength(2);
-    await reserveDnsWizardHostname(f.db, f.other, f.gameId, {
-      domainId: result.domainId,
-      subdomain: result.subdomain,
-      hostname: result.hostname,
-    });
-    expect(
-      await getGameConnectionAvailability(
-        f.db,
-        f.context,
-        f.gameId,
-        { subdomain: result.subdomain },
-        f.options,
-      ),
-    ).toEqual({ available: false, hostname: result.hostname });
-    expect(f.dnsCalls).toHaveLength(2);
-  });
-  it('bounds suggestion collisions and stops immediately on provider failure', async () => {
-    const f = await ready();
-    f.options.env = { ...f.options.env, NH_CLOUDFLARE_API_TOKEN: randomUUID() };
-    const read = vi.fn(async () => true);
-    const forbidden = async () => {
-      throw new Error('unexpected DNS operation');
+    expect(f.dnsCalls).toEqual(['GET', 'GET']);
+    f.options.env = {
+      ...f.options.env,
+      NH_DNS_BLOCKED_TERMS: '[{"value":"panda","match":"word"}]',
     };
-    f.options.dnsFactory = () => ({
-      plan: forbidden,
-      apply: forbidden,
-      inspectOwned: forbidden,
-      hasRecordsAtName: read,
-    });
     await expect(
-      suggestGameConnection(f.db, f.context, f.gameId, {}, f.options),
-    ).rejects.toMatchObject({ code: 'conflict' });
-    expect(read).toHaveBeenCalledTimes(10);
-    read.mockImplementation(async () => {
-      throw new Error('isolated unavailable');
-    });
-    await expect(suggestGameConnection(f.db, f.context, f.gameId, {}, f.options)).rejects.toThrow(
-      'isolated unavailable',
-    );
-    expect(read).toHaveBeenCalledTimes(12);
-    expect(await f.db.selectFrom('dns_hostname_reservations').selectAll().execute()).toEqual([]);
+      reserveGameConnection(f.db, f.context, f.gameId, { subdomain: 'cute-panda-bag' }, f.options),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+    expect(f.dnsCalls).toEqual(['GET', 'GET']);
   });
   it('skips prohibited names locally and rejects invalid domains and unauthorized suggestions before provider reads', async () => {
     const f = await ready();

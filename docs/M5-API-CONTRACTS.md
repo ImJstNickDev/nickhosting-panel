@@ -1284,18 +1284,21 @@ the selected hostname.
 
 `POST /v1/games/:id/connection-suggestion` accepts `{domainId?}` and returns
 `{available:true,domainId,subdomain,hostname}`. It uses the existing three-word
-name generator, Owner blacklist/domain policy, local claims and the same cached
-Cloudflare availability checks below. The request makes at most 32 local draws
-and checks at most five distinct eligible names (at most ten upstream GETs when
-SRV checks apply), within the shared provider budget. Exhaustion returns conflict;
-provider uncertainty/rate limiting stops the attempt without trying more names.
+name generator, Owner blacklist/domain policy and the existing PostgreSQL hostname
+registry only. Generated names (exactly three words from the generator vocabulary,
+joined by dashes) belong to the platform-managed namespace: availability and Next
+reservation do not query Cloudflare, including when that same name is typed or
+rechecked. Other custom names retain the provider checks below. Local assigned
+names and active holds are authoritative; no separate cache or DNS inventory is
+introduced. Generation is bounded; exhaustion returns conflict.
 This is an advisory read: it creates neither a reservation nor a DNS record.
 Authentication, regular-session/rollout checks and CSRF match availability.
 
 `POST /v1/games/:id/connection-availability` accepts `{domainId?,subdomain}` and
 returns `{available,hostname}`. It requires a regular authorized session, CSRF,
 game rollout access and an eligible/customizable domain; invalid/blocked labels
-are rejected before provider access. Local claims are checked before cached
+are rejected before provider access. Local claims are always checked first.
+Generated-namespace names return the local result; other names then use cached
 Cloudflare results. Presence queries use exact names, `per_page=1`, at most two
 GETs for the hostname and declared SRV name. No record contents are disclosed.
 

@@ -555,9 +555,18 @@ describe('M2 Hono API with real invitation, password and session authentication'
             .status,
         ).toBe(403);
         const response = await request(user, path, input);
-        expect(response.status).toBe(429);
-        expect(response.headers.get('Retry-After')).toBe('3');
-        expect(JSON.stringify(await response.json())).not.toContain('retryAfterMs');
+        if (path.endsWith('suggestion')) {
+          expect(response.status).toBe(200);
+          expect(await response.json()).toMatchObject({
+            available: true,
+            subdomain: expect.any(String),
+          });
+          expect(response.headers.get('Retry-After')).toBeNull();
+        } else {
+          expect(response.status).toBe(429);
+          expect(response.headers.get('Retry-After')).toBe('3');
+          expect(JSON.stringify(await response.json())).not.toContain('retryAfterMs');
+        }
       }
       expect(read).toHaveBeenCalledTimes(2);
     } finally {

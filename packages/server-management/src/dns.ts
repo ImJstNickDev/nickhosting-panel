@@ -178,6 +178,7 @@ async function checkGameConnectionName(
   subdomain: string,
   { connection, config, domain }: Awaited<ReturnType<typeof prepareGameConnectionLookup>>,
   options: ExternalServiceOptions,
+  reuseOwnHold = true,
 ) {
   const hostname = `${subdomain}.${domain.hostname}`;
   if (hostname.length > 253) throw new DomainError('validation_failed');
@@ -190,10 +191,15 @@ async function checkGameConnectionName(
   if (reservation)
     return {
       available:
+        reuseOwnHold &&
         reservation.wizard_user_id === context.subjectUserId &&
         reservation.wizard_game_id === gameId,
       hostname,
     };
+  // The generator's exact three-word namespace is managed locally. The durable
+  // claim below/at creation still arbitrates races; publication keeps DNS ownership
+  // checks. Arbitrary custom names continue to require a provider availability read.
+  if (isGeneratedLabel(subdomain)) return { available: true, hostname };
   const key = await getSecret(db, options.codec, 'cloudflareApiToken', options.env);
   if (!key || !config.dnsInstanceId) throw new DomainError('configuration_invalid');
   const names = [
@@ -241,10 +247,8 @@ export async function suggestGameConnection(
   const request = parse(serverConnectionRequest.pick({ domainId: true }), input);
   const lookup = await prepareGameConnectionLookup(db, context, gameId, request.domainId, options);
   const attempted = new Set<string>();
-  let checks = 0;
-  // Bound both local blacklist work and provider reads. Shared cache/rate budgets
-  // apply unchanged; provider uncertainty aborts rather than trying another name.
-  for (let draw = 0; draw < 32 && checks < 5; draw++) {
+  // Bounded local work only: previews never claim names or contact Cloudflare.
+  for (let draw = 0; draw < 32; draw++) {
     let subdomain: string;
     try {
       subdomain = validateDnsLabel(randomLabel(), lookup.config);
@@ -254,8 +258,15 @@ export async function suggestGameConnection(
     }
     if (attempted.has(subdomain)) continue;
     attempted.add(subdomain);
-    checks++;
-    const result = await checkGameConnectionName(db, context, gameId, subdomain, lookup, options);
+    const result = await checkGameConnectionName(
+      db,
+      context,
+      gameId,
+      subdomain,
+      lookup,
+      options,
+      false,
+    );
     if (result.available) return { ...result, domainId: lookup.domain.id, subdomain };
   }
   throw new DomainError('conflict');
@@ -309,6 +320,11 @@ async function dnsProvider(db: Kysely<Database>, options: ExternalServiceOptions
       options.dnsFactory?.(config, key) ??
       new CloudflareDnsProvider({ instanceId: config.dnsInstanceId, apiToken: key }),
   };
+}
+const generatedWords = new Set<string>(dnsNameWords);
+function isGeneratedLabel(label: string) {
+  const words = label.split('-');
+  return words.length === 3 && words.every((word) => generatedWords.has(word));
 }
 function randomLabel() {
   return Array.from({ length: 3 }, () => dnsNameWords[randomInt(dnsNameWords.length)]).join('-');
