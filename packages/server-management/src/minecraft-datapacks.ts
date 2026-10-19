@@ -56,7 +56,7 @@ const activeStates = ['preparing', 'ready', 'dispatched', 'uncertain', 'failed']
 const hiddenRoot = '.nickhosting-datapacks';
 const directory = (world: string) => `${world}/datapacks`;
 const disabledRoot = (world: string) => `${hiddenRoot}/${world}/disabled`;
-const parent = (path: string) => path.slice(0, path.lastIndexOf('/'));
+const parent = (path: string) => path.slice(0, Math.max(0, path.lastIndexOf('/')));
 const leaf = (path: string) => path.slice(path.lastIndexOf('/') + 1);
 const failureCode = (error: unknown) =>
   error instanceof DomainError ? error.code : 'integration_unavailable';
@@ -137,10 +137,16 @@ export function createMinecraftDatapackService(options: {
     files: FilemanReadService,
     path: string,
   ): Promise<readonly FilemanEntry[]> {
-    const result = (await files.listMany([path]))[0];
-    if (result && 'files' in result) return result.files;
-    if (result && 'error' in result && result.error === 'not_found') return [];
-    throw new DomainError('integration_unavailable');
+    if (path) {
+      // Missing optional directories are normal on the first visit. Some Wings
+      // versions report them as a generic error, so prove absence from the
+      // cached parent listing instead of probing a path that does not exist.
+      const entries = await listOptional(files, parent(path));
+      const entry = entries.find((item) => item.name === leaf(path));
+      if (!entry) return [];
+      if (entry.kind !== 'directory') throw new DomainError('provenance_mismatch');
+    }
+    return files.list(path);
   }
   async function inventory(
     files: FilemanReadService,
@@ -243,7 +249,7 @@ export function createMinecraftDatapackService(options: {
   async function ensureDirectories(identifier: string, files: FilemanReadService, path: string) {
     let root = '';
     for (const name of path.split('/')) {
-      const existing = (await listOptional(files, root)).find((file) => file.name === name);
+      const existing = (await files.list(root)).find((file) => file.name === name);
       if (existing && existing.kind !== 'directory') throw new DomainError('conflict');
       if (!existing) await runtime.adapter.createDirectory(identifier, root, name);
       root = [root, name].filter(Boolean).join('/');

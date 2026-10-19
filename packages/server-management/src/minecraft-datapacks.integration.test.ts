@@ -286,6 +286,29 @@ describe('Minecraft datapack durable preparation and publication', () => {
     };
   }
 
+  it('does not probe absent optional inventory directories and preserves failures for existing directories', async () => {
+    const f = await fixture();
+    f.directories.delete('world/datapacks');
+    const batch = f.adapter.listDirectoriesBatch.bind(f.adapter);
+    const unavailable = new Set<string>();
+    f.adapter.listDirectoriesBatch = async (...args) =>
+      (await batch(...args)).map((result) =>
+        'error' in result || unavailable.has(result.directory)
+          ? { directory: result.directory, error: 'unavailable' as const }
+          : result,
+      );
+    expect((await f.service.snapshot(f.context, f.serverId)).packs).toEqual([]);
+    expect(
+      f.listFiles.mock.calls.some(
+        ([, path]) => path === 'world/datapacks' || path?.startsWith('.nickhosting-datapacks'),
+      ),
+    ).toBe(false);
+    f.directories.add('world/datapacks');
+    unavailable.add('world/datapacks');
+    await expect(f.service.snapshot(f.context, f.serverId)).rejects.toMatchObject({
+      code: 'integration_unavailable',
+    });
+  });
   it('publishes a prepared batch with one provider rename and one reload, and retries without replay', async () => {
     const f = await fixture();
     const a = await f.draft('one.zip'),
@@ -390,56 +413,69 @@ describe('Minecraft datapack durable preparation and publication', () => {
     expect(f.sendCommand).not.toHaveBeenCalled();
   });
 
-  it('uploads and validates ZIP bytes into a unique pending file, never enabling them before Apply', async () => {
-    const f = await fixture(false);
-    const zip = new ZipFile();
-    zip.addBuffer(
-      Buffer.from('{"pack":{"pack_format":48,"description":"Fixture"}}'),
-      'pack.mcmeta',
-    );
-    zip.end();
-    const chunks: Buffer[] = [];
-    for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
-    const bytes = Buffer.concat(chunks);
-    const sources = createMinecraftSourceStore(f.db, f.context, f.env, {
-      observeDisk: async () => ({ available: 10n ** 12n, total: 10n ** 12n }),
-    });
-    const reserved = await sources.reserveUpload({
-      kind: 'datapack',
-      serverId: f.serverId,
-      idempotencyKey: randomUUID(),
-      bytes: bytes.length,
-      sha256: createHash('sha256').update(bytes).digest('hex'),
-    });
-    await sources.upload(
-      reserved.id,
-      Readable.toWeb(Readable.from([bytes])) as ReadableStream<Uint8Array>,
-      bytes.length,
-    );
-    const change = await f.service.prepare(f.context, f.serverId, {
-      world: 'world',
-      action: 'install',
-      name: 'fixture.zip',
-      sourceId: reserved.id,
-      idempotencyKey: randomUUID(),
-    });
-    expect(change.state).toBe('ready');
-    expect(f.uploadFile).toHaveBeenCalledTimes(1);
-    const pendingPath = f.uploadFile.mock.calls[0]?.[1] ?? '';
-    expect(pendingPath).toMatch(/^world\/datapacks\/fixture\.zip\.[a-f0-9-]+\.pending$/);
-    expect(f.files.get(pendingPath)).toEqual(bytes);
-    expect(f.files.has('world/datapacks/fixture.zip')).toBe(false);
-    expect(f.renameFiles).not.toHaveBeenCalled();
-    expect(f.sendCommand).not.toHaveBeenCalled();
-    expect(
-      await f.service.apply(f.context, f.serverId, {
-        world: 'world',
+  it.each([false, true])(
+    'uploads and validates ZIP bytes without enabling them before Apply (missing datapacks directory: %s)',
+    async (missingDatapacks) => {
+      const f = await fixture(false);
+      if (missingDatapacks) {
+        f.directories.delete('world/datapacks');
+        const batch = f.adapter.listDirectoriesBatch.bind(f.adapter);
+        f.adapter.listDirectoriesBatch = async (...args) =>
+          (await batch(...args)).map((result) =>
+            'error' in result
+              ? { directory: result.directory, error: 'unavailable' as const }
+              : result,
+          );
+      }
+      const zip = new ZipFile();
+      zip.addBuffer(
+        Buffer.from('{"pack":{"pack_format":48,"description":"Fixture"}}'),
+        'pack.mcmeta',
+      );
+      zip.end();
+      const chunks: Buffer[] = [];
+      for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
+      const bytes = Buffer.concat(chunks);
+      const sources = createMinecraftSourceStore(f.db, f.context, f.env, {
+        observeDisk: async () => ({ available: 10n ** 12n, total: 10n ** 12n }),
+      });
+      const reserved = await sources.reserveUpload({
+        kind: 'datapack',
+        serverId: f.serverId,
         idempotencyKey: randomUUID(),
-      }),
-    ).toEqual({ state: 'published', reload: 'required' });
-    expect(f.files.get('world/datapacks/fixture.zip')).toEqual(bytes);
-    expect(f.sendCommand).not.toHaveBeenCalled();
-  });
+        bytes: bytes.length,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+      });
+      await sources.upload(
+        reserved.id,
+        Readable.toWeb(Readable.from([bytes])) as ReadableStream<Uint8Array>,
+        bytes.length,
+      );
+      const change = await f.service.prepare(f.context, f.serverId, {
+        world: 'world',
+        action: 'install',
+        name: 'fixture.zip',
+        sourceId: reserved.id,
+        idempotencyKey: randomUUID(),
+      });
+      expect(change.state).toBe('ready');
+      expect(f.uploadFile).toHaveBeenCalledTimes(1);
+      const pendingPath = f.uploadFile.mock.calls[0]?.[1] ?? '';
+      expect(pendingPath).toMatch(/^world\/datapacks\/fixture\.zip\.[a-f0-9-]+\.pending$/);
+      expect(f.files.get(pendingPath)).toEqual(bytes);
+      expect(f.files.has('world/datapacks/fixture.zip')).toBe(false);
+      expect(f.renameFiles).not.toHaveBeenCalled();
+      expect(f.sendCommand).not.toHaveBeenCalled();
+      expect(
+        await f.service.apply(f.context, f.serverId, {
+          world: 'world',
+          idempotencyKey: randomUUID(),
+        }),
+      ).toEqual({ state: 'published', reload: 'required' });
+      expect(f.files.get('world/datapacks/fixture.zip')).toEqual(bytes);
+      expect(f.sendCommand).not.toHaveBeenCalled();
+    },
+  );
   it('does not prepare the same pack twice under different request keys', async () => {
     const f = await fixture();
     f.files.set('world/datapacks/one.zip', Buffer.from('fixture'));

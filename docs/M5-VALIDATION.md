@@ -13888,7 +13888,7 @@ scripts/dev.sh pnpm i18n:check
 scripts/dev.sh pnpm build
 ```
 
-Final outcomes: **20/20 database/runtime tests**, **8/8 real browser tests**.
+Final outcomes: **22/22 database/runtime tests**, **8/8 real browser tests**.
 Coverage includes permissions/revocation, single-batch Apply, idempotency, explicit
 reload dispatch, inactive worlds, interrupted upload discard, missing-effect 204,
 partial replacement recovery, disabled replacement preservation and delayed cleanup
@@ -13899,9 +13899,25 @@ or page errors. Keyboard checks cover initial Cancel focus and Escape, not a ful
 manual accessibility certification. Independent final review has no remaining
 must-fix findings.
 
-Migration 044 activation remains subject to specific Owner approval. Current dev
-API/worker/Vite are healthy, restart counters zero, public HTTPS health is 200.
-Only project source watchers have consumed changes; no manual restart, image
-rebuild, dev migration or live game mutation has yet been performed in this pass.
-Rollback preserves additive tables and durable receipts. PR #21 stays OPEN and
+After explicit scoped Owner approval, the previous API image was preserved as
+`nickhosting-dev-app:before-datapacks-20261019`, the development image rebuilt,
+and the tools-profile migrator applied **only 044_minecraft_datapacks.sql**. The
+migrator used only the existing internal dev-data network, published no ports,
+and was removed normally after success. No long-running container was recreated
+or manually restarted. API/worker/Vite remained healthy with restart counters zero;
+public HTTPS health and Vite module transformation returned 200, and a real browser
+confirmed HMR connected with no page errors.
+
+An authenticated read-only smoke test initially exposed a real Wings difference:
+missing optional folders can report generic unavailable rather than not-found.
+The shared optional-directory helper now proves absence from cached parent listings,
+while still rejecting genuine failures for existing directories. Two additional
+DB/runtime regressions cover that case and first installation without a datapacks
+folder. Final authenticated inventory returned 200, four worlds, one existing pack
+and zero drafts; both real Modrinth and CurseForge search and file-list requests
+returned 200. No pack was downloaded, installed, disabled, removed or reloaded on
+any live server. The extra source correction loaded through the existing watcher.
+
+Rollback preserves additive tables and durable receipts. No Blueprint, Wings,
+Pterodactyl, DNS or production configuration was changed. PR #21 stays OPEN and
 unmerged; SFTPGo #18 remains an independent production-release gate.
