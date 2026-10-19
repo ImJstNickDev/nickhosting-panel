@@ -49,6 +49,7 @@ import {
   setProjectMember,
   setRuntimeMapping,
   setUserLimits,
+  suggestGameConnection,
   updateServerDns,
   uploadPolicyOverrides,
 } from '@nickhosting/server-management';
@@ -1321,13 +1322,17 @@ export function registerServerRoutes(
       ),
     );
   });
-  for (const kind of ['availability', 'reservation'] as const)
+  for (const kind of ['availability', 'reservation', 'suggestion'] as const)
     app.post(`/v1/games/:id/connection-${kind}`, async (c) => {
       try {
         const context = await principal(c, true),
           service = await management();
         const operation =
-          kind === 'availability' ? getGameConnectionAvailability : reserveGameConnection;
+          kind === 'availability'
+            ? getGameConnectionAvailability
+            : kind === 'suggestion'
+              ? suggestGameConnection
+              : reserveGameConnection;
         return c.json(
           await operation(db, context, c.req.param('id'), await body(c), service.externalOptions),
           kind === 'reservation' ? 201 : 200,

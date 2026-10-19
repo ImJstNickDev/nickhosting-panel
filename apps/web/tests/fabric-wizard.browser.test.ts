@@ -91,6 +91,21 @@ describe('Fabric independent catalog wizard', () => {
           supportsSrv: true,
           configured: true,
         });
+      if (path.endsWith('/connection-suggestion'))
+        return response({
+          domainId: 'main',
+          subdomain: 'calm-panda-bag',
+          hostname: 'calm-panda-bag.games.example.test',
+          available: true,
+        });
+      if (path.endsWith('/connection-reservation'))
+        return response({
+          reservationId: id,
+          domainId: 'main',
+          subdomain: 'calm-panda-bag',
+          hostname: 'calm-panda-bag.games.example.test',
+          expiresAt: new Date(Date.now() + 900000).toISOString(),
+        });
       if (path === '/v1/minecraft/choices')
         return response([
           { id, version: '26.1', runtime: 'vanilla', releaseType: 'release' },
@@ -174,10 +189,15 @@ describe('Fabric independent catalog wizard', () => {
     await next(); // whitelist
     await next(); // resources
     await next(); // review
+    await check(page.getByText('calm-panda-bag.games.example.test', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Create server', exact: true }).click();
     await check(page.getByRole('link', { name: 'Open server', exact: true })).toBeVisible();
-    expect(writes).toHaveLength(1);
-    expect(writes[0]).toMatchObject({
+    expect(writes.map(({ path }) => path)).toEqual([
+      '/v1/games/minecraft/connection-suggestion',
+      '/v1/games/minecraft/connection-reservation',
+      '/v1/minecraft/servers',
+    ]);
+    expect(writes.at(-1)).toMatchObject({
       path: '/v1/minecraft/servers',
       body: {
         minecraft: { choiceId: fabricId, loaderVersion: '0.14.0', configuration: { eula: true } },

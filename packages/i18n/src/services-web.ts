@@ -7,16 +7,26 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
   'connection.availability.available': ['Available', 'Disponibile'],
   'connection.availability.taken': ['This name is already in use.', 'Questo nome è già in uso.'],
   'connection.availability.invalid': [
-    'Use lowercase letters, numbers and hyphens.',
-    'Usa lettere minuscole, numeri e trattini.',
+    'Use letters, numbers or hyphens; start and end with a letter or number.',
+    'Usa lettere, numeri o trattini; inizia e termina con una lettera o un numero.',
   ],
   'connection.availability.unavailable': [
-    'Availability could not be checked. Change the name or leave it empty for an automatic address.',
-    'Impossibile verificare la disponibilità. Cambia nome o lascia vuoto per un indirizzo automatico.',
+    'Availability could not be checked.',
+    'Impossibile verificare la disponibilità.',
   ],
   'connection.reservationExpired': [
     'Your address reservation expired. Check it again to continue.',
     'La prenotazione dell’indirizzo è scaduta. Verificalo di nuovo per continuare.',
+  ],
+  'connection.generate': ['Generate another name', 'Genera un altro nome'],
+  'connection.reserving': ['Reserving…', 'Prenotazione…'],
+  'connection.availability.prohibited': [
+    'This name is not allowed.',
+    'Questo nome non è consentito.',
+  ],
+  'connection.availability.required': [
+    'Enter a name or generate one.',
+    'Inserisci un nome o generane uno.',
   ],
   'connection.automatic': ['Automatic', 'Automatico'],
   'connection.disableLast': [

@@ -1277,3 +1277,18 @@ On mobile the registered list prioritizes version/date and creation availability
 Java/capability details remain in the detail panel, and an Order control preserves
 all four existing sort modes. Error notices remain compact while loading/empty
 states retain space. This is a presentation change, with unchanged APIs and gates.
+
+
+### Creation address control
+
+The shared SDK address step renders the subdomain and domain as one centered
+control, with a quiet regenerate action for personal-subdomain integrations.
+It proposes a checked name on entry; typing remains available during that request
+and a late result never replaces edited input. Clearing a name does not generate
+another one automatically. Shared/fixed host modes keep their declared behavior.
+Availability occupies a stable status area: checking, available, taken, invalid,
+not allowed or unavailable with Retry. Invalid syntax is distinct from an Owner
+restriction and an unavailable provider. Next reserves the exact displayed name,
+shows reserving feedback and preserves the existing expiry/replacement semantics.
+The final summary shows the hostname. Labels, status and accessible actions ship
+in English and Italian; no DNS record is written by preview or reservation.

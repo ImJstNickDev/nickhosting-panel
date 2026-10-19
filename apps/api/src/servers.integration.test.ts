@@ -492,8 +492,8 @@ describe('M2 Hono API with real invitation, password and session authentication'
         .execute();
     }
   });
-  it('protects DNS availability and reservation and preserves provider Retry-After', async () => {
-    const paths = ['availability', 'reservation'].map(
+  it('protects DNS availability, reservation and suggestion and preserves provider Retry-After', async () => {
+    const paths = ['availability', 'reservation', 'suggestion'].map(
       (kind) => `/v1/games/${f.gameId}/connection-${kind}`,
     );
     const keys = [
@@ -548,18 +548,13 @@ describe('M2 Hono API with real invitation, password and session authentication'
         },
       });
       for (const path of paths) {
-        expect((await request(null, path, { subdomain: 'probe' })).status).toBe(401);
+        const input = path.endsWith('suggestion') ? {} : { subdomain: 'probe' };
+        expect((await request(null, path, input)).status).toBe(401);
         expect(
-          (
-            await request(
-              user,
-              path,
-              { subdomain: 'probe' },
-              { headers: { origin: 'https://foreign.test' } },
-            )
-          ).status,
+          (await request(user, path, input, { headers: { origin: 'https://foreign.test' } }))
+            .status,
         ).toBe(403);
-        const response = await request(user, path, { subdomain: 'probe' });
+        const response = await request(user, path, input);
         expect(response.status).toBe(429);
         expect(response.headers.get('Retry-After')).toBe('3');
         expect(JSON.stringify(await response.json())).not.toContain('retryAfterMs');

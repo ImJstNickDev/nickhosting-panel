@@ -1,11 +1,15 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { type AuthContext, authSessionId, SecretCodec } from '@nickhosting/core';
+import { type AuthContext, authSessionId, dnsNameWords, SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { CloudflareDnsProvider, SftpGoAdapter } from '@nickhosting/external-services';
 import type { GameManifest } from '@nickhosting/game-sdk';
 import { sql } from 'kysely';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getGameConnectionAvailability, reserveGameConnection } from './dns.js';
+import {
+  getGameConnectionAvailability,
+  reserveGameConnection,
+  suggestGameConnection,
+} from './dns.js';
 import { consumeDnsWizardReservation, reserveDnsWizardHostname } from './dns-reservations.js';
 import {
   assignServerDns,
@@ -2416,6 +2420,114 @@ describe('wizard DNS availability and reservations', () => {
       .execute();
     return f;
   }
+  it('suggests a real available name without reserving or publishing it, then reuses the availability cache', async () => {
+    const f = await ready();
+    f.options.env = { ...f.options.env, NH_CLOUDFLARE_API_TOKEN: randomUUID() };
+    const result = await suggestGameConnection(f.db, f.context, f.gameId, {}, f.options);
+    expect(result).toMatchObject({ available: true, domainId: 'legacy' });
+    expect(result.subdomain.split('-')).toHaveLength(3);
+    expect(result.hostname).toBe(`${result.subdomain}.example.test`);
+    expect(f.dnsCalls).toEqual(['GET', 'GET']);
+    expect(f.records.size).toBe(0);
+    expect(await f.db.selectFrom('dns_hostname_reservations').selectAll().execute()).toEqual([]);
+    expect(await f.db.selectFrom('dns_assignments').selectAll().execute()).toEqual([]);
+    await getGameConnectionAvailability(
+      f.db,
+      f.context,
+      f.gameId,
+      { subdomain: result.subdomain },
+      f.options,
+    );
+    expect(f.dnsCalls).toHaveLength(2);
+    await reserveDnsWizardHostname(f.db, f.other, f.gameId, {
+      domainId: result.domainId,
+      subdomain: result.subdomain,
+      hostname: result.hostname,
+    });
+    expect(
+      await getGameConnectionAvailability(
+        f.db,
+        f.context,
+        f.gameId,
+        { subdomain: result.subdomain },
+        f.options,
+      ),
+    ).toEqual({ available: false, hostname: result.hostname });
+    expect(f.dnsCalls).toHaveLength(2);
+  });
+  it('bounds suggestion collisions and stops immediately on provider failure', async () => {
+    const f = await ready();
+    f.options.env = { ...f.options.env, NH_CLOUDFLARE_API_TOKEN: randomUUID() };
+    const read = vi.fn(async () => true);
+    const forbidden = async () => {
+      throw new Error('unexpected DNS operation');
+    };
+    f.options.dnsFactory = () => ({
+      plan: forbidden,
+      apply: forbidden,
+      inspectOwned: forbidden,
+      hasRecordsAtName: read,
+    });
+    await expect(
+      suggestGameConnection(f.db, f.context, f.gameId, {}, f.options),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    expect(read).toHaveBeenCalledTimes(10);
+    read.mockImplementation(async () => {
+      throw new Error('isolated unavailable');
+    });
+    await expect(suggestGameConnection(f.db, f.context, f.gameId, {}, f.options)).rejects.toThrow(
+      'isolated unavailable',
+    );
+    expect(read).toHaveBeenCalledTimes(12);
+    expect(await f.db.selectFrom('dns_hostname_reservations').selectAll().execute()).toEqual([]);
+  });
+  it('skips prohibited names locally and rejects invalid domains and unauthorized suggestions before provider reads', async () => {
+    const f = await ready();
+    f.options.env = {
+      ...f.options.env,
+      NH_DNS_BLOCKED_TERMS: JSON.stringify(dnsNameWords.map((value) => ({ value, match: 'word' }))),
+    };
+    await expect(
+      suggestGameConnection(f.db, f.context, f.gameId, {}, f.options),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    await expect(
+      suggestGameConnection(f.db, f.context, f.gameId, { domainId: 'foreign' }, f.options),
+    ).rejects.toMatchObject({ code: 'configuration_invalid' });
+    await expect(
+      suggestGameConnection(
+        f.db,
+        { ...f.context, sessionType: 'support' },
+        f.gameId,
+        {},
+        f.options,
+      ),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    await f.db
+      .updateTable('game_rollouts')
+      .set({ state: 'private-testing', allowlist: [] })
+      .where('integration_id', '=', f.gameId)
+      .execute();
+    await expect(
+      suggestGameConnection(f.db, f.context, f.gameId, {}, f.options),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    expect(f.dnsCalls).toEqual([]);
+    expect(await f.db.selectFrom('dns_hostname_reservations').selectAll().execute()).toEqual([]);
+  });
+  it('leaves static and fixed shared-host modes unchanged', async () => {
+    const f = await ready();
+    for (const connection of [
+      { mode: 'static-host-port', hostnameSettingKey: 'staticGameHostname', showPort: true },
+      { mode: 'shared-host', defaultLabel: 'shared', allowCustomSubdomain: false },
+    ]) {
+      await sql`update game_integrations set manifest=jsonb_set(manifest,'{connection}',${JSON.stringify(connection)}::jsonb) where id=${f.gameId}`.execute(
+        f.db,
+      );
+      await expect(
+        suggestGameConnection(f.db, f.context, f.gameId, {}, f.options),
+      ).rejects.toMatchObject({ code: 'forbidden' });
+    }
+    expect(f.dnsCalls).toEqual([]);
+  });
   it('checks exact hostname and SRV once, caches provider reads but never local claims', async () => {
     const f = await ready();
     const check = (subdomain: string, context = f.context) =>

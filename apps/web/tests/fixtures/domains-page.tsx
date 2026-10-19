@@ -28,6 +28,7 @@ function Fixture() {
     options.data,
     choice,
     view === 'availability',
+    setChoice,
   );
   const [continued, setContinued] = useState(false);
   const settings = useQuery({
@@ -57,6 +58,9 @@ function Fixture() {
             value={choice}
             onChange={setChoice}
             availability={availability.state}
+            retry={availability.retry}
+            generate={availability.canGenerate ? () => void availability.generate() : undefined}
+            generating={availability.generating}
           />
           <button type="submit" disabled={!availability.canContinue}>
             Next

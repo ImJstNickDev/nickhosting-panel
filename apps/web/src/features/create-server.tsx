@@ -98,11 +98,23 @@ export function CreateServerPage() {
     step > 0 && step < nameStep
       ? beforeName[step - 1]
       : configurationPages[step - configurationStep];
+  const changeConnection = useCallback(
+    (choice: ConnectionChoice) => {
+      previousReservation.current =
+        connectionReservation?.reservationId ?? previousReservation.current;
+      setConnectionReservation(undefined);
+      setFailure(undefined);
+      setConnectionChoice(choice);
+      key.current = idempotencyKey();
+    },
+    [connectionReservation],
+  );
   const addressAvailability = useConnectionAvailability(
     gameId,
     connectionOptions.data,
     connectionChoice,
     page?.kind === 'address',
+    changeConnection,
   );
   const addressBlocked =
     page?.kind === 'address' &&
@@ -162,6 +174,7 @@ export function CreateServerPage() {
     [page?.field],
   );
   function selectGame(id: string) {
+    addressAvailability.reset();
     const extension = gameUiRegistry.get(id);
     if (!extension) return;
     prefetchCreationCatalog(extension);
@@ -447,14 +460,14 @@ export function CreateServerPage() {
                   options={connectionOptions}
                   availability={addressAvailability.state}
                   value={connectionChoice}
-                  onChange={(choice) => {
-                    previousReservation.current =
-                      connectionReservation?.reservationId ?? previousReservation.current;
-                    setConnectionReservation(undefined);
-                    setFailure(undefined);
-                    setConnectionChoice(choice);
-                    key.current = idempotencyKey();
-                  }}
+                  onChange={changeConnection}
+                  retry={addressAvailability.retry}
+                  generate={
+                    addressAvailability.canGenerate
+                      ? () => void addressAvailability.generate()
+                      : undefined
+                  }
+                  generating={addressAvailability.generating}
                 />
               )}
               {page.kind === 'players' && page.lookupHandler && (
@@ -594,6 +607,16 @@ export function CreateServerPage() {
               <Details
                 values={[
                   [t('gameUi.serverName'), name],
+                  ...(connectionReservation?.hostname || connectionOptions.data?.defaultHostname
+                    ? [
+                        [
+                          t('service.address'),
+                          connectionReservation?.hostname ??
+                            connectionOptions.data?.defaultHostname ??
+                            '',
+                        ] as [string, string],
+                      ]
+                    : []),
                   ...preparedSummary.map(({ labelKey, value }): [string, string] => [
                     t(labelKey),
                     value,
@@ -644,7 +667,14 @@ export function CreateServerPage() {
               (step === resourcesStep && !quota.data)
             }
           >
-            {t(step === finalStep ? 'web.createServer' : 'web.next')}
+            {busy && page?.kind === 'address' ? (
+              <>
+                <span className="connection-button-spinner" aria-hidden="true" />
+                {t('connection.reserving')}
+              </>
+            ) : (
+              t(step === finalStep ? 'web.createServer' : 'web.next')
+            )}
           </button>
         </footer>
       </form>

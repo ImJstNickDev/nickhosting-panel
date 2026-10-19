@@ -32,6 +32,7 @@ describe('Domain choices and management (isolated responses, real components)', 
   let availabilityRequests: Array<{ domainId: string; subdomain: string }>;
   let releaseSlow: (() => void) | undefined;
   let reservationExpiry: string;
+  let suggestions: number;
   let assignments: Array<{ id: string; state: string; connection: { displayAddress: string } }>;
   beforeAll(async () => {
     vite = await createServer({
@@ -76,6 +77,7 @@ describe('Domain choices and management (isolated responses, real components)', 
     displayAddress = '192.0.2.1:28000';
     availabilityRequests = [];
     releaseSlow = undefined;
+    suggestions = 0;
     reservationExpiry = new Date(Date.now() + 15 * 60_000).toISOString();
     context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     page = await context.newPage();
@@ -141,6 +143,17 @@ describe('Domain choices and management (isolated responses, real components)', 
             },
           ],
         });
+      if (path.endsWith('/connection-suggestion')) {
+        suggestions++;
+        return route.fulfill({
+          json: {
+            domainId: route.request().postDataJSON().domainId ?? 'main',
+            subdomain: `calm-panda-${suggestions}`,
+            hostname: `calm-panda-${suggestions}.${domain.hostname}`,
+            available: true,
+          },
+        });
+      }
       if (path.endsWith('/connection-availability')) {
         const body = route.request().postDataJSON();
         availabilityRequests.push(body);
@@ -148,6 +161,8 @@ describe('Domain choices and management (isolated responses, real components)', 
           await new Promise<void>((resolve) => {
             releaseSlow = resolve;
           });
+        if (body.subdomain === 'blocked')
+          return route.fulfill({ status: 400, json: { code: 'validation_failed' } });
         if (body.subdomain === 'unreachable')
           return route.fulfill({ status: 503, json: { code: 'integration_unavailable' } });
         return route.fulfill({
@@ -171,6 +186,25 @@ describe('Domain choices and management (isolated responses, real components)', 
         });
       }
       if (path.endsWith('/connection-options')) return route.fulfill({ json: options });
+      if (path.endsWith('/domain-policy')) {
+        if (method === 'PUT') {
+          const body = route.request().postDataJSON();
+          writes.push({ path, body });
+          values.dnsGamePolicies = { fixture: body };
+        }
+        return route.fulfill({
+          json: {
+            policy: (values.dnsGamePolicies as Record<string, unknown>).fixture ?? {
+              selection: 'all',
+              domainIds: [],
+            },
+            domains: (values.dnsDomains as unknown[]).length
+              ? values.dnsDomains
+              : [{ ...domain, id: 'legacy' }],
+            locked: false,
+          },
+        });
+      }
       if (path === '/v1/owner/settings') {
         if (method === 'PATCH') {
           const body = route.request().postDataJSON();
@@ -267,9 +301,11 @@ describe('Domain choices and management (isolated responses, real components)', 
     expect(availabilityRequests).toHaveLength(1);
     await check(next).toBeDisabled();
     await input.fill('');
-    await check(next).toBeEnabled();
+    await check(next).toBeDisabled();
     await page.waitForTimeout(650);
     expect(availabilityRequests).toHaveLength(1);
+    await page.getByRole('button', { name: 'Generate another name' }).click();
+    await check(input).toHaveValue('calm-panda-2');
     await input.press('Enter');
     await check(page.locator('output')).toHaveText('continued');
   });
@@ -304,6 +340,129 @@ describe('Domain choices and management (isolated responses, real components)', 
     await check(next).toBeDisabled();
     await check(page.locator('.connection-availability')).toHaveText('Available');
     expect(availabilityRequests.at(-1)).toEqual({ domainId: 'other', subdomain: 'free' });
+  });
+  it('keeps typed text when a suggestion arrives late and generates only on explicit request after clearing', async () => {
+    let release: (() => void) | undefined;
+    let calls = 0;
+    await page.route('**/connection-suggestion', async (route) => {
+      calls++;
+      if (calls === 1)
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      await route
+        .fulfill({
+          json: {
+            domainId: 'main',
+            subdomain: 'bright-panda-bag',
+            hostname: `bright-panda-bag.${domain.hostname}`,
+            available: true,
+          },
+        })
+        .catch(() => {});
+    });
+    await open('availability');
+    await check.poll(() => calls).toBe(1);
+    const input = page.getByLabel('Subdomain', { exact: true });
+    await input.fill('my-own-name');
+    release?.();
+    await check(page.locator('.connection-availability')).toHaveText('Available');
+    await check(input).toHaveValue('my-own-name');
+    await input.fill('');
+    await check(page.getByRole('button', { name: 'Next', exact: true })).toBeDisabled();
+    await page.waitForTimeout(700);
+    expect(calls).toBe(1);
+    await page.getByRole('button', { name: 'Generate another name' }).click();
+    await check(input).toHaveValue('bright-panda-bag');
+    expect(availabilityRequests).toEqual([{ domainId: 'main', subdomain: 'my-own-name' }]);
+  });
+  it('retries availability failures, distinguishes prohibited labels and links errors to the input', async () => {
+    await open('availability');
+    const input = page.getByLabel('Subdomain', { exact: true });
+    await check(input).toHaveValue('calm-panda-1');
+    const before = await page.getByRole('button', { name: 'Next', exact: true }).boundingBox();
+    await input.fill('blocked');
+    await check(page.locator('.connection-availability')).toHaveText('This name is not allowed.');
+    await check(input).toHaveAttribute('aria-invalid', 'true');
+    expect(await input.getAttribute('aria-describedby')).toBe(
+      await page.locator('.connection-availability').getAttribute('id'),
+    );
+    await input.fill('unreachable');
+    await check(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+    const count = availabilityRequests.length;
+    await page.route('**/connection-availability', (route) =>
+      route.fulfill({ json: { available: true, hostname: `unreachable.${domain.hostname}` } }),
+    );
+    await page.getByRole('button', { name: 'Try again' }).click();
+    await check(page.locator('.connection-availability')).toHaveText('Available');
+    await check(input).not.toHaveAttribute('aria-invalid', 'true');
+    expect(availabilityRequests.length).toBe(count);
+    expect((await page.getByRole('button', { name: 'Next', exact: true }).boundingBox())?.y).toBe(
+      before?.y,
+    );
+  });
+  it('shows the configured shared hostname without requesting a random suggestion', async () => {
+    options = {
+      ...options,
+      mode: 'shared-host',
+      customizable: false,
+      defaultHostname: 'shared.games.example.test',
+    };
+    await open('availability');
+    await check(page.getByText('shared.games.example.test', { exact: true })).toBeVisible();
+    expect(suggestions).toBe(0);
+    await check(page.getByRole('button', { name: 'Generate another name' })).toHaveCount(0);
+    await check(page.getByRole('button', { name: 'Next', exact: true })).toBeEnabled();
+  });
+  it('restarts an abandoned first suggestion after navigating back into the address step', async () => {
+    let release: (() => void) | undefined;
+    let calls = 0;
+    await page.route('**/connection-suggestion', async (route) => {
+      calls++;
+      if (calls === 1)
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      await route
+        .fulfill({
+          json: {
+            domainId: 'main',
+            subdomain: 'ready-panda-bag',
+            hostname: `ready-panda-bag.${domain.hostname}`,
+            available: true,
+          },
+        })
+        .catch(() => {});
+    });
+    await open('wizard');
+    await page.getByRole('button', { name: 'Minecraft', exact: true }).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await page.getByText('Vanilla', { exact: true }).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await page.getByLabel('Server name', { exact: true }).fill('Island');
+    await page.getByLabel('Server name', { exact: true }).press('Enter');
+    await page.getByText('26.1', { exact: true }).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await check.poll(() => calls).toBe(1);
+    await page.getByRole('button', { name: 'Back', exact: true }).click();
+    release?.();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await check(page.getByLabel('Subdomain', { exact: true })).toHaveValue('ready-panda-bag');
+    expect(calls).toBe(2);
+    expect(availabilityRequests).toEqual([]);
+    // Selecting the same game again creates a new draft and must prepare a new name.
+    for (let step = 0; step < 4; step++)
+      await page.getByRole('button', { name: 'Back', exact: true }).click();
+    await page.getByRole('button', { name: 'Minecraft', exact: true }).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await page.getByText('Vanilla', { exact: true }).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await page.getByLabel('Server name', { exact: true }).fill('Another island');
+    await page.getByLabel('Server name', { exact: true }).press('Enter');
+    await page.getByText('26.1', { exact: true }).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await check(page.getByLabel('Subdomain', { exact: true })).toHaveValue('ready-panda-bag');
+    expect(calls).toBe(3);
   });
   it('renders the SDK address step after version, reserves on Next and reuses the hold when navigating back', async () => {
     await open('wizard');
@@ -395,12 +554,12 @@ describe('Domain choices and management (isolated responses, real components)', 
       path: '.codex/local/m5-browser/screenshots/address-wizard-it-mobile.png',
       fullPage: true,
     });
-    await input.fill('');
     await input.press('Enter');
     await check(
       page.getByRole('heading', { name: 'Chi sarà operatore?', exact: true }),
     ).toBeVisible();
-    expect(writes).toEqual([]);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.body).toMatchObject({ subdomain: 'isola' });
   });
   it('uses automatic labels and only shows domain selection when necessary', async () => {
     await open('creation');

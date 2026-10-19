@@ -1278,7 +1278,19 @@ submitted. No record has been published in that pre-intent state.
 
 Minecraft declares a dedicated SDK `address` page immediately after version choice;
 the common wizard renders it instead of placing editable connection fields in the
-final summary. An empty name retains automatic naming.
+final summary. Personal-subdomain mode proposes a concrete available name before
+Next; shared-host modes retain their configured default. The final summary includes
+the selected hostname.
+
+`POST /v1/games/:id/connection-suggestion` accepts `{domainId?}` and returns
+`{available:true,domainId,subdomain,hostname}`. It uses the existing three-word
+name generator, Owner blacklist/domain policy, local claims and the same cached
+Cloudflare availability checks below. The request makes at most 32 local draws
+and checks at most five distinct eligible names (at most ten upstream GETs when
+SRV checks apply), within the shared provider budget. Exhaustion returns conflict;
+provider uncertainty/rate limiting stops the attempt without trying more names.
+This is an advisory read: it creates neither a reservation nor a DNS record.
+Authentication, regular-session/rollout checks and CSRF match availability.
 
 `POST /v1/games/:id/connection-availability` accepts `{domainId?,subdomain}` and
 returns `{available,hostname}`. It requires a regular authorized session, CSRF,
@@ -1305,7 +1317,7 @@ headroom but cannot guarantee that external activity will not exhaust it.
 Sources: [API limits](https://developers.cloudflare.com/fundamentals/api/reference/limits/),
 [exact-name DNS queries](https://developers.cloudflare.com/api/typescript/resources/dns/subresources/records/methods/list/).
 
-Next on a custom name calls `POST /v1/games/:id/connection-reservation` with
+Next on the displayed generated or custom name calls `POST /v1/games/:id/connection-reservation` with
 `{domainId?,subdomain,previousReservationId?}`. It returns
 `{reservationId,hostname,expiresAt,domainId,subdomain}`. A 15-minute account/game-bound
 hold is atomically stored in the existing hostname registry, with at most five
@@ -1315,7 +1327,11 @@ Cloudflare record is created. The wizard passes `connection.reservationId` durin
 creation; the same transaction verifies ownership, exact choice and expiry and
 transfers the claim to the new server. Transaction failure preserves the hold;
 idempotent creation replay does not consume it twice. An expired hold returns the
-wizard to address selection. Blank automatic names do not require a wizard hold.
+wizard to address selection. Existing API callers may still omit automatic names
+without a wizard hold; the personal-address wizard requires a displayed, checked
+name. A suggestion response seeds availability locally, avoiding an immediate
+duplicate check. Editing the name/domain invalidates that result; stale suggestions
+cannot replace user input. Failed checks offer explicit retry.
 
 A hold excludes other NickHosting assignments, including API calls omitting the
 token; it cannot prevent manual/external Cloudflare changes. Existing owned-record

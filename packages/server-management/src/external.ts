@@ -9,6 +9,7 @@ export {
   listServerDns,
   previewServerDns,
   reserveGameConnection,
+  suggestGameConnection,
   updateServerDns,
 } from './dns.js';
 

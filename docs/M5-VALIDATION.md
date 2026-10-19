@@ -14323,3 +14323,53 @@ An eligible Owner mapping, actual direct endpoint and sufficient resources remai
 required. User-facing installation failures retain existing durable operation and
 retry semantics. No migration/new resource required; rollback source while retaining
 runtime rows/receipts. PR21 stays open/unmerged and issue18 remains independent.
+
+## 2026-10-19 — shared creation address step
+
+M5 / PR21: Vanilla and Fabric use the same centered address control. Personal
+addresses start with a concrete checked three-word proposal, editable name/domain
+and a regenerate icon. Availability stays in a fixed status area with separate
+syntax, policy, collision and provider-failure states; failures offer Retry.
+Next shows reservation progress, reserves the displayed name and retains existing
+hold replacement/expiry semantics. The final summary includes the hostname.
+Shared/fixed integration modes and existing server-address editing remain supported.
+
+The new suggestion endpoint reuses existing policy, local claims, provider cache
+and quotas; it does not reserve names or write DNS. Each request bounds local
+random draws to 32 and candidate checks to 5, stopping on provider uncertainty/429.
+Regression coverage includes late suggestions after typing, clearing, Back/Next,
+reselecting the same game, explicit retry, domain changes, existing holds and expiry.
+
+Verification:
+
+- Isolated real API/service handlers: 9 focused tests passed; 142 unrelated tests
+  skipped. Command: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/external.integration.test.ts apps/api/src/servers.integration.test.ts -t 'wizard DNS|protects DNS'`.
+- DNS availability cache/budget unit suite: 5 passed.
+- Firefox browser suites: **21 passed** (18 domain/wizard cases and three Fabric
+  cases), 96.24s. Actual React components with isolated API fixtures; includes
+  keyboard/Enter, reservation reuse/expiry, generated-name summary, stale responses,
+  retry, EN/IT mobile reflow and automated axe checks. These are not a comprehensive
+  WCAG-conformance claim. Command: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/domains.browser.test.ts apps/web/tests/fabric-wizard.browser.test.ts`.
+- Full TypeScript, production build and scoped Biome passed; EN/IT/pseudolocale
+  completeness passed. The production build retains existing large lazy-chunk warnings.
+- Independent technical and desktop EN/mobile IT rendered-screen review found no
+  remaining must-fix. Review caught and resolved suggestion state on abandoned
+  requests and restarted game selection.
+
+Actual dev HTTPS Firefox smoke reached Minecraft→Fabric→26.1→Loader→Address:
+a concrete available proposal appeared, the input held focus, and there were zero
+page errors or attempted mutating API calls. Only authenticated read routes and
+advisory availability/suggestion POSTs were allowed. No Next reservation or server
+creation was attempted. Screenshots (cropped to remove identity) are
+`.codex/local/m5-browser/screenshots/address-polished-live-desktop.png`,
+`address-polished-live-mobile.png`, and `address-polished-live-invalid-mobile.png`.
+Isolated rendered screenshots `address-wizard-en.png` and
+`address-wizard-it-mobile.png` cover EN/IT. The first live attempt overlapped HMR
+and lost the wizard draft; the completed stable-code run passed.
+
+Source watchers loaded changes; API/Vite were healthy without an explicit restart,
+image rebuild or migration. No production provider, DNS record, game server,
+Blueprint, network or persistent infrastructure changes. Temporary private browser
+authentication was removed. Test schemas were isolated and cleaned by their harness;
+no new live test assets. Rollback is a source revert; existing holds still expire
+normally. PR21 remains open/unmerged; issue18 remains an independent release gate.

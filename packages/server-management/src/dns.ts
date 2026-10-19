@@ -134,15 +134,14 @@ export async function getGameConnectionOptions(
     (await secretStatus(db, env)).some((s) => s.name === 'cloudflareApiToken' && s.configured);
   return { ...options, configured: options.configured && ready };
 }
-export async function getGameConnectionAvailability(
+async function prepareGameConnectionLookup(
   db: Kysely<Database>,
   context: AuthContext,
   gameId: string,
-  input: unknown,
+  domainId: string | undefined,
   options: ExternalServiceOptions,
 ) {
   if (context.sessionType !== 'regular') throw new DomainError('forbidden');
-  const request = parse(serverConnectionRequest.required({ subdomain: true }), input);
   const [connection, settings] = await Promise.all([
     authorizedGameConnection(db, context, gameId),
     getSettings(db, options.env),
@@ -155,11 +154,32 @@ export async function getGameConnectionAvailability(
   const config = settings.values;
   const choices = resolveDnsOptions(config, connection, gameId);
   const domain = resolveDnsDomains(config, connection, gameId).find(
-    (d) => d.id === (request.domainId ?? choices.defaultDomainId),
+    (d) => d.id === (domainId ?? choices.defaultDomainId),
   );
   if (!domain || !choices.configured) throw new DomainError('configuration_invalid');
-  const subdomain = validateDnsLabel(request.subdomain, config),
-    hostname = `${subdomain}.${domain.hostname}`;
+  return { connection, config, domain };
+}
+export async function getGameConnectionAvailability(
+  db: Kysely<Database>,
+  context: AuthContext,
+  gameId: string,
+  input: unknown,
+  options: ExternalServiceOptions,
+) {
+  const request = parse(serverConnectionRequest.required({ subdomain: true }), input);
+  const lookup = await prepareGameConnectionLookup(db, context, gameId, request.domainId, options);
+  const subdomain = validateDnsLabel(request.subdomain, lookup.config);
+  return checkGameConnectionName(db, context, gameId, subdomain, lookup, options);
+}
+async function checkGameConnectionName(
+  db: Kysely<Database>,
+  context: AuthContext,
+  gameId: string,
+  subdomain: string,
+  { connection, config, domain }: Awaited<ReturnType<typeof prepareGameConnectionLookup>>,
+  options: ExternalServiceOptions,
+) {
+  const hostname = `${subdomain}.${domain.hostname}`;
   if (hostname.length > 253) throw new DomainError('validation_failed');
   const reservation = await db
     .selectFrom('dns_hostname_reservations')
@@ -209,6 +229,36 @@ export async function getGameConnectionAvailability(
     },
   );
   return { available, hostname };
+}
+/** Advisory only: selection is reserved by Next, never by a preview. */
+export async function suggestGameConnection(
+  db: Kysely<Database>,
+  context: AuthContext,
+  gameId: string,
+  input: unknown,
+  options: ExternalServiceOptions,
+) {
+  const request = parse(serverConnectionRequest.pick({ domainId: true }), input);
+  const lookup = await prepareGameConnectionLookup(db, context, gameId, request.domainId, options);
+  const attempted = new Set<string>();
+  let checks = 0;
+  // Bound both local blacklist work and provider reads. Shared cache/rate budgets
+  // apply unchanged; provider uncertainty aborts rather than trying another name.
+  for (let draw = 0; draw < 32 && checks < 5; draw++) {
+    let subdomain: string;
+    try {
+      subdomain = validateDnsLabel(randomLabel(), lookup.config);
+    } catch (error) {
+      if (error instanceof DomainError && error.code === 'validation_failed') continue;
+      throw error;
+    }
+    if (attempted.has(subdomain)) continue;
+    attempted.add(subdomain);
+    checks++;
+    const result = await checkGameConnectionName(db, context, gameId, subdomain, lookup, options);
+    if (result.available) return { ...result, domainId: lookup.domain.id, subdomain };
+  }
+  throw new DomainError('conflict');
 }
 export async function reserveGameConnection(
   db: Kysely<Database>,
