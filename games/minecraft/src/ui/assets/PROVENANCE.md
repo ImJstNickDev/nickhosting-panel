@@ -9,6 +9,11 @@ This records provenance; it does not add or change a repository license. The
 application bundles this local asset through the trusted first-party Minecraft
 UI module. API responses cannot supply executable modules or remote artwork URLs.
 
+`fabric-workshop.svg` is original SVG geometry authored for the Fabric runtime
+card on 2026-10-19: a voxel loom, woven cloth and thread spool. It does not copy
+Fabric's logo, Minecraft textures or third-party artwork. The integration supplies
+its bundled asset identifier through the common choice-card contract.
+
 `player-placeholder.svg` is original eight-by-eight SVG geometry authored for the
 installer on 2026-10-10: a brown-haired voxel face with white eyes, used as the
 requested Herobrine-style fallback. No skin texture or remote avatar was copied.

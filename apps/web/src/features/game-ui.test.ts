@@ -16,6 +16,7 @@ import { gameUiWebMessages } from '../../../../packages/i18n/src/game-ui-web.js'
 import { webMessages } from '../../../../packages/i18n/src/web.js';
 import { FileIcon } from './file-icon.js';
 import { GameFields, GameSections } from './game-sections.js';
+import { VersionList } from './installer-fields.js';
 import {
   gameUiRegistry,
   getGameAdminSections,
@@ -60,6 +61,32 @@ describe('trusted game frontend rendering', () => {
     expect(getGameAdminSections('unknown-game')).toEqual([]);
     expect(getGameAdminSections('minecraft').map((section) => section.id)).toEqual(['versions']);
     expect(gameUiRegistry.list().map((m) => m.descriptor.gameId)).toEqual(['minecraft']);
+  });
+  it('renders distinct bundled runtime artwork from integration-provided choices', () => {
+    const cache = new QueryClient();
+    cache.setQueryData(['creation', 'catalog', 'minecraft'], {
+      choices: ['vanilla', 'fabric'].map((runtime, index) => ({
+        id: `10000000-0000-4000-8000-00000000000${index + 1}`,
+        runtime,
+        version: '26.1',
+      })),
+    });
+    const markup = render(
+      h(VersionList, {
+        module: minecraftUiModule,
+        fieldId: 'runtime',
+        versionFilter: false,
+        presentation: 'cards',
+        values: {},
+        value: 'fabric',
+        onChange: () => {},
+        onChoices: () => {},
+      }),
+      cache,
+    );
+    expect(markup).toContain('minecraft-landscape.svg');
+    expect(markup).toContain('fabric-workshop.svg');
+    expect(markup).toContain('alt=""');
   });
   it('keeps creation runtime-first and renders a real archive picker for pack replacement', () => {
     const markup = render(

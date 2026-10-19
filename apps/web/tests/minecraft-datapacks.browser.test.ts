@@ -226,6 +226,51 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
     expect(response.status(), await response.text()).toBe(200);
     return await response.json();
   }
+  it('shows a centered empty state before a world is generated, without broken controls or a 404', async () => {
+    const files = await provider.files();
+    const worlds = [...files].filter(([path]) => path.endsWith('/level.dat'));
+    for (const [path] of worlds) files.delete(path);
+    try {
+      const response = await user.request.get(`${fixture.origin}${base()}`);
+      expect(response.status(), await response.text()).toBe(200);
+      expect(await response.json()).toMatchObject({ worlds: [], packs: [], world: '' });
+      await user.goto(route());
+      const empty = user.getByRole('status').filter({ hasText: 'No worlds available.' });
+      await browserExpect(empty).toBeVisible();
+      await browserExpect(empty.locator('svg')).toBeVisible();
+      await browserExpect(user.getByRole('combobox', { name: 'World', exact: true })).toHaveCount(
+        0,
+      );
+      await browserExpect(
+        user.getByRole('button', { name: 'Upload ZIP', exact: true }),
+      ).toHaveCount(0);
+      await browserExpect(user.getByRole('alert')).toHaveCount(0);
+      await accessible();
+      await user.screenshot({
+        path: resolve('.codex/local/m5-browser/screenshots/minecraft-datapacks-no-worlds-en.png'),
+        fullPage: true,
+      });
+      await journeyRequest(fixture, user, '/api/auth/update-user', { locale: 'it' });
+      await user.evaluate(() => localStorage.setItem('nh.locale', 'it'));
+      await user.setViewportSize({ width: 390, height: 844 });
+      await user.reload();
+      await browserExpect(
+        user.getByRole('status').filter({ hasText: 'Nessun mondo disponibile.' }),
+      ).toBeVisible();
+      await accessible();
+      await user.screenshot({
+        path: resolve(
+          '.codex/local/m5-browser/screenshots/minecraft-datapacks-no-worlds-mobile-it.png',
+        ),
+        fullPage: true,
+      });
+    } finally {
+      for (const [path, value] of worlds) files.set(path, value);
+      await user.evaluate(() => localStorage.setItem('nh.locale', 'en'));
+      await journeyRequest(fixture, user, '/api/auth/update-user', { locale: 'en' });
+      await user.setViewportSize({ width: 1440, height: 1000 });
+    }
+  });
   it('discovers manually uploaded folders, keeps selected-world default and changes world independently', async () => {
     const initialSnapshot = await snapshot();
     expect(initialSnapshot.world).toBe('world');

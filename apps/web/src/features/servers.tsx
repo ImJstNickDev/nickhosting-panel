@@ -313,90 +313,87 @@ export function QuotaSummary() {
         <ErrorNotice error={quota.error} retry={() => void quota.refetch()} />
       ) : (
         quota.data && (
-          <>
-            <div className="home-quota-grid">
-              {(['memoryMiB', 'cpuPercent', 'storageMiB', 'serverCount'] as const).map((key) => {
-                const unit = key.endsWith('MiB') ? ' MiB' : key === 'cpuPercent' ? '%' : '';
-                const amount = (value: number) => `${format.number(value)}${unit}`;
-                return (
-                  <article className="home-quota-card" key={key}>
-                    <header>
-                      <span className="home-quota-icon" aria-hidden="true">
-                        <svg viewBox="0 0 24 24" aria-hidden="true">
-                          <path d={quotaIcons[key]} />
-                        </svg>
-                      </span>
-                      <h3>
+          <div className="home-quota-grid">
+            {(['memoryMiB', 'cpuPercent', 'storageMiB', 'serverCount'] as const).map((key) => {
+              const unit = key.endsWith('MiB') ? ' MiB' : key === 'cpuPercent' ? '%' : '';
+              const amount = (value: number) => `${format.number(value)}${unit}`;
+              return (
+                <article className="home-quota-card" key={key}>
+                  <header>
+                    <span className="home-quota-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d={quotaIcons[key]} />
+                      </svg>
+                    </span>
+                    <h3>
+                      {t(
+                        key === 'memoryMiB'
+                          ? 'web.memory'
+                          : key === 'cpuPercent'
+                            ? 'web.cpu'
+                            : key === 'storageMiB'
+                              ? 'web.disk'
+                              : 'web.servers',
+                      )}
+                    </h3>
+                  </header>
+                  <dl>
+                    <div className="home-quota-committed">
+                      <dt>
                         {t(
-                          key === 'memoryMiB'
-                            ? 'web.memory'
-                            : key === 'cpuPercent'
-                              ? 'web.cpu'
-                              : key === 'storageMiB'
-                                ? 'web.disk'
-                                : 'web.servers',
+                          key === 'storageMiB' && quota.data.limits.storageMiB === null
+                            ? 'web.usage'
+                            : 'web.reserved',
                         )}
-                      </h3>
-                    </header>
-                    <dl>
-                      <div className="home-quota-committed">
-                        <dt>
-                          {t(
-                            key === 'storageMiB' && quota.data.limits.storageMiB === null
-                              ? 'web.usage'
-                              : 'web.reserved',
-                          )}
-                        </dt>
-                        <dd>
-                          {key === 'storageMiB' && quota.data.limits.storageMiB === null
-                            ? storageUsage === null
-                              ? t('web.unavailable')
-                              : format.bytes(storageUsage)
-                            : amount(quota.data.committed[key])}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>{t('web.quota')}</dt>
-                        <dd>
-                          {quota.data.limits[key] === null
-                            ? t(
-                                key === 'serverCount' ||
-                                  (key === 'storageMiB' && quota.data.storageBudgetMiB === 0)
-                                  ? 'platform.unlimited'
-                                  : 'platform.globalPool',
-                              )
-                            : amount(quota.data.limits[key])}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>{t('platform.remaining')}</dt>
-                        <dd>
-                          {key === 'storageMiB' && quota.data.limits.storageMiB === null ? (
-                            quota.data.sharedStorageAvailableBytes == null ? (
-                              t('web.unavailable')
-                            ) : (
-                              format.bytes(quota.data.sharedStorageAvailableBytes)
+                      </dt>
+                      <dd>
+                        {key === 'storageMiB' && quota.data.limits.storageMiB === null
+                          ? storageUsage === null
+                            ? t('web.unavailable')
+                            : format.bytes(storageUsage)
+                          : amount(quota.data.committed[key])}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{t('web.quota')}</dt>
+                      <dd>
+                        {quota.data.limits[key] === null
+                          ? t(
+                              key === 'serverCount' ||
+                                (key === 'storageMiB' && quota.data.storageBudgetMiB === 0)
+                                ? 'platform.unlimited'
+                                : 'platform.globalPool',
                             )
-                          ) : quota.data.remaining[key] === null ? (
-                            key === 'serverCount' ? (
-                              <span role="img" aria-label={t('platform.unlimited')}>
-                                ∞
-                              </span>
-                            ) : (
-                              '—'
-                            )
+                          : amount(quota.data.limits[key])}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{t('platform.remaining')}</dt>
+                      <dd>
+                        {key === 'storageMiB' && quota.data.limits.storageMiB === null ? (
+                          quota.data.sharedStorageAvailableBytes == null ? (
+                            t('web.unavailable')
                           ) : (
-                            amount(quota.data.remaining[key])
-                          )}
-                        </dd>
-                      </div>
-                    </dl>
-                  </article>
-                );
-              })}
-            </div>
-            <p className="home-quota-hint muted">{t('platform.allowanceHint')}</p>
-          </>
+                            format.bytes(quota.data.sharedStorageAvailableBytes)
+                          )
+                        ) : quota.data.remaining[key] === null ? (
+                          key === 'serverCount' ? (
+                            <span role="img" aria-label={t('platform.unlimited')}>
+                              ∞
+                            </span>
+                          ) : (
+                            '—'
+                          )
+                        ) : (
+                          amount(quota.data.remaining[key])
+                        )}
+                      </dd>
+                    </div>
+                  </dl>
+                </article>
+              );
+            })}
+          </div>
         )
       )}
     </HomeSection>

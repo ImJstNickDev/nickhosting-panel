@@ -8,6 +8,7 @@ import {
   gameUiRegistry,
   getGameSectionView,
 } from '../features/integrations.js';
+import { ProvisioningHistory } from '../features/provisioning.js';
 import { useServer } from '../features/service-contracts.js';
 import './server-game.css';
 import { useT } from './i18n.js';
@@ -20,6 +21,7 @@ export function ServerShell() {
   const location = useLocation(),
     tabsElement = useRef<HTMLElement>(null);
   const gameRoute = useMatch('/servers/:serverId/game/:sectionId');
+  const statusRoute = useMatch('/servers/:serverId/status');
   const { serverId = '' } = useParams(),
     t = useT(),
     server = useServer(serverId);
@@ -88,6 +90,9 @@ export function ServerShell() {
         </NavLink>
       </nav>
       <Outlet />
+      {statusRoute && (
+        <ProvisioningHistory serverId={serverId} operationId={value.activeOperationId} />
+      )}
     </>
   );
 }

@@ -1683,3 +1683,16 @@ Blueprint 1.7's Client route
 is backend-only and uses the existing technical account's Client key. It issues
 only installation-channel permissions for the exact linked server/owner. The
 normal runtime console continues to use its existing route.
+
+## 2026-10-19 — Empty datapack inventory and runtime artwork
+
+The default datapack inventory read for an installed server without worlds now
+returns HTTP 200 with `world: ""`, `worlds: []`, empty packs/changes and
+`reload.state: "not_required"`. An explicit missing world remains 404. Missing
+`server.properties` is tolerated during discovery; provider errors and current
+authorization remain authoritative. See [Datapacks](M5-MINECRAFT-DATAPACKS.md).
+
+Trusted UI options may include `artwork: {assetId}`. This references an existing
+bundled module asset; it cannot introduce a remote URL or executable module.
+Omission preserves the generic game-art fallback. Fabric declares its distinct
+placeholder through this contract. No database migration or new endpoint.

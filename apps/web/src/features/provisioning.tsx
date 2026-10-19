@@ -4,7 +4,7 @@ import { Link } from 'react-router';
 import { ApiError, api, apiError, consumeEvents, queryClient } from '../api/client.js';
 import { useLocale, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
-import { ConfirmDialog } from '../components/ui.js';
+import { ConfirmDialog, ErrorNotice, Section } from '../components/ui.js';
 import { useRequestOperation } from './servers.js';
 import { serverPath } from './service-contracts.js';
 import './provisioning.css';
@@ -148,6 +148,94 @@ export function useProvisioning(serverId: string, enabled: boolean, operationId?
       void query.refetch();
     },
   };
+}
+
+// Provider output is plain text in both the live installation console and Status.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally remove ANSI terminal escapes.
+const terminalEscapes = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: strip terminal controls, preserving line breaks.
+const terminalControls = /[\x00-\x08\x0b-\x1f\x7f]/g;
+export function provisioningLogLines(value?: ProvisioningSnapshot | null) {
+  return (
+    value?.logs.map((line) =>
+      line.text.replace(terminalEscapes, '').replace(terminalControls, ''),
+    ) ?? []
+  );
+}
+
+/** Only announce a completion observed here; historical snapshots never replay a toast. */
+export function ProvisioningCompletion({ value }: { value?: ProvisioningSnapshot | null }) {
+  const t = useT();
+  const observed = useRef<string | undefined>(undefined);
+  const [notification, setNotification] = useState<{ jobId: string; leaving: boolean }>();
+  const jobId = value?.jobId;
+  const state = value?.state;
+  useEffect(() => {
+    if (state === 'active' || state === 'uncertain') {
+      observed.current = jobId;
+      setNotification(undefined);
+    } else if (state === 'completed' && jobId && observed.current === jobId) {
+      observed.current = undefined;
+      setNotification({ jobId, leaving: false });
+    }
+  }, [jobId, state]);
+  const notificationId = notification?.jobId;
+  useEffect(() => {
+    if (!notificationId) return;
+    const fade = setTimeout(() => {
+      setNotification((current) => current && { ...current, leaving: true });
+    }, 5000);
+    const dismiss = setTimeout(() => setNotification(undefined), 5240);
+    return () => {
+      clearTimeout(fade);
+      clearTimeout(dismiss);
+    };
+  }, [notificationId]);
+  if (!notification || state !== 'completed') return null;
+  return (
+    <div className="provisioning-complete" data-leaving={notification.leaving} role="status">
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        aria-hidden="true"
+      >
+        <path d="m5 12 4 4L19 6" />
+      </svg>
+      <strong>{t('provisioning.ready')}</strong>
+    </div>
+  );
+}
+
+export function ProvisioningHistory({
+  serverId,
+  operationId,
+}: {
+  serverId: string;
+  operationId?: string | null;
+}) {
+  const t = useT();
+  const provisioning = useProvisioning(serverId, true, operationId);
+  const value = provisioning.value;
+  const error = provisioning.error ?? provisioning.streamError;
+  const lines = provisioningLogLines(value);
+  if (!value && !error) return null;
+  return (
+    <Section>
+      <details className="provisioning-log-history">
+        <summary>{t('provisioning.history')}</summary>
+        {Boolean(error) && <ErrorNotice error={error} retry={provisioning.retry} />}
+        {value && (
+          <pre>
+            {lines.length
+              ? lines.join('\n')
+              : t(value.logsAvailable ? 'provisioning.noOutput' : 'provisioning.outputUnavailable')}
+          </pre>
+        )}
+      </details>
+    </Section>
+  );
 }
 
 function StageIcon({ stage, complete }: { stage: ProvisioningStage; complete: boolean }) {

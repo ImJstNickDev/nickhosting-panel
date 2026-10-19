@@ -4,6 +4,8 @@ import { BrowserRouter, Link, Route, Routes } from 'react-router';
 import { queryClient } from '../../src/api/client.js';
 import { LocaleProvider } from '../../src/app/i18n.js';
 import { ConsolePage } from '../../src/features/console.js';
+import { ProvisioningHistory } from '../../src/features/provisioning.js';
+import { ServerOverview } from '../../src/features/servers.js';
 import '../../src/app/style.css';
 
 const id = '10000000-0000-4000-8000-000000000001';
@@ -17,9 +19,19 @@ createRoot(root).render(
           <nav className="tabs" aria-label="Server">
             <Link to="/provisioning-fixture">Console</Link>
             <Link to="/provisioning-files">Files</Link>
+            <Link to="/provisioning-status">Status</Link>
           </nav>
           <Routes>
             <Route path="/provisioning-fixture" element={<ConsolePage serverId={id} />} />
+            <Route
+              path="/provisioning-status"
+              element={
+                <>
+                  <ServerOverview serverId={id} />
+                  <ProvisioningHistory serverId={id} />
+                </>
+              }
+            />
             <Route path="*" element={<h1>Files</h1>} />
           </Routes>
         </main>

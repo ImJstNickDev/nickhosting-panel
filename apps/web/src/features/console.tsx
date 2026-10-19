@@ -13,7 +13,12 @@ import {
   type TelemetrySample,
 } from './console-resources.js';
 import { ConsoleSummary } from './console-summary.js';
-import { ProvisioningPanel, useProvisioning } from './provisioning.js';
+import {
+  ProvisioningCompletion,
+  ProvisioningPanel,
+  provisioningLogLines,
+  useProvisioning,
+} from './provisioning.js';
 import { useRequestOperation } from './servers.js';
 import {
   type Metrics,
@@ -168,15 +173,7 @@ export function ConsolePage({ serverId }: { serverId: string }) {
       (!setup && expectedSetup),
   );
   const installing = showSetup && setup?.stage !== 'starting';
-  const [dismissedSetup, setDismissedSetup] = useState<string>();
-  const completionVisible =
-    setup?.state === 'completed' &&
-    setup.jobId !== dismissedSetup &&
-    Date.now() - Date.parse(setup.completedAt ?? setup.updatedAt) < 600000;
-  const installLines =
-    setup?.logs.map((line) =>
-      line.text.replace(terminalEscapes, '').replace(terminalControls, ''),
-    ) ?? [];
+  const installLines = provisioningLogLines(setup);
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     heading.current?.focus({ preventScroll: true });
@@ -451,35 +448,7 @@ export function ConsolePage({ serverId }: { serverId: string }) {
         </Notice>
       )}
       {consoleAvailable && Boolean(error) && <ErrorNotice error={error} />}
-      {completionVisible && (
-        <div className="provisioning-complete">
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            aria-hidden="true"
-          >
-            <path d="m5 12 4 4L19 6" />
-          </svg>
-          <strong role="status">{t('provisioning.ready')}</strong>
-          <button
-            type="button"
-            aria-label={t('provisioning.dismiss')}
-            onClick={() => setDismissedSetup(setup.jobId)}
-          >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              aria-hidden="true"
-            >
-              <path d="m6 6 12 12M6 18 18 6" />
-            </svg>
-          </button>
-        </div>
-      )}
+      <ProvisioningCompletion key={serverId} value={setup} />
       <div className={`console-workspace${showSetup ? ' is-provisioning' : ''}`}>
         <div className="console-heading">
           <h1 ref={heading} tabIndex={-1}>
@@ -612,12 +581,6 @@ export function ConsolePage({ serverId }: { serverId: string }) {
           sampleAt={sampleAt}
           stale={!measured && resourceStale}
         />
-      )}
-      {!showSetup && Boolean(installLines.length) && (
-        <details className="provisioning-log-history">
-          <summary>{t('provisioning.history')}</summary>
-          <pre>{installLines.join('\n')}</pre>
-        </details>
       )}
     </>
   );

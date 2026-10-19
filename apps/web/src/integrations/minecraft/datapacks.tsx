@@ -50,6 +50,7 @@ export function DatapackIcon({
     | 'disable'
     | 'replace'
     | 'files'
+    | 'world'
     | 'inspect';
 }) {
   return (
@@ -71,6 +72,13 @@ export function DatapackIcon({
         </>
       )}
       {name === 'pack' && <path d="m12 3 9 5v9l-9 5-9-5V8zm-9 5 9 5 9-5m-9 5v9M7.5 5.5l9 5v4" />}
+      {name === 'world' && (
+        <>
+          <circle cx="12" cy="12" r="9" />
+          <path d="m4 16 5-6 4 4 3-3 5 5" />
+          <circle cx="15" cy="7.5" r="1" />
+        </>
+      )}
       {name === 'upload' && <path d="M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5" />}
       {name === 'folder' && <path d="M3 7V5h7l2 3h9v13H3V7m9 10V11m-3 3 3-3 3 3" />}
       {name === 'search' && (
@@ -426,6 +434,15 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
       </Tooltip>
     );
   }
+  if (data && !data.worlds.length && !inventory.error)
+    return (
+      <section className="minecraft-datapacks" aria-label={t('games.minecraft.sections.datapacks')}>
+        <div className="datapack-no-worlds" role="status">
+          <DatapackIcon name="world" />
+          <p>{t(key('noWorlds'))}</p>
+        </div>
+      </section>
+    );
   return (
     <section className="minecraft-datapacks" aria-label={t('games.minecraft.sections.datapacks')}>
       <div className="datapack-toolbar">
@@ -517,9 +534,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
         </div>
       ) : data && !data.supported ? (
         <p className="datapack-empty">{t(key('unsupported'))}</p>
-      ) : !data?.worlds.length ? (
-        <p className="datapack-empty">{t(key('noWorlds'))}</p>
-      ) : (
+      ) : !data?.worlds.length ? null : (
         <>
           {data.world !== data.selectedWorld && (
             <p className="datapack-note">{t(key('inactive'))}</p>

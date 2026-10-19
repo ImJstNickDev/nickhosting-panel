@@ -8,6 +8,7 @@ import {
   type TrustedGameUiModule,
   uiFieldSchema,
   uiFormSchema,
+  uiOptionSchema,
   validateUiValues,
   visibleFields,
 } from './ui.js';
@@ -420,6 +421,22 @@ it('accepts only registered artwork identifiers and fails safely without artwork
   expect(
     createTrustedGameUiRegistry([module]).get('fixture-arena')?.descriptor.artwork,
   ).toBeUndefined();
+  const option = { value: 'runtime', label: 'Runtime' };
+  expect(uiOptionSchema.parse({ ...option, artwork: { assetId: 'runtime-card' } })).toMatchObject({
+    artwork: { assetId: 'runtime-card' },
+  });
+  expect(
+    uiOptionSchema.safeParse({
+      ...option,
+      artwork: { assetId: 'https://untrusted.invalid/art.svg' },
+    }).success,
+  ).toBe(false);
+  expect(
+    uiOptionSchema.safeParse({
+      ...option,
+      artwork: { assetId: 'runtime-card', url: 'https://untrusted.invalid/art.svg' },
+    }).success,
+  ).toBe(false);
 });
 
 describe('installer page contracts', () => {

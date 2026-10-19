@@ -148,6 +148,24 @@ describe('Fabric independent catalog wizard', () => {
     await page.goto(`${origin}domains-fixture?view=wizard`);
     await page.getByRole('button', { name: 'Minecraft', exact: true }).click();
     await next(locale);
+    const fabricCard = page.locator('.installer-choice-card').filter({
+      has: page.getByRole('radio', { name: 'Fabric', exact: true }),
+    });
+    await check(fabricCard.locator('img')).toBeVisible();
+    await check(fabricCard.locator('img')).toHaveJSProperty('complete', true);
+    expect(await fabricCard.locator('img').getAttribute('src')).not.toBe(
+      await page
+        .locator('.installer-choice-card')
+        .filter({
+          has: page.getByRole('radio', { name: 'Vanilla', exact: true }),
+        })
+        .locator('img')
+        .getAttribute('src'),
+    );
+    await page.screenshot({
+      path: `.codex/local/m5-browser/screenshots/fabric-wizard-runtimes-${locale}.png`,
+      fullPage: true,
+    });
     await page
       .locator('.installer-choice-card')
       .filter({ has: page.getByRole('radio', { name: 'Fabric', exact: true }) })

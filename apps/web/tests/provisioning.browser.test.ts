@@ -139,7 +139,7 @@ describe('post-create installation journey', () => {
                   id,
                   name: 'Panda valley',
                   gameId: 'minecraft',
-                  runtime: 'fabric',
+                  runtimeId: 'fabric',
                   installationState: installState,
                   runtimeState:
                     runtimeState ?? (snapshot.state === 'completed' ? 'running' : 'offline'),
@@ -309,13 +309,46 @@ describe('post-create installation journey', () => {
     await check(page.getByText('Setup complete', { exact: true })).toBeVisible();
     await check(page.getByRole('textbox', { name: 'Command', exact: true })).toBeVisible();
     await check(page.locator('.provisioning-panel')).toHaveCount(0);
+    await check(page.locator('.provisioning-log-history')).toHaveCount(0);
+    expect(
+      await page.locator('.provisioning-complete').evaluate((element) => ({
+        position: getComputedStyle(element).position,
+        pointerEvents: getComputedStyle(element).pointerEvents,
+      })),
+    ).toEqual({ position: 'fixed', pointerEvents: 'none' });
+    await screenshot('provisioning-completed-en-desktop');
+    await check(page.getByText('Setup complete', { exact: true })).toHaveCount(0, {
+      timeout: 7000,
+    });
+    await page.getByRole('link', { name: 'Status', exact: true }).click();
     await page.locator('.provisioning-log-history summary').click();
     await check(page.locator('.provisioning-log-history')).toContainText(
       'Installing Fabric Loader',
     );
-    await screenshot('provisioning-completed-en-desktop');
-    await page.getByRole('button', { name: 'Dismiss setup confirmation' }).click();
+    await screenshot('provisioning-history-en-desktop');
+    await page.reload();
+    await page.locator('.provisioning-log-history summary').click();
+    await check(page.locator('.provisioning-log-history')).toContainText(
+      'Installing Fabric Loader',
+    );
+    await page.getByRole('link', { name: 'Console', exact: true }).click();
+    await check(page.getByRole('textbox', { name: 'Command', exact: true })).toBeVisible();
     await check(page.getByText('Setup complete', { exact: true })).toHaveCount(0);
+    await page.reload();
+    await check(page.getByRole('textbox', { name: 'Command', exact: true })).toBeVisible();
+    await check(page.getByText('Setup complete', { exact: true })).toHaveCount(0);
+  });
+  it('fades the live completion in place and leaves no historical confirmation after refresh', async () => {
+    await page.goto(`${origin}provisioning-fixture`);
+    await check(page.getByRole('heading', { name: 'Installing', exact: true })).toBeVisible();
+    await check.poll(() => streams.size).toBe(1);
+    await page.clock.install();
+    advance('ready', 'completed');
+    await check(page.locator('.provisioning-complete')).toHaveAttribute('data-leaving', 'false');
+    await page.clock.fastForward(5001);
+    await check(page.locator('.provisioning-complete')).toHaveAttribute('data-leaving', 'true');
+    await page.clock.fastForward(240);
+    await check(page.locator('.provisioning-complete')).toHaveCount(0);
   });
   it('keeps uncertain results separate from failure and offers only authorized confirmed reinstall', async () => {
     snapshot = { ...snapshot, errorCode: 'operation_uncertain' };

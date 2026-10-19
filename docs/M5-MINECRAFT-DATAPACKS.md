@@ -6,6 +6,13 @@ the actual server directories, including packs uploaded through Fileman/SFTP or
 included with an imported world. Filesystem presence and Minecraft's loaded pack
 selection are distinct observations.
 
+Before the first world exists, the default inventory read returns an empty
+`worlds` list, empty packs/changes and `world: ''`. The tab shows a centered,
+localized empty state rather than an error or unavailable actions. Missing
+`server.properties` is allowed during this discovery. An explicitly requested
+missing world still returns 404; provider/authorization failures remain errors
+and are never disguised as an empty inventory.
+
 ## Task flow
 
 1. Choose packs from Modrinth/CurseForge, or upload a ZIP/folder. Folder uploads use

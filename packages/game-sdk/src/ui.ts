@@ -24,6 +24,7 @@ export const uiOptionSchema = z
     value: z.string().min(1).max(256),
     label: z.string().min(1).max(256).optional(),
     labelKey: key.optional(),
+    artwork: z.object({ assetId: id }).strict().optional(),
     disabled: z.boolean().default(false),
     reasonKey: key.optional(),
     recommended: z.boolean().optional(),

@@ -300,12 +300,23 @@ visually hidden: runtime selection uses a contained border, a subtle 4% scale
 and 85% opacity on other enabled cards, without a checkmark. Transitions take
 160 ms; reduced-motion preference removes both movement and animation. Version
 rows retain their decorative check in a compact scrollable list.
+Runtime options may reference a bundled `artwork.assetId` from the trusted module;
+the shared renderer falls back to game artwork when omitted. Fabric uses its own
+integration-owned workshop illustration, distinct from Vanilla's landscape.
 Decorative art/checks do not duplicate accessible labels. Keyboard focus uses a
 restrained high-contrast outline, always available without an opt-in; programmatic
 heading focus has no decorative ring. Forced-colors mode retains selection cues.
 Configured CPU/RAM on cards are labeled as limits. Disk shows occupied space from
 the same Wings resources field as Console; unavailable or stale readings retain
 an explicit localized fallback instead of displaying the configured allowance.
+Server list resources use shared grid columns across rows, independent of value
+length; on narrow layouts icons sit above values. Console reconnect keeps a 40px
+target while its hover treatment is confined to a faint 2px halo around the dot.
+
+An observed installation completion produces a non-interactive overlay for five
+seconds, followed by a short fade. It occupies no layout space, never moves focus,
+and does not replay when returning to Console. Retained installer output belongs
+to Status; in-progress installer output stays in Console.
 
 Owner Settings includes a compact storage policy flow: cached allocations render
 immediately, changes update totals locally, and debounced serialized background

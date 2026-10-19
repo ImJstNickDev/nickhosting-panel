@@ -116,7 +116,7 @@ export function createMinecraftDatapackService(options: {
   }
   async function worlds(files: FilemanReadService) {
     const [properties, root] = await Promise.all([
-      files.read({ path: 'server.properties', maxBytes: 1048576 }),
+      files.read({ path: 'server.properties', maxBytes: 1048576, missing: 'allow' }),
       files.list(''),
     ]);
     const selected =
@@ -130,6 +130,8 @@ export function createMinecraftDatapackService(options: {
     const results = candidates.length
       ? await files.listMany(candidates.map((entry) => entry.name))
       : [];
+    if (results.some((result) => 'error' in result && result.error !== 'not_found'))
+      throw new DomainError('integration_unavailable');
     return {
       selected,
       worlds: results
@@ -381,6 +383,21 @@ export function createMinecraftDatapackService(options: {
               reload: { state: 'not_required' },
             };
           const available = await worlds(files);
+          // An installed server may not have generated its first world yet.
+          // An explicitly requested missing world remains a genuine 404.
+          if (requestedWorld === undefined && available.worlds.length === 0)
+            return {
+              world: '',
+              selectedWorld: available.selected,
+              worlds: [],
+              running: server.runtime_state === 'running',
+              version: info.version,
+              supported: datapacksSupported(info.version),
+              installed: info.installed,
+              packs: [],
+              changes: [],
+              reload: { state: 'not_required' },
+            };
           const world = parse(minecraftDatapackWorldSchema, requestedWorld ?? available.selected);
           if (!available.worlds.some((item) => item.name === world))
             throw new DomainError('not_found');

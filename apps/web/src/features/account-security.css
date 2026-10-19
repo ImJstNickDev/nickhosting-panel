@@ -125,7 +125,7 @@
   padding-block: 18px;
   border-top: 1px solid var(--line);
 }
-.account-passkey:first-of-type,
+.account-security-heading + .account-passkey,
 .account-security-heading + .account-security-item {
   margin-top: 18px;
 }

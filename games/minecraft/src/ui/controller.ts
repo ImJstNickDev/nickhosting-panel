@@ -340,6 +340,7 @@ export function minecraftCatalogOptions(
     return [...new Set(choices.map((choice) => choice.runtime))].map((runtime) => ({
       value: runtime,
       labelKey: `games.minecraft.runtimes.${runtime}`,
+      ...(runtime === 'fabric' ? { artwork: { assetId: 'fabric' } } : {}),
       disabled: false,
     }));
   if (handler !== 'choices') throw new MinecraftUiError('integration_unavailable');

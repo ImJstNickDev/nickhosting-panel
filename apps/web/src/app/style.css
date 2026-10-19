@@ -593,7 +593,7 @@
     background: #b42318;
   }
   .console-connection:hover .console-connection-dot {
-    box-shadow: 0 0 0 5px #edf0f2;
+    box-shadow: 0 0 0 2px #e3ecf12b;
   }
   .console-connection[data-state="connected"] .console-connection-dot {
     background: #16803c;

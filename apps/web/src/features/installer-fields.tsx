@@ -141,52 +141,55 @@ export function VersionList({
           role="radiogroup"
           aria-label={t(field?.labelKey ?? 'gameUi.version')}
         >
-          {visible.map((o) => (
-            <label
-              key={o.value}
-              className={presentation === 'cards' ? 'installer-choice-card' : 'installer-version'}
-            >
-              {presentation === 'cards' && artwork && (
-                <img
-                  className="installer-choice-art"
-                  src={artwork}
-                  alt=""
-                  aria-hidden="true"
-                  draggable={false}
+          {visible.map((o) => {
+            const optionArtwork = o.artwork ? module.assets?.[o.artwork.assetId] : artwork;
+            return (
+              <label
+                key={o.value}
+                className={presentation === 'cards' ? 'installer-choice-card' : 'installer-version'}
+              >
+                {presentation === 'cards' && optionArtwork && (
+                  <img
+                    className="installer-choice-art"
+                    src={optionArtwork}
+                    alt=""
+                    aria-hidden="true"
+                    draggable={false}
+                  />
+                )}
+                <input
+                  className="installer-choice-input"
+                  type="radio"
+                  name={`server-${fieldId}`}
+                  value={o.value}
+                  checked={value === o.value}
+                  disabled={o.disabled}
+                  onChange={() => onChange(o.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                      e.preventDefault();
+                      if (!e.repeat) e.currentTarget.form?.requestSubmit();
+                    }
+                  }}
+                  onFocus={(e) => {
+                    if (presentation === 'list')
+                      e.currentTarget.closest('label')?.scrollIntoView({ block: 'nearest' });
+                  }}
                 />
-              )}
-              <input
-                className="installer-choice-input"
-                type="radio"
-                name={`server-${fieldId}`}
-                value={o.value}
-                checked={value === o.value}
-                disabled={o.disabled}
-                onChange={() => onChange(o.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
-                    e.preventDefault();
-                    if (!e.repeat) e.currentTarget.form?.requestSubmit();
-                  }
-                }}
-                onFocus={(e) => {
-                  if (presentation === 'list')
-                    e.currentTarget.closest('label')?.scrollIntoView({ block: 'nearest' });
-                }}
-              />
-              {presentation === 'list' && (
-                <span className="installer-choice-check" aria-hidden="true">
-                  ✓
+                {presentation === 'list' && (
+                  <span className="installer-choice-check" aria-hidden="true">
+                    ✓
+                  </span>
+                )}
+                <span className={presentation === 'cards' ? 'installer-choice-title' : undefined}>
+                  {o.label ?? t(o.labelKey ?? '')}
                 </span>
-              )}
-              <span className={presentation === 'cards' ? 'installer-choice-title' : undefined}>
-                {o.label ?? t(o.labelKey ?? '')}
-              </span>
-              {o.recommended && (
-                <span className="installer-recommended muted">{t('gameUi.recommended')}</span>
-              )}
-            </label>
-          ))}
+                {o.recommended && (
+                  <span className="installer-recommended muted">{t('gameUi.recommended')}</span>
+                )}
+              </label>
+            );
+          })}
         </div>
       )}
     </>

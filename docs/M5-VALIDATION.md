@@ -14567,3 +14567,56 @@ an independent production-release gate; PR21 remains open and unmerged.
   reconcile any subsequently created Fabric Gateway servers before reverting.
   Ownership rollback, if needed, must use only the reviewed manifest/journal and
   unchanged inode identities, never recursive chown or a game-data reset.
+
+### 2026-10-19 — Empty datapacks, installation and shared UI polish
+
+- Datapacks without worlds return an honest empty inventory and a centered
+  localized icon/message. Explicit missing worlds, provider failures and permission
+  failures retain their error semantics. No extra provider path was introduced.
+- Completion is a five-second overlay with a 240ms fade, no layout displacement,
+  pointer interception or focus movement. Historical completions do not replay.
+  Retained installation logs moved to Status; active installer output stays in
+  Console. Failure, uncertainty and capacity-denial states remain available.
+- Console reconnect hover is a faint 2px ring around the existing dot; its 40px
+  hit target and keyboard access remain. Passkeys has the same 18px separation
+  below its heading as Sessions. Removed the requested quota prose from Home.
+- Fabric has a distinct, integration-owned bundled illustration through optional
+  SDK option artwork. Server list resources share stable columns, with icons above
+  values in narrow layouts; lengths such as 164 B and 12.3 GiB do not shift CPU.
+- Focused validation passed: 56 SDK/Minecraft UI unit tests; 30 datapack database
+  integration tests (plus a final rerun of the three new empty/error cases);
+  15 browser cases across provisioning (10), Fabric wizard (3), empty datapacks (1)
+  and resource columns (1). Final changed fixture/column captures were rerun.
+  TypeScript, production build, i18n completeness (2,503 keys, EN/IT/pseudolocale),
+  changed-file Biome and `git diff --check` pass. Three pre-existing reduced-motion
+  `!important` warnings and existing production chunk-size warnings remain.
+- Real Chromium/Firefox screenshots were inspected across desktop/mobile and EN/IT.
+  Resource checks use CSS viewports equivalent to 100/125/150/200% of a 1440×1000
+  display plus 390px mobile; these are viewport/reflow checks, not browser zoom-UI
+  automation. Columns align within 1px with no clipped fixture values. Automated
+  axe checks passed in the scoped cases and an additional Firefox security-page
+  inspection; Passkeys heading gap measured 18px and reconnect halo measured 2px.
+- Independent technical and rendered UX/accessibility reviews found no outstanding
+  must-fix items. The initial narrow-column truncation was corrected and recaptured.
+  Evidence uses the actual app/components with isolated PostgreSQL/auth handlers
+  and simulated provider effects; wizard/provisioning catalogs/events and the
+  screenshot passkey row are controlled fixtures. No real installation was started.
+- Sanitized screenshots: [empty datapacks](screenshots/m5/ui-polish-datapacks-empty-en.png),
+  [Italian mobile](screenshots/m5/ui-polish-datapacks-empty-it-mobile.png),
+  [completion](screenshots/m5/ui-polish-installation-complete-en.png),
+  [Status logs](screenshots/m5/ui-polish-installation-history-en.png),
+  [console hover](screenshots/m5/ui-polish-console-hover-en.png),
+  [security](screenshots/m5/ui-polish-security-en.png),
+  [Home](screenshots/m5/ui-polish-home-en.png),
+  [runtime artwork](screenshots/m5/ui-polish-runtime-art-en.png),
+  [Italian runtime cards](screenshots/m5/ui-polish-runtime-art-it-mobile.png),
+  [server columns](screenshots/m5/ui-polish-server-columns-en.png),
+  [mobile columns](screenshots/m5/ui-polish-server-columns-mobile-en.png).
+- Existing dev source mounts/HMR expose the changes. Read-only checks: dev HTTPS
+  200, updated Vite module 200, API health probe succeeds; web/API/Vite/worker
+  healthy. The previously documented Gateway readiness condition is unchanged.
+  No explicit container restart/rebuild, migration, Blueprint/Panel/Wings change,
+  game-server operation, DNS/network edit or production deployment occurred.
+  Disposable test schemas were cleaned by their harnesses; no live test assets
+  were created or changed. Rollback is a code revert; no persistent data changed.
+  PR21 remains open/unmerged and SFTPGo issue18 remains a separate release gate.

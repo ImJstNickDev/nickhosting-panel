@@ -621,6 +621,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
     gatewayPing: new URL('./assets/local-26.1/ping.png', import.meta.url).href,
     gatewayButton: new URL('./assets/local-26.1/button.png', import.meta.url).href,
     landscape: new URL('./assets/minecraft-landscape.svg', import.meta.url).href,
+    fabric: new URL('./assets/fabric-workshop.svg', import.meta.url).href,
     properties: new URL('./assets/minecraft-properties.svg', import.meta.url).href,
   },
   playerAppearance: {

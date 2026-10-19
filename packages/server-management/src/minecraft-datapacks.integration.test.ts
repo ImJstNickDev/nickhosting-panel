@@ -558,6 +558,46 @@ describe('Minecraft datapack durable preparation and publication', () => {
     ).rejects.toMatchObject({ code: 'content_dependency_missing' });
   });
 
+  it.each([true, false])(
+    'returns an empty inventory before the first world exists (properties present: %s)',
+    async (propertiesPresent) => {
+      const f = await fixture(false);
+      f.files.delete('world/level.dat');
+      f.directories.delete('world/datapacks');
+      f.directories.delete('world');
+      if (!propertiesPresent) f.files.delete('server.properties');
+      expect(await f.service.snapshot(f.context, f.serverId)).toMatchObject({
+        world: '',
+        selectedWorld: 'world',
+        worlds: [],
+        running: false,
+        supported: true,
+        installed: true,
+        packs: [],
+        changes: [],
+        reload: { state: 'not_required' },
+      });
+      expect(f.listFiles.mock.calls.map(([, path]) => path)).toEqual(['']);
+      expect(f.renameFiles).not.toHaveBeenCalled();
+      expect(f.uploadFile).not.toHaveBeenCalled();
+      await expect(f.service.snapshot(f.context, f.serverId, 'world')).rejects.toMatchObject({
+        code: 'not_found',
+      });
+    },
+  );
+  it('keeps unavailable world discovery distinct from an empty inventory', async () => {
+    const f = await fixture(false);
+    const batch = f.adapter.listDirectoriesBatch.bind(f.adapter);
+    f.adapter.listDirectoriesBatch = async (...args) =>
+      (await batch(...args)).map((result) =>
+        result.directory === 'world'
+          ? { directory: 'world', error: 'unavailable' as const }
+          : result,
+      );
+    await expect(f.service.snapshot(f.context, f.serverId)).rejects.toMatchObject({
+      code: 'integration_unavailable',
+    });
+  });
   it('does not probe absent optional inventory directories and preserves failures for existing directories', async () => {
     const f = await fixture();
     f.directories.delete('world/datapacks');

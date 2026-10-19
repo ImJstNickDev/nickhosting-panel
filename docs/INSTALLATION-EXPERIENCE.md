@@ -22,6 +22,15 @@ creation whose first start was denied by admission are separate outcomes.
 Reinstall uses the existing authorized operation and consequence confirmation.
 It is not an automatic replay of an uncertain provisioning request.
 
+When an open Console observes completion, a compact confirmation appears for five
+seconds and fades out over 240 ms. It overlays the viewport without moving the
+layout or intercepting clicks; it never takes focus. Reduced motion removes the
+animation. Reloading or returning to an already completed installation does not
+replay the confirmation. Failures and uncertain outcomes retain their recovery UI.
+The bounded installation transcript remains accessible from Status, including after
+a page reload, rather than beneath the runtime console. The existing transcript
+expiry and access checks still apply.
+
 `GET /v1/servers/:id/provisioning` returns the latest provision/reinstall operation
 and its bounded transcript. `GET /v1/servers/:id/provisioning/stream` supplies
 updated snapshots from NickHosting's database/cache. Both enforce current server

@@ -261,6 +261,102 @@ describe('M5 server browser filters, ownership and bounded views', () => {
     await user.setViewportSize({ width: 1440, height: 1000 });
   });
 
+  it('aligns resource columns across short and long disk values at zoom-equivalent widths', async () => {
+    const rows = await fixture.database.db
+      .selectFrom('managed_servers')
+      .select(['id', 'name'])
+      .where('owner_id', '=', identities.userId)
+      .where('name', 'in', ['World 30', 'World 31'])
+      .execute();
+    const small = rows.find((row) => row.name === 'World 31');
+    if (!small) throw new Error('Missing small-storage fixture');
+    const pattern = '**/v1/servers/*/resources';
+    await user.route(pattern, async (route) => {
+      await route.fulfill({
+        json: {
+          current_state: 'offline',
+          resources: {
+            disk_bytes: route.request().url().includes(small.id) ? 164 : 12.34 * 1024 ** 3,
+            cpu_absolute: 0,
+            memory_bytes: 0,
+            network_rx_bytes: 0,
+            network_tx_bytes: 0,
+            uptime: 0,
+          },
+        },
+      });
+    });
+    try {
+      await user.goto(`${fixture.origin}/servers`);
+      await user.getByRole('searchbox', { name: 'Search servers' }).fill('World 3');
+      await user.getByRole('button', { name: 'List', exact: true }).click();
+      await browserExpect(cards(user)).toHaveCount(2);
+      await browserExpect(user.locator('.server-card-resources')).toContainText(['164', '12.3']);
+      // Equivalent CSS viewport sizes for a 1440x1000 display at 100/125/150/200%.
+      for (const [zoom, width, height] of [
+        [100, 1440, 1000],
+        [125, 1152, 800],
+        [150, 960, 667],
+        [200, 720, 500],
+        [100, 390, 844],
+      ] as const) {
+        await user.setViewportSize({ width, height });
+        await user.evaluate(async () => {
+          await document.fonts.ready;
+          await new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          );
+        });
+        await browserExpect(user.locator('.server-browser-results')).toHaveAttribute(
+          'aria-busy',
+          'false',
+        );
+        await bounded(user);
+        const positions = await user
+          .locator('.server-card-resources')
+          .evaluateAll((lists) =>
+            lists.map((list) =>
+              [...list.querySelectorAll('.server-card-resource')].map(
+                (resource) => resource.getBoundingClientRect().left,
+              ),
+            ),
+          );
+        // At high zoom the bounded browser may paginate one row at a time.
+        if (positions.length === 1) {
+          const next = user.getByRole('navigation', { name: 'Pages' }).getByRole('button').last();
+          await next.click();
+          await browserExpect(cards(user)).toContainText('World 30');
+          positions.push(
+            await user
+              .locator('.server-card-resources')
+              .evaluate((list) =>
+                [...list.querySelectorAll('.server-card-resource')].map(
+                  (resource) => resource.getBoundingClientRect().left,
+                ),
+              ),
+          );
+          await user.getByRole('navigation', { name: 'Pages' }).getByRole('button').first().click();
+          await browserExpect(cards(user)).toContainText('World 31');
+        }
+        expect(positions).toHaveLength(2);
+        for (let column = 0; column < 3; column++)
+          expect(
+            Math.abs((positions[0]?.[column] ?? 0) - (positions[1]?.[column] ?? 0)),
+          ).toBeLessThan(1);
+        await user.mouse.move(0, 0);
+        await browserExpect(user.getByRole('tooltip')).toHaveCount(0);
+        await screenshot(
+          user,
+          `server-resource-columns-${width === 390 ? 'mobile' : `zoom-${zoom}`}-en`,
+        );
+      }
+      await accessible(user);
+    } finally {
+      await user.unroute(pattern);
+      await user.setViewportSize({ width: 1440, height: 1000 });
+    }
+  });
+
   it('switches Owner inventory and exposes an owner filter only for other users’ servers', async () => {
     await owner.goto(`${fixture.origin}/servers`);
     const scope = owner.getByRole('switch', { name: 'Others', exact: true });
