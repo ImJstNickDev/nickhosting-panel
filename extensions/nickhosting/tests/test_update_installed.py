@@ -32,7 +32,7 @@ echo 'passed';
         self.assertEqual(u.docker(os.environ['NH_BLUEPRINT_TEST_CONTAINER'], ['php'], source), b'passed')
 
     def fixture(self, before='1.5.0', after='1.6.0'):
-        new = {name: (u.HERE / name).read_bytes().replace(b'1.6.1',after.encode()) for name in u.packager.FILES}
+        new = {name: (u.HERE / name).read_bytes().replace(b'1.7.0',after.encode()) for name in u.packager.FILES}
         baseline = dict(new)
         baseline['conf.yml'] = baseline['conf.yml'].replace(after.encode(),before.encode())
         prefix = b'@extends(\'layouts.admin\')\n$EXTENSION_ID = "nickhosting";\n$EXTENSION_VERSION = "'+before.encode()+b'";\n@yield(\'extension.description\')'

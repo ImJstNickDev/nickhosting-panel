@@ -284,6 +284,7 @@ export async function authorizeQueuedEffect(
 }
 
 export interface ManagementOptions {
+  onInstallationAvailable?: (jobId: string, serverId: string) => void;
   logger?: ReturnType<typeof createLogger>;
   db: Kysely<Database>;
   codec: SecretCodec;
@@ -663,6 +664,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     );
   }
   const lifecycle = {
+    onInstallationAvailable: options.onInstallationAvailable,
     supportsManagedFileOperations: async (serverId: string, connection: Kysely<Database>) => {
       const server = await connection
         .selectFrom('managed_servers')

@@ -243,8 +243,17 @@ export async function consumeEvents(
   options: {
     signal: AbortSignal;
     onEvent: (event: { type: string; data: string; id?: string }) => void;
+    /** Decoded frame budget; larger installation snapshots opt in without enlarging other streams. */
+    maxFrameCharacters?: number;
   },
 ) {
+  const maxFrameCharacters = options.maxFrameCharacters ?? 262144;
+  if (
+    !Number.isInteger(maxFrameCharacters) ||
+    maxFrameCharacters < 1 ||
+    maxFrameCharacters > 1048576
+  )
+    throw new Error('invalid_event_frame_limit');
   const response = await fetch(safeApiPath(path), {
     credentials: 'same-origin',
     headers: { Accept: 'text/event-stream', 'Accept-Language': locale },
@@ -262,9 +271,9 @@ export async function consumeEvents(
       const result = await reader.read();
       if (result.done) break;
       pending = (pending + decoder.decode(result.value, { stream: true })).replace(/\r\n/g, '\n');
-      if (pending.length > 262144) throw apiError(null);
       let boundary = pending.indexOf('\n\n');
       while (boundary >= 0) {
+        if (boundary > maxFrameCharacters) throw apiError(null);
         const frame = pending.slice(0, boundary);
         pending = pending.slice(boundary + 2);
         let type = 'message';
@@ -278,6 +287,7 @@ export async function consumeEvents(
         if (data.length) options.onEvent({ type, data: data.join('\n'), id });
         boundary = pending.indexOf('\n\n');
       }
+      if (pending.length > maxFrameCharacters) throw apiError(null);
     }
   } finally {
     await reader.cancel().catch(() => {});

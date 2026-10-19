@@ -2,6 +2,7 @@ import { type AuthContext, assertAuthContext, DomainError } from '@nickhosting/c
 import { sql } from 'kysely';
 import { z } from 'zod';
 import type { DB } from './admission.js';
+import { provisioningPresentation } from './provisioning.js';
 import { parse } from './registry.js';
 
 export const activityCategories = [
@@ -116,6 +117,7 @@ export interface PlatformActivity {
   errorCode: string | null;
   phase: string | null;
   effectState: string | null;
+  provisioning?: { stage: string; state: string };
   createdAt: Date;
   updatedAt: Date;
   completedAt: Date | null;
@@ -254,6 +256,7 @@ export async function listUnifiedActivity(db: DB, context: AuthContext, input: u
     subjectName: string | null;
     subjectUsername: string | null;
     canManage: boolean;
+    installationPlan: Record<string, unknown> | null;
   };
   const rows = (
     await sql<Row>`
@@ -302,7 +305,7 @@ export async function listUnifiedActivity(db: DB, context: AuthContext, input: u
         operation.action, job.actor_id as "actorId", job.subject_id as "subjectId", actor.name as "actorName", actor.username as "actorUsername", subject.name as "subjectName", subject.username as "subjectUsername",
         job.resource_owner_id as "resourceOwnerId", operation.server_id as "serverId", server.name as "serverName",
         job.attempts, job.max_attempts as "maxAttempts", job.error_code as "errorCode", operation.phase, operation.effect_state as "effectState",
-        job.created_at as "createdAt", job.updated_at as "updatedAt", job.completed_at as "completedAt", '{}'::jsonb as metadata, coalesce(server.can_manage, false) as "canManage"
+        job.created_at as "createdAt", job.updated_at as "updatedAt", job.completed_at as "completedAt", '{}'::jsonb as metadata, coalesce(server.can_manage, false) as "canManage", case when operation.action in ('provision','reinstall') then jsonb_build_object('provisioning',operation.plan->'provisioning','installConfirmed',operation.plan->'installConfirmed','initialStartDenied',operation.plan->'initialStartDenied','waitReason',operation.plan->'waitReason','autoStart',operation.plan->'autoStart') else null end as "installationPlan"
       from operation_jobs job left join server_operations operation on operation.job_id = job.id
       left join visible_servers server on server.id = operation.server_id left join "user" actor on actor.id = job.actor_id left join "user" subject on subject.id = job.subject_id
       where server.id is not null or (operation.server_id is null and (${allServers} or job.resource_owner_id = ${context.subjectUserId}))
@@ -318,7 +321,7 @@ export async function listUnifiedActivity(db: DB, context: AuthContext, input: u
         case when audit.metadata->>'source' = 'sftp' then 'sftp' when audit.metadata->>'source' = 'schedule' then 'schedule' when audit.metadata->>'source' = 'system' or audit.actor_user_id is null then 'system' else 'manual' end,
         audit.action, audit.actor_user_id, audit.subject_user_id, actor.name, actor.username, subject.name, subject.username,
         audit.owner_id, (audit.metadata->>'serverId')::uuid, audit.server_name,
-        0, 0, null, null, null, audit.first_at, audit.last_at, null, (case when audit.metadata ? 'entry' then audit.initial_metadata - 'entries' else audit.initial_metadata end) || audit.metadata, audit.can_manage
+        0, 0, null, null, null, audit.first_at, audit.last_at, null, (case when audit.metadata ? 'entry' then audit.initial_metadata - 'entries' else audit.initial_metadata end) || audit.metadata, audit.can_manage, null
       from audit_grouped audit left join "user" actor on actor.id = audit.actor_user_id left join "user" subject on subject.id = audit.subject_user_id
     ) select * from combined where ${sql.join(filters, sql` and `)}
     order by date_trunc('milliseconds', "createdAt") desc, id desc limit ${value.limit + 1}
@@ -326,16 +329,45 @@ export async function listUnifiedActivity(db: DB, context: AuthContext, input: u
   ).rows;
   const items: PlatformActivity[] = rows
     .slice(0, value.limit)
-    .map(({ actorName, actorUsername, subjectName, subjectUsername, canManage, ...row }) => ({
-      ...row,
-      metadata: safeMetadata(row.metadata, canManage),
-      actor: row.actorId ? { id: row.actorId, name: actorName, username: actorUsername } : null,
-      subject: row.subjectId
-        ? { id: row.subjectId, name: subjectName, username: subjectUsername }
-        : null,
-      outcome: row.state,
-      messageKey: `${row.kind === 'job' ? 'jobs' : 'activity.state'}.${row.state}`,
-    }));
+    .map(
+      ({
+        actorName,
+        actorUsername,
+        subjectName,
+        subjectUsername,
+        canManage,
+        installationPlan,
+        ...row
+      }) => ({
+        ...row,
+        ...(installationPlan
+          ? {
+              provisioning: (() => {
+                const progress = provisioningPresentation({
+                  job_id: row.jobId ?? '',
+                  action: row.action ?? '',
+                  phase: row.phase ?? '',
+                  plan: installationPlan,
+                  effect_state: row.effectState ?? '',
+                  state: row.state,
+                  error_code: row.errorCode,
+                  created_at: row.createdAt,
+                  updated_at: row.updatedAt,
+                  completed_at: row.completedAt,
+                });
+                return { stage: progress.stage, state: progress.state };
+              })(),
+            }
+          : {}),
+        metadata: safeMetadata(row.metadata, canManage),
+        actor: row.actorId ? { id: row.actorId, name: actorName, username: actorUsername } : null,
+        subject: row.subjectId
+          ? { id: row.subjectId, name: subjectName, username: subjectUsername }
+          : null,
+        outcome: row.state,
+        messageKey: `${row.kind === 'job' ? 'jobs' : 'activity.state'}.${row.state}`,
+      }),
+    );
   const last = items.at(-1);
   return {
     items,

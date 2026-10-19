@@ -127,7 +127,7 @@ it('parses console events split across CRLF boundaries without dropping or joini
   ]);
 });
 it('bounds incomplete console frames and text editing, while leaving binary transfers separate', async () => {
-  response(['data: ' + 'x'.repeat(262145)]);
+  response([`data: ${'x'.repeat(262145)}`]);
   await expect(
     consumeEvents('/v1/servers/test/console', {
       signal: new AbortController().signal,
@@ -145,6 +145,95 @@ it('bounds incomplete console frames and text editing, while leaving binary tran
     code: 'text_too_large',
   });
 });
+it('accepts bounded large provisioning transcripts while preserving the default console cap', async () => {
+  const data = JSON.stringify({
+    provisioning: {
+      logs: Array.from({ length: 32 }, (_, id) => ({
+        id: String(id),
+        at: '2026-10-19T17:00:00Z',
+        text: 'x'.repeat(8192),
+      })),
+    },
+  });
+  expect(data.length).toBeGreaterThan(262144);
+  const frame = `event: provisioning\ndata: ${data}\n\n`;
+  const events: Array<{ type: string; data: string }> = [];
+  response([frame.slice(0, 200000), frame.slice(200000)]);
+  await consumeEvents('/v1/servers/test/provisioning/stream', {
+    signal: new AbortController().signal,
+    maxFrameCharacters: 1048576,
+    onEvent: (event) => events.push(event),
+  });
+  expect(events).toHaveLength(1);
+  expect(JSON.parse(events[0]?.data ?? '{}').provisioning.logs).toHaveLength(32);
+  response([frame]);
+  await expect(
+    consumeEvents('/v1/servers/test/console', {
+      signal: new AbortController().signal,
+      onEvent: () => {},
+    }),
+  ).rejects.toThrow();
+});
+it('bounds individual SSE frames, not a network chunk containing several valid frames', async () => {
+  const frame = `data: ${'x'.repeat(200000)}\n\n`;
+  response([frame + frame]);
+  const onEvent = vi.fn();
+  await consumeEvents('/v1/servers/test/console', {
+    signal: new AbortController().signal,
+    onEvent,
+  });
+  expect(onEvent).toHaveBeenCalledTimes(2);
+});
+it.each([false, true])(
+  'rejects oversized provisioning frames (terminated: %s) and cancels reading',
+  async (terminated) => {
+    const cancel = vi.fn();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    `data: ${'x'.repeat(1048576)}${terminated ? '\n\n' : ''}`,
+                  ),
+                );
+              },
+              cancel,
+            }),
+            { headers: { 'Content-Type': 'text/event-stream' } },
+          ),
+      ),
+    );
+    const onEvent = vi.fn();
+    await expect(
+      consumeEvents('/v1/servers/test/provisioning/stream', {
+        signal: new AbortController().signal,
+        maxFrameCharacters: 1048576,
+        onEvent,
+      }),
+    ).rejects.toThrow();
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+  },
+);
+it.each([0, -1, 1048577, Infinity, NaN])(
+  'rejects unsafe SSE limits: %s',
+  async (maxFrameCharacters) => {
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    await expect(
+      consumeEvents('/v1/servers/test/provisioning/stream', {
+        signal: new AbortController().signal,
+        maxFrameCharacters,
+        onEvent: () => {},
+      }),
+    ).rejects.toThrow('invalid_event_frame_limit');
+    expect(fetch).not.toHaveBeenCalled();
+  },
+);
 it('rejects non-API destinations and maps authentication failures without provider prose', () => {
   for (const path of [
     'https://provider.invalid/files',

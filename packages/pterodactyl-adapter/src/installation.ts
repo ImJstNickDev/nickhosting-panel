@@ -7,14 +7,19 @@ import type { ApplicationServer } from './types.js';
 interface Boundary {
   getApplicationServer(id: number): Promise<ApplicationServer>;
   relayConsole(identifier: string, options: ConsoleRelayOptions): Promise<ConsoleRelay>;
+  relayInstallation?(
+    identifier: string,
+    options: ConsoleRelayOptions & { serverUUID: string },
+  ): Promise<ConsoleRelay>;
   reinstall(identifier: string): Promise<void>;
 }
+export type InstallationConfirmationOptions = StopConfirmationOptions & { serverUUID?: string };
 /** Panel clears installing on daemon reset too; status alone cannot prove completion. */
 export async function confirmInstallation(
   adapter: Boundary,
   applicationId: number,
   identifier: string,
-  options: StopConfirmationOptions,
+  options: InstallationConfirmationOptions,
   reinstall = false,
   timeoutMs = 300000,
   observer?: ContainerObserver,
@@ -29,7 +34,7 @@ export async function confirmInstallation(
   const done = new Promise<void>((resolve) => {
     finish = resolve;
   });
-  const relay = await adapter.relayConsole(identifier, {
+  const relayOptions: ConsoleRelayOptions = {
     authorize: options.authorize,
     maxDurationMs: Math.max(1000, timeoutMs),
     onEvent: (event) => {
@@ -38,7 +43,14 @@ export async function confirmInstallation(
         finish();
         return;
       }
-      if (!connected || !armed || handled || event.type !== 'installation') return;
+      if (
+        !connected ||
+        !armed ||
+        handled ||
+        event.type !== 'installation' ||
+        event.phase !== 'completed'
+      )
+        return;
       handled = true;
       void (async () => {
         try {
@@ -62,7 +74,30 @@ export async function confirmInstallation(
         }
       })();
     },
-  });
+  };
+  let relay: ConsoleRelay;
+  if (adapter.relayInstallation) {
+    const server = options.serverUUID
+      ? undefined
+      : (options.verifiedServer ?? (await adapter.getApplicationServer(applicationId)));
+    if (
+      server &&
+      (server.identifier !== identifier || (options.verifiedServer && server.id !== applicationId))
+    )
+      throw new PterodactylError('invalid_response', 'application', 'rejected');
+    const serverUUID = options.serverUUID ?? server?.uuid;
+    if (!serverUUID) throw new PterodactylError('invalid_request', 'application', 'rejected');
+    try {
+      relay = await adapter.relayInstallation(identifier, {
+        ...relayOptions,
+        serverUUID,
+      });
+    } catch (error) {
+      // A stock Panel remains supported; never fall back on authorization or state errors.
+      if (!(error instanceof PterodactylError) || error.reason !== 'not_found') throw error;
+      relay = await adapter.relayConsole(identifier, relayOptions);
+    }
+  } else relay = await adapter.relayConsole(identifier, relayOptions);
   const timer = setTimeout(() => {
     connected = false;
     finish();

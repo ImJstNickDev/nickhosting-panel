@@ -19,7 +19,7 @@ import {
   guardedDeleteDirectory,
   inspectFileOperation,
 } from './file-operations.js';
-import { confirmInstallation } from './installation.js';
+import { confirmInstallation, type InstallationConfirmationOptions } from './installation.js';
 import { type StopConfirmationOptions, stopWithConfirmation } from './power.js';
 import { createPreparedFileWrites } from './prepared-file-writes.js';
 import { createTransferGuard, type TransferOptions } from './transfer-guard.js';
@@ -76,7 +76,12 @@ export interface PterodactylOptions extends TransportOptions {
 export interface PrivateTransferCache {
   get(key: string): Promise<string | undefined>;
   take(key: string): Promise<string | undefined>;
-  put(key: string, value: string, ttlMs: number): Promise<void>;
+  put(
+    key: string,
+    value: string,
+    ttlMs: number,
+    fence?: { key: string; token: string },
+  ): Promise<void>;
   delete(key: string): Promise<void>;
 }
 export interface PreparedUploadBatch {
@@ -309,7 +314,7 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     confirmInstallation(
       applicationId: number,
       identifier: string,
-      input: StopConfirmationOptions,
+      input: InstallationConfirmationOptions,
     ): Promise<{ confirmed: boolean }> {
       return confirmInstallation(
         adapter,
@@ -324,7 +329,7 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     reinstallWithConfirmation(
       applicationId: number,
       identifier: string,
-      input: StopConfirmationOptions,
+      input: InstallationConfirmationOptions,
     ): Promise<{ confirmed: boolean }> {
       fileDownloads.invalidate(identifier);
       return confirmInstallation(
@@ -788,6 +793,17 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     async relayConsole(identifier: string, input: ConsoleRelayOptions) {
       const server = await adapter.getClientServer(identifier);
       return createConsoleRelay(transport, options, identifier, server.uuid, input);
+    },
+    /** Installation-only channel; UUID comes from the already verified managed registry. */
+    relayInstallation(identifier: string, input: ConsoleRelayOptions & { serverUUID: string }) {
+      return createConsoleRelay(
+        transport,
+        options,
+        identifier,
+        parseInput(z.uuid(), input.serverUUID),
+        input,
+        'installation',
+      );
     },
     /** Read scopes only. Write permissions cannot be proven by these probes. */
     async discoverCapabilities(includeClient = true) {

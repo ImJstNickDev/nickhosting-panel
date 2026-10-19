@@ -1,6 +1,10 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { createNickHostingBridge, verifyProviderChangeSignature } from './blueprint.js';
+import {
+  createNickHostingBridge,
+  verifyProviderChangeSignature,
+  verifyProviderEventSignature,
+} from './blueprint.js';
 
 const instanceId = randomUUID();
 const event = {
@@ -151,4 +155,34 @@ describe('Blueprint administrative transport', () => {
       }).getServer(instanceId, event.server.providerUuid),
     ).rejects.toMatchObject({ reason: 'invalid_response' });
   });
+});
+
+it('authenticates installation outcomes independently of limit revisions and rejects contradictory states', () => {
+  const { revision: _revision, limits: _limits, ...base } = event;
+  const payload = {
+    ...base,
+    type: 'installation.updated',
+    installation: { state: 'installed', status: null },
+  };
+  const sign = (value: unknown) => {
+    const body = JSON.stringify(value);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    return {
+      body,
+      timestamp,
+      eventId: event.eventId,
+      secret,
+      signature: createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex'),
+    };
+  };
+  expect(verifyProviderEventSignature(sign(payload))).toEqual(payload);
+  for (const installation of [
+    { state: 'installed', status: 'install_failed' },
+    { state: 'failed', status: null },
+    { state: 'installing', status: 'suspended' },
+  ])
+    expect(() => verifyProviderEventSignature(sign({ ...payload, installation }))).toThrow();
+  expect(() =>
+    verifyProviderEventSignature({ ...sign(payload), signature: '00'.repeat(32) }),
+  ).toThrow();
 });

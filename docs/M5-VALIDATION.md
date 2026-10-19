@@ -14397,3 +14397,83 @@ configuration changed. No new live-provider test was needed.
 No UI layout changed. No production/DNS/game-server mutations, infrastructure
 changes or live test assets are required. Rollback: source revert. PR21 stays
 open/unmerged; the separate issue18 production-release gate is unchanged.
+
+## 2026-10-19 — post-creation installation experience
+
+The creation wizard now navigates to Console on acceptance. Real durable stages,
+elapsed time and retained installer output replace the isolated success link and
+raw queue state. The same terminal hands over to the runtime console; navigation
+and refresh preserve progress. Failure, uncertainty, successful preparation with
+denied first start, and completion have distinct concise EN/IT presentations.
+The [architecture and limits](INSTALLATION-EXPERIENCE.md) describe the leased
+worker collector and Blueprint 1.7 transport.
+
+Focused evidence:
+
+- Presentation unit tests: **4 passed**.
+- Adapter installation/console/Blueprint tests: **48 passed**.
+- Browser API client/parser tests: **23 passed**, including large and coalesced
+  frames with the original limit retained for other streams.
+- Isolated PostgreSQL/Redis tests: **21 passed** (provisioning/API 6, encrypted
+  cache 6, Activity 9), plus **12 lifecycle regressions** (309 unrelated skipped).
+- Real Firefox component journeys: **30 passed** across address wizard (18), Fabric
+  wizard (3) and provisioning (9). The provisioning cases include phase changes,
+  runtime handoff, refresh/navigation, final-frame races, failure/reinstall,
+  capacity denial/supersession, large transcripts, delayed HTTP responses, loading,
+  retry, revocation, mobile reflow and reduced motion. Automated
+  axe checks passed on the tested desktop/mobile states.
+- PHP harness with installed vendor classes and SQLite `:memory:`: **375 checks
+  passed**. No Panel bootstrap, production database or Wings calls were used.
+- Python package/updater checks: **28 tests**, one optional probe skipped and all
+  remaining passed. The old bounded updater intentionally refuses the new layout.
+- TypeScript (backend and WebPanel), scoped Biome, localization completeness and
+  production WebPanel build passed. Vite retains its existing large-chunk warning.
+
+Reproducible targeted commands (prefix with `scripts/dev.sh`):
+
+```sh
+pnpm exec vitest run packages/server-management/src/provisioning.test.ts
+pnpm exec vitest run apps/web/src/api/client.test.ts
+pnpm exec vitest run packages/pterodactyl-adapter/src/console.test.ts packages/pterodactyl-adapter/src/installation.test.ts packages/pterodactyl-adapter/src/blueprint-bridge.test.ts
+pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/provisioning.integration.test.ts packages/jobs/src/private-transfer-cache.integration.test.ts packages/server-management/src/activity.integration.test.ts
+pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/provisioning.browser.test.ts apps/web/tests/fabric-wizard.browser.test.ts apps/web/tests/domains.browser.test.ts
+pnpm typecheck
+pnpm i18n:check
+pnpm build
+```
+
+Rendered screenshots are sanitized real Console components with isolated HTTP/SSE
+responses, not generated illustrations or a live installation claim:
+
+- [Installing, desktop EN](screenshots/m5/provisioning-installing-en-desktop.png)
+- [Failed, desktop EN](screenshots/m5/provisioning-failed-en-desktop.png)
+- [Completed, desktop EN](screenshots/m5/provisioning-completed-en-desktop.png)
+- [Installing, mobile IT](screenshots/m5/provisioning-installing-it-mobile.png)
+- [Capacity denied, mobile IT](screenshots/m5/provisioning-capacity-it-mobile.png)
+- [Loading, desktop EN](screenshots/m5/provisioning-loading-en-desktop.png)
+- [Uncertain, desktop EN](screenshots/m5/provisioning-uncertain-en-desktop.png)
+
+Independent security/durability review found two issues and verified the fixes:
+stale collectors now cannot publish after lease replacement, and a revocation
+during a delayed cache read prevents delivery of the transcript. The signed
+callback only wakes normal confirmation; a WebSocket completion notification
+cannot mark an installation successful.
+
+Rendered-screen and frontend review also caught an oversized-transcript stream
+limit, a delayed HTTP response overwriting newer streamed logs, an unverified
+initial phase, and missed discovery of a subsequent reinstall while Console
+remained mounted. These were corrected with bounded per-frame parsing, a stream
+revision fence, a neutral loading skeleton and operation-change refresh.
+A later successful manual start also retires the old capacity-denial presentation
+without rewriting historical Activity; a failed retry retains that outcome.
+Both independent reviews signed off with no remaining must-fix findings. Keyboard
+and axe evidence covers the tested states; this is not a manual screen-reader
+certification or proof of live installer delivery.
+
+No server was created, started, reinstalled or modified for these tests. Existing
+dev source watchers load the application changes. Live frontend HTTPS returned
+200; API/worker/Vite were healthy without an explicit restart. The new Blueprint
+package requires a separately approved native update and scoped rollback before
+the Owner's creation can validate real installer delivery. No new dependency,
+migration, network, port or persistent service is required. Issue18 remains an
+independent production-release gate and PR21 remains open/unmerged.

@@ -1,7 +1,7 @@
 import { QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, useLocation } from 'react-router';
 import { api, queryClient } from '../../src/api/client.js';
 import { LocaleProvider } from '../../src/app/i18n.js';
 import { useConnectionAvailability } from '../../src/features/connection-availability.js';
@@ -19,6 +19,7 @@ import '../../src/app/style.css';
 
 function Fixture() {
   const view = new URLSearchParams(location.search).get('view');
+  const navigation = useLocation();
   const options = useConnectionOptions(
     ['creation', 'availability'].includes(view ?? '') ? 'fixture' : '',
   );
@@ -45,7 +46,11 @@ function Fixture() {
       {view === 'summary' ? (
         <ConsoleSummary serverId="domain-fixture" availability="unavailable" />
       ) : view === 'wizard' ? (
-        <CreateServerPage />
+        navigation.pathname.startsWith('/servers/') ? (
+          <output data-testid="created-console">{navigation.pathname}</output>
+        ) : (
+          <CreateServerPage />
+        )
       ) : view === 'availability' ? (
         <form
           onSubmit={(event) => {

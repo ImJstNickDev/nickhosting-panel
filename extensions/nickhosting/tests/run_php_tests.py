@@ -20,6 +20,7 @@ script+="\n$technicalMigration=eval(base64_decode('"+base64.b64encode(technical.
 backup=root/'private/migrations/2026_10_17_000004_nickhosting_backup_events.php'
 script+="\n$backupMigration=eval(base64_decode('"+base64.b64encode(backup.read_bytes().removeprefix(b'<?php')).decode()+"'));\n"
 script+="\n$backupHarness=base64_decode('"+base64.b64encode((root/'tests/backup_harness.php').read_bytes().removeprefix(b'<?php')).decode()+"');\n"
+script+="\n$installationHarness=base64_decode('"+base64.b64encode((root/'tests/installation_harness.php').read_bytes().removeprefix(b'<?php')).decode()+"');\n"
 script+="\ndefine('NICKHOSTING_TEST_CONFIGURE', true); eval(base64_decode('"+base64.b64encode((root/'private/configure.php').read_bytes().removeprefix(b'<?php')).decode()+"'));\n"
 script+="\n$settingsView=base64_decode('"+base64.b64encode((root/'admin/view.blade.php').read_bytes()).decode()+"');\n"
 script+="\n$directoryHarness=base64_decode('"+base64.b64encode((root/'tests/directory_harness.php').read_bytes().removeprefix(b'<?php')).decode()+"');\n"

@@ -1651,3 +1651,35 @@ The original creation intent is the idempotency identity. Retrying an accepted
 request after Installer latest changes returns the original accepted server/job,
 rather than generating a second server or conflicting due solely to catalog refresh.
 Different content under the same key remains a conflict.
+
+### Creation and installation progress
+
+See [Installation experience](INSTALLATION-EXPERIENCE.md) for transport,
+retention and activation boundaries.
+
+- `GET /v1/servers/:id/provisioning` returns `{ provisioning: null | snapshot }`
+  for the latest provision/reinstall operation under current server-read access.
+- `GET /v1/servers/:id/provisioning/stream` sends `provisioning` SSE snapshots
+  with the same envelope, plus keepalives. Reconnection obtains the current
+  snapshot, including retained log IDs; clients need not replay provider events.
+- The snapshot contains `jobId`, `action`, `stage`, `state`, `startedAt`,
+  `updatedAt`, `completedAt`, `errorCode`, `canReinstall`, `stages`, `logs` and
+  `logsAvailable`. Stages are `preparing`, `installing`, `configuring`, `starting`,
+  `ready`; states are `active`, `completed`, `failed`, `uncertain`, `start-denied`.
+  Log entries contain only `id`, `at`, `text`. No signed provider URL/token is
+  exposed. `canReinstall` is a UI hint, never authority to bypass operation guards.
+- SSE rechecks live access, suppresses unchanged snapshots and closes on
+  revocation or stream expiry. The browser reconnects with bounded backoff.
+- Stage timestamps live in the existing operation plan. `queued` delivery while
+  waiting for an external installer remains an active installation in this DTO.
+  Successful provisioning with denied first start is explicitly `start-denied`.
+- The existing signed provider callback additionally accepts
+  `type: installation.updated` with `installation.state` (`installing`,
+  `installed`, `failed`) and native status. It wakes reconciliation of a matching
+  active installation; it does not itself mark the operation successful.
+
+Blueprint 1.7's Client route
+`GET /api/client/extensions/nickhosting/servers/:identifier/installation-websocket`
+is backend-only and uses the existing technical account's Client key. It issues
+only installation-channel permissions for the exact linked server/owner. The
+normal runtime console continues to use its existing route.

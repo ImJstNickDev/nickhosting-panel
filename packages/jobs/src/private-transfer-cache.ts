@@ -7,7 +7,12 @@ import { validateTransportOptions } from './transport.js';
 export interface PrivateTransferCache {
   get(key: string): Promise<string | undefined>;
   take(key: string): Promise<string | undefined>;
-  put(key: string, value: string, ttlMs: number): Promise<void>;
+  put(
+    key: string,
+    value: string,
+    ttlMs: number,
+    fence?: { key: string; token: string },
+  ): Promise<void>;
   delete(key: string): Promise<void>;
 }
 type Client = Pick<Redis, 'eval' | 'connect' | 'disconnect' | 'on' | 'status'>;
@@ -32,6 +37,7 @@ for _, key in ipairs(redis.call('ZRANGEBYSCORE', index, '-inf', milliseconds)) d
   forget(key)
 end
 if ARGV[1] == 'put' then
+  if ARGV[7] ~= '' and redis.call('GET', KEYS[5]) ~= ARGV[7] then return -1 end
   local previous = tonumber(redis.call('HGET', sizes, KEYS[1]) or '0')
   local bytes = string.len(ARGV[2])
   local count = redis.call('ZCARD', index)
@@ -100,6 +106,7 @@ export function createPrivateTransferCache(options: {
     key: string,
     value = '',
     ttl = 0,
+    fence?: { key: string; token: string },
   ) {
     try {
       if (closed) throw failure();
@@ -112,17 +119,19 @@ export function createPrivateTransferCache(options: {
       if (closed) throw failure();
       return await client.eval(
         operation,
-        4,
+        5,
         key,
         `${namespace}:index`,
         `${namespace}:sizes`,
         `${namespace}:bytes`,
+        fence?.key ?? key,
         kind,
         value,
         ttl,
         MAX_ENTRIES,
         MAX_BYTES,
         MAX_TTL_MS,
+        fence?.token ?? '',
       );
     } catch {
       throw failure();
@@ -142,7 +151,7 @@ export function createPrivateTransferCache(options: {
   return {
     get: (key) => read('get', key),
     take: (key) => read('take', key),
-    async put(key, value, ttlMs) {
+    async put(key, value, ttlMs, fence) {
       const privateKey = keyFor(key);
       if (
         !Number.isSafeInteger(ttlMs) ||
@@ -154,7 +163,7 @@ export function createPrivateTransferCache(options: {
       )
         throw new DomainError('validation_failed');
       const encrypted = JSON.stringify(options.codec.encrypt(value, privateKey));
-      if ((await execute('put', privateKey, encrypted, ttlMs)) !== 1) throw failure();
+      if ((await execute('put', privateKey, encrypted, ttlMs, fence)) !== 1) throw failure();
     },
     async delete(key) {
       await execute('delete', keyFor(key));

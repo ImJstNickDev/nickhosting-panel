@@ -128,6 +128,7 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
       return value;
     };
     const app = createApp({
+      provisioningCache: transferCache,
       database,
       codec,
       management: () =>

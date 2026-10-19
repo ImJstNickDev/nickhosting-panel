@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useLocation } from 'react-router';
 import { ApiError, api, apiError, consumeEvents, queryClient } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
@@ -12,6 +13,7 @@ import {
   type TelemetrySample,
 } from './console-resources.js';
 import { ConsoleSummary } from './console-summary.js';
+import { ProvisioningPanel, useProvisioning } from './provisioning.js';
 import { useRequestOperation } from './servers.js';
 import {
   type Metrics,
@@ -30,10 +32,12 @@ function ConsoleOutput({
   output,
   lines,
   onScroll,
+  emptyLabel,
 }: {
   output: React.RefObject<HTMLElement | null>;
   lines: string[];
   onScroll: React.UIEventHandler<HTMLElement>;
+  emptyLabel?: string;
 }) {
   const t = useT(),
     label = t('service.consoleOutput');
@@ -41,7 +45,7 @@ function ConsoleOutput({
     // biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard users must scroll the bounded console region.
     <section ref={output} className="console" tabIndex={0} aria-label={label} onScroll={onScroll}>
       <pre role="log" aria-live="off">
-        {lines.length ? lines.join('\n') : t('service.noConsoleOutput')}
+        {lines.length ? lines.join('\n') : (emptyLabel ?? t('service.noConsoleOutput'))}
       </pre>
     </section>
   );
@@ -112,9 +116,10 @@ function transientFailure(error: unknown) {
     failure.status >= 500
   );
 }
-function useLiveResources(serverId: string, streaming: boolean) {
+function useLiveResources(serverId: string, streaming: boolean, enabled = true) {
   return useQuery({
     queryKey: ['resources', serverId],
+    enabled,
     queryFn: () => api<Resources>(`${serverPath(serverId)}/resources`),
     refetchInterval: streaming ? false : 10000,
     retry: (attempt, error) => attempt < 2 && transientFailure(error),
@@ -138,6 +143,40 @@ function useResourceStaleness(updatedAt: number) {
 export function ConsolePage({ serverId }: { serverId: string }) {
   const t = useT();
   const server = useServer(serverId);
+  const location = useLocation();
+  const expectedSetup = ['pending', 'installing', 'failed'].includes(
+    server.data?.installationState ?? '',
+  );
+  const provisioning = useProvisioning(
+    serverId,
+    Boolean(
+      server.data &&
+        (expectedSetup || server.data.activeOperationId || location.state?.provisioningJobId),
+    ),
+    server.data?.activeOperationId,
+  );
+  const setup =
+    expectedSetup &&
+    server.data?.activeOperationId &&
+    provisioning.value?.jobId !== server.data.activeOperationId
+      ? undefined
+      : provisioning.value;
+  const showSetup = Boolean(
+    (setup &&
+      setup.state !== 'completed' &&
+      (setup.state !== 'start-denied' || server.data?.runtimeState === 'offline')) ||
+      (!setup && expectedSetup),
+  );
+  const installing = showSetup && setup?.stage !== 'starting';
+  const [dismissedSetup, setDismissedSetup] = useState<string>();
+  const completionVisible =
+    setup?.state === 'completed' &&
+    setup.jobId !== dismissedSetup &&
+    Date.now() - Date.parse(setup.completedAt ?? setup.updatedAt) < 600000;
+  const installLines =
+    setup?.logs.map((line) =>
+      line.text.replace(terminalEscapes, '').replace(terminalControls, ''),
+    ) ?? [];
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     heading.current?.focus({ preventScroll: true });
@@ -155,7 +194,9 @@ export function ConsolePage({ serverId }: { serverId: string }) {
   const [disk, setDisk] = useState<{ scope: string; bytes: number; at: number }>();
   const [state, setState] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const session = useSession();
-  const consoleAvailable = Boolean(server.data?.capabilities?.console);
+  const consoleAvailable = Boolean(
+    server.data?.capabilities?.console && server.data.availableActions.console && !installing,
+  );
   const request = useRequestOperation(serverId);
   const [powerError, setPowerError] = useState<unknown>();
   const [powerBusy, setPowerBusy] = useState(false);
@@ -195,14 +236,16 @@ export function ConsolePage({ serverId }: { serverId: string }) {
   const live = useLiveResources(
     serverId,
     state === 'connected' && Boolean(stats?.scope === scope && now - stats.at < 30000),
+    !installing && Boolean(server.data?.availableActions.console),
   );
   const resourceStale = useResourceStaleness(live.dataUpdatedAt);
-  const lines =
+  const runtimeLines =
     buffer.scope === scope && identity
       ? buffer.lines.map((line) =>
           line.type === 'status' ? t(`service.consoleStatus.${line.data}`) : line.data,
         )
       : [];
+  const lines = showSetup ? [...installLines, ...(!installing ? runtimeLines : [])] : runtimeLines;
   const [error, setError] = useState<unknown>();
   const [runtime, setRuntime] = useState<{
     scope: string;
@@ -402,20 +445,50 @@ export function ConsolePage({ serverId }: { serverId: string }) {
   return (
     <>
       {Boolean(powerError) && <ErrorNotice error={powerError} />}
-      {server.data?.firstStart && server.data.runtimeState === 'offline' && (
+      {!showSetup && server.data?.firstStart && server.data.runtimeState === 'offline' && (
         <Notice>
           {t('platform.initialStartDenied')} <Time value={server.data.firstStart.occurredAt} />
         </Notice>
       )}
       {consoleAvailable && Boolean(error) && <ErrorNotice error={error} />}
-      <div className="console-workspace">
+      {completionVisible && (
+        <div className="provisioning-complete">
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            aria-hidden="true"
+          >
+            <path d="m5 12 4 4L19 6" />
+          </svg>
+          <strong role="status">{t('provisioning.ready')}</strong>
+          <button
+            type="button"
+            aria-label={t('provisioning.dismiss')}
+            onClick={() => setDismissedSetup(setup.jobId)}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              aria-hidden="true"
+            >
+              <path d="m6 6 12 12M6 18 18 6" />
+            </svg>
+          </button>
+        </div>
+      )}
+      <div className={`console-workspace${showSetup ? ' is-provisioning' : ''}`}>
         <div className="console-heading">
           <h1 ref={heading} tabIndex={-1}>
             {server.data?.name}
           </h1>
         </div>
         <div className="console-actions">
-          {server.data?.permissions.operate &&
+          {(!showSetup || setup?.state === 'start-denied') &&
+            server.data?.permissions.operate &&
             (['start', 'restart', powerState === 'stopping' ? 'kill' : 'stop'] as const).map(
               (action) => (
                 <button
@@ -441,34 +514,52 @@ export function ConsolePage({ serverId }: { serverId: string }) {
             )}
         </div>
         <div className="console-terminal-slot">
-          {consoleAvailable ? (
+          {consoleAvailable || showSetup ? (
             <div className="console-terminal">
-              <div className="console-connection-slot">
-                <Tooltip content={t('service.connectionAction', { state: t(`service.${state}`) })}>
-                  <button
-                    type="button"
-                    className="console-connection"
-                    data-state={state}
-                    aria-label={t('service.connectionAction', { state: t(`service.${state}`) })}
-                    onClick={() => setConnection((value) => value + 1)}
+              {showSetup && (
+                <div className="provisioning-terminal-title">
+                  <span>{t('provisioning.output')}</span>
+                </div>
+              )}
+              {consoleAvailable && (
+                <div className="console-connection-slot">
+                  <Tooltip
+                    content={t('service.connectionAction', { state: t(`service.${state}`) })}
                   >
-                    <span className="console-connection-dot" aria-hidden="true" />
-                  </button>
-                </Tooltip>
-                <span className="visually-hidden" role="status">
-                  {t(`service.${state}`)}
-                </span>
-              </div>
+                    <button
+                      type="button"
+                      className="console-connection"
+                      data-state={state}
+                      aria-label={t('service.connectionAction', { state: t(`service.${state}`) })}
+                      onClick={() => setConnection((value) => value + 1)}
+                    >
+                      <span className="console-connection-dot" aria-hidden="true" />
+                    </button>
+                  </Tooltip>
+                  <span className="visually-hidden" role="status">
+                    {t(`service.${state}`)}
+                  </span>
+                </div>
+              )}
               <ConsoleOutput
                 output={output}
                 lines={lines}
+                emptyLabel={
+                  showSetup
+                    ? t(
+                        setup?.logsAvailable === false
+                          ? 'provisioning.outputUnavailable'
+                          : 'provisioning.noOutput',
+                      )
+                    : undefined
+                }
                 onScroll={(event) => {
                   const element = event.currentTarget;
                   follow.current =
                     element.scrollHeight - element.clientHeight - element.scrollTop <= 2;
                 }}
               />
-              {server.data?.permissions.manage && identity && (
+              {!showSetup && server.data?.permissions.manage && identity && (
                 <ConsoleCommand key={scope} serverId={serverId} />
               )}
             </div>
@@ -476,11 +567,21 @@ export function ConsolePage({ serverId }: { serverId: string }) {
             <Notice>{t('web.unavailable')}</Notice>
           )}
         </div>
-        <ConsoleSummary
-          serverId={serverId}
-          resources={resources}
-          availability={resources ? 'ready' : live.isPending ? 'loading' : 'unavailable'}
-        />
+        {showSetup ? (
+          <ProvisioningPanel
+            serverId={serverId}
+            name={server.data?.name ?? ''}
+            value={setup}
+            error={provisioning.error ?? provisioning.streamError}
+            retry={provisioning.retry}
+          />
+        ) : (
+          <ConsoleSummary
+            serverId={serverId}
+            resources={resources}
+            availability={resources ? 'ready' : live.isPending ? 'loading' : 'unavailable'}
+          />
+        )}
       </div>
       <Dialog open={restart} title={t('web.restart')} onClose={() => setRestart(false)}>
         <p>{t('platform.restartWarning', { name: server.data?.name ?? '' })}</p>
@@ -502,14 +603,22 @@ export function ConsolePage({ serverId }: { serverId: string }) {
           {t('service.kill')}
         </button>
       </Dialog>
-      <Telemetry
-        key={scope}
-        serverId={serverId}
-        live={live}
-        resources={resources}
-        sampleAt={sampleAt}
-        stale={!measured && resourceStale}
-      />
+      {!showSetup && (
+        <Telemetry
+          key={scope}
+          serverId={serverId}
+          live={live}
+          resources={resources}
+          sampleAt={sampleAt}
+          stale={!measured && resourceStale}
+        />
+      )}
+      {!showSetup && Boolean(installLines.length) && (
+        <details className="provisioning-log-history">
+          <summary>{t('provisioning.history')}</summary>
+          <pre>{installLines.join('\n')}</pre>
+        </details>
+      )}
     </>
   );
 }

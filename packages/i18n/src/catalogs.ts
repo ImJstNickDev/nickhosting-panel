@@ -49,6 +49,7 @@ export const en = {
   'servers.operation.kill_unconfirmed':
     'Force stop could not be confirmed. Check the operation details.',
   'servers.operation.install_confirmed': 'Installation completion confirmed.',
+  'servers.operation.installation_updated': 'Installation status updated.',
   'servers.operation.succeeded': 'Server operation completed.',
   'servers.operation.failed': 'Server operation failed.',
   'servers.operation.initial_start_failed': 'Server created; its first start failed.',
@@ -182,6 +183,7 @@ export const it: Record<MessageKey, string> = {
   'servers.operation.kill_unconfirmed':
     'Impossibile confermare l’arresto forzato. Controlla i dettagli dell’operazione.',
   'servers.operation.install_confirmed': 'Completamento dell’installazione confermato.',
+  'servers.operation.installation_updated': 'Stato dell’installazione aggiornato.',
   'servers.operation.succeeded': 'Operazione sul server completata.',
   'servers.operation.failed': 'Operazione sul server non riuscita.',
   'servers.operation.initial_start_failed': 'Server creato; il primo avvio non è riuscito.',

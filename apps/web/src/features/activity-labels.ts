@@ -50,3 +50,20 @@ export function activityLabelKey(item: Item) {
   }
   return `activity.event.${eventLabels[item.action ?? ''] ?? 'change'}`;
 }
+
+/** The durable installation stage takes precedence over worker delivery state. */
+export function activityStatus(
+  item: Pick<Item, 'phase' | 'effectState' | 'state' | 'outcome' | 'provisioning'>,
+) {
+  if (item.phase !== 'owner_resolved_failed' && item.provisioning?.state === 'active')
+    return { value: 'running', labelKey: `provisioning.${item.provisioning.stage}` };
+  if (item.provisioning?.state === 'start-denied')
+    return { value: 'pending', labelKey: 'provisioning.startDenied' };
+  const value =
+    item.phase === 'owner_resolved_failed'
+      ? 'failed'
+      : item.effectState === 'uncertain'
+        ? 'uncertain'
+        : (item.outcome ?? item.state);
+  return { value, labelKey: `activity.state.${value}` };
+}

@@ -21,6 +21,7 @@ import {
   Time,
   text,
 } from '../components/ui.js';
+import { activityStatus } from './activity-labels.js';
 
 type Job = Result<typeof getPlatformJob>;
 function acknowledgedFailure(job: Pick<Job, 'state' | 'phase'>) {
@@ -54,7 +55,10 @@ export function JobPage({ jobId: explicitId }: { jobId?: string } = {}) {
   const data = job.data;
   if (!data) return null;
   const acknowledged = acknowledgedFailure(data);
-  const uncertain = data.effectState === 'uncertain' || data.effectState === 'prepared';
+  const uncertain = data.provisioning
+    ? data.provisioning.state === 'uncertain'
+    : data.effectState === 'uncertain' || data.effectState === 'prepared';
+  const presented = activityStatus({ ...data, outcome: data.state });
   return (
     <Page
       title={t('platform.jobDetails')}
@@ -70,10 +74,7 @@ export function JobPage({ jobId: explicitId }: { jobId?: string } = {}) {
           values={[
             [
               t('web.status'),
-              <Badge
-                key="state"
-                value={acknowledged ? 'failed' : uncertain ? 'uncertain' : data.state}
-              />,
+              <Badge key="state" value={presented.value} label={t(presented.labelKey)} />,
             ],
             [t('web.created'), <Time key="created" value={data.createdAt} />],
             [t('web.updated'), <Time key="updated" value={data.updatedAt} />],
@@ -96,7 +97,15 @@ export function JobPage({ jobId: explicitId }: { jobId?: string } = {}) {
             ],
           ]}
         />
-        {data.errorCode && !acknowledged && <Notice>{t(`errors.${data.errorCode}`)}</Notice>}
+        {data.errorCode && !acknowledged && data.provisioning?.state !== 'active' && (
+          <Notice>
+            {t(
+              data.provisioning && data.errorCode === 'integration_unavailable'
+                ? 'provisioning.checkOutput'
+                : `errors.${data.errorCode}`,
+            )}
+          </Notice>
+        )}
         {acknowledged && <Notice>{t('platform.failureAcknowledged')}</Notice>}
         {uncertain && !acknowledged && <Notice>{t('platform.uncertainHelp')}</Notice>}
         {data.ownerRecovery && (

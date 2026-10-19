@@ -5,6 +5,7 @@ import { type createDatabase, recordAudit } from '@nickhosting/database';
 import {
   isUploadCancelled,
   isUploadNotDispatched,
+  type PrivateTransferCache,
   relativePath,
   type ServerFile,
 } from '@nickhosting/pterodactyl-adapter';
@@ -69,11 +70,13 @@ import {
   validateFileMoves,
 } from './file-operations.js';
 import { registerUploadBatchRoutes } from './file-upload-batches.js';
+import { registerProvisioningRoutes } from './provisioning.js';
 import { createServerEventStream } from './server-events-stream.js';
 import { boundedEventWriter } from './stream-buffer.js';
 
 type C = Context<{ Variables: Variables }>;
 export interface ServerRouteOptions {
+  provisioningCache?: PrivateTransferCache;
   logger?: ReturnType<typeof createLogger>;
   db: ReturnType<typeof createDatabase>['db'];
   pool?: ReturnType<typeof createDatabase>['pool'];
@@ -99,6 +102,7 @@ export function registerServerRoutes(
   const commandRelays = createConsoleCommandRelays();
   const backupEvents = options.pool ? createBackupEventStream(options.pool) : undefined;
   const serverEvents = options.pool ? createServerEventStream(options.pool) : undefined;
+  registerProvisioningRoutes(app, options);
   registerFileBrowsingRoutes(app, options);
   registerFileOperationRoutes(app, options);
   const runBatchUpload = registerUploadBatchRoutes(app, options);

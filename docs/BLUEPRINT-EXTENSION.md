@@ -953,3 +953,28 @@ describe native framework effects. The private activation bundle retains exact
 previous extension/configuration files and metadata, without copying game data or
 dumping the database. See the
 [complete activation evidence](M5-VALIDATION.md#native-blueprint-161-activation--2026-10-18).
+
+## 1.7.0 — installation output and committed status notifications
+
+The [installation experience](INSTALLATION-EXPERIENCE.md) extends the existing
+adapter and signed feed. A dedicated Client route issues a server/technical-owner
+scoped Wings token with only `websocket.connect` and `admin.websocket.install`.
+It permits reading installer output while the ordinary Client route is blocked
+by installation state, without granting administrator, power or file authority.
+Suspension, maintenance, restore, transfer and exact managed identity restrictions
+remain enforced. Browser clients receive only NickHosting's authorized transcript.
+
+The native `Server\Updated` event records committed installation status changes
+in the existing transactional outbox, independent of notification email settings.
+The new event is separate from resource-limit revisions and wakes the existing
+job; terminal success still requires normal installation confirmation. No new
+extension migration, native Panel/Wings patch or separate provisioning route is
+introduced.
+
+The allowlisted package and in-memory PHP tests cover native JWT signing,
+ownership/policy denial, event capture, unrelated-state exclusion and transaction
+rollback. Adapter tests cover the dedicated route, origin/UUID pinning, output
+filtering, command denial and completion semantics. These are local contract
+checks, not evidence of a live installation. Native activation remains a
+separately approved operation with the existing separated mounts and scoped
+code/configuration rollback.

@@ -44,6 +44,7 @@ const identifierArguments: Partial<Record<keyof PterodactylAdapter, number>> = {
   prepareUpload: 0,
   prepareUploadBatch: 0,
   relayConsole: 0,
+  relayInstallation: 0,
 };
 const timingArguments: Partial<Record<keyof PterodactylAdapter, number>> = {
   getDirectoryBatchSettings: 1,

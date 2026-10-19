@@ -57,6 +57,24 @@ afterEach(async () => {
 });
 
 describe('isolated encrypted transfer cache', () => {
+  it('fences a paused collector after another replica acquires its publication lease', async () => {
+    const a = fixture(),
+      b = fixture();
+    const lease = `${prefix}:installation-lease`;
+    owned.add(lease);
+    a.key('transcript');
+    await raw.set(lease, 'collector-a', 'PX', 5000);
+    await a.cache.put('transcript', 'first lines', 5000, { key: lease, token: 'collector-a' });
+    await raw.set(lease, 'collector-b', 'PX', 5000);
+    await b.cache.put('transcript', 'new complete history', 5000, {
+      key: lease,
+      token: 'collector-b',
+    });
+    await expect(
+      a.cache.put('transcript', 'stale final flush', 5000, { key: lease, token: 'collector-a' }),
+    ).rejects.toMatchObject({ code: 'integration_unavailable' });
+    expect(await b.cache.get('transcript')).toBe('new complete history');
+  });
   it('shares ciphertext across independent clients and consumes a grant exactly once', async () => {
     const a = fixture();
     const b = fixture();

@@ -191,7 +191,7 @@ describe('Fabric independent catalog wizard', () => {
     await next(); // review
     await check(page.getByText('calm-panda-bag.games.example.test', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Create server', exact: true }).click();
-    await check(page.getByRole('link', { name: 'Open server', exact: true })).toBeVisible();
+    await check(page.getByTestId('created-console')).toHaveText(`/servers/${id}/console`);
     expect(writes.map(({ path }) => path)).toEqual([
       '/v1/games/minecraft/connection-suggestion',
       '/v1/games/minecraft/connection-reservation',

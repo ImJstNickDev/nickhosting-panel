@@ -114,6 +114,7 @@ export interface LifecycleOptions {
   /** Opening-time stopped observation + current local power revision; no physical read at click. */
   assertWorldSelectionAccess?: (db: Kysely<Database>, server: Server) => Promise<void>;
   logger?: ReturnType<typeof createLogger>;
+  onInstallationAvailable?: (jobId: string, serverId: string) => void;
   adapter: PterodactylAdapter;
   backupSchemaAvailable?: (db: Kysely<Database>) => Promise<boolean>;
   backupPolicy?: (context: GameLifecycleContext) => Promise<GameBackupPolicy>;
@@ -563,6 +564,25 @@ export async function processServerOperation(
           .returningAll()
           .executeTakeFirstOrThrow();
       });
+    const progress = async (stage: 'installing' | 'configuring' | 'starting' | 'ready') => {
+      if (!['provision', 'reinstall'].includes(operation.action)) return;
+      const previous = operation.plan.provisioning as
+        | { stage?: string; timestamps?: Record<string, string> }
+        | undefined;
+      if (previous?.stage === stage) return;
+      await update({
+        plan: {
+          ...operation.plan,
+          provisioning: {
+            stage,
+            timestamps: { ...previous?.timestamps, [stage]: nowOf(options).toISOString() },
+          },
+        },
+      });
+      await sql`select pg_notify('nh_server_events_' || md5(current_database() || ':' || current_schema()), ${server.id})`.execute(
+        db,
+      );
+    };
     const event = async (
       messageKey: string,
       data: Record<string, unknown> = {},
@@ -615,6 +635,16 @@ export async function processServerOperation(
           .where('id', '=', jobId)
           .forUpdate()
           .executeTakeFirstOrThrow();
+        if (['provision', 'reinstall'].includes(operation.action)) {
+          const receipt = await tx
+            .selectFrom('server_events')
+            .select('id')
+            .where('job_id', '=', jobId)
+            .where('message_key', '=', 'servers.operation.installation_updated')
+            .where('created_at', '>=', at)
+            .executeTakeFirst();
+          if (receipt) next = nowOf(options);
+        }
         const waitingBackupId =
           reason === 'backup_confirmation'
             ? operation.plan.backupId
@@ -1271,6 +1301,7 @@ export async function processServerOperation(
       return true;
     };
     const installationCallbacks = (mutating: boolean) => ({
+      ...(server.pterodactyl_uuid ? { serverUUID: server.pterodactyl_uuid } : {}),
       authorize: async () => {
         try {
           await options.verifyObservationHost?.(server.id, db);
@@ -2224,6 +2255,10 @@ export async function processServerOperation(
             .executeTakeFirstOrThrow();
           await update({ phase: 'installation', effect_state: 'confirmed' });
         }
+        if (operation.plan.installConfirmed !== true) {
+          await progress('installing');
+          options.onInstallationAvailable?.(jobId, server.id);
+        }
         remote = await timed('provider_identity', () => ownedRemote(db, server, options));
         if (['install_failed', 'reinstall_failed'].includes(remote.status ?? '')) {
           await db
@@ -2272,6 +2307,7 @@ export async function processServerOperation(
         }
         const current = await resources();
         if (current.current_state !== 'offline') return wait('unexpected_provision_power_state');
+        await progress('configuring');
         if (
           options.configureGameProvision &&
           !(await options.configureGameProvision(gameContext()))
@@ -2281,6 +2317,7 @@ export async function processServerOperation(
         await activateProvisionGateway(db, server.id, jobId, options.env);
         await update({});
         if (operation.plan.autoStart === true) {
+          await progress('starting');
           if (!options.reserveStart) throw new DomainError('configuration_invalid');
           if (typeof operation.plan.reservationCreated !== 'boolean') {
             const priorReservation = await db
@@ -2295,6 +2332,7 @@ export async function processServerOperation(
           } catch (error) {
             if (!(error instanceof DomainError) || error.code !== 'resources_unavailable')
               throw error;
+            await update({ plan: { ...operation.plan, initialStartDenied: true } });
             await event('servers.operation.initial_start_denied');
             return finish(true);
           }
@@ -2838,6 +2876,8 @@ export async function processServerOperation(
             .set({ installation_state: 'installing' })
             .where('id', '=', server.id)
             .execute();
+          await progress('installing');
+          options.onInstallationAvailable?.(jobId, server.id);
           await effect('reinstall', async () => {
             await options.adapter.reinstallWithConfirmation(
               server.pterodactyl_id ?? 0,
@@ -2857,6 +2897,8 @@ export async function processServerOperation(
             .execute();
           return finish(false, false, 'integration_unavailable');
         }
+        if (operation.plan.installConfirmed !== true)
+          options.onInstallationAvailable?.(jobId, server.id);
         if (!(await observeInstallation()))
           return wait('installation_terminal_unproven', 'operation_uncertain');
         remote = await timed('provider_identity', () => ownedRemote(db, server, options));
@@ -2866,6 +2908,7 @@ export async function processServerOperation(
             .set({ installation_state: 'installed' })
             .where('id', '=', server.id)
             .execute();
+          await progress('configuring');
           if (
             options.configureGameProvision &&
             !(await options.configureGameProvision(gameContext()))

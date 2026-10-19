@@ -1762,3 +1762,18 @@ Rollback the source together across API/worker/frontend and retain all data. The
 prior version may hide Fabric creation again or require another association sync;
 never delete server records or downgrade the database as part of rollback. Existing
 Fabric installation receipts are persistent server state and must be preserved.
+
+### Post-creation installation experience (2026-10-19)
+
+The [installation experience](INSTALLATION-EXPERIENCE.md) uses the existing API,
+worker, PostgreSQL and encrypted Redis cache. There is no new mount, public port,
+service, dependency or NickHosting database migration. Source watchers load the
+application changes. Blueprint 1.7 adds a narrowly scoped installer WebSocket
+credential route and committed installation notifications; its native update is
+a separate approval and must retain the Panel/Wings mount separation above.
+
+Rollback application sources together, retaining operation history and all user
+data. The previous UI can ignore the additive progress fields. Restore the saved
+extension/configuration and staged artifact if an approved activation regresses;
+no table deletion, game reinstall, provider cleanup or database downgrade is
+part of rollback. A live creation is reserved for the Owner's subsequent test.

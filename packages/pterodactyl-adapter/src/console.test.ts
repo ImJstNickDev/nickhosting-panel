@@ -47,7 +47,7 @@ async function setup() {
     });
   });
   const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url) =>
-    String(url).endsWith('/websocket')
+    /\/(?:installation-)?websocket$/.test(String(url))
       ? Response.json({
           data: {
             token: `jwt-fixture-secret-${incoming.filter((event) => event.event === 'auth').length}`,
@@ -78,6 +78,54 @@ async function setup() {
 }
 
 describe('backend console mediation over a real isolated WebSocket', () => {
+  it('uses one restricted Blueprint request for installation logs without a blocked Client identity fetch', async () => {
+    const fixture = await setup();
+    const events: ConsoleEvent[] = [];
+    const relay = await fixture.adapter.relayInstallation('f729c8a1', {
+      serverUUID: uuid,
+      authorize: async () => true,
+      canSendCommands: true, // Even a mistaken caller cannot enable commands on this relay.
+      onEvent: (event) => events.push(event),
+    });
+    relays.push(relay);
+    expect(fixture.fetcher).toHaveBeenCalledTimes(1);
+    expect(String(fixture.fetcher.mock.calls[0]?.[0])).toBe(
+      'https://panel.example.com/api/client/extensions/nickhosting/servers/f729c8a1/installation-websocket',
+    );
+    expect(new Headers(fixture.fetcher.mock.calls[0]?.[1]?.headers).get('authorization')).toBe(
+      'Bearer client-fixture-secret',
+    );
+    fixture.send('install started', []);
+    fixture.send('install output', ['Downloading jwt-fixture-secret-0']);
+    fixture.send('console output', ['runtime output is separate']);
+    fixture.send('status', ['running']);
+    fixture.send('install completed', []);
+    await vi.waitFor(() => expect(events).toHaveLength(3));
+    expect(events).toEqual([
+      { type: 'installation', phase: 'started' },
+      { type: 'console', source: 'installation', data: 'Downloading [redacted]' },
+      { type: 'installation', phase: 'completed' },
+    ]);
+    await expect(relay.sendCommand('stop')).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(relay.requestLogs()).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(relay.requestStats()).rejects.toMatchObject({ code: 'forbidden' });
+    expect(fixture.incoming).toHaveLength(1);
+    fixture.send('token expiring', []);
+    await vi.waitFor(() => expect(fixture.incoming).toHaveLength(2));
+    expect(
+      fixture.fetcher.mock.calls.every(([url]) => String(url).endsWith('/installation-websocket')),
+    ).toBe(true);
+  });
+  it('rejects installer websocket tokens pointing to a different managed server UUID', async () => {
+    const fixture = await setup();
+    await expect(
+      fixture.adapter.relayInstallation('f729c8a1', {
+        serverUUID: 'a729c8a1-6773-467a-af3f-a7ea8704f0bd',
+        authorize: async () => true,
+        onEvent() {},
+      }),
+    ).rejects.toMatchObject({ reason: 'invalid_response' });
+  });
   it('uses the managed stop UUID for its internal relay without refetching Application or Client identity', async () => {
     const fixture = await setup();
     const reads: string[] = [];
@@ -171,7 +219,7 @@ describe('backend console mediation over a real isolated WebSocket', () => {
     expect(events).toEqual([
       { type: 'console', data: 'server ready [redacted] [redacted]' },
       { type: 'console', data: 'Pulling image [redacted]' },
-      { type: 'console', data: 'Installer output [redacted]' },
+      { type: 'console', data: 'Installer output [redacted]', source: 'installation' },
       { type: 'status', data: 'running' },
       { type: 'stats', data: { memory_bytes: 100, cpu_absolute: 4, disk_bytes: 20 } },
     ]);

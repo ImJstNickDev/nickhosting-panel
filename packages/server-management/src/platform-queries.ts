@@ -20,6 +20,7 @@ import {
 } from './gateway-orchestration.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { backupSchemaAvailable, providerBackupEventsEnabled } from './provider-backup-events.js';
+import { provisioningPresentation, successfulStartAfter } from './provisioning.js';
 import {
   authorizeServer,
   enqueueServerOperation,
@@ -301,6 +302,8 @@ async function describeServer(
             .executeTakeFirst()
         : undefined,
     ]);
+  const unresolvedFirstStart =
+    initialDenied && !(await successfulStartAfter(db, row.id, initialDenied.created_at));
   const manifest = gameManifestSchema.safeParse(mapping.manifest);
   const scope = { ownerUserId: row.owner_id, memberRole: member?.role };
   const manage = hasPermission(context, 'server:manage', scope),
@@ -378,7 +381,7 @@ async function describeServer(
       files: configured && capabilities?.files === true,
       console: configured && capabilities?.console === true,
     },
-    firstStart: initialDenied
+    firstStart: unresolvedFirstStart
       ? {
           outcome: 'denied' as const,
           messageKey: initialDenied.message_key,
@@ -924,6 +927,21 @@ export async function getPlatformJob(db: DB, context: AuthContext, jobId: string
         .where('job_id', '=', jobId)
         .executeTakeFirst()
     : undefined;
+  const provisioning =
+    operation && ['provision', 'reinstall'].includes(job.action ?? '')
+      ? provisioningPresentation({
+          job_id: jobId,
+          action: job.action ?? '',
+          phase: job.phase ?? '',
+          plan: operation.plan,
+          effect_state: job.effectState ?? '',
+          state: job.state,
+          error_code: job.errorCode,
+          created_at: job.createdAt,
+          updated_at: job.updatedAt,
+          completed_at: job.completedAt,
+        })
+      : undefined;
   const backupPlan = ['backup', 'restore'].includes(job.action ?? '') ? operation?.plan : undefined;
   // Only confirmed counters are public; staging identities, source paths and
   // integrity digests stay in the protected operation plan.
@@ -954,6 +972,9 @@ export async function getPlatformJob(db: DB, context: AuthContext, jobId: string
   }
   return {
     ...job,
+    ...(provisioning
+      ? { provisioning: { stage: provisioning.stage, state: provisioning.state } }
+      : {}),
     ...(fileTransfer.success ? { fileTransfer: fileTransfer.data } : {}),
     backupResult: backupPlan
       ? {

@@ -12,7 +12,7 @@ class CapabilitiesController
         return new JsonResponse([
             'schemaVersion' => 1,
             'extension' => 'nickhosting',
-            'extensionVersion' => '1.6.1',
+            'extensionVersion' => '1.7.0',
             'target' => [
                 'panel' => '1.11.11',
                 'blueprint' => 'beta-2025-09',
@@ -22,6 +22,8 @@ class CapabilitiesController
                 'technicalAccounts' => true,
                 'serverChangeEvents' => true,
                 'backupEvents' => true,
+                'installationEvents' => true,
+                'installationConsole' => true,
                 'fileOperations' => true,
                 'bulkUploadUrls' => true,
                 'bulkDownloadUrls' => true,

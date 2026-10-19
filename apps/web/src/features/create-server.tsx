@@ -1,21 +1,12 @@
 import { type UiOption, validateUiValues, visibleFields } from '@nickhosting/game-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import { type FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Link } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import { z } from 'zod';
 import { ApiError, api, idempotencyKey } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
-import {
-  Check,
-  Details,
-  Empty,
-  ErrorNotice,
-  Input,
-  Loading,
-  Page,
-  Section,
-} from '../components/ui.js';
+import { Check, Details, Empty, ErrorNotice, Input, Loading } from '../components/ui.js';
 import {
   type ConnectionReservation,
   creationConnectionChoice,
@@ -42,6 +33,7 @@ export function CreateServerPage() {
   const t = useT(),
     format = useFormat(),
     session = useSession();
+  const navigate = useNavigate();
   const [step, setStep] = useState(0),
     [gameId, setGameId] = useState(''),
     [values, setValues] = useState<Record<string, unknown>>({});
@@ -54,8 +46,7 @@ export function CreateServerPage() {
   const [choices, setChoices] = useState<Record<string, UiOption[]>>({}),
     [errors, setErrors] = useState<Record<string, string>>({}),
     [failure, setFailure] = useState<unknown>(),
-    [busy, setBusy] = useState(false),
-    [result, setResult] = useState<{ jobId: string; serverId: string }>();
+    [busy, setBusy] = useState(false);
   const [playerPending, setPlayerPending] = useState(false);
   const [whitelistMotion, setWhitelistMotion] = useState(false);
   const [preparedSummary, setPreparedSummary] = useState<{ labelKey: string; value: string }[]>([]);
@@ -196,7 +187,7 @@ export function CreateServerPage() {
   }
   async function next(event: FormEvent) {
     event.preventDefault();
-    if (busy || reserving.current || playerPending || result || !module || addressBlocked) return;
+    if (busy || reserving.current || playerPending || !module || addressBlocked) return;
     setFailure(undefined);
     setErrors({});
     if (step === nameStep && !name.trim()) {
@@ -328,21 +319,17 @@ export function CreateServerPage() {
         gameUiClient,
         { values: submitted, idempotencyKey: key.current },
       );
-      setResult(z.object({ serverId: z.uuid(), jobId: z.uuid() }).parse(response));
+      const result = z.object({ serverId: z.uuid(), jobId: z.uuid() }).parse(response);
+      navigate(`/servers/${result.serverId}/console`, {
+        replace: true,
+        state: { provisioningJobId: result.jobId },
+      });
     } catch (e) {
       setFailure(e);
     } finally {
       setBusy(false);
     }
   }
-  if (result)
-    return (
-      <Page title={t('web.createServer')}>
-        <Section>
-          <Link to={`/servers/${result.serverId}`}>{t('web.openServer')}</Link>
-        </Section>
-      </Page>
-    );
   const names = (id: string) => (Array.isArray(values[id]) ? (values[id] as string[]) : []);
   const enabled = page?.toggleField ? values[page.toggleField] === true : false;
   return (

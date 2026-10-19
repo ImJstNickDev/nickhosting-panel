@@ -400,7 +400,7 @@ uses Laravel fakes. It exercises transaction rollback, idempotency, encryption,
 authorization, identity invalidation, delivery retry and configuration transforms.
 It is not a MySQL lock-concurrency or real HTTP middleware test. Packaging uses
 an explicit file allowlist, excludes secrets/tests/docs, rejects symlinks and
-existing output, and defaults to ignored `build/blueprint/1.6.1/nickhosting.blueprint`.
+existing output, and defaults to ignored `build/blueprint/1.7.0/nickhosting.blueprint`.
 
 The [extension-only update procedure](UPDATE-INSTALLED.md) supports the reviewed
 1.5.0 → 1.6.0 and 1.6.0 → 1.6.1 transitions. Its default is a read-only plan;
@@ -423,7 +423,7 @@ Version 1.4.0 adds directory batches and three configurable bounds. The stable
 defaults are 48 directories per request and two parallel Wings reads, with an
 eight-second whole-batch deadline. Updating preserves all saved Owner settings;
 the new defaults apply only when a setting is absent or invalid.
-The admin view lists nine responsibilities in English and Italian.
+The admin view lists concise responsibilities in English and Italian.
 
 Version 1.6.1 corrects unintended serialization in archive commits and guarded
 file inspections: each operation shares one native Wings client, including
@@ -445,3 +445,46 @@ these are diagnostics, never completion evidence or part of the receipt identity
 Implementation independently uses existing public framework/model contracts.
 No Blueprint/PteroCA/closed-source implementation is copied or bundled; no new
 repository license decision is introduced.
+
+
+### Installation transport — 1.7.0
+
+`GET /api/client/extensions/nickhosting/servers/{server}/installation-websocket`
+returns native Wings `{data:{token,socket}}` with `Cache-Control: no-store`.
+Only a real Client API account token with `websocket.connect` and the exact
+linked non-admin technical owner is accepted. The managed server ID, UUID,
+external ID, node and linked account identity must match. This one route omits
+`AuthenticateServerAccess`, whose installing restriction would otherwise block
+the feature; suspension, node maintenance, restore and transfer restrictions
+remain enforced explicitly.
+
+The native ten-minute JWT grants exactly `websocket.connect` and
+`admin.websocket.install`, scoped to the server UUID and user UUID. It grants
+no command, power or file permissions. Wings also permits ordinary console output
+with `websocket.connect`; NickHosting's relay filters those frames out. It keeps the
+JWT on the backend, validates the Wings origin/path and relays only installer
+output and started/completed events. The ordinary console route is unchanged.
+The native `send logs` command is not an installer-history endpoint: NickHosting
+collects a bounded installer log from the live channel instead.
+
+The existing native `Server\Updated` model event also records an
+`installation.updated` event in the existing transactional signed outbox when
+`status` or `installed_at` changes. Its envelope is
+`{schemaVersion:1,eventId,instanceId,server,occurredAt,type,installation}`;
+`installation` is one of `{state:"installing",status:"installing"}`,
+`{state:"installed",status:null}`, or
+`{state:"failed",status:"install_failed"|"reinstall_failed"}`.
+It does not depend on the email-gated `Server\Installed` notification and does
+not advance the independent resource-limit revision. Unchanged unrelated
+updates, unsuspension and foreign/unlinked server changes do not report an
+installation. A repeated callback can wake reconciliation again; the existing
+signed event ID fences delivery replay. This event wakes the NickHosting job;
+it does not replace managed-identity, installation receipt or resource checks.
+
+Discovery advertises `installationConsole:true` and `installationEvents:true`.
+No extension migration or Wings/Panel source patch is added. Installing 1.7.0
+requires separate approval of the native Blueprint update and its rollback;
+the legacy extension-only updater deliberately does not accept this layout.
+The in-memory PHP tests exercise native JWT signing, policy, model observer,
+transaction rollback and exact ownership using the installed framework vendor
+libraries without bootstrapping the Panel or accessing its database.

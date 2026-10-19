@@ -18,6 +18,7 @@ export * from './gateway-orchestration.js';
 export * from './gateway-registry.js';
 export * from './health.js';
 export * from './host-observations.js';
+export * from './installation-collector.js';
 export * from './integration-settings.js';
 export * from './lifecycle.js';
 export * from './minecraft-catalog.js';
@@ -29,7 +30,13 @@ export * from './platform-queries.js';
 export { ensureProviderAccounts, resolveProviderCredential } from './provider-accounts.js';
 export * from './provider-backup-events.js';
 export * from './provider-change-feed.js';
-export { refreshProviderFeeds, startProviderFeedLoop } from './provider-feed-worker.js';
+export {
+  ensureInstallationFeedLink,
+  refreshProviderFeeds,
+  startProviderFeedLoop,
+} from './provider-feed-worker.js';
+export * from './provider-installation-events.js';
+export * from './provisioning.js';
 export * from './registry.js';
 export * from './runtime.js';
 export * from './schedules.js';

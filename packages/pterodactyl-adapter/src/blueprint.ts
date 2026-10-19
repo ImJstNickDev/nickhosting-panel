@@ -21,6 +21,8 @@ export const nickHostingExtensionSchema = z
         bulkDownloadUrls: z.boolean().optional(),
         bulkDirectoryListings: z.boolean().optional(),
         backupEvents: z.boolean().optional(),
+        installationEvents: z.boolean().optional(),
+        installationConsole: z.boolean().optional(),
         fileOperations: z.boolean().optional(),
       })
       .strict(),
@@ -98,7 +100,32 @@ export const providerBackupEventSchema = z
   })
   .strict();
 export type ProviderBackupEvent = z.infer<typeof providerBackupEventSchema>;
-export const providerEventSchema = z.union([providerChangeSchema, providerBackupEventSchema]);
+export const providerInstallationEventSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    eventId: z.uuid(),
+    instanceId: z.uuid(),
+    server: providerIdentitySchema,
+    type: z.literal('installation.updated'),
+    occurredAt: z.iso.datetime({ offset: true }),
+    installation: z.union([
+      z.object({ state: z.literal('installing'), status: z.literal('installing') }).strict(),
+      z.object({ state: z.literal('installed'), status: z.null() }).strict(),
+      z
+        .object({
+          state: z.literal('failed'),
+          status: z.enum(['install_failed', 'reinstall_failed']),
+        })
+        .strict(),
+    ]),
+  })
+  .strict();
+export type ProviderInstallationEvent = z.infer<typeof providerInstallationEventSchema>;
+export const providerEventSchema = z.union([
+  providerChangeSchema,
+  providerBackupEventSchema,
+  providerInstallationEventSchema,
+]);
 export const providerHealthSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -259,7 +286,7 @@ export function verifyProviderEventSignature(input: {
   eventId: string;
   secret: string;
   now?: number;
-}): ProviderChange | ProviderBackupEvent {
+}): ProviderChange | ProviderBackupEvent | ProviderInstallationEvent {
   if (
     Buffer.byteLength(input.body) > 65536 ||
     !/^[0-9]{10}$/.test(input.timestamp) ||

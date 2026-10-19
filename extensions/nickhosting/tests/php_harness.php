@@ -41,7 +41,7 @@ $settings->save('https://review.example');
 Schema::create('servers', function ($t) {
     $t->increments('id'); $t->string('uuid'); $t->string('uuidShort'); $t->string('external_id'); $t->integer('node_id'); $t->integer('owner_id')->default(1);
     foreach (['memory','swap','disk','io','cpu'] as $field) { $t->integer($field); }
-    $t->string('threads')->nullable(); $t->timestamps();
+    $t->string('threads')->nullable(); $t->string('status')->nullable(); $t->timestamp('installed_at')->nullable(); $t->timestamps();
 });
 Schema::create('users', function ($t) { $t->increments('id'); $t->string('uuid'); $t->string('external_id'); $t->boolean('root_admin'); $t->boolean('use_totp')->default(false); $t->string('totp_secret')->nullable(); foreach (['username','email','password','name_first','name_last','language'] as $field) { $t->string($field)->nullable(); } $t->timestamps(); });
 Schema::create('api_keys', function ($t) { $t->increments('id'); $t->integer('user_id'); $t->integer('key_type'); $t->string('identifier'); $t->text('token'); $t->text('memo'); $t->text('allowed_ips'); $t->timestamps(); });
@@ -240,7 +240,7 @@ foreach (['en','it'] as $locale) {
     check(str_contains($html, 'name="_token"') && str_contains($html, 'value="PATCH"'), 'Blade CSRF and method fields ' . $locale);
     check(str_contains($html, $locale==='it' ? 'Ultima consegna confermata' : 'Last acknowledged delivery'), 'Blade status localized ' . $locale);
     check(str_contains($html, 'https://review.example'), 'Blade origin visible ' . $locale);
-    check(substr_count($html, '<li>') === 11 && str_contains($html, $locale==='it' ? 'più upload' : 'multiple uploads'), 'Blade concise feature bullets ' . $locale);
+    check(substr_count($html, '<li>') === 12 && str_contains($html, $locale==='it' ? 'più upload' : 'multiple uploads'), 'Blade concise feature bullets ' . $locale);
     check(str_contains($html, 'name="downloadBatchLimit"') && str_contains($html, 'value="2500"') && str_contains($html, $locale === 'it' ? 'Durata URL firmati' : 'Signed URL lifetime'), 'Blade operational settings localized ' . $locale);
 }
 $instance = '11111111-1111-4111-8111-111111111111';
@@ -372,6 +372,7 @@ function transferRequest(string $kind, array $data, $server, $user, mixed $token
         'guarded-delete' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\GuardedDeleteRequest::class,
         'archive-commit' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\ArchiveCommitRequest::class,
         'directory-settings' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\DirectorySettingsRequest::class,
+        'installation-websocket' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\InstallationWebsocketRequest::class,
     };
     $method=str_ends_with($kind,'settings') ? 'GET' : 'POST';
     $r=$class::create('/api/client/extensions/nickhosting/servers/'.$server->uuidShort.'/'.$kind, $method, $data);
@@ -509,6 +510,7 @@ $lowerUploadBody=$uploads(uploadRequest(['count'=>2],$uploadServer,$uploadUser),
 $ttl=strtotime($lowerUploadBody['expiresAt'])-time();
 check($ttl>=118 && $ttl<=120, 'upload signing uses configurable lifetime');
 $settings->saveOperational($defaults);
+eval($installationHarness);
 eval($directoryHarness);
 eval($fileOperationHarness);
 eval($backupHarness);

@@ -12,6 +12,75 @@ import {
   markProviderFeedHealth,
 } from './provider-change-feed.js';
 
+/** Link one newly provisioned identity immediately so its first installer stream
+ * need not wait for the shared feed maintenance interval. */
+export async function ensureInstallationFeedLink(
+  db: Kysely<Database>,
+  codec: SecretCodec,
+  env: Readonly<Record<string, string | undefined>>,
+  serverId: string,
+  coordinator?: Parameters<typeof createNickHostingBridge>[0]['coordinator'],
+) {
+  const existing = await db
+    .selectFrom('provider_server_projections')
+    .select(['server_id', 'identity_invalidated'])
+    .where('server_id', '=', serverId)
+    .executeTakeFirst();
+  if (existing?.identity_invalidated) throw new Error('Provider identity invalidated');
+  if (existing) return;
+  const [{ values }, applicationKey, server] = await Promise.all([
+    getSettings(db, env),
+    getSecret(db, codec, 'pterodactylApplicationKey', env),
+    db
+      .selectFrom('managed_servers as s')
+      .innerJoin('managed_nodes as n', 'n.id', 's.node_id')
+      .select([
+        's.id',
+        's.pterodactyl_id',
+        's.pterodactyl_uuid',
+        's.pterodactyl_identifier',
+        's.provider_user_id',
+        's.external_id',
+        'n.pterodactyl_node_id',
+      ])
+      .where('s.id', '=', serverId)
+      .where('s.deleted_at', 'is', null)
+      .executeTakeFirst(),
+  ]);
+  if (
+    !applicationKey ||
+    !values.pterodactylBaseUrl ||
+    !server?.pterodactyl_id ||
+    !server.pterodactyl_uuid ||
+    !server.pterodactyl_identifier
+  )
+    return;
+  const feed = await db
+    .selectFrom('provider_change_feeds')
+    .select('instance_id')
+    .where('enabled', '=', true)
+    .where('provider_url', '=', values.pterodactylBaseUrl.replace(/\/$/, ''))
+    .executeTakeFirst();
+  if (!feed) return;
+  const bridge = createNickHostingBridge({
+    baseURL: values.pterodactylBaseUrl,
+    applicationKey,
+    coordinator,
+  });
+  const snapshot = await bridge.linkServer(
+    feed.instance_id,
+    {
+      providerId: server.pterodactyl_id,
+      providerUuid: server.pterodactyl_uuid,
+      identifier: server.pterodactyl_identifier,
+      externalId: server.external_id,
+      nodeId: server.pterodactyl_node_id,
+    },
+    server.provider_user_id ?? undefined,
+  );
+  await linkProviderFeedServer(db, feed.instance_id, serverId, snapshot);
+}
+
 /** One shared background feed check, never one poll per browser or Start. */
 export async function refreshProviderFeeds(
   db: Kysely<Database>,

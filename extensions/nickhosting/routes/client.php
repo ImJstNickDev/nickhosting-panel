@@ -9,6 +9,10 @@ use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Http\Controllers\Dire
 use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Http\Controllers\DirectorySettingsController;
 
 // Blueprint supplies native Client authentication, IP restrictions, binding and rate limits.
+// Exact technical-owner access is checked in the controller. Native server middleware
+// intentionally blocks non-admins while installing, so this read-only route omits it.
+Route::get('/servers/{server}/installation-websocket', \Pterodactyl\BlueprintFramework\Extensions\{identifier}\Http\Controllers\InstallationWebsocketController::class);
+
 Route::post('/servers/{server}/upload-urls', UploadUrlsController::class)
     ->middleware(AuthenticateServerAccess::class);
 

@@ -20,7 +20,7 @@ import {
   Section,
   Time,
 } from '../components/ui.js';
-import { activityLabelKey } from './activity-labels.js';
+import { activityLabelKey, activityStatus } from './activity-labels.js';
 import { getGameArtwork } from './integrations.js';
 import { type Resources, type ServerInfo, serverPath, useServer } from './service-contracts.js';
 import { useStorageUsage } from './use-storage-usage.js';
@@ -107,7 +107,12 @@ function ServerCardResource({
 }
 function serverListState(server: ServerInfo): { tone: string; label: string } {
   if (server.installationState === 'pending' || server.installationState === 'installing')
-    return { tone: 'pending', label: statusKey(server.installationState) };
+    return {
+      tone: 'pending',
+      label: `provisioning.${server.installationState === 'pending' ? 'preparing' : 'installing'}`,
+    };
+  if (server.installationState === 'failed')
+    return { tone: 'unknown', label: 'provisioning.failed' };
   if (server.runtimeState === 'starting' || server.runtimeState === 'stopping')
     return { tone: 'pending', label: statusKey(server.runtimeState) };
   if (server.activeOperationId) return { tone: 'pending', label: 'platform.activeOperation' };
@@ -459,12 +464,7 @@ export function HomePage() {
                   <span>{job.serverName ?? t('platform.operation')}</span>
                   <span className="muted">{t(activityLabelKey(job))}</span>
                 </Link>
-                <Badge
-                  value={job.effectState === 'uncertain' ? 'uncertain' : job.state}
-                  label={t(
-                    `activity.state.${job.effectState === 'uncertain' ? 'uncertain' : job.state}`,
-                  )}
-                />
+                <Badge value={activityStatus(job).value} label={t(activityStatus(job).labelKey)} />
                 <Time value={job.updatedAt} />
               </li>
             ))}

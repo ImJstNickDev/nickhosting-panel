@@ -39,6 +39,8 @@ final class BridgeServiceProvider extends ServiceProvider
         Event::listen(\Pterodactyl\Events\ActivityLogged::class, static fn ($event) =>
             app(\Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\BackupEvents::class)->capture($event));
         Event::listen(Updated::class, static fn (Updated $event) => app(ChangeFeed::class)->capture($event->server));
+        Event::listen(Updated::class, static fn (Updated $event) =>
+            app(\Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\InstallationEvents::class)->capture($event->server));
         Event::listen(Deleted::class, static fn (Deleted $event) => app(ChangeFeed::class)->capture($event->server, true));
         $this->callAfterResolving(Schedule::class, static function (Schedule $schedule) {
             $schedule->job(new DeliverChanges(), 'standard')->everyMinute()->withoutOverlapping();

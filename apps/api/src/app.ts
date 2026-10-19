@@ -61,6 +61,7 @@ interface Options {
   env?: Readonly<Record<string, string | undefined>>;
   defaultLocale?: () => Promise<'en' | 'it'>;
   log?: (event: Record<string, unknown>) => void;
+  provisioningCache?: import('@nickhosting/pterodactyl-adapter').PrivateTransferCache;
   management?: () => Promise<ManagementRuntime>;
   /** Isolated tests only: substitute public content HTTP without provider credentials. */
   minecraftContentHttp?: ContentHttp;
@@ -571,6 +572,7 @@ export function createApp(options: Options) {
       }),
   });
   registerServerRoutes(app, {
+    provisioningCache: options.provisioningCache,
     logger: options.logger,
     db,
     pool: options.database.pool,

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLogger, DomainError, encryptionKeyFromBase64, SecretCodec } from '@nickhosting/core';
@@ -6,11 +6,14 @@ import { createDatabase, getSettings } from '@nickhosting/database';
 import { createPrivateTransferCache, processJob, startJobWorker } from '@nickhosting/jobs';
 import {
   createDirectoryIdentityCache,
+  createInstallationCollector,
   createManagementRuntime,
   createManagementTransportCoordinator,
+  ensureInstallationFeedLink,
   ensureProviderAccounts,
   recordWorkerHeartbeat,
   refreshHostObservations,
+  wakeInstallationOperation,
 } from '@nickhosting/server-management';
 import { startHostObservationLoop } from './host-observations.js';
 import { pollFabricMetadata, pollMinecraftMetadata } from './minecraft-metadata.js';
@@ -30,6 +33,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     const logger = createLogger((record) => process.stdout.write(`${JSON.stringify(record)}\n`), {
       level: settings.values.logLevel,
     });
+    let installations: ReturnType<typeof createInstallationCollector> | undefined;
     const management = async () => {
       if (!env.NH_SECRETS_MASTER_KEY) throw new DomainError('configuration_invalid');
       const keyId = env.NH_SECRETS_KEY_ID ?? 'primary';
@@ -53,6 +57,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         transferCache,
         directoryIdentityCache,
         codec,
+        onInstallationAvailable: (jobId, serverId) => installations?.ensure(jobId, serverId),
       });
     };
     const runtime = await startJobWorker({
@@ -70,6 +75,64 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         return row ? (await management()).process(jobId) : processJob(db, jobId);
       },
     });
+    // Reuse the job Redis connection and deployment/database namespace for replica leases.
+    const redis = await runtime.queue.getBackend().client;
+    redis.defineCommand('nhInstallationLease', {
+      numberOfKeys: 1,
+      lua: `
+      if ARGV[2] == 'claim' then
+        if redis.call('SET',KEYS[1],ARGV[1],'PX',15000,'NX') then return 1 else return 0 end
+      end
+      if redis.call('GET',KEYS[1]) ~= ARGV[1] then return 0 end
+      if ARGV[2] == 'renew' then return redis.call('PEXPIRE',KEYS[1],15000) end
+      return redis.call('DEL',KEYS[1])
+    `,
+    });
+    const leasePrefix = `${env.NH_JOB_PREFIX}:installation:{${createHash('sha256')
+      .update(JSON.stringify([env.NH_JOB_PREFIX, env.DATABASE_URL]))
+      .digest('hex')}}`;
+    if (env.NH_SECRETS_MASTER_KEY) {
+      const keyId = env.NH_SECRETS_KEY_ID ?? 'primary';
+      const installCodec = new SecretCodec({
+        activeKeyId: keyId,
+        keys: { [keyId]: encryptionKeyFromBase64(env.NH_SECRETS_MASTER_KEY ?? '') },
+      });
+      transferCache ??= createPrivateTransferCache({
+        redisUrl: env.REDIS_URL,
+        prefix: env.NH_JOB_PREFIX,
+        databaseUrl: env.DATABASE_URL,
+        codec: installCodec,
+        logger,
+      });
+      if (transferCache)
+        installations = createInstallationCollector({
+          db,
+          cache: transferCache,
+          adapter: async () => (await management()).adapter,
+          prepare: (serverId) =>
+            ensureInstallationFeedLink(db, installCodec, env, serverId, transportCoordinator),
+          wake: (jobId) => wakeInstallationOperation(db, jobId),
+          leaseKey: (jobId) => `${leasePrefix}:${jobId}`,
+          async lease(jobId, token, operation) {
+            const key = `${leasePrefix}:${jobId}`;
+            const result = await redis.runCommand('nhInstallationLease', [key, token, operation]);
+            return result === 1;
+          },
+        });
+    }
+    const recoverInstallations = async () => {
+      const rows = await db
+        .selectFrom('server_operations as o')
+        .innerJoin('managed_servers as s', 's.active_operation_id', 'o.job_id')
+        .select(['o.job_id', 's.id'])
+        .where('o.action', 'in', ['provision', 'reinstall'])
+        .where('s.deleted_at', 'is', null)
+        .where('s.pterodactyl_identifier', 'is not', null)
+        .where('s.installation_state', 'in', ['pending', 'installing'])
+        .limit(32)
+        .execute();
+      for (const row of rows) installations?.ensure(row.job_id, row.id);
+    };
     const observations = startHostObservationLoop(
       async () => {
         await refreshHostObservations(db, env, { force: true });
@@ -115,6 +178,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     const poll = async () => {
       let successful = false;
       try {
+        await recoverInstallations();
         await reconcileServers(db, management, logger, env);
         successful =
           schedulesHealthy &&
@@ -181,6 +245,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           providerAccounts.close(),
         ]);
         try {
+          await installations?.close();
           await runtime.close();
         } finally {
           directoryIdentityCache?.close();

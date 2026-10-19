@@ -12,10 +12,10 @@ import {
 } from './transport.js';
 
 export type ConsoleEvent =
-  | { type: 'console'; data: string }
+  | { type: 'console'; data: string; source?: 'installation' }
   | { type: 'status'; data: 'offline' | 'starting' | 'running' | 'stopping' }
   | { type: 'stats'; data: ConsoleStats }
-  | { type: 'installation'; phase: 'completed' }
+  | { type: 'installation'; phase: 'started' | 'completed' }
   | { type: 'error'; code: 'integration_unavailable' }
   | { type: 'closed' };
 const statsSchema = z.object({
@@ -51,6 +51,7 @@ export async function createConsoleRelay(
   identifier: string,
   serverUUID: string,
   input: ConsoleRelayOptions,
+  mode: 'console' | 'installation' = 'console',
 ): Promise<ConsoleRelay> {
   const duration = parseInput(
     z.number().int().min(1000).max(3600000),
@@ -69,7 +70,9 @@ export async function createConsoleRelay(
   async function credentials() {
     const response = await transport.json(
       'client',
-      `servers/${segment(identifier)}/websocket`,
+      mode === 'installation'
+        ? `extensions/nickhosting/servers/${segment(identifier)}/installation-websocket`
+        : `servers/${segment(identifier)}/websocket`,
       tokenSchema,
     );
     try {
@@ -223,18 +226,29 @@ export async function createConsoleRelay(
       }
       if (!authenticated) return;
       if (
+        mode === 'installation' &&
+        !['install output', 'install started', 'install completed'].includes(event.event)
+      )
+        return;
+      if (
         event.event === 'console output' ||
         event.event === 'install output' ||
         event.event === 'daemon message'
       ) {
         let line = parseInput(z.string().max(32768), event.args[0]);
         for (const secret of hidden) line = line.replaceAll(secret, '[redacted]');
-        emit({ type: 'console', data: line });
+        emit({
+          type: 'console',
+          data: line,
+          ...(event.event === 'install output' ? { source: 'installation' as const } : {}),
+        });
       } else if (event.event === 'status') {
         emit({
           type: 'status',
           data: parseInput(z.enum(['offline', 'starting', 'running', 'stopping']), event.args[0]),
         });
+      } else if (event.event === 'install started') {
+        emit({ type: 'installation', phase: 'started' });
       } else if (event.event === 'install completed') {
         // This is a completion notification, never an installation-success claim.
         emit({ type: 'installation', phase: 'completed' });
@@ -255,7 +269,7 @@ export async function createConsoleRelay(
   }
   return {
     async sendCommand(command) {
-      if (!input.canSendCommands) throw new DomainError('forbidden');
+      if (mode === 'installation' || !input.canSendCommands) throw new DomainError('forbidden');
       const value = parseInput(
         z
           .string()
@@ -270,10 +284,12 @@ export async function createConsoleRelay(
       send('send command', [value]);
     },
     async requestLogs() {
+      if (mode === 'installation') throw new DomainError('forbidden');
       await assertAuthorized();
       send('send logs');
     },
     async requestStats() {
+      if (mode === 'installation') throw new DomainError('forbidden');
       await assertAuthorized();
       send('send stats');
     },

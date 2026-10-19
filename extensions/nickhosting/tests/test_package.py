@@ -61,9 +61,9 @@ class PackageTests(unittest.TestCase):
         with zipfile.ZipFile(self.output) as archive:
             for name in ('app/Services/TechnicalAccounts.php', 'app/Http/Middleware/TechnicalAccountAccess.php', 'private/migrations/2026_10_12_000003_nickhosting_technical_users.php'):
                 self.assertIn(name, archive.namelist())
-            self.assertIn(b'version: 1.6.1\n', archive.read('conf.yml'))
-            self.assertIn(b"'extensionVersion' => '1.6.1'", archive.read('app/Http/Controllers/CapabilitiesController.php'))
-            self.assertIn(b'<small>1.6.1</small>', archive.read('admin/view.blade.php'))
+            self.assertIn(b'version: 1.7.0\n', archive.read('conf.yml'))
+            self.assertIn(b"'extensionVersion' => '1.7.0'", archive.read('app/Http/Controllers/CapabilitiesController.php'))
+            self.assertIn(b'<small>1.7.0</small>', archive.read('admin/view.blade.php'))
 
     def test_client_upload_route_and_authorization_packaged(self):
         packager.build(self.source, self.output)
@@ -97,6 +97,19 @@ class PackageTests(unittest.TestCase):
             self.assertIn(b"'backupEvents' => true", archive.read('app/Http/Controllers/CapabilitiesController.php'))
             self.assertIn(b'ActivityLogged::class', archive.read('app/Providers/BridgeServiceProvider.php'))
             self.assertNotIn('/backups', archive.read('routes/client.php').decode())
+
+    def test_installation_stream_and_native_status_events_packaged(self):
+        packager.build(self.source, self.output)
+        with zipfile.ZipFile(self.output) as archive:
+            for name in ('app/Http/Requests/InstallationWebsocketRequest.php',
+                         'app/Http/Controllers/InstallationWebsocketController.php',
+                         'app/Services/InstallationEvents.php'):
+                self.assertIn(name, archive.namelist())
+            self.assertIn(b"'installationEvents' => true", archive.read('app/Http/Controllers/CapabilitiesController.php'))
+            self.assertIn(b"'installationConsole' => true", archive.read('app/Http/Controllers/CapabilitiesController.php'))
+            self.assertIn(b'/installation-websocket', archive.read('routes/client.php'))
+            self.assertNotIn(b'Server\\Installed', archive.read('app/Providers/BridgeServiceProvider.php'))
+            self.assertEqual(sum(name.startswith('private/migrations/') for name in archive.namelist()), 5)
 
     def test_scoped_file_operations_and_durable_receipts_packaged(self):
         packager.build(self.source, self.output)

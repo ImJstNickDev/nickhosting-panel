@@ -4,7 +4,11 @@ import {
   providerEventSchema,
   verifyProviderEventSignature,
 } from '@nickhosting/pterodactyl-adapter';
-import { applyProviderBackupEvent, applyProviderChange } from '@nickhosting/server-management';
+import {
+  applyProviderBackupEvent,
+  applyProviderChange,
+  applyProviderInstallationEvent,
+} from '@nickhosting/server-management';
 import type { Kysely } from 'kysely';
 
 export const PROVIDER_EVENTS_PATH = '/v1/provider-events/pterodactyl';
@@ -55,6 +59,8 @@ export async function receiveProviderEvent(options: {
   });
   if (event.type === 'backup.completed' || event.type === 'backup.restore-completed')
     await applyProviderBackupEvent(options.db, event);
+  else if (event.type === 'installation.updated')
+    await applyProviderInstallationEvent(options.db, event);
   else await applyProviderChange(options.db, event);
   return { received: true };
 }

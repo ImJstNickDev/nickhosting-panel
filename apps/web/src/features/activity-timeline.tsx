@@ -7,7 +7,7 @@ import type { Result } from '../api/contracts.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { Tooltip } from '../components/tooltip.js';
 import { Badge, ErrorNotice, Page, Time } from '../components/ui.js';
-import { activityJobKey, activityLabelKey } from './activity-labels.js';
+import { activityJobKey, activityLabelKey, activityStatus } from './activity-labels.js';
 import { CursorControls } from './servers.js';
 import './activity.css';
 
@@ -422,12 +422,7 @@ export function ActivityTimeline({ serverId }: { serverId?: string }) {
                   const open = expanded === item.id,
                     label = t(activityLabelKey(item)),
                     meta = item.metadata ?? {},
-                    outcome =
-                      item.phase === 'owner_resolved_failed'
-                        ? 'failed'
-                        : item.effectState === 'uncertain'
-                          ? 'uncertain'
-                          : (item.outcome ?? item.state);
+                    outcome = activityStatus(item);
                   const automatic = ['system', 'schedule'].includes(item.source),
                     actor = automatic
                       ? t(`activity.source.${item.source}`)
@@ -496,7 +491,7 @@ export function ActivityTimeline({ serverId }: { serverId?: string }) {
                           {item.source === 'sftp' && <small>SFTP</small>}
                         </td>
                         <td className="activity-outcome" data-label={t('web.status')}>
-                          <Badge value={outcome} label={t(`activity.state.${outcome}`)} />
+                          <Badge value={outcome.value} label={t(outcome.labelKey)} />
                         </td>
                         <td className="activity-time" data-label={t('activity.when')}>
                           <Time value={item.createdAt} />

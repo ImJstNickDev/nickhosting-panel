@@ -756,6 +756,7 @@ export async function installBrowserFixtures(
         reader.releaseLock();
       }
     },
+    relayInstallation: async (id, input) => adapter.relayConsole(id, input),
     relayConsole: async (id, input) => {
       const r = remote(id);
       if (!(await input.authorize())) throw new DomainError('forbidden');
