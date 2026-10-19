@@ -41,3 +41,12 @@ export const worldCatalogFilesSchema = z
   .object({ items: z.array(worldCatalogFileSchema).max(20), ...pagination })
   .strict();
 export type WorldCatalogFiles = z.infer<typeof worldCatalogFilesSchema>;
+
+/** Datapacks share catalog metadata, with explicit per-file installation limits. */
+export const datapackCatalogFileSchema = worldCatalogFileSchema.extend({
+  unavailableReason: z.enum(['dependencies', 'distribution', 'archive']).optional(),
+});
+export const datapackCatalogFilesSchema = worldCatalogFilesSchema.extend({
+  items: z.array(datapackCatalogFileSchema).max(20),
+});
+export type DatapackCatalogFiles = z.infer<typeof datapackCatalogFilesSchema>;

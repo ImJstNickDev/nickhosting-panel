@@ -92,7 +92,16 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
         project_type: 'mod',
       };
     if (address.pathname === '/v2/project/catalog-pack/version')
-      return [version('first'), version('second')];
+      return [
+        version('first'),
+        version('second'),
+        {
+          ...version('blocked'),
+          dependencies: [
+            { project_id: 'required-mod', version_id: null, dependency_type: 'required' },
+          ],
+        },
+      ];
     if (address.pathname.startsWith('/v2/version/'))
       return version(address.pathname.split('/').at(-1) ?? 'first');
     throw new Error(`Unexpected fixture request ${address.pathname}`);
@@ -312,9 +321,35 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
       const dialog = user.getByRole('dialog', { name: 'Find datapacks', exact: true });
       await dialog.getByRole('button', { name: /Catalog pack/ }).click();
       const files = user.getByRole('dialog', { name: 'Catalog pack', exact: true });
-      await files.getByRole('button', { name: 'Prepare this file', exact: true }).first().click();
+      await browserExpect(
+        files.getByText(
+          'This version declares dependencies or conflicts that automatic installation does not yet handle.',
+          { exact: true },
+        ),
+      ).toBeVisible();
+      await browserExpect(
+        files
+          .getByRole('listitem')
+          .filter({ hasText: 'Pack blocked' })
+          .getByRole('button', { name: 'Prepare this file', exact: true }),
+      ).toBeDisabled();
+      await files
+        .getByRole('listitem')
+        .filter({ hasText: 'Pack first' })
+        .getByRole('button', { name: 'Prepare this file', exact: true })
+        .click();
+      await user.screenshot({
+        path: resolve(
+          '.codex/local/m5-browser/screenshots/minecraft-datapacks-catalog-unavailable-en.png',
+        ),
+        fullPage: true,
+      });
       await expect.poll(() => download.mock.calls.length).toBe(1);
-      await files.getByRole('button', { name: 'Prepare this file', exact: true }).click();
+      await files
+        .getByRole('listitem')
+        .filter({ hasText: 'Pack second' })
+        .getByRole('button', { name: 'Prepare this file', exact: true })
+        .click();
       await browserExpect(
         files.getByRole('button', { name: 'Queued for preparation', exact: true }),
       ).toBeVisible();

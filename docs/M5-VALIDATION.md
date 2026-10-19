@@ -13921,3 +13921,37 @@ any live server. The extra source correction loaded through the existing watcher
 Rollback preserves additive tables and durable receipts. No Blueprint, Wings,
 Pterodactyl, DNS or production configuration was changed. PR #21 stays OPEN and
 unmerged; SFTPGo #18 remains an independent production-release gate.
+
+### Datapack catalog unavailable-release regression (2026-10-19)
+
+Authenticated read-only requests for CurseForge's “Hostile Neural Networks: Extra
+Data Models” and Modrinth's “Cobblemon additions” returned HTTP 200, with individual
+releases marked unavailable because of declared dependencies/conflicts. The UI
+incorrectly parsed these receipts with the strict world-catalog schema, rejecting
+the additional availability reason and turning the whole list into a generic error.
+
+The controller now consumes the canonical datapack schema through the existing
+browser-safe catalog entry. EN/IT copy explains each unavailable release without
+discarding usable results or relaxing installation guards. Strict world receipts
+remain unchanged. The fix loads through existing dev watchers: the live Vite
+controller transformation returns HTTP 200; no container restart, migration or
+package installation was needed.
+
+Final focused checks:
+
+```sh
+scripts/dev.sh pnpm exec vitest run games/minecraft/src/ui/ui.test.ts packages/content-providers/src/datapacks.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-datapacks.browser.test.ts
+scripts/dev.sh pnpm typecheck
+scripts/dev.sh pnpm i18n:check
+```
+
+Results: **53/53 unit tests**, **8/8 browser tests**, typecheck and all 2412
+EN/IT/pseudolocale keys passed; scoped Biome and diff checks passed. Both provider
+routes have mixed-availability contract coverage, including invalid/unexpected
+fields; browser coverage uses actual Modrinth adapter logic with isolated provider
+fixtures and verifies the blocked action plus successful background preparation.
+[Catalog screenshot](screenshots/m5/minecraft-datapacks-catalog-unavailable-en.png)
+shows available and blocked releases together. No live datapack was downloaded,
+installed or reloaded. Dependency resolution remains unsupported, not bypassed.
+Independent final source and screenshot review found no must-fix findings.

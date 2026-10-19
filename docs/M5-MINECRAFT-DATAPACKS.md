@@ -117,6 +117,13 @@ does not claim real-client testing of every historical release.
 - [Desktop inventory](screenshots/m5/minecraft-datapacks-desktop-en.png)
 - [Italian mobile inventory](screenshots/m5/minecraft-datapacks-mobile-it.png)
 - [Prepared catalog changes](screenshots/m5/minecraft-datapacks-prepared-en.png)
+- [Available and unavailable catalog releases](screenshots/m5/minecraft-datapacks-catalog-unavailable-en.png)
+
+Catalog releases carry their individual availability reason: unsupported dependency
+or conflict handling, provider distribution restrictions, or no supported verifiable
+ZIP. One unavailable release does not invalidate the rest of the project list.
+The UI and backend consume the same strict datapack receipt schema; world catalogs
+retain their separate strict contract. These reasons do not bypass installation guards.
 
 These are real browser captures against isolated application handlers and provider
 fixtures, not screenshots of a live game-server installation.

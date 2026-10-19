@@ -210,7 +210,17 @@ export function MinecraftDatapackCatalog({
                           : t(key('catalog.version'), { versions: file.gameVersions.join(', ') })}
                       </span>
                     )}
-                    {!file.available && <span>{t(key('catalog.downloadUnavailable'))}</span>}
+                    {!file.available && (
+                      <span>
+                        {t(
+                          key(
+                            file.unavailableReason
+                              ? `catalog.unavailable.${file.unavailableReason}`
+                              : 'catalog.downloadUnavailable',
+                          ),
+                        )}
+                      </span>
+                    )}
                   </div>
                   <button
                     type="button"

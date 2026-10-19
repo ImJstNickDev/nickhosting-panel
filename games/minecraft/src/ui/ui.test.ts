@@ -149,6 +149,52 @@ describe('Minecraft browser module and exact API contracts', () => {
     ).rejects.toThrow();
     expect(client.request).toHaveBeenCalledTimes(3);
   });
+  it.each(['curseforge', 'modrinth'] as const)(
+    'keeps mixed %s datapack results and explains unavailable releases without weakening world schemas',
+    async (provider) => {
+      const client = clientFixture(),
+        controller = createMinecraftUiController(client);
+      const file = {
+        id: 'version',
+        projectId: 'project',
+        name: 'Pack',
+        filename: 'pack.zip',
+        gameVersions: ['26.1'],
+        publishedAt: '2026-01-01T00:00:00Z',
+        bytes: 100,
+        available: true,
+      };
+      const receipt = {
+        offset: 0,
+        limit: 20,
+        total: 5,
+        items: [
+          file,
+          ...(['dependencies', 'distribution', 'archive'] as const).map((reason) => ({
+            ...file,
+            id: reason,
+            available: false,
+            unavailableReason: reason,
+          })),
+          { ...file, id: 'no-reason', available: false },
+        ],
+      };
+      client.request.mockResolvedValue(JSON.parse(JSON.stringify(receipt)));
+      const result = await controller.datapackCatalogFiles(serverId, provider, 'project');
+      expect(result).toEqual(receipt);
+      expect(result.items[0]?.available).toBe(true);
+      await expect(controller.worldCatalogFiles(serverId, '123')).rejects.toThrow();
+      for (const invalid of [
+        { ...file, unavailableReason: 'unrecognized' },
+        { ...file, secret: 'must-not-pass' },
+      ]) {
+        client.request.mockResolvedValue({ ...receipt, total: 1, items: [invalid] });
+        await expect(
+          controller.datapackCatalogFiles(serverId, provider, 'project'),
+        ).rejects.toThrow();
+      }
+    },
+  );
   it('projects the existing tracked inventory without scanning files or duplicating requests', async () => {
     const client = clientFixture();
     const paths = [

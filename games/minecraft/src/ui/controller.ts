@@ -1,4 +1,5 @@
 import {
+  datapackCatalogFilesSchema,
   worldCatalogFilesSchema,
   worldCatalogProjectsSchema,
 } from '@nickhosting/content-providers/world-catalog';
@@ -472,7 +473,7 @@ export function createMinecraftUiController(client: GameUiClient) {
       offset = 0,
       signal?: AbortSignal,
     ) {
-      return worldCatalogFilesSchema.parse(
+      return datapackCatalogFilesSchema.parse(
         await request(
           serverPath(
             serverId,

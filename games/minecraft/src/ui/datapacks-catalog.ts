@@ -99,6 +99,18 @@ export const minecraftDatapacksMessages: Record<string, [string, string]> = {
     'This provider is not configured.',
     'Questo provider non è configurato.',
   ],
+  'datapacks.catalog.unavailable.dependencies': [
+    'This version declares dependencies or conflicts that automatic installation does not yet handle.',
+    'Questa versione dichiara dipendenze o conflitti non ancora gestiti dall’installazione automatica.',
+  ],
+  'datapacks.catalog.unavailable.distribution': [
+    'The provider does not make this file available for automatic download.',
+    'Il provider non rende disponibile questo file per il download automatico.',
+  ],
+  'datapacks.catalog.unavailable.archive': [
+    'No supported, verifiable ZIP is available for this version.',
+    'Per questa versione non è disponibile uno ZIP supportato e verificabile.',
+  ],
   'datapacks.catalog.downloadUnavailable': [
     'Automatic download unavailable',
     'Download automatico non disponibile',
