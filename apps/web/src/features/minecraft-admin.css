@@ -872,3 +872,20 @@ fieldset.version-catalog-datasets {
     display: block;
   }
 }
+
+.fabric-game-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.25rem 0;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+}
+.fabric-game-link:hover {
+  color: var(--accent);
+}
+.fabric-game-link > :where(span) {
+  color: var(--muted);
+}

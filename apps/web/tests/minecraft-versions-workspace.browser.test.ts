@@ -56,7 +56,7 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
     writes: Array<{ path: string; body: Record<string, unknown> }>,
     errors: string[];
   let multipleMappings: boolean, bulkFails: boolean;
-  let fabricSynced: boolean, fabricSyncFails: boolean;
+  let fabricSynced: boolean, fabricSyncFails: boolean, fabricQueued: boolean;
   beforeAll(async () => {
     vite = await createServer({
       root: `${process.cwd()}/apps/web`,
@@ -87,6 +87,7 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
     errors = [];
     multipleMappings = false;
     bulkFails = false;
+    fabricQueued = false;
     fabricSynced = false;
     fabricSyncFails = false;
     context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
@@ -109,7 +110,11 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
       if (method === 'GET') reads.push(url);
       else writes.push({ path, body: route.request().postDataJSON() ?? {} });
       if (path === '/v1/owner/minecraft/fabric/catalog') {
-        if (method === 'POST' && !fabricSyncFails) fabricSynced = true;
+        if (method === 'POST') fabricQueued = true;
+        if (method === 'GET' && fabricQueued) {
+          fabricQueued = false;
+          if (!fabricSyncFails) fabricSynced = true;
+        }
         const list = (prefix: string) =>
           fabricSynced
             ? Array.from({ length: 130 }, (_, i) => ({
@@ -128,7 +133,17 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
             : [],
           latestInstallerVersion: fabricSynced ? '1.1.2' : null,
           synced: fabricSynced,
+          relations: fabricSynced
+            ? {
+                checkedAt: '2026-10-19T10:00:00Z',
+                loaderSets: [list('0.19.').map((item) => item.version), ['0.19.128']],
+                gameLoaderSets: Object.fromEntries(
+                  list('1.21.').map((item) => [item.version, item.version === '1.21.130' ? 1 : 0]),
+                ),
+              }
+            : undefined,
           status: {
+            syncState: fabricQueued ? 'queued' : 'idle',
             lastCheckedAt: fabricSynced ? '2026-10-19T10:00:00Z' : null,
             lastSuccessAt: fabricSynced ? '2026-10-19T10:00:00Z' : null,
             nextCheckAt: null,
@@ -286,7 +301,7 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
     expect(await page.locator('.fabric-catalog-table').evaluate((el) => el.clientHeight)).toBe(
       height,
     );
-    expect(reads.filter((u) => u.pathname.endsWith('/fabric/catalog'))).toHaveLength(1);
+    expect(reads.filter((u) => u.pathname.endsWith('/fabric/catalog'))).toHaveLength(2);
     expect(reads.some((u) => u.pathname.includes('/compatibility'))).toBe(false);
     expect(writes.map((w) => w.path)).toEqual(['/v1/owner/minecraft/fabric/catalog']);
     await axe();
@@ -296,6 +311,33 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
     });
     await page.getByRole('button', { name: 'Vanilla', exact: true }).click();
     await check(page.getByRole('button', { name: 'Sync versions', exact: true })).toBeVisible();
+  });
+  it('filters compatible Loaders from the saved associations without more requests', async () => {
+    fabricSynced = true;
+    await page.goto(`${origin}owner/integrations/minecraft/versions?runtime=fabric`);
+    await page.getByRole('button', { name: 'Loaders for 1.21.130', exact: true }).click();
+    await check(page.getByLabel('Minecraft version', { exact: true })).toHaveValue('1.21.130');
+    await check(page.getByLabel('Minecraft version', { exact: true })).toBeFocused();
+    await check(page.locator('.fabric-catalog-table tbody tr')).toHaveCount(1);
+    await check(page.locator('.fabric-catalog-table tbody tr')).toContainText('0.19.128');
+    await page.getByLabel('Minecraft version', { exact: true }).selectOption('1.21.129');
+    await check(page.locator('.fabric-catalog-table tbody tr')).toHaveCount(25);
+    expect(reads.filter((u) => u.pathname.endsWith('/fabric/catalog'))).toHaveLength(1);
+    expect(writes).toHaveLength(0);
+    await axe();
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/fabric-associations-desktop-en.png',
+      fullPage: true,
+    });
+  });
+  it('keeps the global Loader list usable when a bookmarked game has left the catalog', async () => {
+    fabricSynced = true;
+    await page.goto(
+      `${origin}owner/integrations/minecraft/versions?runtime=fabric&fabricKind=loaders&fabricGame=removed`,
+    );
+    await check(page.getByLabel('Minecraft version', { exact: true })).toHaveValue('');
+    await check(page.locator('.fabric-catalog-table tbody tr')).toHaveCount(25);
+    await check(page.locator('.fabric-catalog-table tbody tr').first()).toContainText('0.19.130');
   });
   it('keeps the last catalog visible after a failed refresh and exposes registered Fabric view', async () => {
     fabricSynced = true;

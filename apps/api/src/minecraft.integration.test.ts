@@ -678,10 +678,57 @@ describe('Minecraft backend API authorization and user projection', () => {
       latestInstallerVersion: null,
     });
     const repeated = await app.request(endpoint, { method: 'POST', body: '{}' });
-    expect(repeated.status).toBe(200);
-    expect(await repeated.json()).toMatchObject({ synced: false });
+    expect(repeated.status).toBe(202);
+    expect(await repeated.json()).toMatchObject({ synced: false, status: { syncState: 'queued' } });
     expect((await app.request(endpoint, { method: 'POST', body: '{"force":true}' })).status).toBe(
       400,
+    );
+    expect(management).not.toHaveBeenCalled();
+  });
+  it('queues a due Owner request without contacting a slow upstream and keeps cached GET local', async () => {
+    actor = fixture.owner;
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({ requested_at: null, next_check_at: new Date(0), last_checked_at: null })
+      .where('id', '=', 'fabric')
+      .execute();
+    const upstream = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(() => new Promise<Response>(() => {}));
+    try {
+      const response = await app.request('/v1/owner/minecraft/fabric/catalog', {
+        method: 'POST',
+        body: '{}',
+      });
+      expect(response.status).toBe(202);
+      expect(await response.json()).toMatchObject({ status: { syncState: 'queued' } });
+      expect((await app.request('/v1/owner/minecraft/fabric/catalog')).status).toBe(200);
+      expect(upstream).not.toHaveBeenCalled();
+    } finally {
+      upstream.mockRestore();
+    }
+  });
+  it('gates the local consumer catalog on Minecraft rollout visibility without registering choices', async () => {
+    await eligibleChoice();
+    await fixture.db
+      .updateTable('game_rollouts')
+      .set({ state: 'private-testing', allowlist: [] })
+      .where('integration_id', '=', 'minecraft')
+      .execute();
+    const endpoint = '/v1/minecraft/fabric/catalog';
+    expect((await app.request(endpoint)).status).toBe(403);
+    await fixture.db
+      .updateTable('game_rollouts')
+      .set({ allowlist: [actor.subjectUserId] })
+      .where('integration_id', '=', 'minecraft')
+      .execute();
+    const before = await fixture.db.selectFrom('minecraft_combinations').selectAll().execute();
+    const response = await app.request(endpoint);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toHaveProperty('games');
+    expect(await fixture.db.selectFrom('minecraft_combinations').selectAll().execute()).toEqual(
+      before,
     );
     expect(management).not.toHaveBeenCalled();
   });

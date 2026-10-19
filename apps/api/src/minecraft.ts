@@ -1,6 +1,6 @@
 import { type ContentHttp, inspectModpack, ModrinthProvider } from '@nickhosting/content-providers';
 import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
-import { type createDatabase, getSettings, registerGame } from '@nickhosting/database';
+import { type createDatabase, gameCatalog, getSettings, registerGame } from '@nickhosting/database';
 import {
   createMinecraftIdentityProvider,
   minecraftAvatarUrl,
@@ -30,8 +30,8 @@ import {
   parse,
   prepareMinecraftContentPlan,
   prepareMinecraftCreationConfig,
-  refreshFabricCatalog,
   registerMinecraftCombination,
+  requestFabricCatalogRefresh,
   requireMinecraftChoice,
   setMinecraftAvailability,
   setMinecraftBulkAvailability,
@@ -96,8 +96,12 @@ export function registerMinecraftRoutes(
   app.post('/v1/owner/minecraft/fabric/catalog', async (c) => {
     await owner(c);
     parse(z.object({}).strict(), await body(c));
-    const { values } = await getSettings(db, env);
-    await refreshFabricCatalog(db, { userAgent: values.contentMetadataUserAgent ?? '' });
+    c.header('Cache-Control', 'no-store');
+    return c.json(await requestFabricCatalogRefresh(db), 202);
+  });
+  app.get('/v1/minecraft/fabric/catalog', async (c) => {
+    const games = await gameCatalog(db, await principal(c));
+    if (!games.some((game) => game.id === 'minecraft')) throw new DomainError('forbidden');
     c.header('Cache-Control', 'no-store');
     return c.json(await getFabricCatalog(db));
   });

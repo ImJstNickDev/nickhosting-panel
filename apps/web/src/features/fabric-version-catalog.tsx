@@ -1,6 +1,7 @@
 import type { FabricCatalogResponse } from '@nickhosting/minecraft/ui';
 import { useQuery } from '@tanstack/react-query';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router';
 import { api, queryClient } from '../api/client.js';
 import { useT } from '../app/i18n.js';
 import { ErrorNotice, Loading, Select, Time } from '../components/ui.js';
@@ -20,10 +21,18 @@ export function FabricVersionCatalog({
   kind: 'games' | 'loaders' | 'installers';
 }) {
   const t = useT();
+  const [params, setParams] = useSearchParams();
+  const requestedGame = params.get('fabricGame') ?? '';
+  const focusLoaders = useRef(false);
+  const filters = useRef<HTMLDivElement>(null);
   const catalog = useQuery({
     queryKey,
     queryFn: ({ signal }) => api<FabricCatalogResponse>(endpoint, { signal }),
     staleTime: 60_000,
+    refetchInterval: (query) => {
+      const state = query.state.data?.status.syncState;
+      return state === 'queued' || state === 'refreshing' ? 2_000 : false;
+    },
   });
   const [search, setSearch] = useState('');
   const [all, setAll] = useState(false);
@@ -33,23 +42,30 @@ export function FabricVersionCatalog({
   const lock = useRef(false);
   const table = useRef<HTMLElement>(null);
   const previousKind = useRef(kind);
+  const previousGame = useRef(requestedGame);
   const reset = () => {
     setPage(1);
     table.current?.scrollTo({ top: 0 });
   };
   useEffect(() => {
-    if (previousKind.current === kind) return;
+    if (previousKind.current === kind && previousGame.current === requestedGame) return;
     previousKind.current = kind;
+    previousGame.current = requestedGame;
     setSearch('');
     setPage(1);
     table.current?.scrollTo({ top: 0 });
-  }, [kind]);
+    if (kind === 'loaders' && focusLoaders.current) {
+      filters.current?.querySelector('select')?.focus();
+      focusLoaders.current = false;
+    }
+  }, [kind, requestedGame]);
   async function sync() {
     if (lock.current) return;
     lock.current = true;
     setBusy(true);
     setError(undefined);
     try {
+      await queryClient.cancelQueries({ queryKey, exact: true });
       const data = await api<FabricCatalogResponse>(endpoint, { method: 'POST', body: {} });
       queryClient.setQueryData(queryKey, data);
     } catch (failure) {
@@ -60,9 +76,32 @@ export function FabricVersionCatalog({
     }
   }
   const data = catalog.data;
+  const syncState = data?.status.syncState ?? 'idle';
+  const syncing = busy || syncState !== 'idle';
+  const game =
+    data?.relations && data.games.some((item) => item.version === requestedGame)
+      ? requestedGame
+      : '';
+  const loaderSetIndex = data?.relations?.gameLoaderSets[game];
+  const compatibleLoaders = new Set(
+    loaderSetIndex === undefined ? [] : (data?.relations?.loaderSets[loaderSetIndex] ?? []),
+  );
+  function chooseGame(version: string) {
+    focusLoaders.current = kind !== 'loaders';
+    setParams((previous) => {
+      const next = new URLSearchParams(previous);
+      next.set('fabricKind', 'loaders');
+      next.set('fabricView', 'discovery');
+      if (version) next.set('fabricGame', version);
+      else next.delete('fabricGame');
+      return next;
+    });
+    reset();
+  }
   const items = (data?.[kind] ?? []).filter(
     (item) =>
       (kind !== 'games' || all || item.stable) &&
+      (kind !== 'loaders' || !game || compatibleLoaders.has(item.version)) &&
       item.version.toLowerCase().includes(search.toLowerCase().trim()),
   );
   const pages = Math.max(1, Math.ceil(items.length / pageSize));
@@ -72,9 +111,20 @@ export function FabricVersionCatalog({
       <VersionCatalogFrame
         navigation={navigation}
         actions={
-          <button type="button" className="secondary" disabled={busy} onClick={() => void sync()}>
+          <button
+            type="button"
+            className="secondary"
+            disabled={syncing}
+            onClick={() => void sync()}
+          >
             <MinecraftAdminIcon kind="scan" />
-            {t(busy ? 'fabricCatalog.syncing' : 'fabricCatalog.sync')}
+            {t(
+              syncState === 'queued'
+                ? 'fabricCatalog.queued'
+                : syncing
+                  ? 'fabricCatalog.syncing'
+                  : 'fabricCatalog.sync',
+            )}
           </button>
         }
         filters={
@@ -92,6 +142,23 @@ export function FabricVersionCatalog({
                 }}
               />
             </label>
+            {kind === 'loaders' && (
+              <div ref={filters}>
+                <Select
+                  label={t('fabricCatalog.gameVersion')}
+                  value={game}
+                  disabled={!data?.relations}
+                  onChange={(event) => chooseGame(event.target.value)}
+                >
+                  <option value="">{t('fabricCatalog.allLoaders')}</option>
+                  {data?.games.map((item) => (
+                    <option key={item.version} value={item.version}>
+                      {item.version}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            )}
             {kind === 'games' && (
               <Select
                 label={t('catalog.releaseType')}
@@ -160,6 +227,11 @@ export function FabricVersionCatalog({
             }}
           />
         )}
+        {data?.synced && !data.relations && (
+          <p role="status" className="muted">
+            {t('fabricCatalog.relationsPending')}
+          </p>
+        )}
         {data?.status.lastError && (
           <p role="status" className="muted">
             {t('fabricCatalog.syncFailed')}
@@ -168,7 +240,7 @@ export function FabricVersionCatalog({
         <section
           ref={table}
           className="minecraft-versions-table fabric-catalog-table"
-          aria-busy={busy || catalog.isPending}
+          aria-busy={catalog.isPending}
           aria-label={t(`fabricCatalog.${kind}`)}
           // biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard users need to scroll the catalog.
           tabIndex={0}
@@ -188,7 +260,19 @@ export function FabricVersionCatalog({
                 {items.slice((current - 1) * pageSize, current * pageSize).map((item) => (
                   <tr key={item.version}>
                     <td>
-                      {item.version}
+                      {kind === 'games' && data?.relations ? (
+                        <button
+                          type="button"
+                          className="fabric-game-link"
+                          aria-label={t('fabricCatalog.loadersFor', { version: item.version })}
+                          onClick={() => chooseGame(item.version)}
+                        >
+                          {item.version}
+                          <span aria-hidden="true">›</span>
+                        </button>
+                      ) : (
+                        item.version
+                      )}
                       {kind === 'installers' && item.version === data?.latestInstallerVersion && (
                         <span className="version-catalog-badge fabric-latest">
                           {t('fabricCatalog.latest')}

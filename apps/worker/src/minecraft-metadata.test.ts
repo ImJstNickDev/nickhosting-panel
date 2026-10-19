@@ -2,7 +2,7 @@ import { createLogger } from '@nickhosting/core';
 import { getSettings } from '@nickhosting/database';
 import { refreshFabricCatalog, refreshMinecraftMetadata } from '@nickhosting/server-management';
 import { beforeEach, expect, it, vi } from 'vitest';
-import { pollMinecraftMetadata } from './minecraft-metadata.js';
+import { pollFabricMetadata, pollMinecraftMetadata } from './minecraft-metadata.js';
 
 vi.mock('@nickhosting/database', () => ({ getSettings: vi.fn() }));
 vi.mock('@nickhosting/server-management', () => ({
@@ -48,9 +48,27 @@ it('contains failures without leaking request or database details into logs', as
 it('refreshes Fabric independently even when Mojang fails', async () => {
   refresh.mockRejectedValue(new Error('unavailable'));
   vi.mocked(refreshFabricCatalog).mockResolvedValue({ state: 'updated', changed: 3 });
-  await pollMinecraftMetadata(db, {}, logger);
+  await Promise.all([pollMinecraftMetadata(db, {}, logger), pollFabricMetadata(db, {}, logger)]);
   expect(refreshFabricCatalog).toHaveBeenCalledWith(db, {
     userAgent: 'Fixture https://example.test',
   });
   expect(JSON.stringify(records)).toContain('fabric.metadata_refreshed');
+});
+
+it('lets Mojang poll again while Fabric remains in progress', async () => {
+  let finish: (() => void) | undefined;
+  vi.mocked(refreshFabricCatalog).mockImplementation(async () => {
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    return { state: 'updated', changed: 1 };
+  });
+  refresh.mockResolvedValue({ state: 'skipped', changed: 0 });
+  const fabric = pollFabricMetadata(db, {}, logger);
+  await pollMinecraftMetadata(db, {}, logger);
+  await pollMinecraftMetadata(db, {}, logger);
+  expect(refresh).toHaveBeenCalledTimes(2);
+  expect(refreshFabricCatalog).toHaveBeenCalledTimes(1);
+  finish?.();
+  await fabric;
 });

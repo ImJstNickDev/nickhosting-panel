@@ -1575,3 +1575,23 @@ retain the additive schema and existing staged sources while reverting code.
 Modrinth remains the existing mod/modpack provider, not a saved-world catalog.
 MinecraftMaps is an external link plus manual ZIP/folder import; no scraper or
 private endpoint was added. See [provider evidence](GAME-INTEGRATIONS.md#world-catalogs--m5-2026-10-18).
+
+
+### Fabric cached compatibility catalog
+
+- `GET /v1/owner/minecraft/fabric/catalog`: Owner-only cached game, Loader and
+  Installer lists with normalized Minecraft→Loader associations.
+- `POST /v1/owner/minecraft/fabric/catalog`: strict empty object; HTTP202 returns
+  the existing snapshot after durably requesting worker refresh. No upstream
+  request runs in the handler. Duplicate queued/active requests coalesce.
+- `GET /v1/minecraft/fabric/catalog`: authenticated, Minecraft rollout-visible
+  users; same local-only DTO. Catalog access grants no provisioning permission.
+
+`status.syncState` is `idle | queued | refreshing`. Last-success/error/freshness
+fields remain available; a failed sync never replaces the last complete snapshot.
+`relations?` is `{ checkedAt, loaderSets: string[][], gameLoaderSets:
+Record<string, number> }`. The index maps each known game version to its Loader
+set. Missing relations in an older snapshot mean associations are not yet loaded,
+not that the global Loader list is compatible with every Minecraft version.
+See [discovery policy](GAME-INTEGRATIONS.md#fabric-version-discovery) for bounded
+incremental refresh, daily full revalidation and installer-latest semantics.

@@ -14149,3 +14149,55 @@ Live dev HTTPS and all three changed/new source-module transformations return 20
 without import errors. Changes use Vite hot reload: no migrations, rebuild/restart
 of containers, production operations or game test assets. Rollback is a source
 revert. PR21 remains open/unmerged; SFTPGo #18 is unchanged.
+
+### Fabric local associations and background queue (2026-10-19)
+
+Scope: preserve the local game/Loader/Installer lists, add authoritative per-game
+Loader associations, make Owner sync an asynchronous durable request, and isolate
+Fabric polling from Mojang polling. Provisioning combinations/rollout are unchanged.
+
+Evidence:
+
+- `scripts/dev.sh pnpm exec vitest run games/minecraft/src/fabric-catalog.test.ts apps/worker/src/minecraft-metadata.test.ts`:30/30 passed.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/fabric-catalog.integration.test.ts apps/api/src/minecraft.integration.test.ts`:36/36 passed against isolated schemas.
+- `scripts/dev.sh pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-versions-workspace.browser.test.ts`:11/11 passed in real Firefox with isolated API fixtures, including axe checks, EN desktop/IT mobile, cached association filtering without extra requests, focus transfer and stale bookmarked-version fallback.
+- Full `pnpm typecheck`, production WebPanel `pnpm build`, `pnpm i18n:check`
+  (2467 keys), scoped Biome and `git diff --check`: passed.
+  Build retains the existing large lazy-chunk warning.
+- Independent backend review: no remaining must-fix issue; checked queue races,
+  expired-lease fencing, last-good atomic publication, real total deadline,
+  old-schema handling, rollout scope and independent worker loops.
+- Independent frontend/rendered review: no remaining blocking issue. Fixed stale
+  game filters, navigation focus and an in-flight GET/queued POST cache race.
+  Screenshots: `.codex/local/m5-browser/screenshots/fabric-associations-desktop-en.png`,
+  `fabric-discovery-desktop-en.png`, `fabric-discovery-mobile-it.png`.
+
+Live development evidence (existing Owner authorization for migrations/restarts):
+
+- Built only the app image through service `api`, preserving all three existing
+  env overlays. New image `sha256:916a675bcb73074e31bc0f40a9dbf757afc03d6b8cf83c6d8c932c6423c421f8`.
+  Explicit tool-profile migrator applied only046 and removed its temporary container.
+- No service recreation or explicit restart was needed: source watchers loaded API,
+  worker and UI. All three remain healthy, with their original network attachments.
+  Public dev HTTPS200 and the existing Owner session still work.
+- A full official Fabric catalog had already been populated by the source-bound
+  worker during this implementation:531 games,254 Loaders,67 Installers.
+  Its successful log is11:03:02Z following worker startup11:02:36Z; this is a
+  lifecycle bound, not a separately instrumented per-request benchmark.
+- After046, HTTPS Owner GET200 returned all531 game associations; normalized
+  response44,731bytes. The current upstream data shares one Loader set across all
+  games; this was fetched from each game endpoint, not inferred as a Cartesian product.
+- POST returned202/queued in73ms. Worker subsequently logged unchanged, preserved
+  the relation timestamp, and scheduled the next refresh15minutes later. The next
+  local GET200 took36ms; initial connection GET took233ms. These are single
+  end-to-end smoke timings, not latency guarantees.
+- Live output is retained privately in `.codex/local/fabric-associations-live.jsonl`;
+  build logs and rollback image `nickhosting-dev-app:before-fabric-associations-20261019`
+  are also retained. No credentials were printed or committed.
+- No Pterodactyl/Wings/Blueprint/DNS/game-server writes, new game assets, database
+  reset or production deployment. Isolated DB test schemas were cleaned normally;
+  existing dev accounts, mappings and review data remain intact. Issue18 unchanged.
+
+Rollback and migration handling are in [M5 environments](M5-ENVIRONMENTS.md#fabric-association-queue-migration-2026-10-19).
+Fabric creation/installer-format work remains a separate next step; discovery does
+not silently enable unverified runtimes.

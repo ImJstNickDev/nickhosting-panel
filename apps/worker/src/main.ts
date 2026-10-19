@@ -13,7 +13,7 @@ import {
   refreshHostObservations,
 } from '@nickhosting/server-management';
 import { startHostObservationLoop } from './host-observations.js';
-import { pollMinecraftMetadata } from './minecraft-metadata.js';
+import { pollFabricMetadata, pollMinecraftMetadata } from './minecraft-metadata.js';
 import { refreshProviderFeeds, startProviderFeedLoop } from './provider-feed.js';
 import { reconcileServers } from './reconcile.js';
 import { pollSchedules } from './schedules.js';
@@ -151,6 +151,16 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         }, 30_000);
     };
     metadataPoll = refreshMetadata();
+    let fabricTimer: ReturnType<typeof setTimeout> | undefined;
+    let fabricPoll: Promise<void> | undefined;
+    const refreshFabric = async () => {
+      await pollFabricMetadata(db, env, logger);
+      if (!stopping)
+        fabricTimer = setTimeout(() => {
+          fabricPoll = refreshFabric();
+        }, 5000);
+    };
+    fabricPoll = refreshFabric();
     reconciliation = poll();
     logger.log('info', 'worker.started');
     let closed: Promise<void> | undefined;
@@ -159,10 +169,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         stopping = true;
         if (timer) clearTimeout(timer);
         if (metadataTimer) clearTimeout(metadataTimer);
+        if (fabricTimer) clearTimeout(fabricTimer);
         if (scheduleTimer) clearTimeout(scheduleTimer);
         await Promise.all([
           reconciliation,
           metadataPoll,
+          fabricPoll,
           schedulePoll,
           observations.close(),
           providerFeeds.close(),

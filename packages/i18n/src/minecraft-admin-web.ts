@@ -1,5 +1,13 @@
 export const minecraftAdminWebMessages: Record<string, readonly [string, string]> = {
   'versions.minecraftVersions': ['Minecraft versions', 'Versioni Minecraft'],
+  'fabricCatalog.queued': ['Queued…', 'In coda…'],
+  'fabricCatalog.gameVersion': ['Minecraft version', 'Versione Minecraft'],
+  'fabricCatalog.allLoaders': ['All Loaders', 'Tutti i Loader'],
+  'fabricCatalog.loadersFor': ['Loaders for {version}', 'Loader per {version}'],
+  'fabricCatalog.relationsPending': [
+    'Sync to load Minecraft–Loader associations.',
+    'Sincronizza per caricare le associazioni Minecraft–Loader.',
+  ],
   'fabricCatalog.view': ['Fabric version view', 'Vista versioni Fabric'],
   'fabricCatalog.discovery': ['Discovery', 'Catalogo'],
   'fabricCatalog.registered': ['Registered combinations', 'Combinazioni registrate'],

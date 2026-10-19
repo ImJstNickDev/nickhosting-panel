@@ -1,7 +1,16 @@
 import { createTestDatabase } from '@nickhosting/database/testing';
-import { fabricCatalogUrls, type RuntimeMetadataClient } from '@nickhosting/minecraft';
+import {
+  fabricCatalogUrls,
+  fabricGameLoadersUrl,
+  type RuntimeMetadataClient,
+} from '@nickhosting/minecraft';
+import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
-import { getFabricCatalog, refreshFabricCatalog } from './fabric-catalog.js';
+import {
+  getFabricCatalog,
+  refreshFabricCatalog,
+  requestFabricCatalogRefresh,
+} from './fabric-catalog.js';
 import { minecraftMetadataRefreshMs } from './minecraft-metadata.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -11,10 +20,14 @@ function client(version = '1.0') {
   return {
     read: vi.fn(async (url: string) => ({
       bytes: new TextEncoder().encode(
-        JSON.stringify([
-          { version, stable: false },
-          { version: '0.1', stable: true },
-        ]),
+        JSON.stringify(
+          url.startsWith(`${fabricCatalogUrls.loaders}/`)
+            ? [{ loader: { version } }, { loader: { version: '0.1' } }]
+            : [
+                { version, stable: false },
+                { version: '0.1', stable: true },
+              ],
+        ),
       ),
       evidence: { url, sha256: 'a'.repeat(64), retrievedAt: now.toISOString() },
     })),
@@ -62,10 +75,10 @@ it('reads empty before migration/sync, stores three lists and uses latest first 
     status: { stale: false },
   });
   expect(await refresh(source)).toEqual({ state: 'skipped', changed: 0 });
-  expect(source.read).toHaveBeenCalledTimes(3);
+  expect(source.read).toHaveBeenCalledTimes(5);
   now = new Date(now.getTime() + minecraftMetadataRefreshMs);
   expect(await refresh(source)).toEqual({ state: 'unchanged', changed: 0 });
-  expect(source.read).toHaveBeenCalledTimes(6);
+  expect(source.read).toHaveBeenCalledTimes(8);
   await database.db.deleteFrom('minecraft_metadata_sync').where('id', '=', 'fabric').execute();
   expect((await refresh(source)).state).toBe('skipped');
   expect((await getFabricCatalog(database.db, now)).synced).toBe(false);
@@ -107,7 +120,7 @@ it('elects one concurrent downloader and fences expired leases', async () => {
     return original(url);
   });
   const pending = refresh(source);
-  await vi.waitFor(() => expect(source.read).toHaveBeenCalledTimes(3));
+  await vi.waitFor(() => expect(source.read).toHaveBeenCalledTimes(2));
   expect((await refresh(client('2.0'))).state).toBe('skipped');
   now = new Date(now.getTime() + 60_001);
   expect((await refresh(client('2.0'))).state).toBe('updated');
@@ -124,4 +137,161 @@ it('does not alter combinations, Mojang metadata or availability', async () => {
   expect(await database.db.selectFrom('minecraft_release_metadata').selectAll().execute()).toEqual(
     [],
   );
+});
+
+it('durably coalesces concurrent requests, bypasses the interval and respects attempt cooldown', async () => {
+  await refresh(client());
+  now = new Date(base.getTime() + 10_000);
+  const requests = await Promise.all(
+    Array.from({ length: 8 }, () => requestFabricCatalogRefresh(database.db, now)),
+  );
+  expect(requests.every((catalog) => catalog.status.syncState === 'queued')).toBe(true);
+  let row = await database.db
+    .selectFrom('minecraft_metadata_sync')
+    .selectAll()
+    .where('id', '=', 'fabric')
+    .executeTakeFirstOrThrow();
+  expect(row.requested_at).toEqual(now);
+  expect(row.next_check_at).toEqual(new Date(base.getTime() + 60_000));
+  const source = client();
+  expect((await refresh(source)).state).toBe('skipped');
+  expect(source.read).not.toHaveBeenCalled();
+  now = new Date(base.getTime() + 60_000);
+  expect((await refresh(source)).state).toBe('unchanged');
+  row = await database.db
+    .selectFrom('minecraft_metadata_sync')
+    .selectAll()
+    .where('id', '=', 'fabric')
+    .executeTakeFirstOrThrow();
+  expect(row.requested_at).toBeNull();
+  expect((await getFabricCatalog(database.db, now)).status.syncState).toBe('idle');
+});
+it('keeps a queued request durable throughout a slow download and coalesces in-flight clicks', async () => {
+  await requestFabricCatalogRefresh(database.db, now);
+  let unblock: (() => void) | undefined;
+  const blocked = new Promise<void>((resolve) => {
+    unblock = resolve;
+  });
+  const source = client();
+  const read = source.read.getMockImplementation();
+  if (!read) throw new Error('missing fixture');
+  source.read.mockImplementation(async (url) => {
+    await blocked;
+    return read(url);
+  });
+  const pending = refresh(source);
+  await vi.waitFor(() => expect(source.read).toHaveBeenCalledTimes(2));
+  now = new Date(base.getTime() + 5_000);
+  expect((await requestFabricCatalogRefresh(database.db, now)).status.syncState).toBe('refreshing');
+  const row = await database.db
+    .selectFrom('minecraft_metadata_sync')
+    .selectAll()
+    .where('id', '=', 'fabric')
+    .executeTakeFirstOrThrow();
+  expect(row.requested_at).toEqual(base);
+  unblock?.();
+  expect((await pending).state).toBe('updated');
+  expect((await getFabricCatalog(database.db, now)).status.syncState).toBe('idle');
+});
+it('recovers a crashed worker request and fences stale failures as well as publications', async () => {
+  await requestFabricCatalogRefresh(database.db, now);
+  let unblock: (() => void) | undefined;
+  const blocked = new Promise<void>((resolve) => {
+    unblock = resolve;
+  });
+  const source: RuntimeMetadataClient = {
+    read: vi.fn(async () => {
+      await blocked;
+      throw new Error('old failure');
+    }),
+  };
+  const pending = refresh(source);
+  await vi.waitFor(() => expect(source.read).toHaveBeenCalledTimes(2));
+  now = new Date(base.getTime() + 60_001);
+  expect((await getFabricCatalog(database.db, now)).status.syncState).toBe('queued');
+  expect((await refresh(client('2.0'))).state).toBe('updated');
+  unblock?.();
+  expect((await pending).state).toBe('skipped');
+  expect(await getFabricCatalog(database.db, now)).toMatchObject({
+    latestInstallerVersion: '2.0',
+    status: { lastError: null, syncState: 'idle' },
+  });
+});
+it('serves an old snapshot during relationship upgrade and preserves it on a pair failure', async () => {
+  const old = {
+    games: [{ version: '1.0', stable: true }],
+    loaders: [{ version: '1.0', stable: true }],
+    installers: [{ version: '1.0', stable: true }],
+  };
+  await database.db
+    .updateTable('minecraft_metadata_sync')
+    .set({ manifest_json: JSON.stringify(old), last_success_at: base })
+    .where('id', '=', 'fabric')
+    .execute();
+  expect(await getFabricCatalog(database.db, now)).toMatchObject({ ...old, synced: true });
+  const source = client();
+  const read = source.read.getMockImplementation();
+  if (!read) throw new Error('missing fixture');
+  source.read.mockImplementation(async (url) => {
+    if (url === fabricGameLoadersUrl('1.0')) throw new Error('pair unavailable');
+    return read(url);
+  });
+  expect((await refresh(source)).state).toBe('failed');
+  const result = await getFabricCatalog(database.db, now);
+  expect(result).toMatchObject({ ...old, synced: true });
+  expect(result.relations).toBeUndefined();
+});
+it('renews a long live lease and performs daily full relationship revalidation', async () => {
+  const source = client();
+  const read = source.read.getMockImplementation();
+  if (!read) throw new Error('missing fixture');
+  source.read.mockImplementation(async (url) => {
+    now = new Date(now.getTime() + 15_000);
+    return read(url);
+  });
+  expect((await refresh(source)).state).toBe('updated');
+  expect(now.getTime() - base.getTime()).toBeGreaterThan(60_000);
+  expect((await getFabricCatalog(database.db, now)).relations).toBeDefined();
+  now = new Date(now.getTime() + 24 * 60 * 60_000);
+  const next = client();
+  expect((await refresh(next)).state).toBe('updated');
+  expect(next.read).toHaveBeenCalledTimes(5);
+});
+it('stops new batches at the total deadline without publishing partial discovery', async () => {
+  const source = client();
+  const read = source.read.getMockImplementation();
+  if (!read) throw new Error('missing fixture');
+  source.read.mockImplementation(async (url) => {
+    now = new Date(now.getTime() + 10_000);
+    const result = await read(url);
+    return url === fabricCatalogUrls.games
+      ? {
+          ...result,
+          bytes: new TextEncoder().encode(
+            JSON.stringify(
+              Array.from({ length: 20 }, (_, i) => ({ version: `1.${i}`, stable: true })),
+            ),
+          ),
+        }
+      : result;
+  });
+  expect((await refresh(source)).state).toBe('failed');
+  expect(source.read).toHaveBeenCalledTimes(19);
+  expect((await getFabricCatalog(database.db, now)).synced).toBe(false);
+});
+it('safely serves old cache and skips work before migration 046', async () => {
+  await sql`alter table minecraft_metadata_sync drop column requested_at`.execute(database.db);
+  try {
+    expect((await getFabricCatalog(database.db, now)).status.syncState).toBe('idle');
+    await expect(requestFabricCatalogRefresh(database.db, now)).rejects.toMatchObject({
+      code: 'integration_unavailable',
+    });
+    const source = client();
+    expect((await refresh(source)).state).toBe('skipped');
+    expect(source.read).not.toHaveBeenCalled();
+  } finally {
+    await sql`alter table minecraft_metadata_sync add column requested_at timestamptz`.execute(
+      database.db,
+    );
+  }
 });

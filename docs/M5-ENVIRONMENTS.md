@@ -1708,3 +1708,31 @@ API/worker/Vite source hot reload remained healthy. Production has not been migr
 Retain the additive cache row and migration history on source rollback; the prior
 code ignores it. See [validation](M5-VALIDATION.md#fabric-catalog-discovery-2026-10-19)
 for catalog, API, browser evidence and retained rollback image.
+
+### Fabric association queue migration (2026-10-19)
+
+Migration `046_fabric_catalog_requests.sql` adds a nullable manual-request timestamp
+to the existing metadata table. No game, account, provider or mapping data changes.
+The API can read the old catalog before migration; worker refresh skips until the
+column is present. Run the explicit migrator from a newly built app image, using
+all three existing dev interpolation files:
+
+```sh
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local build api
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local --profile tools run --rm --no-deps migrate
+```
+
+Source-bound API/worker/Vite use their normal watchers. No new network, mount,
+host port or production deployment is required. The first association refresh
+reads the official Fabric per-game metadata with concurrency2 and bounded resource
+use; subsequent unchanged refreshes only read three root catalogs. Catalog reads
+remain local during refresh and on upstream errors. The Owner's Sync versions
+button requests background work with HTTP202.
+
+Rollback: revert this change's source and restart only a development watcher if
+needed. Retain the additive column, cached snapshot and migration ledger.
+Older code ignores the extra column and strips optional relation metadata on read.
+The previous running image is retained locally as
+`nickhosting-dev-app:before-fabric-associations-20261019`; source mounts must also
+be reverted for image rollback to restore application behavior. Do not down/reset
+the stack or drop persistent data. See the corresponding M5 validation entry.

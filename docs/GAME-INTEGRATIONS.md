@@ -759,21 +759,43 @@ See [datapack workflow, limits and contracts](M5-MINECRAFT-DATAPACKS.md).
 
 ### Fabric version discovery
 
-Owner → Integrations → Minecraft → Versions → Fabric exposes three independent
-catalogs: supported Minecraft game versions, Loader versions and Installer versions.
-Search, pagination and game-release filtering use the local snapshot. Registered
-combinations remain a separate view; discovery does not register the Cartesian
-product, modify mappings or make Fabric eligible for creation.
+Owner → Integrations → Minecraft → Versions → Fabric exposes supported Minecraft,
+Loader and Installer versions. Selecting a Minecraft row opens its compatible Loader
+list. Search, pagination and all association filters read the local snapshot only.
+Registered provisioning combinations remain separate: discovery does not register
+a Cartesian product, modify mappings or make Fabric eligible for creation.
 
-`GET /v1/owner/minecraft/fabric/catalog` is a local-only read;
-`POST` to the same path accepts `{}` and requests a due refresh. Both require the
-regular Owner session. The response includes `games`, `loaders`, `installers`,
-`latestInstallerVersion`, `synced` and freshness/error timestamps in `status`.
-Migration 045 adds the `fabric` row to the existing metadata cache. The worker
-refreshes it independently of Mojang, every 15 minutes, with a durable lease and
-three concurrent bounded requests. An unchanged hash avoids rewriting the snapshot;
-a failed refresh retains the last good lists and schedules a retry after 60 seconds.
-The missing migration row safely disables refresh until deployment.
+`GET /v1/owner/minecraft/fabric/catalog` is a local-only Owner read.
+`POST` to the same path accepts `{}`, durably queues a refresh and immediately
+returns HTTP202 with the current cached DTO; it never fetches Fabric inline.
+Repeated requests while queued/running are coalesced; attempts have a 60-second
+minimum interval. The UI polls local status every two seconds only while queued or
+refreshing and retains the previous catalog throughout.
+`GET /v1/minecraft/fabric/catalog` exposes the same local catalog to authenticated
+users with Minecraft rollout access, without granting provisioning permission.
+
+The DTO includes `games`, `loaders`, `installers`, `latestInstallerVersion`,
+`synced` and freshness/error timestamps plus `syncState` (idle/queued/refreshing).
+Optional `relations` contains deduplicated `loaderSets`, a `gameLoaderSets`
+index keyed by Minecraft version, and `checkedAt` for the last full sweep.
+Old root-only snapshots remain readable but cannot assert Loader compatibility.
+
+Migration 045 seeds the Fabric cache; migration 046 adds `requested_at` to the
+existing metadata row. Fabric has its own worker polling loop, independent of
+Mojang and user requests. Every 15 minutes it fetches the three root catalogs.
+If Loader versions/recommendations are unchanged, existing game associations are
+reused and only new Minecraft versions need per-game reads. Loader changes trigger
+a full sweep; a daily full sweep also discovers association-only changes.
+Manual sync uses this same incremental policy, not a forced complete rescan.
+
+Per-game associations come from `/v2/versions/loader/{minecraftVersion}`, not
+assumed combinations. All network reads use at most two concurrent requests;
+each batch settles before the next begins. A run is bounded to three minutes,
+2,000 games, 512MiB cumulative received metadata and an 8MiB normalized snapshot.
+A renewable 60-second lease fences atomic publication of lists and associations.
+Failures preserve the last complete snapshot and retry after 60 seconds.
+No raw launcher metadata is duplicated per pair. Unchanged snapshots avoid writes.
+Before migration 046, reads still work and worker refresh safely skips.
 
 Sources are the official [Fabric Meta API](https://github.com/FabricMC/fabric-meta):
 `/v2/versions/game`, `/v2/versions/loader`, `/v2/versions/installer` on
