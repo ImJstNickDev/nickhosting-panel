@@ -7,6 +7,7 @@ export * from './content-admission.js';
 export { createDirectoryIdentityCache } from './directory-identity.js';
 export { consumeDnsWizardReservation } from './dns-reservations.js';
 export * from './external.js';
+export * from './fabric-catalog.js';
 export * from './file-upload-urls.js';
 export * from './fileman-read.js';
 export * from './fileman-transfers.js';

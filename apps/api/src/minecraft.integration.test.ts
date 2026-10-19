@@ -657,10 +657,40 @@ describe('Minecraft backend API authorization and user projection', () => {
     const legacy = await (await app.request(endpoint)).json();
     expect(Array.isArray(legacy)).toBe(true);
   });
+  it('serves Owner Fabric discovery locally and coalesces repeated sync requests without provider access', async () => {
+    actor = fixture.owner;
+    const endpoint = '/v1/owner/minecraft/fabric/catalog';
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({
+        next_check_at: new Date(Date.now() + 60_000),
+      })
+      .where('id', '=', 'fabric')
+      .execute();
+    const initial = await app.request(endpoint);
+    expect(initial.status).toBe(200);
+    expect(initial.headers.get('cache-control')).toBe('no-store');
+    expect(await initial.json()).toMatchObject({
+      synced: false,
+      games: [],
+      loaders: [],
+      installers: [],
+      latestInstallerVersion: null,
+    });
+    const repeated = await app.request(endpoint, { method: 'POST', body: '{}' });
+    expect(repeated.status).toBe(200);
+    expect(await repeated.json()).toMatchObject({ synced: false });
+    expect((await app.request(endpoint, { method: 'POST', body: '{"force":true}' })).status).toBe(
+      400,
+    );
+    expect(management).not.toHaveBeenCalled();
+  });
   it('rejects user access to every technical compatibility administration route', async () => {
     const id = randomUUID();
     for (const [method, path] of [
       ['GET', '/v1/owner/minecraft/manifest'],
+      ['GET', '/v1/owner/minecraft/fabric/catalog'],
+      ['POST', '/v1/owner/minecraft/fabric/catalog'],
       ['GET', '/v1/owner/minecraft/compatibility'],
       ['POST', '/v1/owner/minecraft/compatibility'],
       ['POST', '/v1/owner/minecraft/catalog/sync'],

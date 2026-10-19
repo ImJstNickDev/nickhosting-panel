@@ -3,6 +3,7 @@ export * from './catalog-dates.js';
 export * from './compatibility.js';
 export * from './datapack-archive.js';
 export * from './datapacks.js';
+export * from './fabric-catalog.js';
 export * from './gateway-messages.js';
 export * from './image-policy.js';
 export * from './management.js';

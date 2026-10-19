@@ -1,11 +1,14 @@
 import { createLogger } from '@nickhosting/core';
 import { getSettings } from '@nickhosting/database';
-import { refreshMinecraftMetadata } from '@nickhosting/server-management';
+import { refreshFabricCatalog, refreshMinecraftMetadata } from '@nickhosting/server-management';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { pollMinecraftMetadata } from './minecraft-metadata.js';
 
 vi.mock('@nickhosting/database', () => ({ getSettings: vi.fn() }));
-vi.mock('@nickhosting/server-management', () => ({ refreshMinecraftMetadata: vi.fn() }));
+vi.mock('@nickhosting/server-management', () => ({
+  refreshMinecraftMetadata: vi.fn(),
+  refreshFabricCatalog: vi.fn(),
+}));
 const db = {} as Parameters<typeof pollMinecraftMetadata>[0];
 const get = vi.mocked(getSettings);
 const refresh = vi.mocked(refreshMinecraftMetadata);
@@ -16,6 +19,7 @@ const logger = createLogger((record) => {
 beforeEach(() => {
   records.length = 0;
   vi.clearAllMocks();
+  vi.mocked(refreshFabricCatalog).mockResolvedValue({ state: 'skipped', changed: 0 });
   get.mockResolvedValue({
     values: { contentMetadataUserAgent: 'Fixture https://example.test' },
   } as Awaited<ReturnType<typeof getSettings>>);
@@ -39,4 +43,14 @@ it('contains failures without leaking request or database details into logs', as
   await pollMinecraftMetadata(db, {}, logger);
   expect(JSON.stringify(records)).toContain('minecraft.metadata_refresh_unavailable');
   expect(JSON.stringify(records)).not.toContain('secret');
+});
+
+it('refreshes Fabric independently even when Mojang fails', async () => {
+  refresh.mockRejectedValue(new Error('unavailable'));
+  vi.mocked(refreshFabricCatalog).mockResolvedValue({ state: 'updated', changed: 3 });
+  await pollMinecraftMetadata(db, {}, logger);
+  expect(refreshFabricCatalog).toHaveBeenCalledWith(db, {
+    userAgent: 'Fixture https://example.test',
+  });
+  expect(JSON.stringify(records)).toContain('fabric.metadata_refreshed');
 });

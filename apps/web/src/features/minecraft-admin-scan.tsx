@@ -39,7 +39,12 @@ export function MinecraftCatalogScan() {
   const mapping = eligible.find((m) => m.id === params.get('mapping')) ?? eligible[0];
   const lastScope = useRef('');
   const scope = `${mapping?.id ?? ''}:${all}`;
+  const fabricDiscovery = runtime === 'fabric' && params.get('fabricView') !== 'registered';
   useLayoutEffect(() => {
+    if (fabricDiscovery) {
+      setTargets(null);
+      return;
+    }
     // Component and coordinator are independent lazy contributions: on a cold
     // navigation the slots may commit after this component's first effect.
     let observer: MutationObserver | undefined;
@@ -61,7 +66,7 @@ export function MinecraftCatalogScan() {
       }
     }
     return () => observer?.disconnect();
-  }, [location.pathname]);
+  }, [location.pathname, fabricDiscovery]);
   useEffect(() => {
     if (!busy && lastScope.current !== scope) {
       lastScope.current = scope;

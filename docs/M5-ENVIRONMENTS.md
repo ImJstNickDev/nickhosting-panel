@@ -1696,3 +1696,15 @@ state changes still reject selection. Missing upload grants retain the Panel wri
 and a dispatched direct write never falls back or retries. See M5 API contracts.
 Development activation uses the existing API/worker source watchers. Code rollback
 is a revert; disposable preparation expires without persistent-data cleanup.
+
+### Fabric discovery cache migration (2026-10-19)
+
+Development now includes migration `045_fabric_catalog.sql`, adding a Fabric
+snapshot to the existing Minecraft metadata cache. A rebuilt app image is required
+for the explicit migrator because migration SQL is image-baked. With the existing
+three env files (dev, viewer and SFTP), the Owner-authorized activation built `api`
+and ran `--profile tools run --rm --no-deps migrate`; no services were recreated.
+API/worker/Vite source hot reload remained healthy. Production has not been migrated.
+Retain the additive cache row and migration history on source rollback; the prior
+code ignores it. See [validation](M5-VALIDATION.md#fabric-catalog-discovery-2026-10-19)
+for catalog, API, browser evidence and retained rollback image.

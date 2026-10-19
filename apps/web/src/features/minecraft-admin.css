@@ -525,3 +525,85 @@ dialog.minecraft-version-drawer {
   color: var(--muted);
   font-size: 0.75rem;
 }
+
+.fabric-version-catalog {
+  display: grid;
+  gap: 0.85rem;
+  min-width: 0;
+}
+.fabric-catalog-tabs,
+.fabric-catalog-heading,
+.fabric-catalog-footer,
+.fabric-catalog-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.fabric-catalog-tabs button {
+  border-color: transparent;
+  background: transparent;
+}
+.fabric-catalog-tabs button[aria-pressed="true"] {
+  background: var(--surface-alt, #edf1f4);
+  border-color: var(--line);
+}
+.fabric-catalog-heading,
+.fabric-catalog-footer,
+.fabric-catalog-status {
+  justify-content: space-between;
+}
+.fabric-catalog-heading > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.fabric-catalog-table {
+  height: 25rem;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+}
+.fabric-catalog-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.fabric-catalog-table th,
+.fabric-catalog-table td {
+  padding: 0.65rem 0.9rem;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.fabric-catalog-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface, #fff);
+}
+.fabric-latest {
+  margin-inline-start: 0.6rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.fabric-catalog-table .fabric-catalog-empty {
+  text-align: center;
+  padding: 2rem 1rem;
+  color: var(--muted);
+}
+.fabric-catalog-status {
+  font-size: 0.85rem;
+}
+@media (max-width: 640px) {
+  .fabric-catalog-footer {
+    justify-content: center;
+  }
+  .fabric-catalog-status {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+fieldset.fabric-catalog-tabs {
+  padding: 0;
+  margin: 0;
+  border: 0;
+  min-width: 0;
+}

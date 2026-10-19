@@ -14058,3 +14058,58 @@ minimums still win. The same five-file focused command above passes **47/47 test
 including missing Java metadata, a 1.17 prerelease and a higher loader requirement.
 Typecheck, scoped Biome and independent review passed. No infrastructure or
 persisted binding changes; no additional network requests.
+
+### Fabric catalog discovery (2026-10-19)
+
+Added local Minecraft/Loader/Installer catalogs, independent scheduled refresh and
+Owner API/UI. Migration 045 only extends the existing metadata cache; discovery
+never creates mappings, runtime combinations or game servers. Installer remains
+`latest`. Historical IDs with spaces and recommendation flags have dedicated
+regressions. Independent backend/security and desktop/mobile content review found
+no remaining must-fix findings.
+
+Validation:
+- Parser/worker unit tests: **12/12**.
+- Isolated PostgreSQL/API integration tests: **27/27**, including Owner access,
+  strict POST body, last-good preservation, cooldown, unchanged snapshots and
+  concurrent lease fencing.
+- Firefox workspace tests: **9/9**, including local filtering/pagination, empty
+  and failed sync states, registered-combination navigation, desktop EN/mobile IT,
+  keyboard access and axe checks.
+- Root/web TypeScript, production build, scoped Biome, i18n completeness
+  (**2461 EN/IT/pseudolocale keys**) passed. Existing large-chunk build warnings remain.
+- Read-only official Fabric Meta probe parsed **531 games, 254 loaders and 67
+  installers**, including 12 historical names containing spaces. Latest installer
+  was `1.1.2` at verification time.
+
+Commands:
+```sh
+scripts/dev.sh pnpm exec vitest run games/minecraft/src/fabric-catalog.test.ts apps/worker/src/minecraft-metadata.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/fabric-catalog.integration.test.ts apps/api/src/minecraft.integration.test.ts
+scripts/dev.sh pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-versions-workspace.browser.test.ts
+scripts/dev.sh pnpm typecheck
+scripts/dev.sh pnpm build
+scripts/dev.sh pnpm i18n:check
+```
+
+Browser evidence uses isolated API fixtures, not live provisioning:
+[desktop EN](screenshots/m5/fabric-discovery-desktop-en.png),
+[mobile IT](screenshots/m5/fabric-discovery-mobile-it.png).
+No game test assets were created or cleaned. Pterodactyl, Wings, Blueprint, provider
+credentials and production infrastructure are unchanged. SFTPGo #18 remains a
+separate release gate.
+
+Owner-authorized development activation completed: built the dev app image and ran
+only the explicit migrator with the three existing dev/viewer/SFTP env files.
+Only `045_fabric_catalog.sql` was applied, from previous migration 044. The transient
+migrator used the existing dev-data network and no published ports. Existing API,
+worker and Vite adopted source changes via hot reload and remained healthy; no
+manual restarts or service recreation were needed. HTTPS returned 200. The worker
+populated all 852 entries; authenticated GET/POST/GET each returned 200 with the
+same fresh catalog, confirming that repeated sync respects the 15-minute cooldown.
+The existing Owner account/session survived; no data reset occurred.
+
+Rollback: revert the feature source and, if needed, restore the retained dev image
+`nickhosting-dev-app:before-fabric-discovery-20261019`. Retain migration 045 and its
+cache row/history: older code only reads the Mojang row, so destructive rollback
+is unnecessary. No production migrations, deployment, DNS or game-server changes.

@@ -16,6 +16,7 @@ import {
   createMinecraftSourceStore,
   createServerSchema,
   enqueueServerOperation,
+  getFabricCatalog,
   importMinecraftEvidence,
   inspectMinecraftCombination,
   inspectMinecraftWorlds,
@@ -29,6 +30,7 @@ import {
   parse,
   prepareMinecraftContentPlan,
   prepareMinecraftCreationConfig,
+  refreshFabricCatalog,
   registerMinecraftCombination,
   requireMinecraftChoice,
   setMinecraftAvailability,
@@ -85,6 +87,19 @@ export function registerMinecraftRoutes(
     );
     await registerGame(db, context, minecraftManifest, { gameId: 'minecraft', ...rollout });
     return c.body(null, 204);
+  });
+  app.get('/v1/owner/minecraft/fabric/catalog', async (c) => {
+    await owner(c);
+    c.header('Cache-Control', 'no-store');
+    return c.json(await getFabricCatalog(db));
+  });
+  app.post('/v1/owner/minecraft/fabric/catalog', async (c) => {
+    await owner(c);
+    parse(z.object({}).strict(), await body(c));
+    const { values } = await getSettings(db, env);
+    await refreshFabricCatalog(db, { userAgent: values.contentMetadataUserAgent ?? '' });
+    c.header('Cache-Control', 'no-store');
+    return c.json(await getFabricCatalog(db));
   });
   app.post('/v1/owner/minecraft/catalog/sync', async (c) => {
     const context = await owner(c);

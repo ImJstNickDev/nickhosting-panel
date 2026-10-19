@@ -920,3 +920,9 @@ async function uploadArchive(
     signal: context.signal,
   });
 }
+
+export type {
+  FabricCatalogResponse,
+  FabricCatalogSnapshot,
+  FabricCatalogStatus,
+} from '../fabric-catalog.js';

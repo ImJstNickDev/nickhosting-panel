@@ -56,6 +56,7 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
     writes: Array<{ path: string; body: Record<string, unknown> }>,
     errors: string[];
   let multipleMappings: boolean, bulkFails: boolean;
+  let fabricSynced: boolean, fabricSyncFails: boolean;
   beforeAll(async () => {
     vite = await createServer({
       root: `${process.cwd()}/apps/web`,
@@ -86,6 +87,8 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
     errors = [];
     multipleMappings = false;
     bulkFails = false;
+    fabricSynced = false;
+    fabricSyncFails = false;
     context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     page = await context.newPage();
     page.on('pageerror', (error) => errors.push(error.message));
@@ -105,6 +108,35 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
       const response = (json: unknown) => route.fulfill({ json });
       if (method === 'GET') reads.push(url);
       else writes.push({ path, body: route.request().postDataJSON() ?? {} });
+      if (path === '/v1/owner/minecraft/fabric/catalog') {
+        if (method === 'POST' && !fabricSyncFails) fabricSynced = true;
+        const list = (prefix: string) =>
+          fabricSynced
+            ? Array.from({ length: 130 }, (_, i) => ({
+                version: `${prefix}${130 - i}`,
+                stable: i % 3 !== 1,
+              }))
+            : [];
+        return response({
+          games: list('1.21.'),
+          loaders: list('0.19.'),
+          installers: fabricSynced
+            ? [
+                { version: '1.1.2', stable: false },
+                { version: '1.1.1', stable: true },
+              ]
+            : [],
+          latestInstallerVersion: fabricSynced ? '1.1.2' : null,
+          synced: fabricSynced,
+          status: {
+            lastCheckedAt: fabricSynced ? '2026-10-19T10:00:00Z' : null,
+            lastSuccessAt: fabricSynced ? '2026-10-19T10:00:00Z' : null,
+            nextCheckAt: null,
+            stale: fabricSyncFails || !fabricSynced,
+            lastError: fabricSyncFails ? 'fabric_metadata_refresh_failed' : null,
+          },
+        });
+      }
       if (path === '/v1/owner/game-modules')
         return response([{ id: 'minecraft', manifest: minecraftManifest }]);
       if (path === '/v1/platform/owner/games')
@@ -226,6 +258,75 @@ describe('Minecraft Versions workspace (real Firefox, isolated responses)', () =
   afterAll(async () => {
     await browser?.close();
     await vite?.close();
+  });
+  it('discovers Fabric catalogs without a mapping or registering combinations, with local filtering and pagination', async () => {
+    await page.goto(`${origin}owner/integrations/minecraft/versions?runtime=fabric`);
+    await check(page.getByText('The Fabric catalog has not been synced yet.')).toBeVisible();
+    await page.getByRole('button', { name: 'Sync versions', exact: true }).click();
+    await check(page.locator('.fabric-catalog-table tbody tr')).toHaveCount(25);
+    const height = await page.locator('.fabric-catalog-table').evaluate((el) => el.clientHeight);
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await check(page.locator('.fabric-catalog-table tbody tr')).toHaveCount(25);
+    await page.getByRole('searchbox').fill('1.21.130');
+    await check(page.locator('.fabric-catalog-table tbody tr')).toHaveCount(1);
+    await page.getByRole('searchbox').clear();
+    await page.getByRole('button', { name: 'Loader', exact: true }).click();
+    await check(
+      page.locator('.fabric-catalog-table').getByText('0.19.130', { exact: true }),
+    ).toBeVisible();
+    await page.getByRole('button', { name: 'Installer', exact: true }).click();
+    await check(
+      page.locator('.fabric-catalog-table tbody tr').filter({ hasText: '1.1.2' }),
+    ).toBeVisible();
+    await check(page.locator('.fabric-latest')).toHaveText('latest');
+    expect(await page.locator('.fabric-catalog-table').evaluate((el) => el.clientHeight)).toBe(
+      height,
+    );
+    expect(reads.filter((u) => u.pathname.endsWith('/fabric/catalog'))).toHaveLength(1);
+    expect(reads.some((u) => u.pathname.includes('/compatibility'))).toBe(false);
+    expect(writes.map((w) => w.path)).toEqual(['/v1/owner/minecraft/fabric/catalog']);
+    await axe();
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/fabric-discovery-desktop-en.png',
+      fullPage: true,
+    });
+    await page.getByRole('button', { name: 'Vanilla', exact: true }).click();
+    await check(page.getByRole('button', { name: 'Detect versions', exact: true })).toBeVisible();
+  });
+  it('keeps the last catalog visible after a failed refresh and exposes registered Fabric view', async () => {
+    fabricSynced = true;
+    await page.goto(`${origin}owner/integrations/minecraft/versions?runtime=fabric`);
+    await check(page.locator('.fabric-catalog-table tbody tr')).toHaveCount(25);
+    fabricSyncFails = true;
+    await page.getByRole('button', { name: 'Sync versions', exact: true }).click();
+    await check(
+      page.getByText('Sync failed. The last saved catalog is shown, if available.'),
+    ).toBeVisible();
+    await check(page.locator('.fabric-catalog-table tbody tr')).toHaveCount(25);
+    await page.getByRole('button', { name: 'Registered combinations', exact: true }).click();
+    await check(page.locator('.fabric-version-catalog')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Discovery', exact: true }).click();
+    await check(page.locator('.fabric-catalog-table tbody tr')).toHaveCount(25);
+  });
+  it('renders Italian Fabric discovery on mobile with bounded rows and keyboard controls', async () => {
+    fabricSynced = true;
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.addInitScript(() => localStorage.setItem('nh.locale', 'it'));
+    await page.goto(`${origin}owner/integrations/minecraft/versions?runtime=fabric`);
+    await check(page.getByRole('searchbox', { name: 'Cerca versioni' })).toBeVisible();
+    const loaders = page.getByRole('button', { name: 'Loader', exact: true });
+    await loaders.focus();
+    await page.keyboard.press('Enter');
+    await check(loaders).toHaveAttribute('aria-pressed', 'true');
+    await check(page.locator('.fabric-catalog-table tbody tr')).toHaveCount(25);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(
+      true,
+    );
+    await axe();
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/fabric-discovery-mobile-it.png',
+      fullPage: true,
+    });
   });
   async function open() {
     await page.goto(`${origin}owner/integrations/minecraft/versions`);

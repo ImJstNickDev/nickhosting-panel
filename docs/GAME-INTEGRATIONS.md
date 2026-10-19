@@ -756,3 +756,32 @@ reload for ordinary changes to the active running world. Disabled ZIPs use
 `.disabled`; disabled folders must live outside the scanned datapacks directory.
 Filesystem state, saved native selection and reload dispatch are distinct.
 See [datapack workflow, limits and contracts](M5-MINECRAFT-DATAPACKS.md).
+
+### Fabric version discovery
+
+Owner → Integrations → Minecraft → Versions → Fabric exposes three independent
+catalogs: supported Minecraft game versions, Loader versions and Installer versions.
+Search, pagination and game-release filtering use the local snapshot. Registered
+combinations remain a separate view; discovery does not register the Cartesian
+product, modify mappings or make Fabric eligible for creation.
+
+`GET /v1/owner/minecraft/fabric/catalog` is a local-only read;
+`POST` to the same path accepts `{}` and requests a due refresh. Both require the
+regular Owner session. The response includes `games`, `loaders`, `installers`,
+`latestInstallerVersion`, `synced` and freshness/error timestamps in `status`.
+Migration 045 adds the `fabric` row to the existing metadata cache. The worker
+refreshes it independently of Mojang, every 15 minutes, with a durable lease and
+three concurrent bounded requests. An unchanged hash avoids rewriting the snapshot;
+a failed refresh retains the last good lists and schedules a retry after 60 seconds.
+The missing migration row safely disables refresh until deployment.
+
+Sources are the official [Fabric Meta API](https://github.com/FabricMC/fabric-meta):
+`/v2/versions/game`, `/v2/versions/loader`, `/v2/versions/installer` on
+`https://meta.fabricmc.net`. Preserve their newest-first order. Historical game IDs
+can contain spaces. The game `stable` flag filters releases; for Loader/Installer,
+it marks Fabric's recommendation, not a reliable prerelease classification, so all
+entries remain visible. Installer policy is **latest**, resolved from the first
+upstream entry, irrespective of that recommendation flag. This discovery does not
+introduce an installer pinning control or change the existing exact provisioning
+contracts; selecting Minecraft/Loader during creation is a separate integration
+step. Existing launcher-format, rollout and runtime support boundaries remain.
