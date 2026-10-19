@@ -211,3 +211,13 @@ backup-then-publication, and recursive creation owned by UID/GID 988. The contai
 had only the private downloaded source/test-cache mount, no Docker socket, game
 volumes or published ports. These tests do not establish live provider behavior
 or make the two-rename replacement atomic.
+
+
+### Activated provider boundary
+
+The coordinated update and compatibility code were activated on 2026-10-19;
+see [the upgrade report](PROVIDER-UPGRADE-READINESS.md#completed-live-activation-2026-10-19).
+Live verification exercised signed token issuance, actual bounded Wings download,
+matching Panel content and authenticated console/installation WebSockets. Mutation
+semantics were tested in isolated native PHP/Wings and application integration
+fixtures; the activation smoke deliberately issued no game-file or power mutations.

@@ -1,8 +1,9 @@
 # Provider ownership and coordinated upgrade readiness
 
-Read-only assessment, 2026-10-19. Tracked in
+Initial read-only assessment and completed coordinated activation, 2026-10-19. Tracked in
 [issue #27](https://github.com/ImJstNickDev/nickhosting-panel/issues/27), under M5
-PR #21. This is an assessment, not an executed upgrade or an activation runbook.
+PR #21. The initial assessment is preserved below; the final section records the
+approved live activation and its verification boundary.
 
 The subsequent [API compatibility assessment](PROVIDER-API-COMPATIBILITY.md)
 covers the entire consumed provider boundary, including upload cancellation,
@@ -142,7 +143,7 @@ belong only in ignored private infrastructure state.
 ## Coordinated upgrade preparation, 2026-10-19
 
 The Owner authorized the coordinated update and selected **only NickHosting**
-for reinstallation. The live activation is not yet complete. The earlier
+for reinstallation. The approved live activation is recorded below. The earlier
 read-only assessment above describes its original evidence boundary; the work
 below includes isolated rehearsal and application compatibility changes.
 
@@ -150,7 +151,7 @@ below includes isolated rehearsal and application compatibility changes.
 
 | Extension | Previous version | Upgrade disposition |
 | --- | --- | --- |
-| NickHosting | 1.7.0 | Reinstall reviewed 1.8.0 |
+| NickHosting | 1.7.0 | Installed reviewed 1.8.0 |
 | Subdomain Manager | 1.0.2 | Do not reinstall; retain code, archives and database state |
 | Minecraft World Manager | 3.1.1 | Do not reinstall; retain code, archives and database state |
 | AddressConfigurator | 1.0 | Do not reinstall; retain installed source and database state |
@@ -209,8 +210,9 @@ Wings 1.13.4 creates missing registered-server containers during bootstrap,
 unlike the previous boot path; it also attempts image pulls for these containers.
 The observed installation has 15 missing containers for pre-existing servers.
 Their data roots exist and all persisted states are offline, but creating them
-requires specific Owner approval before activation. The private proposal lists
-exact identities, commands and rollback; no such containers have been created.
+required additional Owner approval before activation. The Owner approved the
+exact private inventory and rollback; all 15 were created and remained stopped.
+Their exact container IDs are retained in the private rollback ledger.
 
 Use a new application code volume and retain the old volume and exact images.
 Keep provider database/cache services, game mounts, UID/GID, networks and ports
@@ -225,3 +227,106 @@ containers identified in the activation ledger, without deleting volumes.
 Once writes reopen, reconcile subsequent actions before any database restore.
 Source-mounted NickHosting compatibility changes also belong to the rollback;
 reverting only a container image does not revert those sources.
+
+
+## Completed live activation, 2026-10-19
+
+| Component | Activated version |
+| --- | --- |
+| Pterodactyl Panel | 1.15.1 |
+| Wings | 1.13.4; image binary matches the official release SHA256 |
+| Blueprint framework | beta-2026-08 |
+| NickHosting extension | 1.8.0; native Blueprint installation |
+
+Only NickHosting was reinstalled. The six extensions listed above remain inactive;
+their old code and private state were preserved for rollback. The existing Panel
+application volume and old provider images were retained. The replacement code
+volume was prepared with the native update workflow against an isolated copy;
+production received explicit native migrations and the normal
+`blueprint -install nickhosting` command. No default database seeding ran.
+
+### Configuration changes
+
+Machine-specific absolute paths remain in the private infrastructure notes.
+Relative to the current provider installation, the changed files were:
+
+- `docker-compose.yml`: pinned the reviewed Panel/Wings image digests, selected
+  the new Panel application code volume, retained the controlled entrypoint, and
+  corrected Wings' healthcheck to its existing HTTP listener. The temporary boot
+  marker held Panel queue/cron during migration. Existing ports, networks and
+  game-data mounts were preserved.
+- `srv/pterodactyl/panel-var/.env`: explicitly retained Client API limit 720,
+  Application API limit 240, and existing identifier-based routes with
+  `PTERODACTYL_USE_SERVER_IDENTIFIERS=false`. Existing credentials and encryption
+  keys were preserved.
+- `srv/pterodactyl/wings/config.yml`: disabled new automatic machine-ID mounts.
+  Wings also serialized its new upstream defaults for download/restore allowlists,
+  SFTP connection limits, passwd generation and CPU scheduling. Existing values,
+  game paths and UID/GID were preserved; no hand-written provider patch was used.
+- `srv/pterodactyl/nginx/panel.conf`: temporary maintenance write gate, subsequently
+  restored byte-for-byte with its original ownership and permissions. The external
+  reverse proxy, DNS, certificates and firewall were not changed.
+
+The final Panel database dump was taken after quiescing all provider/NickHosting
+writers and verifying empty operation queues. Restoring that dump into an emptied
+isolated schema succeeded before live migrations. The exact write-reopening time
+is recorded privately; any later database rollback must first reconcile new user
+actions. No game-data backup was made, as requested by the Owner.
+
+### Verification and data boundary
+
+- Independent before/after no-follow scans covered **29 game roots and 3,413,483
+  entries** with zero errors. All 29 digests matched: path, UID/GID, permissions,
+  type and inode were unchanged. This is metadata evidence, not a full file-content
+  checksum or a promise of zero operational risk.
+- All **14 existing game containers** retained their IDs, images, configuration,
+  mounts and start/finish timestamps. The **15 explicitly approved missing
+  containers** were created by Wings and never started. No game power commands,
+  installs, reinstalls or game-file mutations were issued by the validation.
+- The 203 pre-existing root-owned entries remained unchanged. Updating Wings
+  prevents the covered creation defect; it does not retroactively repair existing
+  entries. Exact repairs remain separately scoped under issue #27.
+- Database fingerprints for servers, users, API keys, nodes, allocations, nests,
+  eggs, egg variables, mounts and NickHosting identity links matched. Expected
+  migration/settings/environment changes were retained. All five managed identity
+  and technical-owner links passed the independent native PHP checks.
+- All 52 installed extension files matched the reviewed package. Its six migrations
+  and bounded settings passed checks. Native authenticated Panel-to-Wings discovery
+  reported 1.13.4.
+- The smoke report contains thirteen successful result records, including artifact,
+  database and completion records. The live checks cover: extension discovery, managed identity,
+  upload-publication capability, scoped upload/download token issuance, directory
+  listing, identical bounded content via Panel and direct Wings download, authenticated
+  console/installation WebSockets and anonymous denial. No upload or command was
+  sent during these live checks.
+- Panel login and NickHosting HTTPS returned 200. Panel queue/cron were resumed;
+  existing dev API, worker and Gateway were restarted without replacing their
+  images, storage or configuration. Panel, Wings, dev API, worker, Vite and web
+  ingress are healthy. Gateway has three admitted routes and two pre-existing
+  `backend_active_binding` failures: those two game containers were already
+  never-started before the update and have no initial reachability proof. Its
+  degraded readiness is not a new provider regression; no game was started to
+  manufacture that proof.
+
+Preparation validation included 323 transfer unit checks, 117 database/integration
+checks, 459 native PHP assertions against each supported Panel generation, three
+actual upstream Wings filesystem cases, 28 Python updater checks, 43 console
+checks, seven backup checks and 16 isolated ingress cases, plus typecheck and
+format/lint checks on changed code. Live game creation, a full backup/restore and
+real game login were deliberately not repeated during activation; those behaviors
+are not established by the read-only smoke test alone.
+
+### Corrected activation issues and rollback retention
+
+An initial code-copy exclusion also omitted Blueprint's `.blueprint` directory.
+It was corrected in the new application volume before live migrations and before
+reopening writes; the old code volume and game directories were unaffected. A
+private quiescence query quoting error and a private smoke-script environment flag
+were corrected without changing application behavior. Wings' first bootstrap
+spent about six minutes pulling missing images before opening its listener.
+
+The two isolated rehearsal containers were stopped; their private state is retained.
+Small private code/configuration/database backups, the old application volume and
+old images remain available for rollback. Do not blindly restore the pre-upgrade
+database after user writes resume. Keep SFTP issue #18 and the M5 production-release
+gate independent of this provider update. PR #21 remains open and unmerged.
