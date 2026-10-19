@@ -13991,12 +13991,16 @@ Results: **143/143 focused unit tests**, **27 database integration cases covered
 diff checks and all **2438 EN/IT/pseudolocale keys** passed. Independent final
 technical and rendered desktop/mobile review found no remaining must-fix findings.
 
-Activation remains pending: the development API watcher stalled during graceful
-shutdown and ingress returns HTTP 502. The worker and Vite remain healthy. Only
-`docker restart --time 20 nickhosting-dev-api-1` is proposed, subject to explicit
-Owner approval; no rebuild, migration or Blueprint update is needed. Rollback is a
-revert of this feature commit and an approved API restart, preserving data and
-prepared changes. No live game-server mutation or new live test asset was made.
+Activation completed after explicit Owner approval with only
+`docker restart --time 20 nickhosting-dev-api-1`. API readiness, authenticated
+inventory/catalog/search/file-list requests for Modrinth and CurseForge returned
+HTTP 200; API, worker and Vite are healthy and the HTTPS frontend returns 200.
+The preliminary `/v1/health` probe returned 404 after recovery because it is not a
+health endpoint; the actual API readiness check is `/readyz` internally.
+No rebuild, migration, Blueprint update or game-server mutation occurred. Existing
+database migration remains 044. Rollback is a revert of the feature commit and an
+approved API restart, preserving data and prepared changes. No new live test asset
+was created.
 
 The browser uses actual application/auth handlers and real provider adapter parsing
 with isolated metadata, archive and game-file fixtures. It exercises automatic
