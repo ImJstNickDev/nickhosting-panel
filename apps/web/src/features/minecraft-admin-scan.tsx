@@ -42,7 +42,7 @@ export function MinecraftCatalogScan() {
   const currentScope = useRef(scope);
   currentScope.current = scope;
   const runScope = useRef('');
-  const fabricDiscovery = runtime === 'fabric' && params.get('fabricView') !== 'registered';
+  const fabricDiscovery = runtime === 'fabric';
   useLayoutEffect(() => {
     if (fabricDiscovery) {
       setTargets(null);
@@ -93,12 +93,7 @@ export function MinecraftCatalogScan() {
     void queryClient.invalidateQueries({ queryKey: ['creation'] });
   };
   async function sync() {
-    if (
-      !mapping ||
-      mapping.enabled === false ||
-      !['vanilla', 'fabric'].includes(runtime) ||
-      controller.current
-    )
+    if (!mapping || mapping.enabled === false || runtime !== 'vanilla' || controller.current)
       return;
     const active = new AbortController();
     controller.current = active;
@@ -116,18 +111,10 @@ export function MinecraftCatalogScan() {
         previous: batch,
         signal: active.signal,
         request: (cursor, signal) =>
-          api<CatalogBatch>(
-            runtime === 'fabric'
-              ? '/v1/owner/minecraft/fabric/combinations/sync'
-              : '/v1/owner/minecraft/catalog/sync',
-            {
-              signal,
-              body:
-                runtime === 'fabric'
-                  ? { mappingId: mapping.id, all, cursor, limit: 5 }
-                  : { mappingId: mapping.id, all, enableSupported: false, cursor, limit: 20 },
-            },
-          ),
+          api<CatalogBatch>('/v1/owner/minecraft/catalog/sync', {
+            signal,
+            body: { mappingId: mapping.id, all, enableSupported: false, cursor, limit: 20 },
+          }),
         progress: (result, measured) => {
           if (!mounted.current || currentScope.current !== activeScope) return;
           setBatch(result);
@@ -164,7 +151,7 @@ export function MinecraftCatalogScan() {
     <>
       {createPortal(
         <>
-          {['vanilla', 'fabric'].includes(runtime) && (
+          {runtime === 'vanilla' && (
             <button
               type="button"
               className="secondary minecraft-detect"
@@ -206,13 +193,7 @@ export function MinecraftCatalogScan() {
                     {t('versions.allVersions')}
                   </button>
                 </fieldset>
-                <p className="muted">
-                  {t(
-                    runtime === 'fabric'
-                      ? 'fabricCatalog.scanDescription'
-                      : 'versions.scanDescription',
-                  )}
-                </p>
+                <p className="muted">{t('versions.scanDescription')}</p>
                 <button
                   type="button"
                   disabled={!mapping || mapping.enabled === false || busy}

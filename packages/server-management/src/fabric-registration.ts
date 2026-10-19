@@ -30,11 +30,10 @@ type RegistrationOptions = {
   protocols?: typeof fetchMinecraftProtocols;
 };
 function requireCatalog(catalog: FabricCatalogResponse) {
-  if (!catalog.synced || !catalog.relations || !catalog.latestInstallerVersion)
+  if (!catalog.synced || !catalog.latestInstallerVersion)
     throw new DomainError('integration_unavailable', 503, { reason: 'fabric_catalog_unavailable' });
   return {
     ...catalog,
-    relations: catalog.relations,
     latestInstallerVersion: catalog.latestInstallerVersion,
   };
 }
@@ -66,10 +65,9 @@ async function registerFromCatalog(
   env: Environment,
   options: RegistrationOptions,
 ) {
-  const setIndex = catalog.relations.gameLoaderSets[value.release];
   if (
-    setIndex === undefined ||
-    !catalog.relations.loaderSets[setIndex]?.includes(value.loaderVersion)
+    !catalog.games.some((game) => game.version === value.release) ||
+    !catalog.loaders.some((loader) => loader.version === value.loaderVersion)
   )
     throw new DomainError('validation_failed', 400, { reason: 'fabric_pair_unavailable' });
   const installerVersion = catalog.latestInstallerVersion;
@@ -211,8 +209,7 @@ export async function syncFabricRegisteredCatalog(
     reason?: string;
   }[] = [];
   for (const game of games.slice(value.cursor, value.cursor + value.limit)) {
-    const loaders =
-      catalog.relations.loaderSets[catalog.relations.gameLoaderSets[game.version] ?? -1] ?? [];
+    const loaders = catalog.loaders.map((loader) => loader.version);
     const loaderVersion = loaders.find((version) => stableLoaders.has(version)) ?? loaders[0];
     const base = { version: game.version, releaseType: game.stable ? 'release' : 'snapshot' };
     if (!loaderVersion) {

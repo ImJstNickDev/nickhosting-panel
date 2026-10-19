@@ -80,7 +80,7 @@ export function OwnerMinecraftPage() {
   const runtimes = modules.data?.find((m) => m.id === 'minecraft')?.manifest.runtimes ?? [];
   const runtime =
     runtimes.find((r) => r.id === params.get('runtime'))?.id ?? runtimes[0]?.id ?? 'vanilla';
-  const fabricDiscovery = runtime === 'fabric' && params.get('fabricView') !== 'registered';
+  const fabricDiscovery = runtime === 'fabric';
   const fabricKind =
     params.get('fabricKind') === 'loaders'
       ? 'loaders'
@@ -245,22 +245,12 @@ export function OwnerMinecraftPage() {
   const catalogNavigation =
     runtime === 'fabric' ? (
       <fieldset className="version-catalog-datasets" aria-label={t('fabricCatalog.view')}>
-        {(['games', 'loaders', 'installers', 'registered'] as const).map((view) => (
+        {(['games', 'loaders', 'installers'] as const).map((view) => (
           <button
             type="button"
             key={view}
-            className={view === 'registered' ? 'version-catalog-registered' : undefined}
-            aria-pressed={
-              view === 'registered' ? !fabricDiscovery : fabricDiscovery && fabricKind === view
-            }
-            disabled={bulkBusy}
-            onClick={() =>
-              update({
-                fabricView: view === 'registered' ? 'registered' : 'discovery',
-                ...(view === 'registered' ? {} : { fabricKind: view }),
-                combination: '',
-              })
-            }
+            aria-pressed={fabricKind === view}
+            onClick={() => update({ fabricKind: view, fabricView: '', combination: '' })}
           >
             {t(`fabricCatalog.${view}`)}
           </button>
@@ -438,15 +428,7 @@ export function OwnerMinecraftPage() {
         ))}
       </fieldset>
       {fabricDiscovery ? (
-        <FabricVersionCatalog
-          kind={fabricKind}
-          navigation={catalogNavigation}
-          mapping={mapping}
-          mappingContext={mappingContext}
-          onRegistered={(id, mappingId) =>
-            update({ fabricView: 'registered', mapping: mappingId, combination: id }, true)
-          }
-        />
+        <FabricVersionCatalog kind={fabricKind} navigation={catalogNavigation} />
       ) : (
         <>
           <VersionCatalogFrame

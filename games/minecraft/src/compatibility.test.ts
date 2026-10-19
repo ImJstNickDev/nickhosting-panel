@@ -43,6 +43,27 @@ const evidence: MinecraftEvidence = {
 };
 const now = new Date('2026-10-09T13:00:00Z');
 describe('Minecraft compatibility evidence', () => {
+  it('declares Fabric installation and direct access without promoting gateway compatibility', () => {
+    const fabric = { ...combination, profile: 'fabric' as const };
+    expect(minecraftDeclaredCapabilities(fabric)).toMatchObject({
+      installation: true,
+      directConnection: true,
+      playerManagement: true,
+      gateway: false,
+      wake: false,
+      sleepWake: false,
+    });
+    expect(() =>
+      assertMinecraftChoice({
+        combination: fabric,
+        enabled: true,
+        mappingDigest: 'a'.repeat(64),
+        choiceDigest: 'b'.repeat(64),
+        evidence: [],
+        privateTester: false,
+      }),
+    ).not.toThrow();
+  });
   it('real installation bootstrap enables only explicit private testing and cannot claim verification', () => {
     const bootstrap: MinecraftEvidence = {
       ...evidence,

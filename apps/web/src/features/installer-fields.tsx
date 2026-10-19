@@ -86,6 +86,11 @@ export function VersionList({
   useEffect(() => {
     if (options.data) onChoices(options.data);
   }, [options.data, onChoices]);
+  useEffect(() => {
+    if (value !== undefined && value !== '') return;
+    const recommended = options.data?.find((option) => option.recommended && !option.disabled);
+    if (recommended) onChange(recommended.value);
+  }, [options.data, value, onChange]);
   const visible =
     options.data?.filter(
       (o) => !versionFilter || all || !o.releaseType || o.releaseType === 'release',
@@ -96,16 +101,21 @@ export function VersionList({
       return;
     }
     if (entryFocusAttempted.current) return;
+    const recommended = options.data?.find((option) => option.recommended && !option.disabled);
+    const inputs = Array.from(
+      choicesElement.current?.querySelectorAll<HTMLInputElement>('input:not(:disabled)') ?? [],
+    );
     const input =
-      choicesElement.current?.querySelector<HTMLInputElement>('input:checked:not(:disabled)') ??
-      choicesElement.current?.querySelector<HTMLInputElement>('input:not(:disabled)');
+      inputs.find((entry) => entry.checked) ??
+      inputs.find((entry) => entry.value === recommended?.value) ??
+      inputs[0];
     if (!input) return;
     entryFocusAttempted.current = true;
     if (canFocusOnEntry(input)) input.focus({ preventScroll: true });
   });
   return (
     <>
-      {versionFilter && (
+      {versionFilter && options.data?.some((option) => option.releaseType) && (
         <Check
           label={t('gameUi.showAllVersions')}
           checked={all}
@@ -172,6 +182,9 @@ export function VersionList({
               <span className={presentation === 'cards' ? 'installer-choice-title' : undefined}>
                 {o.label ?? t(o.labelKey ?? '')}
               </span>
+              {o.recommended && (
+                <span className="installer-recommended muted">{t('gameUi.recommended')}</span>
+              )}
             </label>
           ))}
         </div>

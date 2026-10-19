@@ -1,5 +1,6 @@
 import { DomainError } from '@nickhosting/core';
 import {
+  isFabricUpdatedBinding,
   type MinecraftEvidence,
   minecraftDigest,
   minecraftRuntimeMappingSchema,
@@ -313,7 +314,12 @@ export async function requireMinecraftRuntimeImageEvidence(
     choice.row.mapping_digest !== choice.mappingDigest
   )
     throw new DomainError('provenance_mismatch');
-  if (choice.supportAuthority === 'integration' && choice.capabilities.installation) {
+  if (
+    choice.supportAuthority === 'integration' &&
+    choice.capabilities.installation &&
+    (choice.combination.profile !== 'fabric' ||
+      isFabricUpdatedBinding(minecraftRuntimeMappingSchema.parse(choice.row.binding)))
+  ) {
     // Compiled Vanilla support is not a per-instance test certificate. Image
     // identity is observed locally and pinned once, after actual installation;
     // future container replacement must preserve that identity.

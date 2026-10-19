@@ -212,7 +212,7 @@ function digest(value: unknown) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 async function previousRequest(
-  tx: Transaction<Database>,
+  tx: Kysely<Database>,
   context: AuthContext,
   key: string,
   hash: string,
@@ -303,17 +303,39 @@ async function insertOperation(
   return { serverId: server.id, jobId };
 }
 
+/** Idempotent catalog creation reuses the accepted request even if installer latest changed. */
+export async function findManagedCreationRequest(
+  db: Kysely<Database>,
+  context: AuthContext,
+  key: string,
+  request: unknown,
+  env: Environment = {},
+) {
+  const current = await currentInteractiveContext(db, context, env);
+  assertPermission(current, 'server:manage', { ownerUserId: current.subjectUserId });
+  return previousRequest(
+    db,
+    current,
+    key,
+    digest({ kind: 'create', subject: current.subjectUserId, value: request }),
+  );
+}
+
 export async function createManagedServer(
   db: Kysely<Database>,
   adapter: PterodactylAdapter,
   context: AuthContext,
   input: unknown,
   env: Environment = {},
-  options: { minecraftInitialContent?: MinecraftPreparedContent } = {},
+  options: { minecraftInitialContent?: MinecraftPreparedContent; creationRequest?: unknown } = {},
 ) {
   assertPermission(context, 'server:manage', { ownerUserId: context.subjectUserId });
   const request = parse(createServerSchema, input);
-  const hash = digest({ kind: 'create', subject: context.subjectUserId, value: request });
+  const hash = digest({
+    kind: 'create',
+    subject: context.subjectUserId,
+    value: options.creationRequest ?? request,
+  });
   return db.transaction().execute(async (tx) => {
     await requestLock(tx, context, request.idempotencyKey);
     const previous = await previousRequest(tx, context, request.idempotencyKey, hash);

@@ -24,6 +24,7 @@ import {
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
 import {
+  isFabricUpdatedBinding,
   minecraftCombinationSchema,
   minecraftDigest,
   minecraftManifest,
@@ -32,6 +33,10 @@ import {
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
 import { z } from 'zod';
+import {
+  fabricInstalledLauncherMaxBytes,
+  verifyFabricInstalledLauncher,
+} from '../../../games/minecraft/src/fabric-launcher.js';
 import {
   canonicalMinecraftJarSha256,
   minecraftGeneratedLauncherMaxBytes,
@@ -843,6 +848,56 @@ async function verifyInstalledRuntime(
     )
       throw new DomainError('conflict');
     verified.push({ path, sha256: actual.sha256, size: actual.size });
+  } else if (runtime.profile === 'fabric' && isFabricUpdatedBinding(binding)) {
+    // The trusted installer owns library resolution. Capture the concrete outputs
+    // once on installation/restore; power operations reuse the persisted receipt.
+    const capture = async (path: string, maxBytes: number, retain = false) => {
+      const chunks: Buffer[] = [];
+      const actual = await hashMinecraftRemoteFile(context, path, {
+        maxBytes,
+        ...(retain
+          ? {
+              onChunk: (chunk: Uint8Array) => {
+                chunks.push(Buffer.from(chunk));
+              },
+            }
+          : {}),
+      });
+      if (!actual) throw new DomainError('conflict');
+      return { path, ...actual, bytes: retain ? Buffer.concat(chunks) : undefined };
+    };
+    const serverArtifact = runtime.artifacts.find((entry) => entry.role === 'server');
+    const installerArtifact = runtime.artifacts.find((entry) => entry.role === 'installer');
+    if (
+      !serverArtifact ||
+      !installerArtifact?.sha256 ||
+      (!serverArtifact.sha1 && !serverArtifact.sha256)
+    )
+      throw new DomainError('configuration_invalid');
+    const [launcher, server, installer, properties] = await Promise.all([
+      capture('server.jar', fabricInstalledLauncherMaxBytes, true),
+      capture('minecraft-server.jar', serverArtifact.size ?? 512 * 1024 ** 2),
+      capture('fabric-installer.jar', 32 * 1024 ** 2),
+      capture('fabric-server-launcher.properties', 64 * 1024, true),
+    ]);
+    if (!launcher.bytes || !properties.bytes) throw new DomainError('conflict');
+    if (
+      (serverArtifact.sha1 && serverArtifact.sha1 !== server.sha1) ||
+      (serverArtifact.sha256 && serverArtifact.sha256 !== server.sha256) ||
+      (serverArtifact.size !== undefined && serverArtifact.size !== server.size) ||
+      installerArtifact.sha256 !== installer.sha256 ||
+      parseMinecraftProperties(properties.bytes.toString('latin1')).serverJar !==
+        'minecraft-server.jar'
+    )
+      throw new DomainError('conflict');
+    await verifyFabricInstalledLauncher(launcher.bytes);
+    verified.push(
+      ...[launcher, server, installer, properties].map(({ path, sha256, size }) => ({
+        path,
+        sha256,
+        size,
+      })),
+    );
   } else {
     // Loader-generated outputs are not proven by downloading an installer. Only
     // the trusted runner's signed exact-combination manifest can establish them.

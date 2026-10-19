@@ -1,5 +1,5 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
-import { type AuthContext, DomainError } from '@nickhosting/core';
+import { type AuthContext, assertPermission, DomainError } from '@nickhosting/core';
 import { type Database, getSettings, recordAudit } from '@nickhosting/database';
 import { evaluateGameAccess } from '@nickhosting/game-sdk';
 import {
@@ -10,6 +10,7 @@ import {
   minecraftDeclaredCapabilities,
   minecraftDigest,
   minecraftEvidenceSchema,
+  minecraftManifestUrl,
   minecraftSupport,
   publicMinecraftChoice,
   resolveMinecraftImage,
@@ -27,8 +28,9 @@ import {
   validateMinecraftRuntimeMapping,
 } from '../../../games/minecraft/src/runtime.js';
 import { type DB, type Environment, lockResources } from './admission.js';
+import { getFabricCatalog } from './fabric-catalog.js';
 import { currentInteractiveContext } from './interactive-context.js';
-import { getMinecraftMetadataStatus } from './minecraft-metadata.js';
+import { cachedMinecraftManifest, getMinecraftMetadataStatus } from './minecraft-metadata.js';
 import { ownerOnly, parse } from './registry.js';
 
 type Mapping = Selectable<Database['runtime_egg_mappings']>;
@@ -100,6 +102,18 @@ export async function registerMinecraftCombination(
   } = {},
 ) {
   ownerOnly(context);
+  return registerCombination(db, adapter, context, input, env, options, false);
+}
+
+async function registerCombination(
+  db: Kysely<Database>,
+  adapter: PterodactylAdapter,
+  context: AuthContext,
+  input: unknown,
+  env: Environment,
+  options: { metadata?: RuntimeMetadataClient; protocols?: typeof fetchMinecraftProtocols },
+  forCreation: boolean,
+) {
   const value = parse(
     z
       .object({
@@ -202,7 +216,8 @@ export async function registerMinecraftCombination(
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
     const current = await currentInteractiveContext(tx, context, env);
-    ownerOnly(current);
+    if (forCreation) await assertFabricCreationAccess(tx, current, mapping.id);
+    else ownerOnly(current);
     const latest = await tx
       .selectFrom('runtime_egg_mappings')
       .selectAll()
@@ -238,6 +253,142 @@ export async function registerMinecraftCombination(
     });
     return { id };
   });
+}
+
+/** Fabric catalogs describe independent choices, not a precomputed Cartesian product. */
+async function assertFabricCreationAccess(db: DB, context: AuthContext, mappingId: string) {
+  assertPermission(context, 'server:manage', { ownerUserId: context.subjectUserId });
+  const [mapping, rollout] = await Promise.all([
+    db
+      .selectFrom('runtime_egg_mappings as mapping')
+      .innerJoin('managed_nodes as node', 'node.id', 'mapping.node_id')
+      .selectAll('mapping')
+      .select('node.enabled as nodeEnabled')
+      .where('mapping.id', '=', mappingId)
+      .executeTakeFirst(),
+    db
+      .selectFrom('game_rollouts')
+      .selectAll()
+      .where('integration_id', '=', 'minecraft')
+      .executeTakeFirst(),
+  ]);
+  if (
+    !rollout ||
+    !evaluateGameAccess(
+      { gameId: 'minecraft', state: rollout.state, allowedUserIds: rollout.allowlist },
+      { userId: context.subjectUserId, role: context.role },
+    ).canCreate
+  )
+    throw new DomainError('forbidden');
+  if (
+    !mapping?.enabled ||
+    !mapping.nodeEnabled ||
+    mapping.game_id !== 'minecraft' ||
+    mapping.runtime_id !== 'fabric'
+  )
+    throw new DomainError('integration_unavailable');
+  const { nodeEnabled: _nodeEnabled, ...identity } = mapping;
+  return identity;
+}
+
+async function fabricCreationCatalog(db: DB) {
+  const [catalog, mappings, releases] = await Promise.all([
+    getFabricCatalog(db),
+    db
+      .selectFrom('runtime_egg_mappings as mapping')
+      .innerJoin('managed_nodes as node', 'node.id', 'mapping.node_id')
+      .select('mapping.id')
+      .where('mapping.game_id', '=', 'minecraft')
+      .where('mapping.runtime_id', '=', 'fabric')
+      .where('mapping.enabled', '=', true)
+      .where('node.enabled', '=', true)
+      .orderBy('mapping.id')
+      .execute(),
+    db.selectFrom('minecraft_release_metadata').select(['id', 'release_time']).execute(),
+  ]);
+  if (!catalog.synced || !catalog.latestInstallerVersion || !catalog.loaders.length) return [];
+  const dates = new Map(
+    releases.map((release) => [release.id, release.release_time?.toISOString() ?? null]),
+  );
+  return mappings.flatMap((mapping) =>
+    catalog.games.map((game) => ({
+      id: `fabric:${mapping.id}:${game.version}`,
+      version: game.version,
+      runtime: 'fabric' as const,
+      releaseType: game.stable ? ('release' as const) : ('snapshot' as const),
+      releaseTime: dates.get(game.version) ?? null,
+      capabilities: minecraftDeclaredCapabilities({
+        profile: 'fabric',
+        release: game.version,
+        releaseType: game.stable ? 'release' : 'snapshot',
+        family: 'unknown',
+        protocolId: null,
+      }),
+    })),
+  );
+}
+
+/** Called only by creation, using the caller's real authority. No Owner impersonation.
+ * Catalog membership is checked independently; immutable registration is lazy. */
+export async function resolveFabricCreationChoice(
+  db: Kysely<Database>,
+  adapter: PterodactylAdapter,
+  context: AuthContext,
+  input: { choiceId: string; loaderVersion: string },
+  env: Environment = {},
+  options: { metadata?: RuntimeMetadataClient; protocols?: typeof fetchMinecraftProtocols } = {},
+) {
+  const match = /^fabric:([a-f0-9-]{36}):(.+)$/.exec(input.choiceId);
+  if (!match) throw new DomainError('validation_failed');
+  const mappingId = parse(z.uuid(), match[1]);
+  const catalog = await getFabricCatalog(db);
+  const current = await currentInteractiveContext(db, context, env);
+  const mapping = await assertFabricCreationAccess(db, current, mappingId);
+  if (!catalog.synced || !catalog.latestInstallerVersion)
+    throw new DomainError('integration_unavailable');
+  const runtime = parse(minecraftRuntimeRequestSchema, {
+    profile: 'fabric',
+    release: match[2],
+    loaderVersion: input.loaderVersion,
+    installerVersion: catalog.latestInstallerVersion,
+  });
+  if (
+    !catalog.games.some((game) => game.version === runtime.release) ||
+    !catalog.loaders.some((loader) => loader.version === runtime.loaderVersion)
+  )
+    throw new DomainError('validation_failed');
+  const existing = await db
+    .selectFrom('minecraft_combinations')
+    .select('id')
+    .where('mapping_id', '=', mappingId)
+    .where('mapping_digest', '=', minecraftMappingDigest(mapping))
+    .where(sql<string>`combination->>'profile'`, '=', 'fabric')
+    .where(sql<string>`combination->>'release'`, '=', runtime.release)
+    .where(sql<string>`combination->>'loaderVersion'`, '=', runtime.loaderVersion ?? '')
+    .where(sql<string>`combination->>'installerVersion'`, '=', runtime.installerVersion ?? '')
+    .orderBy('created_at', 'desc')
+    .executeTakeFirst();
+  if (existing) return requireMinecraftChoice(db, current, existing.id, env);
+  const { values } = await getSettings(db, env);
+  const upstream =
+    options.metadata ??
+    createRuntimeMetadataClient({ userAgent: values.contentMetadataUserAgent ?? '' });
+  const metadata: RuntimeMetadataClient = {
+    read: (url) =>
+      !options.metadata && url === minecraftManifestUrl
+        ? cachedMinecraftManifest(db)
+        : upstream.read(url),
+  };
+  const registered = await registerCombination(
+    db,
+    adapter,
+    current,
+    { mappingId, runtime },
+    env,
+    { ...options, metadata },
+    true,
+  );
+  return requireMinecraftChoice(db, current, registered.id, env);
 }
 
 export async function inspectMinecraftCombination(db: DB, id: string, env: Environment = {}) {
@@ -280,8 +431,9 @@ function inspectLoadedCombination(
     evidence,
     mappingDigest,
     capabilities: minecraftDeclaredCapabilities(combination),
-    supportAuthority:
-      combination.profile === 'vanilla' ? ('integration' as const) : ('signed-evidence' as const),
+    supportAuthority: minecraftDeclaredCapabilities(combination).installation
+      ? ('integration' as const)
+      : ('signed-evidence' as const),
     support: minecraftSupport(combination, mappingDigest, row.identity_digest, evidence),
   };
 }
@@ -382,7 +534,7 @@ function minecraftChoiceBlockReason(
   choice: ReturnType<typeof inspectLoadedCombination>,
   privateTester: boolean,
 ): 'choice-disabled' | 'mapping-disabled' | 'mapping-changed' | 'evidence-required' | null {
-  if (!choice.row.enabled) return 'choice-disabled';
+  if (!choice.row.enabled && choice.combination.profile !== 'fabric') return 'choice-disabled';
   if (!choice.mapping.enabled) return 'mapping-disabled';
   if (choice.row.mapping_digest !== choice.mappingDigest) return 'mapping-changed';
   try {
@@ -455,6 +607,7 @@ export async function minecraftCatalog(db: DB, context: AuthContext, env: Enviro
   const loaded = await inspectMinecraftCombinations(db, rows, env, false);
   const choices = [];
   for (const choice of loaded) {
+    if (choice.combination.profile === 'fabric') continue;
     try {
       assertLoadedMinecraftChoice(choice, rollout, context);
       choices.push({
@@ -469,6 +622,7 @@ export async function minecraftCatalog(db: DB, context: AuthContext, env: Enviro
         throw error;
     }
   }
+  choices.push(...(await fabricCreationCatalog(db)));
   const compare = new Intl.Collator('en', { numeric: true }).compare;
   return choices.sort(
     (left, right) =>

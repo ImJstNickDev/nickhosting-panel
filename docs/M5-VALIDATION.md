@@ -14247,3 +14247,79 @@ game test assets or production deployment. Isolated test schemas were cleaned.
 Rollback preserves registry rows as described in M5 environments. PR21 stays
 open/unmerged; Fabric creation/launcher verification remains separate and issue18
 is unchanged.
+
+### Fabric independent catalog creation — 2026-10-19
+
+Supersedes the previous registration-bridge acceptance boundary. Owner-approved
+policy now offers independent Minecraft and Loader selections from the local
+Fabric catalogs. Latest Installer is frozen on creation, with an immutable runtime
+snapshot resolved only for that request. No Cartesian product or preregistration
+is required; old rows remain reusable diagnostics. Owner mapping/node/rollout,
+current identity, permissions and atomic admission remain authoritative.
+
+Implemented evidence:
+
+- Root discovery fetches exactly three official endpoints, bounded to two concurrent
+  reads and 8MiB. Unit simulation with 1,000 games and 2,500 loaders still makes only
+  three reads and stores no pair matrix. Stale caches remain usable on refresh failure.
+- Normal-user creation works without any existing combination. Tests cover missing
+  catalog members, disabled mapping/rollout, revoked or invalid assisted session,
+  mapping changes during upstream reads, and unchanged ordinary Owner boundaries.
+- Real API-handler integration covers creation and idempotent replay after cached
+  Installer latest changes, including conflict on a changed request under one key.
+- FabricUpdated installation verifies exact launcher/Mojang JAR/installer/properties
+  outputs once on install/restore. Modern and shaded historical launcher layouts
+  are covered, including old LaunchWrapper metadata. First installation does not
+  require a previously started container. Normal power paths reuse existing receipts.
+- The integration supplies a conditional Loader wizard step, recommended stable
+  default and independent choices. Shared SDK/renderers honor field conditions and
+  optional `UiOption.recommended`; no game-specific conditions enter the shared shell.
+  Changing Minecraft preserves Loader; changing runtime clears it. Installer has no
+  user control. Owner Fabric management has only three version catalogs, no required
+  registered-combination scan.
+
+Commands/results:
+
+- `pnpm exec vitest run games/minecraft/src/fabric-catalog.test.ts apps/worker/src/minecraft-metadata.test.ts`: **21 passed**.
+- Isolated `fabric-catalog.integration.test.ts`: **11 passed**.
+- Runtime/capability/Fabric egg/launcher unit suites: **46 passed**.
+- Full isolated Minecraft content/installation suite: **82 passed**, including new
+  FabricUpdated and existing Vanilla/custom signed paths (167.35s).
+- UI/controller/creation-cache focused unit suites: **51 passed**.
+- Isolated Fabric registration, Minecraft registry and real API handler suites:
+  **50 passed**. One initial query-count expectation was updated from three to six
+  constant local reads (no per-version N+1 queries); the final run passed.
+- Firefox Owner versions and Fabric wizard browser suites: **14 passed** (11+3).
+  An initial Italian test label mismatch was corrected and rerun. Tests use the real
+  rendered components with isolated API fixtures, not live game creation.
+- Full TypeScript, production build, scoped Biome and i18n completeness passed.
+  Build retains existing large lazy-chunk warnings unrelated to this change.
+
+Sanitized browser screenshots under `.codex/local/m5-browser/screenshots/`:
+`fabric-wizard-loaders-en.png`, `fabric-wizard-loaders-it-mobile.png`,
+`fabric-independent-loaders-en.png`, `fabric-discovery-mobile-it.png`, and
+`fabric-live-wizard-loader.png` (actual development app, cropped to remove identity).
+Firefox tests exercise keyboard selection, preserved/default selections, submitted
+Loader, cache reuse, EN/IT, mobile reflow and automated axe checks. Independent
+technical and rendered-screen review found no remaining must-fix. These checks are
+not a claim of comprehensive WCAG conformance or real Minecraft-client coverage.
+
+Live development read-only smoke: HTTPS API returned 531 Fabric Minecraft choices,
+254 Loader versions and Installer1.1.2. Choice listing took218ms in the sampled
+request, with registry count unchanged. API/worker/Vite were healthy; source
+watchers loaded the change without migration, image rebuild or explicit restart.
+An initial read overlapped source reload and returned a non-JSON response; the
+subsequent completed read returnedHTTP200. A real Firefox session on the dev URL
+then navigated Minecraft → Fabric →26.1→Loader: 254choices, default0.19.5, zero
+page errors and zero attempted API writes. The browser stopped before address
+reservation/creation. Temporary private browser authentication was removed.
+No game server was created or modified,
+no production provider/DNS/Blueprint changes occurred. Isolated database schemas
+were cleaned by the test harness; historical test assets and live data remain intact.
+
+Boundary: Fabric installation/direct creation support is declared; Gateway,
+sleep/wake and every possible Minecraft/Loader pair are not certified by this task.
+An eligible Owner mapping, actual direct endpoint and sufficient resources remain
+required. User-facing installation failures retain existing durable operation and
+retry semantics. No migration/new resource required; rollback source while retaining
+runtime rows/receipts. PR21 stays open/unmerged and issue18 remains independent.

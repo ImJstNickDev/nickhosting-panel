@@ -1,4 +1,4 @@
-import { type UiOption, validateUiValues } from '@nickhosting/game-sdk/ui';
+import { type UiOption, validateUiValues, visibleFields } from '@nickhosting/game-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import { type FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
@@ -80,9 +80,13 @@ export function CreateServerPage() {
   const chosenCapabilities = versionField
     ? choices[versionField]?.find((entry) => entry.value === values[versionField])?.capabilities
     : undefined;
+  const visibleFieldIds = new Set(
+    visibleFields(module?.descriptor.creation.fields ?? [], values).map((field) => field.id),
+  );
   const pages = declaredPages.filter(
     (entry) =>
-      !entry.requiredCapability || chosenCapabilities?.[entry.requiredCapability] !== false,
+      (entry.kind === 'address' || visibleFieldIds.has(entry.field)) &&
+      (!entry.requiredCapability || chosenCapabilities?.[entry.requiredCapability] !== false),
   );
   const beforeName = pages.filter((entry) => entry.position === 'before-name');
   const configurationPages = pages.filter((entry) => entry.position !== 'before-name');
@@ -426,6 +430,7 @@ export function CreateServerPage() {
             <>
               {(page.kind === 'version-list' || page.kind === 'choice-list') && (
                 <VersionList
+                  key={page.id}
                   module={module}
                   focusOnEntry={page.kind === 'version-list'}
                   fieldId={page.field}

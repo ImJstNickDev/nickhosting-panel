@@ -2,13 +2,11 @@ import { expect, it, vi } from 'vitest';
 import {
   fabricCatalogSnapshotSchema,
   fabricCatalogUrls,
-  fabricGameLoadersUrl,
   fetchFabricCatalog,
 } from './fabric-catalog.js';
 import type { RuntimeMetadataClient } from './runtime.js';
 
 const timestamp = '2026-10-19T12:00:00.000Z';
-const now = () => new Date(timestamp);
 function deferred() {
   let resolve: () => void = () => {
     throw new Error('Deferred not initialized');
@@ -44,42 +42,29 @@ function fixture(
   } satisfies RuntimeMetadataClient;
 }
 const versions = (...items: string[]) => items.map((version) => ({ version, stable: true }));
-const pairs = (...items: string[]) => items.map((version) => ({ loader: { version } }));
-it('reads root catalogs and per-game associations, preserving catalog order and stable flags', async () => {
+it('reads exactly three catalogs, preserving upstream order and recommendation flags', async () => {
   const source = fixture({
     games: [
       { version: '26.4-snapshot-1', stable: false },
       { version: '26.3', stable: true },
     ],
   });
-  const result = await fetchFabricCatalog(source, { now });
+  const result = await fetchFabricCatalog(source);
   expect(result.games.map((item) => item.version)).toEqual(['26.4-snapshot-1', '26.3']);
   expect(result.games[0]?.stable).toBe(false);
-  expect(result.loaders).toEqual([{ version: '1.0', stable: true }]);
-  expect(source.read.mock.calls.map(([url]) => url)).toEqual([
-    ...Object.values(fabricCatalogUrls),
-    fabricGameLoadersUrl('26.4-snapshot-1'),
-    fabricGameLoadersUrl('26.3'),
-  ]);
-  expect(result.relations).toEqual({
-    checkedAt: timestamp,
-    loaderSets: [['1.0']],
-    gameLoaderSets: { '26.4-snapshot-1': 0, '26.3': 0 },
-  });
+  expect(source.read.mock.calls.map(([url]) => url)).toEqual(Object.values(fabricCatalogUrls));
+  expect(result.relations).toBeUndefined();
 });
-it('normalizes equivalent associations without duplicating metadata or inferring unsupported pairs', async () => {
-  const result = await fetchFabricCatalog(
-    fixture(
-      { games: versions('a', 'b', 'c', 'd'), loaders: versions('2.0', '1.0', '0.9') },
-      { a: pairs('1.0', '2.0'), b: pairs('2.0', '1.0'), c: pairs('0.9'), d: [] },
-    ),
-    { now },
-  );
-  expect(result.relations).toEqual({
-    checkedAt: timestamp,
-    loaderSets: [['2.0', '1.0'], ['0.9'], []],
-    gameLoaderSets: { a: 0, b: 0, c: 1, d: 2 },
+it('does not expand thousands of independent game/loader selections', async () => {
+  const source = fixture({
+    games: versions(...Array.from({ length: 1000 }, (_, i) => `1.${i}`)),
+    loaders: versions(...Array.from({ length: 2500 }, (_, i) => `0.${i}`)),
   });
+  const result = await fetchFabricCatalog(source);
+  expect(result.games).toHaveLength(1000);
+  expect(result.loaders).toHaveLength(2500);
+  expect(source.read).toHaveBeenCalledTimes(3);
+  expect(result.relations).toBeUndefined();
 });
 it.each(
   [
@@ -111,72 +96,10 @@ it('encodes historical game IDs and rejects them as loader coordinates', async (
   const historical = [{ version: '1.14 Pre-Release 5', stable: false }];
   const source = fixture({ games: historical });
   expect((await fetchFabricCatalog(source)).games).toEqual(historical);
-  expect(source.read).toHaveBeenCalledWith(
-    'https://meta.fabricmc.net/v2/versions/loader/1.14%20Pre-Release%205',
-  );
+  expect(source.read).toHaveBeenCalledTimes(3);
   await expect(fetchFabricCatalog(fixture({ loaders: historical }))).rejects.toMatchObject({
     code: 'integration_unavailable',
   });
-});
-it('accepts the intermediary placeholder for unobfuscated Minecraft releases', async () => {
-  await expect(
-    fetchFabricCatalog(
-      fixture(
-        { games: versions('26.1') },
-        {
-          '26.1': [{ loader: { version: '1.0' }, intermediary: { version: '0.0.0' } }],
-        },
-      ),
-    ),
-  ).resolves.toMatchObject({ relations: { gameLoaderSets: { '26.1': 0 } } });
-});
-it.each([pairs('missing'), pairs('1.0', '1.0'), pairs('../bad'), [{ loader: { version: 1 } }], {}])(
-  'rejects malformed, duplicate and unknown per-game loader versions',
-  async (association) => {
-    await expect(
-      fetchFabricCatalog(fixture(undefined, { '1.0': association })),
-    ).rejects.toMatchObject({
-      details: { reason: 'fabric_metadata_invalid' },
-    });
-  },
-);
-it('reuses associations, checks new games only and retains the full refresh timestamp', async () => {
-  const previous = await fetchFabricCatalog(fixture({ games: versions('a') }), { now });
-  const unchanged = fixture({ games: versions('a') });
-  const incremental = fixture({ games: versions('a', 'b') });
-  await fetchFabricCatalog(unchanged, { previous });
-  expect(unchanged.read).toHaveBeenCalledTimes(3);
-  const result = await fetchFabricCatalog(incremental, { previous });
-  expect(incremental.read.mock.calls.map(([url]) => url)).toEqual([
-    ...Object.values(fabricCatalogUrls),
-    fabricGameLoadersUrl('b'),
-  ]);
-  expect(result.relations?.checkedAt).toBe(timestamp);
-});
-it('refreshes every association after loader changes or explicit periodic revalidation', async () => {
-  const previous = await fetchFabricCatalog(fixture({ games: versions('a', 'b') }), { now });
-  const changed = fixture({ games: versions('a', 'b'), loaders: versions('1.1', '1.0') });
-  const forced = fixture({ games: versions('a', 'b') });
-  const later = () => new Date('2026-10-20T12:00:00.000Z');
-  expect((await fetchFabricCatalog(changed, { previous, now: later })).relations?.checkedAt).toBe(
-    later().toISOString(),
-  );
-  expect(
-    (await fetchFabricCatalog(forced, { previous, forceRelationsRefresh: true, now: later }))
-      .relations?.checkedAt,
-  ).toBe(later().toISOString());
-  expect(changed.read).toHaveBeenCalledTimes(5);
-  expect(forced.read).toHaveBeenCalledTimes(5);
-});
-it('keeps legacy snapshots readable and backfills their missing associations', async () => {
-  const previous = fabricCatalogSnapshotSchema.parse({
-    games: versions('a'),
-    loaders: versions('1.0'),
-    installers: versions('1.0'),
-  });
-  const source = fixture({ games: versions('a') });
-  expect((await fetchFabricCatalog(source, { previous })).relations).toBeDefined();
-  expect(source.read).toHaveBeenCalledTimes(4);
 });
 it('checks progress before and after each batch, bounding all requests to two in flight', async () => {
   const source = fixture({ games: versions('a', 'b', 'c') });
@@ -197,17 +120,17 @@ it('checks progress before and after each batch, bounding all requests to two in
   });
   await fetchFabricCatalog(source, { onProgress });
   expect(maximum).toBe(2);
-  expect(onProgress).toHaveBeenCalledTimes(8);
+  expect(onProgress).toHaveBeenCalledTimes(4);
 });
-it('waits for an in-flight sibling and schedules no further reads after a pair failure', async () => {
-  const source = fixture({ games: versions('a', 'b', 'c') });
+it('settles in-flight root requests before failing without scheduling further reads', async () => {
+  const source = fixture();
   const read = source.read.getMockImplementation();
   if (!read) throw new Error('Missing fixture implementation');
   const sibling = deferred();
   const started = deferred();
   source.read.mockImplementation(async (url) => {
-    if (url === fabricGameLoadersUrl('a')) throw new Error('upstream unavailable');
-    if (url === fabricGameLoadersUrl('b')) {
+    if (url === fabricCatalogUrls.games) throw new Error('upstream unavailable');
+    if (url === fabricCatalogUrls.loaders) {
       started.resolve();
       await sibling.promise;
     }
@@ -220,10 +143,9 @@ it('waits for an in-flight sibling and schedules no further reads after a pair f
   const rejected = expect(result).rejects.toThrow('upstream unavailable');
   await started.promise;
   expect(settled).toBe(false);
-  expect(source.read).not.toHaveBeenCalledWith(fabricGameLoadersUrl('c'));
   sibling.resolve();
   await rejected;
-  expect(source.read).not.toHaveBeenCalledWith(fabricGameLoadersUrl('c'));
+  expect(source.read).not.toHaveBeenCalledWith(fabricCatalogUrls.installers);
 });
 it('stops before issuing requests when the progress hook rejects', async () => {
   const source = fixture();
@@ -244,7 +166,7 @@ it('bounds the number of per-game requests before fetching associations', async 
   expect(source.read).toHaveBeenCalledTimes(3);
 });
 it('rejects dangling, missing, foreign and duplicate normalized relations', async () => {
-  const snapshot = await fetchFabricCatalog(fixture({ games: versions('a', 'b') }), { now });
+  const snapshot = await fetchFabricCatalog(fixture({ games: versions('a', 'b') }));
   const malformed = [
     { loaderSets: [['1.0']], gameLoaderSets: { a: 0 } },
     { loaderSets: [['1.0']], gameLoaderSets: { a: 0, b: 1 } },
@@ -269,8 +191,8 @@ it('bounds cumulative bytes before decoding further documents', async () => {
   if (!read) throw new Error('Missing fixture implementation');
   source.read.mockImplementation(async (url) => {
     const document = await read(url);
-    // Model cumulative client bytes without allocating a half-gigabyte test buffer.
-    Object.defineProperty(document.bytes, 'byteLength', { value: 180 * 1024 * 1024 });
+    // Model cumulative client bytes without allocating a large test buffer.
+    Object.defineProperty(document.bytes, 'byteLength', { value: 3 * 1024 * 1024 });
     return document;
   });
   await expect(fetchFabricCatalog(source)).rejects.toMatchObject({

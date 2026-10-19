@@ -33,7 +33,7 @@ const entries = boundedEntries(entry);
 const games = boundedEntries(gameEntry);
 const maxGames = 2_000;
 const maxSnapshotBytes = 8 * 1024 * 1024;
-const maxRunBytes = 512 * 1024 * 1024;
+const maxRunBytes = 8 * 1024 * 1024;
 const relationsSchema = z.object({
   checkedAt: z.iso.datetime(),
   loaderSets: z.array(z.array(entry.shape.version).max(20_000)).max(maxGames),
@@ -96,23 +96,13 @@ export interface FabricCatalogResponse extends FabricCatalogSnapshot {
   synced: boolean;
 }
 export interface FetchFabricCatalogOptions {
-  previous?: FabricCatalogSnapshot;
-  /** Periodically recheck existing associations even when the global lists are unchanged. */
-  forceRelationsRefresh?: boolean;
-  /** Called before and after each successful batch of at most two requests; may renew a lease. */
+  /** Called around each settled request batch to maintain the publication lease. */
   onProgress?: () => void | Promise<void>;
-  now?: () => Date;
 }
+/** Retained for consumers of historical association snapshots, not used during sync. */
 export function fabricGameLoadersUrl(gameVersion: string): string {
   return `${fabricCatalogUrls.loaders}/${encodeURIComponent(gameEntry.shape.version.parse(gameVersion))}`;
 }
-const pairEntries = z
-  .array(
-    z.object({
-      loader: z.object({ version: entry.shape.version }),
-    }),
-  )
-  .max(20_000);
 function invalidMetadata(): never {
   throw new DomainError('integration_unavailable', 503, { reason: 'fabric_metadata_invalid' });
 }
@@ -121,8 +111,8 @@ function exceededBudget(): never {
     reason: 'fabric_metadata_budget_exceeded',
   });
 }
-/** Associations come from Fabric's per-game endpoint, never the Cartesian product of root lists.
- * Batches bound concurrency and settle fully before failure escapes or further work starts. */
+/** Independent version lists: exactly three reads, no per-game or per-pair discovery.
+ * Choosing a Loader is not a claim that every pair has been tested. */
 export async function fetchFabricCatalog(
   client: RuntimeMetadataClient,
   options: FetchFabricCatalogOptions = {},
@@ -130,7 +120,7 @@ export async function fetchFabricCatalog(
   let bytesRead = 0;
   let requests = 0;
   async function read<T>(url: string, schema: z.ZodType<T>): Promise<T> {
-    if (++requests > maxGames + 3) exceededBudget();
+    if (++requests > 3) exceededBudget();
     const document = await client.read(url);
     bytesRead += document.bytes.byteLength;
     if (bytesRead > maxRunBytes) exceededBudget();
@@ -159,64 +149,5 @@ export async function fetchFabricCatalog(
   if (!parsed.success) return invalidMetadata();
   const snapshot = parsed.data;
   if (snapshot.games.length > maxGames) exceededBudget();
-  const previous = fabricCatalogSnapshotSchema.safeParse(options.previous);
-  const reusable =
-    !options.forceRelationsRefresh &&
-    previous.success &&
-    previous.data.relations &&
-    JSON.stringify(previous.data.loaders) === JSON.stringify(snapshot.loaders)
-      ? previous.data.relations
-      : undefined;
-  const knownLoaders = new Set(snapshot.loaders.map((item) => item.version));
-  const byGame = new Map<string, string[]>();
-  const pending: string[] = [];
-  for (const { version } of snapshot.games) {
-    const priorIndex = reusable?.gameLoaderSets[version];
-    const priorSet = priorIndex === undefined ? undefined : reusable?.loaderSets[priorIndex];
-    if (priorSet) byGame.set(version, priorSet);
-    else pending.push(version);
-  }
-  await batches(pending, async (game) => {
-    const pairs = await read(fabricGameLoadersUrl(game), pairEntries);
-    const versions = pairs.map((pair) => pair.loader.version);
-    if (
-      new Set(versions).size !== versions.length ||
-      versions.some((version) => !knownLoaders.has(version))
-    )
-      invalidMetadata();
-    byGame.set(game, versions);
-  });
-  const loaderSets: string[][] = [];
-  const setIndexes = new Map<string, number>();
-  const mappings: [string, number][] = [];
-  let relationBytes = 0;
-  for (const { version: game } of snapshot.games) {
-    const versions = byGame.get(game);
-    if (!versions) return invalidMetadata();
-    // Canonical global order deduplicates equal sets even if upstream pair order differs.
-    const members = new Set(versions);
-    const canonical = snapshot.loaders
-      .filter((item) => members.has(item.version))
-      .map((item) => item.version);
-    const key = JSON.stringify(canonical);
-    let index = setIndexes.get(key);
-    if (index === undefined) {
-      index = loaderSets.length;
-      setIndexes.set(key, index);
-      loaderSets.push(canonical);
-      relationBytes += new TextEncoder().encode(key).byteLength;
-      if (relationBytes > maxSnapshotBytes) exceededBudget();
-    }
-    mappings.push([game, index]);
-  }
-  const complete = fabricCatalogSnapshotSchema.safeParse({
-    ...snapshot,
-    relations: {
-      checkedAt: reusable?.checkedAt ?? (options.now?.() ?? new Date()).toISOString(),
-      loaderSets,
-      gameLoaderSets: Object.fromEntries(mappings),
-    },
-  });
-  if (!complete.success) return invalidMetadata();
-  return complete.data;
+  return snapshot;
 }

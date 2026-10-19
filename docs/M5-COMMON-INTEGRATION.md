@@ -17,6 +17,18 @@ below describe the historical audit, not an additional current Vanilla gate.
 Other runtimes are not automatically promoted. Identity, installation integrity,
 admission, permissions and truthful evidence remain required.
 
+## Owner Fabric policy amendment — 2026-10-19
+
+The Owner explicitly authorizes Fabric creation from independent locally cached
+Minecraft and Loader catalogs, with Installer latest resolved at creation. Fabric
+installation/direct capabilities are declared by the integration; signed per-pair
+reports and preregistered combinations are no longer creation prerequisites. Mapping,
+node, rollout, identity, admission and permission checks remain authoritative.
+Optional Gateway capabilities are not declared by this change. Other undeclared
+runtimes retain their existing controls; no claim of testing every pair is made.
+See [Fabric creation](GAME-INTEGRATIONS.md#fabric-creation-snapshots) and the dated
+validation report. Historical evidence-gate text below is preserved as baseline.
+
 ## Implementation checkpoint — 2026-10-09
 
 The current source implements the former gaps through additive contracts; the

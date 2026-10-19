@@ -2467,6 +2467,79 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     },
   );
 
+  it('accepts FabricUpdated outputs without signed reports and rejects corrupt installation files', async () => {
+    const installed = await launcherJar('2026-01-02T00:00:00Z');
+    const f = await minecraftFixture({
+      bootstrap: installed,
+      installed,
+      digest: await canonicalMinecraftJarSha256(installed),
+      boundPath: 'server.jar',
+    });
+    await f.f.db.deleteFrom('minecraft_verification_evidence').execute();
+    const row = await f.f.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', f.combinationId)
+      .executeTakeFirstOrThrow();
+    const installer = Buffer.from('fixture trusted fabric installer');
+    const binding = row.binding as Record<string, unknown>;
+    const runtime = row.resolved_runtime as { artifacts: Record<string, unknown>[] };
+    await f.f.db
+      .updateTable('minecraft_combinations')
+      .set({
+        binding: JSON.stringify({
+          ...binding,
+          artifactPaths: { server: 'server.jar', installer: 'fabric-installer.jar' },
+        }),
+        resolved_runtime: JSON.stringify({
+          ...runtime,
+          artifacts: [
+            ...runtime.artifacts,
+            { role: 'installer', sha256: createHash('sha256').update(installer).digest('hex') },
+          ],
+        }),
+      })
+      .where('id', '=', f.combinationId)
+      .execute();
+    f.files.set('minecraft-server.jar', f.files.get('server.jar') as Buffer);
+    f.files.set('server.jar', installed);
+    f.files.set('fabric-installer.jar', installer);
+    f.files.set(
+      'fabric-server-launcher.properties',
+      Buffer.from('serverJar=minecraft-server.jar\n'),
+    );
+    f.options.env = {};
+    // Wings has not started the game container yet; this is not a prerequisite
+    // for acknowledging the install and issuing the admitted first start.
+    f.options.observedImageDigest = async () => null;
+    expect(await configureMinecraftProvision(f.context, f.options)).toBe(true);
+    const profile = await f.f.db
+      .selectFrom('minecraft_server_profiles')
+      .select(['installed', 'installed_manifest'])
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    expect(profile.installed).toBe(true);
+    expect(profile.installed_manifest).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: 'server.jar' }),
+        expect.objectContaining({ path: 'minecraft-server.jar' }),
+        expect.objectContaining({ path: 'fabric-installer.jar' }),
+        expect.objectContaining({ path: 'fabric-server-launcher.properties' }),
+      ]),
+    );
+    for (const path of [
+      'server.jar',
+      'minecraft-server.jar',
+      'fabric-installer.jar',
+      'fabric-server-launcher.properties',
+    ]) {
+      const bytes = f.files.get(path) as Buffer;
+      f.files.set(path, Buffer.from('corrupt'));
+      await expect(verifyMinecraftRestore(f.context, f.options)).rejects.toThrow();
+      f.files.set(path, bytes);
+    }
+  });
+
   it('verifies timestamp-variable Fabric launchers using signed entry contents and stores the actual target receipt', async () => {
     const bootstrap = await launcherJar('2026-01-01T00:00:00Z');
     const installed = await launcherJar('2026-01-02T00:00:00Z');

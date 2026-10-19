@@ -163,6 +163,7 @@ describe('Minecraft exact runtime metadata', () => {
   });
   it.each([
     ['1.14', null, 8, 8, '0.14.25', 'release'],
+    ['1.14', null, undefined, 8, '0.1.0.48', 'release'],
     ['1.16.5', 8, 8, 8, '0.19.5', 'release'],
     ['1.17', 16, 8, 17, '0.11.3', 'release'],
     ['1.17.1', 16, 8, 17, '0.19.5', 'release'],
@@ -193,7 +194,10 @@ describe('Minecraft exact runtime metadata', () => {
           },
           [`${base}/server/json`]: {
             inheritsFrom: release,
-            mainClass: 'net.fabricmc.loader.impl.launch.server.FabricServerLauncher',
+            mainClass:
+              loader === '0.1.0.48'
+                ? 'net.minecraft.launchwrapper.Launch'
+                : 'net.fabricmc.loader.impl.launch.server.FabricServerLauncher',
           },
           'https://meta.fabricmc.net/v2/versions/installer': [{ version: '1.1.2', url: installer }],
           [`${installer}.sha256`]: 'c'.repeat(64),

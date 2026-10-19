@@ -11,7 +11,10 @@ const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const identifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/);
 export const minecraftCombinationSchema = z
   .object({
-    release: identifier,
+    release: z
+      .string()
+      .max(128)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._+ -]*[A-Za-z0-9._+-]$|^[A-Za-z0-9]$/),
     releaseType: z.enum(['release', 'snapshot', 'old_alpha', 'old_beta']),
     protocolId: z.number().int().nonnegative().max(2147483647).nullable(),
     family: z.enum(['netty', 'legacy', 'unknown']),
@@ -196,8 +199,13 @@ export function minecraftGatewaySupported(
 
 /** Families describe responder support; backend status availability separately
  * controls automatic sleep. No per-installation evidence checkbox grants support. */
-export function minecraftDeclaredCapabilities(combination: MinecraftCombination) {
-  const installation = combination.profile === 'vanilla';
+export function minecraftDeclaredCapabilities(
+  combination: Pick<
+    MinecraftCombination,
+    'profile' | 'release' | 'releaseType' | 'family' | 'protocolId'
+  >,
+) {
+  const installation = ['vanilla', 'fabric'].includes(combination.profile);
   const gateway = minecraftGatewaySupported(combination);
   const playerIdle =
     gateway &&

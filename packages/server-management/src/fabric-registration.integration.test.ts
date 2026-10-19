@@ -12,7 +12,11 @@ import {
   registerFabricCatalogCombination,
   syncFabricRegisteredCatalog,
 } from './fabric-registration.js';
-import { registerMinecraftCombination } from './minecraft-registry.js';
+import {
+  minecraftCatalog,
+  registerMinecraftCombination,
+  resolveFabricCreationChoice,
+} from './minecraft-registry.js';
 import { managementFixture } from './test-fixtures.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -33,11 +37,6 @@ async function catalog(version = '1.1.2') {
         games: games.map((version) => ({ version, stable: true })),
         loaders: loaders.map((version, index) => ({ version, stable: index === 1 })),
         installers: [{ version, stable: false }],
-        relations: {
-          checkedAt: new Date().toISOString(),
-          loaderSets: [loaders],
-          gameLoaderSets: Object.fromEntries(games.map((game) => [game, 0])),
-        },
       }),
     })
     .where('id', '=', 'fabric')
@@ -153,6 +152,11 @@ beforeEach(async () => {
     })
     .where('id', '=', f.mappingId)
     .execute();
+  await f.db
+    .insertInto('game_rollouts')
+    .values({ integration_id: 'minecraft', state: 'public', allowlist: [] })
+    .onConflict((c) => c.column('integration_id').doUpdateSet({ state: 'public', allowlist: [] }))
+    .execute();
   egg.mockReset().mockResolvedValue({
     id: 1,
     nest: 1,
@@ -170,7 +174,7 @@ beforeEach(async () => {
   protocols.mockClear();
   await catalog();
 });
-it('registers a discovered exact pair with the cached latest installer and preserves evidence gates', async () => {
+it('registers a discovered exact pair with the cached latest installer and declared installation', async () => {
   const source = metadata();
   const result = await registerFabricCatalogCombination(
     f.db,
@@ -185,7 +189,7 @@ it('registers a discovered exact pair with the cached latest installer and prese
     .selectAll()
     .where('id', '=', result.id)
     .executeTakeFirstOrThrow();
-  expect(row.enabled).toBe(false);
+  expect(row.enabled).toBe(true);
   expect(row.combination).toMatchObject({
     profile: 'fabric',
     release: '1.21.1',
@@ -506,4 +510,221 @@ it('reuses an unchanged legacy identity through the existing registry without re
       .where('id', '=', first.id)
       .executeTakeFirstOrThrow(),
   ).toEqual(legacy);
+});
+
+const creation = () => ({ choiceId: `fabric:${f.mappingId}:1.21.1`, loaderVersion: '0.16.10' });
+it('lists local games without registered rows or remote reads and resolves one choice as an ordinary user', async () => {
+  const before = await f.db
+    .selectFrom('minecraft_combinations')
+    .select('id')
+    .where('mapping_id', '=', f.mappingId)
+    .execute();
+  expect(before).toEqual([]);
+  const choices = (await minecraftCatalog(f.db, f.context)).filter((choice) =>
+    choice.id.startsWith(`fabric:${f.mappingId}:`),
+  );
+  expect(choices.map((choice) => choice.version)).toEqual(games);
+  expect(choices[0]).toMatchObject({
+    runtime: 'fabric',
+    capabilities: { installation: true, directConnection: true, gateway: false },
+  });
+  expect(egg).not.toHaveBeenCalled();
+  const source = metadata();
+  const resolved = await resolveFabricCreationChoice(
+    f.db,
+    await provider(),
+    f.context,
+    creation(),
+    {},
+    { metadata: source, protocols },
+  );
+  expect(resolved.combination).toMatchObject({
+    release: '1.21.1',
+    loaderVersion: '0.16.10',
+    installerVersion: '1.1.2',
+  });
+  expect(resolved.row.enabled).toBe(true);
+  const rows = await f.db
+    .selectFrom('minecraft_combinations')
+    .select('id')
+    .where('mapping_id', '=', f.mappingId)
+    .execute();
+  expect(rows).toHaveLength(1);
+  source.read.mockClear();
+  egg.mockClear();
+  await f.db
+    .updateTable('minecraft_combinations')
+    .set({ enabled: false })
+    .where('id', '=', resolved.row.id)
+    .execute();
+  const reused = await resolveFabricCreationChoice(
+    f.db,
+    await provider(),
+    f.context,
+    creation(),
+    {},
+    { metadata: source, protocols },
+  );
+  expect(reused.row.id).toBe(resolved.row.id);
+  expect(reused.row.enabled).toBe(false);
+  expect(source.read).not.toHaveBeenCalled();
+  expect(egg).not.toHaveBeenCalled();
+});
+it('accepts any independently cataloged Loader and freezes latest once during resolution', async () => {
+  const source = metadata();
+  const original = source.read.getMockImplementation();
+  source.read.mockImplementation(async (url) => {
+    if (url.endsWith('/1.21.1.json')) await catalog('1.1.3');
+    if (!original) throw new Error('fixture');
+    return original(url);
+  });
+  const choice = await resolveFabricCreationChoice(
+    f.db,
+    await provider(),
+    f.context,
+    { ...creation(), loaderVersion: loaders[0] ?? '' },
+    {},
+    { metadata: source, protocols },
+  );
+  expect(choice.combination).toMatchObject({
+    loaderVersion: loaders[0],
+    installerVersion: '1.1.2',
+  });
+});
+it('rejects missing catalogs, unknown selections and disabled rollout before provider reads', async () => {
+  const source = metadata(),
+    adapter = await provider();
+  for (const input of [
+    { ...creation(), loaderVersion: '0.0.0' },
+    { ...creation(), choiceId: `fabric:${f.mappingId}:1.0` },
+  ])
+    await expect(
+      resolveFabricCreationChoice(
+        f.db,
+        adapter,
+        f.context,
+        input,
+        {},
+        { metadata: source, protocols },
+      ),
+    ).rejects.toThrow('validation_failed');
+  await f.db
+    .updateTable('game_rollouts')
+    .set({ state: 'disabled-for-new-servers' })
+    .where('integration_id', '=', 'minecraft')
+    .execute();
+  await expect(
+    resolveFabricCreationChoice(
+      f.db,
+      adapter,
+      f.context,
+      creation(),
+      {},
+      { metadata: source, protocols },
+    ),
+  ).rejects.toThrow('forbidden');
+  expect(await minecraftCatalog(f.db, f.context)).toEqual([]);
+  await f.db
+    .updateTable('game_rollouts')
+    .set({ state: 'public' })
+    .where('integration_id', '=', 'minecraft')
+    .execute();
+  await f.db
+    .updateTable('minecraft_metadata_sync')
+    .set({ manifest_json: null })
+    .where('id', '=', 'fabric')
+    .execute();
+  await expect(
+    resolveFabricCreationChoice(
+      f.db,
+      adapter,
+      f.context,
+      creation(),
+      {},
+      { metadata: source, protocols },
+    ),
+  ).rejects.toThrow('integration_unavailable');
+  expect(source.read).not.toHaveBeenCalled();
+  expect(egg).not.toHaveBeenCalled();
+});
+it('revalidates user sessions and mapping revisions after metadata resolution', async () => {
+  const source = metadata(),
+    adapter = await provider();
+  const original = source.read.getMockImplementation();
+  let changed = false;
+  source.read.mockImplementation(async (url) => {
+    if (!changed) {
+      changed = true;
+      await f.db
+        .updateTable('runtime_egg_mappings')
+        .set({ startup: 'java -jar different.jar' })
+        .where('id', '=', f.mappingId)
+        .execute();
+    }
+    if (!original) throw new Error('fixture');
+    return original(url);
+  });
+  await expect(
+    resolveFabricCreationChoice(
+      f.db,
+      adapter,
+      f.context,
+      creation(),
+      {},
+      { metadata: source, protocols },
+    ),
+  ).rejects.toThrow('conflict');
+  expect(
+    await f.db
+      .selectFrom('minecraft_combinations')
+      .select('id')
+      .where('mapping_id', '=', f.mappingId)
+      .execute(),
+  ).toEqual([]);
+  const session = f.context[authSessionId];
+  if (!session) throw new Error('fixture');
+  await f.db.deleteFrom('session').where('id', '=', session).execute();
+  source.read.mockClear();
+  await expect(
+    resolveFabricCreationChoice(
+      f.db,
+      adapter,
+      f.context,
+      creation(),
+      {},
+      { metadata: source, protocols },
+    ),
+  ).rejects.toThrow('unauthenticated');
+  expect(source.read).not.toHaveBeenCalled();
+});
+it('does not grant creation through a disabled mapping or fabricated assisted context', async () => {
+  const source = metadata(),
+    adapter = await provider();
+  await f.db
+    .updateTable('runtime_egg_mappings')
+    .set({ enabled: false })
+    .where('id', '=', f.mappingId)
+    .execute();
+  await expect(
+    resolveFabricCreationChoice(
+      f.db,
+      adapter,
+      f.context,
+      creation(),
+      {},
+      { metadata: source, protocols },
+    ),
+  ).rejects.toThrow('integration_unavailable');
+  await expect(
+    resolveFabricCreationChoice(
+      f.db,
+      adapter,
+      { ...f.context, sessionType: 'support' },
+      creation(),
+      {},
+      { metadata: source, protocols },
+    ),
+  ).rejects.toThrow('support_invalid');
+  expect(source.read).not.toHaveBeenCalled();
+  expect(egg).not.toHaveBeenCalled();
 });

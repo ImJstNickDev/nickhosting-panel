@@ -355,3 +355,11 @@
     transition: none;
   }
 }
+
+.installer-recommended {
+  margin-inline-start: auto;
+  font-size: 0.8rem;
+}
+.installer-version:has(input:checked):has(.installer-recommended) .installer-choice-check {
+  margin-left: 0;
+}

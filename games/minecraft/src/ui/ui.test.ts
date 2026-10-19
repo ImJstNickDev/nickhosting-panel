@@ -301,11 +301,12 @@ describe('Minecraft browser module and exact API contracts', () => {
     expect(minecraftUiModule.descriptor.creation.pages.map((page) => page.id)).toEqual([
       'runtime',
       'version',
+      'loader',
       'address',
       'operators',
       'whitelist',
     ]);
-    expect(minecraftUiModule.descriptor.creation.pages[2]).toMatchObject({
+    expect(minecraftUiModule.descriptor.creation.pages[3]).toMatchObject({
       kind: 'address',
       field: 'connection',
     });
@@ -313,7 +314,14 @@ describe('Minecraft browser module and exact API contracts', () => {
       field: 'runtime',
       kind: 'choice-list',
       position: 'before-name',
-      resetFields: ['choiceId', 'operators', 'whitelist', 'whitelistEnabled', 'eula'],
+      resetFields: [
+        'choiceId',
+        'loaderVersion',
+        'operators',
+        'whitelist',
+        'whitelistEnabled',
+        'eula',
+      ],
     });
     expect(await minecraftUiModule.handlers.runtimes?.(client, { values: {} })).toEqual([
       { value: 'vanilla', labelKey: 'games.minecraft.runtimes.vanilla', disabled: false },
@@ -368,6 +376,60 @@ describe('Minecraft browser module and exact API contracts', () => {
         ?.filter((page) => page.id === 'operators' || page.id === 'whitelist')
         .every((page) => page.requiredCapability === 'playerManagement'),
     ).toBe(true);
+  });
+  it('offers independent Fabric loader choices and submits only the chosen loader', async () => {
+    const fabricId = `fabric:${choiceId}:26.1`;
+    const request = vi.fn<GameUiClient['request']>(async (path) => {
+      if (path === '/v1/minecraft/choices')
+        return [{ id: fabricId, version: '26.1', runtime: 'fabric' }];
+      if (path === '/v1/minecraft/fabric/catalog')
+        return {
+          loaders: [
+            { version: '0.20.0-preview', stable: false },
+            { version: '0.19.5', stable: true },
+            { version: '0.14.0', stable: true },
+          ],
+          latestInstallerVersion: '1.1.2',
+        };
+      return { serverId, jobId };
+    });
+    const client = { request };
+    const catalog = await minecraftUiModule.creationCatalog?.load(client);
+    const options = minecraftUiModule.creationCatalog?.options(catalog, 'loaders', {
+      runtime: 'fabric',
+    });
+    expect(options?.map((option) => option.value)).toEqual(['0.20.0-preview', '0.19.5', '0.14.0']);
+    expect(options?.filter((option) => option.recommended).map((option) => option.value)).toEqual([
+      '0.19.5',
+    ]);
+    const input = {
+      idempotencyKey: 'fabric-create',
+      name: 'Fabric server',
+      limits: { memory: 2048, cpu: 100 },
+      minecraft: { choiceId: fabricId, loaderVersion: '0.14.0', configuration: { eula: true } },
+    };
+    expect(await createMinecraftUiController(client).create(input)).toEqual({ serverId, jobId });
+    expect(request).toHaveBeenLastCalledWith(
+      '/v1/minecraft/servers',
+      expect.objectContaining({
+        body: expect.objectContaining({
+          minecraft: expect.objectContaining({ choiceId: fabricId, loaderVersion: '0.14.0' }),
+        }),
+      }),
+    );
+    await expect(
+      createMinecraftUiController(client).create({
+        ...input,
+        minecraft: { ...input.minecraft, loaderVersion: 'missing' },
+      }),
+    ).rejects.toThrow('validation_failed');
+    await expect(
+      createMinecraftUiController(client).create({
+        ...input,
+        minecraft: { choiceId: fabricId, configuration: { eula: true } },
+      }),
+    ).rejects.toThrow('validation_failed');
+    expect(request.mock.calls.every(([path]) => !path.includes('/combinations'))).toBe(true);
   });
   it('preserves exact creation API, explicit EULA, no Owner mapping ID and accepted job semantics', async () => {
     const client = clientFixture(),

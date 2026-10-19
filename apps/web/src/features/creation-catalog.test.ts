@@ -43,7 +43,9 @@ describe('authorized creation catalog reuse', () => {
       body: { enabled: false },
     });
     fetch.mockImplementation(async () => Response.json([]));
-    expect(await queryClient.fetchQuery(creationCatalogQuery(minecraftUiModule))).toEqual([]);
+    expect(await queryClient.fetchQuery(creationCatalogQuery(minecraftUiModule))).toEqual({
+      choices: [],
+    });
     expect(queryClient.getQueryData(creationGamesQuery.queryKey)).toBeUndefined();
     expect(fetch).toHaveBeenCalledTimes(4);
   });
@@ -53,7 +55,9 @@ describe('authorized creation catalog reuse', () => {
     await queryClient.fetchQuery(creationCatalogQuery(minecraftUiModule));
     await identityChanged();
     fetch.mockImplementation(async () => Response.json([]));
-    expect(await queryClient.fetchQuery(creationCatalogQuery(minecraftUiModule))).toEqual([]);
+    expect(await queryClient.fetchQuery(creationCatalogQuery(minecraftUiModule))).toEqual({
+      choices: [],
+    });
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 });

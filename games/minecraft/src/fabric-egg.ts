@@ -59,3 +59,17 @@ export function fabricEggBinding(input: {
     supportedProperties: [],
   });
 }
+
+/** Identifies the integration-owned output layout, not an arbitrary Owner binding. */
+export function isFabricUpdatedBinding(binding: {
+  profile: string;
+  installationKind: string;
+  artifactPaths: Readonly<{ server?: string; installer?: string }>;
+}): boolean {
+  return (
+    binding.profile === 'fabric' &&
+    binding.installationKind === 'fabric-installer' &&
+    binding.artifactPaths.server === 'server.jar' &&
+    binding.artifactPaths.installer === 'fabric-installer.jar'
+  );
+}

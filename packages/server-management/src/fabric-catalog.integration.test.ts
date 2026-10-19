@@ -1,9 +1,5 @@
 import { createTestDatabase } from '@nickhosting/database/testing';
-import {
-  fabricCatalogUrls,
-  fabricGameLoadersUrl,
-  type RuntimeMetadataClient,
-} from '@nickhosting/minecraft';
+import { fabricCatalogUrls, type RuntimeMetadataClient } from '@nickhosting/minecraft';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import {
@@ -75,10 +71,10 @@ it('reads empty before migration/sync, stores three lists and uses latest first 
     status: { stale: false },
   });
   expect(await refresh(source)).toEqual({ state: 'skipped', changed: 0 });
-  expect(source.read).toHaveBeenCalledTimes(5);
+  expect(source.read).toHaveBeenCalledTimes(3);
   now = new Date(now.getTime() + minecraftMetadataRefreshMs);
   expect(await refresh(source)).toEqual({ state: 'unchanged', changed: 0 });
-  expect(source.read).toHaveBeenCalledTimes(8);
+  expect(source.read).toHaveBeenCalledTimes(6);
   await database.db.deleteFrom('minecraft_metadata_sync').where('id', '=', 'fabric').execute();
   expect((await refresh(source)).state).toBe('skipped');
   expect((await getFabricCatalog(database.db, now)).synced).toBe(false);
@@ -217,66 +213,52 @@ it('recovers a crashed worker request and fences stale failures as well as publi
     status: { lastError: null, syncState: 'idle' },
   });
 });
-it('serves an old snapshot during relationship upgrade and preserves it on a pair failure', async () => {
+it('replaces historical relation snapshots with independent lists without per-game reads', async () => {
   const old = {
     games: [{ version: '1.0', stable: true }],
     loaders: [{ version: '1.0', stable: true }],
     installers: [{ version: '1.0', stable: true }],
+    relations: {
+      checkedAt: base.toISOString(),
+      loaderSets: [['1.0']],
+      gameLoaderSets: { '1.0': 0 },
+    },
   };
   await database.db
     .updateTable('minecraft_metadata_sync')
     .set({ manifest_json: JSON.stringify(old), last_success_at: base })
     .where('id', '=', 'fabric')
     .execute();
-  expect(await getFabricCatalog(database.db, now)).toMatchObject({ ...old, synced: true });
+  expect((await getFabricCatalog(database.db, now)).relations).toBeDefined();
   const source = client();
-  const read = source.read.getMockImplementation();
-  if (!read) throw new Error('missing fixture');
-  source.read.mockImplementation(async (url) => {
-    if (url === fabricGameLoadersUrl('1.0')) throw new Error('pair unavailable');
-    return read(url);
-  });
-  expect((await refresh(source)).state).toBe('failed');
-  const result = await getFabricCatalog(database.db, now);
-  expect(result).toMatchObject({ ...old, synced: true });
-  expect(result.relations).toBeUndefined();
+  expect((await refresh(source)).state).toBe('updated');
+  expect(source.read.mock.calls.map(([url]) => url)).toEqual(Object.values(fabricCatalogUrls));
+  expect((await getFabricCatalog(database.db, now)).relations).toBeUndefined();
 });
-it('renews a long live lease and performs daily full relationship revalidation', async () => {
+it('renews a live lease between root batches and retains unchanged snapshots', async () => {
   const source = client();
   const read = source.read.getMockImplementation();
-  if (!read) throw new Error('missing fixture');
+  if (!read) throw new Error('Missing fixture implementation');
   source.read.mockImplementation(async (url) => {
     now = new Date(now.getTime() + 15_000);
     return read(url);
   });
   expect((await refresh(source)).state).toBe('updated');
-  expect(now.getTime() - base.getTime()).toBeGreaterThan(60_000);
-  expect((await getFabricCatalog(database.db, now)).relations).toBeDefined();
   now = new Date(now.getTime() + 24 * 60 * 60_000);
   const next = client();
-  expect((await refresh(next)).state).toBe('updated');
-  expect(next.read).toHaveBeenCalledTimes(5);
+  expect((await refresh(next)).state).toBe('unchanged');
+  expect(next.read).toHaveBeenCalledTimes(3);
 });
-it('stops new batches at the total deadline without publishing partial discovery', async () => {
+it('does not publish after the run deadline', async () => {
   const source = client();
   const read = source.read.getMockImplementation();
-  if (!read) throw new Error('missing fixture');
+  if (!read) throw new Error('Missing fixture implementation');
   source.read.mockImplementation(async (url) => {
-    now = new Date(now.getTime() + 10_000);
-    const result = await read(url);
-    return url === fabricCatalogUrls.games
-      ? {
-          ...result,
-          bytes: new TextEncoder().encode(
-            JSON.stringify(
-              Array.from({ length: 20 }, (_, i) => ({ version: `1.${i}`, stable: true })),
-            ),
-          ),
-        }
-      : result;
+    now = new Date(now.getTime() + 100_000);
+    return read(url);
   });
-  expect((await refresh(source)).state).toBe('failed');
-  expect(source.read).toHaveBeenCalledTimes(19);
+  expect((await refresh(source)).state).toBe('skipped');
+  expect(source.read).toHaveBeenCalledTimes(2);
   expect((await getFabricCatalog(database.db, now)).synced).toBe(false);
 });
 it('safely serves old cache and skips work before migration 046', async () => {

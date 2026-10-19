@@ -25,13 +25,14 @@ operational dashboard, dead navigation or feature-shaped placeholder counts as
 finished. A UI control must perform an authorized operation or explain a real,
 applicable restriction; omit unsupported game functions from ordinary journeys.
 
-Vanilla alone has M4 real-server verification. Normal creation shows only exact
-version/runtime combinations with sufficient evidence and Owner enablement.
-Paper/Folia/Fabric/Forge and other combinations stay hidden until verified;
-experimental access follows the existing private-testing allowlist. Internal
-protocol IDs, test checklists and support badges belong to Owner administration.
-An administrative checkbox cannot manufacture compatibility. M5 must neither
-promise a modded Vanilla runtime nor provide fake Satisfactory functionality.
+Vanilla alone has M4 real-server verification. Owner-authorized integration
+capability declarations govern Vanilla and Fabric installation; exact signed reports
+remain diagnostic rather than per-selection creation prerequisites for these two
+runtimes. Fabric uses independent locally cached Minecraft and Loader lists and
+resolves an immutable configuration at creation. Paper/Folia/Forge retain existing
+evidence/private-testing controls. Installation support does not assert Gateway
+compatibility or certify all Minecraft/Loader pairs. Protocol IDs and diagnostic
+checklists stay in Owner administration. M5 provides no Satisfactory functionality.
 
 ## Implemented conventions — M5, 2026-10-09
 

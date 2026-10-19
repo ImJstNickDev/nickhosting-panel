@@ -117,3 +117,21 @@ firewall/NAT change or production mutation is implied.
 [ADR 0016](0016-provider-readiness.md) supersedes the requirement to repeat a
 game-protocol readiness probe after authenticated live provider-running for the
 compiled Minecraft integration. Original decisions and test history remain above.
+
+
+## Amendment — Fabric independent catalog creation, 2026-10-19
+
+Owner-approved: Fabric Minecraft, Loader and Installer discovery stays local and
+refreshes three independent root lists. A user chooses Minecraft and any listed
+Loader; latest Installer is resolved to an exact version when creating the server.
+The registry records that immutable selection on demand, not a compatibility
+matrix that an Owner must prepare. Old registration rows remain intact.
+
+The trusted integration declares installation/direct support for the FabricUpdated
+contract and validates generated launcher/Minecraft/installer/properties outputs
+once during installation/restore. Startup uses existing receipts. Signed per-pair
+verification is diagnostic for this declared contract; optional Gateway features
+remain undeclared. This does not certify every possible Minecraft/Loader pair.
+Mapping identity, managed ownership, permissions, rollout and atomic admission
+are unchanged. Custom signed egg contracts and other undeclared runtimes retain
+their existing behavior. No production deployment or new game is authorized.

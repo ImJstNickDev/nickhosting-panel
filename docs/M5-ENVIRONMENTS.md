@@ -1748,3 +1748,17 @@ Rollback: revert this update’s source, preserving registered combinations and 
 existing data. No schema downgrade or provider cleanup is needed. Valid old
 combination identities remain reusable; new mapping-sensitive identities are
 opaque to older readers. No provider servers are created by registration.
+
+### Fabric catalog-based creation (2026-10-19)
+
+Supersedes the association sweep and registration prerequisite above. No new
+migration, dependency, image or persistent resource is required. API/worker/Vite
+source watchers load the update. The next Fabric sync replaces the old optional
+association snapshot with the three root catalogs; existing server runtime records
+remain untouched. Owner-selected FabricUpdated mappings are reused, not created
+or edited by this change. Installer latest is fixed to an exact version at creation.
+
+Rollback the source together across API/worker/frontend and retain all data. The
+prior version may hide Fabric creation again or require another association sync;
+never delete server records or downgrade the database as part of rollback. Existing
+Fabric installation receipts are persistent server state and must be preserved.

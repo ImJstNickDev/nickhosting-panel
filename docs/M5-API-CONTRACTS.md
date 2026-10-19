@@ -1577,10 +1577,10 @@ MinecraftMaps is an external link plus manual ZIP/folder import; no scraper or
 private endpoint was added. See [provider evidence](GAME-INTEGRATIONS.md#world-catalogs--m5-2026-10-18).
 
 
-### Fabric cached compatibility catalog
+### Fabric cached version catalog
 
-- `GET /v1/owner/minecraft/fabric/catalog`: Owner-only cached game, Loader and
-  Installer lists with normalized Minecraft→Loader associations.
+- `GET /v1/owner/minecraft/fabric/catalog`: Owner-only cached Minecraft, Loader and
+  Installer lists.
 - `POST /v1/owner/minecraft/fabric/catalog`: strict empty object; HTTP202 returns
   the existing snapshot after durably requesting worker refresh. No upstream
   request runs in the handler. Duplicate queued/active requests coalesce.
@@ -1588,32 +1588,47 @@ private endpoint was added. See [provider evidence](GAME-INTEGRATIONS.md#world-c
   users; same local-only DTO. Catalog access grants no provisioning permission.
 
 `status.syncState` is `idle | queued | refreshing`. Last-success/error/freshness
-fields remain available; a failed sync never replaces the last complete snapshot.
-`relations?` is `{ checkedAt, loaderSets: string[][], gameLoaderSets:
-Record<string, number> }`. The index maps each known game version to its Loader
-set. Missing relations in an older snapshot mean associations are not yet loaded,
-not that the global Loader list is compatible with every Minecraft version.
-See [discovery policy](GAME-INTEGRATIONS.md#fabric-version-discovery) for bounded
-incremental refresh, daily full revalidation and installer-latest semantics.
+fields remain available; a failed sync preserves the last complete snapshot.
+Historical `relations?` can remain in old snapshots but no longer restrict choices;
+new syncs read only the three root catalogs. See
+[discovery policy](GAME-INTEGRATIONS.md#fabric-version-discovery).
 
-### Fabric catalog → registered combinations
+### Fabric legacy registration endpoints
 
 Both routes require current interactive Owner authority and an enabled Minecraft
-Fabric runtime/egg mapping. They never create or modify Pterodactyl servers.
+Fabric runtime/egg mapping. They remain diagnostic APIs, not wizard prerequisites,
+and never create or modify Pterodactyl servers.
 
 - `POST /v1/owner/minecraft/fabric/combinations`: strict
-  `{ mappingId, release, loaderVersion }`; HTTP201 `{ id }`. The pair must occur
-  in cached associations; Installer is the latest cached version, resolved exactly.
-  Repeated registration returns the same existing ID without re-enabling it.
+  `{ mappingId, release, loaderVersion }`; HTTP201 `{ id }`. Minecraft and Loader
+  must occur in their independent cached lists. Latest cached Installer is resolved
+  exactly. Repeated registration reuses the same immutable identity.
 - `POST /v1/owner/minecraft/fabric/combinations/sync`: strict
-  `{ mappingId, all?: boolean, cursor?: number, limit?: number }`. Defaults are
-  false/0/5; limit is 1–20 and cursor 0–2000. HTTP200 returns
-  `{ items, nextCursor, total }`; each item contains `version`, `releaseType`,
-  `status: registered | unavailable`, and `id` or `reason`. Picks one recommended
-  associated Loader per game, not every pair. Non-stable games require `all`.
+  `{ mappingId, all?: boolean, cursor?: number, limit?: number }`, defaults false/0/5,
+  limit1–20, cursor0–2000. HTTP200 `{ items, nextCursor, total }` chooses one
+  recommended Loader per Minecraft version; non-stable games require `all`.
 
-One snapshot fixes the Installer and associations throughout a bounded request.
-Metadata/egg reads are shared within that request; existing registrations need no
-provider access. Expected unsupported combinations appear as unavailable items;
-authorization, conflicts and unexpected errors stop the scan. Registration does
-not bypass Fabric’s existing creation/evidence gates or add an enable flag.
+A bounded legacy scan shares its catalog snapshot and metadata reads. These
+endpoints are no longer shown as a required Fabric setup flow in Owner UI.
+
+### Fabric creation from independent catalogs
+
+`GET /v1/minecraft/choices` includes virtual Fabric Minecraft choices from enabled
+runtime mappings on enabled managed nodes and the local Fabric catalog, subject to
+existing rollout access. A Fabric choice ID is opaque to consumers and is distinct
+from the UUID of a persisted server runtime snapshot. Reading choices does not
+register combinations or contact upstream providers.
+
+`POST /v1/minecraft/servers` accepts `minecraft.loaderVersion` when the selected
+choice is a Fabric catalog choice; it is required for that path and rejected for
+ordinary persisted choices. The API verifies the independent cached Minecraft and
+Loader memberships, resolves the exact latest cached Installer, validates the egg
+binding and integration image, and stores/reuses only the selected immutable
+combination. The caller retains their real user authority; no Owner context is
+fabricated. Node/mapping/rollout and current-session checks fence resolution and
+commit, while normal project permission and resource admission remain unchanged.
+
+The original creation intent is the idempotency identity. Retrying an accepted
+request after Installer latest changes returns the original accepted server/job,
+rather than generating a second server or conflicting due solely to catalog refresh.
+Different content under the same key remains a conflict.

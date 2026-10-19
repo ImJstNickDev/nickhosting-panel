@@ -955,6 +955,120 @@ describe('Minecraft backend API authorization and user projection', () => {
         .executeTakeFirstOrThrow(),
     ).toEqual({ combination_id: choiceId });
   });
+  it('creates Fabric from the independent catalog and preserves retry identity across installer updates', async () => {
+    const id = await eligibleChoice(false);
+    await fixture.db
+      .updateTable('runtime_egg_mappings')
+      .set({ runtime_id: 'fabric' })
+      .where('id', '=', fixture.mappingId)
+      .execute();
+    const mapping = await fixture.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', fixture.mappingId)
+      .executeTakeFirstOrThrow();
+    const old = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirstOrThrow();
+    const combination = {
+      ...(old.combination as Record<string, unknown>),
+      profile: 'fabric',
+      loaderVersion: '0.16.10',
+      installerVersion: '1.1.2',
+    };
+    const runtime = {
+      ...(old.resolved_runtime as Record<string, unknown>),
+      profile: 'fabric',
+      loaderVersion: '0.16.10',
+      installerVersion: '1.1.2',
+      installation: { kind: 'fabric-installer', args: [] },
+    };
+    const binding = {
+      ...(old.binding as Record<string, unknown>),
+      profile: 'fabric',
+      installationKind: 'fabric-installer',
+      declaredEggVariables: ['VERSION', 'LOADER', 'INSTALLER'],
+      bindings: { release: 'VERSION', loaderVersion: 'LOADER', installerVersion: 'INSTALLER' },
+    };
+    await fixture.db
+      .updateTable('minecraft_combinations')
+      .set({
+        combination: JSON.stringify(combination),
+        resolved_runtime: JSON.stringify(runtime),
+        binding: JSON.stringify(binding),
+        mapping_digest: minecraftMappingDigest(mapping),
+        enabled: false,
+      })
+      .where('id', '=', id)
+      .execute();
+    const snapshot = {
+      games: [{ version: '1.21.1', stable: true }],
+      loaders: [{ version: '0.16.10', stable: true }],
+      installers: [{ version: '1.1.2', stable: true }],
+    };
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({ manifest_json: JSON.stringify(snapshot), last_success_at: new Date() })
+      .where('id', '=', 'fabric')
+      .execute();
+    const choiceId = `fabric:${fixture.mappingId}:1.21.1`;
+    const choices = await (await app.request('/v1/minecraft/choices')).json();
+    expect(choices.some((choice: { id: string }) => choice.id === choiceId)).toBe(true);
+    const input = {
+      ...createInput(choiceId),
+      minecraft: { ...createInput(choiceId).minecraft, loaderVersion: '0.16.10' },
+    };
+    const response = await post('/v1/minecraft/servers', input);
+    expect(await response.clone().json()).not.toHaveProperty('code');
+    expect(response.status).toBe(202);
+    const created = await response.json();
+    const profile = await fixture.db
+      .selectFrom('minecraft_server_profiles')
+      .select('combination_id')
+      .where('server_id', '=', created.serverId)
+      .executeTakeFirstOrThrow();
+    expect(profile.combination_id).toBe(id);
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({
+        manifest_json: JSON.stringify({
+          ...snapshot,
+          installers: [{ version: '1.1.3', stable: true }],
+        }),
+      })
+      .where('id', '=', 'fabric')
+      .execute();
+    management.mockClear();
+    expect(await (await post('/v1/minecraft/servers', input)).json()).toEqual(created);
+    expect(management).not.toHaveBeenCalled();
+    expect((await post('/v1/minecraft/servers', { ...input, name: 'Changed replay' })).status).toBe(
+      409,
+    );
+    expect(
+      (
+        await post('/v1/minecraft/servers', {
+          ...input,
+          minecraft: { ...input.minecraft, loaderVersion: '0.16.9' },
+        })
+      ).status,
+    ).toBe(409);
+  });
+  it('does not silently ignore Loader selections on registered UUID choices', async () => {
+    const choiceId = await eligibleChoice(false);
+    const input = createInput(choiceId);
+    management.mockClear();
+    expect(
+      (
+        await post('/v1/minecraft/servers', {
+          ...input,
+          minecraft: { ...input.minecraft, loaderVersion: '0.16.10' },
+        })
+      ).status,
+    ).toBe(400);
+    expect(management).not.toHaveBeenCalled();
+  });
   it.each(['missing', 'stale'] as const)(
     'refreshes %s host observations before first Minecraft creation',
     async (kind) => {

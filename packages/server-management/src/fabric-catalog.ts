@@ -16,7 +16,6 @@ const leaseMs = 60_000;
 const heartbeatMs = 20_000;
 const minimumAttemptMs = 60_000;
 const runDeadlineMs = 180_000;
-const relationsRefreshMs = 24 * 60 * 60_000;
 /** Local-only, including a truthful empty response before the first successful sync. */
 export async function getFabricCatalog(db: DB, now = new Date()): Promise<FabricCatalogResponse> {
   const row = await db
@@ -122,8 +121,6 @@ export async function refreshFabricCatalog(
     lastHeartbeat = at.getTime();
   };
   try {
-    const previous = fabricCatalogSnapshotSchema.safeParse(claim.manifest_json);
-    const checkedAt = previous.success ? previous.data.relations?.checkedAt : undefined;
     const snapshot = await fetchFabricCatalog(
       options.client ??
         createRuntimeMetadataClient({
@@ -136,11 +133,7 @@ export async function refreshFabricCatalog(
             }),
         }),
       {
-        ...(previous.success ? { previous: previous.data } : {}),
-        forceRelationsRefresh:
-          !checkedAt || started.getTime() - Date.parse(checkedAt) >= relationsRefreshMs,
         onProgress,
-        now,
       },
     );
     await onProgress();

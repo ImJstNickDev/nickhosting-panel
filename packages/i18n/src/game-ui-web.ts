@@ -35,6 +35,7 @@ export const gameUiWebMessages: Record<string, [string, string]> = {
   ],
   'gameUi.nameQuestion': ['Choose a name for your server', 'Scegli un nome per il tuo server'],
   'gameUi.nameHint': ['Make it cool', 'Scegline uno bello'],
+  'gameUi.recommended': ['Recommended', 'Consigliato'],
   'gameUi.showAllVersions': ['Show all versions', 'Mostra tutte le versioni'],
   'gameUi.version': ['Version', 'Versione'],
   'gameUi.playerName': ['Player name', 'Nome giocatore'],

@@ -10,6 +10,11 @@ const exactVersion = z
   .min(1)
   .max(96)
   .regex(/^[a-zA-Z0-9][a-zA-Z0-9._+-]*$/);
+const releaseVersion = z
+  .string()
+  .min(1)
+  .max(96)
+  .regex(/^[a-zA-Z0-9][a-zA-Z0-9._+ -]*[a-zA-Z0-9._+-]$|^[a-zA-Z0-9]$/);
 const javaVersion = z.number().int().min(8).max(100);
 const sha1 = z.string().regex(/^[a-f0-9]{40}$/i);
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/i);
@@ -167,7 +172,7 @@ function freeze<T>(value: T): T {
 }
 export const minecraftRuntimeRequestSchema = z
   .object({
-    release: exactVersion,
+    release: releaseVersion,
     profile: z.enum(minecraftRuntimeProfiles),
     buildId: z.number().int().positive().optional(),
     loaderVersion: exactVersion.optional(),
@@ -218,7 +223,7 @@ export async function resolveMinecraftRuntime(
     return fail('minecraft_metadata_integrity');
   const release = parse(
     z.object({
-      id: exactVersion,
+      id: releaseVersion,
       javaVersion: z.object({ majorVersion: javaVersion }).optional(),
       downloads: z.object({
         server: z.object({ url: z.string(), sha1, size: z.number().int().positive() }).optional(),
@@ -289,12 +294,12 @@ export async function resolveMinecraftRuntime(
     const pair = parse(
       z.object({
         loader: z.object({ version: exactVersion }),
-        intermediary: z.object({ version: exactVersion }),
-        launcherMeta: z.object({ min_java_version: javaVersion }),
+        intermediary: z.object({ version: releaseVersion }),
+        launcherMeta: z.object({ min_java_version: javaVersion.optional() }),
       }),
       json(
         await read(
-          `https://meta.fabricmc.net/v2/versions/loader/${request.release}/${request.loaderVersion}`,
+          `https://meta.fabricmc.net/v2/versions/loader/${encodeURIComponent(request.release)}/${request.loaderVersion}`,
         ),
       ),
     );
@@ -302,16 +307,17 @@ export async function resolveMinecraftRuntime(
     // Since 26.1 the official intermediary identity can be 0.0.0 (unobfuscated).
     // Exact server-profile inheritance establishes the requested game identity instead.
     const serverProfile = parse(
-      z.object({ inheritsFrom: exactVersion, mainClass: z.string().min(1).max(500) }),
+      z.object({ inheritsFrom: releaseVersion, mainClass: z.string().min(1).max(500) }),
       json(
         await read(
-          `https://meta.fabricmc.net/v2/versions/loader/${request.release}/${request.loaderVersion}/server/json`,
+          `https://meta.fabricmc.net/v2/versions/loader/${encodeURIComponent(request.release)}/${request.loaderVersion}/server/json`,
         ),
       ),
     );
     if (
       serverProfile.inheritsFrom !== request.release ||
-      !serverProfile.mainClass.startsWith('net.fabricmc.')
+      (!serverProfile.mainClass.startsWith('net.fabricmc.') &&
+        serverProfile.mainClass !== 'net.minecraft.launchwrapper.Launch')
     )
       return fail('minecraft_loader_mismatch');
     const installers = parse(
@@ -334,7 +340,7 @@ export async function resolveMinecraftRuntime(
     // Snapshot requirements remain metadata-led. https://wiki.fabricmc.net/install
     const recommendedJava =
       entry.type === 'release' && /^1\.17(?:\.1)?$/.test(request.release) ? 17 : javaMajor;
-    javaMajor = Math.max(javaMajor, recommendedJava, pair.launcherMeta.min_java_version);
+    javaMajor = Math.max(javaMajor, recommendedJava, pair.launcherMeta.min_java_version ?? 8);
     installation = {
       kind: 'fabric-installer',
       args: [
@@ -398,7 +404,7 @@ const artifactPath = z
 export const minecraftRuntimeMappingSchema = z
   .object({
     profile: z.enum(minecraftRuntimeProfiles),
-    release: exactVersion,
+    release: releaseVersion,
     image: z.string().min(1).max(500),
     imageJavaMajor: javaVersion,
     declaredEggVariables: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/)).max(100),

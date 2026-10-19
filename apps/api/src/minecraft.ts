@@ -6,6 +6,7 @@ import {
   minecraftAvatarUrl,
   minecraftEditablePropertyKeys,
   minecraftManifest,
+  minecraftRuntimeRequestSchema,
   minecraftWizard,
   parseMinecraftProperties,
   verifyMinecraftPlayer,
@@ -16,6 +17,7 @@ import {
   createMinecraftSourceStore,
   createServerSchema,
   enqueueServerOperation,
+  findManagedCreationRequest,
   getFabricCatalog,
   importMinecraftEvidence,
   inspectMinecraftCombination,
@@ -34,6 +36,7 @@ import {
   registerMinecraftCombination,
   requestFabricCatalogRefresh,
   requireMinecraftChoice,
+  resolveFabricCreationChoice,
   setMinecraftAvailability,
   setMinecraftBulkAvailability,
   syncFabricRegisteredCatalog,
@@ -49,8 +52,11 @@ import { registerMinecraftPlayerRoutes } from './minecraft-players.js';
 type C = Context<{ Variables: Variables }>;
 // Public choices carry all runtime-selection authority; an Owner-only mapping
 // selector is neither required nor accepted by the dedicated creation endpoint.
-const minecraftCreateSchema = createServerSchema.omit({ mappingId: true }).required({
-  minecraft: true,
+const minecraftCreateSchema = createServerSchema.omit({ mappingId: true }).extend({
+  minecraft: createServerSchema.shape.minecraft.unwrap().extend({
+    choiceId: z.string().min(1).max(256),
+    loaderVersion: minecraftRuntimeRequestSchema.shape.loaderVersion.optional(),
+  }),
 });
 export function registerMinecraftRoutes(
   app: Hono<{ Variables: Variables }>,
@@ -406,11 +412,35 @@ export function registerMinecraftRoutes(
   app.post('/v1/minecraft/servers', async (c) => {
     const context = await principal(c);
     const input = parse(minecraftCreateSchema, await body(c));
-    const choice = await requireMinecraftChoice(db, context, input.minecraft.choiceId, env);
+    const fabric = input.minecraft.choiceId.startsWith('fabric:');
+    if (fabric !== (input.minecraft.loaderVersion !== undefined))
+      throw new DomainError('validation_failed');
+    if (fabric) {
+      const previous = await findManagedCreationRequest(
+        db,
+        context,
+        input.idempotencyKey,
+        input,
+        env,
+      );
+      if (previous) return c.json(previous, 202);
+    }
+    const choice = fabric
+      ? await resolveFabricCreationChoice(
+          db,
+          (await management()).adapter,
+          context,
+          {
+            choiceId: input.minecraft.choiceId,
+            loaderVersion: input.minecraft.loaderVersion ?? '',
+          },
+          env,
+        )
+      : await requireMinecraftChoice(db, context, input.minecraft.choiceId, env);
     const { service, options: content } = await contentOptions(context);
     const prepared = await prepareMinecraftCreationConfig(
       db,
-      input.minecraft.choiceId,
+      choice.row.id,
       input.minecraft.configuration,
       content,
     );
@@ -426,10 +456,13 @@ export function registerMinecraftRoutes(
         {
           ...input,
           mappingId: choice.row.mapping_id,
-          minecraft: { ...input.minecraft, configuration: prepared.configuration },
+          minecraft: { choiceId: choice.row.id, configuration: prepared.configuration },
         },
         env,
-        { minecraftInitialContent: prepared.initialContent },
+        {
+          minecraftInitialContent: prepared.initialContent,
+          ...(fabric ? { creationRequest: input } : {}),
+        },
       ),
       202,
     );

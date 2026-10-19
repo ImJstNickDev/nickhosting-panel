@@ -759,75 +759,56 @@ See [datapack workflow, limits and contracts](M5-MINECRAFT-DATAPACKS.md).
 
 ### Fabric version discovery
 
-Owner → Integrations → Minecraft → Versions → Fabric exposes supported Minecraft,
-Loader and Installer versions. Selecting a Minecraft row opens its compatible Loader
-list. Search, pagination and all association filters read the local snapshot only.
-Discovery refresh and provisioning registration are separate operations. Discovery
-does not register a Cartesian product, modify mappings or enable Fabric creation.
-From a Minecraft version’s compatible Loader list, **Register** adds that exact pair
-to the selected existing runtime/egg mapping. In **Registered combinations**,
-**Sync versions** registers one recommended associated Loader per Minecraft version
-(first stable Loader in upstream order, otherwise the first associated Loader).
-The release filter applies; additional Loaders remain individually registrable.
-The scan processes five versions per request, with progress, cancellation and resume.
-Automatic 15-minute discovery refresh does not run this registration scan.
+Owner → Integrations → Minecraft → Versions → Fabric exposes three independent
+catalogs: supported Minecraft versions, Loader versions and Installer versions.
+The creation wizard selects Minecraft and Loader separately; it defaults to the
+first recommended Loader (falling back to the first entry). Every listed Loader
+remains selectable. This is selection availability, not certification of every pair.
+No registered-combination scan or signed per-pair report is required for Fabric.
 
 `GET /v1/owner/minecraft/fabric/catalog` is a local-only Owner read.
 `POST` to the same path accepts `{}`, durably queues a refresh and immediately
-returns HTTP202 with the current cached DTO; it never fetches Fabric inline.
-Repeated requests while queued/running are coalesced; attempts have a 60-second
-minimum interval. The UI polls local status every two seconds only while queued or
-refreshing and retains the previous catalog throughout.
-`GET /v1/minecraft/fabric/catalog` exposes the same local catalog to authenticated
-users with Minecraft rollout access, without granting provisioning permission.
+returns HTTP202 with the current cached DTO. Duplicate requests coalesce and
+attempts have a 60-second minimum interval. The UI retains the last good catalog.
+`GET /v1/minecraft/fabric/catalog` exposes the local catalog to authenticated users
+with Minecraft rollout access, without granting provisioning permission.
 
-The DTO includes `games`, `loaders`, `installers`, `latestInstallerVersion`,
-`synced` and freshness/error timestamps plus `syncState` (idle/queued/refreshing).
-Optional `relations` contains deduplicated `loaderSets`, a `gameLoaderSets`
-index keyed by Minecraft version, and `checkedAt` for the last full sweep.
-Old root-only snapshots remain readable but cannot assert Loader compatibility.
+The DTO contains `games`, `loaders`, `installers`, `latestInstallerVersion`,
+`synced`, freshness/error timestamps and `syncState` (idle/queued/refreshing).
+Historical optional `relations` remain readable but do not restrict selections.
+The next successful sync replaces that legacy data with the three independent lists.
 
-Migration 045 seeds the Fabric cache; migration 046 adds `requested_at` to the
-existing metadata row. Fabric has its own worker polling loop, independent of
-Mojang and user requests. Every 15 minutes it fetches the three root catalogs.
-If Loader versions/recommendations are unchanged, existing game associations are
-reused and only new Minecraft versions need per-game reads. Loader changes trigger
-a full sweep; a daily full sweep also discovers association-only changes.
-Manual sync uses this same incremental policy, not a forced complete rescan.
+Migration 045 seeds the cache; migration 046 adds the durable request timestamp.
+Every 15 minutes the independent Fabric worker reads exactly three root endpoints
+from the official [Fabric Meta API](https://meta.fabricmc.net/):
+`/v2/versions/game`, `/v2/versions/loader`, `/v2/versions/installer`.
+Manual sync uses the same path. There are no per-game sweeps, pair downloads or
+Cartesian products. At most two requests run concurrently. Publication retains
+the existing renewable lease, deadline and last-good-snapshot recovery; metadata
+is bounded to 8MiB cumulative bytes and 2,000 Minecraft versions.
 
-Per-game associations come from `/v2/versions/loader/{minecraftVersion}`, not
-assumed combinations. All network reads use at most two concurrent requests;
-each batch settles before the next begins. A run is bounded to three minutes,
-2,000 games, 512MiB cumulative received metadata and an 8MiB normalized snapshot.
-A renewable 60-second lease fences atomic publication of lists and associations.
-Failures preserve the last complete snapshot and retry after 60 seconds.
-No raw launcher metadata is duplicated per pair. Unchanged snapshots avoid writes.
-Before migration 046, reads still work and worker refresh safely skips.
+Upstream newest-first order is preserved. Minecraft `stable` distinguishes releases;
+Loader/Installer `stable` is a recommendation flag, not a prerelease classifier.
+Installer is always latest from the accepted local snapshot and is frozen to its
+exact version when the server is created. No installer chooser is exposed.
 
-Sources are the official [Fabric Meta API](https://github.com/FabricMC/fabric-meta):
-`/v2/versions/game`, `/v2/versions/loader`, `/v2/versions/installer` on
-`https://meta.fabricmc.net`. Preserve their newest-first order. Historical game IDs
-can contain spaces. The game `stable` flag filters releases; for Loader/Installer,
-it marks Fabric's recommendation, not a reliable prerelease classification, so all
-entries remain visible. Installer policy is **latest**, resolved from the first
-upstream entry, irrespective of that recommendation flag. This discovery does not
-introduce an installer pinning control or change the existing exact provisioning
-contracts; selecting Minecraft/Loader during creation is a separate integration
-step. Existing launcher-format, rollout and runtime support boundaries remain.
+### Fabric creation snapshots
 
-### Fabric catalog registration
+The runtime/egg mapping, managed node, rollout and user permissions remain
+necessary. Fabric's immutable combination is resolved only for the selected
+Minecraft/Loader at creation, using the latest cached Installer and the integration's
+Java/image policy. The saved snapshot records the exact versions and binding so
+existing servers do not change when catalogs refresh. Registry rows are diagnostic
+snapshots, not a Fabric availability whitelist. Other undeclared runtimes retain
+their existing evidence controls.
 
-Registration resolves the latest Installer from the accepted local catalog and
-freezes its exact version in the immutable combination. The FabricUpdated contract
-automatically binds `MC_VERSION`, `LOADER_VERSION`, `FABRIC_VERSION` and optional
+FabricUpdated binds `MC_VERSION`, `LOADER_VERSION`, `FABRIC_VERSION` and optional
 `SERVER_JARFILE=server.jar`; extra egg variables require explicit mapping values.
-Integration-managed Java/image selection still uses the Minecraft/Loader rules.
-Custom eggs retain the existing explicit advanced binding path.
+The installer produces `server.jar` as the Fabric launcher and
+`minecraft-server.jar` as the Mojang server, with `fabric-server-launcher.properties`
+pointing to the latter. Installation verification runs on installation completion;
+it does not download JARs at every start. Support for installation/direct connection
+does not automatically declare Gateway, sleep/wake or real-client verification.
 
-Each bounded scan shares one catalog snapshot, metadata reads and egg metadata.
-Existing matching combinations return immediately without provider/upstream reads,
-including combinations explicitly disabled by the Owner. Mapping revisions produce
-a new identity; valid legacy identities retain their IDs and associated evidence.
-No server, egg or mapping is mutated. Missing associations, unsupported metadata or
-egg contracts remain reported failures; Fabric’s existing evidence/rollout and
-installed-launcher-format requirements are unchanged.
+Legacy Owner registration endpoints remain available for diagnostic integrations;
+they are not called by the Fabric wizard or required by Owner version management.

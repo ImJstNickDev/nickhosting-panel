@@ -630,10 +630,7 @@ fieldset.version-catalog-datasets {
   color: #213b50;
   font-weight: 650;
 }
-.version-catalog-datasets :where(button).version-catalog-registered {
-  margin-left: 0.6rem;
-  border-left-color: var(--line);
-}
+
 .version-catalog-filters,
 .version-catalog-filters > .minecraft-versions-toolbar {
   display: flex;
@@ -753,15 +750,7 @@ fieldset.version-catalog-datasets {
 .fabric-catalog-table th:first-child {
   width: 45%;
 }
-.fabric-catalog-table .fabric-register-column {
-  width: 8.5rem;
-  text-align: end;
-}
-.fabric-register {
-  min-height: 2.25rem;
-  padding: 0.3rem 0.6rem;
-  font-size: 0.82rem;
-}
+
 .fabric-latest {
   margin-inline-start: 0.6rem;
 }
@@ -779,16 +768,6 @@ fieldset.version-catalog-datasets {
   gap: 0.5rem 1rem;
 }
 @media (max-width: 640px) {
-  .fabric-catalog-table .fabric-register-table th:first-child {
-    width: 25%;
-  }
-  .fabric-catalog-table .fabric-register-table .fabric-register-column {
-    width: 7rem;
-  }
-  .fabric-register-table .version-catalog-badge {
-    overflow-wrap: normal;
-    word-break: normal;
-  }
   .version-catalog-header {
     padding: 0.75rem;
     gap: 0.65rem;
@@ -809,9 +788,7 @@ fieldset.version-catalog-datasets {
   .version-catalog-datasets :where(button) {
     padding: 0.5rem 0.6rem;
   }
-  .version-catalog-datasets :where(button).version-catalog-registered {
-    margin-left: 0;
-  }
+
   .version-catalog-footer,
   .version-catalog-body > .minecraft-versions-footer {
     padding: 0.75rem;
@@ -890,21 +867,4 @@ fieldset.version-catalog-datasets {
   .version-catalog-mobile-date {
     display: block;
   }
-}
-
-.fabric-game-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.65rem;
-  padding: 0.25rem 0;
-  background: transparent;
-  border: 0;
-  color: inherit;
-  font: inherit;
-}
-.fabric-game-link:hover {
-  color: var(--accent);
-}
-.fabric-game-link > :where(span) {
-  color: var(--muted);
 }

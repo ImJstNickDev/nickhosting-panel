@@ -26,6 +26,7 @@ export const uiOptionSchema = z
     labelKey: key.optional(),
     disabled: z.boolean().default(false),
     reasonKey: key.optional(),
+    recommended: z.boolean().optional(),
     releaseType: z.enum(['release', 'snapshot', 'old_alpha', 'old_beta']).optional(),
     capabilities: z.record(fieldId, z.boolean()).optional(),
   })

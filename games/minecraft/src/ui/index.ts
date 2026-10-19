@@ -92,6 +92,8 @@ const translated: Record<string, [string, string]> = {
   'runtimes.forge': ['Forge', 'Forge'],
   'installer.address': ['Choose an address', 'Scegli un indirizzo'],
   'installer.version': ['Choose a version', 'Scegli una versione'],
+  'installer.loader': ['Choose a Fabric Loader', 'Scegli un Fabric Loader'],
+  'fields.loaderVersion': ['Fabric Loader', 'Fabric Loader'],
   'installer.operators': ['Who should be an operator?', 'Chi sarà operatore?'],
   'installer.whitelist': ['Do you want to turn whitelist on?', 'Vuoi attivare la whitelist?'],
   'installer.eula': [
@@ -330,9 +332,22 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
         field: 'runtime',
         kind: 'choice-list',
         position: 'before-name',
-        resetFields: ['choiceId', 'operators', 'whitelist', 'whitelistEnabled', 'eula'],
+        resetFields: [
+          'choiceId',
+          'loaderVersion',
+          'operators',
+          'whitelist',
+          'whitelistEnabled',
+          'eula',
+        ],
       },
       { id: 'version', titleKey: k('installer.version'), field: 'choiceId', kind: 'version-list' },
+      {
+        id: 'loader',
+        titleKey: k('installer.loader'),
+        field: 'loaderVersion',
+        kind: 'version-list',
+      },
       { id: 'address', titleKey: k('installer.address'), kind: 'address' },
       {
         id: 'operators',
@@ -373,6 +388,12 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
         type: 'choice',
         required: true,
         source: { handler: 'choices', dependsOn: ['runtime'] },
+      }),
+      field('loaderVersion', {
+        type: 'choice',
+        required: true,
+        when: [{ field: 'runtime', operator: 'equals', values: ['fabric'] }],
+        source: { handler: 'loaders', dependsOn: ['runtime'] },
       }),
       field('operators', {
         type: 'multi-text',
@@ -607,9 +628,9 @@ export const minecraftUiModule = defineTrustedGameUiModule({
     avatarUrl: (name) => `https://api.mcheads.org/head/${encodeURIComponent(name)}/64`,
   },
   creationCatalog: {
-    handlers: ['runtimes', 'choices'],
+    handlers: ['runtimes', 'choices', 'loaders'],
     applies: (_handler, values) => values.sourceMode !== 'modpack',
-    load: (client, signal) => createMinecraftUiController(client).choices(signal),
+    load: (client, signal) => createMinecraftUiController(client).creationCatalog(signal),
     options: minecraftCatalogOptions,
   },
   handlers: {
@@ -647,6 +668,14 @@ export const minecraftUiModule = defineTrustedGameUiModule({
         summary: [
           { labelKey: k('fields.runtime'), value: choice.runtime },
           { labelKey: k('fields.choiceId'), value: choice.version },
+          ...(choice.runtime === 'fabric'
+            ? [
+                {
+                  labelKey: k('fields.loaderVersion'),
+                  value: z.string().parse(context.values.loaderVersion),
+                },
+              ]
+            : []),
         ],
       };
     },
@@ -682,6 +711,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
         .deletePaths,
     'upload-world': (client, context) => uploadArchive(client, context, 'world'),
     'upload-modpack': (client, context) => uploadArchive(client, context, 'modpack'),
+    loaders: (client, context) => createMinecraftUiController(client).loaderOptions(context.signal),
     runtimes: (client, context) =>
       createMinecraftUiController(client).runtimeOptions(context.signal),
     choices: async (client, context) => {
@@ -717,6 +747,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
           connection: v.connection,
           minecraft: {
             choiceId,
+            ...(v.runtime === 'fabric' ? { loaderVersion: v.loaderVersion } : {}),
             configuration: {
               eula: v.eula,
               properties:
