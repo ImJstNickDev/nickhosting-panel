@@ -14742,3 +14742,36 @@ credential file at0600; reverting to0777 would restore both its defect and unsaf
 permissions. Original migration copies remain untouched, with deletion still
 requiring separate Owner approval. No game fixtures, production NickHosting
 activation, M6 work, DNS or Blueprint change. PR #21 stays open and unmerged.
+
+## World archive preflight and bounded retries — 2026-10-20
+
+- Root collision checks and upload preparation share the same directory read.
+  The exact absent staging directory no longer triggers a second listing, which
+  Wings returned as 500. Signed-grant acquisition and quota checks stay concurrent;
+  failures still join before upload or claim creation.
+- Provider preflight failures now terminate on definitive errors or exhaust a
+  durable transient budget independent of observation polls and mutation attempts.
+  A persistent 429 deadline also prevents installation notifications from bypassing
+  `Retry-After`. Prepared/uncertain/confirmed external effects keep their recovery
+  path without replay.
+- Node 24 validation: 29 Fileman archive integration tests and 338 lifecycle/delivery
+  integration tests pass (367 total), using isolated PostgreSQL schemas and mocked
+  provider responses. Archive regressions exercise the real HTTP adapter against
+  a fixture returning 500 for nonexistent staging directories. Root TypeScript,
+  changed-file Biome and diff checks pass. Independent review caught and verified
+  the notification/cooldown fix. No UI changes or screenshots were required.
+- Live activation stopped/started only the same dev worker. The existing Owner
+  import resumed without a second source download: grant/root checks completed
+  in 62 ms, archive upload in 4,255 ms. Its 853-file archive extracted successfully,
+  but the extension's initial tree verification produced an uncertain receipt
+  before publication. Later independent filesystem comparison and the extension's
+  own read-only verification confirmed all 853 files / 104 directories. The original
+  exception is not recorded; its cause remains unproven. This is **not** evidence
+  of a completed import or successful Worlds UI refresh.
+- A private dry-run recovery proposal verifies the exact server, operation,
+  fingerprint, staging tree and absent destination. Its rename, temporary-stage
+  cleanup and single receipt update have **not** been executed; they require
+  explicit Owner approval. No Panel/Wings configuration, code, permission or
+  scheduler changes occurred. No new test server, power operation, production
+  deployment or historical-data cleanup. Existing staging/source data is retained.
+  PR #21 remains open/unmerged; rollback preserves all receipts and game data.

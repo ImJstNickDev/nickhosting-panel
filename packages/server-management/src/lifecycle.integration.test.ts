@@ -25,6 +25,7 @@ import {
   resolveUncertainOperation,
 } from './lifecycle.js';
 import { applyMinecraftWorldRemoval } from './minecraft-content.js';
+import { wakeInstallationOperation } from './provider-installation-events.js';
 import { enqueueServerOperation } from './registry.js';
 import { pendingUploadFixture } from './test-fixtures.js';
 
@@ -472,6 +473,176 @@ async function fixture(
 }
 
 describe('durable provider lifecycle with real PostgreSQL', () => {
+  it.each([
+    'credential_missing',
+    'permission_denied',
+    'not_found',
+    'invalid_request',
+    'invalid_response',
+  ] as const)(
+    'terminates a definitive %s provider preflight without sending power',
+    async (reason) => {
+      const f = await fixture('start', { pollCount: 87, reservationCreated: true });
+      await f.prepareReservation();
+      f.adapter.getApplicationServer.mockRejectedValue(
+        new PterodactylError(reason, 'application', 'rejected'),
+      );
+      expect(await f.run()).toBe('failed');
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(await f.reservation()).toBeUndefined();
+      expect((await f.server()).active_operation_id).toBeNull();
+      expect(await f.operation()).toMatchObject({
+        phase: 'failed',
+        effect_state: 'none',
+        effect_started_at: null,
+      });
+      expect(
+        await f.db
+          .selectFrom('operation_jobs')
+          .select(['state', 'attempts', 'error_code'])
+          .where('id', '=', f.jobId)
+          .executeTakeFirstOrThrow(),
+      ).toEqual({ state: 'failed', attempts: 0, error_code: 'integration_unavailable' });
+      f.tick();
+      expect(await f.run()).toBe('duplicate');
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each([
+    new PterodactylError('unavailable', 'application', 'rejected', 500),
+    new PterodactylError('unavailable', 'application', 'unknown'),
+    new DomainError('integration_unavailable'),
+  ])(
+    'bounds transient provider preflight failures independently of historical polls: %s',
+    async (error) => {
+      const f = await fixture('start', { pollCount: 87, reservationCreated: true });
+      await f.prepareReservation();
+      f.adapter.getApplicationServer.mockRejectedValue(error);
+      for (let failure = 1; failure <= 3; failure++) {
+        expect(await f.run()).toBe(failure < 3 ? 'waiting' : 'failed');
+        expect((await f.operation()).plan.providerPreflightFailures).toBe(failure);
+        f.tick();
+      }
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(3);
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(await f.reservation()).toBeUndefined();
+      expect((await f.server()).active_operation_id).toBeNull();
+      expect(await f.run()).toBe('duplicate');
+      expect(
+        (
+          await f.db
+            .selectFrom('operation_jobs')
+            .select('attempts')
+            .where('id', '=', f.jobId)
+            .executeTakeFirstOrThrow()
+        ).attempts,
+      ).toBe(0);
+    },
+  );
+  it('recovers a transient provider preflight before its durable budget is exhausted', async () => {
+    const f = await fixture('start');
+    f.adapter.getApplicationServer.mockRejectedValueOnce(
+      new PterodactylError('unavailable', 'application', 'rejected', 503),
+    );
+    expect(await f.run()).toBe('waiting');
+    expect((await f.operation()).plan.providerPreflightFailures).toBe(1);
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    expect((await f.operation()).plan.providerPreflightFailures).toBe(1);
+  });
+  it('honors provider Retry-After without consuming preflight or mutation attempts', async () => {
+    const f = await fixture('start');
+    f.adapter.getApplicationServer.mockRejectedValue(
+      new PterodactylError('rate_limited', 'application', 'rejected', 429, 120_000),
+    );
+    for (let failure = 1; failure <= 4; failure++) {
+      const requestedAt = f.now().getTime();
+      expect(await f.run()).toBe('waiting');
+      const scheduled = await f.db
+        .selectFrom('operation_jobs')
+        .select(['state', 'next_attempt_at', 'attempts'])
+        .where('id', '=', f.jobId)
+        .executeTakeFirstOrThrow();
+      expect(scheduled).toMatchObject({ state: 'queued', attempts: 0 });
+      expect(scheduled.next_attempt_at.getTime()).toBeGreaterThanOrEqual(requestedAt + 120_000);
+      expect((await f.operation()).plan).toMatchObject({ waitReason: 'provider_rate_limited' });
+      expect((await f.operation()).plan.providerPreflightFailures).toBeUndefined();
+      f.tick(119_999);
+      expect(await f.run()).toBe('deferred');
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(failure);
+      f.tick(1000);
+    }
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect((await f.server()).active_operation_id).toBe(f.jobId);
+  });
+  it('retains provider Retry-After after an installation notification advances delivery', async () => {
+    const f = await fixture('reinstall');
+    const deadline = new Date(f.now().getTime() + 120_000);
+    f.adapter.getApplicationServer.mockRejectedValueOnce(
+      new PterodactylError('rate_limited', 'application', 'rejected', 429, 120_000),
+    );
+    expect(await f.run()).toBe('waiting');
+    expect((await f.operation()).plan.providerPreflightRetryAt).toBe(deadline.toISOString());
+    for (let notification = 0; notification < 2; notification++) {
+      f.tick(1000);
+      await wakeInstallationOperation(f.db, f.jobId, f.now());
+      expect(await f.run()).toBe('deferred');
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+      expect(f.adapter.reinstall).not.toHaveBeenCalled();
+      expect(
+        await f.db
+          .selectFrom('operation_jobs')
+          .select(['next_attempt_at', 'attempts'])
+          .where('id', '=', f.jobId)
+          .executeTakeFirstOrThrow(),
+      ).toEqual({ next_attempt_at: deadline, attempts: 0 });
+      expect(
+        (
+          await f.db
+            .selectFrom('job_outbox')
+            .select('next_dispatch_at')
+            .where('job_id', '=', f.jobId)
+            .executeTakeFirstOrThrow()
+        ).next_dispatch_at,
+      ).toEqual(deadline);
+    }
+    f.tick(118_000);
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+    expect((await f.operation()).plan.waitReason).toBe('offline_confirmation');
+    expect((await f.operation()).plan.providerPreflightFailures).toBeUndefined();
+  });
+  it.each(['prepared', 'uncertain', 'confirmed'] as const)(
+    'preserves %s external outcome recovery beyond the preflight retry budget',
+    async (state) => {
+      const f = await fixture('start', {
+        pollCount: 87,
+        effectAttempts: { power: 1 },
+        powerEffectPrepared: true,
+      });
+      await f.db
+        .updateTable('server_operations')
+        .set({ phase: 'power', effect_state: state, effect_started_at: f.now() })
+        .where('job_id', '=', f.jobId)
+        .execute();
+      f.adapter.getApplicationServer.mockRejectedValue(
+        new PterodactylError('permission_denied', 'application', 'rejected', 403),
+      );
+      for (let attempt = 0; attempt < 4; attempt++) {
+        expect(await f.run()).toBe('waiting');
+        f.tick();
+      }
+      expect((await f.operation()).effect_state).toBe(state);
+      expect((await f.operation()).plan.providerPreflightFailures).toBeUndefined();
+      expect((await f.server()).active_operation_id).toBe(f.jobId);
+      expect(f.adapter.power).not.toHaveBeenCalled();
+    },
+  );
   const loopbackBinding = {
     address: '127.0.0.1',
     backendAddress: '10.0.0.254',

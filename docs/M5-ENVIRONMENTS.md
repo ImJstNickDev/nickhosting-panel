@@ -1854,3 +1854,28 @@ Authenticated Mods inventory and both provider catalogs return 200. The
 missing-directory Wings behavior found during the first read was corrected in
 source with two regression tests; no game directory was created to hide it.
 No Blueprint/Panel/Wings change or real mod installation was performed.
+
+### World archive preflight recovery (2026-10-20)
+
+The shared Fileman archive path now reuses its root collision check when preparing
+an upload into its not-yet-created staging directory. It no longer asks Wings to
+list that nonexistent directory. Lifecycle preflight failures have a persistent
+retry budget; 429 cooldowns survive worker restarts and asynchronous notifications.
+Existing uncertain effects retain their recovery semantics.
+
+Activation stopped and started only the existing development worker, preserving
+its image, identity, mounts, networks and data. No dependency, migration or
+Blueprint update was needed. The original queued world import resumed from its
+cached download and uploaded/extracted its archive. The extension subsequently
+returned an uncertain receipt during tree verification, before publication.
+A later read-only verification passed for all 853 files and 104 directories;
+publication and administrative receipt recovery remain pending explicit Owner
+approval. The initial verification exception was not retained by the extension,
+so its precise cause is not established.
+
+No Panel/Wings code, permissions, scheduler or Compose configuration was changed.
+The independently observed Panel daily-log ownership problem remains a separate,
+unapplied proposal. Keep the cached source, staged world and durable receipts.
+Rollback is a NickHosting code revert plus a scoped development worker restart;
+never reset an uncertain operation, repeat extraction or delete staged game data
+as part of code rollback.

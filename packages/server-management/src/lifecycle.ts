@@ -515,6 +515,32 @@ export async function processServerOperation(
       log('servers.operation_deferred', { reason: 'inactive' });
       return 'inactive';
     }
+    const providerRetryAt =
+      typeof operation.plan.providerPreflightRetryAt === 'string'
+        ? new Date(operation.plan.providerPreflightRetryAt)
+        : undefined;
+    if (providerRetryAt && providerRetryAt > nowOf(options)) {
+      // Installation/backup notifications can advance delivery after wait()
+      // commits. Preserve the provider's durable deadline before any new read,
+      // and rearm delivery instead of spinning on a due outbox entry.
+      await db.transaction().execute(async (tx) => {
+        await tx
+          .updateTable('operation_jobs')
+          .set({ next_attempt_at: sql`greatest(next_attempt_at, ${providerRetryAt})` })
+          .where('id', '=', jobId)
+          .execute();
+        await tx
+          .updateTable('job_outbox')
+          .set({ next_dispatch_at: sql`greatest(next_dispatch_at, ${providerRetryAt})` })
+          .where('job_id', '=', jobId)
+          .execute();
+      });
+      log('servers.operation_deferred', {
+        reason: 'provider_rate_limited',
+        nextAttemptAt: providerRetryAt.toISOString(),
+      });
+      return 'deferred';
+    }
     const token = randomUUID();
     const at = nowOf(options);
     const metadataContent =
@@ -601,7 +627,11 @@ export async function processServerOperation(
         })
         .execute();
     };
-    const wait = async (reason = 'waiting', errorCode: string | null = null): Promise<Result> => {
+    const wait = async (
+      reason = 'waiting',
+      errorCode: string | null = null,
+      minimumDelayMs = 0,
+    ): Promise<Result> => {
       const poll = typeof operation.plan.pollCount === 'number' ? operation.plan.pollCount + 1 : 1;
       const processConfirmation =
         options.observeProcessStart !== undefined &&
@@ -628,6 +658,7 @@ export async function processServerOperation(
           ? 2000
           : Math.min(10_000, 1_000 * 2 ** Math.min(poll, 4));
       let next = new Date(nowOf(options).getTime() + delay + Math.floor(Math.random() * 500));
+      const notBefore = nowOf(options).getTime() + minimumDelayMs;
       await db.transaction().execute(async (tx) => {
         await tx
           .selectFrom('operation_jobs')
@@ -670,6 +701,9 @@ export async function processServerOperation(
           )
             next = nowOf(options);
         }
+        // A provider cooldown also survives an installation/backup notification:
+        // neither that event nor a recreated worker may retry before Retry-After.
+        next = new Date(Math.max(next.getTime(), notBefore));
         await tx
           .updateTable('operation_jobs')
           .set({
@@ -3091,6 +3125,55 @@ export async function processServerOperation(
         return finish(false, false, code);
       if (operation.phase === 'installation' && code === 'operation_uncertain')
         return wait('installation_terminal_unproven', code);
+      // A failure before durable effect preparation cannot have dispatched a
+      // provider mutation. Keep its retry budget separate from asynchronous
+      // observation polls and from per-phase mutation attempts.
+      const effectAttempts = z
+        .record(z.string(), z.number().int().nonnegative())
+        .safeParse(operation.plan.effectAttempts ?? {});
+      const preflight =
+        operation.effect_state === 'none' &&
+        operation.effect_started_at === null &&
+        operation.plan.fileArchive === undefined &&
+        effectAttempts.success &&
+        Object.values(effectAttempts.data).every((attempt) => attempt === 0);
+      if (preflight && error instanceof PterodactylError) {
+        if (error.reason === 'rate_limited') {
+          const retryAfter = error.retryAfterMs;
+          const delay =
+            retryAfter !== undefined && Number.isFinite(retryAfter) && retryAfter >= 0
+              ? retryAfter
+              : 60_000;
+          await update({
+            plan: {
+              ...operation.plan,
+              providerPreflightRetryAt: new Date(nowOf(options).getTime() + delay).toISOString(),
+            },
+          });
+          return wait('provider_rate_limited', code, delay);
+        }
+        if (
+          [
+            'credential_missing',
+            'permission_denied',
+            'not_found',
+            'invalid_request',
+            'invalid_response',
+          ].includes(error.reason)
+        )
+          return finish(false, false, code);
+      }
+      if (preflight && error instanceof DomainError && code === 'integration_unavailable') {
+        const previous = operation.plan.providerPreflightFailures;
+        const failures =
+          (typeof previous === 'number' && Number.isSafeInteger(previous) && previous >= 0
+            ? previous
+            : 0) + 1;
+        // Persist before scheduling the next delivery. Worker restarts cannot
+        // reset the budget, including jobs with a large historical pollCount.
+        await update({ plan: { ...operation.plan, providerPreflightFailures: failures } });
+        if (failures >= job.max_attempts) return finish(false, false, code);
+      }
       return wait('provider_unavailable', code);
     } finally {
       await trace('lease.release', () =>

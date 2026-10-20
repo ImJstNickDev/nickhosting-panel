@@ -337,25 +337,26 @@ export async function uploadFilemanArchive(
     throw new DomainError('operation_uncertain');
   await authorize();
   const scratch = `.nickhosting-import-${jobId}`;
+  const rootListing = timed(
+    'root_listing',
+    async () => {
+      const root = await context.adapter.listFiles(identifier, '');
+      if (
+        root.some((entry) =>
+          [scratch.toLowerCase(), input.destinationRoot.toLowerCase()].includes(
+            entry.name.toLowerCase(),
+          ),
+        )
+      )
+        throw new DomainError('conflict');
+    },
+    'preflight',
+  );
   // These authenticated provider reads are independent. A signed URL grants
   // no write until send() is called. Join every branch even when one fails;
   // neither body consumption nor admission begins before all gates pass.
   const ready = await Promise.allSettled([
-    timed(
-      'root_listing',
-      async () => {
-        const root = await context.adapter.listFiles(identifier, '');
-        if (
-          root.some((entry) =>
-            [scratch.toLowerCase(), input.destinationRoot.toLowerCase()].includes(
-              entry.name.toLowerCase(),
-            ),
-          )
-        )
-          throw new DomainError('conflict');
-      },
-      'preflight',
-    ),
+    rootListing,
     timed(
       'quota',
       async () => {
@@ -370,7 +371,16 @@ export async function uploadFilemanArchive(
     ),
     timed(
       'upload_token',
-      () => context.adapter.prepareUpload(identifier, `${scratch}/payload.zip`),
+      () =>
+        context.adapter.prepareUpload(identifier, `${scratch}/payload.zip`, {
+          readDirectory: async (root) => {
+            if (root !== scratch) return context.adapter.listFiles(identifier, root);
+            // The shared root read proves this exact job's scratch parent absent.
+            // Asking Wings to list it before upload can return 500 for ENOENT.
+            await rootListing;
+            return [];
+          },
+        }),
       'preflight',
     ),
   ]);

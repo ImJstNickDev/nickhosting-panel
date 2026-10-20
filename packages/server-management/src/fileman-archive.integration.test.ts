@@ -3,10 +3,11 @@ import { resolve } from 'node:path';
 import { createLogger, DomainError, type LogRecord } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { FilemanJobServices } from '@nickhosting/game-sdk';
-import type {
-  FileArchiveCommit,
-  FileArchiveReceipt,
-  PterodactylAdapter,
+import {
+  createPterodactylAdapter,
+  type FileArchiveCommit,
+  type FileArchiveReceipt,
+  type PterodactylAdapter,
 } from '@nickhosting/pterodactyl-adapter';
 import { sql } from 'kysely';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -184,6 +185,7 @@ describe('Fileman archive durable transfer', () => {
       expect(f.adapter.prepareUpload).toHaveBeenCalledExactlyOnceWith(
         f.context.server.pterodactyl_identifier,
         `.nickhosting-import-${f.context.operation().job_id}/payload.zip`,
+        { readDirectory: expect.any(Function) },
       );
       expect(f.adapter.commitFileArchive).toHaveBeenCalledTimes(1);
       expect(f.adapter.commitFileArchive.mock.calls[0]?.[1].archiveSha256).toBe(
@@ -203,6 +205,156 @@ describe('Fileman archive durable transfer', () => {
       expect(await f.run(replay)).toEqual(receipt);
       expect(replay.open).not.toHaveBeenCalled();
       expect(f.adapter.commitFileArchive).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  function nativeUpload(
+    f: Awaited<ReturnType<typeof fixture>>,
+    hooks: { root?: () => Promise<unknown[]>; grant?: () => Promise<void> } = {},
+  ) {
+    const directories: string[] = [];
+    const mutations: string[] = [];
+    const adapter = createPterodactylAdapter({
+      baseURL: 'https://panel.example.test',
+      applicationKey: 'fixture-application-key',
+      clientKey: 'fixture-client-key',
+      uploadOrigins: ['https://wings.example.test'],
+      fetcher: async (url, init) => {
+        const target = new URL(String(url));
+        if (target.pathname.endsWith('/files/list')) {
+          const directory = target.searchParams.get('directory') ?? '';
+          directories.push(directory);
+          // Current Wings reports an absent directory as 500 rather than 404.
+          if (directory !== '/') return new Response('directory absent', { status: 500 });
+          return Response.json({
+            object: 'list',
+            data: (await hooks.root?.())?.map((attributes) => ({ attributes })) ?? [],
+          });
+        }
+        if (target.pathname.endsWith('/files/upload')) {
+          await hooks.grant?.();
+          return Response.json({
+            attributes: { url: 'https://wings.example.test/upload/file?token=fixture' },
+          });
+        }
+        mutations.push(target.pathname);
+        if (target.pathname === '/upload/file') {
+          await new Response(init?.body).arrayBuffer();
+          return new Response(null, { status: 204 });
+        }
+        if (target.pathname.endsWith('/files/rename')) return new Response(null, { status: 204 });
+        throw new Error('Unexpected fixture request');
+      },
+    });
+    f.context.adapter = {
+      ...f.context.adapter,
+      listFiles: adapter.listFiles,
+      prepareUpload: adapter.prepareUpload,
+    };
+    return { directories, mutations };
+  }
+
+  it('uses the native upload adapter without requesting the missing scratch directory and keeps grant lookup parallel', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const input = f.input();
+      const roots = Promise.withResolvers<unknown[]>();
+      const grantEntered = Promise.withResolvers<void>();
+      const native = nativeUpload(f, {
+        root: () => roots.promise,
+        grant: async () => grantEntered.resolve(),
+      });
+      const running = f.run(input);
+      await grantEntered.promise;
+      expect(input.open).not.toHaveBeenCalled();
+      expect(f.context.effect).not.toHaveBeenCalled();
+      expect(native.mutations).toEqual([]);
+      roots.resolve([]);
+      expect(await running).toMatchObject({ files: 3 });
+      expect(native.directories).toEqual(['/']);
+      expect(native.mutations).toEqual([
+        '/upload/file',
+        `/api/client/servers/${f.context.server.pterodactyl_identifier}/files/rename`,
+      ]);
+      expect(f.adapter.commitFileArchive).toHaveBeenCalledOnce();
+      expect(await f.claims()).toEqual([]);
+    });
+  });
+
+  it.each([
+    ['scratch', false, false],
+    ['scratch', true, true],
+    ['destination', false, false],
+    ['destination', true, true],
+  ] as const)(
+    'rejects existing %s root entries (symlink=%s, different case=%s) before native upload',
+    async (kind, symlink, differentCase) => {
+      await database.db.connection().execute(async (db) => {
+        const f = await fixture(db);
+        const input = f.input();
+        const name =
+          kind === 'scratch'
+            ? `.nickhosting-import-${f.context.operation().job_id}`
+            : input.destinationRoot;
+        const native = nativeUpload(f, {
+          root: async () => [
+            {
+              name: differentCase ? name.toUpperCase() : name,
+              mode: 'drwxr-xr-x',
+              mode_bits: '755',
+              size: 0,
+              is_file: false,
+              is_symlink: symlink,
+              mimetype: 'inode/directory',
+              created_at: '',
+              modified_at: '',
+            },
+          ],
+        });
+        await expect(f.run(input)).rejects.toMatchObject({ code: 'conflict' });
+        expect(native.directories).toEqual(['/']);
+        expect(native.mutations).toEqual([]);
+        expect(input.open).not.toHaveBeenCalled();
+        expect(f.context.effect).not.toHaveBeenCalled();
+        expect(f.adapter.commitFileArchive).not.toHaveBeenCalled();
+        expect(await f.claims()).toEqual([]);
+      });
+    },
+  );
+
+  it('joins the native grant lookup after a root failure without assuming absence or dispatching bytes', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const input = f.input();
+      const releaseGrant = Promise.withResolvers<void>();
+      const rootFailed = Promise.withResolvers<void>();
+      const native = nativeUpload(f, {
+        root: async () => {
+          rootFailed.resolve();
+          throw new Error('root unavailable');
+        },
+        grant: () => releaseGrant.promise,
+      });
+      let finished = false;
+      const running = f.run(input);
+      const observed = running.finally(() => {
+        finished = true;
+      });
+      void observed.catch(() => {});
+      await rootFailed.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(finished).toBe(false);
+      expect(native.mutations).toEqual([]);
+      expect(input.open).not.toHaveBeenCalled();
+      expect(await f.claims()).toEqual([]);
+      releaseGrant.resolve();
+      await expect(observed).rejects.toMatchObject({
+        code: 'integration_unavailable',
+        reason: 'unavailable',
+      });
+      expect(native.directories).toEqual(['/']);
+      expect(f.context.effect).not.toHaveBeenCalled();
+      expect(f.adapter.commitFileArchive).not.toHaveBeenCalled();
     });
   });
 

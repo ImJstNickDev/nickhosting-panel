@@ -681,6 +681,17 @@ Worker delivery logs include processor/rearm `durationMs` and, on deferral,
 external checks still add elapsed time; 500 ms is a retry delay, not an end-to-end
 latency guarantee.
 
+Provider failures before any durable effect preparation use a separate persistent
+`plan.providerPreflightFailures` budget, bounded by the job's `max_attempts`.
+Historical observation polls do not consume that budget. Missing credentials,
+permission denials, missing resources and invalid provider requests/responses
+terminate immediately at this boundary; transient unavailable responses retry
+within the budget. A 429 observes `Retry-After` (60 seconds if absent) without
+consuming mutation or preflight attempts. Jobs with prepared, uncertain or
+confirmed effects retain their existing recovery path: an observation error must
+not authorize replay or discard an unresolved mutation. No database migration
+or manual reset of queued jobs is needed.
+
 ## Installer admission and completion
 
 Managed node configuration accepts `installerMemoryMiB` and `installerCpuPercent`
