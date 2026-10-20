@@ -14841,3 +14841,32 @@ without blockers. This is provider-metadata validation, not gameplay evidence.
 No download, installation, draft mutation, service restart, migration or
 Panel/Wings change occurred. All eleven dev services remain healthy. No test
 assets created/cleaned; source-revert rollback leaves data intact. PR21 stays open.
+
+## Mods dependency guidance and background updates — 2026-10-20
+
+Review now retains dependency/parent/root identities, observed catalog targets,
+and a distinct alpha-only cause. Explicit bounded alternative lookup reuses raw
+metadata and never silently changes a selected version. Existing drafts can be
+rechecked deliberately. Installed update advice is nonblocking and receipt-based;
+exact candidates enter one ordinary selection/review. Manual choices, pending file
+actions and disabled replacements are preserved. Target-sensitive caches,
+publication-time comparison and partial-result handling avoid stale suggestions,
+downgrades and false complete results.
+
+67 focused provider/advice/model/controller tests and 28 isolated database/HTTP
+cases pass across the initial run and targeted correction rerun. The 19-case
+Firefox fixture set is covered by the initial full run and targeted follow-ups,
+including EN/IT, desktop/mobile, keyboard, zero Axe findings and zero overflow.
+Root/web/test TypeScript, changed-file Biome, localization and production build
+pass; existing chunk-size warnings remain. Independent backend and visual review
+found no remaining blockers. See [feature evidence and screenshots](M5-MINECRAFT-MODS.md#dependency-guidance-and-update-advice--2026-10-20).
+
+Authenticated development Firefox smoke: HTTPS200, WSS HMR, new update API200,
+seven installed mods checked, no update candidates or partial failures, no browser
+errors. Read-only CurseForge resolution confirms JEI's incompatible MezzConfig
+dependency with observed version/loader hints. No real downloads, selection writes,
+file publication or game power actions. All eleven dev services are healthy at
+handoff; no manual restart/rebuild, migration, Blueprint/Panel/Wings change or
+production deployment. Isolated fixture schemas/files were cleaned by their own
+harness; historical test evidence and real game data remain intact. Source-revert
+rollback retains the unchanged schema and application/game state. PR21 remains open.

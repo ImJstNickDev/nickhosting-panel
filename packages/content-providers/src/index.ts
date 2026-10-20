@@ -16,6 +16,7 @@ export type {
   ResolvedMods,
   ResolveModsOptions,
 } from './mod-resolution.js';
+export { createModMetadataMemo } from './mod-resolution.js';
 export * from './modpack.js';
 export * from './modrinth.js';
 export * from './staging.js';

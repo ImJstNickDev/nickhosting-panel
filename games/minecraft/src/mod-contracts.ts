@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { modCatalogVersionSchema } from '../../../packages/content-providers/src/mod-catalog.js';
 
 export const minecraftModProviderSchema = z.enum(['modrinth', 'curseforge']);
 const identifier = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
@@ -29,6 +30,46 @@ export const minecraftModInstalledChangeSchema = z.strictObject({
 export type MinecraftModSelection = z.infer<typeof minecraftModSelectionSchema>;
 export type MinecraftModRoot = MinecraftModSelection['roots'][number];
 export type MinecraftModSide = 'server' | 'client' | 'both' | 'unknown';
+export const minecraftModBlockerSchema = z.object({
+  projectId: identifier,
+  name: z.string(),
+  reason: z.string(),
+  provider: minecraftModProviderSchema.optional(),
+  versionId: identifier.optional(),
+  requiredBy: identifier.optional(),
+  requiredByName: z.string().optional(),
+  roots: z.array(z.object({ projectId: identifier, name: z.string() })).optional(),
+  availableMinecraftVersions: z.array(z.string()).max(20).optional(),
+  availableLoaders: z.array(z.string()).max(20).optional(),
+  availableChannels: z
+    .array(z.enum(['release', 'beta', 'alpha']))
+    .max(3)
+    .optional(),
+});
+export const minecraftModUpdatesSchema = z.object({
+  checkedAt: z.iso.datetime(),
+  limited: z.boolean().optional(),
+  items: z.array(
+    z.object({
+      path: z.string(),
+      provider: minecraftModProviderSchema,
+      projectId: identifier,
+      currentVersionId: identifier,
+      status: z.enum(['update', 'current', 'limited', 'unavailable']),
+      version: modCatalogVersionSchema.optional(),
+    }),
+  ),
+});
+export type MinecraftModUpdates = z.infer<typeof minecraftModUpdatesSchema>;
+export const minecraftModAlternativesSchema = z.object({
+  revision: z.number().int().nonnegative(),
+  provider: minecraftModProviderSchema,
+  projectId: identifier,
+  items: z.array(modCatalogVersionSchema).max(1),
+  checked: z.number().int().nonnegative(),
+  limited: z.boolean(),
+});
+export type MinecraftModAlternatives = z.infer<typeof minecraftModAlternativesSchema>;
 export interface MinecraftModAlias {
   provider: 'modrinth' | 'curseforge';
   projectId: string;
@@ -90,7 +131,7 @@ export interface MinecraftModsSnapshot {
     aliases?: MinecraftModAlias[];
   }[];
   changes: MinecraftModQueueItem[];
-  blockers: { projectId: string; name: string; reason: string }[];
+  blockers: z.infer<typeof minecraftModBlockerSchema>[];
   optional: {
     provider: 'modrinth' | 'curseforge';
     projectId: string;

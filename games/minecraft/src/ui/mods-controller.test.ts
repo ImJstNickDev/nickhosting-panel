@@ -87,4 +87,33 @@ describe('Minecraft Mods browser contracts', () => {
     expect(snapshot.preparing).toBe(true);
     expect(() => minecraftModsSnapshotSchema.parse({ ...snapshot, revision: -1 })).toThrow();
   });
+  it('uses read-only versioned alternatives and update endpoints with bounded metadata', async () => {
+    const request = vi.fn<GameUiClient['request']>();
+    const controller = createMinecraftModsController({ request });
+    request.mockResolvedValue({ checkedAt: '2026-10-20T12:00:00Z', items: [] });
+    await controller.updates(serverId, true);
+    expect(request).toHaveBeenLastCalledWith(
+      `/v1/servers/${serverId}/minecraft/mods/updates?preferBeta=true`,
+      { signal: undefined },
+    );
+    request.mockResolvedValue({
+      revision: 4,
+      provider: 'curseforge',
+      projectId: '123',
+      items: [],
+      checked: 5,
+      limited: true,
+    });
+    expect((await controller.alternatives(serverId, 'curseforge', '123', 4)).limited).toBe(true);
+    expect(request).toHaveBeenLastCalledWith(
+      `/v1/servers/${serverId}/minecraft/mods/alternatives/curseforge/123?revision=4`,
+      { signal: undefined },
+    );
+    request.mockClear();
+    await expect(
+      controller.alternatives(serverId, 'curseforge', '../foreign', 4),
+    ).rejects.toThrow();
+    await expect(controller.alternatives(serverId, 'curseforge', '123', -1)).rejects.toThrow();
+    expect(request).not.toHaveBeenCalled();
+  });
 });

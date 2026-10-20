@@ -173,6 +173,10 @@ describe('Mods HTTP catalog and mutation boundaries', () => {
       '/catalog/search?provider=modrinth&url=https://example.test',
       '/catalog/modrinth/testmod/versions?preferBeta=anything',
       '/catalog/modrinth/testmod/versions?includeIncompatible=true&url=https://example.test',
+      '/updates?preferBeta=anything',
+      '/updates?url=https://example.test',
+      '/alternatives/modrinth/testmod?revision=-1',
+      '/alternatives/unknown/testmod?revision=1',
     ])
       expect((await app.request(`${base()}${suffix}`)).status).toBe(400);
     expect(
@@ -199,6 +203,66 @@ describe('Mods HTTP catalog and mutation boundaries', () => {
     ).toBe(400);
     expect(json).not.toHaveBeenCalled();
     expect(download).not.toHaveBeenCalled();
+  });
+
+  it('serves updates without Wings reads and protects cached advice after session revocation', async () => {
+    await database.db
+      .insertInto('minecraft_mod_receipts')
+      .values({
+        server_id: serverId,
+        path: 'mods/testmod.jar',
+        receipt: JSON.stringify({
+          from: 'mods/source.pending',
+          to: 'mods/testmod.jar',
+          size: 100,
+          modifiedAt: '2026-01-01T00:00:00Z',
+          metadata: {
+            provider: 'modrinth',
+            projectId: 'testmod',
+            versionId: 'oldversion',
+            name: 'Fixture mod',
+            version: '0.1',
+            channel: 'release',
+            side: 'both',
+            tags: [],
+            minecraftVersions: ['1.21.1'],
+            loaders: ['fabric'],
+          },
+          dependency: false,
+          requiredBy: [],
+          forceIncompatible: false,
+          incompatibilities: [],
+          dependencies: [],
+          conflicts: [],
+        }),
+      })
+      .execute();
+    const original = json.getMockImplementation();
+    json.mockImplementation(async (url, ...args) => {
+      if (new URL(url).pathname.endsWith('/version/oldversion'))
+        return { ...version, id: 'oldversion', date_published: '2026-01-01T00:00:00Z' };
+      if (!original) throw new Error('Missing fixture');
+      return original(url, ...args);
+    });
+    const response = await app.request(`${base()}/updates?preferBeta=false`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      items: [
+        {
+          path: 'mods/testmod.jar',
+          currentVersionId: 'oldversion',
+          status: 'update',
+          version: { id: 'version1' },
+        },
+      ],
+    });
+    expect(providerRead).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
+    await database.db
+      .deleteFrom('session')
+      .where('id', '=', actor[authSessionId] ?? '')
+      .execute();
+    expect((await app.request(`${base()}/updates`)).status).toBe(401);
   });
 
   it('allows a shared viewer to browse but rejects every mutation and a foreign server', async () => {

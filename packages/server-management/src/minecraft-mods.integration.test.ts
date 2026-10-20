@@ -371,6 +371,141 @@ describe('Minecraft Mods durable preparation and publication', () => {
       });
     return { ...f, service, http, bytes, artifact, project, version, resolution, resolve, select };
   }
+  it('preserves dependency diagnostics through the durable draft and links the selected root', async () => {
+    const f = await catalogFixture();
+    f.resolve.mockResolvedValue({
+      ...f.resolution,
+      catalog: {
+        ...f.resolution.catalog,
+        blocked: [
+          {
+            provider: 'modrinth',
+            projectId: 'dep',
+            name: 'Dependency',
+            requiredBy: 'example',
+            reason: 'incompatible-version',
+            availableMinecraftVersions: ['1.21.2'],
+            availableLoaders: ['fabric'],
+          },
+        ],
+      },
+    });
+    await f.select();
+    await f.service.drain();
+    expect((await f.service.snapshot(f.context, f.serverId)).blockers).toEqual([
+      expect.objectContaining({
+        provider: 'modrinth',
+        projectId: 'dep',
+        requiredBy: 'example',
+        requiredByName: 'Example',
+        roots: [{ projectId: 'example', name: 'Example' }],
+        availableMinecraftVersions: ['1.21.2'],
+      }),
+    ]);
+    expect(f.http.download).not.toHaveBeenCalled();
+  });
+  it('checks updates from local receipts, coalesces requests and rechecks revoked authorization before cache', async () => {
+    const f = await catalogFixture();
+    const selected = await f.select();
+    await f.service.drain();
+    await f.service.apply(f.context, f.serverId, {
+      revision: selected.revision,
+      idempotencyKey: randomUUID(),
+    });
+    await f.service.drain();
+    f.listFiles.mockClear();
+    const current = vi.spyOn(ModrinthProvider.prototype, 'modVersion').mockResolvedValue(f.version);
+    const newest = { ...f.version, id: 'v2', version: '2.0', publishedAt: '2026-02-01T00:00:00Z' };
+    const versions = vi
+      .spyOn(ModrinthProvider.prototype, 'modVersions')
+      .mockResolvedValue({ items: [newest], offset: 0, total: 1, limit: 20 });
+    const beforeDownloads = vi.mocked(f.http.download).mock.calls.length;
+    const results = await Promise.all([
+      f.service.updates(f.context, f.serverId),
+      f.service.updates(f.context, f.serverId),
+    ]);
+    expect(results[0].items).toEqual([
+      expect.objectContaining({
+        path: 'mods/example.jar',
+        currentVersionId: 'v1',
+        status: 'update',
+        version: expect.objectContaining({ id: 'v2' }),
+      }),
+    ]);
+    expect(current).toHaveBeenCalledTimes(1);
+    expect(versions).toHaveBeenCalledTimes(1);
+    expect(f.listFiles).not.toHaveBeenCalled();
+    expect(f.http.download).toHaveBeenCalledTimes(beforeDownloads);
+    await f.db
+      .deleteFrom('session')
+      .where('id', '=', f.context[authSessionId] ?? '')
+      .execute();
+    await expect(f.service.updates(f.context, f.serverId)).rejects.toMatchObject({
+      code: 'unauthenticated',
+    });
+  });
+  it('preserves a disabled installed mod when replacing its version', async () => {
+    const f = await catalogFixture();
+    const first = await f.select();
+    await f.service.drain();
+    await f.service.apply(f.context, f.serverId, {
+      revision: first.revision,
+      idempotencyKey: randomUUID(),
+    });
+    await f.service.drain();
+    await f.service.change(f.context, f.serverId, {
+      path: 'mods/example.jar',
+      action: 'disable',
+      idempotencyKey: randomUUID(),
+    });
+    const changed = await f.service.snapshot(f.context, f.serverId);
+    await f.service.apply(f.context, f.serverId, {
+      revision: changed.revision,
+      idempotencyKey: randomUUID(),
+    });
+    await f.service.drain();
+    f.resolve.mockResolvedValue({
+      ...f.resolution,
+      plan: {
+        ...f.resolution.plan,
+        artifacts: [{ ...f.artifact, path: 'mods/example-v2.jar', versionId: 'v2' }],
+      },
+      catalog: {
+        ...f.resolution.catalog,
+        items: f.resolution.catalog.items.map((item) => ({
+          ...item,
+          version: { ...item.version, id: 'v2', version: '2.0', filename: 'example-v2.jar' },
+        })),
+      },
+    });
+    const second = await f.select();
+    await f.service.drain();
+    expect((await f.service.snapshot(f.context, f.serverId)).changes[0]?.path).toBe(
+      'mods/example-v2.jar.disabled',
+    );
+    await f.service.apply(f.context, f.serverId, {
+      revision: second.revision,
+      idempotencyKey: randomUUID(),
+    });
+    expect((await f.service.snapshot(f.context, f.serverId)).packs).toEqual([
+      expect.objectContaining({ state: 'disabled' }),
+    ]);
+  });
+  it('does not search alternatives for stale drafts or projects outside selected roots', async () => {
+    const f = await catalogFixture();
+    const selected = await f.select();
+    await f.service.drain();
+    const versions = vi
+      .spyOn(ModrinthProvider.prototype, 'modVersions')
+      .mockResolvedValue({ items: [f.version], offset: 0, total: 1, limit: 20 });
+    await expect(
+      f.service.alternatives(f.context, f.serverId, 'modrinth', 'example', selected.revision - 1),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    await expect(
+      f.service.alternatives(f.context, f.serverId, 'modrinth', 'foreign', selected.revision),
+    ).rejects.toMatchObject({ code: 'not_found' });
+    expect(versions).not.toHaveBeenCalled();
+  });
   it('treats a missing mods directory reported unavailable by Wings as empty after one root observation', async () => {
     const f = await fixture();
     f.directories.delete('mods');

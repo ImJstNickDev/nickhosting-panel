@@ -17,10 +17,13 @@ import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import { minecraftContentCapabilities } from '../../../games/minecraft/src/content-capabilities.js';
 import {
+  type MinecraftModAlternatives,
   type MinecraftModMetadata,
   type MinecraftModSelection,
   type MinecraftModsSnapshot,
+  type MinecraftModUpdates,
   minecraftModApplySchema,
+  minecraftModBlockerSchema,
   minecraftModInstalledChangeSchema,
   minecraftModSelectionSchema,
 } from '../../../games/minecraft/src/mod-contracts.js';
@@ -28,6 +31,7 @@ import type { ModResolutionItem } from '../../content-providers/src/mod-catalog.
 import type { Environment } from './admission.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { datapackReceipts, datapackStateRows } from './minecraft-datapack-dependencies.js';
+import { modAlternativeAdvice, modUpdateAdvice } from './minecraft-mod-advice.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
 import { authorizeServer, parse } from './registry.js';
@@ -137,6 +141,38 @@ const tasks = new WeakMap<
   Kysely<Database>,
   Map<string, { revision: number; abort: AbortController; promise: Promise<void> }>
 >();
+const adviceCaches = new WeakMap<
+  Kysely<Database>,
+  Map<string, { expires: number; promise: Promise<MinecraftModUpdates | MinecraftModAlternatives> }>
+>();
+function cachedAdvice<T extends MinecraftModUpdates | MinecraftModAlternatives>(
+  db: Kysely<Database>,
+  key: string,
+  load: () => Promise<T>,
+): Promise<T> {
+  let cache = adviceCaches.get(db);
+  if (!cache) {
+    cache = new Map();
+    adviceCaches.set(db, cache);
+  }
+  const existing = cache.get(key);
+  if (existing && existing.expires > Date.now()) return existing.promise as Promise<T>;
+  if (cache.size >= 32) cache.delete(cache.keys().next().value as string);
+  const promise = load();
+  cache.set(key, { expires: Date.now() + 300_000, promise });
+  const owned = cache;
+  void promise.then(
+    (value) => {
+      if ('checkedAt' in value && value.items.some((item) => item.status === 'unavailable')) {
+        if (owned.get(key)?.promise === promise) owned.delete(key);
+      }
+    },
+    () => {
+      if (owned.get(key)?.promise === promise) owned.delete(key);
+    },
+  );
+  return promise;
+}
 const recordSchema = planSchema.extend({ modifiedAt: z.string() });
 const moveSchema = z.object({
   from: z.string(),
@@ -682,12 +718,28 @@ export function createMinecraftModsService(options: {
         }),
     );
     signal.throwIfAborted();
-    const blockers = resolved.flatMap((result) =>
-      result.catalog.blocked.map((item) => ({
-        projectId: item.projectId,
-        name: item.name,
-        reason: item.reason,
-      })),
+    const blockers: MinecraftModsSnapshot['blockers'] = resolved.flatMap((result) =>
+      result.catalog.blocked.map((item) => {
+        const byId = new Map(result.catalog.items.map((entry) => [entry.project.id, entry]));
+        const names = new Map(
+          result.catalog.items.map((entry) => [entry.project.id, entry.project.name]),
+        );
+        names.set(item.projectId, item.name);
+        const pending = [item.requiredBy];
+        const visited = new Set<string>();
+        const roots: { projectId: string; name: string }[] = [];
+        while (pending.length) {
+          const id = pending.pop();
+          if (!id || visited.has(id)) continue;
+          visited.add(id);
+          if (
+            selection.roots.some((root) => root.provider === item.provider && root.projectId === id)
+          )
+            roots.push({ projectId: id, name: names.get(id) ?? id });
+          pending.push(...(byId.get(id)?.requiredBy ?? []));
+        }
+        return { ...item, requiredByName: names.get(item.requiredBy) ?? item.requiredBy, roots };
+      }),
     );
     const optionalByProject = new Map<string, MinecraftModsSnapshot['optional'][number]>();
     for (const result of resolved)
@@ -791,9 +843,19 @@ export function createMinecraftModsService(options: {
           .execute();
       if (blockers.length) return;
       for (const { item, artifact, id } of planned) {
+        const replaced = observed.filter((row) =>
+          identities(row.plan).some(
+            (identity) =>
+              identity.provider === item.project.provider && identity.projectId === item.project.id,
+          ),
+        );
+        const preserveDisabled =
+          item.root &&
+          replaced.length > 0 &&
+          replaced.every((row) => row.path.endsWith('.disabled'));
         const plan: Plan = {
           from: `mods/.nh-${id}.jar.pending`,
-          to: artifact.path,
+          to: `${artifact.path}${preserveDisabled ? '.disabled' : ''}`,
           size: artifact.size,
           metadata: metadata(item),
           target: info.target,
@@ -1170,6 +1232,85 @@ export function createMinecraftModsService(options: {
   return {
     profile: (serverId: string) => profile(db, serverId),
     restartStatus,
+    async updates(
+      context: AuthContext,
+      serverId: string,
+      preferBeta = false,
+    ): Promise<MinecraftModUpdates> {
+      await authorized(context, serverId);
+      const [info, stored] = await Promise.all([
+        profile(db, serverId),
+        db
+          .selectFrom('minecraft_mod_receipts')
+          .select(['path', 'receipt'])
+          .where('server_id', '=', serverId)
+          .orderBy('path')
+          .execute(),
+      ]);
+      if (!info.supported || !info.installed) throw new DomainError('integration_unavailable');
+      // Advice uses local receipts, never another Wings inventory poll. The UI matches
+      // these exact path/version identities against its current observed inventory.
+      const allPacks = stored.flatMap((row) => {
+        const parsed = recordSchema.safeParse(row.receipt);
+        const metadata = parsed.success ? parsed.data.metadata : null;
+        return metadata
+          ? [
+              {
+                path: row.path,
+                provider: metadata.provider,
+                projectId: metadata.projectId,
+                versionId: metadata.versionId,
+              },
+            ]
+          : [];
+      });
+      const packs = allPacks.slice(0, 512);
+      const limited = packs.length !== allPacks.length;
+      return cachedAdvice(
+        db,
+        digest(['updates', serverId, info.target, preferBeta, packs, limited]),
+        async () => ({
+          ...(await modUpdateAdvice({
+            packs,
+            target: info.target,
+            preferBeta,
+            provider,
+            signal: AbortSignal.timeout(30_000),
+          })),
+          limited,
+        }),
+      );
+    },
+    async alternatives(
+      context: AuthContext,
+      serverId: string,
+      name: 'modrinth' | 'curseforge',
+      projectId: string,
+      revision: number,
+    ): Promise<MinecraftModAlternatives> {
+      await authorized(context, serverId);
+      const [info, current] = await Promise.all([profile(db, serverId), draft(db, serverId)]);
+      if (!info.supported || !info.installed) throw new DomainError('integration_unavailable');
+      if (!current || current.revision !== revision) throw new DomainError('conflict');
+      const selection = parse(minecraftModSelectionSchema, current.selection);
+      const roots = selection.roots.filter((root) => root.provider === name);
+      if (!roots.some((root) => root.projectId === projectId)) throw new DomainError('not_found');
+      return cachedAdvice(
+        db,
+        digest(['alternatives', serverId, info.target, revision, name, projectId, selection]),
+        () =>
+          modAlternativeAdvice({
+            provider: provider(name),
+            name,
+            projectId,
+            roots,
+            revision,
+            target: info.target,
+            preferBeta: selection.preferBeta,
+            signal: AbortSignal.timeout(30_000),
+          }),
+      );
+    },
     async drain() {
       await Promise.allSettled([...runningTasks.values()].map((item) => item.promise));
       await Promise.allSettled([...cleanupTasks.values()]);
@@ -1266,9 +1407,7 @@ export function createMinecraftModsService(options: {
                 ...(row.error ? { error: row.error } : {}),
               };
             }),
-            blockers: ((current?.blockers ?? []) as MinecraftModsSnapshot['blockers']).map(
-              ({ projectId, name, reason }) => ({ projectId, name, reason }),
-            ),
+            blockers: z.array(minecraftModBlockerSchema).parse(current?.blockers ?? []),
             optional: (current?.optional ?? []) as MinecraftModsSnapshot['optional'],
             restart,
           };

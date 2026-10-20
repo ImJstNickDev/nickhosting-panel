@@ -16,7 +16,14 @@ import { ErrorNotice } from '../../components/ui.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { ViewerSelect } from '../../features/viewer-engine/viewer-select.js';
 import { contentPreparationErrorKey } from './content-preparation-error.js';
-import { matchesMod, modRootState, versionForMod } from './mods-model.js';
+import {
+  currentModUpdates,
+  eligibleModUpdates,
+  installedModsFingerprint,
+  matchesMod,
+  modRootState,
+  versionForMod,
+} from './mods-model.js';
 import {
   ModsAction,
   ModsArtwork,
@@ -31,6 +38,7 @@ import {
   modTagLabel,
   projectIdentity,
 } from './mods-primitives.js';
+import { ModsBlocker } from './mods-resolution.js';
 import { modsController, modsQueryKey, useModsSelection } from './mods-selection.js';
 import { ModsVersions } from './mods-versions.js';
 import './mods.css';
@@ -106,6 +114,13 @@ export function MinecraftModsSection(props: GameSectionViewProps) {
       rootIdentity(root),
       known.current.get(rootIdentity(root))?.name ??
         data?.changes.find((item) => matchesMod(item, root))?.name ??
+        data?.blockers
+          .find(
+            (item) =>
+              item.provider === root.provider &&
+              item.roots?.some((entry) => entry.projectId === root.projectId),
+          )
+          ?.roots?.find((entry) => entry.projectId === root.projectId)?.name ??
         root.projectId,
     ]),
   );
@@ -332,6 +347,7 @@ export function MinecraftModsSection(props: GameSectionViewProps) {
             <InstalledMods
               {...common}
               onDiscover={() => setView('discover')}
+              onReview={() => setView('review')}
               onProject={(value) => {
                 openProject(value);
                 setView('discover');
@@ -366,6 +382,10 @@ export function MinecraftModsSection(props: GameSectionViewProps) {
             <ReviewMods
               {...common}
               rootNames={rootNames}
+              onProject={(value) => {
+                openProject(value);
+                setView('discover');
+              }}
               onBack={() => setView('discover')}
               onDiscard={(changeId) =>
                 void operation(`discard:${changeId}`, () =>
@@ -694,6 +714,7 @@ function DiscoverMods(
 function InstalledMods(
   props: SharedProps & {
     onDiscover(): void;
+    onReview(): void;
     onAction(pack: Snapshot['packs'][number], action: 'enable' | 'disable' | 'delete'): void;
     onDiscard(changeId: string): void;
   },
@@ -705,6 +726,50 @@ function InstalledMods(
   const [category, setCategory] = useState('');
   const [offset, setOffset] = useState(0);
   const packs = props.data?.packs ?? [];
+  const hasCatalogPacks = packs.some((pack) => pack.metadata);
+  const updates = useQuery({
+    queryKey: [
+      'minecraft-mod-updates',
+      props.serverId,
+      props.data?.version,
+      props.data?.loader,
+      installedModsFingerprint(props.data),
+      props.selection.preferBeta,
+    ],
+    queryFn: ({ signal }) =>
+      modsController.updates(props.serverId, props.selection.preferBeta, signal),
+    enabled: Boolean(props.data?.supported && props.data.installed && hasCatalogPacks),
+    staleTime: 5 * 60_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+  const observedUpdates = props.data ? currentModUpdates(props.data, updates.data) : [];
+  const eligibleUpdates = props.data
+    ? eligibleModUpdates(props.data, updates.data, props.selection.roots)
+    : [];
+  const updatesCount = observedUpdates.filter((item) => item.status === 'update').length;
+  const incompleteUpdates =
+    updates.data?.limited ||
+    observedUpdates.some((item) => ['limited', 'unavailable'].includes(item.status)) ||
+    observedUpdates.length < packs.filter((pack) => pack.metadata).length;
+  function prepareUpdates(path?: string) {
+    if (props.disabled || !props.data) return;
+    // Re-evaluate against the latest local selection inside the serialized write.
+    props.selection.change((roots) => [
+      ...roots,
+      ...eligibleModUpdates(props.data as Snapshot, updates.data, roots)
+        .filter((item) => !path || item.path === path)
+        .map((item) => ({
+          provider: item.provider,
+          projectId: item.projectId,
+          versionId: item.version?.id,
+          forceIncompatible: false,
+          optionalProjectIds: [],
+        })),
+    ]);
+    props.onReview();
+  }
+
   const categories = new Map(
     packs.flatMap(
       (pack) => pack.metadata?.tags.map((tag) => [tag.id, modTagLabel(tag, t)] as const) ?? [],
@@ -766,6 +831,62 @@ function InstalledMods(
           />
         )}
       </div>
+      {hasCatalogPacks && (
+        <div className="mods-updates-bar">
+          <div className="mods-updates-summary" aria-live="polite">
+            <span className="mods-update-note">
+              {t(
+                modsKey(
+                  updates.isFetching
+                    ? 'updates.checking'
+                    : updates.error
+                      ? 'updates.failed'
+                      : updatesCount
+                        ? 'updates.available'
+                        : incompleteUpdates
+                          ? 'updates.partial'
+                          : 'updates.current',
+                ),
+                { count: updatesCount },
+              )}
+            </span>
+            {!updates.isFetching && !updates.error && updatesCount > 0 && incompleteUpdates && (
+              <small>{t(modsKey('updates.partial'))}</small>
+            )}
+          </div>
+          <div className="mods-update-controls">
+            <Tooltip content={t(modsKey('betaHint'))}>
+              <span>
+                <ModsCheckbox
+                  label={t(modsKey('betaPreference'))}
+                  checked={props.selection.preferBeta}
+                  disabled={props.disabled}
+                  onChange={props.selection.setPreferBeta}
+                />
+              </span>
+            </Tooltip>
+            <ModsAction
+              icon="refresh"
+              label={t(modsKey('updates.check'))}
+              disabled={updates.isFetching}
+              onClick={() => void updates.refetch()}
+            />
+            {eligibleUpdates.length > 0 && (
+              <button
+                type="button"
+                className="mods-quiet-button mods-prepare-updates"
+                disabled={
+                  props.disabled || props.selection.saving || Boolean(props.selection.error)
+                }
+                onClick={() => prepareUpdates()}
+              >
+                <ModsIcon name="download" />
+                {t(modsKey('updates.prepare'), { count: eligibleUpdates.length })}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       {packs.length === 0 ? (
         <ModsEmpty
           action={
@@ -784,6 +905,7 @@ function InstalledMods(
             const pending = props.data?.changes.find(
               (item) => item.path === pack.path && item.action !== 'install',
             );
+            const update = eligibleUpdates.find((item) => item.path === pack.path);
             return (
               <li
                 key={pack.id}
@@ -801,6 +923,23 @@ function InstalledMods(
                     {pack.metadata && <ModsChannel channel={pack.metadata.channel} />}
                     <span>· {format.bytes(pack.size)}</span>
                     {pack.state === 'disabled' && <span>{t(modsKey('disabled'))}</span>}
+                    {update?.version && (
+                      <button
+                        type="button"
+                        className="mods-update-badge"
+                        aria-label={t(modsKey('updates.one'), {
+                          name: pack.metadata?.name ?? pack.name,
+                        })}
+                        disabled={
+                          props.disabled || props.selection.saving || Boolean(props.selection.error)
+                        }
+                        onClick={() => prepareUpdates(pack.path)}
+                      >
+                        <ModsIcon name="download" />
+                        {t(modsKey('updates.version'), { version: update.version.version })}
+                        <ModsChannel channel={update.version.channel} />
+                      </button>
+                    )}
                   </span>
                   <ModsTags side={pack.metadata?.side ?? 'unknown'} tags={pack.metadata?.tags} />
                 </div>
@@ -884,14 +1023,6 @@ function ReviewMods(
       requiredBy: [...new Set([...(prior?.requiredBy ?? []), ...item.requiredBy])],
     });
   }
-  const knownReasons = new Set([
-    'conflict',
-    'version-conflict',
-    'incompatible-version',
-    'unavailable',
-    'unresolved',
-    'datapack_dependency',
-  ]);
   function optional(
     projectId: string,
     provider: ModProvider,
@@ -943,7 +1074,7 @@ function ReviewMods(
                 : ({
                     id: root.projectId,
                     provider: root.provider,
-                    name: root.projectId,
+                    name: props.rootNames.get(rootIdentity(root)) ?? root.projectId,
                     summary: '',
                     websiteUrl: '',
                     authors: [],
@@ -1139,13 +1270,29 @@ function ReviewMods(
             <ModsIcon name="warning" />
             {t(modsKey('conflicts'))}
           </h3>
+          {props.data?.blockers.some((item) => !item.provider) && (
+            <button
+              type="button"
+              className="mods-quiet-button mods-blocker-recheck"
+              disabled={props.disabled || props.selection.saving || Boolean(props.selection.error)}
+              onClick={() => props.selection.change((roots) => [...roots])}
+            >
+              <ModsIcon name="refresh" />
+              {t(modsKey('recheckDependencies'))}
+            </button>
+          )}
           {props.data?.blockers.map((item) => (
-            <div key={`${item.projectId}:${item.reason}`}>
-              <strong>{item.name}</strong>
-              <p>
-                {t(modsKey(`blocker.${knownReasons.has(item.reason) ? item.reason : 'unknown'}`))}
-              </p>
-            </div>
+            <ModsBlocker
+              key={`${item.provider}:${item.projectId}:${item.requiredBy}:${item.reason}`}
+              item={item}
+              data={props.data as Snapshot}
+              serverId={props.serverId}
+              disabled={props.disabled || props.selection.saving || Boolean(props.selection.error)}
+              preferBeta={props.selection.preferBeta}
+              selectedFile={props.selectedFile}
+              onProject={props.onProject}
+              onVersion={props.onVersion}
+            />
           ))}
         </section>
       )}

@@ -595,6 +595,15 @@ export class ModrinthProvider {
   modVersions(projectId: string, input: ModCatalogVersionsInput) {
     return this.modCatalog.listVersions(projectId, input);
   }
+  modVersion(
+    projectId: string,
+    versionId: string,
+    target: ContentTarget,
+    signal?: AbortSignal,
+    metadataMemo?: ResolveModsOptions['metadataMemo'],
+  ) {
+    return this.modCatalog.getVersion(projectId, versionId, target, signal, metadataMemo);
+  }
   resolveMods(roots: ModSelection[], target: ContentTarget, options: ResolveModsOptions = {}) {
     return this.modCatalog.resolve(roots, target, options);
   }

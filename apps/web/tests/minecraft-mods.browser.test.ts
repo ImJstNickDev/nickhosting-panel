@@ -14,7 +14,9 @@ import type {
   MinecraftModMetadata,
   MinecraftModSelection,
   MinecraftModsSnapshot,
+  MinecraftModUpdates,
 } from '../../../games/minecraft/src/mod-contracts.js';
+import { minecraftModsMessages } from '../../../games/minecraft/src/ui/mods-catalog.js';
 import type {
   ModCatalogProject,
   ModCatalogVersion,
@@ -50,7 +52,7 @@ const file = (
   incompatible = false,
 ): ModCatalogVersion => ({
   provider: item.provider,
-  id: `${item.id}-${version}`,
+  id: `${item.id}-${version.replaceAll('.', '_')}`,
   projectId: item.id,
   name: `${item.name} ${version}`,
   version,
@@ -94,6 +96,12 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
   let delaySnapshot: Promise<void> | undefined;
   let releaseSnapshot: (() => void) | undefined;
   let snapshotReads = 0;
+  let updateItems: MinecraftModUpdates['items'] | undefined;
+  let updateReads = 0;
+  let updatesLimited = false;
+  let alternativeReads = 0;
+  let delayUpdates: Promise<void> | undefined;
+  let releaseUpdates: (() => void) | undefined;
   let failedProvider = false;
   let completed = true;
   const timers = new Set<ReturnType<typeof setTimeout>>();
@@ -212,6 +220,43 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
                 snapshotReads++;
                 await delaySnapshot;
                 return json(snapshot);
+              }
+              if (url.pathname === `${base}/updates`) {
+                updateReads++;
+                await delayUpdates;
+                return json({
+                  checkedAt: '2026-10-20T12:00:00Z',
+                  limited: updatesLimited,
+                  items:
+                    updateItems ??
+                    snapshot.packs.flatMap((pack) =>
+                      pack.metadata
+                        ? [
+                            {
+                              path: pack.path,
+                              provider: pack.metadata.provider,
+                              projectId: pack.metadata.projectId,
+                              currentVersionId: pack.metadata.versionId,
+                              status: 'current',
+                            },
+                          ]
+                        : [],
+                    ),
+                });
+              }
+              if (url.pathname.startsWith(`${base}/alternatives/`)) {
+                alternativeReads++;
+                const projectId = url.pathname.split('/').at(-1) ?? '';
+                const item =
+                  catalog.find((item) => item.id === projectId) ?? project(projectId, projectId);
+                return json({
+                  revision: Number(url.searchParams.get('revision')),
+                  provider: item.provider,
+                  projectId,
+                  items: [file(item, '1.0')],
+                  checked: 3,
+                  limited: false,
+                });
               }
               if (url.pathname === `${base}/catalog`)
                 return json({
@@ -379,6 +424,12 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     delaySnapshot = undefined;
     releaseSnapshot = undefined;
     snapshotReads = 0;
+    updateItems = undefined;
+    updateReads = 0;
+    updatesLimited = false;
+    alternativeReads = 0;
+    delayUpdates = undefined;
+    releaseUpdates = undefined;
     context = await browser.newContext({ viewport: { width: 1360, height: 1000 } });
     page = await context.newPage();
     page.on('pageerror', (error) => errors.push(error.message));
@@ -388,6 +439,7 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
   });
   afterEach(async () => {
     releaseSnapshot?.();
+    releaseUpdates?.();
     for (const timer of timers) clearTimeout(timer);
     timers.clear();
     await context.close();
@@ -551,6 +603,7 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     await page.getByRole('checkbox', { name: 'Select Copper Toolkit' }).check();
     expect(writes).toHaveLength(1);
     releaseSnapshot?.();
+    releaseUpdates?.();
     delaySnapshot = undefined;
     await check.poll(() => snapshot.roots.length).toBe(2);
     await page.reload();
@@ -562,7 +615,7 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     snapshot.packs.push({
       id: 'installed',
       name: item.name,
-      path: 'mods/evergreen-1.0.jar',
+      path: 'mods/evergreen-1_0.jar',
       size: 12,
       state: 'enabled',
       metadata: metadata(item, file(item, '1.0')),
@@ -674,5 +727,248 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     await page.getByRole('button', { name: 'About Evergreen' }).click();
     await check(page.getByRole('button', { name: 'Select version', exact: true })).toBeDisabled();
     expect(writes).toHaveLength(0);
+  });
+  it.each(['en', 'it'] as const)(
+    'explains dependency requirements and offers an explicit alternative (%s)',
+    async (locale) => {
+      if (locale === 'it') await page.setViewportSize({ width: 390, height: 844 });
+      await page.addInitScript((value) => localStorage.setItem('nh.locale', value), locale);
+      snapshot.roots = [
+        {
+          provider: 'modrinth',
+          projectId: 'evergreen',
+          optionalProjectIds: [],
+          forceIncompatible: false,
+        },
+      ];
+      snapshot.blockers = [
+        {
+          provider: 'modrinth',
+          projectId: 'evergreen-config',
+          name: 'Evergreen Config',
+          reason: 'incompatible-version',
+          requiredBy: 'evergreen',
+          requiredByName: 'Evergreen',
+          roots: [{ projectId: 'evergreen', name: 'Evergreen' }],
+          availableMinecraftVersions: ['26.1.2'],
+          availableLoaders: ['fabric'],
+          availableChannels: ['beta'],
+        },
+      ];
+      const text = (key: string) =>
+        minecraftModsMessages[`mods.${key}`]?.[locale === 'it' ? 1 : 0] ?? key;
+      await page.goto(`${origin}mods-fixture`);
+      await page
+        .getByRole('button', { name: text('install').replace('{count}', '1'), exact: true })
+        .click();
+      await check(page.locator('.mods-blockers')).toContainText('26.1.2');
+      await check(page.locator('.mods-blockers')).toContainText('Minecraft 26.1 · fabric');
+      expect(writes).toHaveLength(0);
+      expect(alternativeReads).toBe(0);
+      await page
+        .getByRole('button', { name: text('alternative.find').replace('{name}', 'Evergreen') })
+        .click();
+      const use = page.getByRole('button', {
+        name: text('alternative.use').replace('{version}', '1.0'),
+        exact: true,
+      });
+      await check(use).toBeVisible();
+      expect(alternativeReads).toBe(1);
+      expect(writes).toHaveLength(0);
+      await capture(
+        `mods-dependency-alternative-${locale}-${locale === 'it' ? 'mobile' : 'desktop'}`,
+      );
+      await use.focus();
+      await page.keyboard.press('Enter');
+      await check.poll(() => snapshot.roots[0]?.versionId).toBe('evergreen-1_0');
+      await check(page.getByRole('button', { name: text('apply'), exact: true })).toBeEnabled();
+      expect(writes.filter((write) => write.path.endsWith('/apply'))).toHaveLength(0);
+    },
+  );
+  it('keeps the inventory usable during background update checks and prepares exact updates in one selection', async () => {
+    snapshot.packs = catalog.slice(0, 2).map((item) => ({
+      id: item.id,
+      path: `mods/${item.id}.jar`,
+      name: item.name,
+      size: 1048576,
+      state: item.id === 'copper' ? 'disabled' : 'enabled',
+      metadata: metadata(item, file(item, '0.9')),
+    }));
+    updateItems = snapshot.packs.map((pack) => ({
+      path: pack.path,
+      provider: 'modrinth',
+      projectId: pack.metadata?.projectId ?? '',
+      currentVersionId: pack.metadata?.versionId ?? '',
+      status: 'update',
+      version: file(catalog.find((item) => item.id === pack.id) as ModCatalogProject, '1.0'),
+    }));
+    delayUpdates = new Promise<void>((resolve) => {
+      releaseUpdates = resolve;
+    });
+    await open();
+    await page.getByRole('button', { name: 'Installed', exact: false }).first().click();
+    await check(page.locator('.mods-installed-row')).toHaveCount(2);
+    await check(page.getByText('Checking updates…', { exact: true })).toBeVisible();
+    await check(page.getByRole('button', { name: 'Disable Evergreen', exact: true })).toBeEnabled();
+    expect(writes).toHaveLength(0);
+    releaseUpdates?.();
+    await check(page.getByRole('button', { name: 'Prepare updates (2)' })).toBeVisible();
+    await capture('mods-updates-en-desktop');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await capture('mods-updates-en-mobile');
+    await page.getByRole('button', { name: 'Prepare updates (2)' }).click();
+    await check.poll(() => snapshot.roots.length).toBe(2);
+    const selections = writes.filter((write) => write.path.endsWith('/selection'));
+    expect(selections).toHaveLength(1);
+    expect(snapshot.roots.map((root) => root.versionId)).toEqual(['evergreen-1_0', 'copper-1_0']);
+    await check(page.getByRole('heading', { name: 'Review changes', exact: false })).toBeVisible();
+    expect(writes.some((write) => write.path.endsWith('/apply'))).toBe(false);
+    expect(updateReads).toBe(1);
+  });
+  it('does not call a partial update check up-to-date or replace manually queued choices', async () => {
+    const item = catalog[0] as ModCatalogProject;
+    snapshot.packs = [
+      {
+        id: item.id,
+        path: 'mods/evergreen.jar',
+        name: item.name,
+        size: 12,
+        state: 'enabled',
+        metadata: metadata(item, file(item, '0.9')),
+      },
+    ];
+    snapshot.roots = [
+      {
+        provider: 'modrinth',
+        projectId: 'evergreen',
+        versionId: 'evergreen-beta',
+        forceIncompatible: false,
+        optionalProjectIds: ['chosen-option'],
+      },
+    ];
+    updateItems = [
+      {
+        path: 'mods/evergreen.jar',
+        provider: 'modrinth',
+        projectId: 'evergreen',
+        currentVersionId: 'evergreen-0_9',
+        status: 'limited',
+      },
+    ];
+    await open();
+    await page.getByRole('button', { name: 'Installed', exact: false }).first().click();
+    await check(page.getByText('Some updates could not be checked', { exact: true })).toBeVisible();
+    await check(page.getByText('Catalog mods are up to date')).toHaveCount(0);
+    updateItems[0] = {
+      ...(updateItems[0] as MinecraftModUpdates['items'][number]),
+      status: 'update',
+      version: file(item, '1.0'),
+    };
+    await page.getByRole('button', { name: 'Check updates', exact: true }).click();
+    await check(page.getByText('Updates available: 1', { exact: true })).toBeVisible();
+    await check(page.getByRole('button', { name: 'Prepare updates (1)' })).toHaveCount(0);
+    expect(snapshot.roots[0]?.versionId).toBe('evergreen-beta');
+    expect(writes).toHaveLength(0);
+  });
+  it('checks again when Minecraft or Loader changes even if installed receipts are unchanged', async () => {
+    const item = catalog[0] as ModCatalogProject;
+    snapshot.packs = [
+      {
+        id: item.id,
+        path: 'mods/evergreen.jar',
+        name: item.name,
+        size: 12,
+        state: 'enabled',
+        metadata: metadata(item, file(item, '0.9')),
+      },
+    ];
+    await open();
+    await page.getByRole('button', { name: 'Installed', exact: false }).first().click();
+    await check(page.getByText('Catalog mods are up to date', { exact: true })).toBeVisible();
+    expect(updateReads).toBe(1);
+    snapshot.version = '26.1.2';
+    await page.getByRole('button', { name: 'Refresh mods', exact: true }).click();
+    await check.poll(() => updateReads).toBe(2);
+    snapshot.loader = 'quilt';
+    await page.getByRole('button', { name: 'Refresh mods', exact: true }).click();
+    await check.poll(() => updateReads).toBe(3);
+    expect(writes).toHaveLength(0);
+  });
+  it('does not reuse an alternative after the server target changes and groups shared roots accurately', async () => {
+    snapshot.roots = ['evergreen', 'copper'].map((projectId) => ({
+      provider: 'modrinth',
+      projectId,
+      optionalProjectIds: [],
+      forceIncompatible: false,
+    }));
+    snapshot.blockers = [
+      {
+        provider: 'modrinth',
+        projectId: 'shared',
+        name: 'Shared Config',
+        reason: 'incompatible-version',
+        requiredBy: 'evergreen',
+        requiredByName: 'Evergreen',
+        roots: [
+          { projectId: 'evergreen', name: 'Evergreen' },
+          { projectId: 'copper', name: 'Copper Toolkit' },
+        ],
+      },
+    ];
+    await open();
+    await page.getByRole('button', { name: 'Install (2)', exact: true }).click();
+    await check(page.locator('.mods-blocker-chain')).toContainText('Evergreen, Copper Toolkit');
+    await check(page.locator('.mods-blocker-chain')).not.toContainText(
+      'Evergreen → Copper Toolkit',
+    );
+    await page.getByRole('button', { name: 'Find alternative for Evergreen', exact: true }).click();
+    await check(page.getByRole('button', { name: 'Use 1.0', exact: true })).toBeVisible();
+    expect(alternativeReads).toBe(1);
+    await page.getByRole('button', { name: 'Back to Discover' }).click();
+    snapshot.version = '26.1.2';
+    await page.getByRole('button', { name: 'Refresh mods', exact: true }).click();
+    await check.poll(() => snapshotReads).toBeGreaterThan(1);
+    await page.getByRole('button', { name: 'Install (2)', exact: true }).click();
+    await check(page.getByRole('button', { name: 'Use 1.0', exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Find alternative for Evergreen', exact: true }).click();
+    await check.poll(() => alternativeReads).toBe(2);
+    expect(writes).toHaveLength(0);
+  });
+  it('reports a bounded update scan as partial even if every returned item is current', async () => {
+    const item = catalog[0] as ModCatalogProject;
+    snapshot.packs = [
+      {
+        id: item.id,
+        path: 'mods/evergreen.jar',
+        name: item.name,
+        size: 12,
+        state: 'enabled',
+        metadata: metadata(item, file(item, '0.9')),
+      },
+    ];
+    updatesLimited = true;
+    await open();
+    await page.getByRole('button', { name: 'Installed', exact: false }).first().click();
+    await check(page.getByText('Some updates could not be checked', { exact: true })).toBeVisible();
+    await check(page.getByText('Catalog mods are up to date')).toHaveCount(0);
+  });
+  it('rechecks old dependency diagnostics only after an explicit request', async () => {
+    snapshot.roots = [
+      {
+        provider: 'modrinth',
+        projectId: 'evergreen',
+        optionalProjectIds: ['optional-choice'],
+        forceIncompatible: false,
+      },
+    ];
+    snapshot.blockers = [{ projectId: 'old-config', name: 'Old Config', reason: 'unavailable' }];
+    await open();
+    await page.getByRole('button', { name: 'Install (1)', exact: true }).click();
+    await check(page.getByRole('button', { name: 'Recheck dependencies' })).toBeVisible();
+    expect(writes).toHaveLength(0);
+    await page.getByRole('button', { name: 'Recheck dependencies' }).click();
+    await check(page.getByRole('button', { name: 'Apply', exact: true })).toBeEnabled();
+    expect(snapshot.roots[0]?.optionalProjectIds).toEqual(['optional-choice']);
+    expect(writes.filter((write) => write.path.endsWith('/selection'))).toHaveLength(1);
   });
 });

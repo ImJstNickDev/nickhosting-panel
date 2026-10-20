@@ -1,11 +1,23 @@
 import type { ContentTarget } from './contracts.js';
 import type {
+  ModAvailabilityHints,
   ModCatalogVersion,
   ModCompatibilityIssue,
   ModEnvironment,
   ModProvider,
   ModTag,
 } from './mod-catalog.js';
+
+/** Observed metadata only: bounded hints, never an exhaustive compatibility claim. */
+export function modAvailabilityHints(versions: readonly ModCatalogVersion[]): ModAvailabilityHints {
+  const bounded = (values: string[]) =>
+    [...new Set(values.filter((value) => value.length > 0 && value.length <= 80))].slice(0, 20);
+  return {
+    availableMinecraftVersions: bounded(versions.flatMap((version) => version.gameVersions)),
+    availableLoaders: bounded(versions.flatMap((version) => version.loaders)),
+    availableChannels: [...new Set(versions.map((version) => version.channel))],
+  };
+}
 
 export function modrinthEnvironment(input: {
   environment?: string | string[];

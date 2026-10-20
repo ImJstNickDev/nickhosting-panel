@@ -66,6 +66,41 @@ download. A parent project's advertised Minecraft range does not override the
 range of a required dependency. The resolver neither skips that dependency nor
 silently changes the user's Minecraft target, provider or selected parent version.
 
+Blocked dependencies retain their provider, requested version, immediate parent and
+selected root projects. Review shows the dependency relationship, the server target,
+and bounded observed Minecraft/loader versions from the catalog. These hints are
+not an exhaustive compatibility matrix. A downloadable alpha-only selection has
+its own explanation and remains an explicit version choice. A failed supplemental
+catalog read does not replace a known incompatibility with a generic failure.
+
+Review links to dependency details and the selected parent's version picker. Find
+alternative checks at most five candidate versions from a bounded catalog lookup,
+using the existing resolver against the selected roots of that provider. Shared
+raw metadata is reused across candidates. A suggested version changes nothing
+until the user chooses it; normal preparation and final installed/cross-provider
+dependency checks still apply. This is a catalog dependency suggestion, not a
+gameplay certification or a complete dependency solver. An exhausted search budget
+is reported as limited, rather than claiming no compatible version exists.
+
+Installed mods check for updates in the background. Advice uses local publication
+receipts and provider metadata; it does not list Wings directories, download JARs
+or delay the installed inventory. Results match the displayed file path, provider,
+project and installed version. Target/preference changes invalidate browser advice.
+The service coalesces matching requests in a bounded five-minute cache and rechecks
+authorization before cache access. Two projects are checked concurrently, with up
+to three catalog pages per project and a 30-second overall deadline. Completed
+checks survive a deadline/provider failure; incomplete checks remain explicit.
+At most 512 receipt-backed files are checked in one response, with a limited flag
+when more exist. Unrecognized local JAR identification is outside this feature.
+
+Stable/beta selection follows the existing policy. Update candidates must be newer
+by provider publication time; opaque version IDs are not compared numerically and
+preferring stable never downgrades a newer installed beta. Prepare updates creates
+one selection with exact version IDs, preserves existing manual choices and pending
+file actions, and opens the ordinary review. Individual updates use the same path.
+Replacing a disabled root mod preserves its disabled state. No update is applied
+automatically and the game server is never stopped/restarted by these actions.
+
 Fabric identity is extracted during the existing JAR inspection. Identical
 artifacts from both catalogs can share one published JAR only when their Fabric
 ID and verified SHA-256 match; their catalog aliases remain recorded for dependency
@@ -89,6 +124,8 @@ All paths are under `/v1/servers/:id/minecraft/mods`:
 | `GET /catalog/search` | Paginated project discovery |
 | `GET /catalog/:provider/:projectId` | Project description and normalized metadata |
 | `GET /catalog/:provider/:projectId/versions` | Versions, compatibility and recommendation |
+| `GET /updates?preferBeta=false` | Cached, read-only installed update advice and partial results |
+| `GET /alternatives/:provider/:projectId?revision=N` | Bounded dependency-resolved suggestion for a selected root |
 | `PUT /selection` | Replace the selected roots and start background preparation |
 | `POST /changes` | Prepare enable, disable or removal of an installed file |
 | `DELETE /changes/:changeId` | Cancel an unpublished installed-file change |
@@ -183,7 +220,38 @@ Screenshots: [full app discovery](screenshots/m5/minecraft-mods-app-discover.png
 [provider unavailable](screenshots/m5/minecraft-mods-unavailable-en.png),
 [Console restart](screenshots/m5/minecraft-mods-console-restart-en.png).
 
-### Approved development activation
+### Dependency guidance and update advice — 2026-10-20
+
+Focused validation for this follow-up: 67 provider/advice/model/controller tests;
+28 isolated database/HTTP cases across the regression run and corrected focused
+rerun; 19 Firefox scenarios covered by the full initial run and focused follow-ups.
+This includes partial deadlines, metadata request reuse, stable/beta/no-downgrade
+selection, disabled replacements, revoked sessions, stale target caches, shared
+dependency chains, manual-choice preservation and old-draft rechecks. Scoped axe
+and desktop/mobile overflow checks report zero findings. Root/WebPanel/test
+TypeScript checks, changed-file Biome, localization compilation and production
+build pass; existing large-chunk build warnings remain.
+
+Independent backend and frontend/visual reviews completed. Screenshots:
+[dependency guidance, desktop](screenshots/m5/mods-dependency-alternative-en-desktop.png),
+[Italian mobile guidance](screenshots/m5/mods-dependency-alternative-it-mobile.png),
+[updates, desktop](screenshots/m5/mods-updates-en-desktop.png),
+[updates, mobile](screenshots/m5/mods-updates-en-mobile.png).
+
+Authenticated Firefox verification against development passed HTTPS 200, WSS HMR,
+the installed inventory and the new updates endpoint (seven installed mods,
+complete result, no update candidates). The real read-only CurseForge resolution
+retained the JEI → MezzConfig incompatibility with catalog version/loader hints.
+No artifacts were downloaded, drafts changed, mods published or game power commands
+sent. No migration, Blueprint update, container rebuild or manual restart was
+needed. Existing blocked drafts can explicitly Recheck dependencies to obtain the
+new diagnostics; merely opening the page never restarts preparation.
+
+Rollback this follow-up's application commit while retaining the unchanged database
+and existing prepared/installed files. Diagnostics are additive JSON fields; no
+schema rollback or resource cleanup is required.
+
+### Initial development activation
 
 On 2026-10-20, the Owner approved the scoped development image build and explicit
 migration. Only 047 was applied, with its source checksum verified; all previous

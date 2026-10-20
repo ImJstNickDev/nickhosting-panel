@@ -6,7 +6,9 @@ import {
   fail,
   validateContentPlan,
 } from './contracts.js';
+import { dependencyMemo } from './datapack-resolution.js';
 import {
+  type ModAvailabilityHints,
   type ModCatalogProject,
   type ModCatalogVersion,
   type ModProvider,
@@ -15,12 +17,14 @@ import {
   modResolutionSchema,
   modSelectionSchema,
 } from './mod-catalog.js';
+import { modAvailabilityHints } from './mod-metadata.js';
 
 export interface ModCandidate {
   project: ModCatalogProject;
   version?: ModCatalogVersion;
   artifact?: ContentArtifact;
-  blockedReason?: 'incompatible-version' | 'unavailable';
+  blockedReason?: 'incompatible-version' | 'unavailable' | 'alpha-only';
+  availabilityHints?: ModAvailabilityHints;
   dependencies: {
     projectId?: string;
     versionId?: string;
@@ -31,7 +35,10 @@ export interface ResolveModsOptions {
   preferBeta?: boolean;
   signal?: AbortSignal;
   installedVersions?: ReadonlyMap<string, string>;
+  /** Request-scoped raw metadata reuse; candidate graphs remain independent. */
+  metadataMemo?: ReturnType<typeof dependencyMemo>;
 }
+export const createModMetadataMemo = (limit = 512) => dependencyMemo(limit);
 export interface ModCatalogSearchInput {
   query: string;
   target: ContentTarget;
@@ -45,6 +52,7 @@ export interface ModCatalogVersionsInput {
   includeIncompatible?: boolean;
   preferBeta?: boolean;
   signal?: AbortSignal;
+  metadataMemo?: ResolveModsOptions['metadataMemo'];
 }
 export interface ResolvedMods {
   plan: ContentPlan;
@@ -115,8 +123,9 @@ export async function resolveModGraph(options: {
       name: string,
       requiredBy: string,
       reason: ModResolution['blocked'][number]['reason'],
+      hints: ModAvailabilityHints = {},
     ) => {
-      catalog.blocked.push({ ...notice(pid, vid, name, requiredBy), reason });
+      catalog.blocked.push({ ...notice(pid, vid, name, requiredBy), reason, ...hints });
     };
     let restart = false;
     let edges = 0;
@@ -185,11 +194,19 @@ export async function resolveModGraph(options: {
           candidate.project.name,
           request.requiredBy,
           candidate.blockedReason ?? 'unavailable',
+          candidate.availabilityHints,
         );
         continue;
       }
       if (version.compatibility.length && !forced) {
-        block(pid, version.id, candidate.project.name, request.requiredBy, 'incompatible-version');
+        block(
+          pid,
+          version.id,
+          candidate.project.name,
+          request.requiredBy,
+          'incompatible-version',
+          modAvailabilityHints([version]),
+        );
         continue;
       }
       if (!version.available || !artifact) {

@@ -10,9 +10,12 @@ import {
 import {
   type MinecraftModSelection,
   type MinecraftModsSnapshot,
+  minecraftModAlternativesSchema,
   minecraftModApplySchema,
+  minecraftModBlockerSchema,
   minecraftModInstalledChangeSchema,
   minecraftModSelectionSchema,
+  minecraftModUpdatesSchema,
 } from '../mod-contracts.js';
 
 export type {
@@ -25,11 +28,13 @@ export type {
   ModTag,
 } from '../../../../packages/content-providers/src/mod-catalog.js';
 export type {
+  MinecraftModAlternatives,
   MinecraftModMetadata,
   MinecraftModQueueItem,
   MinecraftModRoot,
   MinecraftModSelection,
   MinecraftModsSnapshot,
+  MinecraftModUpdates,
 } from '../mod-contracts.js';
 
 const metadata = z.object({
@@ -93,7 +98,7 @@ export const minecraftModsSnapshotSchema: z.ZodType<MinecraftModsSnapshot> = z.o
       error: z.string().optional(),
     }),
   ),
-  blockers: z.array(z.object({ projectId: z.string(), name: z.string(), reason: z.string() })),
+  blockers: z.array(minecraftModBlockerSchema),
   optional: z.array(
     z.object({
       provider: modProviderSchema,
@@ -173,6 +178,33 @@ export function createMinecraftModsController(client: GameUiClient) {
         await client.request(`${projectPath(serverId, provider, projectId)}/versions?${params}`, {
           signal,
         }),
+      );
+    },
+    async updates(serverId: string, preferBeta: boolean, signal?: AbortSignal) {
+      return minecraftModUpdatesSchema.parse(
+        await client.request(path(serverId, `/updates?preferBeta=${preferBeta}`), { signal }),
+      );
+    },
+    async alternatives(
+      serverId: string,
+      provider: ModProvider,
+      projectId: string,
+      revision: number,
+      signal?: AbortSignal,
+    ) {
+      const project = z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{1,128}$/)
+        .parse(projectId);
+      const current = z.number().int().nonnegative().parse(revision);
+      return minecraftModAlternativesSchema.parse(
+        await client.request(
+          path(
+            serverId,
+            `/alternatives/${modProviderSchema.parse(provider)}/${encodeURIComponent(project)}?revision=${current}`,
+          ),
+          { signal },
+        ),
       );
     },
     async select(serverId: string, input: MinecraftModSelection) {

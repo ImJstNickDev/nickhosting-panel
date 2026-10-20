@@ -57,6 +57,31 @@ export function registerMinecraftModRoutes(app: Hono<{ Variables: Variables }>, 
     c.header('cache-control', 'no-store');
     return c.json(await (await service()).restartStatus(await principal(c), c.req.param('id')));
   });
+  app.get(`${base}/updates`, async (c) => {
+    c.header('cache-control', 'no-store');
+    const query = parse(z.strictObject({ preferBeta: boolean }), c.req.query());
+    return c.json(
+      await (await service(true)).updates(await principal(c), c.req.param('id'), query.preferBeta),
+    );
+  });
+  app.get(`${base}/alternatives/:provider/:projectId`, async (c) => {
+    c.header('cache-control', 'no-store');
+    const name = parse(providerId, c.req.param('provider'));
+    const id = parse(projectId, c.req.param('projectId'));
+    const query = parse(
+      z.strictObject({ revision: z.coerce.number().int().nonnegative() }),
+      c.req.query(),
+    );
+    return c.json(
+      await (await service(true)).alternatives(
+        await principal(c),
+        c.req.param('id'),
+        name,
+        id,
+        query.revision,
+      ),
+    );
+  });
   app.put(`${base}/selection`, async (c) =>
     c.json(
       await (await service(true)).select(await principal(c), c.req.param('id'), await body(c)),

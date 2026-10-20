@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DomainError } from '@nickhosting/core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ZipFile } from 'yazl';
 import {
@@ -16,6 +17,7 @@ import {
 } from './index.js';
 import type { ModSelection } from './mod-catalog.js';
 import { curseforgeEnvironment } from './mod-metadata.js';
+import { createModMetadataMemo } from './mod-resolution.js';
 
 const target = { minecraftVersion: '1.21.1', loader: 'fabric' as const };
 const root = (projectId: string, extra: Partial<ModSelection> = {}): ModSelection => ({
@@ -60,7 +62,7 @@ const version = (id: string, pid: string, extra = {}) => ({
   ...extra,
 });
 function mr(projects: ReturnType<typeof project>[], versions: ReturnType<typeof version>[]) {
-  const json = vi.fn(async (input: string) => {
+  const json = vi.fn(async (input: string): Promise<unknown> => {
     const url = new URL(input);
     const path = url.pathname.replace('/v2', '');
     if (path === '/search')
@@ -123,7 +125,7 @@ const cfFile = (id: number, modId: number, extra = {}) => ({
   ...extra,
 });
 function cf(projects: ReturnType<typeof cfProject>[], files: ReturnType<typeof cfFile>[]) {
-  const json = vi.fn(async (input: string) => {
+  const json = vi.fn(async (input: string): Promise<unknown> => {
     const url = new URL(input);
     const parts = url.pathname.replace('/v1', '').split('/').filter(Boolean);
     if (parts[1] === 'search')
@@ -364,7 +366,7 @@ describe('Mods graph selection', () => {
       (await provider.resolveMods([root('b')], target)).catalog.items[0]?.version.channel,
     ).toBe('beta');
     expect((await provider.resolveMods([root('c')], target)).catalog.blocked[0]?.reason).toBe(
-      'unavailable',
+      'alpha-only',
     );
     expect(
       (await provider.resolveMods([root('c', { versionId: 'alpha' })], target)).catalog.items[0]
@@ -555,13 +557,16 @@ describe('Mods graph selection', () => {
           projectId: '2',
           requiredBy: '1',
           reason: 'incompatible-version',
+          availableMinecraftVersions: ['1.21.2'],
+          availableLoaders: ['fabric'],
+          availableChannels: ['release'],
         }),
       ]);
       expect(result.catalog.items.map((item) => item.project.id)).toEqual(['1']);
       expect(result.plan.artifacts.some((artifact) => artifact.projectId === '2')).toBe(false);
-      // Classification reuses the existing filtered lookup, without probing other targets.
+      // One unfiltered metadata lookup supplies bounded observed hints only on failure.
       const calls = json.mock.calls.map(([url]) => url);
-      expect(calls).toHaveLength(4);
+      expect(calls).toHaveLength(5);
       expect(calls.some((url) => url.includes('1.21.2'))).toBe(false);
 
       const blocked =
@@ -578,6 +583,241 @@ describe('Mods graph selection', () => {
       expect(
         (await blocked.provider.resolveMods([root('1')], target)).catalog.blocked[0]?.reason,
       ).toBe('unavailable');
+    },
+  );
+  it.each(['curseforge', 'modrinth'] as const)(
+    'reports downloadable alpha-only choices distinctly and permits an explicit alpha on %s',
+    async (name) => {
+      const { provider, json } =
+        name === 'curseforge'
+          ? cf([cfProject(1)], [cfFile(10, 1, { releaseType: 3 })])
+          : mr([project('1')], [version('10', '1', { version_type: 'alpha' })]);
+      const result = await provider.resolveMods([root('1')], target);
+      expect(result.catalog.blocked[0]).toMatchObject({
+        provider: name,
+        projectId: '1',
+        requiredBy: '1',
+        reason: 'alpha-only',
+        availableMinecraftVersions: ['1.21.1'],
+        availableLoaders: ['fabric'],
+        availableChannels: ['alpha'],
+      });
+      expect(json.mock.calls).toHaveLength(2);
+      expect(
+        (await provider.resolveMods([root('1', { versionId: '10' })], target)).catalog.blocked,
+      ).toEqual([]);
+      const denied =
+        name === 'curseforge'
+          ? cf([cfProject(1, { allowModDistribution: false })], [cfFile(10, 1, { releaseType: 3 })])
+          : mr(
+              [project('1')],
+              [
+                version('10', '1', {
+                  version_type: 'alpha',
+                  files: [{ ...version('10', '1').files[0], filename: 'bad.zip' }],
+                }),
+              ],
+            );
+      expect(
+        (await denied.provider.resolveMods([root('1')], target)).catalog.blocked[0]?.reason,
+      ).toBe('unavailable');
+    },
+  );
+  it.each(['curseforge', 'modrinth'] as const)(
+    'uses a pinned incompatible version for hints without looking up other releases on %s',
+    async (name) => {
+      const { provider, json } =
+        name === 'curseforge'
+          ? cf([cfProject(1)], [cfFile(10, 1, { gameVersions: ['1.20.1', 'Forge'] })])
+          : mr(
+              [project('1')],
+              [version('10', '1', { game_versions: ['1.20.1'], loaders: ['forge'] })],
+            );
+      expect(
+        (await provider.resolveMods([root('1', { versionId: '10' })], target)).catalog.blocked[0],
+      ).toMatchObject({
+        versionId: '10',
+        reason: 'incompatible-version',
+        availableMinecraftVersions: ['1.20.1'],
+        availableLoaders: ['forge'],
+      });
+      expect(json.mock.calls).toHaveLength(2);
+      const current = await provider.modVersion('1', '10', target);
+      expect(current).toMatchObject({
+        id: '10',
+        projectId: '1',
+        publishedAt: '2026-10-10T00:00:00Z',
+        compatibility: ['minecraft-version', 'loader'],
+      });
+      expect(current).not.toHaveProperty('downloadUrl');
+      expect(current).not.toHaveProperty('files');
+      expect(json.mock.calls).toHaveLength(4);
+    },
+  );
+  it.each(['curseforge', 'modrinth'] as const)(
+    'reuses request-scoped metadata for independent resolutions without retaining the candidate selection on %s',
+    async (name) => {
+      const { provider, json } =
+        name === 'curseforge'
+          ? cf(
+              [cfProject(1), cfProject(2)],
+              [
+                cfFile(10, 1, { dependencies: [{ modId: 2, relationType: 3 }] }),
+                cfFile(11, 1),
+                cfFile(20, 2, { gameVersions: ['1.20.1', 'Forge'] }),
+              ],
+            )
+          : mr(
+              [project('1'), project('2')],
+              [
+                version('10', '1', {
+                  dependencies: [{ project_id: '2', dependency_type: 'required' }],
+                }),
+                version('11', '1'),
+                version('20', '2', { game_versions: ['1.20.1'], loaders: ['forge'] }),
+              ],
+            );
+      const metadataMemo = createModMetadataMemo();
+      const resolve = (versionId: string) =>
+        provider.resolveMods([root('1', { versionId })], target, { metadataMemo });
+      expect((await resolve('10')).catalog.blocked[0]?.projectId).toBe('2');
+      const initialCalls = json.mock.calls.length;
+      expect((await resolve('10')).catalog.blocked[0]?.projectId).toBe('2');
+      expect(json.mock.calls).toHaveLength(initialCalls);
+      expect((await resolve('11')).catalog.blocked).toEqual([]);
+      expect(json.mock.calls).toHaveLength(initialCalls + 1);
+    },
+  );
+  it('bounds observed hints and does not fetch additional CF pages for diagnostic discovery', async () => {
+    const { provider, json } = cf(
+      [cfProject(1)],
+      Array.from({ length: 60 }, (_, i) =>
+        cfFile(i + 10, 1, {
+          gameVersions: [`other-${i}`, 'Forge'],
+          releaseType: 3,
+        }),
+      ),
+    );
+    const blocked = (await provider.resolveMods([root('1')], target)).catalog.blocked[0];
+    expect(blocked?.availableMinecraftVersions).toHaveLength(20);
+    expect(blocked?.availableLoaders).toEqual(['forge']);
+    expect(json.mock.calls).toHaveLength(3);
+    expect(json.mock.calls.some(([url]) => url.includes('index=20'))).toBe(false);
+  });
+  it.each(['curseforge', 'modrinth'] as const)(
+    'shares project and page metadata between update reads and pinned advice on %s',
+    async (name) => {
+      const { provider, json } =
+        name === 'curseforge'
+          ? cf(
+              [cfProject(1)],
+              Array.from({ length: 40 }, (_, i) => cfFile(i + 10, 1)),
+            )
+          : mr(
+              [project('1')],
+              Array.from({ length: 40 }, (_, i) => version(String(i + 10), '1')),
+            );
+      const metadataMemo = createModMetadataMemo();
+      const [installed, listed] = await Promise.all([
+        provider.modVersion('1', '10', target, undefined, metadataMemo),
+        provider.modVersions('1', { target, metadataMemo }),
+      ]);
+      expect(installed.id).toBe('10');
+      expect(listed.items).toHaveLength(20);
+      expect(json.mock.calls).toHaveLength(3);
+      const second = await provider.modVersions('1', { target, offset: 20, metadataMemo });
+      expect(second.items).toHaveLength(20);
+      const expectedCalls = name === 'modrinth' ? 3 : 4;
+      expect(json.mock.calls).toHaveLength(expectedCalls);
+      const candidate = second.items[0];
+      if (!candidate) throw new Error('fixture version missing');
+      expect(
+        (await provider.modVersion('1', candidate.id, target, undefined, metadataMemo)).id,
+      ).toBe(candidate.id);
+      expect(
+        (
+          await provider.resolveMods([root('1', { versionId: candidate.id })], target, {
+            metadataMemo,
+          })
+        ).catalog.blocked,
+      ).toEqual([]);
+      await provider.modVersions('1', { target, metadataMemo });
+      expect(json.mock.calls).toHaveLength(expectedCalls);
+      const aborted = new AbortController();
+      aborted.abort();
+      await expect(
+        provider.modVersion('1', '10', target, aborted.signal, metadataMemo),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      await expect(
+        provider.modVersions('1', { target, metadataMemo, signal: aborted.signal }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+    },
+  );
+  it('keeps CF UI pages distinct from resolver pages with larger page size', async () => {
+    const { provider, json } = cf(
+      [cfProject(1)],
+      [
+        ...Array.from({ length: 25 }, (_, i) => cfFile(100 + i, 1, { releaseType: 2 })),
+        cfFile(2, 1, { fileDate: '2026-09-01T00:00:00Z' }),
+      ],
+    );
+    const metadataMemo = createModMetadataMemo();
+    await provider.modVersions('1', { target, metadataMemo });
+    expect(
+      (await provider.resolveMods([root('1')], target, { metadataMemo })).catalog.items[0]?.version
+        .id,
+    ).toBe('2');
+    expect(json.mock.calls).toHaveLength(3);
+    expect(
+      json.mock.calls
+        .filter(([url]) => url.includes('/files?'))
+        .map(([url]) => new URL(url).searchParams.get('pageSize')),
+    ).toEqual(['20', '50']);
+  });
+  it.each(['curseforge', 'modrinth'] as const)(
+    'keeps the known incompatibility if optional hints are unavailable on %s, preserving aborts and invalid metadata',
+    async (name) => {
+      const { provider, json } =
+        name === 'curseforge' ? cf([cfProject(1)], []) : mr([project('1')], []);
+      const read = json.getMockImplementation();
+      if (!read) throw new Error('fixture transport missing');
+      const controller = new AbortController();
+      let mode: 'http' | 'identity' | 'abort' = 'http';
+      json.mockImplementation(async (input) => {
+        const url = new URL(input);
+        const unfiltered =
+          (url.pathname.endsWith('/files') || url.pathname.endsWith('/version')) &&
+          !url.searchParams.has('gameVersion') &&
+          !url.searchParams.has('game_versions');
+        if (unfiltered) {
+          if (mode === 'abort') controller.abort();
+          if (mode === 'identity')
+            throw new DomainError('validation_failed', 400, {
+              contentReason: 'dependency_identity',
+            });
+          throw new DomainError('integration_unavailable', 503, {
+            reason: 'content_http_refused',
+            providerStatus: 429,
+          });
+        }
+        return read(input);
+      });
+      const metadataMemo = createModMetadataMemo();
+      expect(
+        (await provider.resolveMods([root('1')], target, { metadataMemo })).catalog.blocked[0]
+          ?.reason,
+      ).toBe('incompatible-version');
+      const callCount = json.mock.calls.length;
+      await provider.resolveMods([root('1')], target, { metadataMemo });
+      expect(json.mock.calls).toHaveLength(callCount);
+      mode = 'identity';
+      await expect(provider.resolveMods([root('1')], target)).rejects.toMatchObject({
+        details: { contentReason: 'dependency_identity' },
+      });
+      mode = 'abort';
+      await expect(
+        provider.resolveMods([root('1')], target, { signal: controller.signal }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
     },
   );
   it('reports unpinned client-only candidates as incompatible instead of download-unavailable', async () => {

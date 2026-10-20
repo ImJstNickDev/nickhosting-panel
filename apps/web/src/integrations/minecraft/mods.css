@@ -1083,3 +1083,145 @@
     outline: 1px solid Highlight;
   }
 }
+
+.mods-updates-bar,
+.mods-update-controls,
+.mods-blocker-heading,
+.mods-alternative-found {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+}
+.mods-updates-bar {
+  padding: 5px 8px 12px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.mods-updates-summary {
+  display: grid;
+  gap: 4px;
+}
+.mods-update-note,
+.mods-updates-summary small {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+.mods-update-controls {
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+.mods-update-controls .mods-checkbox {
+  font-size: 0.76rem;
+}
+.mods-quiet-button,
+.mods-update-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--mods-quiet);
+  border: 0;
+  box-shadow: none;
+  border-radius: 7px;
+  min-height: 32px;
+  padding: 6px 9px;
+  color: inherit;
+  font-size: 0.76rem;
+}
+.mods-quiet-button:hover:not(:disabled),
+.mods-update-badge:hover:not(:disabled) {
+  background: var(--mods-selected);
+}
+.mods-update-badge {
+  background: var(--mods-selected);
+  font-size: 0.72rem;
+  min-height: 26px;
+  padding: 4px 7px;
+}
+.mods-update-badge :where(svg) {
+  width: 14px;
+  height: 14px;
+}
+.mods-blockers > .mods-blocker {
+  padding: 16px 0;
+}
+.mods-blocker + .mods-blocker {
+  border-top: 1px solid var(--line);
+}
+.mods-blocker-heading {
+  align-items: flex-start;
+}
+.mods-blocker-heading > div {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.mods-blocker-heading > :where(button) {
+  flex-shrink: 0;
+}
+.mods-blocker-chain {
+  color: var(--muted);
+}
+.mods-blocker-evidence {
+  display: grid;
+  gap: 3px;
+  margin-top: 9px;
+  font-size: 0.75rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.mods-blocker-resolution {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(180px, 2fr);
+  align-items: center;
+  gap: 8px 14px;
+  margin-top: 14px;
+}
+.mods-blocker-resolution > :where(span) {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.mods-alternative {
+  grid-column: 2;
+  min-width: 0;
+}
+.mods-alternative-found {
+  padding: 10px;
+  background: var(--mods-quiet);
+  border-radius: 8px;
+}
+.mods-alternative-found > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.mods-alternative-found small {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+.mods-alternative-found > :where(button) {
+  flex-shrink: 0;
+}
+@container (max-width: 560px) {
+  .mods-blocker-resolution {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .mods-alternative {
+    grid-column: 1;
+  }
+  .mods-update-controls {
+    width: 100%;
+  }
+  .mods-prepare-updates {
+    margin-left: auto;
+  }
+  .mods-alternative-found {
+    flex-wrap: wrap;
+  }
+}

@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import type { MinecraftModsSnapshot } from '../../../../../games/minecraft/src/ui/mods-controller.js';
-import { matchesMod, modRootState, versionForMod } from './mods-model.js';
+import type {
+  MinecraftModsSnapshot,
+  MinecraftModUpdates,
+  ModCatalogVersion,
+} from '../../../../../games/minecraft/src/ui/mods-controller.js';
+import {
+  currentModUpdates,
+  eligibleModUpdates,
+  installedModsFingerprint,
+  matchesMod,
+  modBlockerChain,
+  modRootState,
+  versionForMod,
+} from './mods-model.js';
 
 const metadata = {
   provider: 'modrinth' as const,
@@ -69,4 +81,115 @@ describe('Mods queue projection', () => {
       ),
     ).toBe('blocked');
   });
+});
+
+describe('Mods update projection', () => {
+  const installed: MinecraftModsSnapshot = {
+    ...snapshot,
+    changes: [],
+    packs: [{ ...change, state: 'disabled' }],
+  };
+  const version: ModCatalogVersion = {
+    provider: 'modrinth',
+    id: 'mr-two',
+    projectId: 'fabric-api',
+    name: '2.0',
+    version: '2.0',
+    filename: 'api.jar',
+    gameVersions: ['26.1'],
+    loaders: ['fabric'],
+    publishedAt: '2026-10-20T12:00:00Z',
+    bytes: 12,
+    channel: 'release',
+    available: true,
+    compatibility: [],
+    environment: { kind: 'both', source: 'modrinth', original: [] },
+  };
+  const updates: MinecraftModUpdates = {
+    checkedAt: '2026-10-20T12:00:00Z',
+    items: [
+      {
+        path: change.path,
+        provider: 'modrinth',
+        projectId: 'fabric-api',
+        currentVersionId: 'mr-one',
+        status: 'update',
+        version,
+      },
+    ],
+  };
+  it('allows disabled installed mods but never stale versions or unrelated files', () => {
+    expect(eligibleModUpdates(installed, updates, [])).toHaveLength(1);
+    const stale = {
+      ...installed,
+      packs: [
+        {
+          ...change,
+          state: 'disabled' as const,
+          metadata: { ...metadata, versionId: 'already-replaced' },
+        },
+      ],
+    };
+    expect(currentModUpdates(stale, updates)).toEqual([]);
+    expect(installedModsFingerprint(stale)).not.toBe(installedModsFingerprint(installed));
+  });
+  it('preserves alias selections and queued disable/delete/replace actions', () => {
+    expect(
+      eligibleModUpdates(installed, updates, [
+        { ...alias, forceIncompatible: false, optionalProjectIds: [] },
+      ]),
+    ).toEqual([]);
+    for (const action of ['enable', 'disable', 'delete', 'install'] as const) {
+      expect(
+        eligibleModUpdates({ ...installed, changes: [{ ...change, action }] }, updates, []),
+      ).toEqual([]);
+    }
+  });
+  it('rejects inaccessible, incompatible and mismatched update candidates', () => {
+    for (const candidate of [
+      { ...version, available: false },
+      { ...version, compatibility: ['loader' as const] },
+      { ...version, projectId: 'foreign' },
+      { ...version, id: metadata.versionId },
+    ]) {
+      expect(
+        eligibleModUpdates(
+          installed,
+          {
+            ...updates,
+            items: [
+              {
+                path: change.path,
+                provider: 'modrinth',
+                projectId: 'fabric-api',
+                currentVersionId: 'mr-one',
+                status: 'update',
+                version: candidate,
+              },
+            ],
+          },
+          [],
+        ),
+      ).toEqual([]);
+    }
+  });
+});
+
+it('groups independent roots rather than inventing a linear dependency chain', () => {
+  const blocker = {
+    projectId: 'shared',
+    name: 'Shared',
+    reason: 'incompatible-version',
+    roots: [
+      { projectId: 'a', name: 'Alpha' },
+      { projectId: 'b', name: 'Beta' },
+    ],
+    requiredBy: 'a',
+    requiredByName: 'Alpha',
+  };
+  expect(modBlockerChain(blocker)).toBe('Alpha, Beta');
+  expect(modBlockerChain({ ...blocker, requiredBy: 'middle', requiredByName: 'Middle' })).toBe(
+    'Alpha, Beta → Middle',
+  );
+  expect(modBlockerChain({ ...blocker, roots: undefined })).toBe('Alpha');
 });

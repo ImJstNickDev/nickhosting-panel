@@ -31,6 +31,7 @@ export const minecraftModsMessages: Record<string, [string, string]> = {
   'mods.versionSearch': ['Find a version', 'Cerca una versione'],
   'mods.selectedVersion': ['Selected version: {version}', 'Versione selezionata: {version}'],
   'mods.select': ['Select {name}', 'Seleziona {name}'],
+  'mods.detailsShort': ['Details', 'Dettagli'],
   'mods.details': ['About {name}', 'Informazioni su {name}'],
   'mods.selectVersion': ['Select version', 'Scegli versione'],
   'mods.automatic': ['Recommended version', 'Versione consigliata'],
@@ -50,6 +51,7 @@ export const minecraftModsMessages: Record<string, [string, string]> = {
   'mods.dependency': ['Dependency', 'Dipendenza'],
   'mods.requiredBy': ['Required by {names}', 'Richiesta da {names}'],
   'mods.optional': ['Optional additions', 'Aggiunte facoltative'],
+  'mods.recheckDependencies': ['Recheck dependencies', 'Ricontrolla dipendenze'],
   'mods.conflicts': ['Resolve before applying', 'Da risolvere prima di applicare'],
   'mods.blocker.conflict': [
     'Conflicts with the selected or installed mods.',
@@ -63,6 +65,50 @@ export const minecraftModsMessages: Record<string, [string, string]> = {
     'No compatible version is available.',
     'Non è disponibile una versione compatibile.',
   ],
+  'mods.blocker.alpha-only': [
+    'Only alpha versions are available. Choose a version to continue.',
+    'Sono disponibili solo versioni alpha. Scegli una versione per continuare.',
+  ],
+  'mods.blocker.server': [
+    'Server: Minecraft {version} · {loader}',
+    'Server: Minecraft {version} · {loader}',
+  ],
+  'mods.blocker.observedVersions': [
+    'Versions found in the catalog: {versions}',
+    'Versioni trovate nel catalogo: {versions}',
+  ],
+  'mods.blocker.observedLoaders': [
+    'Loaders found in the catalog: {loaders}',
+    'Loader trovati nel catalogo: {loaders}',
+  ],
+  'mods.blocker.changeParent': ['Version of {name}', 'Versione di {name}'],
+  'mods.alternative.find': ['Find alternative for {name}', 'Trova alternativa per {name}'],
+  'mods.alternative.searching': ['Checking alternatives…', 'Verifica delle alternative…'],
+  'mods.alternative.use': ['Use {version}', 'Usa {version}'],
+  'mods.alternative.found': [
+    'Dependencies resolved for this selection.',
+    'Dipendenze risolte per questa selezione.',
+  ],
+  'mods.alternative.none': [
+    'No alternative found among the checked versions.',
+    'Nessuna alternativa trovata tra le versioni controllate.',
+  ],
+  'mods.alternative.limited': [
+    'Search limit reached. Other versions may be available.',
+    'Limite della ricerca raggiunto. Potrebbero essere disponibili altre versioni.',
+  ],
+  'mods.updates.checking': ['Checking updates…', 'Verifica aggiornamenti…'],
+  'mods.updates.current': ['Catalog mods are up to date', 'Le mod del catalogo sono aggiornate'],
+  'mods.updates.partial': [
+    'Some updates could not be checked',
+    'Non è stato possibile verificare tutti gli aggiornamenti',
+  ],
+  'mods.updates.failed': ['Update check unavailable', 'Verifica aggiornamenti non disponibile'],
+  'mods.updates.check': ['Check updates', 'Controlla aggiornamenti'],
+  'mods.updates.available': ['Updates available: {count}', 'Aggiornamenti disponibili: {count}'],
+  'mods.updates.prepare': ['Prepare updates ({count})', 'Prepara aggiornamenti ({count})'],
+  'mods.updates.one': ['Prepare update for {name}', 'Prepara aggiornamento di {name}'],
+  'mods.updates.version': ['Update to {version}', 'Aggiorna a {version}'],
   'mods.blocker.unavailable': [
     'Automatic download is unavailable.',
     'Il download automatico non è disponibile.',

@@ -130,14 +130,25 @@ export const modResolutionSchema = z
         noticeSchema.extend({
           reason: z.enum([
             'unavailable',
+            'alpha-only',
             'unresolved',
             'incompatible-version',
             'version-conflict',
             'conflict',
           ]),
+          availableMinecraftVersions: z.array(z.string().min(1).max(80)).max(20).optional(),
+          availableLoaders: z.array(z.string().min(1).max(80)).max(20).optional(),
+          availableChannels: z
+            .array(z.enum(['release', 'beta', 'alpha']))
+            .max(3)
+            .optional(),
         }),
       )
       .max(512),
   })
   .strict();
 export type ModResolution = z.infer<typeof modResolutionSchema>;
+export type ModAvailabilityHints = Pick<
+  ModResolution['blocked'][number],
+  'availableMinecraftVersions' | 'availableLoaders' | 'availableChannels'
+>;
