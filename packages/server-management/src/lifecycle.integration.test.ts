@@ -1361,6 +1361,135 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect((await f.operation()).plan.waitReason).toBe('stop_terminal_unproven');
     expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
   });
+  it.each(['offline', 'running'] as const)(
+    'recovers a lost stop receipt with physical proof despite cached %s, without cache settlement',
+    async (cached) => {
+      const f = await fixture('stop');
+      await f.prepareReservation();
+      f.setState('running');
+      const preparedAt = f.now();
+      const epoch = new Date(preparedAt.getTime() - 60_000).toISOString();
+      f.options.observeReconciliationProcessStart = async () => epoch;
+      f.adapter.stopWithConfirmation.mockImplementation(async (_id, _identifier, input) => {
+        await input.beforePower?.();
+        f.setState(cached);
+        return { confirmed: false };
+      });
+      expect(await f.run()).toBe('waiting');
+      expect((await f.operation()).plan.stopConfirmed).toBeUndefined();
+      f.options.verifyObservationHost = vi.fn(async () => {});
+      f.options.confirmAlreadyStopped = vi.fn(async (_server, _db, proof) => {
+        expect(proof?.stoppedProcess).toEqual({ startedAt: epoch, stoppedAfter: preparedAt });
+        expect((await proof?.providerServer)?.uuid).toBe(f.remote.uuid);
+        await proof?.observerPreflight;
+        return true;
+      });
+      f.adapter.getApplicationServer.mockClear();
+      f.adapter.getResources.mockClear();
+      // First outbox retry, before the 20-second provider resource-cache boundary.
+      f.tick(3000);
+      expect(await f.run()).toBe('succeeded');
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledOnce();
+      expect(f.options.verifyObservationHost).toHaveBeenCalledOnce();
+      expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
+      expect(f.adapter.getResources).not.toHaveBeenCalled();
+      expect(await f.reservation()).toBeUndefined();
+      expect(await f.server()).toMatchObject({
+        runtime_state: 'offline',
+        active_operation_id: null,
+      });
+      expect((await f.operation()).plan).toMatchObject({
+        stopConfirmed: true,
+        stopConfirmationSource: 'terminal_process',
+      });
+      expect(await f.run()).toBe('duplicate');
+      expect(f.adapter.stopWithConfirmation).toHaveBeenCalledOnce();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(
+        await f.db
+          .selectFrom('server_events')
+          .select('id')
+          .where('job_id', '=', f.jobId)
+          .where('message_key', '=', 'servers.operation.stop_confirmed')
+          .execute(),
+      ).toHaveLength(1);
+    },
+  );
+  it('recovers a lost live stop receipt in the same delivery when the process has exited', async () => {
+    const f = await fixture('stop');
+    await f.prepareReservation();
+    f.setState('running');
+    f.options.observeReconciliationProcessStart = async () =>
+      new Date(f.now().getTime() - 60_000).toISOString();
+    f.options.confirmAlreadyStopped = vi.fn(async (_server, _db, proof) => {
+      expect(proof?.stoppedProcess).toBeDefined();
+      return true;
+    });
+    f.adapter.stopWithConfirmation.mockImplementation(async (_id, _identifier, input) => {
+      await input.beforePower?.();
+      throw new PterodactylError('unavailable', 'client', 'unknown');
+    });
+    expect(await f.run()).toBe('succeeded');
+    expect(await f.reservation()).toBeUndefined();
+    expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
+    expect(f.adapter.stopWithConfirmation).toHaveBeenCalledOnce();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it.each(['false', 'unavailable'] as const)(
+    'retains a lost stop receipt when physical proof is %s without repeating the probe',
+    async (proof) => {
+      const f = await fixture('stop');
+      await f.prepareReservation();
+      f.setState('running');
+      f.options.observeReconciliationProcessStart = async () =>
+        new Date(f.now().getTime() - 60_000).toISOString();
+      f.options.confirmAlreadyStopped = vi.fn(async () => {
+        if (proof === 'unavailable') throw new Error('observer unavailable');
+        return false;
+      });
+      f.adapter.stopWithConfirmation.mockImplementation(async (_id, _identifier, input) => {
+        await input.beforePower?.();
+        f.setState('offline');
+        return { confirmed: false };
+      });
+      expect(await f.run()).toBe('waiting');
+      vi.mocked(f.options.confirmAlreadyStopped).mockClear();
+      f.tick();
+      expect(await f.run()).toBe('waiting');
+      expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
+      expect(await f.reservation()).toBeDefined();
+      expect((await f.server()).active_operation_id).toBe(f.jobId);
+      expect((await f.operation()).plan.stopConfirmed).toBeUndefined();
+      expect(f.adapter.stopWithConfirmation).toHaveBeenCalledOnce();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+    },
+  );
+  it.each([undefined, null, 'invalid'])(
+    'does not recover a lost stop receipt without a valid prepared epoch: %s',
+    async (baseline) => {
+      const f = await fixture('stop', {
+        powerEffectPrepared: true,
+        stopProcessStartedAt: baseline,
+      });
+      await f.prepareReservation();
+      await f.db
+        .updateTable('server_operations')
+        .set({
+          phase: 'power',
+          effect_state: 'uncertain',
+          effect_started_at: f.now(),
+        })
+        .where('job_id', '=', f.jobId)
+        .execute();
+      f.options.confirmAlreadyStopped = vi.fn(async () => true);
+      f.tick();
+      expect(await f.run()).toBe('waiting');
+      expect(f.options.confirmAlreadyStopped).not.toHaveBeenCalled();
+      expect(await f.reservation()).toBeDefined();
+      expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+    },
+  );
   it('completes a proven offline stop without power and leaves start, repeated stop and delete usable', async () => {
     const f = await fixture('provision');
     expect(await f.run()).toBe('succeeded');
@@ -4289,45 +4418,72 @@ describe('Minecraft world selection without telemetry settling', () => {
     },
   );
 
-  it('retains the global lock when a confirmed stop finishes and releases reservations', async () => {
-    const f = await fixture('stop', { stopConfirmed: true });
-    await f.prepareReservation();
-    await f.options.reserveInstallation?.(f.serverId, f.jobId, f.db);
-    await f.db
-      .updateTable('server_operations')
-      .set({ phase: 'power', effect_state: 'confirmed', effect_started_at: f.now() })
-      .where('job_id', '=', f.jobId)
-      .execute();
-    f.options.confirmAlreadyStopped = vi.fn(async () => true);
-    const compute = await f.reservation();
-    const installation = await f.installationReservation();
-    const blocked = await resourceBlockedWorker(f.jobId);
-    try {
-      // PostgreSQL bounds the lock wait; no elapsed-time assertion is needed.
-      expect(await blocked.run(f.options)).toBe('waiting');
-      expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
-      expect(await f.reservation()).toEqual(compute);
-      expect(await f.installationReservation()).toEqual(installation);
-      expect((await f.server()).active_operation_id).toBe(f.jobId);
-      expect((await f.operation()).phase).toBe('power');
-      expect(
-        await f.db
-          .selectFrom('operation_jobs')
-          .select('completed_at')
-          .where('id', '=', f.jobId)
-          .executeTakeFirstOrThrow(),
-      ).toEqual({ completed_at: null });
-    } finally {
-      await blocked.close();
-    }
-    f.tick();
-    expect(await f.run()).toBe('succeeded');
-    expect(await f.reservation()).toBeUndefined();
-    expect(await f.installationReservation()).toBeUndefined();
-    expect((await f.server()).active_operation_id).toBeNull();
-    expect(f.adapter.power).not.toHaveBeenCalled();
-    expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
-  });
+  it.each(['websocket', 'terminal_process'] as const)(
+    'retains the global lock and resumes a %s stop receipt after completion interruption',
+    async (source) => {
+      const f = await fixture(
+        'stop',
+        source === 'websocket'
+          ? { stopConfirmed: true }
+          : {
+              powerEffectPrepared: true,
+              stopProcessStartedAt: '2026-01-01T00:00:00.000Z',
+            },
+      );
+      await f.prepareReservation();
+      await f.options.reserveInstallation?.(f.serverId, f.jobId, f.db);
+      await f.db
+        .updateTable('server_operations')
+        .set({
+          phase: 'power',
+          effect_state: source === 'websocket' ? 'confirmed' : 'uncertain',
+          effect_started_at: f.now(),
+        })
+        .where('job_id', '=', f.jobId)
+        .execute();
+      f.options.confirmAlreadyStopped = vi.fn(async () => true);
+      const compute = await f.reservation();
+      const installation = await f.installationReservation();
+      const blocked = await resourceBlockedWorker(f.jobId);
+      try {
+        // PostgreSQL bounds the lock wait; no elapsed-time assertion is needed.
+        expect(await blocked.run(f.options)).toBe('waiting');
+        expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
+        expect(await f.reservation()).toEqual(compute);
+        expect(await f.installationReservation()).toEqual(installation);
+        expect((await f.server()).active_operation_id).toBe(f.jobId);
+        expect((await f.operation()).phase).toBe('power');
+        expect((await f.operation()).plan.stopConfirmed).toBe(true);
+        expect(
+          await f.db
+            .selectFrom('operation_jobs')
+            .select('completed_at')
+            .where('id', '=', f.jobId)
+            .executeTakeFirstOrThrow(),
+        ).toEqual({ completed_at: null });
+      } finally {
+        await blocked.close();
+      }
+      f.tick();
+      expect(await f.run()).toBe('succeeded');
+      expect(await f.reservation()).toBeUndefined();
+      expect(await f.installationReservation()).toBeUndefined();
+      expect((await f.server()).active_operation_id).toBeNull();
+      if (source === 'terminal_process') {
+        expect((await f.operation()).plan.stopConfirmationSource).toBe(source);
+        expect(
+          await f.db
+            .selectFrom('server_events')
+            .select('id')
+            .where('job_id', '=', f.jobId)
+            .where('message_key', '=', 'servers.operation.stop_confirmed')
+            .execute(),
+        ).toHaveLength(1);
+      }
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+    },
+  );
   it('orders selection completion behind user locks before taking the server row', async () => {
     const f = await fixture('minecraft-content', plan());
     const ready = Promise.withResolvers<void>();

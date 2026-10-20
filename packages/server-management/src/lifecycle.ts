@@ -205,8 +205,8 @@ export interface LifecycleOptions {
     serverId: string,
     connection: Kysely<Database>,
   ) => Promise<ExternalStopReceipt | null>;
-  /** Fresh host- and current registry/provider-identity-bound physical stopped proof,
-   * only when no compute/installer reservation exists. */
+  /** Fresh host- and current registry/provider-identity-bound physical stopped proof.
+   * Recovering a lost stop receipt requires the exact prepared process, not just absence. */
   confirmAlreadyStopped?: (
     serverId: string,
     connection: Kysely<Database>,
@@ -214,6 +214,7 @@ export interface LifecycleOptions {
       providerServer: Promise<ApplicationServer>;
       observerPreflight?: Promise<void>;
       timing?: OperationTiming;
+      stoppedProcess?: { startedAt: string; stoppedAfter: Date };
     },
   ) => Promise<boolean>;
   /** Read-only host sampling may overlap provider reads. The returned admission
@@ -2168,30 +2169,69 @@ export async function processServerOperation(
           return options.adapter.power(server.pterodactyl_identifier ?? '', 'kill');
         },
       });
-    const completeObservedStop = async (): Promise<Result | null> => {
+    let stopProofAttempted = false;
+    const completeObservedStop = async (
+      verifiedServer?: ApplicationServer,
+    ): Promise<Result | null> => {
       if (
         operation.action !== 'stop' ||
         operation.phase !== 'power' ||
-        operation.plan.stopConfirmed !== true ||
         !options.confirmAlreadyStopped
       )
         return null;
-      // The persisted terminal proof belongs to this operation. Recheck the
-      // exact host/process before releasing capacity: Panel resources can still
-      // report running for 20 seconds. This never grants another power effect.
-      const providerServer = timed('provider_identity', () => ownedRemote(db, server, options));
+      const recovering = operation.plan.stopConfirmed !== true;
+      const baseline = operation.plan.stopProcessStartedAt;
+      if (
+        recovering &&
+        (operation.plan.powerEffectPrepared !== true ||
+          !operation.effect_started_at ||
+          typeof baseline !== 'string' ||
+          processStartTime(baseline) === null)
+      )
+        return null;
+      stopProofAttempted = true;
+      // Reuse this delivery's identity. After the websocket helper returns, its
+      // earlier preflight can be old, so that caller obtains a fresh identity.
+      const providerServer = verifiedServer
+        ? Promise.resolve(verifiedServer)
+        : timed('provider_identity', () => ownedRemote(db, server, options));
       const observerPreflight = options.verifyObservationHost?.(server.id, db);
-      // Share this attempt's proofs with the runtime instead of fetching the
-      // same identity and Docker preflight twice. Generic observers cannot skip
-      // either proof: all branches settle before capacity can be released.
       const proofs = await Promise.allSettled([
         providerServer,
         observerPreflight,
-        options.confirmAlreadyStopped(server.id, db, { providerServer, observerPreflight }),
+        options.confirmAlreadyStopped(server.id, db, {
+          providerServer,
+          observerPreflight,
+          ...(recovering
+            ? {
+                stoppedProcess: {
+                  startedAt: baseline as string,
+                  stoppedAfter: operation.effect_started_at as Date,
+                },
+              }
+            : {}),
+        }),
       ]);
       for (const proof of proofs) if (proof.status === 'rejected') throw proof.reason;
       if (proofs[2].status !== 'fulfilled' || !proofs[2].value)
-        return wait('stop_terminal_unproven', 'operation_uncertain');
+        // A still-running process may have a pending Kill; keep its normal path.
+        return recovering ? null : wait('stop_terminal_unproven', 'operation_uncertain');
+      if (recovering) {
+        await db.transaction().execute(async (tx) => {
+          await update(
+            {
+              plan: {
+                ...operation.plan,
+                stopConfirmed: true,
+                stopConfirmedAt: nowOf(options).toISOString(),
+                stopConfirmationSource: 'terminal_process',
+              },
+            },
+            tx,
+          );
+          await event('servers.operation.stop_confirmed', { source: 'terminal_process' }, tx);
+        });
+      }
       return finish(true, true, null, false, true);
     };
     try {
@@ -2487,7 +2527,7 @@ export async function processServerOperation(
       if (worldFileContent) worldContentIdentity = { remote, checkedAt: nowOf(options).getTime() };
       if (['start', 'stop', 'restart'].includes(operation.action)) {
         const action = operation.action as 'start' | 'stop' | 'restart';
-        const observedStop = await completeObservedStop();
+        const observedStop = await completeObservedStop(remote);
         if (observedStop) return observedStop;
         const externalStop = await completeExternalStop();
         if (externalStop) return externalStop;
@@ -3086,6 +3126,21 @@ export async function processServerOperation(
       }
       throw new DomainError('validation_failed');
     } catch (error) {
+      // If the live confirmation was lost, inspect the prepared process now.
+      // A failed recovery already attempted in this delivery is never repeated.
+      if (
+        !stopProofAttempted &&
+        operation.plan.rejected !== true &&
+        error instanceof PterodactylError &&
+        error.outcome === 'unknown'
+      ) {
+        try {
+          const stopped = await completeObservedStop();
+          if (stopped) return stopped;
+        } catch {
+          // Preserve the existing uncertain outcome; no power effect is retried.
+        }
+      }
       const code = safeError(error).code;
       if (
         operation.action === 'backup' &&

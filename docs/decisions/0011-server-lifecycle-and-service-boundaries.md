@@ -71,7 +71,14 @@ non-caret command or `^C` (case-insensitive native Docker stop), corroborated by
 fresh ordered `stopping` → `offline` transition on the authenticated backend
 WebSocket, an independent exact-container Docker observation proving the process
 is no longer running, and no earlier unresolved power operation. Wings can report
-offline after losing its output stream while the container remains alive. Reject
+offline after losing its output stream while the container remains alive. A lost
+WebSocket receipt is recoverable from the existing host-bound Docker terminal
+process record, provided its start timestamp exactly matches the pre-dispatch
+baseline and its finish follows durable effect preparation. Recovery shares the
+current provider/host proofs, persists the receipt source and uses the same atomic
+completion; it never resends power or waits for provider resource-cache expiry.
+A missing baseline, replacement process or unavailable physical proof stays
+uncertain. This fallback runs only for a prepared Stop, not unrelated operations. Reject
 unsupported stop profiles rather than modifying eggs or Wings. Unknown/caret signal modes remain
 fail-closed. Restart confirmation uses the exact running Docker process start
 timestamp

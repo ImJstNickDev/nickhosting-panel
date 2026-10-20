@@ -104,13 +104,21 @@ sample or timeout is not proof that all delayed process starts have finished.
 Runtime mapping admission validates supported egg stop configuration (a nonempty
 command not beginning with `^`, or native Docker stop `^C`, case-insensitive).
 The stop operation does not fetch or reinterpret the egg again: Wings executes
-its configured stop semantics. Completion requires a fresh, ordered `stopping` → `offline`
+its configured stop semantics. Live completion uses a fresh, ordered `stopping` → `offline`
 transition from the authenticated backend WebSocket, an independent exact-container
 Docker observation proving the process is no longer running, and no earlier
 unresolved power effect. Wings can emit offline after a failed output stream while
 the process still runs; the WebSocket transition alone cannot release capacity.
 After that durable stop receipt, a fresh host-bound check of the exact container
 can complete the stop without waiting for the provider's resource cache to expire.
+If the live receipt is lost, recovery uses the same host/identity verification and
+Docker's terminal process record: its exact start timestamp must match the process
+recorded before dispatch, and its finish must follow durable effect preparation.
+This recovers in the same delivery when possible, or the existing outbox retry,
+without reading cached resources, waiting for cache expiry or sending Stop again.
+Missing baseline, absent/created/running/replaced containers and unavailable evidence
+cannot manufacture completion. Recovery persists its `terminal_process` source;
+subsequent deliveries use the ordinary durable receipt path.
 Offline state, job completion and reservation release commit together. Running or
 unverifiable container evidence retains the reservation; this path never
 issues another power request. The conservative cached-resource path remains when

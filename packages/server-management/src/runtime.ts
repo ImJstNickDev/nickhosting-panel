@@ -50,6 +50,7 @@ import { currentInteractiveContext } from './interactive-context.js';
 import {
   createLifecycleProcessor,
   type ExternalStopReceipt,
+  type LifecycleOptions,
   reconcileManagedServer,
   verifyManagedIdentity,
 } from './lifecycle.js';
@@ -791,11 +792,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     confirmAlreadyStopped: async (
       serverId: string,
       connection: Kysely<Database>,
-      context?: {
-        providerServer: Promise<ApplicationServer>;
-        observerPreflight?: Promise<void>;
-        timing?: OperationTiming;
-      },
+      context?: Parameters<NonNullable<LifecycleOptions['confirmAlreadyStopped']>>[2],
     ) => {
       const server = await traceOperation(context?.timing, 'server', () =>
         connection
@@ -819,9 +816,17 @@ export async function createManagementRuntime(options: ManagementOptions) {
       ]);
       for (const proof of proofs) if (proof.status === 'rejected') throw proof.reason;
       const uuid = server.pterodactyl_uuid;
-      return traceOperation(context?.timing, 'process', () =>
-        containerObserver.stopped(uuid, 'server'),
-      );
+      return traceOperation(context?.timing, 'process', async () => {
+        if (context?.stoppedProcess) {
+          const terminal = await containerObserver.terminalProcess?.(uuid);
+          return Boolean(
+            terminal &&
+              terminal.startedAt === context.stoppedProcess.startedAt &&
+              Date.parse(terminal.finishedAt) >= context.stoppedProcess.stoppedAfter.getTime(),
+          );
+        }
+        return containerObserver.stopped(uuid, 'server');
+      });
     },
     observeExternalStop: async (
       serverId: string,

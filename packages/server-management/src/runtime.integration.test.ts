@@ -848,6 +848,192 @@ describe('management runtime execution-time authorization', () => {
     expect(observer.stopped).not.toHaveBeenCalled();
   });
 
+  it.each(['exact', 'finish-boundary', 'different-epoch', 'absent', 'old-finish'] as const)(
+    'confirms stopped-process recovery only from the exact terminal epoch: %s',
+    async (condition) => {
+      const serverId = await f.server();
+      const remote = await providerIdentity(serverId);
+      const provider = vi.fn(async () => remote);
+      Object.assign(f.adapter, { getApplicationServer: provider });
+      const stoppedProcess = {
+        startedAt: '2026-10-21T10:00:00.123456789Z',
+        stoppedAfter: new Date('2026-10-21T10:01:00.000Z'),
+      };
+      const terminal = {
+        containerId: 'a'.repeat(64),
+        startedAt:
+          condition === 'different-epoch'
+            ? '2026-10-21T10:00:00.123456788Z'
+            : stoppedProcess.startedAt,
+        finishedAt: new Date(
+          stoppedProcess.stoppedAfter.getTime() +
+            (condition === 'old-finish' ? -1 : condition === 'finish-boundary' ? 0 : 1000),
+        ).toISOString(),
+      };
+      const observer = {
+        preflight: vi.fn(async () => {}),
+        stopped: vi.fn(async () => true),
+        terminalProcess: vi.fn(async () => (condition === 'absent' ? null : terminal)),
+      };
+      const runtime = await createManagementRuntime({
+        db: f.db,
+        codec,
+        adapter: f.adapter,
+        containerObserver: observer,
+        env: { NH_OBSERVER_ID: 'isolated-observer' },
+      });
+      await expect(
+        runtime.lifecycle.confirmAlreadyStopped(serverId, f.db, {
+          providerServer: f.adapter.getApplicationServer(remote.id),
+          stoppedProcess,
+        }),
+      ).resolves.toBe(condition === 'exact' || condition === 'finish-boundary');
+      expect(observer.terminalProcess).toHaveBeenCalledExactlyOnceWith(remote.uuid);
+      expect(observer.stopped).not.toHaveBeenCalled();
+      expect(observer.preflight).toHaveBeenCalledOnce();
+      expect(provider).toHaveBeenCalledExactlyOnceWith(remote.id);
+    },
+  );
+  it('reuses shared host and provider proofs for stopped-process recovery', async () => {
+    const serverId = await f.server();
+    const remote = await providerIdentity(serverId);
+    const provider = vi.fn(async () => remote);
+    Object.assign(f.adapter, { getApplicationServer: provider });
+    const startedAt = '2026-10-21T10:00:00.123456789Z';
+    const stoppedAfter = new Date('2026-10-21T10:01:00.000Z');
+    const observer = {
+      preflight: vi.fn(async () => {}),
+      stopped: vi.fn(async () => true),
+      terminalProcess: vi.fn(async () => ({
+        containerId: 'a'.repeat(64),
+        startedAt,
+        finishedAt: stoppedAfter.toISOString(),
+      })),
+    };
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      containerObserver: observer,
+      env: { NH_OBSERVER_ID: 'isolated-observer' },
+    });
+    const sharedProofs = {
+      providerServer: provider(),
+      observerPreflight: observer.preflight(),
+      stoppedProcess: { startedAt, stoppedAfter },
+    };
+    await expect(
+      runtime.lifecycle.confirmAlreadyStopped(serverId, f.db, sharedProofs),
+    ).resolves.toBe(true);
+    expect(observer.preflight).toHaveBeenCalledOnce();
+    expect(provider).toHaveBeenCalledOnce();
+    expect(observer.terminalProcess).toHaveBeenCalledExactlyOnceWith(remote.uuid);
+    expect(observer.stopped).not.toHaveBeenCalled();
+  });
+  it.each(['fresh', 'shared'] as const)(
+    'rejects mismatched %s provider identity before stopped-process recovery',
+    async (proof) => {
+      const serverId = await f.server();
+      const remote = { ...(await providerIdentity(serverId)), uuid: randomUUID() };
+      const provider = vi.fn(async () => remote);
+      Object.assign(f.adapter, { getApplicationServer: provider });
+      const observer = {
+        preflight: vi.fn(async () => {}),
+        stopped: vi.fn(async () => true),
+        terminalProcess: vi.fn(async () => ({
+          containerId: 'a'.repeat(64),
+          startedAt: '2026-10-21T10:00:00.123456789Z',
+          finishedAt: '2026-10-21T10:01:01.000Z',
+        })),
+      };
+      const runtime = await createManagementRuntime({
+        db: f.db,
+        codec,
+        adapter: f.adapter,
+        containerObserver: observer,
+        env: { NH_OBSERVER_ID: 'isolated-observer' },
+      });
+      await expect(
+        runtime.lifecycle.confirmAlreadyStopped(serverId, f.db, {
+          providerServer:
+            proof === 'shared'
+              ? Promise.resolve(remote)
+              : f.adapter.getApplicationServer(remote.id),
+          ...(proof === 'shared' ? { observerPreflight: Promise.resolve() } : {}),
+          stoppedProcess: {
+            startedAt: '2026-10-21T10:00:00.123456789Z',
+            stoppedAfter: new Date('2026-10-21T10:01:00.000Z'),
+          },
+        }),
+      ).rejects.toThrow('provenance_mismatch');
+      expect(observer.terminalProcess).not.toHaveBeenCalled();
+      expect(observer.stopped).not.toHaveBeenCalled();
+      expect(provider).toHaveBeenCalledTimes(proof === 'shared' ? 0 : 1);
+      expect(observer.preflight).toHaveBeenCalledTimes(proof === 'shared' ? 0 : 1);
+    },
+  );
+  it.each(['preflight', 'terminal'] as const)(
+    'rejects stopped-process recovery when the observer is unavailable during %s',
+    async (stage) => {
+      const serverId = await f.server();
+      const remote = await providerIdentity(serverId);
+      Object.assign(f.adapter, { getApplicationServer: vi.fn(async () => remote) });
+      const observer = {
+        preflight: vi.fn(async () => {
+          if (stage === 'preflight') throw new Error('isolated observer unavailable');
+        }),
+        stopped: vi.fn(async () => true),
+        terminalProcess: vi.fn(async () => {
+          throw new Error('isolated observer unavailable');
+        }),
+      };
+      const runtime = await createManagementRuntime({
+        db: f.db,
+        codec,
+        adapter: f.adapter,
+        containerObserver: observer,
+        env: { NH_OBSERVER_ID: 'isolated-observer' },
+      });
+      await expect(
+        runtime.lifecycle.confirmAlreadyStopped(serverId, f.db, {
+          providerServer: Promise.resolve(remote),
+          stoppedProcess: {
+            startedAt: '2026-10-21T10:00:00.123456789Z',
+            stoppedAfter: new Date('2026-10-21T10:01:00.000Z'),
+          },
+        }),
+      ).rejects.toThrow('isolated observer unavailable');
+      expect(observer.terminalProcess).toHaveBeenCalledTimes(stage === 'terminal' ? 1 : 0);
+      expect(observer.stopped).not.toHaveBeenCalled();
+    },
+  );
+  it('does not substitute broad stopped evidence for unavailable stopped-process recovery', async () => {
+    const serverId = await f.server();
+    const remote = await providerIdentity(serverId);
+    Object.assign(f.adapter, { getApplicationServer: vi.fn(async () => remote) });
+    const observer = {
+      preflight: vi.fn(async () => {}),
+      stopped: vi.fn(async () => true),
+    };
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      containerObserver: observer,
+      env: { NH_OBSERVER_ID: 'isolated-observer' },
+    });
+    await expect(
+      runtime.lifecycle.confirmAlreadyStopped(serverId, f.db, {
+        providerServer: Promise.resolve(remote),
+        stoppedProcess: {
+          startedAt: '2026-10-21T10:00:00.123456789Z',
+          stoppedAfter: new Date('2026-10-21T10:01:00.000Z'),
+        },
+      }),
+    ).resolves.toBe(false);
+    expect(observer.stopped).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['properties', false],
     ['properties', true],

@@ -107,6 +107,7 @@ async function fixture() {
     .values({
       id: serverId,
       owner_id: userId,
+      provider_user_id: 1,
       project_id: null,
       mapping_id: mappingId,
       node_id: nodeId,
@@ -413,6 +414,32 @@ it('lifecycle recovery consumes pending Kill and releases only after trusted ter
       .where('server_id', '=', f.serverId)
       .executeTakeFirst(),
   ).toBeUndefined();
+  expect((await f.receipt())?.state).toBe('confirmed');
+});
+it('lost stop recovery still consumes pending Kill when its process is running', async () => {
+  const f = await lifecycleFixture();
+  await f.db
+    .updateTable('server_operations')
+    .set({
+      effect_state: 'uncertain',
+      plan: JSON.stringify({
+        powerEffectPrepared: true,
+        stopProcessStartedAt: '2026-01-01T00:00:00.000Z',
+      }),
+    })
+    .where('job_id', '=', f.jobId)
+    .execute();
+  const originalProof = f.options.confirmAlreadyStopped;
+  const proofs: boolean[] = [];
+  f.options.confirmAlreadyStopped = async () => {
+    const result = await originalProof();
+    proofs.push(result);
+    return result;
+  };
+  expect(await processServerOperation(f.db, f.jobId, f.options)).toBe('succeeded');
+  expect(proofs[0]).toBe(false);
+  expect(proofs.at(-1)).toBe(true);
+  expect(f.power).toHaveBeenCalledTimes(1);
   expect((await f.receipt())?.state).toBe('confirmed');
 });
 it('lifecycle refuses a different process epoch and retains the reservation', async () => {
