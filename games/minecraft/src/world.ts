@@ -13,6 +13,7 @@ import {
   contentFileUnchanged,
   contentLimits,
   contentStageDirectory,
+  contentStagingRootAllowed,
   readArchiveFile,
   type StagedContentFile,
   visitArchive,
@@ -346,10 +347,9 @@ async function writeExclusive(path: string, value: unknown): Promise<void> {
     await handle.close();
   }
 }
-function stageRoot(mountdataRoot: string, jobId: string): string {
+function stageRoot(mountdataRoot: string, jobId: string, storageBoundary?: string): string {
   if (
-    !isAbsolute(mountdataRoot) ||
-    !resolve(mountdataRoot).split(sep).includes('mountdata') ||
+    !contentStagingRootAllowed(mountdataRoot, storageBoundary) ||
     !/^[A-Za-z0-9_-]{1,128}$/.test(jobId)
   )
     fail('stage_root');
@@ -421,6 +421,7 @@ export async function stageMinecraftWorld(
   archivePath: string,
   options: {
     mountdataRoot: string;
+    storageBoundary?: string;
     /** Trusted source-store root may be a separate project-local mountdata subtree. */
     sourceRoot?: string;
     jobId: string;
@@ -441,12 +442,11 @@ export async function stageMinecraftWorld(
   const targetWorld = minecraftWorldName(options.targetWorld);
   const limits = contentLimits(options.limits);
   const metadataLimits = nbtLimits(options.nbtLimits);
-  const job = stageRoot(options.mountdataRoot, options.jobId);
+  const job = stageRoot(options.mountdataRoot, options.jobId, options.storageBoundary);
   const root = resolve(options.sourceRoot ?? options.mountdataRoot);
   if (
     !isAbsolute(options.sourceRoot ?? options.mountdataRoot) ||
-    root === sep ||
-    !root.split(sep).includes('mountdata') ||
+    !contentStagingRootAllowed(root, options.storageBoundary) ||
     !options.release ||
     options.release.length > 128 ||
     (options.expectedDataVersion !== undefined &&
@@ -652,11 +652,12 @@ export async function stageMinecraftWorld(
 /** A crash-left lock is never removed using PID or time guesses. Core must establish exclusive DB job ownership. */
 export async function recoverMinecraftWorldStageLock(options: {
   mountdataRoot: string;
+  storageBoundary?: string;
   jobId: string;
   expectedPlanDigest: string;
   assertExclusiveJob: () => Promise<void>;
 }): Promise<void> {
-  const job = stageRoot(options.mountdataRoot, options.jobId);
+  const job = stageRoot(options.mountdataRoot, options.jobId, options.storageBoundary);
   await options.assertExclusiveJob();
   await contentStageDirectory(job);
   const path = join(job, 'plan.json');

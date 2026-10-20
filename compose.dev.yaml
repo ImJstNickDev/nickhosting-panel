@@ -113,8 +113,8 @@ services:
       - { type: bind, source: ./apps/api/src, target: /app/apps/api/src, read_only: true, bind: { create_host_path: false } }
       - { type: bind, source: ./apps/worker/src, target: /app/apps/worker/src, read_only: true, bind: { create_host_path: false } }
       - { type: bind, source: ./tsconfig.json, target: /app/tsconfig.json, read_only: true, bind: { create_host_path: false } }
-      - { type: bind, source: ./mountdata/dev/app, target: /app/mountdata, bind: { create_host_path: false } }
-      - { type: bind, source: ./mountdata/dev/mail-tls/cert.pem, target: /run/dev-mail/cert.pem, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: "${NH_MOUNTDATA_ROOT:-./mountdata}/dev/app", target: /app/mountdata, bind: { create_host_path: false } }
+      - { type: bind, source: "${NH_MOUNTDATA_ROOT:-./mountdata}/dev/mail-tls/cert.pem", target: /run/dev-mail/cert.pem, read_only: true, bind: { create_host_path: false } }
     healthcheck:
       test: [CMD, node, deploy/container-health.mjs, api]
       interval: 15s
@@ -143,7 +143,7 @@ services:
       postgres: { condition: service_healthy }
     # Explicit command only; SQL is image-baked. Match the scoped SMTP trust path.
     volumes:
-      - { type: bind, source: ./mountdata/dev/mail-tls/cert.pem, target: /run/dev-mail/cert.pem, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: "${NH_MOUNTDATA_ROOT:-./mountdata}/dev/mail-tls/cert.pem", target: /run/dev-mail/cert.pem, read_only: true, bind: { create_host_path: false } }
   postgres:
     image: postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
     environment:
@@ -151,7 +151,7 @@ services:
       POSTGRES_DB: nickhosting_dev
       POSTGRES_PASSWORD: ${NH_DEV_DB_PASSWORD:?Dedicated database password required}
     volumes:
-      - { type: bind, source: ./mountdata/dev/postgres, target: /var/lib/postgresql, bind: { create_host_path: false } }
+      - { type: bind, source: "${NH_MOUNTDATA_ROOT:-./mountdata}/dev/postgres", target: /var/lib/postgresql, bind: { create_host_path: false } }
     networks: [data]
     restart: unless-stopped
     stop_grace_period: 60s
@@ -168,7 +168,7 @@ services:
     environment: { REDIS_PASSWORD: "${NH_DEV_REDIS_PASSWORD:?Dedicated Redis password required}" }
     command: [/bin/sh, -c, 'exec redis-server --appendonly yes --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"']
     volumes:
-      - { type: bind, source: ./mountdata/dev/redis, target: /data, bind: { create_host_path: false } }
+      - { type: bind, source: "${NH_MOUNTDATA_ROOT:-./mountdata}/dev/redis", target: /data, bind: { create_host_path: false } }
     networks: [data]
     restart: unless-stopped
     stop_grace_period: 60s
@@ -207,8 +207,8 @@ services:
       MP_ALLOWED_HOSTS: mailpit,127.0.0.1,localhost
       MP_QUIET: "true"
     volumes:
-      - { type: bind, source: ./mountdata/dev/mail, target: /data, bind: { create_host_path: false } }
-      - { type: bind, source: ./mountdata/dev/mail-tls, target: /run/mail-tls, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: "${NH_MOUNTDATA_ROOT:-./mountdata}/dev/mail", target: /data, bind: { create_host_path: false } }
+      - { type: bind, source: "${NH_MOUNTDATA_ROOT:-./mountdata}/dev/mail-tls", target: /run/mail-tls, read_only: true, bind: { create_host_path: false } }
     networks: [data]
     read_only: true
     tmpfs: [/tmp]

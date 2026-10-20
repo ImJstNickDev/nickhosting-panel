@@ -612,6 +612,32 @@ describe('streamed isolated world staging', () => {
       }),
     ).rejects.toThrow();
   });
+  it('supports an explicit migrated storage boundary for world sources, staging and recovery', async () => {
+    const { parent } = await environment();
+    const boundary = join(parent, 'external-storage');
+    const sources = join(boundary, 'sources');
+    const work = join(boundary, 'work');
+    await mkdir(sources, { recursive: true });
+    const archive = await makeZip(sources, { 'level.dat': levelDat() });
+    const settings = {
+      ...options(work, archive.sha256),
+      storageBoundary: boundary,
+      sourceRoot: sources,
+    };
+    const staged = await stageMinecraftWorld(archive.path, settings);
+    expect(staged.manifest).toHaveLength(1);
+    await recoverMinecraftWorldStageLock({
+      ...settings,
+      expectedPlanDigest: staged.planDigest,
+      assertExclusiveJob: async () => {},
+    });
+    await expect(
+      stageMinecraftWorld(archive.path, { ...settings, storageBoundary: `${boundary}-other` }),
+    ).rejects.toMatchObject({ details: { reason: 'minecraft_world_stage_root' } });
+    await expect(
+      stageMinecraftWorld(archive.path, { ...settings, sourceRoot: join(parent, 'mountdata') }),
+    ).rejects.toMatchObject({ details: { reason: 'minecraft_world_source' } });
+  });
   it('stages a wrapped legacy world and unknown target without converting its bytes', async () => {
     const { root } = await environment();
     const original = metadata({ version: { type: 'int', value: 19133 } });

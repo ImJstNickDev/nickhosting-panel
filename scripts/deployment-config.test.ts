@@ -34,6 +34,21 @@ function deployment(environment: Environment): Record<string, string> {
 }
 
 describe('scoped container environment', () => {
+  it.each(['development', 'production'] as const)(
+    'keeps the %s host storage root out of application configuration',
+    (environment) => {
+      const input = Object.freeze({
+        ...deployment(environment),
+        NH_MOUNTDATA_ROOT: '/approved-storage/nickhosting',
+      });
+      const result = containerEnvironment(input);
+      expect(result).not.toHaveProperty('NH_MOUNTDATA_ROOT');
+      expect(result.NH_MINECRAFT_CONTENT_ROOT).toBe('./mountdata/content');
+      expect(result.NH_MINECRAFT_SOURCE_ROOT).toBe('./mountdata/sources');
+      expect(input.NH_MOUNTDATA_ROOT).toBe('/approved-storage/nickhosting');
+    },
+  );
+
   it('unlocks protected CurseForge credentials only for explicit real-dev opt-in', () => {
     const real = { ...deployment('development'), NH_DEV_PROVIDER_MODE: 'real' };
     expect(containerEnvironment(real).NH_CURSEFORGE_API_KEY).toBe('development-disabled');
@@ -836,6 +851,7 @@ function composeConfiguration(
   scope: 'dev' | 'prod',
   realProvider = false,
   observer = false,
+  options: { environment?: Record<string, string>; overlays?: string[] } = {},
 ): ComposeConfiguration {
   const environment = Object.fromEntries(
     Object.entries(process.env).filter(
@@ -855,6 +871,7 @@ function composeConfiguration(
       `compose.${scope}.yaml`,
       ...(realProvider ? ['-f', 'compose.dev.real.yaml'] : []),
       ...(observer ? ['-f', `compose.${scope}.observer.yaml`] : []),
+      ...(options.overlays ?? []).flatMap((file) => ['-f', file]),
       'config',
       '--format',
       'json',
@@ -863,6 +880,7 @@ function composeConfiguration(
       cwd: repository,
       env: {
         ...environment,
+        ...options.environment,
         ...(observer
           ? {
               [`NH_${scope.toUpperCase()}_PHYSICAL_HOST_ID`]: 'test-host',
@@ -880,6 +898,139 @@ function composeConfiguration(
 }
 
 describe('deployment Compose isolation (read-only configuration parsing)', () => {
+  it.each(['dev', 'prod'] as const)(
+    'relocates only %s persistent host sources and never creates missing directories',
+    (scope) => {
+      const baseline = composeConfiguration(scope);
+      const root = '/approved-storage/nickhosting';
+      const configured = composeConfiguration(scope, false, false, {
+        environment: { NH_MOUNTDATA_ROOT: root },
+      });
+      expect(configured.networks).toEqual(baseline.networks);
+      for (const [name, service] of Object.entries(configured.services)) {
+        const original = baseline.services[name];
+        expect(service.ports).toEqual(original?.ports);
+        expect(service.environment).toEqual(original?.environment);
+        expect(service.image).toBe(original?.image);
+        const oldVolumes = original?.volumes ?? [];
+        expect(service.volumes?.length ?? 0).toBe(oldVolumes.length);
+        for (const volume of service.volumes ?? []) {
+          const previous = oldVolumes.find((item) => item.target === volume.target);
+          expect(previous).toBeDefined();
+          const persistent = previous?.source.startsWith(resolve(repository, 'mountdata/'));
+          expect(volume).toEqual({
+            ...previous,
+            source: persistent
+              ? previous?.source.replace(resolve(repository, 'mountdata'), root)
+              : previous?.source,
+          });
+          if (persistent) expect(volume.bind?.create_host_path).toBe(false);
+        }
+      }
+    },
+  );
+
+  it('relocates SFTP state without changing approved game mounts or container paths', () => {
+    const root = '/approved-storage/nickhosting';
+    const { services } = composeConfiguration('dev', true, false, {
+      overlays: ['compose.dev.viewers.yaml', 'compose.dev.sftp.yaml'],
+      environment: {
+        NH_MOUNTDATA_ROOT: root,
+        NH_VIEWER_SFTPGO_UID: '1000',
+        NH_VIEWER_SFTPGO_GID: '1000',
+        NH_VIEWER_SFTPGO_ADMIN: 'fixture-viewer',
+        NH_VIEWER_SFTPGO_PASSWORD: 'fixture-secret',
+        NH_VIEWER_WINGS_DATA_ROOT: '/approved-provider/volumes',
+        NH_SFTP_USERS_UID: '1000',
+        NH_SFTP_USERS_GID: '1000',
+        NH_SFTP_USERS_ADMIN: 'fixture-users',
+        NH_SFTP_USERS_PASSWORD: 'fixture-secret',
+        NH_SFTP_USERS_SERVER_DIRECTORY: '/approved-provider/volumes/fixture-server',
+        NH_SFTP_USERS_SERVER_UUID: 'fixture-server',
+        NH_SFTP_USERS_BIND_IP: '127.0.0.1',
+        NH_SFTP_USERS_PORT: '2023',
+      },
+    });
+    for (const name of ['sftpgo-viewer', 'sftpgo-users']) {
+      expect(
+        services[name]?.volumes?.find((volume) => volume.target === '/var/lib/sftpgo'),
+      ).toEqual(
+        expect.objectContaining({
+          source: `${root}/dev/${name}`,
+          bind: { create_host_path: false },
+        }),
+      );
+      expect(Object.keys(services[name]?.environment ?? {})).not.toContain('NH_MOUNTDATA_ROOT');
+    }
+    expect(services['sftpgo-viewer']?.volumes?.find((volume) => volume.read_only)).toMatchObject({
+      source: '/approved-provider/volumes',
+      target: '/srv/nickhosting-viewer/servers',
+      read_only: true,
+    });
+    const userFiles = services['sftpgo-users']?.volumes?.find((volume) =>
+      volume.target.includes('/servers/'),
+    );
+    expect(userFiles).toMatchObject({
+      source: '/approved-provider/volumes/fixture-server',
+      target: '/srv/nickhosting-sftp/servers/fixture-server',
+    });
+    expect(userFiles?.read_only).not.toBe(true);
+  });
+
+  it.each(['test', 'm2-test'] as const)(
+    'keeps %s state isolated under the chosen root with explicit existing binds',
+    (scope) => {
+      for (const storageRoot of [undefined, '/approved-storage/nickhosting']) {
+        const env = Object.fromEntries(
+          Object.entries(process.env).filter(
+            ([key]) => !/^(NH_|COMPOSE_|POSTGRES_|REDIS_)/.test(key),
+          ),
+        );
+        const parsed = spawnSync(
+          'docker',
+          [
+            'compose',
+            '--env-file',
+            '/dev/null',
+            '-f',
+            `compose.${scope}.yaml`,
+            'config',
+            '--format',
+            'json',
+          ],
+          {
+            cwd: repository,
+            env: {
+              ...env,
+              ...(storageRoot ? { NH_MOUNTDATA_ROOT: storageRoot } : {}),
+              NH_TEST_POSTGRES_PASSWORD: 'fixture-postgres',
+              NH_TEST_REDIS_PASSWORD: 'fixture-redis',
+              NH_TEST_UID: '1000',
+              NH_TEST_GID: '1000',
+              NH_TEST_SFTPGO_ADMIN: 'fixture',
+              NH_TEST_SFTPGO_PASSWORD: 'fixture-sftp',
+            },
+            encoding: 'utf8',
+            timeout: 15_000,
+          },
+        );
+        expect(parsed.error).toBeUndefined();
+        expect(parsed.status, parsed.stderr).toBe(0);
+        const config = JSON.parse(parsed.stdout) as ComposeConfiguration;
+        const root = storageRoot ?? resolve(repository, 'mountdata');
+        const namespace = scope === 'test' ? 'm1-tests' : 'm2-tests';
+        for (const service of Object.values(config.services)) {
+          for (const volume of service.volumes ?? []) {
+            expect(volume.type).toBe('bind');
+            expect(volume.source.startsWith(`${root}/${namespace}/`)).toBe(true);
+            expect(volume.bind?.create_host_path).toBe(false);
+          }
+          expect(service.environment).not.toHaveProperty('NH_MOUNTDATA_ROOT');
+        }
+      }
+    },
+  );
+
   it.each(['dev', 'prod'] as const)(
     'mounts the approved direct Docker socket into %s API/worker only',
     (scope) => {

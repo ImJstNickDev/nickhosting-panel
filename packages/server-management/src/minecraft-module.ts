@@ -1,6 +1,11 @@
-import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
+import {
+  type AuthContext,
+  DomainError,
+  resolveContentStoragePath,
+  runtimeStorageRoot,
+  type SecretCodec,
+} from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
 import {
   minecraftManifest,
@@ -379,11 +384,12 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
     );
     if (!providers || !minecraft.contentMetadataUserAgent)
       throw new DomainError('configuration_invalid');
-    const mountdataRoot = resolve(minecraft.contentWorkRoot);
+    const mountdataRoot = resolveContentStoragePath(minecraft.contentWorkRoot, env);
     return {
       ...providers,
       mountdataRoot,
-      sourceRoot: resolve(minecraft.contentSourceRoot),
+      storageBoundary: runtimeStorageRoot(env),
+      sourceRoot: resolveContentStoragePath(minecraft.contentSourceRoot, env),
       userAgent: minecraft.contentMetadataUserAgent,
       env,
       observedImageDigest,

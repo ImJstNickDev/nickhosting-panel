@@ -4,11 +4,12 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, mkdtemp, stat, statfs } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ZipFile } from 'yazl';
+import { storagePath } from '../deploy/storage-root.mjs';
 import { parseMinecraftProperties } from '../games/minecraft/src/management.js';
 import { probeMinecraftStatus } from '../games/minecraft/src/protocol.js';
 import { ModrinthProvider } from '../packages/content-providers/src/index.js';
@@ -40,7 +41,7 @@ export async function checkMinecraftLiveContent(c: MinecraftLiveScenarioContext)
     archiveResolver: store.archiveResolver,
     worldArchiveResolver: store.worldArchiveResolver,
   };
-  const scratch = await mkdtemp(resolve('mountdata/test-assets', `m4-content-${c.ledger.runId}-`));
+  const scratch = await mkdtemp(storagePath(`test-assets/m4-content-${c.ledger.runId}-`));
   await c.event('minecraft.content.local-fixture-created', { scratch });
   const text = async (path: string) =>
     Buffer.from(await adapter.readFile(identifier, path)).toString();

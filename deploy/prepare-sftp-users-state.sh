@@ -16,13 +16,14 @@ fi
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 workspace=$(pwd -P)
 cd -- "$workspace"
-for directory in mountdata mountdata/dev; do
-  if [[ ! -d $directory || -L $directory || $(realpath -- "$directory") != "$workspace/$directory" ]]; then
+storage_root=$(node deploy/storage-root.mjs --workspace "$workspace" --require-existing)
+for directory in "$storage_root/dev"; do
+  if [[ ! -d $directory || -L $directory || $(realpath -- "$directory") != "$directory" ]]; then
     printf '%s\n' 'Existing development parent is absent or is a symlink; no changes made.' >&2
     exit 1
   fi
 done
-state="$workspace/mountdata/dev/sftpgo-users"
+state="$storage_root/dev/sftpgo-users"
 if [[ -e $state || -L $state ]]; then
   printf '%s\n' 'SFTP users state already exists. Preserve and inspect it; preparation never repairs or resets existing state.' >&2
   exit 1

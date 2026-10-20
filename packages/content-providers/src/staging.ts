@@ -23,6 +23,17 @@ export function contentPlanDigest(input: ContentPlan): string {
     .update(JSON.stringify(validateContentPlan(input)))
     .digest('hex');
 }
+/** Explicit runtime boundary takes precedence over the legacy staging-fixture convention. */
+export function contentStagingRootAllowed(root: string, storageBoundary?: string): boolean {
+  if (!isAbsolute(root) || resolve(root) === sep) return false;
+  if (storageBoundary !== undefined)
+    return (
+      isAbsolute(storageBoundary) &&
+      resolve(storageBoundary) !== sep &&
+      resolve(root).startsWith(`${resolve(storageBoundary)}${sep}`)
+    );
+  return resolve(root).split(sep).includes('mountdata');
+}
 export async function contentStageDirectory(path: string): Promise<void> {
   if (!isAbsolute(path)) fail('stage_root');
   const parts = resolve(path).split(sep).filter(Boolean);
@@ -73,6 +84,7 @@ export async function stageContent(
   input: ContentPlan,
   options: {
     mountdataRoot: string;
+    storageBoundary?: string;
     jobId: string;
     archivePath?: string;
     http: ContentHttp;
@@ -87,7 +99,7 @@ export async function stageContent(
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(options.jobId) || !isAbsolute(options.mountdataRoot))
     fail('stage_job');
   const root = resolve(options.mountdataRoot);
-  if (root === sep || !root.split(sep).includes('mountdata')) fail('stage_root');
+  if (!contentStagingRootAllowed(root, options.storageBoundary)) fail('stage_root');
   await contentStageDirectory(root);
   if ((await realpath(root)) !== root) fail('stage_root');
   const parent = join(root, 'content-staging');
@@ -279,13 +291,13 @@ async function readWriteExclusive(path: string, content: string): Promise<void> 
 /** Only the coordinator, after proving the DB job is not running, may clear a crash-left lock. */
 export async function recoverContentStageLock(options: {
   mountdataRoot: string;
+  storageBoundary?: string;
   jobId: string;
   expectedPlanDigest: string;
   assertExclusiveJob: () => Promise<void>;
 }): Promise<void> {
   if (
-    !isAbsolute(options.mountdataRoot) ||
-    !resolve(options.mountdataRoot).split(sep).includes('mountdata') ||
+    !contentStagingRootAllowed(options.mountdataRoot, options.storageBoundary) ||
     !/^[A-Za-z0-9_-]{1,128}$/.test(options.jobId)
   )
     fail('stage_job');

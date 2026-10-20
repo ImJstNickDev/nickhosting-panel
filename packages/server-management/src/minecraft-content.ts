@@ -106,6 +106,8 @@ export interface MinecraftContentOptions {
   worldPreparation?: ReturnType<typeof createMinecraftWorldPreparation>;
   http: ContentHttp;
   mountdataRoot: string;
+  /** Approved host storage boundary; absent for legacy isolated staging fixtures. */
+  storageBoundary?: string;
   sourceRoot?: string;
   userAgent: string;
   curseforge?: CurseForgeProvider;
@@ -2097,6 +2099,7 @@ async function applyPreparedContent(
   // authoritative server session lock for this exact active durable job.
   const stageOptions = {
     mountdataRoot: resolve(options.mountdataRoot),
+    storageBoundary: options.storageBoundary,
     jobId,
     archivePath: prepared.archivePath,
     http: options.http,
@@ -2649,6 +2652,7 @@ async function applyWorldContent(
   const stageOptions = {
     mountdataRoot: resolve(options.mountdataRoot),
     sourceRoot: options.sourceRoot,
+    storageBoundary: options.storageBoundary,
     jobId: context.operation().job_id,
     targetWorld: target,
     release: choice.combination.release,

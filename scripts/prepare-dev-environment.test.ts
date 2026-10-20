@@ -14,6 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { resolveStorageRoot } from '../deploy/storage-root.mjs';
 import {
   parseDevPreparationArgs,
   prepareDevelopmentEnvironment,
@@ -177,6 +178,62 @@ describe('future development-only preparation', () => {
       expect(await files(root)).toEqual(before);
       expect(await readFile(join(root, marker), 'utf8')).toBe('preserve-original');
     }
+  });
+
+  it('prepares a configured existing storage root without creating repository persistence', async () => {
+    const root = await fixture();
+    const storage = join(await fixture(), 'external data # $root');
+    await mkdir(storage);
+    await writeFile(join(storage, 'unrelated'), 'preserve');
+    const result = await prepareDevelopmentEnvironment({
+      root,
+      ownerApproved: true,
+      publicUrl,
+      env: { NH_MOUNTDATA_ROOT: storage },
+    });
+    expect(result.devRoot).toBe(join(storage, 'dev'));
+    expect(await readdir(root)).toEqual(['.env.dev.local']);
+    expect(await readFile(join(storage, 'unrelated'), 'utf8')).toBe('preserve');
+    // Preserve Compose interpolation on subsequent invocations. The container
+    // adapter strips this host-only key before producing application settings.
+    expect(await readFile(result.envPath, 'utf8')).toContain(`NH_MOUNTDATA_ROOT='${storage}'`);
+    expect(resolveStorageRoot({ workspaceRoot: root, env: {} })).toBe(storage);
+    const before = await files(storage);
+    await expect(
+      prepareDevelopmentEnvironment({
+        root: await fixture(),
+        ownerApproved: true,
+        publicUrl,
+        env: { NH_MOUNTDATA_ROOT: storage },
+      }),
+    ).rejects.toThrow('preserved');
+    expect(await files(storage)).toEqual(before);
+  });
+
+  it('refuses a missing or symlinked external root without creating empty state', async () => {
+    const root = await fixture();
+    const parent = await fixture();
+    const missing = join(parent, 'unmounted-storage');
+    await expect(
+      prepareDevelopmentEnvironment({
+        root,
+        ownerApproved: true,
+        publicUrl,
+        env: { NH_MOUNTDATA_ROOT: missing },
+      }),
+    ).rejects.toThrow('Configured storage root is absent');
+    expect(await readdir(parent)).toEqual([]);
+    const alias = join(parent, 'linked-storage');
+    await symlink(await fixture(), alias);
+    await expect(
+      prepareDevelopmentEnvironment({
+        root,
+        ownerApproved: true,
+        publicUrl,
+        env: { NH_MOUNTDATA_ROOT: alias },
+      }),
+    ).rejects.toThrow('symlink');
+    expect(await readdir(root)).toEqual([]);
   });
 
   it('refuses symlinked roots, mount directories, environment files and noncanonical roots', async () => {

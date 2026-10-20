@@ -1,5 +1,9 @@
 /** Shared by entrypoint/health checks. Never loads a host .env implicitly. */
 export function containerEnvironment(input) {
+  // Compose interpolation and host tools own this path. Containers retain their
+  // existing /app/mountdata bind target and must never resolve a host disk path.
+  const { NH_MOUNTDATA_ROOT: _hostStorageRoot, ...runtimeInput } = input;
+  input = runtimeInput;
   const development = input.NH_DEPLOYMENT_ENV === 'development';
   if (!development && input.NH_DEPLOYMENT_ENV !== 'production')
     throw new Error('Explicit deployment environment required');

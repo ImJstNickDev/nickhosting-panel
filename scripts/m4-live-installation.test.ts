@@ -305,6 +305,7 @@ async function fixture(profile: ResolvedMinecraftRuntime['profile']) {
     binding: selectedBinding,
     assertOwned,
     workDirectory,
+    storageRoot: join(parent, 'mountdata'),
     userAgent: 'NickHosting test https://example.test',
     metadata: {
       read: async (url) => {

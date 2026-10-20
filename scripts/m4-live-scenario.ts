@@ -12,6 +12,7 @@ import { parseEnv } from 'node:util';
 import minecraftProtocol, { type Client } from 'minecraft-protocol';
 import { createApp } from '../apps/api/src/app.js';
 import { createGatewayRuntime } from '../apps/game-gateway/src/main.js';
+import { resolveStorageRoot, storagePath } from '../deploy/storage-root.mjs';
 import {
   type MinecraftEvidence,
   minecraftDigest,
@@ -814,7 +815,7 @@ export async function runMinecraftLiveScenario(options: {
   let ledger: Ledger, path: string;
   if (options.ledgerPath) {
     path = resolve(options.ledgerPath);
-    assert.equal(resolve('mountdata/test-assets'), resolve(path, '..'));
+    assert.equal(storagePath('test-assets'), resolve(path, '..'));
     assert.match(path.split('/').at(-1) ?? '', /^m4-live-[a-f0-9-]{36}\.json$/);
     const stat = await lstat(path);
     assert(stat.isFile() && !stat.isSymbolicLink() && (stat.mode & 0o077) === 0);
@@ -903,6 +904,7 @@ export async function runMinecraftLiveScenario(options: {
     [authSessionId]: scenario.sessionId,
   };
   const env: Record<string, string> = {
+    NH_MOUNTDATA_ROOT: resolveStorageRoot(),
     NH_OBSERVER_ID: ledger.runId,
     NH_DOCKER_OBSERVER_SOCKET: plan.observer.dockerSocket,
     NH_MINECRAFT_METADATA_USER_AGENT: plan.metadataUserAgent,
@@ -1294,7 +1296,7 @@ export async function runMinecraftLiveScenario(options: {
         assertOwned: async () => {
           await prove(asset);
         },
-        workDirectory: resolve('mountdata/test-assets'),
+        workDirectory: storagePath('test-assets'),
         userAgent: plan.metadataUserAgent,
       };
       await stage('bootstrap.installation.verify-before-start');
@@ -1954,7 +1956,7 @@ export async function runMinecraftLiveScenario(options: {
           assertOwned: async () => {
             await prove(asset);
           },
-          workDirectory: resolve('mountdata/test-assets'),
+          workDirectory: storagePath('test-assets'),
           userAgent: plan.metadataUserAgent,
         });
         const installedFiles = promoteMinecraftInstallationEvidence(

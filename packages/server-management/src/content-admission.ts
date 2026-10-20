@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
 import { statfs } from 'node:fs/promises';
-import { resolve, sep } from 'node:path';
 import { contentStageDirectory } from '@nickhosting/content-providers';
 import {
   type AuthContext,
   contentPolicyValues,
   DomainError,
   type PlatformConfig,
+  resolveContentStoragePath,
 } from '@nickhosting/core';
 import {
   assertStoragePolicyIdle,
@@ -35,12 +35,8 @@ export interface ContentAdmissionOptions {
   /** Isolated tests only; normal admission observes the real configured filesystem. */
   observeDisk?: (root: string) => Promise<ContentDiskSnapshot>;
 }
-export function contentStorageRoot(setting: string) {
-  const root = resolve(setting);
-  const mountdata = `${resolve('./mountdata')}${sep}`;
-  if (!root.startsWith(mountdata) || root === mountdata || /[\0\r\n]/.test(root))
-    throw new DomainError('configuration_invalid');
-  return root;
+export function contentStorageRoot(setting: string, env: Environment = {}) {
+  return resolveContentStoragePath(setting, env);
 }
 async function observeContentDisk(root: string): Promise<ContentDiskSnapshot> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -199,7 +195,7 @@ export async function reserveContentStaging(
       throw new DomainError('forbidden');
     await authorizeServer(tx, context, serverId, 'server:manage');
     const { values } = await getSettings(tx, env);
-    const root = contentStorageRoot(values.contentWorkRoot);
+    const root = contentStorageRoot(values.contentWorkRoot, env);
     const bytes = BigInt(expandedBytes) + 65536n;
     // Keep the established digest shape so an in-flight pre-migration job resumes.
     const identity = createHash('sha256')

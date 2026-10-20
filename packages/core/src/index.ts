@@ -8,3 +8,4 @@ export * from './logging.js';
 export * from './minecraft-gateway-config.js';
 export * from './permissions.js';
 export * from './secrets.js';
+export * from './storage.js';

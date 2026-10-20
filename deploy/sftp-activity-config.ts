@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { storagePath } from './storage-root.mjs';
 
 /** Offline preparation only. Never contacts SFTPGo or changes existing users. */
 export function sftpActivityConfiguration(input: {
@@ -86,7 +87,7 @@ async function prepare() {
     instanceId: process.env.NH_SFTPGO_INSTANCE_ID ?? '',
     secret: process.env.NH_SFTPGO_EVENT_SECRET ?? '',
   });
-  const directory = resolve('mountdata/sftp-activity-config');
+  const directory = storagePath('sftp-activity-config');
   await mkdir(directory, { recursive: true, mode: 0o700 });
   // wx refuses to replace earlier proposals or accidentally follow an existing file.
   for (const action of config.actions)
@@ -100,9 +101,7 @@ async function prepare() {
     `${JSON.stringify(config.rule, null, 2)}\n`,
     { flag: 'wx', mode: 0o600 },
   );
-  process.stdout.write(
-    'Prepared three private JSON files under mountdata/sftp-activity-config. No requests sent.\n',
-  );
+  process.stdout.write(`Prepared three private JSON files under ${directory}. No requests sent.\n`);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href)
   prepare().catch(() => {

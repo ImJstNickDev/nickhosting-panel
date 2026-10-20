@@ -13,7 +13,11 @@ import tarfile
 import urllib.request
 
 REPOSITORY = Path(__file__).resolve().parents[3]
-STATE = REPOSITORY / "mountdata/test-assets/world-transfer-feasibility"
+STORAGE_ROOT = Path(subprocess.check_output(
+    ["node", str(REPOSITORY / "deploy/storage-root.mjs"), "--workspace",
+     str(REPOSITORY), "--require-existing"], text=True
+).strip())
+STATE = STORAGE_ROOT / "test-assets/world-transfer-feasibility"
 TOOLCHAIN = "go1.21.13.linux-amd64.tar.gz"
 TOOLCHAIN_SHA256 = "502fc16d5910562461e6a6631fb6377de2322aad7304bf2bcd23500ba9dab4a7"
 

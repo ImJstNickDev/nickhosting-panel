@@ -485,7 +485,7 @@ export function createMinecraftSourceStore(
         return existing[0];
       }
       const { values } = await getSettings(tx, env);
-      const root = contentStorageRoot(values.contentSourceRoot);
+      const root = contentStorageRoot(values.contentSourceRoot, env);
       await contentStageDirectory(root);
       await assertStoragePolicyIdle(tx);
       const bytes = BigInt(input.bytes) + 65536n;

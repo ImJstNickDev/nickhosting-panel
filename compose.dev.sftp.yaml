@@ -37,7 +37,7 @@ services:
       SFTPGO_TELEMETRY__BIND_PORT: "0"
     volumes:
       - type: bind
-        source: ./mountdata/dev/sftpgo-users
+        source: "${NH_MOUNTDATA_ROOT:-./mountdata}/dev/sftpgo-users"
         target: /var/lib/sftpgo
         bind: { create_host_path: false }
       - type: bind

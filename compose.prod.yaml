@@ -53,7 +53,7 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     volumes: &app-data
-      - { type: bind, source: ./mountdata/prod/app, target: /app/mountdata, bind: { create_host_path: false } }
+      - { type: bind, source: "${NH_MOUNTDATA_ROOT:-./mountdata}/prod/app", target: /app/mountdata, bind: { create_host_path: false } }
     healthcheck:
       test: [CMD, node, deploy/container-health.mjs, api]
       interval: 15s
@@ -87,7 +87,7 @@ services:
       POSTGRES_DB: nickhosting_prod
       POSTGRES_PASSWORD: ${NH_PROD_DB_PASSWORD:?Dedicated production database password required}
     volumes:
-      - { type: bind, source: ./mountdata/prod/postgres, target: /var/lib/postgresql, bind: { create_host_path: false } }
+      - { type: bind, source: "${NH_MOUNTDATA_ROOT:-./mountdata}/prod/postgres", target: /var/lib/postgresql, bind: { create_host_path: false } }
     networks: [data]
     restart: unless-stopped
     stop_grace_period: 60s
@@ -104,7 +104,7 @@ services:
     environment: { REDIS_PASSWORD: "${NH_PROD_REDIS_PASSWORD:?Dedicated production Redis password required}" }
     command: [/bin/sh, -c, 'exec redis-server --appendonly yes --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"']
     volumes:
-      - { type: bind, source: ./mountdata/prod/redis, target: /data, bind: { create_host_path: false } }
+      - { type: bind, source: "${NH_MOUNTDATA_ROOT:-./mountdata}/prod/redis", target: /data, bind: { create_host_path: false } }
     networks: [data]
     restart: unless-stopped
     stop_grace_period: 60s

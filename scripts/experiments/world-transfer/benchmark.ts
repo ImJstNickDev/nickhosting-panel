@@ -1,15 +1,15 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { lstat, mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pipeline } from 'node:stream/promises';
 import { ZipFile } from 'yazl';
+import { storagePath } from '../../../deploy/storage-root.mjs';
 import { prepareArchiveTransfer } from '../../../packages/content-providers/src/archive-transfer.js';
 
 // Synthetic local work only. These timings do not measure upload, Wings extraction
 // or promotion, and do not establish the end-to-end three-second target.
-const parent = resolve('mountdata/test-assets/world-transfer-feasibility');
+const parent = storagePath('test-assets/world-transfer-feasibility');
 await mkdir(parent, { recursive: true });
 const root = await mkdtemp(`${parent}/benchmark-`);
 try {

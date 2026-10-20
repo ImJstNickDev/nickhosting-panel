@@ -4,6 +4,7 @@ import { constants } from 'node:fs';
 import { access, lstat, mkdir, open, readdir } from 'node:fs/promises';
 import { dirname, join, parse, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { resolveStorageRoot } from '../deploy/storage-root.mjs';
 
 class PreparationError extends Error {}
 
@@ -135,7 +136,12 @@ function mailCertificate() {
 }
 
 /** Future Owner-approved preparation only. Never starts services or seeds accounts. */
-export async function prepareDevelopmentEnvironment({ root, ownerApproved, publicUrl }) {
+export async function prepareDevelopmentEnvironment({
+  root,
+  ownerApproved,
+  publicUrl,
+  env = process.env,
+}) {
   if (ownerApproved !== true) throw new PreparationError('Explicit --owner-approved is required.');
   const origin = publicOrigin(publicUrl);
   const uid = process.getuid?.();
@@ -148,13 +154,24 @@ export async function prepareDevelopmentEnvironment({ root, ownerApproved, publi
   try {
     await assertDirectoryChain(root);
     const envPath = join(root, '.env.dev.local');
-    const mountRoot = join(root, 'mountdata');
+    const mountRoot = resolveStorageRoot({ workspaceRoot: root, env });
     const devRoot = join(mountRoot, 'dev');
+    // Both Compose and Node's dotenv parser must read the same literal path.
+    // Single quotes preserve spaces, # and $ without interpolation.
+    const storageField = mountRoot !== join(root, 'mountdata') ? mountRoot : undefined;
+    if (storageField?.includes("'"))
+      throw new PreparationError(
+        'Choose a storage root without single quotes for the generated environment file.',
+      );
     if (await existing(envPath))
       throw new PreparationError(
         'Existing .env.dev.local is preserved; preparation will not overwrite it.',
       );
     const mountInfo = await existing(mountRoot);
+    if (!mountInfo && mountRoot !== join(root, 'mountdata'))
+      throw new PreparationError(
+        'Configured storage root is absent. Mount and prepare that root explicitly before development preparation.',
+      );
     if (mountInfo) await assertDirectoryChain(mountRoot);
     const devInfo = await existing(devRoot);
     if (devInfo) {
@@ -181,6 +198,7 @@ export async function prepareDevelopmentEnvironment({ root, ownerApproved, publi
     secrets.NH_DEV_MASTER_KEY = randomBytes(32).toString('base64');
     const fields = {
       NH_DEV_ENV_FILE: '.env.dev.local',
+      ...(storageField ? { NH_MOUNTDATA_ROOT: `'${storageField}'` } : {}),
       NH_DEV_PUBLIC_URL: origin,
       NH_DEV_UID: String(uid),
       NH_DEV_GID: String(gid),

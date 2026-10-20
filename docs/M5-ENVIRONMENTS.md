@@ -181,6 +181,35 @@ creates only its dedicated empty database/user. Restarting services retains revi
 accounts and data; tests retain their own `nickhosting-m2-tests` database and
 schema guards and must never run against this environment.
 
+`NH_MOUNTDATA_ROOT` selects the **host** persistence root for every Compose
+environment and the SFTP state overlays; it defaults to `./mountdata`, relative
+to the repository. For example, an approved external root still contains
+`dev/`, `prod/`, `m1-tests/`, `m2-tests/` and `test-assets/`. Container targets
+such as `/app/mountdata`, `/var/lib/postgresql` and `/var/lib/sftpgo` do not change.
+Keep the value in the private Compose interpolation file and pass that same
+root to host tooling. The shared host resolver reads the explicit environment
+first, then only this field from `.env.dev.local`; it never loads its secrets
+into a host command. Production tooling must explicitly select its production
+environment/root.
+
+Missing roots or service directories are errors, including for M1/M2 test
+stacks. Preparation is a separate operation for new environments; never run it
+to activate a copied environment or repair existing permissions. The dev helper
+can create the default local root, but an external root must already exist.
+SFTP helpers preserve their refusal to reuse existing state. The test helper
+creates missing known paths and leaves existing ownership, modes and data alone:
+`bash scripts/prepare-m2-test-directories.sh --owner-approved` (or `--m1` for M1).
+It requires the storage root to exist and does not start test services.
+
+Changing the variable alone is **not a storage migration**. Copy and validate
+the offline state, verify the destination filesystem UUID in preflight, then
+change references and recreate the approved consumers. The migration adds a
+required read-only sentinel file bind with `create_host_path: false` to those
+consumers. This prevents startup when that file is absent; it does not itself
+verify a disk UUID. No systemd mount dependency is installed.
+See [persistent storage relocation](STORAGE-MIGRATION.md) for the cutover and
+rollback boundaries.
+
 Dev runtime rejects production-prefixed and direct unscoped external-provider settings,
 generic database/job overrides, placeholder/reused credentials and disabled TLS
 verification. Sandbox pins Pterodactyl to `http://provider:9090`. Both modes disable
