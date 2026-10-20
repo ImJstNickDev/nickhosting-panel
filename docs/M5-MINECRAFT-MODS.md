@@ -64,7 +64,33 @@ automatically remove dependencies that another selection may still need.
 An empty compatible-version lookup is reported separately from an unavailable
 download. A parent project's advertised Minecraft range does not override the
 range of a required dependency. The resolver neither skips that dependency nor
-silently changes the user's Minecraft target, provider or selected parent version.
+changes the user's Minecraft target or provider.
+
+Selection now attempts automatic dependency recovery before exposing blockers.
+If the initially selected version cannot resolve, preparation uses the same
+bounded alternative search, including for a manually selected version. Explicitly
+forced selections are preserved. A healthy initial result performs no extra
+catalog search. The queue/version picker displays the version actually prepared;
+an alternative already installed is shown as already installed and is not
+downloaded again. Apply remains a separate, explicit publication step.
+
+Automatic recovery makes one deterministic pass over problematic selected roots.
+Each accepted alternative clears that root's dependency problems without adding
+new blockers elsewhere; unrelated remaining blockers can be resolved next. One
+attempt budget (default 25) and one 30-second search deadline are shared per provider
+selection, and one metadata memo includes the initial resolution. Installed
+dependency preferences, optional selections, compatibility and force boundaries
+are retained. The accepted resolved plan is reused without a final duplicate
+resolution. This is bounded recovery, not an exhaustive Cartesian dependency
+solver; combinations requiring coordinated backtracking may remain unresolved.
+Operational catalog failures retain the known diagnosis, while revision
+cancellation stops preparation. Final file/installed/cross-provider checks remain.
+
+The durable requested selection is unchanged, preserving idempotent retries and
+the distinction between automatic choices and explicit pins. Effective versions
+are recorded in existing prepared changes/receipts. Stale blockers and errors are
+hidden while a new selection is saving or preparing; unresolved problems remain
+available after preparation. No new schema, migration or persistent job type.
 
 Blocked dependencies retain their provider, requested version, immediate parent and
 selected root projects. Review shows the dependency relationship, the server target,
@@ -91,7 +117,7 @@ Metadata scanning is bounded to the larger of three pages or the configured
 attempt budget rounded up to pages of 20. Sparse catalogs and the existing
 30-second deadline can therefore produce a partial result before all attempts
 are used, without claiming an exhaustive negative or returning a timeout as HTTP500.
-A suggested version changes nothing
+A manually requested suggestion changes nothing
 until the user chooses it; normal preparation and final installed/cross-provider
 dependency checks still apply. This is a catalog dependency suggestion, not a
 gameplay certification or a complete dependency solver. An exhausted search budget

@@ -38,16 +38,18 @@ export function useModsSelection(serverId: string, snapshot: MinecraftModsSnapsh
     };
   }, []);
   useEffect(() => {
-    if (!snapshot) return;
+    if (!snapshot || saving) return;
     const current = state.current;
     if (current.busy || current.failed || current.generation !== current.saved) return;
     if (snapshot.revision < revision.current) return;
     revision.current = snapshot.revision;
     current.roots = snapshot.roots;
     current.preferBeta = snapshot.preferBeta;
-    setRoots(snapshot.roots);
+    setRoots(current.roots);
     setPreferBeta(snapshot.preferBeta);
-  }, [snapshot]);
+    // Refetch can finish while drain is still busy. Adopt it when saving settles,
+    // without overwriting a newer edit, a failed intent, or a newer revision.
+  }, [snapshot, saving]);
   const drain = useCallback(async () => {
     const current = state.current;
     if (current.busy) return;

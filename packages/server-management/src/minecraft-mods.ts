@@ -32,6 +32,7 @@ import type { Environment } from './admission.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { datapackReceipts, datapackStateRows } from './minecraft-datapack-dependencies.js';
 import { modAlternativeAdvice, modUpdateAdvice } from './minecraft-mod-advice.js';
+import { resolveModsAutomatically } from './minecraft-mod-auto-resolution.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
 import { authorizeServer, parse } from './registry.js';
@@ -682,7 +683,7 @@ export function createMinecraftModsService(options: {
     signal: AbortSignal,
   ) {
     await cleanupTasks.get(serverId);
-    const info = await profile(db, serverId);
+    const [info, config] = await Promise.all([profile(db, serverId), getSettings(db, env)]);
     if (!info.supported || !info.installed) throw new DomainError('integration_unavailable');
     const observed = await runtime.fileReadScope(
       context,
@@ -693,27 +694,26 @@ export function createMinecraftModsService(options: {
       (['modrinth', 'curseforge'] as const)
         .filter((name) => selection.roots.some((root) => root.provider === name))
         .map(async (name) => {
-          const output = await provider(name).resolveMods(
-            selection.roots
+          const output = await resolveModsAutomatically({
+            provider: provider(name),
+            roots: selection.roots
               .filter((root) => root.provider === name)
               .map(({ provider: _, ...root }) => root),
-            info.target,
-            {
-              preferBeta: selection.preferBeta,
-              signal,
-              installedVersions: new Map(
-                observed
-                  .filter((row) => row.path.endsWith('.jar'))
-                  .flatMap((row) =>
-                    identities(row.plan)
-                      .filter((identity) => identity.provider === name && identity.versionId)
-                      .map(
-                        (identity) => [identity.projectId, identity.versionId as string] as const,
-                      ),
-                  ),
-              ),
-            },
-          );
+            target: info.target,
+            maxVersions: config.values.minecraftModAlternativeLimit,
+            replacePinned: true,
+            preferBeta: selection.preferBeta,
+            signal,
+            installedVersions: new Map(
+              observed
+                .filter((row) => row.path.endsWith('.jar'))
+                .flatMap((row) =>
+                  identities(row.plan)
+                    .filter((identity) => identity.provider === name && identity.versionId)
+                    .map((identity) => [identity.projectId, identity.versionId as string] as const),
+                ),
+            ),
+          });
           return { name, ...output };
         }),
     );

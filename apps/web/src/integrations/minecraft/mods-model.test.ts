@@ -81,6 +81,34 @@ describe('Mods queue projection', () => {
       ),
     ).toBe('blocked');
   });
+  it('recognizes a settled alternative already installed without mistaking a newer local pin for it', () => {
+    const root = {
+      ...alias,
+      versionId: 'requested-newer',
+      optionalProjectIds: [],
+      forceIncompatible: false,
+    };
+    const resolved = {
+      ...snapshot,
+      roots: [root],
+      changes: [],
+      packs: [{ ...change, state: 'enabled' as const }],
+    };
+    expect(modRootState(resolved, root)).toBe('alreadyInstalled');
+    expect(versionForMod(resolved.packs[0] as (typeof resolved.packs)[number], root)?.id).toBe(
+      '456',
+    );
+    expect(modRootState(resolved, { ...root, versionId: 'new-local-choice' })).toBe('queued');
+    expect(modRootState(resolved, root, true)).toBe('queued');
+    expect(modRootState({ ...resolved, preparing: true }, root)).toBe('preparing');
+    expect(modRootState({ ...resolved, error: 'request_failed' }, root)).toBe('failed');
+    expect(
+      modRootState(
+        { ...resolved, blockers: [{ projectId: 'config', name: 'Config', reason: 'unavailable' }] },
+        root,
+      ),
+    ).toBe('blocked');
+  });
 });
 
 describe('Mods update projection', () => {

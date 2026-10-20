@@ -1011,6 +1011,7 @@ function ReviewMods(
 ) {
   const t = useT();
   const [forcing, setForcing] = useState<string>();
+  const resolving = props.selection.saving || props.data?.preparing;
   const changes = props.data?.changes ?? [];
   const dependencies = changes.filter((item) => item.action === 'install' && item.dependency);
   const otherChanges = changes.filter((item) => item.action !== 'install');
@@ -1264,7 +1265,7 @@ function ReviewMods(
           </div>
         </section>
       )}
-      {Boolean(props.data?.blockers.length) && (
+      {!resolving && Boolean(props.data?.blockers.length) && (
         <section className="mods-review-group mods-blockers" aria-label={t(modsKey('conflicts'))}>
           <h3>
             <ModsIcon name="warning" />
@@ -1296,7 +1297,7 @@ function ReviewMods(
           ))}
         </section>
       )}
-      {props.data?.error && (
+      {!resolving && props.data?.error && (
         <p className="mods-warning-text" role="alert">
           {t(contentPreparationErrorKey(props.data.error))}{' '}
           <button

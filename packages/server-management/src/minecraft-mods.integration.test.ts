@@ -7,6 +7,7 @@ import {
   ModrinthProvider,
 } from '@nickhosting/content-providers';
 import { authSessionId, SecretCodec } from '@nickhosting/core';
+import { updateSettings } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import {
   type ApplicationServer,
@@ -373,6 +374,12 @@ describe('Minecraft Mods durable preparation and publication', () => {
   }
   it('preserves dependency diagnostics through the durable draft and links the selected root', async () => {
     const f = await catalogFixture();
+    vi.spyOn(ModrinthProvider.prototype, 'modVersions').mockResolvedValue({
+      items: [],
+      offset: 0,
+      limit: 20,
+      total: 0,
+    });
     f.resolve.mockResolvedValue({
       ...f.resolution,
       catalog: {
@@ -402,6 +409,198 @@ describe('Minecraft Mods durable preparation and publication', () => {
         availableMinecraftVersions: ['1.21.2'],
       }),
     ]);
+    expect(f.http.download).not.toHaveBeenCalled();
+  });
+  it.each([undefined, 'v2'])(
+    'automatically prepares a resolved alternative for selection %s and preserves idempotent intent',
+    async (versionId) => {
+      const f = await catalogFixture();
+      const requested = { ...f.version, id: 'v2', publishedAt: '2026-10-01T00:00:00Z' };
+      const blocked = {
+        ...f.resolution,
+        catalog: {
+          ...f.resolution.catalog,
+          items: f.resolution.catalog.items.map((item) => ({ ...item, version: requested })),
+          blocked: [
+            {
+              provider: 'modrinth' as const,
+              projectId: 'missing',
+              name: 'Missing',
+              requiredBy: 'example',
+              reason: 'incompatible-version' as const,
+            },
+          ],
+        },
+      };
+      f.resolve.mockImplementation(async (roots) =>
+        roots[0]?.versionId === 'v1' ? f.resolution : blocked,
+      );
+      const versions = vi.spyOn(ModrinthProvider.prototype, 'modVersions').mockResolvedValue({
+        items: [requested, f.version],
+        offset: 0,
+        limit: 20,
+        total: 2,
+      });
+      const request = {
+        roots: [
+          { provider: 'modrinth', projectId: 'example', ...(versionId ? { versionId } : {}) },
+        ],
+        idempotencyKey: randomUUID(),
+      };
+      const first = await f.service.select(f.context, f.serverId, request);
+      await f.service.drain();
+      const snapshot = await f.service.snapshot(f.context, f.serverId);
+      expect(snapshot.blockers).toEqual([]);
+      expect(snapshot.changes).toMatchObject([{ state: 'ready', metadata: { versionId: 'v1' } }]);
+      expect(snapshot.roots[0]?.versionId).toBe(versionId);
+      expect(f.resolve).toHaveBeenCalledTimes(2);
+      expect(versions).toHaveBeenCalledTimes(1);
+      const memo = f.resolve.mock.calls[0]?.[2]?.metadataMemo;
+      expect(memo).toBeDefined();
+      expect(f.resolve.mock.calls[1]?.[2]?.metadataMemo).toBe(memo);
+      expect(f.resolve.mock.calls[1]?.[2]?.installedVersions).toBe(
+        f.resolve.mock.calls[0]?.[2]?.installedVersions,
+      );
+      expect(f.http.download).toHaveBeenCalledTimes(1);
+      expect(f.uploadFile).toHaveBeenCalledTimes(1);
+      expect(f.renameFiles).not.toHaveBeenCalled();
+      expect(f.sendCommand).not.toHaveBeenCalled();
+      expect(await f.service.select(f.context, f.serverId, request)).toEqual(first);
+      await f.service.drain();
+      expect(f.resolve).toHaveBeenCalledTimes(2);
+      expect(f.uploadFile).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('recognizes a resolved alternative already installed without downloading or publishing again', async () => {
+    const f = await catalogFixture();
+    const first = await f.select();
+    await f.service.drain();
+    await f.service.apply(f.context, f.serverId, {
+      revision: first.revision,
+      idempotencyKey: randomUUID(),
+    });
+    await f.service.drain();
+    vi.mocked(f.http.download).mockClear();
+    f.uploadFile.mockClear();
+    f.renameFiles.mockClear();
+    const requested = { ...f.version, id: 'v2', publishedAt: '2026-10-01T00:00:00Z' };
+    const blocked = {
+      ...f.resolution,
+      catalog: {
+        ...f.resolution.catalog,
+        items: f.resolution.catalog.items.map((item) => ({ ...item, version: requested })),
+        blocked: [
+          {
+            provider: 'modrinth' as const,
+            projectId: 'missing',
+            name: 'Missing',
+            requiredBy: 'example',
+            reason: 'unresolved' as const,
+          },
+        ],
+      },
+    };
+    f.resolve.mockImplementation(async (roots) =>
+      roots[0]?.versionId === 'v1' ? f.resolution : blocked,
+    );
+    vi.spyOn(ModrinthProvider.prototype, 'modVersions').mockResolvedValue({
+      items: [requested, f.version],
+      offset: 0,
+      limit: 20,
+      total: 2,
+    });
+    await f.service.select(f.context, f.serverId, {
+      roots: [{ provider: 'modrinth', projectId: 'example', versionId: 'v2' }],
+      idempotencyKey: randomUUID(),
+    });
+    await f.service.drain();
+    const snapshot = await f.service.snapshot(f.context, f.serverId);
+    expect(snapshot).toMatchObject({
+      preparing: false,
+      blockers: [],
+      changes: [],
+      roots: [{ versionId: 'v2' }],
+      packs: [{ metadata: { versionId: 'v1' } }],
+    });
+    expect(snapshot.error).toBeUndefined();
+    expect(f.http.download).not.toHaveBeenCalled();
+    expect(f.uploadFile).not.toHaveBeenCalled();
+    expect(f.renameFiles).not.toHaveBeenCalled();
+  });
+
+  it('respects the configured automatic budget and retains the unresolved diagnostics', async () => {
+    const f = await catalogFixture();
+    await updateSettings(f.db, f.owner, { minecraftModAlternativeLimit: 1 }, f.env);
+    const requested = { ...f.version, id: 'v3' };
+    const blocked = {
+      ...f.resolution,
+      plan: { ...f.resolution.plan, artifacts: [{ ...f.artifact, versionId: 'v3' }] },
+      catalog: {
+        ...f.resolution.catalog,
+        items: f.resolution.catalog.items.map((item) => ({ ...item, version: requested })),
+        blocked: [
+          {
+            provider: 'modrinth' as const,
+            projectId: 'missing',
+            name: 'Missing',
+            requiredBy: 'example',
+            reason: 'unresolved' as const,
+          },
+        ],
+      },
+    };
+    f.resolve.mockImplementation(async (roots) =>
+      roots[0]?.versionId === 'v1' ? f.resolution : blocked,
+    );
+    vi.spyOn(ModrinthProvider.prototype, 'modVersions').mockResolvedValue({
+      items: [{ ...f.version, id: 'v2', publishedAt: '2026-10-01T00:00:00Z' }, f.version],
+      offset: 0,
+      limit: 20,
+      total: 2,
+    });
+    await f.select();
+    await f.service.drain();
+    const snapshot = await f.service.snapshot(f.context, f.serverId);
+    expect(snapshot.blockers).toMatchObject([{ projectId: 'missing', reason: 'unresolved' }]);
+    expect(snapshot.error).toBeUndefined();
+    expect(f.resolve).toHaveBeenCalledTimes(2);
+    expect(f.http.download).not.toHaveBeenCalled();
+    expect(f.uploadFile).not.toHaveBeenCalled();
+  });
+
+  it('never replaces an explicitly forced selection', async () => {
+    const f = await catalogFixture();
+    f.resolve.mockResolvedValue({
+      ...f.resolution,
+      catalog: {
+        ...f.resolution.catalog,
+        blocked: [
+          {
+            provider: 'modrinth',
+            projectId: 'missing',
+            name: 'Missing',
+            requiredBy: 'example',
+            reason: 'unresolved',
+          },
+        ],
+      },
+    });
+    const versions = vi.spyOn(ModrinthProvider.prototype, 'modVersions');
+    await f.service.select(f.context, f.serverId, {
+      roots: [
+        {
+          provider: 'modrinth',
+          projectId: 'example',
+          versionId: 'forced',
+          forceIncompatible: true,
+        },
+      ],
+      idempotencyKey: randomUUID(),
+    });
+    await f.service.drain();
+    expect(versions).not.toHaveBeenCalled();
+    expect(f.resolve).toHaveBeenCalledTimes(1);
     expect(f.http.download).not.toHaveBeenCalled();
   });
   it('checks updates from local receipts, coalesces requests and rechecks revoked authorization before cache', async () => {

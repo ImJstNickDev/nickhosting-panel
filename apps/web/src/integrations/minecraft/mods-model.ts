@@ -31,7 +31,18 @@ export function modRootState(
   if (snapshot?.error) return 'failed';
   if (snapshot?.blockers.length) return 'blocked';
   const installed = snapshot?.packs.find((pack) => matchesMod(pack, root));
-  if (installed && (!root.versionId || versionForMod(installed, root)?.id === root.versionId))
+  const resolvedRequest = snapshot?.roots.some(
+    (requested) =>
+      requested.provider === root.provider &&
+      requested.projectId === root.projectId &&
+      requested.versionId === root.versionId,
+  );
+  // A completed resolution can choose the version already installed instead of
+  // the original pin. No change is needed; newer local pins still remain queued.
+  if (
+    installed &&
+    (!root.versionId || versionForMod(installed, root)?.id === root.versionId || resolvedRequest)
+  )
     return 'alreadyInstalled';
   return 'queued';
 }

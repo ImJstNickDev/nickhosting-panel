@@ -104,6 +104,8 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
   let releaseUpdates: (() => void) | undefined;
   let failedProvider = false;
   let completed = true;
+  let fallbackToPrevious = false;
+  let fallbackRequestedVersion: string | undefined;
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const generated = () =>
     `20000000-0000-4000-8000-${String(snapshot.changes.length + 1).padStart(12, '0')}`;
@@ -120,13 +122,17 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
           project(root.projectId, root.projectId)),
         provider: root.provider,
       };
-      const version = root.versionId?.endsWith('-old')
-        ? file(item, 'old', 'release', true)
-        : item.id === 'copper' ||
-            root.versionId?.endsWith('-beta') ||
-            (!root.versionId && input.preferBeta)
-          ? file(item, 'beta', 'beta')
-          : file(item, '1.0');
+      const version =
+        (fallbackToPrevious && !root.versionId && !input.preferBeta) ||
+        (fallbackRequestedVersion !== undefined && root.versionId === fallbackRequestedVersion)
+          ? file(item, '0.9')
+          : root.versionId?.endsWith('-old')
+            ? file(item, 'old', 'release', true)
+            : item.id === 'copper' ||
+                root.versionId?.endsWith('-beta') ||
+                (!root.versionId && input.preferBeta)
+              ? file(item, 'beta', 'beta')
+              : file(item, '1.0');
       if (version.compatibility.length && !root.forceIncompatible) {
         snapshot.blockers.push({
           projectId: item.id,
@@ -420,6 +426,8 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     failedProvider = false;
     failSelection = false;
     completed = true;
+    fallbackToPrevious = false;
+    fallbackRequestedVersion = undefined;
     delaySelection = undefined;
     delaySnapshot = undefined;
     releaseSnapshot = undefined;
@@ -609,6 +617,153 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     await page.reload();
     await check(page.getByRole('button', { name: 'Install (2)' })).toBeVisible({ timeout: 10000 });
   });
+  it.each(['en', 'it'] as const)(
+    'shows the resolved automatic version without pinning the requested choice (%s)',
+    async (locale) => {
+      fallbackToPrevious = true;
+      if (locale === 'it') await page.setViewportSize({ width: 390, height: 844 });
+      await page.addInitScript((value) => localStorage.setItem('nh.locale', value), locale);
+      const text = (key: string) =>
+        minecraftModsMessages[`mods.${key}`]?.[locale === 'it' ? 1 : 0] ?? key;
+      await page.goto(`${origin}mods-fixture`);
+      await page
+        .getByRole('checkbox', { name: text('select').replace('{name}', 'Evergreen'), exact: true })
+        .check();
+      await page
+        .getByRole('button', { name: text('install').replace('{count}', '1'), exact: true })
+        .click();
+      await check(page.getByRole('button', { name: text('apply'), exact: true })).toBeEnabled();
+      await check(page.locator('.mods-review-controls')).toContainText('0.9');
+      await check(page.locator('.mods-blockers')).toHaveCount(0);
+      expect(snapshot.roots[0]?.versionId).toBeUndefined();
+      expect(snapshot.changes[0]?.metadata?.versionId).toBe('evergreen-0_9');
+      expect(writes.filter((write) => write.path.endsWith('/selection'))).toHaveLength(1);
+      await capture(`mods-automatic-version-${locale}-${locale === 'it' ? 'mobile' : 'desktop'}`);
+      await page.getByRole('button', { name: text('back'), exact: true }).click();
+      await page
+        .getByRole('checkbox', { name: text('select').replace('{name}', 'Copper Toolkit') })
+        .check();
+      await check.poll(() => snapshot.roots.length).toBe(2);
+      expect(snapshot.roots.every((root) => root.versionId === undefined)).toBe(true);
+      await page.getByRole('button', { name: text('betaPreference'), exact: true }).click();
+      await check.poll(() => snapshot.preferBeta).toBe(true);
+      await check
+        .poll(
+          () =>
+            snapshot.changes.find((change) => change.metadata?.projectId === 'evergreen')?.metadata
+              ?.channel,
+        )
+        .toBe('beta');
+      await page.reload();
+      await page
+        .getByRole('button', { name: text('install').replace('{count}', '2'), exact: true })
+        .click();
+      await check(page.locator('.mods-review')).toContainText('BETA');
+      expect(snapshot.roots.every((root) => root.versionId === undefined)).toBe(true);
+    },
+  );
+  it('preserves a newer manual version chosen during an automatic selection refresh', async () => {
+    fallbackToPrevious = true;
+    await open();
+    await page.getByRole('button', { name: 'About Evergreen' }).click();
+    const reads = snapshotReads;
+    delaySnapshot = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    await page.getByRole('checkbox', { name: 'Select Evergreen', exact: true }).first().check();
+    await check.poll(() => snapshotReads).toBeGreaterThan(reads);
+    await page.getByRole('button', { name: 'Select version', exact: true }).click();
+    await page.locator('.mods-version-option').filter({ hasText: 'beta' }).click();
+    expect(writes).toHaveLength(1);
+    releaseSnapshot?.();
+    delaySnapshot = undefined;
+    await check.poll(() => snapshot.roots[0]?.versionId).toBe('evergreen-beta');
+    await page.getByRole('button', { name: 'Install (1)', exact: true }).click();
+    await check(page.getByRole('button', { name: 'Apply', exact: true })).toBeEnabled();
+    await check(page.locator('.mods-review-controls')).toContainText('beta');
+    await page.getByRole('button', { name: 'Back to Discover' }).click();
+    await page.getByRole('checkbox', { name: 'Select Copper Toolkit' }).check();
+    await check.poll(() => snapshot.roots.length).toBe(2);
+    expect(snapshot.roots[0]?.versionId).toBe('evergreen-beta');
+    expect(writes[1]?.body.idempotencyKey).not.toBe(writes[0]?.body.idempotencyKey);
+  });
+  it('adopts a newer settled snapshot after the selection refetch finishes', async () => {
+    await open();
+    await page.route(`**${base}`, async (route) => {
+      // Another view cleared the draft while this selection's refresh was in flight.
+      const settled = { ...snapshot, revision: snapshot.revision + 1, roots: [], changes: [] };
+      await route.fulfill({ contentType: 'application/json', body: JSON.stringify(settled) });
+    });
+    await page.getByRole('checkbox', { name: 'Select Evergreen', exact: true }).check();
+    await check(
+      page.getByRole('checkbox', { name: 'Select Evergreen', exact: true }),
+    ).not.toBeChecked();
+    expect(writes).toHaveLength(1);
+  });
+  it('does not replace newer selection intent with a stale snapshot', async () => {
+    const stale = structuredClone(snapshot);
+    await open();
+    await page.getByRole('checkbox', { name: 'Select Evergreen', exact: true }).check();
+    await page.getByRole('button', { name: 'Install (1)', exact: true }).click();
+    await check(page.getByRole('button', { name: 'Apply', exact: true })).toBeEnabled();
+    await page.getByRole('button', { name: 'Back to Discover' }).click();
+    await page.route(
+      `**${base}`,
+      async (route) => {
+        await route.fulfill({ contentType: 'application/json', body: JSON.stringify(stale) });
+      },
+      { times: 1 },
+    );
+    const response = page.waitForResponse((response) => response.url().endsWith(base));
+    await page.getByRole('button', { name: 'Refresh mods', exact: true }).click();
+    await response;
+    await check(
+      page.getByRole('checkbox', { name: 'Select Evergreen', exact: true }),
+    ).toBeChecked();
+    await page.getByRole('checkbox', { name: 'Select Copper Toolkit' }).check();
+    await check.poll(() => snapshot.roots.length).toBe(2);
+    expect(snapshot.roots.map((root) => root.projectId)).toEqual(['evergreen', 'copper']);
+  });
+  it('hides previous dependency blockers while a new selection is saving or preparing', async () => {
+    snapshot.roots = [
+      {
+        provider: 'modrinth',
+        projectId: 'evergreen',
+        optionalProjectIds: [],
+        forceIncompatible: false,
+      },
+    ];
+    snapshot.blockers = [{ projectId: 'config', name: 'Config', reason: 'unavailable' }];
+    const previousBlockers = structuredClone(snapshot.blockers);
+    await open();
+    await page.getByRole('button', { name: 'Install (1)', exact: true }).click();
+    await check(page.locator('.mods-blockers')).toBeVisible();
+    let releaseSelection: (() => void) | undefined;
+    delaySelection = new Promise<void>((resolve) => {
+      releaseSelection = resolve;
+    });
+    try {
+      await page.getByRole('button', { name: 'Recheck dependencies', exact: true }).click();
+      await check(page.locator('.mods-blockers')).toHaveCount(0);
+      completed = false;
+      releaseSelection?.();
+      await check.poll(() => snapshot.preparing).toBe(true);
+      snapshot.blockers = previousBlockers;
+      await page.evaluate(
+        `import('/src/api/client.ts').then(({ queryClient }) => queryClient.invalidateQueries({ queryKey: ['minecraft-mods', '${serverId}'] }))`,
+      );
+      await check(page.locator('.mods-blockers')).toHaveCount(0);
+      await check(page.getByRole('button', { name: 'Apply', exact: true })).toBeDisabled();
+      snapshot.preparing = false;
+      snapshot.changes = snapshot.changes.map((change) => ({ ...change, state: 'ready' }));
+      await page.evaluate(
+        `import('/src/api/client.ts').then(({ queryClient }) => queryClient.invalidateQueries({ queryKey: ['minecraft-mods', '${serverId}'] }))`,
+      );
+      await check(page.locator('.mods-blockers')).toBeVisible();
+    } finally {
+      releaseSelection?.();
+    }
+  });
   it('marks an unchanged installed selection as already installed instead of preparing forever', async () => {
     const item = catalog[0];
     if (!item) throw new Error('Missing fixture');
@@ -626,6 +781,31 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     await check(page.locator('.mods-review')).toContainText('Already installed');
     await check(page.getByRole('button', { name: 'Apply', exact: true })).toBeDisabled();
     expect(snapshot.changes).toHaveLength(0);
+  });
+  it('shows the installed fallback for an explicit pin as already installed without another download', async () => {
+    const item = catalog[0] as ModCatalogProject;
+    fallbackRequestedVersion = 'evergreen-beta';
+    snapshot.packs.push({
+      id: 'installed',
+      name: item.name,
+      path: 'mods/evergreen-0.9.jar',
+      size: 12,
+      state: 'enabled',
+      metadata: metadata(item, file(item, '0.9')),
+    });
+    await open();
+    await page.getByRole('button', { name: 'About Evergreen' }).click();
+    await page.getByRole('button', { name: 'Selected version: 0.9', exact: true }).click();
+    await page.locator('.mods-version-option').filter({ hasText: 'beta' }).click();
+    await page.getByRole('button', { name: 'Install (1)', exact: true }).click();
+    await check(page.locator('.mods-review')).toContainText('Already installed');
+    await check(
+      page.getByRole('button', { name: 'Selected version: 0.9', exact: true }),
+    ).toBeVisible();
+    await check(page.getByRole('button', { name: 'Apply', exact: true })).toBeDisabled();
+    expect(snapshot.roots[0]?.versionId).toBe('evergreen-beta');
+    expect(snapshot.changes).toHaveLength(0);
+    expect(writes.filter((write) => write.path.endsWith('/selection'))).toHaveLength(1);
   });
   it('shows localized preparation reasons for failed roots, dependencies and the durable selection', async () => {
     select({

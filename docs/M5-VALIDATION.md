@@ -14929,3 +14929,45 @@ retain a private preimage and remove only `minecraftModAlternativeLimit` from
 `platform_settings.value` (and its environment override, if set) before reverting,
 so the old strict schema accepts the configuration. Retain all other settings/data.
 PR21 stays open and unmerged.
+
+## Automatic Mods version recovery — 2026-10-20
+
+Selection preparation now reuses the bounded first-match alternative search
+before exposing dependency blockers. Manual version selections can recover to a
+compatible alternative; forced selections are retained. Healthy selections perform
+no extra catalog search. Each provider shares the configured attempt budget,
+metadata memo and search deadline across problematic roots, and reuses the
+accepted plan. Durable requested roots remain unchanged for idempotency and
+stable/beta preferences. Apply remains explicit. The queue displays the actual
+prepared version, suppresses old blockers during preparation, and correctly
+recognizes alternatives already installed without downloading them again.
+
+Validation: 80 provider/advice/automatic-resolution unit cases, 11 UI model and
+selection-controller cases, and 26 Firefox browser cases pass. The 36 isolated
+service/HTTP cases are covered by the initial full run and targeted correction/new
+case runs: two fixture assumptions were updated for the newly invoked fallback
+lookup, then both passed. Regressions cover shared dependencies, independent
+blocked roots, conflicts, budgets, force/pin behavior, cancellation, catalog
+failures, installed versions, stale snapshots, unchanged intent and duplicate
+selection retries. No real artifact download or installation was used by tests.
+Root/web/browser TypeScript, changed-file Biome, localization and diff checks pass.
+Independent backend/UI review found no remaining blockers. Browser checks report
+zero Axe findings and zero horizontal overflow. Screenshots:
+[English desktop](screenshots/m5/mods-automatic-version-en-desktop.png) and
+[Italian mobile](screenshots/m5/mods-automatic-version-it-mobile.png).
+
+A separate metadata-only dev probe resolves the previously blocked JEI selection
+automatically in 1,018 ms, using two graph resolutions and two version-page reads,
+with no remaining dependency blockers. The requested selection remains unchanged;
+there are zero downloads, draft writes or file publications. This verifies catalog
+metadata, not gameplay compatibility or the contents of the selected artifact.
+Authenticated Firefox dev smoke confirms HTTPS200, inventory200, secure WSS HMR
+and no browser errors. All eleven dev services are healthy.
+
+No API/schema change, migration, manual container restart, Blueprint/Panel/Wings
+change, production deployment or real game-data mutation. Only isolated test
+fixtures were created and cleaned by their harness. Existing drafts need a new
+selection/recheck to use the new preparation behavior. Recovery remains bounded;
+cases requiring coordinated backtracking can still show actionable blockers.
+Rollback is a source revert, preserving database and files. PR21 stays open and
+unmerged; issue #18 remains a separate production-release boundary.

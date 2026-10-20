@@ -129,20 +129,27 @@ export async function modUpdateAdvice(input: {
   return { checkedAt: new Date().toISOString(), items: result };
 }
 
-/** Suggestions never mutate the draft or acquire artifacts. The explicit choice goes
- * through normal selection/preparation, including installed and cross-provider checks. */
-export async function modAlternativeAdvice(input: {
+interface ModAlternativeMatch {
+  version: ModCatalogVersion;
+  roots: ModSelection[];
+  resolved: ResolvedMods;
+}
+
+/** Shared bounded metadata search. The caller decides which remaining blockers are unrelated. */
+export async function findModAlternative(input: {
   provider: ModAdviceProvider;
-  name: ModProvider;
   projectId: string;
   roots: ModSelection[];
-  revision: number;
   maxVersions: number;
   target: ContentTarget;
   preferBeta: boolean;
   signal?: AbortSignal;
-}): Promise<MinecraftModAlternatives> {
-  const metadataMemo = createModMetadataMemo();
+  metadataMemo?: ReturnType<typeof createModMetadataMemo>;
+  installedVersions?: ReadonlyMap<string, string>;
+  excludeVersionId?: string;
+  accept(resolved: ResolvedMods): boolean;
+}): Promise<{ match?: ModAlternativeMatch; checked: number; limited: boolean }> {
+  const metadataMemo = input.metadataMemo ?? createModMetadataMemo();
   const root = input.roots.find((item) => item.projectId === input.projectId);
   const seen = new Set<string>();
   const deferredBeta: ModCatalogVersion[] = [];
@@ -151,11 +158,8 @@ export async function modAlternativeAdvice(input: {
   const scanLimit = Math.max(60, Math.ceil(input.maxVersions / 20) * 20);
   let complete = false;
   let checked = 0;
-  const result = (items: ModCatalogVersion[], limited: boolean): MinecraftModAlternatives => ({
-    revision: input.revision,
-    provider: input.name,
-    projectId: input.projectId,
-    items,
+  const result = (limited: boolean, match?: ModAlternativeMatch) => ({
+    ...(match ? { match } : {}),
     checked,
     limited,
   });
@@ -170,9 +174,10 @@ export async function modAlternativeAdvice(input: {
       preferBeta: input.preferBeta,
       signal: input.signal,
       metadataMemo,
+      installedVersions: input.installedVersions,
     });
     checked++;
-    return !resolved.catalog.blocked.length;
+    return input.accept(resolved) ? { version, roots, resolved } : undefined;
   }
   try {
     for (let offset = 0; offset < scanLimit; offset += 20) {
@@ -191,6 +196,7 @@ export async function modAlternativeAdvice(input: {
         seen.add(version.id);
         if (
           version.id === root?.versionId ||
+          version.id === input.excludeVersionId ||
           !version.available ||
           version.compatibility.length ||
           version.channel === 'alpha'
@@ -200,23 +206,52 @@ export async function modAlternativeAdvice(input: {
           deferredBeta.push(version);
           continue;
         }
-        if (checked >= input.maxVersions) return result([], true);
-        if (await check(version)) return result([version], false);
+        if (checked >= input.maxVersions) return result(true);
+        const match = await check(version);
+        if (match) return result(false, match);
       }
       if (complete) break;
-      if (checked >= input.maxVersions) return result([], true);
+      if (checked >= input.maxVersions) return result(true);
     }
     // A truncated catalog cannot establish that no stable alternative exists.
-    if (!complete) return result([], true);
+    if (!complete) return result(true);
     for (const version of deferredBeta.sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))) {
-      if (checked >= input.maxVersions) return result([], true);
-      if (await check(version)) return result([version], false);
+      if (checked >= input.maxVersions) return result(true);
+      const match = await check(version);
+      if (match) return result(false, match);
     }
-    return result([], false);
+    return result(false);
   } catch (error) {
     // A bounded search may hit its deadline before its attempt budget. Keep an
     // honest partial negative result instead of turning a timeout into HTTP500.
-    if (input.signal?.aborted) return result([], true);
+    if (input.signal?.aborted) return result(true);
     throw error;
   }
+}
+
+/** Suggestions never mutate the draft or acquire artifacts. The explicit choice goes
+ * through normal selection/preparation, including installed and cross-provider checks. */
+export async function modAlternativeAdvice(input: {
+  provider: ModAdviceProvider;
+  name: ModProvider;
+  projectId: string;
+  roots: ModSelection[];
+  revision: number;
+  maxVersions: number;
+  target: ContentTarget;
+  preferBeta: boolean;
+  signal?: AbortSignal;
+}): Promise<MinecraftModAlternatives> {
+  const result = await findModAlternative({
+    ...input,
+    accept: (resolved) => !resolved.catalog.blocked.length,
+  });
+  return {
+    revision: input.revision,
+    provider: input.name,
+    projectId: input.projectId,
+    items: result.match ? [result.match.version] : [],
+    checked: result.checked,
+    limited: result.limited,
+  };
 }
