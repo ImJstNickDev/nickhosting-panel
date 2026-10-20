@@ -617,8 +617,13 @@ Control communication uses the existing dev HTTPS origin and the narrowly routed
 and dedicated bearer; browser cookies/support sessions do not authorize it.
 Other `/internal/` paths return 404. No NPM/DNS/certificate change is proposed.
 Diagnostics use an authenticated Unix socket in service-owned tmpfs, with no
-HTTP health port. `/readyz` checks the control-plane lease; zero-route readiness
-must never be reported as proof that forwarding or sleep/wake works.
+HTTP health port. `/readyz` checks the control-plane lease, control availability
+and eligible listeners. Routes withheld for `backend_active_binding`, including
+servers awaiting their first backend binding proof, are reported separately as
+`withheldRoutes` alongside `configuredRoutes` and active `routes`; they do not make
+the service unhealthy. Their safety checks and withheld listeners remain
+unchanged. Zero-route readiness must never be reported as proof that forwarding or
+sleep/wake works. See [Gateway diagnostics](M3-API.md#configuration-and-deployment-prerequisites).
 
 ### Proposed activation, not executed
 

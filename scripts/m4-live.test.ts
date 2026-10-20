@@ -560,6 +560,8 @@ describe('reviewed M4 live resource envelope', () => {
       revision: 6,
       expiresAt: snapshot.expiresAt,
       routes: 1,
+      configuredRoutes: 1,
+      withheldRoutes: 0,
       tcpConnections: 0,
       udpSessions: 0,
       quiescentServers: 0,

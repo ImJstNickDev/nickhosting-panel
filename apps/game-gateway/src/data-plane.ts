@@ -129,6 +129,9 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     leaseExpirations: 0,
   };
   let snapshot: GatewaySnapshot | undefined;
+  // Only a successfully applied snapshot can exempt an intentionally withheld
+  // route from listener readiness. Failed candidates never change this count.
+  let withheldRoutes = 0;
   // Authenticated candidates may be probed before they are safe to bind. This
   // breaks first-start readiness bootstrap without granting forwarding rights.
   let candidateSnapshot: GatewaySnapshot | undefined;
@@ -1026,7 +1029,6 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         }
       }
       syncSleepWatches();
-      controlAvailable = true;
       for (const listener of listeners.values())
         logRouteTransition(
           listener,
@@ -1052,6 +1054,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           )
         )
           wakeRequests.delete(serverId);
+      withheldRoutes = next.routes.filter((route) => withheldServers.has(route.serverId)).length;
+      controlAvailable = true;
     } catch (error) {
       if (error instanceof GatewayProviderRateLimitedError) {
         candidateSnapshot = snapshot;
@@ -1063,7 +1067,12 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     }
   };
   const applySnapshot = (input: unknown, fetchStartedAt = now()) => {
-    const result = serial.then(() => apply(input, fetchStartedAt));
+    const result = serial.then(() =>
+      apply(input, fetchStartedAt).catch((error) => {
+        controlAvailable = false;
+        throw error;
+      }),
+    );
     serial = result.catch(() => {});
     return result;
   };
@@ -1819,12 +1828,17 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     ownedBindings: (): GatewayEndpoint[] =>
       [...listeners.values()].map((listener) => ({ ...listener.route.public })),
     health: () => ({
-      ready: leased() && listeners.size === snapshot?.routes.length,
+      ready:
+        leased() &&
+        controlAvailable &&
+        listeners.size === (snapshot?.routes.length ?? 0) - withheldRoutes,
       controlAvailable,
       stopping,
       revision: snapshot?.revision ?? null,
       expiresAt: snapshot?.expiresAt ?? null,
       routes: listeners.size,
+      configuredRoutes: snapshot?.routes.length ?? 0,
+      withheldRoutes,
       tcpConnections: clientsCount(),
       udpSessions: sessionsCount(),
       quiescentServers: quiescence.size,

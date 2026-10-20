@@ -96,3 +96,21 @@ awaiting first-start reachability proofs; the existing MariaDB healthcheck issue
 also remains, despite successful DB and Panel requests. Neither was concealed or
 weakened to report the migration as successful. No original-data deletion,
 production NickHosting deployment or unrelated infrastructure change was made.
+
+### Health follow-up — 2026-10-20
+
+The Owner requested correction of both health conditions after the cutover.
+Gateway health now separates eligible listeners from routes withheld for
+`backend_active_binding`; it does not relax listener admission or create missing
+proofs. The existing dev Gateway was restarted, then reported healthy with three
+active and four withheld routes. All three active routes passed status-only
+Minecraft checks with no wake requests.
+
+MariaDB's official healthcheck was ignoring its existing credential file because
+the file was world-writable. Restoring only that file's mode from `0777` to the
+image's intended `0600` restored the original connectivity/InnoDB healthcheck.
+Contents, ownership and inode were unchanged; no database restart, account or
+data change was needed. Panel and Wings remained healthy without restarts.
+
+The original migration copies remain intact and still require separate deletion
+approval. This follow-up did not start any game server.

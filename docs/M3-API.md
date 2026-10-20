@@ -217,6 +217,17 @@ leave the Gateway disabled, with 15-second route leases (3–30 supported).
 | `gatewayDataPolicy` / `NH_GATEWAY_DATA_POLICY` | Typed connection/session/buffer/time limits; defaults in `packages/core/src/gateway-config.ts`. |
 | `gatewayDiagnosticsSocket` / `NH_GATEWAY_DIAGNOSTICS_SOCKET` | Optional private Unix socket for bearer-authenticated `/healthz`, `/readyz`, `/metrics`; supply its approved path in bootstrap environment. No diagnostic TCP bind. |
 
+Gateway readiness describes the service, not whether every configured game server
+has completed its first startup. `/readyz` requires a current authenticated lease,
+available control plane, and all eligible listeners. A route withheld specifically
+for `backend_active_binding` stays unbound without making the service unready.
+Health reports `configuredRoutes`, active `routes`, and `withheldRoutes`; the latter
+is counted only from the last successfully applied snapshot. Route identities and
+safety reasons remain in the existing diagnostics. Missing control authority,
+expired leases, shutdown, bind failures and other validation failures still make
+readiness fail. Healthy service status is not proof that every server is reachable
+or that sleep/wake has been tested.
+
 `gatewayNetworkPolicy` is `{nodes,maximumObservationAgeMs}` (100–15000 ms).
 Each node is `{nodeId,nodeUuid,networkMode,loopbackRemap?}`; loopback remapping
 requires Wings `1.11.13`, explicit private `interfaceAddress`, `ispn:false`, and

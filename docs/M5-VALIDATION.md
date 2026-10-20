@@ -14704,3 +14704,41 @@ an independent production-release gate; PR21 remains open and unmerged.
   Lowering the live dev storage margin remains a separate Owner decision; the
   code fix does not silently change it. Rollback is a code revert. PR21 remains
   open/unmerged.
+
+## Gateway service readiness and database health — 2026-10-20
+
+Owner requested resolution of the two outstanding health conditions after storage
+migration. Gateway readiness now excludes only routes deliberately withheld for
+`backend_active_binding` in the last successfully applied snapshot. Authenticated
+health adds bounded `configuredRoutes`/`withheldRoutes` counts; existing `routes`
+continues to count live listeners. Control loss, rejected snapshots, expiry,
+shutdown, unexpected listener loss and bind failures still fail readiness. No
+reachability proof, listener admission or forwarding requirement was removed.
+
+Validation on supported Node24: 177 Gateway data-plane/runtime tests, 176 safety
+validator/deployment tests, and 48 isolated live-test-helper tests passed (401
+in total). Root `tsc --noEmit`, focused Biome and `git diff --check` passed.
+Independent review found no blockers. No UI changes or browser screenshots needed.
+
+Activated with one authorized restart of the existing dev Gateway. Authenticated
+`/readyz` returned200, Docker healthy, three live/seven configured/four withheld
+routes. Three existing routes passed modern status/exact pong or legacy FE01
+checks; zero login packets, wake requests or game power operations. All31 game
+containers present at pre-restart verification remained off. Identity, image,
+mounts, networks and published-port configuration stayed unchanged.
+
+The existing provider database's official healthcheck ignored its world-writable
+credential file, then failed authentication. A reviewed correction changed only
+that file from0777 to0600, retaining contents/hash, inode and UID/GID. The original
+`healthcheck.sh --connect --innodb_initialized` passed, followed by Docker healthy.
+Database, Panel and Wings were not restarted; both Panel and WebPanel HTTPS
+returned200. No DB account/schema/data or provider configuration was changed.
+Private evidence and exact operational rollback notes remain in local records.
+
+Gateway rollback: revert the health-only code change and restart the same dev
+Gateway under the standing authorization; this restores the prior false-unhealthy
+semantics without changing persisted routes or proofs. Keep the repaired database
+credential file at0600; reverting to0777 would restore both its defect and unsafe
+permissions. Original migration copies remain untouched, with deletion still
+requiring separate Owner approval. No game fixtures, production NickHosting
+activation, M6 work, DNS or Blueprint change. PR #21 stays open and unmerged.

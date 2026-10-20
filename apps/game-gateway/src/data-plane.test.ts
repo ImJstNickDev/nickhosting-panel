@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createSocket, Socket as DatagramSocket } from 'node:dgram';
 import { once } from 'node:events';
-import { connect, createServer, type Socket } from 'node:net';
+import { connect, createServer, Server, type Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DomainError } from '@nickhosting/core';
 import type {
@@ -825,10 +825,12 @@ describe('persistent Gateway fixture forwarding', () => {
     });
     await f.gateway.start();
     expect(f.gateway.health()).toMatchObject({
-      ready: false,
+      ready: true,
       controlAvailable: true,
       revision: 1,
       routes: 1,
+      configuredRoutes: 2,
+      withheldRoutes: 1,
     });
     expect(f.gateway.ownedBindings()).toEqual([valid.public]);
     const firstExpiry = f.gateway.health().expiresAt;
@@ -839,7 +841,13 @@ describe('persistent Gateway fixture forwarding', () => {
     timestamp += 4000;
     await f.gateway.refresh();
     expect(f.gateway.health().expiresAt).not.toBe(firstExpiry);
-    expect(f.gateway.health()).toMatchObject({ controlAvailable: true, ready: false, routes: 1 });
+    expect(f.gateway.health()).toMatchObject({
+      controlAvailable: true,
+      ready: true,
+      routes: 1,
+      configuredRoutes: 2,
+      withheldRoutes: 1,
+    });
     timestamp += 2000;
     // The first lease has expired, but this independently validated route has
     // renewed authority. The withheld server remains unbound.
@@ -851,7 +859,13 @@ describe('persistent Gateway fixture forwarding', () => {
 
     proofMissing = false;
     await f.gateway.refresh();
-    expect(f.gateway.health()).toMatchObject({ ready: true, controlAvailable: true, routes: 2 });
+    expect(f.gateway.health()).toMatchObject({
+      ready: true,
+      controlAvailable: true,
+      routes: 2,
+      configuredRoutes: 2,
+      withheldRoutes: 0,
+    });
     expect((await exchange(stopped.port, 'STATUS\n')).toString()).toBe('sleeping\n');
   });
   it('withdraws every existing role of a server when one role loses active binding proof', async () => {
@@ -879,7 +893,13 @@ describe('persistent Gateway fixture forwarding', () => {
     proofMissing = true;
     await f.gateway.refresh();
     expect(f.gateway.ownedBindings()).toEqual([valid.public]);
-    expect(f.gateway.health()).toMatchObject({ ready: false, controlAvailable: true, routes: 1 });
+    expect(f.gateway.health()).toMatchObject({
+      ready: true,
+      controlAvailable: true,
+      routes: 1,
+      configuredRoutes: 3,
+      withheldRoutes: 2,
+    });
     await refuses(first.port);
     await refuses(second.port);
     expect((await exchange(independent.port, 'STATUS\n')).toString()).toBe('sleeping\n');
@@ -904,10 +924,153 @@ describe('persistent Gateway fixture forwarding', () => {
     await f.gateway.applySnapshot(f.snapshot());
     expect(validate).toHaveBeenCalledTimes(6);
     expect(f.gateway.ownedBindings()).toEqual([valid.public]);
-    expect(f.gateway.health()).toMatchObject({ ready: false, controlAvailable: true, routes: 1 });
+    expect(f.gateway.health()).toMatchObject({
+      ready: true,
+      controlAvailable: true,
+      routes: 1,
+      configuredRoutes: 3,
+      withheldRoutes: 2,
+    });
     await refuses(first.port);
     await refuses(second.port);
     expect((await exchange(independent.port, 'STATUS\n')).toString()).toBe('sleeping\n');
+  });
+  it('is ready with only withheld routes, but not before a snapshot, after invalid control, expiry or shutdown', async () => {
+    const stopped = await tcpFixture();
+    const unproven = route(stopped.port, 'tcp', 'sleeping');
+    let timestamp = Date.now();
+    const f = plane([unproven], {
+      now: () => timestamp,
+      lease: 5000,
+      safety: {
+        validate: vi.fn(async () => {
+          throw new GatewaySafetyError('backend_active_binding');
+        }),
+      },
+    });
+    expect(f.gateway.health()).toMatchObject({
+      ready: false,
+      configuredRoutes: 0,
+      withheldRoutes: 0,
+    });
+    await f.gateway.applySnapshot(f.snapshot());
+    expect(f.gateway.health()).toMatchObject({
+      ready: true,
+      controlAvailable: true,
+      configuredRoutes: 1,
+      withheldRoutes: 1,
+      routes: 0,
+    });
+    expect(f.gateway.ownedBindings()).toEqual([]);
+    await refuses(stopped.port);
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+
+    await expect(f.gateway.applySnapshot({})).rejects.toThrow('validation_failed');
+    expect(f.gateway.health()).toMatchObject({
+      ready: false,
+      controlAvailable: false,
+      configuredRoutes: 1,
+      withheldRoutes: 1,
+    });
+    await f.gateway.applySnapshot(f.snapshot());
+    expect(f.gateway.health().ready).toBe(true);
+    timestamp += 5001;
+    expect(f.gateway.health()).toMatchObject({
+      ready: false,
+      controlAvailable: true,
+      routes: 0,
+      withheldRoutes: 1,
+    });
+    await f.gateway.applySnapshot(f.snapshot());
+    expect(f.gateway.health().ready).toBe(true);
+    await f.gateway.applySnapshot(f.snapshot([], 2));
+    expect(f.gateway.health()).toMatchObject({
+      ready: true,
+      configuredRoutes: 0,
+      withheldRoutes: 0,
+      routes: 0,
+    });
+    await f.gateway.stop();
+    expect(f.gateway.health()).toMatchObject({ ready: false, stopping: true });
+  });
+  it('does not commit withheld counts or report readiness when a later listener bind fails', async () => {
+    const stopped = await tcpFixture();
+    const validBackend = await tcpFixture();
+    const newlyStopped = await tcpFixture();
+    const direct = await tcpFixture('127.0.0.1');
+    const unproven = route(stopped.port, 'tcp', 'sleeping');
+    const valid = route(validBackend.port, 'tcp', 'sleeping');
+    const newlyUnproven = route(newlyStopped.port, 'tcp', 'sleeping');
+    const collision = route(direct.port);
+    const f = plane([unproven, valid], {
+      safety: {
+        validate: vi.fn<GatewaySafety['validate']>(async (current) => {
+          if ([unproven.id, newlyUnproven.id].includes(current.id))
+            throw new GatewaySafetyError('backend_active_binding');
+        }),
+      },
+    });
+    await f.gateway.applySnapshot(f.snapshot());
+    expect(f.gateway.health().ready).toBe(true);
+    const next = [unproven, newlyUnproven, valid, collision];
+    await expect(f.gateway.applySnapshot(f.snapshot(next, 2))).rejects.toThrow();
+    expect(f.gateway.health()).toMatchObject({
+      ready: false,
+      controlAvailable: false,
+      revision: 1,
+      configuredRoutes: 2,
+      withheldRoutes: 1,
+      routes: 1,
+    });
+    expect(f.gateway.ownedBindings()).toEqual([valid.public]);
+    await refuses(stopped.port);
+    await refuses(newlyStopped.port);
+    expect((await exchange(validBackend.port, 'STATUS\n')).toString()).toBe('sleeping\n');
+    expect((await exchange(direct.port, 'still-direct')).toString()).toBe('still-direct');
+
+    await f.gateway.applySnapshot(f.snapshot([valid], 3));
+    expect(f.gateway.health()).toMatchObject({
+      ready: true,
+      controlAvailable: true,
+      configuredRoutes: 1,
+      withheldRoutes: 0,
+      routes: 1,
+    });
+  });
+  it('does not count an unexpected listener loss as a withheld route', async () => {
+    const stopped = await tcpFixture();
+    const validBackend = await tcpFixture();
+    const unproven = route(stopped.port, 'tcp', 'sleeping');
+    const valid = route(validBackend.port, 'tcp', 'sleeping');
+    const f = plane([unproven, valid], {
+      safety: {
+        validate: vi.fn<GatewaySafety['validate']>(async (current) => {
+          if (current.id === unproven.id) throw new GatewaySafetyError('backend_active_binding');
+        }),
+      },
+    });
+    const listen = vi.spyOn(Server.prototype, 'listen');
+    let listener: Server | undefined;
+    try {
+      await f.gateway.applySnapshot(f.snapshot());
+      const context = listen.mock.contexts[0];
+      if (context instanceof Server) listener = context;
+    } finally {
+      listen.mockRestore();
+    }
+    expect(f.gateway.health().ready).toBe(true);
+    expect(listener).toBeInstanceOf(Server);
+    listener?.emit('error', new Error('fixture listener failure'));
+    expect(f.gateway.health()).toMatchObject({
+      ready: false,
+      controlAvailable: true,
+      configuredRoutes: 2,
+      withheldRoutes: 1,
+      routes: 0,
+    });
+    await refuses(validBackend.port);
+    await f.gateway.applySnapshot(f.snapshot());
+    expect(f.gateway.health()).toMatchObject({ ready: true, routes: 1, withheldRoutes: 1 });
   });
   it.each([
     new DomainError('allocation_unavailable', 409, {
@@ -929,7 +1092,14 @@ describe('persistent Gateway fixture forwarding', () => {
         },
       });
       await expect(f.gateway.applySnapshot(f.snapshot())).rejects.toBe(error);
-      expect(f.gateway.health()).toMatchObject({ revision: null, routes: 0 });
+      expect(f.gateway.health()).toMatchObject({
+        ready: false,
+        controlAvailable: false,
+        revision: null,
+        configuredRoutes: 0,
+        withheldRoutes: 0,
+        routes: 0,
+      });
       await refuses(first.port);
       await refuses(second.port);
     },
@@ -2664,7 +2834,7 @@ describe('lease, reconciliation and shutdown safety', () => {
       new DomainError('integration_unavailable'),
     );
     await expect(f.gateway.refresh()).rejects.toThrow();
-    expect(f.gateway.health().controlAvailable).toBe(false);
+    expect(f.gateway.health()).toMatchObject({ ready: false, controlAvailable: false });
     expect((await exchange(backend.port, 'cached')).toString()).toBe('cached');
     await delay(200);
     expect(f.gateway.health().ready).toBe(false);
