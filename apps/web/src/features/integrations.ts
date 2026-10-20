@@ -53,7 +53,7 @@ import type { ComponentType } from 'react';
 import { lazy } from 'react';
 import type { GameFormViewProps } from './game-form-view.js';
 import type { GameSectionViewProps } from './game-section-view.js';
-import { MinecraftResponseSettings } from './integration-game-settings.js';
+import { MinecraftModSettings, MinecraftResponseSettings } from './integration-game-settings.js';
 
 const MinecraftSettingsForm = lazy(() =>
   import('../integrations/minecraft/settings.js').then((module) => ({
@@ -118,6 +118,12 @@ export function getGameAdminSections(gameId: string) {
 }
 export function getGameConnectionAdmin(gameId: string) {
   return ownerConnectionComponents.get(gameId);
+}
+const ownerContentComponents = new Map([
+  [minecraftUiModule.descriptor.gameId, MinecraftModSettings],
+]);
+export function getGameContentAdmin(gameId: string) {
+  return ownerContentComponents.get(gameId);
 }
 
 const MinecraftPlayersSection = lazy(() =>

@@ -74,9 +74,24 @@ its own explanation and remains an explicit version choice. A failed supplementa
 catalog read does not replace a known incompatibility with a generic failure.
 
 Review links to dependency details and the selected parent's version picker. Find
-alternative checks at most five candidate versions from a bounded catalog lookup,
-using the existing resolver against the selected roots of that provider. Shared
-raw metadata is reused across candidates. A suggested version changes nothing
+alternative stops at the first dependency-resolved candidate, or after 25 attempts
+by default. Owner → Integrations → Minecraft → Content configures this budget
+(`minecraftModAlternativeLimit`, integer 1–250); the optional environment override
+is `NH_MINECRAFT_MOD_ALTERNATIVE_LIMIT`. Existing installations inherit 25 without
+a migration. Changed limits invalidate cached alternatives on the server and in
+the Owner's browser.
+
+Catalog pages are read progressively using the existing resolver against the
+selected roots of that provider. Shared raw metadata is reused across pages and
+candidates; a successful candidate prevents further page/resolution requests.
+Current pins, duplicates, unavailable, incompatible and alpha files do not consume
+resolution attempts. Stable releases take priority unless beta preference is on;
+deferred beta candidates are considered after the catalog has been exhausted.
+Metadata scanning is bounded to the larger of three pages or the configured
+attempt budget rounded up to pages of 20. Sparse catalogs and the existing
+30-second deadline can therefore produce a partial result before all attempts
+are used, without claiming an exhaustive negative or returning a timeout as HTTP500.
+A suggested version changes nothing
 until the user chooses it; normal preparation and final installed/cross-provider
 dependency checks still apply. This is a catalog dependency suggestion, not a
 gameplay certification or a complete dependency solver. An exhausted search budget

@@ -1,6 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { AxeBuilder } from '@axe-core/playwright';
+import { resolveConfig, resolveContentPolicy } from '@nickhosting/core';
 import {
   type Browser,
   type BrowserContext,
@@ -306,5 +307,37 @@ describe('Owner integration workspace (real components, isolated API responses)'
           .analyze()
       ).violations,
     ).toEqual([]);
+  });
+  it('places Minecraft mod alternative settings in its Content tab only', async () => {
+    await page.route('**/v1/owner/integrations/*/content-policy', (route) =>
+      route.fulfill({
+        json: {
+          policy: {},
+          effective: resolveContentPolicy(resolveConfig(), 'minecraft'),
+          locked: false,
+        },
+      }),
+    );
+    await page.goto(`${origin}owner/integrations/minecraft/content`);
+    await check(page.getByRole('heading', { name: 'Mod alternatives', exact: true })).toBeVisible();
+    await check(page.getByLabel('Maximum versions to check', { exact: true })).toHaveValue('25');
+    await check(page.getByRole('heading', { name: 'Content limits', exact: true })).toBeVisible();
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/integration-mod-alternatives-workspace-en.png',
+      fullPage: true,
+    });
+    expect(
+      (
+        await new AxeBuilder({ page })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+    await page.goto(`${origin}owner/integrations/fixture-game/content`);
+    await check(page.getByRole('heading', { name: 'Content limits', exact: true })).toBeVisible();
+    await check(page.getByRole('heading', { name: 'Mod alternatives', exact: true })).toHaveCount(
+      0,
+    );
+    expect(writes).toHaveLength(0);
   });
 });

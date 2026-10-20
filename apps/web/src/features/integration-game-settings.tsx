@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { ApiError, api } from '../api/client.js';
+import { ApiError, api, queryClient } from '../api/client.js';
 import { useT } from '../app/i18n.js';
 import {
   ActionForm,
@@ -237,5 +237,50 @@ export function MinecraftProtocolSettings({ embedded = false }: { embedded?: boo
       <summary>{t('integrationConfig.protocolSource')}</summary>
       {form}
     </details>
+  );
+}
+
+export function MinecraftModSettings() {
+  const t = useT(),
+    settings = useSettings();
+  const setting = 'minecraftModAlternativeLimit';
+  const locked = settings.data?.config.lockedKeys.includes(setting) ?? false;
+  return (
+    <Section title={t('integrationConfig.modAlternatives')}>
+      {settings.isPending ? (
+        <Loading />
+      ) : settings.error ? (
+        <ErrorNotice error={settings.error} retry={() => void settings.refetch()} />
+      ) : (
+        <fieldset disabled={locked}>
+          {locked && <Notice>{t('owner.environmentLocked')}</Notice>}
+          <ActionForm
+            key={String(settings.data.config.values[setting])}
+            onSubmit={async (form) => {
+              await api('/v1/owner/settings', {
+                method: 'PATCH',
+                body: { [setting]: Number(form.get(setting)) },
+              });
+              await queryClient.invalidateQueries({ queryKey: ['minecraft-mod-alternatives'] });
+              await settings.refetch();
+            }}
+          >
+            <div className="integration-settings-grid">
+              <Input
+                label={t('integrationConfig.modAlternativeLimit')}
+                name={setting}
+                type="number"
+                min={1}
+                max={250}
+                step={1}
+                required
+                defaultValue={Number(settings.data.config.values[setting] ?? 25)}
+              />
+            </div>
+            <small className="muted">{t('integrationConfig.modAlternativeHint')}</small>
+          </ActionForm>
+        </fieldset>
+      )}
+    </Section>
   );
 }

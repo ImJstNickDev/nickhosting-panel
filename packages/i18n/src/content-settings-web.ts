@@ -26,6 +26,19 @@ export const contentSettingsWebMessages: Record<string, readonly [string, string
     'Overrides can only restrict the platform list. An empty override blocks all configured origins.',
     'Gli override possono solo restringere l’elenco della piattaforma. Un override vuoto blocca tutte le origini configurate.',
   ],
+  'integrationConfig.modAlternatives': ['Mod alternatives', 'Alternative delle mod'],
+  'integrationConfig.modAlternativeLimit': [
+    'Maximum versions to check',
+    'Versioni massime da controllare',
+  ],
+  'integrationConfig.modAlternativeHint': [
+    'Stops at the first version with resolved dependencies.',
+    'Si ferma alla prima versione con dipendenze risolte.',
+  ],
+  'owner.config.minecraftModAlternativeLimit': [
+    'Minecraft mod alternative search limit',
+    'Limite ricerca alternative mod Minecraft',
+  ],
   'integrationConfig.messages': ['Gateway messages', 'Messaggi Gateway'],
   'integrationConfig.response': ['Response', 'Risposta'],
   'integrationConfig.motd': ['Server list', 'Lista server'],

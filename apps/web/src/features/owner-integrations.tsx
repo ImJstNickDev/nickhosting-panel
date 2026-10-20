@@ -22,7 +22,12 @@ import {
 import { IntegrationWakeSettings } from './auto-wake-policy.js';
 import { IntegrationContentPolicy } from './integration-content-policy.js';
 import { IntegrationRuntimeMappings } from './integration-runtime-mappings.js';
-import { getGameAdminSections, getGameArtwork, getGameConnectionAdmin } from './integrations.js';
+import {
+  getGameAdminSections,
+  getGameArtwork,
+  getGameConnectionAdmin,
+  getGameContentAdmin,
+} from './integrations.js';
 import { IntegrationConnectionSettings } from './owner-domains.js';
 import { IntegrationSleepSettings } from './sleep-timeout.js';
 import './owner-integrations.css';
@@ -117,7 +122,8 @@ function IntegrationWorkspace({ module, section }: { module: Module; section: st
   const gameId = module.id,
     base = `/owner/integrations/${encodeURIComponent(gameId)}`;
   const contributed = useMemo(() => getGameAdminSections(gameId), [gameId]),
-    Connection = getGameConnectionAdmin(gameId);
+    Connection = getGameConnectionAdmin(gameId),
+    Content = getGameContentAdmin(gameId);
   const [visited, setVisited] = useState<string[]>([]);
   const navigation = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -201,7 +207,12 @@ function IntegrationWorkspace({ module, section }: { module: Module; section: st
             />
           </Section>
         )}
-        {section === 'content' && <IntegrationContentPolicy gameId={gameId} />}
+        {section === 'content' && (
+          <div className="stack">
+            {Content && <Content />}
+            <IntegrationContentPolicy gameId={gameId} />
+          </div>
+        )}
         {active && (
           <Suspense fallback={<Loading />}>
             <active.Component />

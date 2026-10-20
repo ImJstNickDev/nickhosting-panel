@@ -18,6 +18,34 @@ import {
 } from './index.js';
 
 describe('typed configuration', () => {
+  it('resolves the Minecraft alternative search limit with Owner/env precedence and bounded integers', () => {
+    expect(resolveConfig().values.minecraftModAlternativeLimit).toBe(25);
+    expect(
+      resolveConfig({ minecraftModAlternativeLimit: 50 }).values.minecraftModAlternativeLimit,
+    ).toBe(50);
+    const configured = resolveConfig(
+      { minecraftModAlternativeLimit: 50 },
+      { NH_MINECRAFT_MOD_ALTERNATIVE_LIMIT: '100' },
+    );
+    expect(configured.values.minecraftModAlternativeLimit).toBe(100);
+    expect(configured.lockedKeys).toContain('minecraftModAlternativeLimit');
+    expect(() => assertConfigWritable({ minecraftModAlternativeLimit: 25 }, configured)).toThrow();
+    for (const value of [0, 251, 1.5, -1]) {
+      expect(() => resolveConfig({ minecraftModAlternativeLimit: value })).toThrow(
+        'configuration_invalid',
+      );
+      expect(() =>
+        resolveConfig({}, { NH_MINECRAFT_MOD_ALTERNATIVE_LIMIT: String(value) }),
+      ).toThrow('configuration_invalid');
+    }
+    expect(
+      resolveConfig({ minecraftModAlternativeLimit: 1 }).values.minecraftModAlternativeLimit,
+    ).toBe(1);
+    expect(
+      resolveConfig({ minecraftModAlternativeLimit: 250 }).values.minecraftModAlternativeLimit,
+    ).toBe(250);
+  });
+
   it('normalizes historical Minecraft sleep settings and rejects ambiguous overrides', () => {
     const policy = { gameTimeoutSeconds: 600, runtimeTimeouts: { vanilla: 120 } };
     expect(

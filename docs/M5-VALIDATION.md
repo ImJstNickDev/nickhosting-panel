@@ -14893,3 +14893,39 @@ errors, HTTPS200 and WSS HMR confirmed. No real downloads, installations, manual
 service restart, migration or Panel/Wings/Blueprint changes. Only isolated fixture
 state is used by automated tests. Source-revert rollback preserves all data;
 PR21 stays open and unmerged.
+
+## Configurable first-match Mods alternatives — 2026-10-20
+
+Find alternative now traverses catalog pages progressively and stops at the first
+dependency-resolved candidate. The default budget is 25 resolutions, configurable
+from Owner → Integrations → Minecraft → Content (integer 1–250, standard protected
+settings and optional environment precedence). No migration is needed. The search
+reuses one metadata memo, retains stable/beta preferences, reports sparse-catalog
+or deadline truncation honestly, and includes the budget in its server cache key.
+Saving the setting also invalidates the browser's alternative-query cache.
+
+Validation: 20 advice tests (first-hit, second-page hit, limits2/25/65, memo reuse,
+duplicates, stable/beta, exclusions, exhausted catalog and deadline), 9 isolated
+HTTP tests including Owner budget changes/cache invalidation, and 51 core config
+tests pass. UI tests cover EN/IT, saving, validation, environment lock and cached
+advice invalidation; a focused workspace test confirms the Minecraft-only Content
+contribution. Root/web/test TypeScript, focused Biome and localization pass.
+Independent review found and resolved the frontend-cache invalidation gap.
+The initial wider workspace run also exposed two existing fixture mismatches
+(old Detect versions button text and missing auto-wake-policy mock); those
+unrelated scenarios were not changed or claimed as passing.
+
+Read-only real-dev Firefox verification returns HTTPS200/alternatives200 and a
+first-match JEI suggestion after two resolutions, with unchanged draft and no
+browser errors; WSS HMR is connected. This verifies provider metadata only, not
+artifact/gameplay compatibility. No selection writes, downloads, installations,
+manual restarts, migrations or Panel/Wings/Blueprint changes. All eleven dev
+services remain healthy. Only isolated test fixtures were created and cleaned by
+their harness. Screenshots: [desktop form](screenshots/m5/integration-mod-alternatives-en-desktop.png),
+[Italian mobile form](screenshots/m5/integration-mod-alternatives-it-mobile.png),
+[Owner workspace](screenshots/m5/integration-mod-alternatives-workspace-en.png).
+Rollback: revert this source change; if the Owner has saved the new setting,
+retain a private preimage and remove only `minecraftModAlternativeLimit` from
+`platform_settings.value` (and its environment override, if set) before reverting,
+so the old strict schema accepts the configuration. Retain all other settings/data.
+PR21 stays open and unmerged.

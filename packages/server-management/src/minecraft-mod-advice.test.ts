@@ -149,6 +149,7 @@ describe('bounded read-only Mods advice', () => {
       projectId: 'mod',
       roots,
       revision: 3,
+      maxVersions: 25,
       target,
       preferBeta: false,
     });
@@ -202,10 +203,148 @@ describe('bounded read-only Mods advice', () => {
       projectId: 'mod',
       roots: [{ projectId: 'mod', optionalProjectIds: [], forceIncompatible: false }],
       revision: 1,
+      maxVersions: 5,
       target,
       preferBeta: false,
     });
     expect(result).toMatchObject({ checked: 5, items: [], limited: true });
     expect(provider.resolveMods).toHaveBeenCalledTimes(5);
+  });
+
+  const roots = [{ projectId: 'mod', optionalProjectIds: [], forceIncompatible: false }];
+  const alternatives = (provider: ModAdviceProvider, extra = {}) =>
+    modAlternativeAdvice({
+      provider,
+      name: 'modrinth',
+      projectId: 'mod',
+      roots,
+      revision: 1,
+      maxVersions: 25,
+      target,
+      preferBeta: false,
+      ...extra,
+    });
+  const blocked = { catalog: { blocked: [{ reason: 'conflict' }] } } as ResolvedMods;
+  const accepted = { catalog: { blocked: [] } } as unknown as ResolvedMods;
+  const releases = (count: number) =>
+    Array.from({ length: count }, (_, i) =>
+      version(`v${i + 1}`, 20, {
+        publishedAt: new Date(Date.UTC(2026, 9, 20) - i * 60_000).toISOString(),
+      }),
+    );
+
+  it('continues to the next page and stops at the first valid alternative', async () => {
+    const { provider } = fixture(releases(80));
+    provider.resolveMods.mockImplementation(async ([root]) =>
+      root?.versionId === 'v21' ? accepted : blocked,
+    );
+    const result = await alternatives(provider);
+    expect(result).toMatchObject({ checked: 21, items: [{ id: 'v21' }], limited: false });
+    expect(provider.modVersions.mock.calls.map(([, input]) => input.offset)).toEqual([0, 20]);
+    expect(provider.resolveMods).toHaveBeenCalledTimes(21);
+    const memo = provider.modVersions.mock.calls[0]?.[1].metadataMemo;
+    expect(memo).toBeDefined();
+    expect(provider.modVersions.mock.calls[1]?.[1].metadataMemo).toBe(memo);
+    expect(
+      provider.resolveMods.mock.calls.every(([, , options]) => options?.metadataMemo === memo),
+    ).toBe(true);
+  });
+
+  it('does not fetch another page after an early hit', async () => {
+    const { provider } = fixture(releases(80));
+    provider.resolveMods.mockResolvedValueOnce(blocked).mockResolvedValueOnce(blocked);
+    expect(await alternatives(provider)).toMatchObject({ checked: 3, items: [{ id: 'v3' }] });
+    expect(provider.modVersions).toHaveBeenCalledTimes(1);
+    expect(provider.resolveMods).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([2, 25, 65])(
+    'respects the configured limit of %i without an extra resolution',
+    async (maxVersions) => {
+      const { provider } = fixture(releases(80));
+      provider.resolveMods.mockResolvedValue(blocked);
+      expect(await alternatives(provider, { maxVersions })).toMatchObject({
+        checked: maxVersions,
+        items: [],
+        limited: true,
+      });
+      expect(provider.resolveMods).toHaveBeenCalledTimes(maxVersions);
+      expect(provider.modVersions).toHaveBeenCalledTimes(Math.ceil(maxVersions / 20));
+    },
+  );
+
+  it('prefers a stable on a later page to a newer beta unless beta preference is enabled', async () => {
+    const items = [
+      ...releases(20).map((item) => ({ ...item, channel: 'beta' as const })),
+      version('stable', 1),
+    ];
+    const { provider } = fixture(items);
+    expect(await alternatives(provider)).toMatchObject({ checked: 1, items: [{ id: 'stable' }] });
+    expect(provider.modVersions).toHaveBeenCalledTimes(2);
+    const beta = fixture(items);
+    expect(await alternatives(beta.provider, { preferBeta: true })).toMatchObject({
+      checked: 1,
+      items: [{ id: 'v1' }],
+    });
+    expect(beta.provider.modVersions).toHaveBeenCalledTimes(1);
+  });
+
+  it('only falls back to beta once the catalog is exhausted', async () => {
+    const items = releases(80).map((item) => ({ ...item, channel: 'beta' as const }));
+    const { provider } = fixture(items);
+    expect(await alternatives(provider)).toMatchObject({ checked: 0, items: [], limited: true });
+    expect(provider.modVersions).toHaveBeenCalledTimes(3);
+    expect(provider.resolveMods).not.toHaveBeenCalled();
+    const short = fixture(items.slice(0, 2));
+    expect(await alternatives(short.provider)).toMatchObject({ checked: 1, items: [{ id: 'v1' }] });
+  });
+
+  it('skips duplicates, current, alpha, incompatible and unavailable files without consuming attempts', async () => {
+    const items = [
+      version('pinned', 20),
+      version('alpha', 19, { channel: 'alpha' }),
+      version('denied', 18, { available: false }),
+      version('client', 17, { compatibility: ['client-only'] }),
+      version('blocked', 16),
+      version('blocked', 16),
+      version('ok', 15),
+    ];
+    const { provider } = fixture(items);
+    provider.resolveMods.mockResolvedValueOnce(blocked);
+    expect(
+      await alternatives(provider, {
+        maxVersions: 2,
+        roots: [{ ...roots[0], versionId: 'pinned' }],
+      }),
+    ).toMatchObject({ checked: 2, items: [{ id: 'ok' }] });
+    expect(provider.resolveMods.mock.calls.map(([items]) => items[0]?.versionId)).toEqual([
+      'blocked',
+      'ok',
+    ]);
+  });
+
+  it('reports a complete negative at the exact limit when the catalog is exhausted', async () => {
+    const { provider } = fixture(releases(25));
+    provider.resolveMods.mockResolvedValue(blocked);
+    expect(await alternatives(provider)).toMatchObject({ checked: 25, items: [], limited: false });
+  });
+
+  it('retains completed attempts as a partial result on deadline, without hiding other failures', async () => {
+    const { provider } = fixture(releases(30));
+    const abort = new AbortController();
+    provider.resolveMods.mockResolvedValueOnce(blocked).mockImplementationOnce(async () => {
+      abort.abort();
+      abort.signal.throwIfAborted();
+      return accepted;
+    });
+    expect(await alternatives(provider, { signal: abort.signal })).toMatchObject({
+      checked: 1,
+      items: [],
+      limited: true,
+    });
+    expect(provider.resolveMods).toHaveBeenCalledTimes(2);
+    const failing = fixture(releases(2));
+    failing.provider.resolveMods.mockRejectedValue(new Error('provider failure'));
+    await expect(alternatives(failing.provider)).rejects.toThrow('provider failure');
   });
 });

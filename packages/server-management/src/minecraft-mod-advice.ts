@@ -137,36 +137,29 @@ export async function modAlternativeAdvice(input: {
   projectId: string;
   roots: ModSelection[];
   revision: number;
+  maxVersions: number;
   target: ContentTarget;
   preferBeta: boolean;
   signal?: AbortSignal;
 }): Promise<MinecraftModAlternatives> {
   const metadataMemo = createModMetadataMemo();
-  const page = await modAdviceVersions(
-    input.provider,
-    input.projectId,
-    input.target,
-    input.preferBeta,
-    input.signal,
-    metadataMemo,
-  );
   const root = input.roots.find((item) => item.projectId === input.projectId);
-  const ordered = page.versions
-    .filter(
-      (item) =>
-        item.id !== root?.versionId &&
-        item.available &&
-        !item.compatibility.length &&
-        item.channel !== 'alpha',
-    )
-    .sort(
-      (a, b) =>
-        (!input.preferBeta
-          ? Number(b.channel === 'release') - Number(a.channel === 'release')
-          : 0) || b.publishedAt.localeCompare(a.publishedAt),
-    );
+  const seen = new Set<string>();
+  const deferredBeta: ModCatalogVersion[] = [];
+  // Sparse/alpha-only catalogs must not cause unlimited metadata requests just
+  // to fill the resolution budget. Keep at least the existing three-page window.
+  const scanLimit = Math.max(60, Math.ceil(input.maxVersions / 20) * 20);
+  let complete = false;
   let checked = 0;
-  for (const version of ordered.slice(0, 5)) {
+  const result = (items: ModCatalogVersion[], limited: boolean): MinecraftModAlternatives => ({
+    revision: input.revision,
+    provider: input.name,
+    projectId: input.projectId,
+    items,
+    checked,
+    limited,
+  });
+  async function check(version: ModCatalogVersion) {
     input.signal?.throwIfAborted();
     const roots = input.roots.map((item) =>
       item.projectId === input.projectId
@@ -179,22 +172,51 @@ export async function modAlternativeAdvice(input: {
       metadataMemo,
     });
     checked++;
-    if (!resolved.catalog.blocked.length)
-      return {
-        revision: input.revision,
-        provider: input.name,
-        projectId: input.projectId,
-        items: [version],
-        checked,
-        limited: !page.complete,
-      };
+    return !resolved.catalog.blocked.length;
   }
-  return {
-    revision: input.revision,
-    provider: input.name,
-    projectId: input.projectId,
-    items: [],
-    checked,
-    limited: !page.complete || ordered.length > checked,
-  };
+  try {
+    for (let offset = 0; offset < scanLimit; offset += 20) {
+      input.signal?.throwIfAborted();
+      const page = await input.provider.modVersions(input.projectId, {
+        target: input.target,
+        offset,
+        preferBeta: input.preferBeta,
+        signal: input.signal,
+        metadataMemo,
+      });
+      complete = offset + page.items.length >= page.total || page.items.length === 0;
+      const ordered = [...page.items].sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
+      for (const version of ordered) {
+        if (seen.has(version.id)) continue;
+        seen.add(version.id);
+        if (
+          version.id === root?.versionId ||
+          !version.available ||
+          version.compatibility.length ||
+          version.channel === 'alpha'
+        )
+          continue;
+        if (!input.preferBeta && version.channel === 'beta') {
+          deferredBeta.push(version);
+          continue;
+        }
+        if (checked >= input.maxVersions) return result([], true);
+        if (await check(version)) return result([version], false);
+      }
+      if (complete) break;
+      if (checked >= input.maxVersions) return result([], true);
+    }
+    // A truncated catalog cannot establish that no stable alternative exists.
+    if (!complete) return result([], true);
+    for (const version of deferredBeta.sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))) {
+      if (checked >= input.maxVersions) return result([], true);
+      if (await check(version)) return result([version], false);
+    }
+    return result([], false);
+  } catch (error) {
+    // A bounded search may hit its deadline before its attempt budget. Keep an
+    // honest partial negative result instead of turning a timeout into HTTP500.
+    if (input.signal?.aborted) return result([], true);
+    throw error;
+  }
 }

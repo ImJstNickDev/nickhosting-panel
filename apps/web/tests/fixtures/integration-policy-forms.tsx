@@ -4,7 +4,10 @@ import { BrowserRouter } from 'react-router';
 import { queryClient } from '../../src/api/client.js';
 import { LocaleProvider } from '../../src/app/i18n.js';
 import { IntegrationContentPolicy } from '../../src/features/integration-content-policy.js';
-import { MinecraftResponseSettings } from '../../src/features/integration-game-settings.js';
+import {
+  MinecraftModSettings,
+  MinecraftResponseSettings,
+} from '../../src/features/integration-game-settings.js';
 import '../../src/app/style.css';
 import '../../src/features/owner-integrations.css';
 
@@ -18,7 +21,9 @@ createRoot(root).render(
           className="owner-integration-body"
           style={{ padding: 24, maxWidth: 960, margin: 'auto' }}
         >
-          {location.pathname.endsWith('content') ? (
+          {location.pathname.endsWith('mods') ? (
+            <MinecraftModSettings />
+          ) : location.pathname.endsWith('content') ? (
             <IntegrationContentPolicy gameId="minecraft" />
           ) : (
             <MinecraftResponseSettings />

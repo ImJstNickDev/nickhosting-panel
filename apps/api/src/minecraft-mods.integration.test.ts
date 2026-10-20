@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { ContentHttp } from '@nickhosting/content-providers';
 import { authSessionId, DomainError, SecretCodec } from '@nickhosting/core';
-import { storeSecret } from '@nickhosting/database';
+import { storeSecret, updateSettings } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import { createManagementRuntime } from '@nickhosting/server-management';
@@ -299,6 +299,78 @@ describe('Mods HTTP catalog and mutation boundaries', () => {
       ).toEqual([]);
     },
   );
+
+  it('honors the Owner alternative limit and invalidates advice when that limit changes', async () => {
+    const selected = {
+      roots: [
+        {
+          provider: 'modrinth',
+          projectId: 'testmod',
+          forceIncompatible: false,
+          optionalProjectIds: [],
+        },
+      ],
+      preferBeta: false,
+      idempotencyKey: randomUUID(),
+    };
+    await database.db
+      .insertInto('minecraft_mod_drafts')
+      .values({
+        server_id: serverId,
+        revision: 1,
+        actor_user_id: actor.actorUserId,
+        state: 'ready',
+        selection: JSON.stringify(selected),
+        blockers: '[]',
+        optional: '[]',
+        error: null,
+      })
+      .execute();
+    json.mockImplementation(async (input) => {
+      const path = new URL(input).pathname;
+      if (path.endsWith('/project/testmod/version'))
+        return [
+          {
+            ...version,
+            dependencies: [
+              { project_id: 'missing', version_id: null, dependency_type: 'required' },
+            ],
+          },
+          { ...version, id: 'older', date_published: '2026-10-01T00:00:00Z' },
+        ];
+      if (path.endsWith('/project/testmod')) return project;
+      if (path.endsWith('/project/missing')) return { ...project, id: 'missing', slug: 'missing' };
+      if (path.endsWith('/project/missing/version')) return [];
+      throw new Error(`Unexpected fixture provider URL: ${path}`);
+    });
+    await updateSettings(database.db, fixture.owner, { minecraftModAlternativeLimit: 1 }, env);
+    const url = `${base()}/alternatives/modrinth/testmod?revision=1`;
+    const limited = await app.request(url);
+    expect(limited.status).toBe(200);
+    expect(await limited.json()).toMatchObject({ checked: 1, items: [], limited: true });
+    const requestCount = json.mock.calls.length;
+    await updateSettings(database.db, fixture.owner, { minecraftModAlternativeLimit: 2 }, env);
+    const expanded = await app.request(url);
+    expect(expanded.status).toBe(200);
+    expect(await expanded.json()).toMatchObject({
+      checked: 2,
+      items: [{ id: 'older' }],
+      limited: false,
+    });
+    expect(json.mock.calls.length).toBeGreaterThan(requestCount);
+    const expandedCount = json.mock.calls.length;
+    expect((await app.request(url)).status).toBe(200);
+    expect(json).toHaveBeenCalledTimes(expandedCount);
+    expect(providerRead).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
+    const current = await database.db
+      .selectFrom('minecraft_mod_drafts')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    expect(current.selection).toEqual(selected);
+    expect(current.revision).toBe(1);
+  });
 
   it('serves updates without Wings reads and protects cached advice after session revocation', async () => {
     await database.db

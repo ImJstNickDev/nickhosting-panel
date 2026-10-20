@@ -181,6 +181,7 @@ export function OwnerSettingsPage() {
                     'gameContentPolicies',
                     'minecraftGatewayResponses',
                     'minecraftProtocolSource',
+                    'minecraftModAlternativeLimit',
                   ].includes(key),
               )
               .map(([key, definition]) => (

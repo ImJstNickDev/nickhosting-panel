@@ -16,6 +16,7 @@ describe('integration policy forms (real React, isolated API responses)', () => 
   let vite: ViteDevServer, browser: Browser, context: BrowserContext, page: Page, origin: string;
   let policy: ContentPolicyOverride,
     locked: boolean,
+    alternativeLimit: number,
     messages: Record<string, unknown>,
     writes: Record<string, unknown>[];
   beforeAll(async () => {
@@ -39,6 +40,7 @@ describe('integration policy forms (real React, isolated API responses)', () => 
   beforeEach(async () => {
     policy = {};
     locked = false;
+    alternativeLimit = 25;
     messages = { motd: { waking: { en: 'Starting', it: 'Avvio' } } };
     writes = [];
     context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
@@ -58,6 +60,8 @@ describe('integration policy forms (real React, isolated API responses)', () => 
         const body = route.request().postDataJSON();
         writes.push(body);
         if (path.endsWith('/content-policy')) policy = body;
+        else if ('minecraftModAlternativeLimit' in body)
+          alternativeLimit = body.minecraftModAlternativeLimit;
         else messages = body.minecraftGatewayResponses;
       }
       if (path.endsWith('/content-policy')) {
@@ -72,8 +76,11 @@ describe('integration policy forms (real React, isolated API responses)', () => 
       return route.fulfill({
         json: {
           config: {
-            values: { minecraftGatewayResponses: messages },
-            lockedKeys: locked ? ['minecraftGatewayResponses'] : [],
+            values: {
+              minecraftGatewayResponses: messages,
+              minecraftModAlternativeLimit: alternativeLimit,
+            },
+            lockedKeys: locked ? ['minecraftGatewayResponses', 'minecraftModAlternativeLimit'] : [],
           },
         },
       });
@@ -168,5 +175,55 @@ describe('integration policy forms (real React, isolated API responses)', () => 
       path: '.codex/local/m5-browser/screenshots/integration-content-mobile-it.png',
       fullPage: true,
     });
+  });
+  it.each(['en', 'it'] as const)(
+    'saves the bounded Minecraft alternative search setting (%s)',
+    async (locale) => {
+      await page.addInitScript((value) => localStorage.setItem('nh.locale', value), locale);
+      if (locale === 'it') await page.setViewportSize({ width: 390, height: 844 });
+      await page.goto(`${origin}policy-forms/mods`);
+      const field = page.getByRole('spinbutton');
+      await check(field).toHaveValue('25');
+      await check(field).toHaveAttribute('min', '1');
+      await check(field).toHaveAttribute('max', '250');
+      await page.evaluate(
+        "import('/src/api/client.ts').then(({ queryClient }) => queryClient.setQueryData(['minecraft-mod-alternatives', 'fixture'], { items: [] }))",
+      );
+      await field.fill('0');
+      await page.getByRole('button').click();
+      expect(writes).toHaveLength(0);
+      await field.fill('50');
+      await field.press('Enter');
+      await check.poll(() => alternativeLimit).toBe(50);
+      expect(writes).toEqual([{ minecraftModAlternativeLimit: 50 }]);
+      await check(field).toHaveValue('50');
+      expect(
+        await page.evaluate(
+          "import('/src/api/client.ts').then(({ queryClient }) => queryClient.getQueryState(['minecraft-mod-alternatives', 'fixture'])?.isInvalidated)",
+        ),
+      ).toBe(true);
+      await page.mouse.click(5, 5);
+      await page.screenshot({
+        path: `.codex/local/m5-browser/screenshots/integration-mod-alternatives-${locale}.png`,
+        fullPage: true,
+      });
+      expect(
+        (
+          await new AxeBuilder({ page })
+            .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+            .analyze()
+        ).violations,
+      ).toEqual([]);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+    },
+  );
+  it('honors the environment lock for Minecraft mod alternative limits', async () => {
+    locked = true;
+    await page.goto(`${origin}policy-forms/mods`);
+    await check(page.getByRole('spinbutton')).toBeDisabled();
+    await check(page.getByRole('button', { name: 'Save changes', exact: true })).toBeDisabled();
+    expect(writes).toEqual([]);
   });
 });

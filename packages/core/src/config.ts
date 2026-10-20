@@ -185,6 +185,7 @@ export const platformConfigSchema = z
     contentSourceFreePercent: z.number().min(0).max(95),
     contentWorkRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
     contentDownloadOrigins: z.array(origin(['https:'])).max(100),
+    minecraftModAlternativeLimit: z.number().int().min(1).max(250),
     minecraftGatewayResponses: minecraftGatewayResponsesSchema.optional(),
     minecraftProtocolSource: z
       .object({
@@ -273,6 +274,7 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   fileOperationsRoot: './mountdata/file-operations',
   // Keep historical storage locations: existing files and in-flight jobs must not move.
   gameContentPolicies: {},
+  minecraftModAlternativeLimit: 25,
   contentWorkRoot: './mountdata/minecraft-content',
   contentSourceRoot: './mountdata/minecraft-sources',
   contentSourceGlobalBytes: 20 * 1024 ** 3,
@@ -353,6 +355,7 @@ export const configEnvironmentKeys = {
   contentSourceFreeBytes: 'NH_CONTENT_SOURCE_FREE_BYTES',
   contentSourceFreePercent: 'NH_CONTENT_SOURCE_FREE_PERCENT',
   contentDownloadOrigins: 'NH_CONTENT_DOWNLOAD_ORIGINS',
+  minecraftModAlternativeLimit: 'NH_MINECRAFT_MOD_ALTERNATIVE_LIMIT',
   minecraftProtocolSource: 'NH_MINECRAFT_PROTOCOL_SOURCE',
   minecraftGatewayResponses: 'NH_MINECRAFT_GATEWAY_RESPONSES',
   gatewayDiagnosticsSocket: 'NH_GATEWAY_DIAGNOSTICS_SOCKET',
@@ -401,6 +404,7 @@ const numericKeys = new Set<PlatformConfigKey>([
   'contentSourceUserConcurrent',
   'contentSourceFreeBytes',
   'contentSourceFreePercent',
+  'minecraftModAlternativeLimit',
 ]);
 
 function invalid(fields: string[]): never {

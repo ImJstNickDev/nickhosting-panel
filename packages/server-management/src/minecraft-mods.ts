@@ -10,7 +10,7 @@ import {
   ModrinthProvider,
 } from '@nickhosting/content-providers';
 import { type AuthContext, DomainError } from '@nickhosting/core';
-import { type Database, recordAudit } from '@nickhosting/database';
+import { type Database, getSettings, recordAudit } from '@nickhosting/database';
 import type { FilemanEntry, FilemanReadService } from '@nickhosting/game-sdk';
 import { isUploadNotDispatched, isUploadNotPublished } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, type Selectable, sql } from 'kysely';
@@ -1289,7 +1289,12 @@ export function createMinecraftModsService(options: {
       revision: number,
     ): Promise<MinecraftModAlternatives> {
       await authorized(context, serverId);
-      const [info, current] = await Promise.all([profile(db, serverId), draft(db, serverId)]);
+      const [info, current, config] = await Promise.all([
+        profile(db, serverId),
+        draft(db, serverId),
+        getSettings(db, env),
+      ]);
+      const maxVersions = config.values.minecraftModAlternativeLimit;
       if (!info.supported || !info.installed) throw new DomainError('integration_unavailable');
       if (!current || current.revision !== revision) throw new DomainError('conflict');
       const selection = parse(minecraftModSelectionSchema, current.selection);
@@ -1299,7 +1304,16 @@ export function createMinecraftModsService(options: {
       if (!roots.some((root) => root.projectId === projectId)) throw new DomainError('not_found');
       return cachedAdvice(
         db,
-        digest(['alternatives', serverId, info.target, revision, name, projectId, selection]),
+        digest([
+          'alternatives-v2',
+          serverId,
+          info.target,
+          revision,
+          name,
+          projectId,
+          selection,
+          maxVersions,
+        ]),
         () =>
           modAlternativeAdvice({
             provider: provider(name),
@@ -1307,6 +1321,7 @@ export function createMinecraftModsService(options: {
             projectId,
             roots,
             revision,
+            maxVersions,
             target: info.target,
             preferBeta: selection.preferBeta,
             signal: AbortSignal.timeout(30_000),
