@@ -1868,14 +1868,22 @@ its image, identity, mounts, networks and data. No dependency, migration or
 Blueprint update was needed. The original queued world import resumed from its
 cached download and uploaded/extracted its archive. The extension subsequently
 returned an uncertain receipt during tree verification, before publication.
-A later read-only verification passed for all 853 files and 104 directories;
-publication and administrative receipt recovery remain pending explicit Owner
-approval. The initial verification exception was not retained by the extension,
-so its precise cause is not established.
+A later read-only verification passed for all 853 files and 104 directories.
+The Owner then explicitly approved the scoped recovery. After a fresh dry run,
+the existing worker was stopped briefly, the verified world was renamed into
+place through Wings, only this operation's temporary staging/archive was removed,
+and its single Blueprint receipt was confirmed. The same worker resumed normal
+recovery: the original job succeeded, its upload claim was settled, and the
+server's active operation was cleared. Authenticated Worlds and Fileman reads
+return the published world. No re-download, re-extraction or game power action
+was performed. The initial verification exception was not retained by the
+extension, so its precise cause is still not established.
 
 No Panel/Wings code, permissions, scheduler or Compose configuration was changed.
-The independently observed Panel daily-log ownership problem remains a separate,
-unapplied proposal. Keep the cached source, staged world and durable receipts.
+All eleven development services are healthy; Panel/Wings container identities
+and start times are unchanged. The independently observed Panel daily-log
+ownership problem remains a separate, unapplied proposal. Keep the cached source,
+published world, durable receipts and original storage-migration copies.
 Rollback is a NickHosting code revert plus a scoped development worker restart;
 never reset an uncertain operation, repeat extraction or delete staged game data
 as part of code rollback.

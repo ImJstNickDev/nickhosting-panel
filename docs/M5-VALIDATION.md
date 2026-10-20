@@ -14766,12 +14766,21 @@ activation, M6 work, DNS or Blueprint change. PR #21 stays open and unmerged.
   but the extension's initial tree verification produced an uncertain receipt
   before publication. Later independent filesystem comparison and the extension's
   own read-only verification confirmed all 853 files / 104 directories. The original
-  exception is not recorded; its cause remains unproven. This is **not** evidence
-  of a completed import or successful Worlds UI refresh.
-- A private dry-run recovery proposal verifies the exact server, operation,
-  fingerprint, staging tree and absent destination. Its rename, temporary-stage
-  cleanup and single receipt update have **not** been executed; they require
-  explicit Owner approval. No Panel/Wings configuration, code, permission or
-  scheduler changes occurred. No new test server, power operation, production
-  deployment or historical-data cleanup. Existing staging/source data is retained.
-  PR #21 remains open/unmerged; rollback preserves all receipts and game data.
+  exception is not recorded; its cause remains unproven.
+- The Owner explicitly approved the independently reviewed recovery. A fresh dry
+  run verified the exact server, operation, fingerprint, staging tree and absent
+  destination. With only the existing dev worker briefly stopped, the recovery
+  published the already extracted world using Wings rename, removed only the
+  operation's temporary stage/archive, and confirmed its single Blueprint receipt.
+  The same worker completed the original job at 14:14:00 UTC: confirmed effect,
+  one mutation attempt, no active server operation and no remaining upload claim.
+- Authenticated Worlds and Fileman reads return 200 and the published world;
+  all 853 files remain present, with world directory UID/GID 988:988. All eleven
+  dev services are healthy. Panel/Wings identities and start times are unchanged.
+  This proves publication and API visibility, not gameplay or a browser refresh.
+  The initial transient verification failure is not claimed to be fixed.
+- No Panel/Wings configuration, code, permission or scheduler changes occurred.
+  The separate daily-log ownership proposal remains unapplied. No new test
+  server, game power operation, production deployment or historical-data cleanup.
+  Source cache, published world, receipts and original migration copies remain
+  retained. PR #21 stays open/unmerged; rollback preserves receipts and game data.
