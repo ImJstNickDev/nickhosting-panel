@@ -27,6 +27,17 @@ export const minecraftModInstalledChangeSchema = z.strictObject({
   action: z.enum(['enable', 'disable', 'delete']),
   idempotencyKey: identifier,
 });
+export const minecraftModToggleSchema = minecraftModInstalledChangeSchema
+  .extend({ action: z.enum(['enable', 'disable']) })
+  .refine((value) => value.path.endsWith('.disabled') === (value.action === 'enable'), {
+    path: ['path'],
+    message: 'The mod state must match the requested action',
+  });
+export const minecraftModToggleResultSchema = z.object({
+  state: z.enum(['published', 'dispatched', 'uncertain']),
+  path: minecraftModInstalledChangeSchema.shape.path,
+  restartRequired: z.boolean(),
+});
 export type MinecraftModSelection = z.infer<typeof minecraftModSelectionSchema>;
 export type MinecraftModRoot = MinecraftModSelection['roots'][number];
 export type MinecraftModSide = 'server' | 'client' | 'both' | 'unknown';
@@ -109,6 +120,7 @@ export interface MinecraftModQueueItem {
   incompatibilities: ('minecraft' | 'loader' | 'client-only')[];
   state: 'queued' | 'preparing' | 'ready' | 'failed' | 'uncertain';
   error?: string;
+  immediate?: boolean;
 }
 export interface MinecraftModsSnapshot {
   supported: boolean;

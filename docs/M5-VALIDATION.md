@@ -15018,3 +15018,44 @@ through Atlas. Rollback is a source revert with existing preferences falling bac
 through the registry; preserve all data. PR21 stays open and unmerged, M6 and
 production-release gates remain unchanged. See the
 [format and extension contract](M5-MINECRAFT-MODS-VIEWER.md).
+
+## Immediate installed-mod enable/disable — 2026-10-21
+
+Installed mod toggles update their row immediately and publish a single rename in
+the background through `POST /minecraft/mods/toggle`. They no longer enter the
+installation review queue. Pending intents live in QueryClient across tab unmounts;
+different rows serialize their writes while navigation stays usable. Confirmed
+failures restore observed state, and uncertain outcomes retain their original
+idempotency key for recovery. Same-file actions wait for that intent; Apply waits
+for pending toggles, while ordinary removal remains an explicit queued change.
+
+The service reuses Fileman's mutation scope, Mods publication, receipts, restart
+advisory and audit. Isolated intents preserve other draft roots, preparation and
+queued installs, including after lost responses. Dependencies are checked against
+installed content. Related draft graph blockers refresh from the verified
+post-rename listing without another directory fetch or catalog/download work.
+The existing stranded-upload recovery access remains unchanged.
+
+Validation: 46 distinct service/API integration cases covered by the initial
+44-case run and final focused reruns, including two added graph/cache regressions;
+five controller tests; 35 Firefox cases (33 full-suite cases and two final
+persisted-recovery cases). Tests cover both directions, idempotency, queued update
+collisions, permissions, required dependencies, restart/audit receipts, failed or
+lost responses, stale inventory, remount/reload and independent queued installs.
+Only isolated provider/filesystem/database fixtures were mutated.
+Root/web/browser TypeScript, production frontend build, localization, scoped
+Biome and diff checks pass. Existing frontend large-chunk warnings remain.
+Independent backend/frontend and visual review found no remaining blockers.
+
+Reviewed screenshots: [desktop EN](screenshots/m5/mods-immediate-toggle-en-desktop.png)
+and [mobile IT](screenshots/m5/mods-immediate-toggle-it-mobile.png). Axe reports zero
+violations, no horizontal overflow or page exceptions. A read-only authenticated
+dev Firefox smoke shows the installed Mods page, HTTPS200 and secure WSS HMR;
+zero mutation requests or page errors. No real mod was toggled for this smoke.
+
+No new migration, dependencies, manual restart/rebuild, game test asset or
+Panel/Wings/Blueprint/infrastructure changes. Existing development source watchers
+load the change. For rollback, reconcile dispatched/uncertain immediate intents
+using this version before reverting; older recovery treats all publication intents
+as whole-draft Apply. Retain receipts, queued artifacts and game data. PR21 remains
+open and unmerged; M6 and production-release gates, including issue18, stay separate.

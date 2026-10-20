@@ -106,6 +106,11 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
   let completed = true;
   let fallbackToPrevious = false;
   let fallbackRequestedVersion: string | undefined;
+  let delayToggle: Promise<void> | undefined;
+  let releaseToggle: (() => void) | undefined;
+  let failToggle: string | undefined;
+  let uncertainToggle = false;
+  let persistUncertainToggle = false;
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const generated = () =>
     `20000000-0000-4000-8000-${String(snapshot.changes.length + 1).padStart(12, '0')}`;
@@ -296,6 +301,65 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
                 select(body as unknown as MinecraftModSelection);
                 return json({ revision: snapshot.revision });
               }
+              if (url.pathname === `${base}/toggle`) {
+                await delayToggle;
+                if (failToggle) {
+                  const code = failToggle;
+                  failToggle = undefined;
+                  return json({ code, messageKey: `errors.${code}` }, 409);
+                }
+                const target = `${String(body.path).replace(/\.disabled$/, '')}${body.action === 'disable' ? '.disabled' : ''}`;
+                if (uncertainToggle) {
+                  uncertainToggle = false;
+                  if (persistUncertainToggle) {
+                    const pack = snapshot.packs.find((item) => item.path === body.path);
+                    if (!pack) return json({ code: 'not_found' }, 404);
+                    snapshot.changes.push({
+                      ...pack,
+                      id: generated(),
+                      action: body.action as 'disable',
+                      state: 'uncertain',
+                      immediate: true,
+                      dependency: false,
+                      requiredBy: [],
+                      forceIncompatible: false,
+                      incompatibilities: [],
+                    });
+                    snapshot.revision++;
+                  }
+                  return json({ state: 'uncertain', path: target, restartRequired: true });
+                }
+                snapshot.packs = snapshot.packs.map((pack) =>
+                  pack.path === body.path
+                    ? {
+                        ...pack,
+                        path: target,
+                        state: body.action === 'disable' ? 'disabled' : 'enabled',
+                      }
+                    : pack,
+                );
+                snapshot.revision++;
+                snapshot.restart = { required: true };
+                return json({ state: 'published', path: target, restartRequired: true });
+              }
+              if (url.pathname === `${base}/recover`) {
+                for (const change of snapshot.changes.filter((item) => item.immediate)) {
+                  const target = `${change.path.replace(/\.disabled$/, '')}${change.action === 'disable' ? '.disabled' : ''}`;
+                  snapshot.packs = snapshot.packs.map((pack) =>
+                    pack.path === change.path
+                      ? {
+                          ...pack,
+                          path: target,
+                          state: change.action === 'disable' ? 'disabled' : 'enabled',
+                        }
+                      : pack,
+                  );
+                }
+                snapshot.changes = snapshot.changes.filter((change) => !change.immediate);
+                snapshot.revision++;
+                snapshot.restart = { required: true };
+                return json({ state: 'published', restartRequired: true });
+              }
               if (url.pathname === `${base}/apply`) {
                 for (const change of snapshot.changes) {
                   if (change.action === 'install')
@@ -428,6 +492,11 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     completed = true;
     fallbackToPrevious = false;
     fallbackRequestedVersion = undefined;
+    delayToggle = undefined;
+    releaseToggle = undefined;
+    failToggle = undefined;
+    uncertainToggle = false;
+    persistUncertainToggle = false;
     delaySelection = undefined;
     delaySnapshot = undefined;
     releaseSnapshot = undefined;
@@ -446,6 +515,7 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     });
   });
   afterEach(async () => {
+    releaseToggle?.();
     releaseSnapshot?.();
     releaseUpdates?.();
     for (const timer of timers) clearTimeout(timer);
@@ -482,6 +552,28 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
       timeout: 15000,
     });
   }
+  function installFixtures() {
+    snapshot.packs = catalog.map((item) => ({
+      id: item.id,
+      name: item.name,
+      path: `mods/${item.id}.jar`,
+      size: 1048576,
+      state: 'enabled',
+      metadata: metadata(item, file(item, '1.0')),
+    }));
+  }
+  function pauseToggles() {
+    delayToggle = new Promise<void>((resolve) => {
+      releaseToggle = resolve;
+    });
+  }
+  function finishToggles() {
+    delayToggle = undefined;
+    releaseToggle?.();
+  }
+  const toggleWrites = () => writes.filter((write) => write.path === `${base}/toggle`);
+  const installedRow = (name: string) =>
+    page.locator('.mods-installed-row').filter({ has: page.getByText(name, { exact: true }) });
   it('opens details separately, prepares stable/beta selections and applies without power commands', async () => {
     await open();
     await page.getByRole('button', { name: 'About Evergreen' }).click();
@@ -847,16 +939,8 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     );
     await check(page.locator('.mods-dependency-row')).toContainText(italian['errors.rate_limited']);
   });
-  it('filters installed metadata and stages disable/remove operations for review', async () => {
-    for (const item of catalog)
-      snapshot.packs.push({
-        id: item.id,
-        name: item.name,
-        path: `mods/${item.id}.jar`,
-        size: 1048576,
-        state: 'enabled',
-        metadata: metadata(item, file(item, '1.0')),
-      });
+  it('filters installed metadata, toggles immediately and only queues removal for review', async () => {
+    installFixtures();
     const first = snapshot.packs[0]?.metadata;
     if (!first) throw new Error('Missing fixture metadata');
     first.side = 'server';
@@ -866,18 +950,234 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     await page.getByRole('option', { name: 'Server only' }).click();
     await check(page.locator('.mods-installed-row')).toHaveCount(1);
     await page.getByRole('button', { name: 'Disable Evergreen' }).click();
-    await check(page.getByRole('button', { name: 'Install (1)' })).toBeVisible();
+    await check(installedRow('Evergreen')).toHaveAttribute('data-disabled', 'true');
+    await check(page.getByRole('button', { name: 'Install (1)' })).toHaveCount(0);
+    await check.poll(() => snapshot.packs[0]?.state).toBe('disabled');
     await page.getByRole('combobox', { name: 'Environment' }).click();
     await page.getByRole('option', { name: 'All environments' }).click();
     await capture('mods-installed-en');
     await page.getByRole('button', { name: 'Remove Map Overlay', exact: true }).click();
-    await page.getByRole('button', { name: 'Install (2)' }).click();
+    await page.getByRole('button', { name: 'Install (1)' }).click();
     await page.getByRole('button', { name: 'Apply', exact: true }).click();
     await check
       .poll(() => snapshot.packs.find((item) => item.id === 'evergreen')?.state)
       .toBe('disabled');
     expect(snapshot.packs.some((item) => item.id === 'overlay')).toBe(false);
     expect(snapshot.running).toBe(true);
+  });
+  it.each(['en', 'it'] as const)(
+    'shows a pending disable immediately without a queue and keeps navigation usable (%s)',
+    async (locale) => {
+      installFixtures();
+      pauseToggles();
+      if (locale === 'it') await page.setViewportSize({ width: 390, height: 844 });
+      await page.addInitScript((value) => localStorage.setItem('nh.locale', value), locale);
+      const text = (key: string) =>
+        minecraftModsMessages[`mods.${key}`]?.[locale === 'it' ? 1 : 0] ?? key;
+      await page.goto(`${origin}mods-fixture`);
+      await page
+        .getByRole('button', { name: text('installed'), exact: false })
+        .first()
+        .click();
+      await page
+        .getByRole('button', { name: text('disable').replace('{name}', 'Evergreen') })
+        .click();
+      await check(installedRow('Evergreen')).toHaveAttribute('data-disabled', 'true');
+      await check(installedRow('Evergreen')).toHaveAttribute('aria-busy', 'true');
+      await check(
+        page.getByRole('button', { name: text('enable').replace('{name}', 'Evergreen') }),
+      ).toBeDisabled();
+      await check(
+        page.getByRole('button', { name: text('disable').replace('{name}', 'Copper Toolkit') }),
+      ).toBeEnabled();
+      expect(snapshot.packs[0]?.state).toBe('enabled');
+      expect(snapshot.changes).toHaveLength(0);
+      await check(
+        page.getByRole('button', { name: text('install').replace('{count}', '1'), exact: true }),
+      ).toHaveCount(0);
+      await capture(`mods-immediate-toggle-${locale}-${locale === 'it' ? 'mobile' : 'desktop'}`);
+      await page.getByRole('button', { name: text('discover'), exact: true }).click();
+      await check(
+        page.getByRole('button', { name: text('details').replace('{name}', 'Copper Toolkit') }),
+      ).toBeVisible();
+      await page
+        .getByRole('button', { name: text('installed'), exact: false })
+        .first()
+        .click();
+      const stale = structuredClone(snapshot);
+      await page.route(
+        `**${base}`,
+        async (route) =>
+          route.fulfill({ contentType: 'application/json', body: JSON.stringify(stale) }),
+        { times: 1 },
+      );
+      const response = page.waitForResponse((value) => value.url().endsWith(base));
+      await page.getByRole('button', { name: text('refresh'), exact: true }).click();
+      await response;
+      await check(installedRow('Evergreen')).toHaveAttribute('data-disabled', 'true');
+      finishToggles();
+      await check(
+        page.getByRole('button', { name: text('enable').replace('{name}', 'Evergreen') }),
+      ).toBeEnabled();
+      expect(snapshot.packs[0]?.path).toBe('mods/evergreen.jar.disabled');
+      expect(toggleWrites()).toHaveLength(1);
+      expect(writes).toHaveLength(1);
+      await page
+        .getByRole('button', { name: text('enable').replace('{name}', 'Evergreen') })
+        .click();
+      await check.poll(() => snapshot.packs[0]?.path).toBe('mods/evergreen.jar');
+      await check(installedRow('Evergreen')).not.toHaveAttribute('data-disabled');
+      expect(toggleWrites()[1]?.body.path).toBe('mods/evergreen.jar.disabled');
+    },
+  );
+  it('serializes pending toggles across rows without blocking either optimistic change', async () => {
+    installFixtures();
+    pauseToggles();
+    await open();
+    await page.getByRole('button', { name: 'Installed', exact: false }).first().click();
+    await page.getByRole('button', { name: 'Disable Evergreen' }).click();
+    await page.getByRole('button', { name: 'Disable Copper Toolkit' }).click();
+    await check(installedRow('Evergreen')).toHaveAttribute('data-disabled', 'true');
+    await check(installedRow('Copper Toolkit')).toHaveAttribute('data-disabled', 'true');
+    await check.poll(() => toggleWrites().length).toBe(1);
+    await check(page.getByRole('button', { name: 'Disable Map Overlay' })).toBeEnabled();
+    expect(snapshot.changes).toHaveLength(0);
+    finishToggles();
+    await check.poll(() => toggleWrites().length).toBe(2);
+    await check
+      .poll(() => snapshot.packs.filter((pack) => pack.state === 'disabled').length)
+      .toBe(2);
+    await check(page.getByRole('button', { name: 'Enable Evergreen' })).toBeEnabled();
+    await check(page.getByRole('button', { name: 'Enable Copper Toolkit' })).toBeEnabled();
+    expect(toggleWrites().map((write) => write.body.path)).toEqual([
+      'mods/evergreen.jar',
+      'mods/copper.jar',
+    ]);
+  });
+  it('rolls a rejected disable back, reports its reason and preserves the queued installation', async () => {
+    installFixtures();
+    select({
+      roots: [
+        {
+          provider: 'modrinth',
+          projectId: 'new-mod',
+          optionalProjectIds: [],
+          forceIncompatible: false,
+        },
+      ],
+      preferBeta: false,
+      idempotencyKey: 'other-queue',
+    });
+    const queued = structuredClone(snapshot.changes);
+    failToggle = 'content_dependency_missing';
+    pauseToggles();
+    await open();
+    await page.getByRole('button', { name: 'Installed', exact: false }).first().click();
+    await page.getByRole('button', { name: 'Disable Evergreen' }).click();
+    await check(installedRow('Evergreen')).toHaveAttribute('data-disabled', 'true');
+    finishToggles();
+    await check(page.getByRole('alert')).toContainText(en['errors.content_dependency_missing']);
+    await check(installedRow('Evergreen')).not.toHaveAttribute('data-disabled');
+    await check(page.getByRole('button', { name: 'Disable Evergreen' })).toBeEnabled();
+    expect(snapshot.changes).toEqual(queued);
+    await check(page.getByRole('button', { name: 'Install (1)' })).toBeVisible();
+    await page.getByRole('button', { name: 'Try again', exact: true }).click();
+    await check.poll(() => toggleWrites().length).toBe(2);
+    expect(toggleWrites()[1]?.body).toEqual(toggleWrites()[0]?.body);
+    await check(page.getByRole('alert')).toHaveCount(0);
+    await check(installedRow('Evergreen')).toHaveAttribute('data-disabled', 'true');
+    expect(snapshot.changes).toEqual(queued);
+  });
+  it('retains an uncertain toggle and retries its exact identity without adding it to the queue', async () => {
+    installFixtures();
+    uncertainToggle = true;
+    await open();
+    await page.getByRole('button', { name: 'Installed', exact: false }).first().click();
+    await page.getByRole('button', { name: 'Disable Evergreen' }).click();
+    await check(page.getByRole('alert')).toContainText(en['errors.operation_uncertain']);
+    await check(installedRow('Evergreen')).toHaveAttribute('data-disabled', 'true');
+    await check(page.getByRole('button', { name: 'Enable Evergreen' })).toBeDisabled();
+    await check(page.getByRole('button', { name: 'Disable Copper Toolkit' })).toBeEnabled();
+    expect(snapshot.changes).toHaveLength(0);
+    await page.getByRole('button', { name: 'Try again', exact: true }).click();
+    await check(page.getByRole('button', { name: 'Enable Evergreen' })).toBeEnabled();
+    await check(page.getByRole('alert')).toHaveCount(0);
+    expect(toggleWrites()).toHaveLength(2);
+    expect(toggleWrites()[1]?.body).toEqual(toggleWrites()[0]?.body);
+    expect(snapshot.packs[0]?.path).toBe('mods/evergreen.jar.disabled');
+  });
+  it.each([false, true])(
+    'recovers a durable immediate change outside the installation queue (reload: %s)',
+    async (reload) => {
+      installFixtures();
+      select({
+        roots: [
+          {
+            provider: 'modrinth',
+            projectId: 'new-mod',
+            optionalProjectIds: [],
+            forceIncompatible: false,
+          },
+        ],
+        preferBeta: false,
+        idempotencyKey: 'other-queue',
+      });
+      const queued = structuredClone(snapshot.changes);
+      uncertainToggle = true;
+      persistUncertainToggle = true;
+      await open();
+      await page.getByRole('button', { name: 'Installed', exact: false }).first().click();
+      const refresh = page.waitForResponse((response) => response.url().endsWith(base));
+      await page.getByRole('button', { name: 'Disable Evergreen' }).click();
+      await refresh;
+      await check(page.getByRole('alert')).toContainText(en['errors.operation_uncertain']);
+      expect(snapshot.changes.some((change) => change.immediate)).toBe(true);
+      if (reload) {
+        await page.reload();
+        await page.getByRole('button', { name: 'Installed', exact: false }).first().click();
+        await check(page.getByRole('button', { name: 'Disable Evergreen' })).toBeDisabled();
+      } else {
+        await check(page.getByRole('button', { name: 'Enable Evergreen' })).toBeDisabled();
+      }
+      await check(page.getByRole('button', { name: 'Install (1)', exact: true })).toBeVisible();
+      await check(page.getByRole('button', { name: 'Install (2)', exact: true })).toHaveCount(0);
+      await page.getByRole('button', { name: 'Try again', exact: true }).click();
+      await check(page.getByRole('button', { name: 'Enable Evergreen' })).toBeEnabled();
+      await check(page.getByRole('alert')).toHaveCount(0);
+      expect(snapshot.changes).toEqual(queued);
+      expect(snapshot.packs[0]?.path).toBe('mods/evergreen.jar.disabled');
+      expect(writes.map((write) => write.path)).toEqual(
+        reload
+          ? [`${base}/toggle`, `${base}/recover`]
+          : [`${base}/toggle`, `${base}/recover`, `${base}/toggle`],
+      );
+      if (!reload) expect(toggleWrites()[1]?.body).toEqual(toggleWrites()[0]?.body);
+    },
+  );
+  it('keeps a pending rename across leaving and remounting Mods', async () => {
+    installFixtures();
+    pauseToggles();
+    await page.goto(`${origin}mods-fixture?remount`);
+    await page.getByRole('button', { name: 'Installed', exact: false }).first().click();
+    await page.getByRole('button', { name: 'Disable Evergreen' }).click();
+    await check(installedRow('Evergreen')).toHaveAttribute('data-disabled', 'true');
+    await page.getByRole('button', { name: 'Leave Mods', exact: true }).click();
+    await check(page.locator('.mods-installed-list')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Return to Mods', exact: true }).click();
+    await page.getByRole('button', { name: 'Installed', exact: false }).first().click();
+    await check(installedRow('Evergreen')).toHaveAttribute('data-disabled', 'true');
+    finishToggles();
+    await check(page.getByRole('button', { name: 'Enable Evergreen' })).toBeEnabled();
+    expect(toggleWrites()).toHaveLength(1);
+    expect(snapshot.packs[0]?.state).toBe('disabled');
+  });
+  it('does not allow read-only users to toggle installed mods', async () => {
+    installFixtures();
+    await page.goto(`${origin}mods-fixture?readonly`);
+    await page.getByRole('button', { name: 'Installed', exact: false }).first().click();
+    await check(page.getByRole('button', { name: 'Disable Evergreen' })).toBeDisabled();
+    await check(page.getByRole('button', { name: 'Remove Evergreen' })).toBeDisabled();
+    expect(toggleWrites()).toHaveLength(0);
   });
   it('keeps mobile details/review inline and preserves beta preference without overwriting a selected version', async () => {
     await page.setViewportSize({ width: 390, height: 844 });

@@ -201,6 +201,16 @@ describe('Mods HTTP catalog and mutation boundaries', () => {
         })
       ).status,
     ).toBe(400);
+    for (const body of [
+      { path: '../server.jar', action: 'disable' },
+      { path: 'mods/test.jar', action: 'delete' },
+      { path: 'mods/test.jar', action: 'enable' },
+      { path: 'mods/test.jar.disabled', action: 'disable' },
+      { path: 'mods/test.jar', action: 'disable', revision: 1 },
+    ])
+      expect((await mutation('/toggle', { ...body, idempotencyKey: randomUUID() })).status).toBe(
+        400,
+      );
     expect(json).not.toHaveBeenCalled();
     expect(download).not.toHaveBeenCalled();
   });
@@ -475,6 +485,15 @@ describe('Mods HTTP catalog and mutation boundaries', () => {
       ).status,
     ).toBe(403);
     expect(
+      (
+        await mutation('/toggle', {
+          path: 'mods/test.jar',
+          action: 'disable',
+          idempotencyKey: randomUUID(),
+        })
+      ).status,
+    ).toBe(403);
+    expect(
       (await app.request(`${base()}/changes/${randomUUID()}`, { method: 'DELETE' })).status,
     ).toBe(403);
     expect((await mutation('/recover')).status).toBe(403);
@@ -512,6 +531,19 @@ describe('Mods HTTP catalog and mutation boundaries', () => {
         body: JSON.stringify({ roots: [], idempotencyKey: randomUUID() }),
       });
       expect(response.status).toBe(403);
+      expect(
+        (
+          await fullApp.request(`${base()}/toggle`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...(origin ? { origin } : {}) },
+            body: JSON.stringify({
+              path: 'mods/test.jar',
+              action: 'disable',
+              idempotencyKey: randomUUID(),
+            }),
+          })
+        ).status,
+      ).toBe(403);
     }
     expect(providerRead).not.toHaveBeenCalled();
     expect(download).not.toHaveBeenCalled();

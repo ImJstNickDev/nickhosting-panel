@@ -94,6 +94,9 @@ export function registerMinecraftModRoutes(app: Hono<{ Variables: Variables }>, 
       201,
     ),
   );
+  app.post(`${base}/toggle`, async (c) =>
+    c.json(await (await service()).toggle(await principal(c), c.req.param('id'), await body(c))),
+  );
   app.delete(`${base}/changes/:changeId`, async (c) => {
     await (await service()).cancel(await principal(c), c.req.param('id'), c.req.param('changeId'));
     return c.body(null, 204);

@@ -372,6 +372,454 @@ describe('Minecraft Mods durable preparation and publication', () => {
       });
     return { ...f, service, http, bytes, artifact, project, version, resolution, resolve, select };
   }
+  async function installedMod(
+    f: Awaited<ReturnType<typeof fixture>>,
+    path: string,
+    projectId: string,
+    overrides: Record<string, unknown> = {},
+  ) {
+    const bytes = Buffer.from(`fixture-${projectId}`);
+    f.files.set(path, bytes);
+    const plan = {
+      from: path,
+      to: path,
+      size: bytes.length,
+      modifiedAt: '2026-01-01T00:00:00Z',
+      metadata: {
+        provider: 'modrinth',
+        projectId,
+        versionId: 'v1',
+        name: projectId,
+        version: '1.0',
+        channel: 'release',
+        side: 'both',
+        tags: [],
+        minecraftVersions: ['1.21.1'],
+        loaders: ['fabric'],
+      },
+      dependency: false,
+      requiredBy: [],
+      forceIncompatible: false,
+      incompatibilities: [],
+      dependencies: [],
+      conflicts: [],
+      aliases: [],
+      retired: [],
+      reuse: false,
+      runtimeModId: projectId,
+      runtimeModVersion: '1.0',
+      target: { minecraftVersion: '1.21.1', loader: 'fabric', loaderVersion: '0.16.10' },
+      ...overrides,
+    };
+    await f.db
+      .insertInto('minecraft_mod_receipts')
+      .values({
+        server_id: f.serverId,
+        path,
+        receipt: JSON.stringify(plan),
+      })
+      .execute();
+    return plan;
+  }
+
+  it('toggles in both directions without a draft, preserves receipts and confirms idempotent replay', async () => {
+    const f = await fixture();
+    const receipt = await installedMod(f, 'mods/local.jar', 'local');
+    const disabled = { path: 'mods/local.jar', action: 'disable', idempotencyKey: randomUUID() };
+    expect(await f.service.toggle(f.context, f.serverId, disabled)).toEqual({
+      state: 'published',
+      path: 'mods/local.jar.disabled',
+      restartRequired: true,
+    });
+    expect(f.files.has('mods/local.jar')).toBe(false);
+    expect(f.files.has('mods/local.jar.disabled')).toBe(true);
+    expect(f.renameFiles).toHaveBeenCalledExactlyOnceWith(expect.any(String), '', [
+      { from: 'mods/local.jar', to: 'mods/local.jar.disabled' },
+    ]);
+    await f.service.drain();
+    f.listFiles.mockClear();
+    expect((await f.service.toggle(f.context, f.serverId, disabled)).state).toBe('published');
+    expect(f.listFiles).not.toHaveBeenCalled();
+    expect(f.renameFiles).toHaveBeenCalledTimes(1);
+    await expect(
+      f.service.toggle(f.context, f.serverId, { ...disabled, path: 'mods/other.jar' }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    expect(
+      await f.service.toggle(f.context, f.serverId, {
+        path: 'mods/local.jar.disabled',
+        action: 'enable',
+        idempotencyKey: randomUUID(),
+      }),
+    ).toEqual({ state: 'published', path: 'mods/local.jar', restartRequired: true });
+    const stored = await f.db
+      .selectFrom('minecraft_mod_receipts')
+      .selectAll()
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    expect(stored.path).toBe('mods/local.jar');
+    expect(stored.receipt).toMatchObject({
+      metadata: receipt.metadata,
+      runtimeModId: 'local',
+      runtimeModVersion: '1.0',
+      target: receipt.target,
+    });
+    expect(
+      await f.db
+        .selectFrom('minecraft_mod_drafts')
+        .selectAll()
+        .where('server_id', '=', f.serverId)
+        .execute(),
+    ).toEqual([]);
+    expect(
+      await f.db
+        .selectFrom('minecraft_mod_restart')
+        .selectAll()
+        .where('server_id', '=', f.serverId)
+        .execute(),
+    ).toHaveLength(1);
+    const audits = await f.db
+      .selectFrom('audit_events')
+      .selectAll()
+      .where('action', '=', 'minecraft.mods.applied')
+      .execute();
+    expect(audits).toHaveLength(2);
+    expect(
+      audits.every(
+        (event) =>
+          event.actor_user_id === f.context.actorUserId &&
+          event.metadata.serverId === f.serverId &&
+          event.metadata.count === 1,
+      ),
+    ).toBe(true);
+    expect(audits.map((event) => event.metadata.paths)).toEqual(
+      expect.arrayContaining([['mods/local.jar.disabled'], ['mods/local.jar']]),
+    );
+    expect(f.sendCommand).not.toHaveBeenCalled();
+    expect(f.uploadFile).not.toHaveBeenCalled();
+  });
+
+  it('publishes only the toggle and preserves an unrelated ready installation and its selection', async () => {
+    const f = await catalogFixture();
+    const selected = await f.select();
+    await f.service.drain();
+    await installedMod(f, 'mods/local.jar', 'local');
+    const beforeDraft = await f.db
+      .selectFrom('minecraft_mod_drafts')
+      .selectAll()
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    const beforeChanges = await f.db
+      .selectFrom('minecraft_mod_changes')
+      .selectAll()
+      .where('server_id', '=', f.serverId)
+      .execute();
+    expect(
+      await f.service.toggle(f.context, f.serverId, {
+        path: 'mods/local.jar',
+        action: 'disable',
+        idempotencyKey: randomUUID(),
+      }),
+    ).toMatchObject({ state: 'published' });
+    expect(
+      await f.db
+        .selectFrom('minecraft_mod_drafts')
+        .selectAll()
+        .where('server_id', '=', f.serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual(beforeDraft);
+    expect(
+      await f.db
+        .selectFrom('minecraft_mod_changes')
+        .selectAll()
+        .where('server_id', '=', f.serverId)
+        .where('action', '=', 'install')
+        .execute(),
+    ).toEqual(beforeChanges);
+    expect(f.files.has('mods/example.jar')).toBe(false);
+    expect(f.renameFiles).toHaveBeenCalledTimes(1);
+    expect(f.uploadFile).toHaveBeenCalledTimes(1);
+    await f.service.apply(f.context, f.serverId, {
+      revision: selected.revision,
+      idempotencyKey: randomUUID(),
+    });
+    expect(f.files.has('mods/example.jar')).toBe(true);
+    expect(f.files.has('mods/local.jar.disabled')).toBe(true);
+  });
+
+  it('validates the installed graph only, neither queued dependencies nor planned removals count', async () => {
+    const f = await catalogFixture();
+    await f.select();
+    await f.service.drain();
+    await installedMod(f, 'mods/dependent.jar.disabled', 'dependent', {
+      dependencies: [{ provider: 'modrinth', projectId: 'example' }],
+    });
+    await expect(
+      f.service.toggle(f.context, f.serverId, {
+        path: 'mods/dependent.jar.disabled',
+        action: 'enable',
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'content_dependency_missing' });
+    expect(f.renameFiles).not.toHaveBeenCalled();
+    await installedMod(f, 'mods/required.jar', 'required');
+    await installedMod(f, 'mods/other.jar', 'other', {
+      dependencies: [{ provider: 'modrinth', projectId: 'required' }],
+    });
+    await f.service.change(f.context, f.serverId, {
+      path: 'mods/other.jar',
+      action: 'delete',
+      idempotencyKey: randomUUID(),
+    });
+    await expect(
+      f.service.toggle(f.context, f.serverId, {
+        path: 'mods/required.jar',
+        action: 'disable',
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'content_dependency_missing' });
+    expect(f.renameFiles).not.toHaveBeenCalled();
+    expect(f.files.has('mods/required.jar')).toBe(true);
+  });
+
+  it('keeps conflicting enabled dependencies protected while enabling an installed mod', async () => {
+    const f = await fixture();
+    await installedMod(f, 'mods/first.jar', 'first');
+    await installedMod(f, 'mods/second.jar.disabled', 'second', {
+      conflicts: [{ provider: 'modrinth', projectId: 'first' }],
+    });
+    await expect(
+      f.service.toggle(f.context, f.serverId, {
+        path: 'mods/second.jar.disabled',
+        action: 'enable',
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'content_dependency_conflict' });
+    expect(f.renameFiles).not.toHaveBeenCalled();
+  });
+
+  it('refreshes only draft graph blockers after toggling without re-resolving or consuming the queue', async () => {
+    const f = await catalogFixture();
+    await installedMod(f, 'mods/local.jar', 'local', {
+      conflicts: [{ provider: 'modrinth', projectId: 'example' }],
+    });
+    await f.select();
+    await f.service.drain();
+    const before = await f.db
+      .selectFrom('minecraft_mod_drafts')
+      .selectAll()
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    expect(before.blockers).toContainEqual(
+      expect.objectContaining({ source: 'graph', reason: 'conflict' }),
+    );
+    const catalogBlocker = { projectId: 'unavailable', name: 'unavailable', reason: 'unavailable' };
+    await f.db
+      .updateTable('minecraft_mod_drafts')
+      .set({
+        blockers: JSON.stringify([...(before.blockers as object[]), catalogBlocker]),
+      })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    await f.service.toggle(f.context, f.serverId, {
+      path: 'mods/local.jar',
+      action: 'disable',
+      idempotencyKey: randomUUID(),
+    });
+    const after = await f.db
+      .selectFrom('minecraft_mod_drafts')
+      .selectAll()
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    expect(after).toEqual({ ...before, blockers: [catalogBlocker] });
+    await f.service.toggle(f.context, f.serverId, {
+      path: 'mods/local.jar.disabled',
+      action: 'enable',
+      idempotencyKey: randomUUID(),
+    });
+    const restored = await f.db
+      .selectFrom('minecraft_mod_drafts')
+      .selectAll()
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    expect(restored.blockers).toContainEqual(catalogBlocker);
+    expect(restored.blockers).toContainEqual(
+      expect.objectContaining({ source: 'graph', reason: 'conflict' }),
+    );
+    expect(restored.selection).toEqual(before.selection);
+    expect(f.files.has('mods/example.jar')).toBe(false);
+    expect(f.resolve).toHaveBeenCalledTimes(1);
+    expect(f.uploadFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('invalidates the preparing inventory cache immediately after a confirmed toggle', async () => {
+    const f = await catalogFixture();
+    await installedMod(f, 'mods/local.jar', 'local');
+    let release!: () => void;
+    let started!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const download = vi.mocked(f.http.download).getMockImplementation();
+    vi.mocked(f.http.download).mockImplementationOnce(async (...args) => {
+      started();
+      await held;
+      if (!download) throw new Error('Missing download fixture');
+      return download(...args);
+    });
+    try {
+      await f.select();
+      await pending;
+      const initial = await f.service.snapshot(f.context, f.serverId);
+      expect(initial.preparing).toBe(true);
+      expect(initial.packs[0]?.state).toBe('enabled');
+      await f.service.toggle(f.context, f.serverId, {
+        path: 'mods/local.jar',
+        action: 'disable',
+        idempotencyKey: randomUUID(),
+      });
+      const next = await f.service.snapshot(f.context, f.serverId);
+      expect(next.preparing).toBe(true);
+      expect(next.packs[0]).toMatchObject({ path: 'mods/local.jar.disabled', state: 'disabled' });
+    } finally {
+      release();
+      await f.service.drain();
+    }
+  });
+
+  it('rejects pending update retirement collisions and an existing destination without renaming', async () => {
+    const f = await catalogFixture();
+    await f.select();
+    await f.service.drain();
+    await installedMod(f, 'mods/local.jar', 'local');
+    const pending = await f.db
+      .selectFrom('minecraft_mod_changes')
+      .selectAll()
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('minecraft_mod_changes')
+      .set({
+        plan: JSON.stringify({
+          ...(pending.plan as object),
+          retired: [{ from: 'mods/local.jar', to: 'mods/.retired', size: 13 }],
+        }),
+      })
+      .where('id', '=', pending.id)
+      .execute();
+    await expect(
+      f.service.toggle(f.context, f.serverId, {
+        path: 'mods/local.jar',
+        action: 'disable',
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    await installedMod(f, 'mods/other.jar', 'other');
+    f.files.set('mods/other.jar.disabled', Buffer.from('foreign'));
+    await expect(
+      f.service.toggle(f.context, f.serverId, {
+        path: 'mods/other.jar',
+        action: 'disable',
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    expect(f.renameFiles).not.toHaveBeenCalled();
+  });
+
+  it('recovers a lost toggle response without replay or consuming unrelated interrupted preparation', async () => {
+    const f = await catalogFixture();
+    await f.select();
+    await f.service.drain();
+    await f.db
+      .updateTable('minecraft_mod_drafts')
+      .set({ state: 'preparing' })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    await f.db
+      .updateTable('minecraft_mod_changes')
+      .set({ state: 'queued' })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    const beforeDraft = await f.db
+      .selectFrom('minecraft_mod_drafts')
+      .selectAll()
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    const beforeQueue = await f.db
+      .selectFrom('minecraft_mod_changes')
+      .selectAll()
+      .where('server_id', '=', f.serverId)
+      .execute();
+    await installedMod(f, 'mods/local.jar', 'local');
+    const rename = f.renameFiles.getMockImplementation();
+    f.renameFiles.mockImplementationOnce(async (...args) => {
+      await rename?.(...args);
+      throw new Error('response lost after rename');
+    });
+    const input = { path: 'mods/local.jar', action: 'disable', idempotencyKey: randomUUID() };
+    expect(await f.service.toggle(f.context, f.serverId, input)).toEqual({
+      state: 'uncertain',
+      path: 'mods/local.jar.disabled',
+      restartRequired: false,
+    });
+    expect((await f.service.snapshot(f.context, f.serverId)).changes).toContainEqual(
+      expect.objectContaining({ action: 'disable', state: 'uncertain', immediate: true }),
+    );
+    expect((await f.service.toggle(f.context, f.serverId, input)).state).toBe('uncertain');
+    expect(f.renameFiles).toHaveBeenCalledTimes(1);
+    expect(await f.service.recover(f.context, f.serverId)).toEqual({ recovered: 1, uncertain: 0 });
+    expect(
+      await f.db
+        .selectFrom('minecraft_mod_drafts')
+        .selectAll()
+        .where('server_id', '=', f.serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual(beforeDraft);
+    expect(
+      await f.db
+        .selectFrom('minecraft_mod_changes')
+        .selectAll()
+        .where('server_id', '=', f.serverId)
+        .where('action', '=', 'install')
+        .execute(),
+    ).toEqual(beforeQueue);
+    expect((await f.service.toggle(f.context, f.serverId, input)).state).toBe('published');
+    expect(f.renameFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a failed unconfirmed toggle fenced when no publication can be proved', async () => {
+    const f = await fixture();
+    await installedMod(f, 'mods/local.jar', 'local');
+    f.renameFiles.mockRejectedValueOnce(new Error('transport interrupted'));
+    const input = { path: 'mods/local.jar', action: 'disable', idempotencyKey: randomUUID() };
+    expect((await f.service.toggle(f.context, f.serverId, input)).state).toBe('uncertain');
+    expect(await f.service.recover(f.context, f.serverId)).toEqual({ recovered: 0, uncertain: 1 });
+    expect((await f.service.toggle(f.context, f.serverId, input)).state).toBe('uncertain');
+    expect(f.renameFiles).toHaveBeenCalledTimes(1);
+    expect(f.files.has('mods/local.jar')).toBe(true);
+  });
+
+  it('rejects revoked authorization and foreign managed identity before an immediate toggle', async () => {
+    const f = await fixture();
+    await installedMod(f, 'mods/local.jar', 'local');
+    const input = { path: 'mods/local.jar', action: 'disable', idempotencyKey: randomUUID() };
+    await f.db
+      .updateTable('managed_servers')
+      .set({ external_id: 'foreign' })
+      .where('id', '=', f.serverId)
+      .execute();
+    await expect(f.service.toggle(f.context, f.serverId, input)).rejects.toBeDefined();
+    await f.db
+      .deleteFrom('session')
+      .where('id', '=', f.context[authSessionId] as string)
+      .execute();
+    await expect(f.service.toggle(f.context, f.serverId, input)).rejects.toMatchObject({
+      code: 'unauthenticated',
+    });
+    expect(f.renameFiles).not.toHaveBeenCalled();
+  });
   it('preserves dependency diagnostics through the durable draft and links the selected root', async () => {
     const f = await catalogFixture();
     vi.spyOn(ModrinthProvider.prototype, 'modVersions').mockResolvedValue({

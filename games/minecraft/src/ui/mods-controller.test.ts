@@ -4,6 +4,51 @@ import { createMinecraftModsController, minecraftModsSnapshotSchema } from './mo
 
 const serverId = '10000000-0000-4000-8000-000000000001';
 describe('Minecraft Mods browser contracts', () => {
+  it('toggles an installed mod immediately through the scoped endpoint and validates confirmation', async () => {
+    const request = vi.fn<GameUiClient['request']>().mockResolvedValue({
+      state: 'published',
+      path: 'mods/example.jar.disabled',
+      restartRequired: true,
+    });
+    const controller = createMinecraftModsController({ request });
+    const body = {
+      path: 'mods/example.jar',
+      action: 'disable' as const,
+      idempotencyKey: 'toggle-one',
+    };
+    expect(await controller.toggle(serverId, body)).toEqual({
+      state: 'published',
+      path: 'mods/example.jar.disabled',
+      restartRequired: true,
+    });
+    expect(request).toHaveBeenCalledExactlyOnceWith(
+      `/v1/servers/${serverId}/minecraft/mods/toggle`,
+      {
+        method: 'POST',
+        body,
+      },
+    );
+    request.mockClear();
+    for (const path of ['../example.jar', 'mods/example.jar.disabled', 'mods/sub/example.jar'])
+      await expect(controller.toggle(serverId, { ...body, path })).rejects.toThrow();
+    expect(request).not.toHaveBeenCalled();
+    request.mockResolvedValue({
+      state: 'uncertain',
+      path: 'mods/example.jar',
+      restartRequired: false,
+    });
+    expect(
+      (
+        await controller.toggle(serverId, {
+          path: 'mods/example.jar.disabled',
+          action: 'enable',
+          idempotencyKey: 'toggle-two',
+        })
+      ).state,
+    ).toBe('uncertain');
+    request.mockResolvedValue({ state: 'ready', path: 'mods/example.jar', restartRequired: false });
+    await expect(controller.toggle(serverId, body)).rejects.toThrow();
+  });
   it('validates durable selections and uses only the protected same-origin transport', async () => {
     const request = vi.fn<GameUiClient['request']>().mockResolvedValue({ revision: 4 });
     const controller = createMinecraftModsController({ request });

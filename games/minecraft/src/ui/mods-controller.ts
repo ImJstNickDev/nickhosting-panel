@@ -15,6 +15,8 @@ import {
   minecraftModBlockerSchema,
   minecraftModInstalledChangeSchema,
   minecraftModSelectionSchema,
+  minecraftModToggleResultSchema,
+  minecraftModToggleSchema,
   minecraftModUpdatesSchema,
 } from '../mod-contracts.js';
 
@@ -96,6 +98,7 @@ export const minecraftModsSnapshotSchema: z.ZodType<MinecraftModsSnapshot> = z.o
       incompatibilities: z.array(z.enum(['minecraft', 'loader', 'client-only'])),
       state: z.enum(['queued', 'preparing', 'ready', 'failed', 'uncertain']),
       error: z.string().optional(),
+      immediate: z.boolean().optional(),
     }),
   ),
   blockers: z.array(minecraftModBlockerSchema),
@@ -220,6 +223,14 @@ export function createMinecraftModsController(client: GameUiClient) {
         method: 'POST',
         body: minecraftModInstalledChangeSchema.parse(input),
       });
+    },
+    async toggle(serverId: string, input: z.infer<typeof minecraftModToggleSchema>) {
+      return minecraftModToggleResultSchema.parse(
+        await client.request(path(serverId, '/toggle'), {
+          method: 'POST',
+          body: minecraftModToggleSchema.parse(input),
+        }),
+      );
     },
     async discard(serverId: string, changeId: string) {
       return client.request(path(serverId, `/changes/${z.uuid().parse(changeId)}`), {

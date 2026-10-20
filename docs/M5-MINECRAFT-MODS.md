@@ -33,6 +33,27 @@ reloads and reconnects. Only an observed process start after the publication
 receipt clears it. A generic `running` state, new WebSocket connection or clicking
 Start is not evidence of a new process.
 
+Installed-mod enable/disable controls publish immediately, independently of the
+installation queue. The row changes state optimistically on click while a single
+scoped rename runs in the background. Other rows and page navigation remain
+usable; pending toggles are serialized per server and survive leaving the tab.
+Only the affected row is temporarily locked against competing actions. A known
+failure restores its observed state and exposes the error. Uncertain outcomes
+retain their idempotency identity and offer reconciliation rather than blindly
+resending a rename. Installation and removal still use the review/Apply flow.
+
+The toggle reuses Fileman's mutation scope and the Mods publication receipt,
+restart advisory and audit. It preserves unrelated prepared installs and draft
+selections, including during recovery. Existing installed dependency/conflict
+constraints remain enforced; pending installs are not treated as installed
+dependencies. No mod classes are hot-unloaded and no server power command is sent.
+Graph blockers for prepared installs are updated from the same verified directory
+observation, without restarting preparation or discarding non-graph catalog errors.
+No new migration is required. Before rolling back the toggle implementation,
+reconcile any dispatched/uncertain immediate operations with the current code:
+older publication code does not distinguish those operations from whole-draft Apply.
+Keep all publication receipts and game files.
+
 ## Catalog metadata
 
 Execution side is separate from category tags. The normalized sides are Server,
@@ -169,6 +190,7 @@ All paths are under `/v1/servers/:id/minecraft/mods`:
 | `GET /alternatives/:provider/:projectId?revision=N` | Bounded dependency-resolved suggestion for a selected root |
 | `PUT /selection` | Replace the selected roots and start background preparation |
 | `POST /changes` | Prepare enable, disable or removal of an installed file |
+| `POST /toggle` | Publish one installed-file enable/disable without applying the draft |
 | `DELETE /changes/:changeId` | Cancel an unpublished installed-file change |
 | `POST /apply` | Publish the specified draft revision |
 | `POST /recover` | Reconcile interrupted preparation/publication |

@@ -40,6 +40,7 @@ import {
 } from './mods-primitives.js';
 import { ModsBlocker } from './mods-resolution.js';
 import { modsController, modsQueryKey, useModsSelection } from './mods-selection.js';
+import { useModsToggles } from './mods-toggles.js';
 import { ModsVersions } from './mods-versions.js';
 import './mods.css';
 
@@ -83,7 +84,8 @@ export function MinecraftModsSection(props: GameSectionViewProps) {
         ? 1000
         : false,
   });
-  const data = inventory.data;
+  const toggles = useModsToggles(props.serverId, inventory.data);
+  const data = toggles.data;
   const selection = useModsSelection(props.serverId, data);
   const [view, setView] = useState<'installed' | 'discover' | 'review'>(
     initial?.packs.length ? 'installed' : 'discover',
@@ -201,7 +203,7 @@ export function MinecraftModsSection(props: GameSectionViewProps) {
     }
   }
   async function apply() {
-    if (disabled || !ready || !data || foregroundLock.current) return;
+    if (disabled || !ready || !data || foregroundLock.current || toggles.pending) return;
     foregroundLock.current = true;
     setBusy('apply');
     setError(undefined);
@@ -310,7 +312,7 @@ export function MinecraftModsSection(props: GameSectionViewProps) {
             <button
               type="button"
               className="mods-primary"
-              disabled={disabled || !ready}
+              disabled={disabled || !ready || toggles.pending}
               onClick={() => void apply()}
             >
               <ModsIcon name={busy === 'apply' ? 'refresh' : 'check'} />
@@ -334,6 +336,9 @@ export function MinecraftModsSection(props: GameSectionViewProps) {
           <p>{t(modsKey('selectionFailed'))}</p>
         </div>
       )}
+      {Boolean(toggles.error) && (
+        <ErrorNotice error={toggles.error} retry={() => void toggles.retry().catch(setError)} />
+      )}
       {!props.canManage && <p className="mods-readonly">{t(modsKey('readonly'))}</p>}
       {inventory.isPending ? (
         <ModsSkeleton />
@@ -353,14 +358,17 @@ export function MinecraftModsSection(props: GameSectionViewProps) {
                 setView('discover');
               }}
               onAction={(pack, action) =>
-                void operation(`${action}:${pack.path}`, (key) =>
-                  modsController.change(props.serverId, {
-                    path: pack.path,
-                    action,
-                    idempotencyKey: key,
-                  }),
-                )
+                action !== 'delete'
+                  ? toggles.toggle(pack, action)
+                  : void operation(`${action}:${pack.path}`, (key) =>
+                      modsController.change(props.serverId, {
+                        path: pack.path,
+                        action,
+                        idempotencyKey: key,
+                      }),
+                    )
               }
+              pendingPath={toggles.locked}
               onDiscard={(changeId) =>
                 void operation(`discard:${changeId}`, () =>
                   modsController.discard(props.serverId, changeId),
@@ -716,6 +724,7 @@ function InstalledMods(
     onDiscover(): void;
     onReview(): void;
     onAction(pack: Snapshot['packs'][number], action: 'enable' | 'disable' | 'delete'): void;
+    pendingPath(path: string): boolean;
     onDiscard(changeId: string): void;
   },
 ) {
@@ -902,6 +911,7 @@ function InstalledMods(
       ) : (
         <ul className="mods-installed-list">
           {filtered.slice(currentOffset, currentOffset + 20).map((pack) => {
+            const changing = props.pendingPath(pack.path);
             const pending = props.data?.changes.find(
               (item) => item.path === pack.path && item.action !== 'install',
             );
@@ -911,6 +921,7 @@ function InstalledMods(
                 key={pack.id}
                 className="mods-installed-row"
                 data-disabled={pack.state === 'disabled' || undefined}
+                aria-busy={changing || undefined}
               >
                 <ModsArtwork
                   image={pack.metadata?.iconUrl}
@@ -931,7 +942,10 @@ function InstalledMods(
                           name: pack.metadata?.name ?? pack.name,
                         })}
                         disabled={
-                          props.disabled || props.selection.saving || Boolean(props.selection.error)
+                          props.disabled ||
+                          changing ||
+                          props.selection.saving ||
+                          Boolean(props.selection.error)
                         }
                         onClick={() => prepareUpdates(pack.path)}
                       >
@@ -952,7 +966,7 @@ function InstalledMods(
                       <ModsAction
                         icon="close"
                         label={t(modsKey('removeQueue'), { name: pack.name })}
-                        disabled={props.disabled}
+                        disabled={props.disabled || changing}
                         onClick={() => props.onDiscard(pending.id)}
                       />
                     </>
@@ -962,7 +976,7 @@ function InstalledMods(
                         <ModsAction
                           icon="version"
                           label={t(modsKey('update'), { name: pack.metadata.name })}
-                          disabled={props.disabled}
+                          disabled={props.disabled || changing}
                           onClick={() =>
                             pack.metadata && props.onProject(projectFromMetadata(pack.metadata))
                           }
@@ -973,7 +987,7 @@ function InstalledMods(
                         label={t(modsKey(pack.state === 'enabled' ? 'disable' : 'enable'), {
                           name: pack.metadata?.name ?? pack.name,
                         })}
-                        disabled={props.disabled}
+                        disabled={props.disabled || changing}
                         onClick={() =>
                           props.onAction(pack, pack.state === 'enabled' ? 'disable' : 'enable')
                         }
@@ -981,7 +995,7 @@ function InstalledMods(
                       <ModsAction
                         icon="delete"
                         label={t(modsKey('delete'), { name: pack.metadata?.name ?? pack.name })}
-                        disabled={props.disabled}
+                        disabled={props.disabled || changing}
                         destructive
                         onClick={() => props.onAction(pack, 'delete')}
                       />

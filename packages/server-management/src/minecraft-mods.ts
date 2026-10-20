@@ -26,6 +26,7 @@ import {
   minecraftModBlockerSchema,
   minecraftModInstalledChangeSchema,
   minecraftModSelectionSchema,
+  minecraftModToggleSchema,
 } from '../../../games/minecraft/src/mod-contracts.js';
 import type { ModResolutionItem } from '../../content-providers/src/mod-catalog.js';
 import type { Environment } from './admission.js';
@@ -74,6 +75,8 @@ const meta = z.object({
   loaders: z.array(z.string()),
 });
 const planSchema = z.object({
+  // Immediate installed-mod toggles never consume the installation draft.
+  isolated: z.boolean().optional(),
   from: z.string(),
   to: z.string(),
   size: z.number().nonnegative(),
@@ -457,8 +460,9 @@ export function createMinecraftModsService(options: {
     entries: readonly FilemanEntry[],
     changes: Change[],
     files: FilemanReadService,
+    installed?: Awaited<ReturnType<typeof receipts>>,
   ) {
-    const old = await receipts(connection, serverId, entries);
+    const old = installed ?? (await receipts(connection, serverId, entries));
     const destinations = new Set<string>();
     for (const change of changes) {
       const plan = parse(planSchema, change.plan);
@@ -569,38 +573,46 @@ export function createMinecraftModsService(options: {
         throw new DomainError('content_dependency_conflict');
     }
   }
+  async function refreshDraftGraph(
+    connection: Kysely<Database>,
+    serverId: string,
+    current: NonNullable<Awaited<ReturnType<typeof draft>>>,
+    files: FilemanReadService,
+    entries?: readonly FilemanEntry[],
+  ) {
+    const changes = (await rows(connection, serverId)).filter(
+      (row) => row.action !== 'install' || row.revision === current.revision,
+    );
+    if (changes.some((row) => row.state !== 'ready')) return;
+    const blockers = (Array.isArray(current.blockers) ? current.blockers : []).filter(
+      (item) => !(item && typeof item === 'object' && 'source' in item && item.source === 'graph'),
+    );
+    try {
+      await reconcileGraph(connection, serverId, entries ?? (await list(files)), changes, files);
+    } catch (error) {
+      if (
+        !(error instanceof DomainError) ||
+        !['content_dependency_conflict', 'content_dependency_missing'].includes(error.code)
+      )
+        throw error;
+      blockers.push({
+        source: 'graph',
+        projectId: error.details?.projectId ?? 'retained-content',
+        name: error.details?.name ?? '',
+        reason: error.code === 'content_dependency_missing' ? 'unresolved' : 'conflict',
+      });
+    }
+    await connection
+      .updateTable('minecraft_mod_drafts')
+      .set({ blockers: JSON.stringify(blockers) })
+      .where('server_id', '=', serverId)
+      .where('revision', '=', current.revision)
+      .execute();
+  }
   async function refreshGraph(context: AuthContext, serverId: string, revision: number) {
     await runtime.fileReadScope(context, serverId, async (files, _identifier, connection) => {
       const current = await checkRevision(connection, serverId, revision);
-      const changes = (await rows(connection, serverId)).filter(
-        (row) => row.action !== 'install' || row.revision === revision,
-      );
-      if (changes.some((row) => row.state !== 'ready')) return;
-      const blockers = (Array.isArray(current.blockers) ? current.blockers : []).filter(
-        (item) =>
-          !(item && typeof item === 'object' && 'source' in item && item.source === 'graph'),
-      );
-      try {
-        await reconcileGraph(connection, serverId, await list(files), changes, files);
-      } catch (error) {
-        if (
-          !(error instanceof DomainError) ||
-          !['content_dependency_conflict', 'content_dependency_missing'].includes(error.code)
-        )
-          throw error;
-        blockers.push({
-          source: 'graph',
-          projectId: error.details?.projectId ?? 'retained-content',
-          name: error.details?.name ?? '',
-          reason: error.code === 'content_dependency_missing' ? 'unresolved' : 'conflict',
-        });
-      }
-      await connection
-        .updateTable('minecraft_mod_drafts')
-        .set({ blockers: JSON.stringify(blockers) })
-        .where('server_id', '=', serverId)
-        .where('revision', '=', revision)
-        .execute();
+      await refreshDraftGraph(connection, serverId, current, files);
     });
   }
   async function coalesce(context: AuthContext, serverId: string, revision: number) {
@@ -1148,6 +1160,7 @@ export function createMinecraftModsService(options: {
     entries: readonly FilemanEntry[],
     applyId: string,
     current: AuthContext,
+    files: FilemanReadService,
   ) {
     for (const row of changes) {
       const plan = parse(planSchema, row.plan);
@@ -1189,22 +1202,28 @@ export function createMinecraftModsService(options: {
       .set({ state: 'published', updated_at: now })
       .where('id', '=', applyId)
       .execute();
-    await connection
-      .updateTable('minecraft_mod_drafts')
-      .set({
-        selection: JSON.stringify({
-          roots: [],
-          preferBeta: parse(
-            minecraftModSelectionSchema,
-            (await draft(connection, serverId))?.selection,
-          ).preferBeta,
-          idempotencyKey: applyId,
-        }),
-        state: 'ready',
-        updated_at: now,
-      })
-      .where('server_id', '=', serverId)
-      .execute();
+    if (!changes.every((row) => parse(planSchema, row.plan).isolated))
+      await connection
+        .updateTable('minecraft_mod_drafts')
+        .set({
+          selection: JSON.stringify({
+            roots: [],
+            preferBeta: parse(
+              minecraftModSelectionSchema,
+              (await draft(connection, serverId))?.selection,
+            ).preferBeta,
+            idempotencyKey: applyId,
+          }),
+          state: 'ready',
+          updated_at: now,
+        })
+        .where('server_id', '=', serverId)
+        .execute();
+    if (changes.every((row) => parse(planSchema, row.plan).isolated)) {
+      const pendingDraft = await draft(connection, serverId);
+      if (pendingDraft && pendingDraft.state !== 'preparing')
+        await refreshDraftGraph(connection, serverId, pendingDraft, files, entries);
+    }
     await recordAudit(connection, current, 'minecraft.mods.applied', {
       serverId,
       applyId,
@@ -1214,6 +1233,7 @@ export function createMinecraftModsService(options: {
         return row.action === 'delete' ? plan.from : plan.to;
       }),
     });
+    inventoryCache.delete(serverId);
   }
   async function verifyMoves(files: FilemanReadService, moves: z.infer<typeof moveSchema>[]) {
     const entries = await list(files);
@@ -1228,6 +1248,50 @@ export function createMinecraftModsService(options: {
         throw new DomainError('operation_uncertain');
     }
     return entries;
+  }
+  async function publish(
+    identifier: string,
+    connection: Kysely<Database>,
+    current: AuthContext,
+    server: Parameters<ManagementRuntime['fileReadPhase']>[1],
+    serverId: string,
+    dispatch: { id: string; changes: Change[]; moves: z.infer<typeof moveSchema>[] },
+  ) {
+    const { id, changes, moves } = dispatch;
+    try {
+      await runtime.authorizeTransfer(current, serverId, true, connection, undefined, server);
+      for (let offset = 0; offset < moves.length; offset += 1000)
+        await runtime.adapter.renameFiles(
+          identifier,
+          '',
+          moves.slice(offset, offset + 1000).map(({ from, to }) => ({ from, to })),
+        );
+      const files = runtime.fileReadPhase(identifier, server);
+      const after = await verifyMoves(files, moves);
+      await connection
+        .transaction()
+        .execute((tx) => finish(tx, serverId, changes, after, id, current, files));
+      return {
+        state: 'published' as const,
+        restartRequired: changes.some((row) => !parse(planSchema, row.plan).reuse),
+      };
+    } catch (error) {
+      await connection
+        .updateTable('minecraft_mod_applies')
+        .set({ state: 'uncertain', updated_at: new Date() })
+        .where('id', '=', id)
+        .execute();
+      await connection
+        .updateTable('minecraft_mod_changes')
+        .set({ state: 'uncertain', error: code(error), updated_at: new Date() })
+        .where(
+          'id',
+          'in',
+          changes.map((row) => row.id),
+        )
+        .execute();
+      throw new DomainError('operation_uncertain');
+    }
   }
   return {
     profile: (serverId: string) => profile(db, serverId),
@@ -1416,6 +1480,7 @@ export function createMinecraftModsService(options: {
                 requiredBy: plan.requiredBy,
                 forceIncompatible: plan.forceIncompatible,
                 incompatibilities: plan.incompatibilities,
+                ...(plan.isolated ? { immediate: true } : {}),
                 state:
                   row.state === 'dispatched' ||
                   (!preparing && ['queued', 'preparing'].includes(row.state))
@@ -1597,6 +1662,177 @@ export function createMinecraftModsService(options: {
       await refreshGraph(context, serverId, (await draft(db, serverId))?.revision ?? 0);
       return result;
     },
+    async toggle(context: AuthContext, serverId: string, input: unknown) {
+      const value = parse(minecraftModToggleSchema, input);
+      await authorized(context, serverId, true);
+      await cleanupTasks.get(serverId);
+      const result = await runtime.fileMutationAccess(
+        context,
+        serverId,
+        async (identifier, connection, current, server) => {
+          const dispatch = await connection.transaction().execute(
+            async (
+              tx,
+            ): Promise<
+              | {
+                  replay: {
+                    state: 'published' | 'dispatched' | 'uncertain';
+                    path: string;
+                    restartRequired: boolean;
+                  };
+                }
+              | {
+                  id: string;
+                  changes: Change[];
+                  moves: z.infer<typeof moveSchema>[];
+                  path: string;
+                }
+            > => {
+              await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`mods:${serverId}`},0))`.execute(
+                tx,
+              );
+              const previous = await tx
+                .selectFrom('minecraft_mod_changes')
+                .selectAll()
+                .where('server_id', '=', serverId)
+                .where('actor_user_id', '=', current.actorUserId)
+                .where('idempotency_key', '=', value.idempotencyKey)
+                .executeTakeFirst();
+              const previousApply = await tx
+                .selectFrom('minecraft_mod_applies')
+                .selectAll()
+                .where('server_id', '=', serverId)
+                .where('actor_user_id', '=', current.actorUserId)
+                .where('idempotency_key', '=', value.idempotencyKey)
+                .executeTakeFirst();
+              if (previous || previousApply) {
+                if (!previous || !previousApply) throw new DomainError('conflict');
+                const plan = parse(planSchema, previous.plan);
+                if (
+                  !plan.isolated ||
+                  previous.action !== value.action ||
+                  plan.from !== value.path ||
+                  digest(previousApply.changes) !== digest([previous.id])
+                )
+                  throw new DomainError('conflict');
+                return {
+                  replay: {
+                    state:
+                      previousApply.state === 'published'
+                        ? ('published' as const)
+                        : previousApply.state === 'dispatched'
+                          ? ('dispatched' as const)
+                          : ('uncertain' as const),
+                    path: plan.to,
+                    restartRequired: previousApply.state === 'published',
+                  },
+                };
+              }
+              const info = await profile(tx, serverId);
+              if (!info.supported || !info.installed)
+                throw new DomainError('integration_unavailable');
+              const to =
+                value.action === 'enable'
+                  ? value.path.replace(/\.disabled$/, '')
+                  : `${value.path}.disabled`;
+              const pending = await rows(tx, serverId);
+              // An unconfirmed publication may have changed the installed dependency graph.
+              if (pending.some((row) => ['dispatched', 'uncertain'].includes(row.state)))
+                throw new DomainError('operation_uncertain');
+              if (
+                pending.some((row) => {
+                  const plan = parse(planSchema, row.plan);
+                  return [
+                    plan.from,
+                    plan.to,
+                    ...plan.retired.flatMap((item) => [item.from, item.to]),
+                  ].some((path) => path === value.path || path === to);
+                })
+              )
+                throw new DomainError('conflict');
+              const files = runtime.fileReadPhase(identifier, server);
+              const entries = await list(files);
+              const entry = entries.find((item) => item.name === leaf(value.path));
+              if (entry?.kind !== 'file') throw new DomainError('not_found');
+              if (entries.some((item) => item.name === leaf(to))) throw new DomainError('conflict');
+              const installed = await receipts(tx, serverId, entries);
+              const old = installed.find((item) => item.path === value.path)?.plan;
+              const plan: Plan = {
+                isolated: true,
+                from: value.path,
+                to,
+                size: entry.size,
+                modifiedAt: entry.modifiedAt,
+                metadata: old?.metadata ?? null,
+                sha256: old?.sha256,
+                aliases: old?.aliases ?? [],
+                dependencies: old?.dependencies ?? [],
+                conflicts: old?.conflicts ?? [],
+                runtimeModId: old?.runtimeModId,
+                runtimeModVersion: old?.runtimeModVersion,
+                target: old?.target,
+                dependency: false,
+                requiredBy: [],
+                forceIncompatible: false,
+                incompatibilities: [],
+                retired: [],
+                reuse: false,
+              };
+              const id = randomUUID();
+              const revision = (await draft(tx, serverId))?.revision ?? 0;
+              const change = await tx
+                .insertInto('minecraft_mod_changes')
+                .values({
+                  id,
+                  server_id: serverId,
+                  revision,
+                  actor_user_id: current.actorUserId,
+                  action: value.action,
+                  state: 'dispatched',
+                  idempotency_key: value.idempotencyKey,
+                  plan: JSON.stringify(plan),
+                  error: null,
+                })
+                .returningAll()
+                .executeTakeFirstOrThrow();
+              // Only installed receipts plus this one toggle participate. A prepared
+              // dependency is not installed until the user publishes their draft.
+              await reconcileGraph(tx, serverId, entries, [change], files, installed);
+              const moves = [
+                { from: plan.from, to: plan.to, size: plan.size, modifiedAt: plan.modifiedAt },
+              ];
+              await tx
+                .insertInto('minecraft_mod_applies')
+                .values({
+                  id,
+                  server_id: serverId,
+                  revision,
+                  actor_user_id: current.actorUserId,
+                  idempotency_key: value.idempotencyKey,
+                  changes: JSON.stringify([change.id]),
+                  moves: JSON.stringify(moves),
+                  state: 'dispatched',
+                })
+                .execute();
+              return { id, changes: [change], moves, path: to };
+            },
+          );
+          if ('replay' in dispatch) return dispatch.replay;
+          try {
+            return {
+              ...(await publish(identifier, connection, current, server, serverId, dispatch)),
+              path: dispatch.path,
+            };
+          } catch (error) {
+            if (!(error instanceof DomainError) || error.code !== 'operation_uncertain')
+              throw error;
+            return { state: 'uncertain' as const, path: dispatch.path, restartRequired: false };
+          }
+        },
+      );
+      queueCleanup(context, serverId);
+      return result;
+    },
     async cancel(context: AuthContext, serverId: string, changeId: string) {
       parse(z.uuid(), changeId);
       await authorized(context, serverId, true);
@@ -1728,40 +1964,7 @@ export function createMinecraftModsService(options: {
             return { id, changes, moves };
           });
           if ('replay' in dispatch) return dispatch.replay;
-          const { id, changes, moves } = dispatch;
-          try {
-            await runtime.authorizeTransfer(current, serverId, true, connection, undefined, server);
-            for (let offset = 0; offset < moves.length; offset += 1000)
-              await runtime.adapter.renameFiles(
-                identifier,
-                '',
-                moves.slice(offset, offset + 1000).map(({ from, to }) => ({ from, to })),
-              );
-            const after = await verifyMoves(runtime.fileReadPhase(identifier, server), moves);
-            await connection
-              .transaction()
-              .execute((tx) => finish(tx, serverId, changes, after, id, current));
-            return {
-              state: 'published',
-              restartRequired: changes.some((row) => !parse(planSchema, row.plan).reuse),
-            };
-          } catch (error) {
-            await connection
-              .updateTable('minecraft_mod_applies')
-              .set({ state: 'uncertain', updated_at: new Date() })
-              .where('id', '=', id)
-              .execute();
-            await connection
-              .updateTable('minecraft_mod_changes')
-              .set({ state: 'uncertain', error: code(error), updated_at: new Date() })
-              .where(
-                'id',
-                'in',
-                changes.map((row) => row.id),
-              )
-              .execute();
-            throw new DomainError('operation_uncertain');
-          }
+          return publish(identifier, connection, current, server, serverId, dispatch);
         },
       );
       queueCleanup(context, serverId);
@@ -1774,31 +1977,58 @@ export function createMinecraftModsService(options: {
         context,
         serverId,
         async (identifier, connection, current, server) => {
-          if (runningTasks.has(serverId)) throw new DomainError('conflict');
           const applies = await connection
             .selectFrom('minecraft_mod_applies')
             .selectAll()
             .where('server_id', '=', serverId)
             .where('state', 'in', ['dispatched', 'uncertain'])
             .execute();
+          const pendingChanges = applies.length
+            ? await connection
+                .selectFrom('minecraft_mod_changes')
+                .selectAll()
+                .where('server_id', '=', serverId)
+                .where(
+                  'id',
+                  'in',
+                  applies.flatMap((apply) => parse(z.array(z.string()), apply.changes)),
+                )
+                .execute()
+            : [];
+          const isolated = applies.filter((apply) => {
+            const ids = parse(z.array(z.string()), apply.changes);
+            return (
+              ids.length > 0 &&
+              ids.every((id) => {
+                const row = pendingChanges.find((change) => change.id === id);
+                return row && parse(planSchema, row.plan).isolated;
+              })
+            );
+          });
+          if (!isolated.length && runningTasks.has(serverId)) throw new DomainError('conflict');
           let recovered = 0;
-          for (const apply of applies) {
+          for (const apply of isolated.length ? isolated : applies) {
             const moves = parse(z.array(moveSchema), apply.moves);
-            const changes = await connection
-              .selectFrom('minecraft_mod_changes')
-              .selectAll()
-              .where('id', 'in', parse(z.array(z.string()), apply.changes))
-              .execute();
+            const ids = parse(z.array(z.string()), apply.changes);
+            const changes = pendingChanges.filter((change) => ids.includes(change.id));
             try {
-              const after = await verifyMoves(runtime.fileReadPhase(identifier, server), moves);
+              const files = runtime.fileReadPhase(identifier, server);
+              const after = await verifyMoves(files, moves);
               await connection
                 .transaction()
-                .execute((tx) => finish(tx, serverId, changes, after, apply.id, current));
+                .execute((tx) => finish(tx, serverId, changes, after, apply.id, current, files));
               recovered++;
             } catch {
               /* Partial external effects require explicit repair; never replay a rename batch. */
             }
           }
+          if (isolated.length)
+            return {
+              recovered,
+              uncertain: (await rows(connection, serverId)).filter((row) =>
+                ['dispatched', 'uncertain'].includes(row.state),
+              ).length,
+            };
           const fenced = new Set(
             applies.flatMap((apply) => parse(z.array(z.string()), apply.changes)),
           );
