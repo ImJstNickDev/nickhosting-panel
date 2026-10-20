@@ -219,3 +219,15 @@ staging/concurrency/free-space limits are global and local overrides restrict th
 shared budget across games. This closes the historical Minecraft-only naming and
 accounting gap rather than deferring it to M6. See
 [implementation and validation](M5-INTEGRATION-ADMIN.md).
+
+## Minecraft Mods follow-up (2026-10-20)
+
+The Minecraft management row now includes the runtime-capability-gated Mods
+workspace: inline discovery and descriptions, version selection, normalized
+metadata, durable dependency-aware preparation and publication, Activity and a
+Console restart receipt. It reuses the common content-source/Fileman/Pterodactyl
+boundaries; it does not add a second transfer system. The Owner-approved explicit
+force flow applies to individual mod-version compatibility, not authorization,
+provider distribution restrictions or unverified runtime activation.
+See [contracts and acceptance evidence](M5-MINECRAFT-MODS.md). This addition does
+not claim completion of unfinished plugin/modpack workflows or remove issue #18.

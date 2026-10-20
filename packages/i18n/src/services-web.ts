@@ -1,4 +1,13 @@
 export const serviceWebMessages: Record<string, readonly [string, string]> = {
+  'service.modsRestartRequired': [
+    'Mods have changed. Restart the server to load the updated selection.',
+    'Le mod sono cambiate. Riavvia il server per caricare la selezione aggiornata.',
+  ],
+  'service.modsReview': ['View mods', 'Vedi mod'],
+  'service.modsRestartUnavailable': [
+    'Mod restart status unavailable.',
+    'Stato del riavvio per le mod non disponibile.',
+  ],
   'provisioning.loading': [
     'Loading installation progress',
     'Caricamento avanzamento installazione',

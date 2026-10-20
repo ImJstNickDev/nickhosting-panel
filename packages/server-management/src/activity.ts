@@ -82,6 +82,8 @@ const auditCategories: Record<string, (typeof activityCategories)[number]> = {
   'server.sftp.access_revoked': 'access',
   'server.sftp.password_revealed': 'access',
   'server.metadata.updated': 'settings',
+  'minecraft.mods.applied': 'settings',
+  'minecraft.mods.preparation_reconciled': 'settings',
   'server.automation_consent.updated': 'settings',
   'server.dns.assigned': 'settings',
   'server.dns.updated': 'settings',

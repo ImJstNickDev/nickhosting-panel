@@ -1,4 +1,6 @@
 export const activityWebMessages: Record<string, readonly [string, string]> = {
+  'activity.event.modsApplied': ['Apply mod changes', 'Applica modifiche alle mod'],
+  'activity.event.modsReconciled': ['Recover mod preparation', 'Recupera preparazione delle mod'],
   'activity.event.memberUpdated': ['Change server access', 'Modifica accesso al server'],
   'activity.detail.memberUsername': ['Member', 'Membro'],
   'activity.detail.memberName': ['Name', 'Nome'],

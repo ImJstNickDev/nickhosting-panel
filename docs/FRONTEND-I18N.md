@@ -1303,3 +1303,18 @@ restriction and an unavailable provider. Next reserves the exact displayed name,
 shows reserving feedback and preserves the existing expiry/replacement semantics.
 The final summary shows the hostname. Labels, status and accessible actions ship
 in English and Italian; no DNS record is written by preview or reservation.
+
+### Minecraft Mods selection
+
+Mods discovery uses separate actions for project inspection and selection:
+the result opens a description pane, while a styled, keyboard-operable checkbox
+selects the project. Selection prepares its version in the background. Install
+switches to an inline queue review; Back returns to discovery without dropping
+that work. The queue is not a permanently visible sidebar or a dialog.
+Explicit version choices survive the automatic stable/beta preference. Beta
+badges and per-version incompatibility consent replace repetitive confirmations.
+Installed items expose normalized execution-side and category filters, including
+Unknown rather than guessed classifications. Descriptions are untrusted content.
+Apply never stops a server. Console's restart advisory follows a persistent
+publication receipt and an observed new process, not a browser refresh.
+See [contracts and lifecycle](M5-MINECRAFT-MODS.md).

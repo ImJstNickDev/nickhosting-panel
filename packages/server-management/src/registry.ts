@@ -200,6 +200,7 @@ export function publicServer(row: Awaited<ReturnType<typeof authorizeServer>>) {
     activeOperationId: row.active_operation_id,
     lastObservedAt: row.last_observed_at,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 

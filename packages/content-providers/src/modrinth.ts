@@ -18,6 +18,13 @@ import {
   dependencyMemo,
   resolveDatapackGraph,
 } from './datapack-resolution.js';
+import type { ModSelection } from './mod-catalog.js';
+import { ModrinthModCatalog } from './mod-provider-adapters.js';
+import type {
+  ModCatalogSearchInput,
+  ModCatalogVersionsInput,
+  ResolveModsOptions,
+} from './mod-resolution.js';
 import { type WorldCatalogProjects, worldCatalogProjectsSchema } from './world-catalog.js';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
@@ -120,8 +127,13 @@ export class ModrinthProvider {
   ) {
     this.origin = options.apiBase ?? 'https://api.modrinth.com/v2';
     this.limits = contentLimits(options.limits);
+    this.modCatalog = new ModrinthModCatalog(
+      (path, signal) => this.http.json(`${this.origin}${path}`, { signal }),
+      this.limits,
+    );
   }
   private readonly limits: ContentLimits;
+  private readonly modCatalog: ModrinthModCatalog;
   async searchDatapacks(
     query: string,
     offset = 0,
@@ -573,5 +585,17 @@ export class ModrinthProvider {
     )
       fail('dependency_incompatible');
     return validateContentPlan(plan);
+  }
+  searchMods(input: ModCatalogSearchInput) {
+    return this.modCatalog.search(input);
+  }
+  modDetails(projectId: string, signal?: AbortSignal) {
+    return this.modCatalog.details(projectId, signal);
+  }
+  modVersions(projectId: string, input: ModCatalogVersionsInput) {
+    return this.modCatalog.listVersions(projectId, input);
+  }
+  resolveMods(roots: ModSelection[], target: ContentTarget, options: ResolveModsOptions = {}) {
+    return this.modCatalog.resolve(roots, target, options);
   }
 }

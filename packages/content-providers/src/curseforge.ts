@@ -17,6 +17,13 @@ import {
   dependencyMemo,
   resolveDatapackGraph,
 } from './datapack-resolution.js';
+import type { ModSelection } from './mod-catalog.js';
+import { CurseForgeModCatalog } from './mod-provider-adapters.js';
+import type {
+  ModCatalogSearchInput,
+  ModCatalogVersionsInput,
+  ResolveModsOptions,
+} from './mod-resolution.js';
 import {
   type WorldCatalogFiles,
   type WorldCatalogProjects,
@@ -130,6 +137,7 @@ export class CurseForgeProvider {
   readonly #key: string;
   private readonly base: string;
   private readonly limits: ContentLimits;
+  private readonly modCatalog: CurseForgeModCatalog;
   private readonly catalogClasses = new Map<string, Promise<number>>();
   constructor(
     readonly http: ContentHttp,
@@ -139,6 +147,10 @@ export class CurseForgeProvider {
     this.#key = options.apiKey;
     this.base = options.apiBase ?? 'https://api.curseforge.com/v1';
     this.limits = contentLimits(options.limits);
+    this.modCatalog = new CurseForgeModCatalog(
+      (path, signal) => this.request(path, signal),
+      this.limits,
+    );
   }
   private async request(path: string, signal?: AbortSignal) {
     return responseSchema.parse(
@@ -615,5 +627,17 @@ export class CurseForgeProvider {
     for (const root of roots) await visit(root.projectID, root.fileID);
     if ([...conflicts].some((pid) => selected.has(pid))) fail('dependency_incompatible');
     return validateContentPlan(plan);
+  }
+  searchMods(input: ModCatalogSearchInput) {
+    return this.modCatalog.search(input);
+  }
+  modDetails(projectId: string, signal?: AbortSignal) {
+    return this.modCatalog.details(projectId, signal);
+  }
+  modVersions(projectId: string, input: ModCatalogVersionsInput) {
+    return this.modCatalog.listVersions(projectId, input);
+  }
+  resolveMods(roots: ModSelection[], target: ContentTarget, options: ResolveModsOptions = {}) {
+    return this.modCatalog.resolve(roots, target, options);
   }
 }

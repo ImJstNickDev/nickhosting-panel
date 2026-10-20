@@ -172,32 +172,66 @@ export async function hashArchiveFile(file: ArchiveFile): Promise<string> {
   return hash.digest('hex');
 }
 export type JarSide = 'server' | 'client' | 'unknown';
-/** Fabric declares an authoritative environment; Forge displayTest is NOT a side guarantee. */
-export async function inspectJarSide(
+export type JarEnvironment = JarSide | 'both';
+export interface JarMetadata {
+  environment: JarEnvironment;
+  fabric?: { id: string; version?: string };
+}
+/** One existing bounded archive pass supplies side and runtime identity; no extra read per mod. */
+export async function inspectJarMetadata(
   path: string,
   limits: Partial<ContentLimits> = {},
-): Promise<JarSide> {
-  const observations: JarSide[] = [];
+): Promise<JarMetadata> {
+  const observations: JarEnvironment[] = [];
+  let fabric: JarMetadata['fabric'];
   await visitArchive(
     path,
     async (file) => {
       if (file.path === 'fabric.mod.json') {
         const metadata = JSON.parse(
           (await readArchiveFile(file, contentLimits(limits).maxMetadataBytes)).toString('utf8'),
-        ) as { environment?: unknown };
+        ) as { environment?: unknown; id?: unknown; version?: unknown };
+        if (metadata.id !== undefined) {
+          if (typeof metadata.id !== 'string' || !/^[a-z][a-z0-9_-]{1,63}$/.test(metadata.id))
+            fail('jar_mod_id');
+          fabric = {
+            id: metadata.id,
+            ...(typeof metadata.version === 'string' && metadata.version.length <= 512
+              ? { version: metadata.version }
+              : {}),
+          };
+        }
         if (metadata.environment === 'client') observations.push('client');
-        else if (
-          metadata.environment === 'server' ||
-          metadata.environment === '*' ||
-          metadata.environment === undefined
-        )
-          observations.push('server');
+        else if (metadata.environment === 'server') observations.push('server');
+        else if (metadata.environment === '*' || metadata.environment === undefined)
+          observations.push('both');
         else fail('jar_environment');
       }
       // Quilt/Forge/Paper metadata needs a reviewed loader-specific classifier, not a guessed side.
     },
     limits,
   );
-  if (observations.includes('client')) return 'client';
-  return observations.includes('server') ? 'server' : 'unknown';
+  const environment: JarEnvironment = observations.includes('client')
+    ? 'client'
+    : observations.includes('server')
+      ? 'server'
+      : observations.includes('both')
+        ? 'both'
+        : 'unknown';
+  return { environment, ...(fabric ? { fabric } : {}) };
+}
+/** Fabric environment evidence; Forge displayTest is not a side guarantee. */
+export async function inspectJarEnvironment(
+  path: string,
+  limits: Partial<ContentLimits> = {},
+): Promise<JarEnvironment> {
+  return (await inspectJarMetadata(path, limits)).environment;
+}
+/** Historical strict staging callers only distinguish server-capable from client-only. */
+export async function inspectJarSide(
+  path: string,
+  limits: Partial<ContentLimits> = {},
+): Promise<JarSide> {
+  const environment = await inspectJarEnvironment(path, limits);
+  return environment === 'both' ? 'server' : environment;
 }

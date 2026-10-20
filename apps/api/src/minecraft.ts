@@ -47,6 +47,7 @@ import { z } from 'zod';
 import { minecraftStoredConfigurationSchema } from '../../../packages/server-management/src/minecraft-content-contracts.js';
 import type { Variables } from './app.js';
 import { registerMinecraftDatapackRoutes } from './minecraft-datapacks.js';
+import { registerMinecraftModRoutes } from './minecraft-mods.js';
 import { registerMinecraftPlayerRoutes } from './minecraft-players.js';
 
 type C = Context<{ Variables: Variables }>;
@@ -72,6 +73,7 @@ export function registerMinecraftRoutes(
 ) {
   registerMinecraftPlayerRoutes(app, options);
   registerMinecraftDatapackRoutes(app, options);
+  registerMinecraftModRoutes(app, options);
   const { db, env, principal, body, management } = options;
   const owner = async (c: C) => {
     const context = await principal(c, true);

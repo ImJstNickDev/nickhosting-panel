@@ -1,0 +1,897 @@
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import {
+  type ContentHttp,
+  CurseForgeProvider,
+  ModrinthProvider,
+} from '@nickhosting/content-providers';
+import { authSessionId, SecretCodec } from '@nickhosting/core';
+import { createTestDatabase } from '@nickhosting/database/testing';
+import {
+  type ApplicationServer,
+  type PterodactylAdapter,
+  PterodactylError,
+} from '@nickhosting/pterodactyl-adapter';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ZipFile } from 'yazl';
+import { createMinecraftModsService } from './minecraft-mods.js';
+import { createManagementRuntime } from './runtime.js';
+import { managementFixture } from './test-fixtures.js';
+
+// Real isolated PostgreSQL, authorization/runtime and source ingestion. Only the
+// external provider's filesystem/console is substituted; no live game resources.
+describe('Minecraft Mods durable preparation and publication', () => {
+  let database: Awaited<ReturnType<typeof createTestDatabase>>;
+  let root: string;
+  let drainCleanup: (() => Promise<void>) | undefined;
+  beforeEach(async () => {
+    drainCleanup = undefined;
+    database = await createTestDatabase();
+    root = `./mountdata/test-assets/datapack-integration-${randomUUID()}`;
+    await mkdir(root, { recursive: true });
+  });
+  afterEach(async () => {
+    await drainCleanup?.();
+    vi.restoreAllMocks();
+    await database?.destroy();
+    if (root) await rm(root, { recursive: true, force: true });
+  });
+
+  async function fixture(running = true) {
+    const f = await managementFixture(database.db, { interactive: true });
+    const serverId = await f.server();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ runtime_state: running ? 'running' : 'offline' })
+      .where('id', '=', serverId)
+      .execute();
+    await f.db
+      .updateTable('physical_hosts')
+      .set({
+        local_disk_path: resolve(root),
+        upload_policy: JSON.stringify({
+          providerMaxFileBytes: 1024 ** 2,
+          temporaryDiskPath: resolve(root),
+          temporaryDiskBudgetBytes: 8 * 1024 ** 2,
+          temporaryDiskHeadroomBytes: 0,
+        }),
+      })
+      .where('id', '=', f.hostId)
+      .execute();
+    const combinationId = randomUUID();
+    await f.db
+      .insertInto('minecraft_combinations')
+      .values({
+        id: combinationId,
+        mapping_id: f.mappingId,
+        identity_digest: '1'.repeat(64),
+        mapping_digest: '2'.repeat(64),
+        combination: JSON.stringify({
+          release: '1.21.1',
+          releaseType: 'release',
+          protocolId: 767,
+          family: 'netty',
+          profile: 'fabric',
+          loaderVersion: '0.16.10',
+          javaMajor: 21,
+          runtimeDigest: 'a'.repeat(64),
+          protocolSource: { url: 'https://example.test/protocols', sha256: 'b'.repeat(64) },
+        }),
+        resolved_runtime: '{}',
+        binding: '{}',
+      })
+      .execute();
+    await f.db
+      .insertInto('minecraft_server_profiles')
+      .values({
+        server_id: serverId,
+        combination_id: combinationId,
+        configuration: '{}',
+        installed: true,
+      })
+      .execute();
+    const server = await f.db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const allocations = await f.db
+      .selectFrom('server_allocations')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .execute();
+    const remote = {
+      id: server.pterodactyl_id,
+      uuid: server.pterodactyl_uuid,
+      identifier: server.pterodactyl_identifier,
+      external_id: server.external_id,
+      node: f.providerNodeId,
+      user: server.provider_user_id,
+      allocation: allocations.find((a) => a.is_primary)?.pterodactyl_allocation_id,
+      relationships: {
+        allocations: {
+          data: allocations.map((a) => ({
+            attributes: {
+              id: a.pterodactyl_allocation_id,
+              ip: a.address,
+              port: a.port,
+              assigned: true,
+            },
+          })),
+        },
+      },
+    } as ApplicationServer;
+    const files = new Map<string, Buffer>([
+      ['server.properties', Buffer.from('level-name=world\n')],
+      ['world/level.dat', Buffer.from([10, 0, 0, 10, 0, 4, 68, 97, 116, 97, 0, 0])],
+    ]);
+    const directories = new Set(['', 'world', 'world/datapacks', 'mods']);
+    const missing = () => new PterodactylError('not_found', 'client', 'rejected', 404);
+    const listFiles = vi.fn(async (_id: string, path = '') => {
+      if (!directories.has(path)) throw missing();
+      const prefix = path ? `${path}/` : '';
+      const names = new Set(
+        [...files.keys(), ...directories]
+          .filter((name) => name.startsWith(prefix) && name !== path)
+          .map((name) => name.slice(prefix.length).split('/')[0] as string),
+      );
+      return [...names].map((name) => ({
+        name,
+        is_file: files.has(`${prefix}${name}`),
+        is_symlink: false,
+        size: files.get(`${prefix}${name}`)?.length ?? 0,
+        modified_at: '2026-01-01T00:00:00Z',
+        created_at: '2026-01-01T00:00:00Z',
+        mimetype: 'application/octet-stream',
+        mode: '-rw-r--r--',
+        mode_bits: '644',
+      }));
+    });
+    const renameFiles = vi.fn(
+      async (_id: string, _root: string, moves: { from: string; to: string }[]) => {
+        for (const { from, to } of moves) {
+          if (files.has(from)) {
+            files.set(to, files.get(from) as Buffer);
+            files.delete(from);
+          }
+          if (directories.has(from)) {
+            for (const path of [...files.keys()])
+              if (path.startsWith(`${from}/`)) {
+                files.set(`${to}${path.slice(from.length)}`, files.get(path) as Buffer);
+                files.delete(path);
+              }
+            for (const path of [...directories])
+              if (path === from || path.startsWith(`${from}/`)) {
+                directories.add(`${to}${path.slice(from.length)}`);
+                directories.delete(path);
+              }
+          }
+        }
+      },
+    );
+    const uploadFile = vi.fn(
+      async (
+        _id: string,
+        path: string,
+        value: { body: ReadableStream<Uint8Array>; authorize?: () => Promise<void> },
+      ) => {
+        await value.authorize?.();
+        files.set(path, Buffer.from(await new Response(value.body).arrayBuffer()));
+      },
+    );
+    const sendCommand = vi.fn(async () => {});
+    const adapter = {
+      ...f.adapter,
+      getApplicationServer: async () => remote,
+      listFiles,
+      getDirectoryBatchSettings: async () => ({
+        directoryBatchLimit: 48,
+        directoryTimeoutSeconds: 5,
+      }),
+      listDirectoriesBatch: async (identifier: string, paths: string[]) =>
+        Promise.all(
+          paths.map(async (directory) => {
+            try {
+              return { directory, files: await listFiles(identifier, directory) };
+            } catch (error) {
+              if (error instanceof PterodactylError && error.reason === 'not_found')
+                return { directory, error: 'not_found' };
+              throw error;
+            }
+          }),
+        ),
+      renameFiles,
+      uploadFile,
+      sendCommand,
+      getResources: async () => ({
+        current_state: running ? 'running' : 'offline',
+        is_suspended: false,
+        resources: {
+          disk_bytes: 0,
+          memory_bytes: 0,
+          cpu_absolute: 0,
+          network_rx_bytes: 0,
+          network_tx_bytes: 0,
+        },
+      }),
+      createDirectory: async (_id: string, path: string, name: string) => {
+        directories.add([path, name].filter(Boolean).join('/'));
+      },
+      deleteFiles: async (_id: string, path: string, names: string[]) => {
+        for (const name of names) {
+          const target = [path, name].filter(Boolean).join('/');
+          files.delete(target);
+          directories.delete(target);
+        }
+      },
+      readFileForEditor: async (_id: string, path: string) => {
+        const data = files.get(path);
+        if (!data) throw missing();
+        return data;
+      },
+      downloadFile: async (_id: string, path: string) => {
+        const data = files.get(path);
+        if (!data) throw missing();
+        return { body: new Response(Uint8Array.from(data)).body };
+      },
+      prefetchDownloads: async () => {},
+    } as unknown as PterodactylAdapter;
+    const env = {
+      NH_OBSERVER_ID: 'isolated-observer',
+      NH_CONTENT_SOURCE_ROOT: root,
+      NH_CONTENT_SOURCE_FREE_BYTES: '0',
+      NH_CONTENT_SOURCE_FREE_PERCENT: '0',
+    };
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      adapter,
+      codec: new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } }),
+      env,
+    });
+    const service = createMinecraftModsService({ db: f.db, runtime, env });
+    drainCleanup = () => service.drain();
+    return {
+      ...f,
+      serverId,
+      files,
+      directories,
+      service,
+      runtime,
+      adapter,
+      env,
+      renameFiles,
+      uploadFile,
+      sendCommand,
+      listFiles,
+    };
+  }
+
+  async function catalogFixture(environment = '*') {
+    const f = await fixture();
+    const zip = new ZipFile();
+    zip.addBuffer(
+      Buffer.from(JSON.stringify({ schemaVersion: 1, id: 'fixture', version: '1.0', environment })),
+      'fabric.mod.json',
+    );
+    zip.end();
+    const chunks: Buffer[] = [];
+    for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
+    const bytes = Buffer.concat(chunks),
+      sha256 = createHash('sha256').update(bytes).digest('hex');
+    const artifact = {
+      path: 'mods/example.jar',
+      urls: ['https://example.test/example.jar'],
+      size: bytes.length,
+      hashes: { sha256 },
+      projectId: 'example',
+      versionId: 'v1',
+      kind: 'mod' as const,
+      serverSide: 'required' as const,
+    };
+    const http = {
+      json: async () => {
+        throw new Error('Unexpected provider JSON');
+      },
+      download: vi.fn(async (_artifact: unknown, path: string) => {
+        await writeFile(path, bytes);
+        return { size: bytes.length, sha256 };
+      }),
+    } as unknown as ContentHttp;
+    const project = {
+      provider: 'modrinth' as const,
+      id: 'example',
+      name: 'Example',
+      summary: 'Example mod',
+      websiteUrl: 'https://example.test',
+      authors: [],
+      downloads: 1,
+      tags: [
+        {
+          id: 'technology',
+          label: 'Technology',
+          source: 'modrinth' as const,
+          original: 'technology',
+        },
+      ],
+      environment: { kind: 'both' as const, source: 'modrinth' as const, original: [] },
+    };
+    const version = {
+      provider: 'modrinth' as const,
+      id: 'v1',
+      projectId: 'example',
+      name: 'Example 1',
+      version: '1.0',
+      filename: 'example.jar',
+      gameVersions: ['1.21.1'],
+      loaders: ['fabric'],
+      publishedAt: '2026-01-01T00:00:00Z',
+      bytes: bytes.length,
+      channel: 'release' as const,
+      available: true,
+      compatibility: [],
+      environment: project.environment,
+    };
+    const resolution = {
+      plan: {
+        format: 'individual' as const,
+        target: { minecraftVersion: '1.21.1', loader: 'fabric' as const },
+        artifacts: [artifact],
+        overrides: [],
+        projects: [],
+        warnings: [],
+      },
+      catalog: {
+        items: [
+          {
+            project,
+            version,
+            root: true,
+            forced: false,
+            requiredBy: [],
+            dependencies: [],
+            conflicts: [],
+          },
+        ],
+        optional: [],
+        embedded: [],
+        blocked: [],
+      },
+    };
+    const resolve = vi
+      .spyOn(ModrinthProvider.prototype, 'resolveMods')
+      .mockResolvedValue(resolution);
+    const service = createMinecraftModsService({ db: f.db, runtime: f.runtime, env: f.env, http });
+    drainCleanup = () => service.drain();
+    const select = (roots = [{ provider: 'modrinth', projectId: 'example' }]) =>
+      service.select(f.context, f.serverId, {
+        roots,
+        preferBeta: false,
+        idempotencyKey: randomUUID(),
+      });
+    return { ...f, service, http, bytes, artifact, project, version, resolution, resolve, select };
+  }
+  it('prepares verified pending bytes, publishes with a single rename and never powers/reloads a running server', async () => {
+    const f = await catalogFixture();
+    const selected = await f.select();
+    await f.service.drain();
+    const ready = await f.service.snapshot(f.context, f.serverId);
+    expect(ready.changes).toHaveLength(1);
+    expect(ready.changes[0]?.state).toBe('ready');
+    expect(f.files.has('mods/example.jar')).toBe(false);
+    expect(f.uploadFile).toHaveBeenCalledTimes(1);
+    const key = randomUUID();
+    expect(
+      await f.service.apply(f.context, f.serverId, {
+        revision: selected.revision,
+        idempotencyKey: key,
+      }),
+    ).toEqual({ state: 'published', restartRequired: true });
+    expect(f.renameFiles).toHaveBeenCalledTimes(1);
+    expect(f.files.get('mods/example.jar')).toEqual(f.bytes);
+    expect(f.sendCommand).not.toHaveBeenCalled();
+    expect((await f.service.snapshot(f.context, f.serverId)).packs[0]?.metadata?.side).toBe('both');
+    await f.service.apply(f.context, f.serverId, {
+      revision: selected.revision,
+      idempotencyKey: key,
+    });
+    expect(f.renameFiles).toHaveBeenCalledTimes(1);
+  });
+  it('deduplicates replayed selection and reuses prepared files when adding/removing roots', async () => {
+    const f = await catalogFixture(),
+      key = randomUUID(),
+      request = { roots: [{ provider: 'modrinth', projectId: 'example' }], idempotencyKey: key };
+    await f.service.select(f.context, f.serverId, request);
+    await f.service.drain();
+    await f.service.select(f.context, f.serverId, request);
+    await f.service.drain();
+    expect(f.uploadFile).toHaveBeenCalledTimes(1);
+    await f.select();
+    await f.service.drain();
+    expect(f.uploadFile).toHaveBeenCalledTimes(1);
+    expect((await f.service.snapshot(f.context, f.serverId)).changes).toHaveLength(1);
+    await f.select([]);
+    await f.service.drain();
+    expect((await f.service.snapshot(f.context, f.serverId)).changes).toHaveLength(0);
+  });
+  it('fences a lost rename response and reconciles its effects without replaying the batch', async () => {
+    const f = await catalogFixture();
+    const selected = await f.select();
+    await f.service.drain();
+    const original = f.renameFiles.getMockImplementation();
+    f.renameFiles.mockImplementationOnce(async (...args) => {
+      await original?.(...args);
+      throw new Error('Lost response');
+    });
+    await expect(
+      f.service.apply(f.context, f.serverId, {
+        revision: selected.revision,
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'operation_uncertain' });
+    expect((await f.service.snapshot(f.context, f.serverId)).changes[0]?.state).toBe('uncertain');
+    expect(await f.service.recover(f.context, f.serverId)).toMatchObject({
+      recovered: 1,
+      uncertain: 0,
+    });
+    expect(f.renameFiles).toHaveBeenCalledTimes(1);
+    expect((await f.service.snapshot(f.context, f.serverId)).packs).toHaveLength(1);
+  });
+  it('refuses filename collisions and foreign server identity before mutation', async () => {
+    const f = await catalogFixture();
+    const selected = await f.select();
+    await f.service.drain();
+    f.files.set('mods/example.jar', Buffer.from('unmanaged'));
+    await expect(
+      f.service.apply(f.context, f.serverId, {
+        revision: selected.revision,
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    expect(f.renameFiles).not.toHaveBeenCalled();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ external_id: 'foreign' })
+      .where('id', '=', f.serverId)
+      .execute();
+    await expect(
+      f.service.change(f.context, f.serverId, {
+        path: 'mods/example.jar',
+        action: 'delete',
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toBeDefined();
+    expect(f.renameFiles).not.toHaveBeenCalled();
+  });
+  it('requires manager authority and live session before changing a selection', async () => {
+    const f = await catalogFixture();
+    await f.db
+      .deleteFrom('session')
+      .where('id', '=', f.context[authSessionId] as string)
+      .execute();
+    await expect(f.select()).rejects.toMatchObject({ code: 'unauthenticated' });
+    expect(f.resolve).not.toHaveBeenCalled();
+  });
+  it('blocks removing an enabled mod needed by another retained mod', async () => {
+    const f = await catalogFixture();
+    const selected = await f.select();
+    await f.service.drain();
+    await f.service.apply(f.context, f.serverId, {
+      revision: selected.revision,
+      idempotencyKey: randomUUID(),
+    });
+    const receipt = await f.db
+      .selectFrom('minecraft_mod_receipts')
+      .selectAll()
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    const plan = receipt.receipt as Record<string, unknown>;
+    f.files.set('mods/dependent.jar', f.bytes);
+    await f.db
+      .insertInto('minecraft_mod_receipts')
+      .values({
+        server_id: f.serverId,
+        path: 'mods/dependent.jar',
+        receipt: JSON.stringify({
+          ...plan,
+          metadata: { ...(plan.metadata as object), projectId: 'dependent' },
+          dependencies: [{ provider: 'modrinth', projectId: 'example' }],
+        }),
+      })
+      .execute();
+    await f.service.change(f.context, f.serverId, {
+      path: 'mods/example.jar',
+      action: 'disable',
+      idempotencyKey: randomUUID(),
+    });
+    await expect(
+      f.service.apply(f.context, f.serverId, {
+        revision: selected.revision,
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'content_dependency_missing' });
+    expect(f.files.has('mods/example.jar')).toBe(true);
+  });
+  it('keeps the restart marker until a strictly newer process start is observed', async () => {
+    const f = await fixture();
+    const now = new Date();
+    await f.db
+      .insertInto('minecraft_mod_restart')
+      .values({ server_id: f.serverId, changed_at: now })
+      .execute();
+    vi.spyOn(f.runtime.lifecycle, 'observeProviderProcessStart').mockResolvedValue(
+      new Date(now.getTime() - 1000).toISOString(),
+    );
+    expect((await f.service.restartStatus(f.context, f.serverId)).required).toBe(true);
+    vi.mocked(f.runtime.lifecycle.observeProviderProcessStart).mockRejectedValueOnce(
+      new Error('observer unavailable'),
+    );
+    expect((await f.service.restartStatus(f.context, f.serverId)).required).toBe(true);
+    vi.mocked(f.runtime.lifecycle.observeProviderProcessStart).mockImplementationOnce(async () => {
+      await f.db
+        .updateTable('minecraft_mod_restart')
+        .set({
+          changed_at: new Date(now.getTime() + 2000),
+        })
+        .where('server_id', '=', f.serverId)
+        .execute();
+      return new Date(now.getTime() + 1000).toISOString();
+    });
+    expect((await f.service.restartStatus(f.context, f.serverId)).required).toBe(true);
+    vi.mocked(f.runtime.lifecycle.observeProviderProcessStart).mockResolvedValue(
+      new Date(now.getTime() + 3000).toISOString(),
+    );
+    expect((await f.service.restartStatus(f.context, f.serverId)).required).toBe(false);
+    expect(f.listFiles).not.toHaveBeenCalled();
+  });
+  it('accepts queue edits during an active upload and reuses its verified bytes', async () => {
+    const f = await catalogFixture();
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = f.uploadFile.getMockImplementation();
+    f.uploadFile.mockImplementationOnce(async (...args) => {
+      entered();
+      await hold;
+      await original?.(...args);
+    });
+    await f.select();
+    await waiting;
+    const changed = await f.select();
+    release();
+    await f.service.drain();
+    const snapshot = await f.service.snapshot(f.context, f.serverId);
+    expect(snapshot.revision).toBe(changed.revision);
+    expect(snapshot.changes).toHaveLength(1);
+    expect(snapshot.changes[0]?.state).toBe('ready');
+    expect(f.uploadFile).toHaveBeenCalledTimes(1);
+    expect(f.http.download).toHaveBeenCalledTimes(1);
+  });
+  it('does not poison source acquisition when queue selection changes during download', async () => {
+    const f = await catalogFixture();
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+        entered = resolve;
+      }),
+      hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    const original = vi.mocked(f.http.download).getMockImplementation();
+    vi.mocked(f.http.download).mockImplementationOnce(async (...args) => {
+      entered();
+      await hold;
+      return (await original?.(...args)) as Awaited<ReturnType<ContentHttp['download']>>;
+    });
+    await f.select();
+    await waiting;
+    await f.select();
+    release();
+    await f.service.drain();
+    expect((await f.service.snapshot(f.context, f.serverId)).changes[0]?.state).toBe('ready');
+    expect(f.http.download).toHaveBeenCalledTimes(1);
+  });
+  it('reconciles a completed preparation with a lost upload response and releases only its scoped claim', async () => {
+    const f = await catalogFixture(),
+      original = f.uploadFile.getMockImplementation();
+    f.uploadFile.mockImplementationOnce(async (...args) => {
+      await original?.(...args);
+      throw new Error('Lost upload response');
+    });
+    await f.select();
+    await f.service.drain();
+    expect((await f.service.snapshot(f.context, f.serverId)).changes[0]?.state).toBe('uncertain');
+    expect(await f.service.recover(f.context, f.serverId)).toMatchObject({
+      recovered: 1,
+      uncertain: 0,
+    });
+    expect((await f.service.snapshot(f.context, f.serverId)).changes[0]?.state).toBe('ready');
+    expect(f.uploadFile).toHaveBeenCalledTimes(1);
+    expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toHaveLength(0);
+  });
+  it('removes only ledger-owned pending and retired files asynchronously', async () => {
+    const f = await catalogFixture();
+    f.files.set('mods/.unrelated.pending', Buffer.from('keep'));
+    await f.select();
+    await f.service.drain();
+    await f.select([]);
+    await f.service.drain();
+    expect([...f.files.keys()].filter((path) => /^mods\/\.nh-/.test(path))).toHaveLength(0);
+    expect(f.files.has('mods/.unrelated.pending')).toBe(true);
+    const selected = await f.select();
+    await f.service.drain();
+    await f.service.apply(f.context, f.serverId, {
+      revision: selected.revision,
+      idempotencyKey: randomUUID(),
+    });
+    await f.service.drain();
+    await f.service.change(f.context, f.serverId, {
+      action: 'delete',
+      path: 'mods/example.jar',
+      idempotencyKey: randomUUID(),
+    });
+    await f.service.apply(f.context, f.serverId, {
+      revision: selected.revision,
+      idempotencyKey: randomUUID(),
+    });
+    await f.service.drain();
+    expect([...f.files.keys()].filter((path) => /^mods\/\.nh-/.test(path))).toHaveLength(0);
+    expect(f.files.has('mods/.unrelated.pending')).toBe(true);
+  });
+  it('rejects a prepared plan after the server changes Minecraft version', async () => {
+    const f = await catalogFixture();
+    const selected = await f.select();
+    await f.service.drain();
+    const profile = await f.db
+      .selectFrom('minecraft_server_profiles')
+      .select('combination_id')
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    const combination = await f.db
+      .selectFrom('minecraft_combinations')
+      .select('combination')
+      .where('id', '=', profile.combination_id)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({
+        combination: JSON.stringify({ ...(combination.combination as object), release: '1.20.1' }),
+      })
+      .where('id', '=', profile.combination_id)
+      .execute();
+    await expect(
+      f.service.apply(f.context, f.serverId, {
+        revision: selected.revision,
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'content_plan_expired' });
+    expect(f.renameFiles).not.toHaveBeenCalled();
+  });
+  it('coalesces the same Fabric artifact from two providers, preserves aliases and publishes once', async () => {
+    const f = await catalogFixture();
+    const curseforge = new CurseForgeProvider(f.http, { apiKey: 'fixture-key' });
+    const item = f.resolution.catalog.items[0];
+    if (!item) throw new Error('Missing catalog fixture');
+    vi.spyOn(curseforge, 'resolveMods').mockResolvedValue({
+      plan: {
+        ...f.resolution.plan,
+        artifacts: [
+          {
+            ...f.artifact,
+            projectId: '123',
+            versionId: '456',
+          },
+        ],
+      },
+      catalog: {
+        ...f.resolution.catalog,
+        items: [
+          {
+            ...item,
+            project: { ...item.project, provider: 'curseforge', id: '123' },
+            version: { ...item.version, provider: 'curseforge', id: '456', projectId: '123' },
+          },
+        ],
+      },
+    });
+    const service = createMinecraftModsService({
+      db: f.db,
+      runtime: f.runtime,
+      env: f.env,
+      http: f.http,
+      curseforge,
+    });
+    drainCleanup = () => service.drain();
+    const selected = await service.select(f.context, f.serverId, {
+      roots: [
+        { provider: 'modrinth', projectId: 'example' },
+        { provider: 'curseforge', projectId: '123' },
+      ],
+      preferBeta: true,
+      idempotencyKey: randomUUID(),
+    });
+    await service.drain();
+    const ready = await service.snapshot(f.context, f.serverId);
+    expect(ready.blockers).toEqual([]);
+    expect(ready.changes).toHaveLength(1);
+    const canonical = ready.changes[0];
+    if (!canonical) throw new Error('Missing canonical change');
+    expect(
+      [
+        canonical.metadata?.provider,
+        ...(canonical.aliases ?? []).map((alias) => alias.provider),
+      ].sort(),
+    ).toEqual(['curseforge', 'modrinth']);
+    expect(f.listFiles.mock.calls.filter(([, path]) => path === '')).toHaveLength(1);
+    await service.apply(f.context, f.serverId, {
+      revision: selected.revision,
+      idempotencyKey: randomUUID(),
+    });
+    await service.drain();
+    expect(f.renameFiles).toHaveBeenCalledTimes(1);
+    expect(f.renameFiles.mock.calls[0]?.[2]).toHaveLength(1);
+    const installed = await service.snapshot(f.context, f.serverId);
+    expect(installed.packs).toHaveLength(1);
+    expect(installed.packs[0]?.aliases).toHaveLength(1);
+    expect(installed.preferBeta).toBe(true);
+    expect([...f.files.keys()].filter((path) => path.startsWith('mods/.nh-'))).toEqual([]);
+    // A later provider identity for the same verified bytes adds provenance only:
+    // no second live JAR, no restart boundary change, and no leaked pending upload.
+    vi.mocked(curseforge.resolveMods).mockResolvedValue({
+      plan: {
+        ...f.resolution.plan,
+        artifacts: [
+          { ...f.artifact, path: 'mods/alternate.jar', projectId: '789', versionId: '987' },
+        ],
+      },
+      catalog: {
+        ...f.resolution.catalog,
+        items: [
+          {
+            ...item,
+            project: { ...item.project, provider: 'curseforge', id: '789' },
+            version: { ...item.version, provider: 'curseforge', id: '987', projectId: '789' },
+          },
+        ],
+      },
+    });
+    const beforeMarker = await f.db
+      .selectFrom('minecraft_mod_restart')
+      .select('changed_at')
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    const next = await service.select(f.context, f.serverId, {
+      roots: [{ provider: 'curseforge', projectId: '789' }],
+      idempotencyKey: randomUUID(),
+    });
+    await service.drain();
+    await service.apply(f.context, f.serverId, {
+      revision: next.revision,
+      idempotencyKey: randomUUID(),
+    });
+    await service.drain();
+    expect(f.renameFiles).toHaveBeenCalledTimes(1);
+    expect((await service.snapshot(f.context, f.serverId)).packs).toHaveLength(1);
+    expect([...f.files.keys()].filter((path) => path.startsWith('mods/.nh-'))).toEqual([]);
+    expect(
+      await f.db
+        .selectFrom('minecraft_mod_restart')
+        .select('changed_at')
+        .where('server_id', '=', f.serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual(beforeMarker);
+  });
+  it('blocks conflicting Fabric IDs across providers even with a shared filename', async () => {
+    const f = await catalogFixture();
+    const zip = new ZipFile();
+    zip.addBuffer(
+      Buffer.from('{"schemaVersion":1,"id":"fixture","version":"2.0","environment":"*"}'),
+      'fabric.mod.json',
+    );
+    zip.end();
+    const chunks: Buffer[] = [];
+    for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
+    const bytes = Buffer.concat(chunks),
+      sha256 = createHash('sha256').update(bytes).digest('hex');
+    const http = {
+      ...f.http,
+      download: vi.fn(async (_artifact: unknown, path: string) => {
+        await writeFile(path, bytes);
+        return { size: bytes.length, sha256 };
+      }),
+    } as ContentHttp;
+    const curseforge = new CurseForgeProvider(http, { apiKey: 'fixture-key' });
+    const item = f.resolution.catalog.items[0];
+    if (!item) throw new Error('Missing catalog fixture');
+    vi.spyOn(curseforge, 'resolveMods').mockResolvedValue({
+      plan: {
+        ...f.resolution.plan,
+        artifacts: [
+          {
+            ...f.artifact,
+            projectId: '123',
+            versionId: '456',
+            size: bytes.length,
+            hashes: { sha256 },
+          },
+        ],
+      },
+      catalog: {
+        ...f.resolution.catalog,
+        items: [
+          {
+            ...item,
+            project: { ...item.project, provider: 'curseforge', id: '123' },
+            version: {
+              ...item.version,
+              provider: 'curseforge',
+              id: '456',
+              projectId: '123',
+              bytes: bytes.length,
+            },
+          },
+        ],
+      },
+    });
+    const service = createMinecraftModsService({
+      db: f.db,
+      runtime: f.runtime,
+      env: f.env,
+      http: f.http,
+      curseforge,
+    });
+    drainCleanup = () => service.drain();
+    const selected = await service.select(f.context, f.serverId, {
+      roots: [
+        { provider: 'modrinth', projectId: 'example' },
+        { provider: 'curseforge', projectId: '123' },
+      ],
+      idempotencyKey: randomUUID(),
+    });
+    await service.drain();
+    expect((await service.snapshot(f.context, f.serverId)).blockers).toEqual([
+      expect.objectContaining({ reason: 'conflict' }),
+    ]);
+    await expect(
+      service.apply(f.context, f.serverId, {
+        revision: selected.revision,
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'content_dependency_conflict' });
+    expect(f.renameFiles).not.toHaveBeenCalled();
+  });
+  it('requires explicit force for archive-declared client mods and reuses already verified local bytes', async () => {
+    const f = await catalogFixture('client');
+    await f.select();
+    await f.service.drain();
+    const failed = await f.service.snapshot(f.context, f.serverId);
+    expect(failed.changes[0]).toMatchObject({
+      state: 'failed',
+      error: 'client_only',
+      metadata: { side: 'client' },
+    });
+    expect(f.uploadFile).not.toHaveBeenCalled();
+    const item = f.resolution.catalog.items[0];
+    if (!item) throw new Error('Missing catalog fixture');
+    item.forced = true;
+    await f.service.select(f.context, f.serverId, {
+      roots: [
+        { provider: 'modrinth', projectId: 'example', versionId: 'v1', forceIncompatible: true },
+      ],
+      idempotencyKey: randomUUID(),
+    });
+    await f.service.drain();
+    expect((await f.service.snapshot(f.context, f.serverId)).changes[0]).toMatchObject({
+      state: 'ready',
+      forceIncompatible: true,
+      metadata: { side: 'client', environment: { source: 'archive' } },
+    });
+    expect(f.http.download).toHaveBeenCalledTimes(1);
+    expect(f.uploadFile).toHaveBeenCalledTimes(1);
+  });
+});

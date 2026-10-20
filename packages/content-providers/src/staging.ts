@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { crc32 } from 'node:zlib';
-import { inspectJarSide, visitArchive } from './archive.js';
+import { inspectJarEnvironment, visitArchive } from './archive.js';
 import {
   type ContentHttp,
   type ContentLimits,
@@ -62,10 +62,12 @@ async function assertJar(
   path: string,
   declared: 'required' | 'optional' | 'unknown',
   limits: Partial<ContentLimits>,
-): Promise<void> {
-  const side = await inspectJarSide(path, limits);
-  if (side === 'client' || (side === 'unknown' && declared === 'unknown'))
+  allowClient = false,
+): Promise<StagedContentFile['environment']> {
+  const side = await inspectJarEnvironment(path, limits);
+  if ((side === 'client' && !allowClient) || (side === 'unknown' && declared === 'unknown'))
     fail('client_or_unknown_content');
+  return side === 'unknown' ? undefined : side;
 }
 export async function stageContent(
   input: ContentPlan,
@@ -136,8 +138,20 @@ export async function stageContent(
           )
         )
           fail('stage_existing_mismatch');
-        if (target.endsWith('.jar')) await assertJar(target, artifact.serverSide, limits);
-        manifest.push({ path: artifact.path, ...actual, source: 'download' });
+        const environment = target.endsWith('.jar')
+          ? await assertJar(
+              target,
+              artifact.serverSide,
+              limits,
+              artifact.kind === 'mod' && artifact.allowClientOnly === true,
+            )
+          : undefined;
+        manifest.push({
+          path: artifact.path,
+          ...actual,
+          source: 'download',
+          ...(environment ? { environment } : {}),
+        });
         continue;
       }
       await assertContentDiskSpace(job, artifact.size, options.diskPolicy);
@@ -166,9 +180,21 @@ export async function stageContent(
           )
         )
           fail('download_hash');
-        if (target.endsWith('.jar')) await assertJar(temporary, artifact.serverSide, limits);
+        const environment = target.endsWith('.jar')
+          ? await assertJar(
+              temporary,
+              artifact.serverSide,
+              limits,
+              artifact.kind === 'mod' && artifact.allowClientOnly === true,
+            )
+          : undefined;
         await rename(temporary, target);
-        manifest.push({ path: artifact.path, ...actual, source: 'download' });
+        manifest.push({
+          path: artifact.path,
+          ...actual,
+          source: 'download',
+          ...(environment ? { environment } : {}),
+        });
       } finally {
         await rm(temporary, { force: true });
       }

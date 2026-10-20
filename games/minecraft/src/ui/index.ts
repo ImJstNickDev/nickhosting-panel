@@ -16,6 +16,8 @@ import {
   minecraftContentCapabilities,
 } from './controller.js';
 import { minecraftDatapacksMessages } from './datapacks-catalog.js';
+import { minecraftModsMessages } from './mods-catalog.js';
+import { createMinecraftModsController } from './mods-controller.js';
 import { minecraftPlayersMessages } from './players-catalog.js';
 import { minecraftWorldsMessages } from './worlds-catalog.js';
 
@@ -28,6 +30,7 @@ const k = (name: string) => `${namespace}.${name}`;
 const translated: Record<string, [string, string]> = {
   ...minecraftPlayersMessages,
   ...minecraftDatapacksMessages,
+  ...minecraftModsMessages,
   ...minecraftWorldsMessages,
   'messages.disconnected': ['Failed to connect to the server', 'Connessione al server fallita'],
   'messages.back': ['Back to Server List', 'Torna alla lista dei server'],
@@ -461,35 +464,13 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
     {
       id: 'mods',
       titleKey: k('sections.mods'),
-      loader: 'content',
+      loader: 'mods',
+      renderer: 'minecraft-mods',
       runtimeIds: [...minecraftContentRuntimes.mods],
       requiredPermissions: ['server:read'],
       requiredCapabilities: ['files'],
-      columns: [
-        { id: 'path', labelKey: k('fields.path') },
-        { id: 'installed_at', labelKey: k('fields.installedAt'), format: 'date' },
-      ],
-      forms: [
-        {
-          id: 'remove-content',
-          titleKey: k('forms.removeContent'),
-          fields: [
-            field('provider', {
-              type: 'choice',
-              required: true,
-              options: [
-                { value: 'modrinth', label: 'Modrinth' },
-                { value: 'curseforge', label: 'CurseForge' },
-              ],
-            }),
-            field('projectId', { type: 'text', maxLength: 128, required: true }),
-          ],
-          action: action('remove', 'mods', {
-            destructive: true,
-            confirmationKey: k('warnings.removeContent'),
-          }),
-        },
-      ],
+      columns: [],
+      forms: [],
     },
     {
       id: 'plugins',
@@ -808,6 +789,13 @@ export const minecraftUiModule = defineTrustedGameUiModule({
         },
         context.signal,
       );
+    },
+    mods: async (client, context): Promise<UiSectionData> => {
+      const mods = await createMinecraftModsController(client).snapshot(
+        server(context),
+        context.signal,
+      );
+      return { values: {}, rows: [], metadata: { mods, installed: mods.installed } };
     },
     datapacks: async (client, context): Promise<UiSectionData> => {
       const datapacks = await createMinecraftUiController(client).datapacks(

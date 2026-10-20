@@ -1781,3 +1781,31 @@ data. The previous UI can ignore the additive progress fields. Restore the saved
 extension/configuration and staged artifact if an approved activation regresses;
 no table deletion, game reinstall, provider cleanup or database downgrade is
 part of rollback. A live creation is reserved for the Owner's subsequent test.
+
+### Minecraft Mods preparation and publication (2026-10-20)
+
+[Mods](M5-MINECRAFT-MODS.md) reuses the existing API, content staging budgets,
+provider credentials and Fileman transfer path. It adds migration
+`047_minecraft_mods.sql`; no service, network, game-volume mount, public port,
+dependency or Blueprint update is required. Migration 047 extends the content
+source kind and adds draft/publication/restart receipts. It does not install mods
+or edit any game server.
+
+The development migrator reads SQL from its built image. Prepare the image and
+apply the migration explicitly using all three private environment overlays:
+
+```sh
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local build api
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local --profile tools run --rm --no-deps migrate
+```
+
+These are activation commands, not permission to run them. First confirm the
+reviewed code, current image tag, migration 046, Compose project and isolated
+migrator mounts/network. Preserve the previous image under a rollback tag.
+Existing source watchers can load the application changes; a manual restart
+requires its applicable approval if a watcher does not recover.
+
+Rollback preserves additive tables, pending files, publication receipts, provider
+credentials and all game data. Restore the reviewed previous application/image
+without dropping tables or automatically reversing a user's published mods.
+No production activation is included.

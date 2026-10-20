@@ -32,6 +32,7 @@ import {
   datapackReceipts,
   datapackStateRows,
 } from './minecraft-datapack-dependencies.js';
+import { minecraftModContentReceipts } from './minecraft-mod-receipts.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
 import { parse } from './registry.js';
@@ -1044,13 +1045,7 @@ export function createMinecraftDatapackService(options: {
               .optional(),
           });
           const mods = catalogs.length
-            ? (
-                await connection
-                  .selectFrom('minecraft_content_items')
-                  .selectAll()
-                  .where('server_id', '=', serverId)
-                  .execute()
-              ).flatMap((row) => {
+            ? (await minecraftModContentReceipts(connection, serverId, db)).flatMap((row) => {
                 const parsed = modSchema.safeParse(row.artifact);
                 return parsed.success && /^mods\/[^/]+\.jar$/.test(row.path)
                   ? [{ ...parsed.data, path: row.path }]

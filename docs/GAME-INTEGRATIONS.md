@@ -745,6 +745,8 @@ discovery, update or version-compatibility behavior. Datapacks is an inventory-o
 section at this stage, including on historical versions: its presence does not
 claim that such versions can install or run datapacks. This paragraph describes
 the initial navigation split; the Datapacks placeholder is superseded below.
+The Mods inventory-only flow is superseded by
+[inline discovery, background preparation and publication](M5-MINECRAFT-MODS.md).
 Other category-specific workflows remain separate work.
 
 ### World-scoped datapacks

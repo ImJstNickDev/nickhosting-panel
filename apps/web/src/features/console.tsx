@@ -13,6 +13,7 @@ import {
   type TelemetrySample,
 } from './console-resources.js';
 import { ConsoleSummary } from './console-summary.js';
+import { GameConsoleNotices } from './game-console-notices.js';
 import {
   ProvisioningCompletion,
   ProvisioningPanel,
@@ -449,6 +450,7 @@ export function ConsolePage({ serverId }: { serverId: string }) {
       )}
       {consoleAvailable && Boolean(error) && <ErrorNotice error={error} />}
       <ProvisioningCompletion key={serverId} value={setup} />
+      {!showSetup && <GameConsoleNotices server={server.data} state={powerState} />}
       <div className={`console-workspace${showSetup ? ' is-provisioning' : ''}`}>
         <div className="console-heading">
           <h1 ref={heading} tabIndex={-1}>

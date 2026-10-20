@@ -17,6 +17,8 @@ const eventLabels: Record<string, string> = {
   'server.sftp.password_revealed': 'sftpRevealed',
   'server.member.updated': 'memberUpdated',
   'server.metadata.updated': 'settingsUpdated',
+  'minecraft.mods.applied': 'modsApplied',
+  'minecraft.mods.preparation_reconciled': 'modsReconciled',
   'server.automation_consent.updated': 'automationUpdated',
   'server.dns.assigned': 'addressCreated',
   'server.dns.updated': 'addressUpdated',

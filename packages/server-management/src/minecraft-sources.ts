@@ -879,6 +879,46 @@ export function createMinecraftSourceStore(
       );
       return { ...source, filename: artifact.path.split('/').at(-1) ?? `${value.projectId}.zip` };
     },
+    /** Internal catalog acquisition: same bounded source store and verified downloader as datapacks. */
+    async acquireMod(
+      input: {
+        provider: 'modrinth' | 'curseforge';
+        projectId: string;
+        versionId: string;
+        serverId: string;
+        idempotencyKey: string;
+      },
+      artifact: ContentArtifact,
+      signal?: AbortSignal,
+    ) {
+      await authorizeScope(db, await reauthorize(), input.serverId);
+      if (
+        artifact.kind !== 'mod' ||
+        artifact.projectId !== input.projectId ||
+        artifact.versionId !== input.versionId ||
+        !/^mods\/[^/]+\.jar$/.test(artifact.path) ||
+        artifact.size < 1
+      )
+        throw new DomainError('provenance_mismatch');
+      const http = options.http;
+      if (!http) throw new DomainError('configuration_invalid');
+      const row = await reserve({
+        ...input,
+        kind: 'mod',
+        origin: input.provider,
+        bytes: artifact.size,
+        hashes: artifact.hashes,
+      });
+      return executeTransfer(
+        row.id,
+        async (source, abort) => {
+          const path = sourcePath(source);
+          const result = await http.download(artifact, path, { signal: abort });
+          return { path, sha256: result.sha256, identity: await lstat(path, { bigint: true }) };
+        },
+        signal,
+      );
+    },
     async acquireWorldCatalog(input: unknown, signal?: AbortSignal) {
       const value = parse(minecraftSourceWorldCatalogSchema, input);
       const actor = await reauthorize();
@@ -942,6 +982,8 @@ export function createMinecraftSourceStore(
     },
     archiveResolver: async (reference: string, serverId: string) =>
       (await resolveSource(reference, 'modpack', serverId)).path,
+    modArchiveResolver: (reference: string, serverId: string) =>
+      resolveSource(reference, 'mod', serverId),
     datapackArchiveResolver: (reference: string, serverId: string) =>
       resolveSource(reference, 'datapack', serverId),
     worldArchiveResolver: (reference: string, serverId: string) =>

@@ -19,11 +19,17 @@ import {
   recoverContentStageLock,
   safeArchivePath,
   safeContentPath,
-  stageContent,
+  stageContent as stageContentWithDiskPolicy,
   targetFromMrpack,
   validateDownloadUrl,
   visitArchive,
 } from './index.js';
+
+const stageContent: typeof stageContentWithDiskPolicy = (input, options) =>
+  stageContentWithDiskPolicy(input, {
+    diskPolicy: { minimumFreePercent: 0, minimumFreeBytes: 0 },
+    ...options,
+  });
 
 const temporary: string[] = [];
 afterEach(async () => {

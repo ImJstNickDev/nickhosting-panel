@@ -75,7 +75,12 @@ async function setup() {
 }
 it('acquires a modpack by exact provider identifiers and revalidates persisted archives', async () => {
   const { root, http, provider } = await setup();
-  const options = { mountdataRoot: join(root, 'mountdata'), jobId: 'job1', http };
+  const options = {
+    mountdataRoot: join(root, 'mountdata'),
+    jobId: 'job1',
+    http,
+    diskPolicy: { minimumFreeBytes: 0, minimumFreePercent: 0 },
+  };
   const first = await acquireModrinthModpack(provider, 'p1', 'v1', options);
   expect(first.plan.target).toEqual({
     minecraftVersion: '1.21.1',
@@ -90,7 +95,12 @@ it('acquires a modpack by exact provider identifiers and revalidates persisted a
 });
 it('requires explicit exclusive durable-job proof to recover a crash-left acquisition lock', async () => {
   const { root, http, provider } = await setup();
-  const options = { mountdataRoot: join(root, 'mountdata'), jobId: 'job1', http };
+  const options = {
+    mountdataRoot: join(root, 'mountdata'),
+    jobId: 'job1',
+    http,
+    diskPolicy: { minimumFreeBytes: 0, minimumFreePercent: 0 },
+  };
   await acquireModrinthModpack(provider, 'p1', 'v1', options);
   await writeFile(join(root, 'mountdata/content-inputs/job1/.lock'), '');
   await expect(acquireModrinthModpack(provider, 'p1', 'v1', options)).rejects.toThrow();

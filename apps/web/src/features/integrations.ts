@@ -135,10 +135,16 @@ const MinecraftDatapacksSection = lazy(() =>
     default: module.MinecraftDatapacksSection,
   })),
 );
+const MinecraftModsSection = lazy(() =>
+  import('../integrations/minecraft/mods.js').then((module) => ({
+    default: module.MinecraftModsSection,
+  })),
+);
 const sectionViews = new Map<string, ComponentType<GameSectionViewProps>>([
   ['minecraft-players', MinecraftPlayersSection],
   ['minecraft-worlds', MinecraftWorldsSection],
   ['minecraft-datapacks', MinecraftDatapacksSection],
+  ['minecraft-mods', MinecraftModsSection],
 ]);
 export function getGameSectionView(renderer: string | undefined) {
   return renderer ? sectionViews.get(renderer) : undefined;

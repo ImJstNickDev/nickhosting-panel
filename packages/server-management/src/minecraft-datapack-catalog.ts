@@ -22,6 +22,7 @@ import {
   receiptMatches,
 } from './minecraft-datapack-dependencies.js';
 import { createMinecraftDatapackService } from './minecraft-datapacks.js';
+import { minecraftModContentReceipts } from './minecraft-mod-receipts.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
 import type { ManagementRuntime } from './runtime.js';
@@ -117,11 +118,7 @@ export function createMinecraftDatapackCatalogService(options: {
           const parsed = draftSchema.safeParse(row.plan);
           return parsed.success ? [parsed.data] : [];
         });
-      const modRows = await connection
-        .selectFrom('minecraft_content_items')
-        .selectAll()
-        .where('server_id', '=', serverId)
-        .execute();
+      const modRows = await minecraftModContentReceipts(connection, serverId, db);
       const mods = modRows.flatMap((row) => {
         const parsed = modSchema.safeParse(row.artifact);
         return parsed.success &&

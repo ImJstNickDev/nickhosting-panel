@@ -38,6 +38,13 @@ export const artifactSchema = z
     kind: z.enum(['mod', 'plugin', 'override']),
     // unknown requires independently inspected embedded JAR metadata before staging succeeds.
     serverSide: z.enum(['required', 'optional', 'unknown']),
+    // Explicit per-version Mods consent; cannot relax download, integrity or path policy.
+    allowClientOnly: z.literal(true).optional(),
+    compatibilityOverride: z
+      .array(z.enum(['minecraft-version', 'loader', 'client-only', 'singleplayer-only']))
+      .min(1)
+      .max(4)
+      .optional(),
   })
   .strict();
 export type ContentArtifact = z.infer<typeof artifactSchema>;
@@ -180,6 +187,7 @@ export interface StagedContentFile {
   size: number;
   sha256: string;
   source: 'download' | 'override';
+  environment?: 'server' | 'client' | 'both';
 }
 export interface StagedContent {
   directory: string;

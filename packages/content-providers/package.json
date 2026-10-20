@@ -4,7 +4,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./world-catalog": "./src/world-catalog.ts"
+    "./world-catalog": "./src/world-catalog.ts",
+    "./mod-catalog": "./src/mod-catalog.ts"
   },
   "dependencies": {
     "@nickhosting/core": "workspace:*",

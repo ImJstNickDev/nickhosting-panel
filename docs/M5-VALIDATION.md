@@ -14620,3 +14620,33 @@ an independent production-release gate; PR21 remains open and unmerged.
   Disposable test schemas were cleaned by their harnesses; no live test assets
   were created or changed. Rollback is a code revert; no persistent data changed.
   PR21 remains open/unmerged and SFTPGo issue18 remains a separate release gate.
+
+### 2026-10-20 — Minecraft Mods discovery, preparation and publication
+
+- Inline Modrinth/CurseForge discovery, right-hand descriptions, custom selection,
+  stable/beta version preference, explicit incompatible-version consent and
+  full-page review. Installed mods expose normalized tags and execution-side
+  filters. Dependencies, cross-provider aliases and conflicts share one plan.
+- Preparation acquires and transfers pending JARs in the background. Apply uses
+  the existing Fileman batch publication path without stopping/restarting the
+  server. Activity records the actor and affected paths; Console retains a restart
+  notice until a new process start is observed.
+- Migration 047 stores drafts, publication/recovery receipts and restart markers.
+  Partial external results stay uncertain rather than being silently retried.
+  Cleanup is restricted to recorded temporary files. No Blueprint change needed.
+- Validation: 186 focused unit/contract tests, 45 Mods/Datapacks database tests,
+  13 API/platform tests, nine Activity regressions and ten Firefox browser cases.
+  Root/web TypeScript, production build, changed-file Biome, i18n completeness
+  (2,613 keys), scoped axe and overflow checks pass. Existing build chunk-size
+  warnings remain. Independent technical and UX/accessibility reviews completed
+  with all blocking findings resolved.
+- The full app journey uses real authentication, API, PostgreSQL and Fileman
+  orchestration with fixture catalog/provider effects; it prepares and publishes
+  a valid test JAR, verifies Activity and the Console notice, and asserts no game
+  power command. It does not install a real third-party mod or establish gameplay
+  compatibility. Temporary harness schemas/files are cleaned; historical test
+  evidence and all live server data remain untouched.
+- [Contracts, screenshot set and verification boundaries](M5-MINECRAFT-MODS.md).
+  Development migration activation is a separate, explicitly approved operation;
+  the implementation alone does not apply schema changes. No production
+  deployment or release-gate waiver is implied.

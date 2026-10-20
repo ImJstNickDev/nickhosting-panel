@@ -281,9 +281,16 @@ describe('M5 additive platform HTTP contracts with actual identity/session handl
       state: 'succeeded',
       retry: { allowed: false },
     });
-    expect(
-      await (await request(peer, `/v1/platform/activity?serverId=${id}`)).json(),
-    ).toMatchObject({ items: [{ serverId: id }] });
+    const activity = (await (
+      await request(peer, `/v1/platform/activity?serverId=${id}`)
+    ).json()) as {
+      items: { serverId: string; jobId: string | null }[];
+    };
+    // Membership changes also have an attributable audit entry. Every row must
+    // remain server-scoped, and the original job must still be visible.
+    expect(activity.items.length).toBeGreaterThan(0);
+    expect(activity.items.every((item) => item.serverId === id)).toBe(true);
+    expect(activity.items.some((item) => item.jobId === operation.job_id)).toBe(true);
     expect(
       (
         await request(
