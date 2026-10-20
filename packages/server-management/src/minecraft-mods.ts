@@ -334,6 +334,16 @@ export function createMinecraftModsService(options: {
     const result = (await files.listMany(['mods']))[0];
     if (result && 'files' in result) return result.files;
     if (result && 'error' in result && result.error === 'not_found') return [];
+    // Wings can report a missing directory as HTTP 500. Confirm absence from
+    // the same authorized Fileman root before treating that response as empty;
+    // an inaccessible existing mods directory must remain an error.
+    if (
+      result &&
+      'error' in result &&
+      result.error === 'unavailable' &&
+      !(await files.list('')).some((entry) => entry.name === 'mods')
+    )
+      return [];
     throw new DomainError('integration_unavailable');
   }
   async function receipts(

@@ -371,6 +371,35 @@ describe('Minecraft Mods durable preparation and publication', () => {
       });
     return { ...f, service, http, bytes, artifact, project, version, resolution, resolve, select };
   }
+  it('treats a missing mods directory reported unavailable by Wings as empty after one root observation', async () => {
+    const f = await fixture();
+    f.directories.delete('mods');
+    const original = f.adapter.listDirectoriesBatch.bind(f.adapter);
+    vi.spyOn(f.adapter, 'listDirectoriesBatch').mockImplementation(async (identifier, paths) =>
+      paths.length === 1 && paths[0] === 'mods'
+        ? [{ directory: 'mods', error: 'unavailable' }]
+        : original(identifier, paths),
+    );
+    const snapshot = await f.service.snapshot(f.context, f.serverId);
+    expect(snapshot.packs).toEqual([]);
+    expect(snapshot.supported).toBe(true);
+    expect(f.listFiles.mock.calls.filter(([, path]) => path === '')).toHaveLength(1);
+    expect(f.uploadFile).not.toHaveBeenCalled();
+    expect(f.renameFiles).not.toHaveBeenCalled();
+  });
+  it('keeps an unavailable existing mods directory as an error', async () => {
+    const f = await fixture();
+    const original = f.adapter.listDirectoriesBatch.bind(f.adapter);
+    vi.spyOn(f.adapter, 'listDirectoriesBatch').mockImplementation(async (identifier, paths) =>
+      paths.length === 1 && paths[0] === 'mods'
+        ? [{ directory: 'mods', error: 'unavailable' }]
+        : original(identifier, paths),
+    );
+    await expect(f.service.snapshot(f.context, f.serverId)).rejects.toMatchObject({
+      code: 'integration_unavailable',
+    });
+    expect(f.listFiles.mock.calls.filter(([, path]) => path === '')).toHaveLength(1);
+  });
   it('prepares verified pending bytes, publishes with a single rename and never powers/reloads a running server', async () => {
     const f = await catalogFixture();
     const selected = await f.select();

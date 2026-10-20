@@ -158,6 +158,28 @@ Screenshots: [full app discovery](screenshots/m5/minecraft-mods-app-discover.png
 [provider unavailable](screenshots/m5/minecraft-mods-unavailable-en.png),
 [Console restart](screenshots/m5/minecraft-mods-console-restart-en.png).
 
+### Approved development activation
+
+On 2026-10-20, the Owner approved the scoped development image build and explicit
+migration. Only 047 was applied, with its source checksum verified; all previous
+migration checksums and all 12 existing dev container identities, mounts, networks,
+ports and restart counts remained unchanged. The one-off migrator was removed
+automatically. The previous image is retained as `before-mods-20261020`.
+
+The first authenticated inventory check exposed Wings returning HTTP 500 for a
+missing `mods` directory on an installed Fabric server that had not started.
+The read path now checks the root only after that ambiguous failure and returns
+an empty inventory only when the directory is absent. Existing inaccessible
+directories remain errors. Two focused regressions and independent review passed;
+the fix loaded through the existing source watcher.
+
+Final authenticated real-provider reads passed for inventory, restart status,
+provider availability, search, descriptions and version lists for both Modrinth
+and CurseForge. Responses also passed the browser contract schemas. API, worker
+and Vite remained healthy; Firefox confirmed HTTPS 200 and the secure HMR
+WebSocket connection. No real mod acquisition, publication or game power action
+was performed. Real Apply latency/gameplay remains for the Owner's test.
+
 ## References
 
 - [Modrinth project versions](https://docs.modrinth.com/api/operations/getprojectversions/)

@@ -14650,3 +14650,27 @@ an independent production-release gate; PR21 remains open and unmerged.
   Development migration activation is a separate, explicitly approved operation;
   the implementation alone does not apply schema changes. No production
   deployment or release-gate waiver is implied.
+
+#### Approved Mods activation and first real-provider reads
+
+- Exact approved HEAD `8c4b0573a5a5e1db7cddd4ed9c7b010d9307d67b`, clean worktree,
+  existing dev project/image and only pending migration 047 verified before work.
+  Image rollback tag retained; build succeeded and explicit migrator applied only
+  047 (`be397e78b98c5a9861d05b10312cff47a871bd4d84b78546cc9a113915fbda3a`).
+- Existing 12 dev containers retain identical IDs, images, start times, restart
+  counts, mounts, networks and published-port configuration. API/worker/Vite stay
+  healthy; temporary migrator removed. Pre-existing Gateway readiness and stopped
+  simulator states were not changed or presented as newly healthy.
+- Initial authenticated inventory returned 503 because the installed Fabric
+  server had no `mods` directory and Wings represented that absence as HTTP 500.
+  A narrow Fileman root-absence fallback fixes this without creating directories
+  or masking inaccessible existing ones. Two added regression cases, TypeScript,
+  scoped Biome and independent technical review passed.
+- Final real authenticated inventory, restart status, provider availability,
+  Modrinth and CurseForge search/details/versions all return HTTP 200 and pass
+  browser response schemas. Inventory is empty as expected. Firefox confirms
+  public HTTPS 200 and connected WSS HMR.
+- No manual service restart, Blueprint update, game file/power mutation, DNS,
+  network, credential or production configuration change. No live test asset
+  created or deleted. Actual mod Apply/gameplay remains for Owner use; fixture
+  evidence does not establish real installation latency.

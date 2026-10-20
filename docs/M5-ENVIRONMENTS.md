@@ -1809,3 +1809,14 @@ Rollback preserves additive tables, pending files, publication receipts, provide
 credentials and all game data. Restore the reviewed previous application/image
 without dropping tables or automatically reversing a user's published mods.
 No production activation is included.
+
+Owner-approved Mods activation completed on 2026-10-20: rollback tag
+`nickhosting-dev-app:before-mods-20261020` retained, shared development image built,
+only migration 047 applied and checksum verified. No `up`, service recreation or
+manual restart was needed. The one-off migrator was removed; all existing
+container identities, networks, ports and mounts remained unchanged.
+API/worker/Vite health, public HTTPS and Firefox WSS HMR checks pass.
+Authenticated Mods inventory and both provider catalogs return 200. The
+missing-directory Wings behavior found during the first read was corrected in
+source with two regression tests; no game directory was created to hide it.
+No Blueprint/Panel/Wings change or real mod installation was performed.
