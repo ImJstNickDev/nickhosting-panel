@@ -80,6 +80,8 @@ export const en = {
   'errors.integration_unavailable': 'This integration is unavailable.',
   'errors.resources_unavailable': 'There is not enough available capacity to start this server.',
   'errors.storage_exhausted': 'There is not enough available storage.',
+  'errors.content_storage_unavailable':
+    'Temporary storage is below the configured free-space margin.',
   'errors.content_dependency_missing':
     'A required dependency is missing or disabled. Restore it or remove the content that requires it before applying changes.',
   'errors.content_dependency_conflict':
@@ -215,6 +217,8 @@ export const it: Record<MessageKey, string> = {
   'errors.resources_unavailable':
     'La capacità disponibile non è sufficiente per avviare questo server.',
   'errors.storage_exhausted': 'Lo spazio di archiviazione disponibile non è sufficiente.',
+  'errors.content_storage_unavailable':
+    'Lo spazio temporaneo disponibile è inferiore alla soglia configurata.',
   'errors.content_dependency_missing':
     'Una dipendenza necessaria è assente o disabilitata. Ripristinala oppure rimuovi il contenuto che la richiede prima di applicare le modifiche.',
   'errors.content_dependency_conflict':

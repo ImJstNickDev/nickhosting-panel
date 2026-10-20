@@ -15,6 +15,7 @@ import { Tooltip } from '../../components/tooltip.js';
 import { ErrorNotice } from '../../components/ui.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { ViewerSelect } from '../../features/viewer-engine/viewer-select.js';
+import { contentPreparationErrorKey } from './content-preparation-error.js';
 import { matchesMod, modRootState, versionForMod } from './mods-model.js';
 import {
   ModsAction,
@@ -1011,6 +1012,14 @@ function ReviewMods(
                       </button>
                     )}
                 </div>
+                {change?.state === 'failed' &&
+                  change.error &&
+                  (change.error !== 'client_only' ||
+                    !change.incompatibilities.includes('client-only')) && (
+                    <p className="mods-warning-text">
+                      {t(contentPreparationErrorKey(change.error))}
+                    </p>
+                  )}
                 {change?.incompatibilities.length ? (
                   <p className="mods-warning-text">
                     {change.incompatibilities
@@ -1087,6 +1096,11 @@ function ReviewMods(
                     {change.requiredBy.length > 0 &&
                       ` · ${t(modsKey('requiredBy'), { names: change.requiredBy.map((id) => props.rootNames.get(`${change.metadata?.provider}:${id}`) ?? id).join(', ') })}`}
                   </small>
+                  {change.state === 'failed' && change.error && (
+                    <small className="mods-warning-text">
+                      {t(contentPreparationErrorKey(change.error))}
+                    </small>
+                  )}
                 </div>
                 {change.metadata && <ModsChannel channel={change.metadata.channel} />}
                 <span className="mods-inline-state" data-state={change.state}>
@@ -1137,7 +1151,7 @@ function ReviewMods(
       )}
       {props.data?.error && (
         <p className="mods-warning-text" role="alert">
-          {t(modsKey('failed'))}
+          {t(contentPreparationErrorKey(props.data.error))}{' '}
           <button
             type="button"
             className="text-button"
@@ -1192,6 +1206,9 @@ function QueuedChange({
           onClick={onDiscard}
         />
       </div>
+      {change.state === 'failed' && change.error && (
+        <p className="mods-warning-text">{t(contentPreparationErrorKey(change.error))}</p>
+      )}
     </li>
   );
 }

@@ -14674,3 +14674,33 @@ an independent production-release gate; PR21 remains open and unmerged.
   network, credential or production configuration change. No live test asset
   created or deleted. Actual mod Apply/gameplay remains for Owner use; fixture
   evidence does not establish real installation latency.
+
+#### Content preparation storage-margin diagnostics
+
+- Read-only diagnosis of the reported Mods failures found content storage below
+  the configured percentage floor. The byte/concurrency budgets had capacity;
+  admission rejected before creating a source claim, `mods/` or a pending JAR.
+  Datapacks uses the same admission path. No failed live claim was cleared or
+  rewritten, and no live source acquisition or game-file mutation was performed.
+- The disk-floor failure now has a distinct public `content_storage_unavailable`
+  code. Mods and Datapacks show localized causes on failed preparation rows;
+  retries clear the previous error. Existing resource locks, accounting, defaults
+  and byte/hash/permission checks remain unchanged.
+- Validation: 18 Mods integration tests; 39 shared admission/source integration
+  tests; seven capacity unit tests; two message-mapping unit tests; two focused
+  Firefox failure/retry cases with axe; root/web TypeScript, changed-file Biome,
+  localization completeness (2,614 keys) and diff checks pass. The source suite
+  covers rejected world/modpack/datapack reservations followed by successful retry
+  after a fixture policy correction. Mods proves the absent directory is created
+  once, before upload, and the pending JAR can be published without power actions.
+- Screenshots inspected: [Mods preparation reason](screenshots/m5/minecraft-mods-preparation-error-en.png)
+  and [Datapacks preparation/retry](screenshots/m5/minecraft-datapacks-preparation-error-en.png).
+  Browser transport failures are controlled fixtures; isolated handlers and
+  schemas provide backend evidence. This is not a real third-party installation
+  test. Independent technical and UI/content review found no blocking issues.
+- Dev HTTPS returns200; web/API/worker/Vite remain healthy with restart count0.
+  No rebuild/restart, migration, Blueprint/Panel/Wings mutation, production change
+  or live test-asset creation/cleanup. Existing source watchers expose the fix.
+  Lowering the live dev storage margin remains a separate Owner decision; the
+  code fix does not silently change it. Rollback is a code revert. PR21 remains
+  open/unmerged.

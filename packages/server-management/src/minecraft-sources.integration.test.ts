@@ -393,7 +393,7 @@ describe('durable Minecraft archive source admission', () => {
           if (order === 'upload-first') {
             claim = await upload();
             await expect(service.reserveUpload(uploadInput())).rejects.toThrow(
-              'resources_unavailable',
+              'content_storage_unavailable',
             );
           } else {
             await service.reserveUpload(uploadInput());
@@ -453,7 +453,7 @@ describe('durable Minecraft archive source admission', () => {
         try {
           if (order === 'upload-first') {
             claim = await upload();
-            await expect(stage()).rejects.toThrow('resources_unavailable');
+            await expect(stage()).rejects.toThrow('content_storage_unavailable');
           } else {
             await stage();
             await expect(upload()).rejects.toThrow('resources_unavailable');
@@ -503,10 +503,36 @@ describe('durable Minecraft archive source admission', () => {
     const service = createMinecraftSourceStore(f.db, f.context, env, { observeDisk });
     await service.reserveUpload(uploadInput());
     await expect(service.reserveUpload(uploadInput({ sha256: 'a'.repeat(64) }))).rejects.toThrow(
-      'resources_unavailable',
+      'content_storage_unavailable',
     );
     expect(observeDisk).toHaveBeenCalledTimes(2);
   });
+  it.each(['world', 'modpack', 'datapack'])(
+    'reports the configured disk margin for %s and allows a retry after a policy correction',
+    async (kind) => {
+      const input = uploadInput({ kind, serverId: await f.server() });
+      const options = {
+        observeDisk: async () => ({ available: 150000n, total: 1000000n }),
+      };
+      const reserveWithMargin = (percent: string) =>
+        createMinecraftSourceStore(
+          f.db,
+          f.context,
+          { ...env, NH_MINECRAFT_SOURCE_FREE_PERCENT: percent },
+          options,
+        ).reserveUpload(input);
+      await expect(reserveWithMargin('10')).rejects.toMatchObject({
+        code: 'content_storage_unavailable',
+        messageKey: 'errors.content_storage_unavailable',
+        status: 409,
+      });
+      expect(await f.db.selectFrom('minecraft_sources').select('id').execute()).toHaveLength(0);
+      await expect(reserveWithMargin('5')).resolves.toMatchObject({
+        kind,
+        state: 'reserved',
+      });
+    },
+  );
   it.each(['short', 'long', 'hash'] as const)(
     'retains a charged uncertain claim after %s input',
     async (failure) => {

@@ -94,6 +94,18 @@ changes, publication receipts, installed metadata and restart markers. Explicit
 idempotency keys and revisions distinguish retries from changed selections.
 Superseded preparation cannot publish its result into a later draft.
 
+Preparation failures expose their localized public cause on the affected mod,
+including required dependencies. `content_storage_unavailable` means the shared
+content store cannot admit the bytes while preserving its configured free-space
+margin and outstanding reservations. It is distinct from content budget or
+concurrency exhaustion (`resources_unavailable`). The Owner controls that margin
+in Settings → Content; preparation does not lower it automatically.
+
+If `mods/` is missing, preparation creates it once before the first pending
+upload. An admission failure occurs before that step and creates no source claim
+or game directory. After correcting the policy or freeing capacity, retry the
+selection; the failed attempt does not require database cleanup.
+
 Wings bulk rename is not an atomic filesystem transaction. Publication records its
 intent before dispatch and verifies the resulting paths in a shared observation.
 An uncertain operation is reconciled, not blindly replayed. Database receipts

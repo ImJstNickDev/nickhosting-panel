@@ -143,7 +143,7 @@ export async function assertContentAdmission(
   // Keep the shared M2 upload accounting: distinct configured paths are not proof
   // of distinct disks. Outstanding reservations remain charged conservatively.
   if (disk.available < (await unresolvedTransferBytes(db)) + input.bytes + margin)
-    throw new DomainError('resources_unavailable');
+    throw new DomainError('content_storage_unavailable');
 }
 
 /** Shared durable-worker reservation. Game identity is read from the immutable

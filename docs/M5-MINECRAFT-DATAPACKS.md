@@ -48,6 +48,13 @@ existing protected content-source acquisition and storage budgets. Paths and
 download credentials never come from an untrusted provider URL submitted by a
 browser.
 
+Failed preparation rows retain the localized public reason, including after
+closing the catalog dialog. A retry clears the old reason. Shared content-store
+admission reports `content_storage_unavailable` (HTTP 409) when the configured
+free-space margin plus outstanding reservations cannot be preserved; it creates
+no source claim. The Owner can adjust the margin in Settings → Content or free
+capacity, then retry. Source budgets and concurrency limits remain independent.
+
 Migration `044_minecraft_datapacks.sql` adds the datapack source kind and durable
 change/apply receipts. Same-name pending changes are unique per server/world.
 Preparation is separate from publication: the Apply path does not download,

@@ -19,6 +19,7 @@ import type {
   ModCatalogProject,
   ModCatalogVersion,
 } from '../../../packages/content-providers/src/mod-catalog.js';
+import { en, it as italian } from '../../../packages/i18n/src/catalogs.js';
 
 const serverId = '10000000-0000-4000-8000-000000000001';
 const base = `/v1/servers/${serverId}/minecraft/mods`;
@@ -520,6 +521,46 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     await check(page.locator('.mods-review')).toContainText('Already installed');
     await check(page.getByRole('button', { name: 'Apply', exact: true })).toBeDisabled();
     expect(snapshot.changes).toHaveLength(0);
+  });
+  it('shows localized preparation reasons for failed roots, dependencies and the durable selection', async () => {
+    select({
+      roots: [
+        {
+          provider: 'modrinth',
+          projectId: 'copper',
+          optionalProjectIds: [],
+          forceIncompatible: false,
+        },
+      ],
+      preferBeta: false,
+      idempotencyKey: 'failed-preparation',
+    });
+    const root = snapshot.changes.find((change) => !change.dependency);
+    const dependency = snapshot.changes.find((change) => change.dependency);
+    if (!root || !dependency) throw new Error('Missing queued fixture');
+    root.state = 'failed';
+    root.error = 'content_storage_unavailable';
+    dependency.state = 'failed';
+    dependency.error = 'rate_limited';
+    snapshot.error = 'content_storage_unavailable';
+    await open();
+    await page.getByRole('button', { name: 'Install (1)' }).click();
+    await check(page.locator('.mods-review-row').first()).toContainText(
+      en['errors.content_storage_unavailable'],
+    );
+    await check(page.locator('.mods-dependency-row')).toContainText(en['errors.rate_limited']);
+    await check(page.locator('.mods-review > [role=alert]')).toContainText(
+      en['errors.content_storage_unavailable'],
+    );
+    await check(page.getByRole('button', { name: 'Apply', exact: true })).toBeDisabled();
+    await capture('mods-preparation-error-en');
+    await page.evaluate(() => localStorage.setItem('nh.locale', 'it'));
+    await page.reload();
+    await page.getByRole('button', { name: 'Installa (1)' }).click();
+    await check(page.locator('.mods-review-row').first()).toContainText(
+      italian['errors.content_storage_unavailable'],
+    );
+    await check(page.locator('.mods-dependency-row')).toContainText(italian['errors.rate_limited']);
   });
   it('filters installed metadata and stages disable/remove operations for review', async () => {
     for (const item of catalog)

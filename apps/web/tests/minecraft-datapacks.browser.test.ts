@@ -6,6 +6,7 @@ import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ZipFile } from 'yazl';
 import type { ContentHttp } from '../../../packages/content-providers/src/contracts.js';
+import { en } from '../../../packages/i18n/src/catalogs.js';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
 import { browserLevelDat } from './minecraft-fixture.js';
@@ -696,5 +697,62 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
       },
     });
     expect(denied.status()).toBe(403);
+  });
+  it('keeps the preparation failure reason on its datapack row and clears it while retrying', async () => {
+    let attempts = 0;
+    let releaseRetry = () => {};
+    const retryGate = new Promise<void>((resolveGate) => {
+      releaseRetry = resolveGate;
+    });
+    const acquisitionUrl = `${fixture.origin}${base()}/catalog/acquire`;
+    await user.route(acquisitionUrl, async (request) => {
+      attempts++;
+      if (attempts > 1) await retryGate;
+      await request.fulfill({
+        status: 409,
+        json: {
+          code: 'content_storage_unavailable',
+          messageKey: 'errors.content_storage_unavailable',
+        },
+      });
+    });
+    try {
+      await user.goto(route());
+      await user.getByRole('button', { name: 'Find datapacks', exact: true }).click();
+      await user
+        .getByRole('dialog', { name: 'Find datapacks', exact: true })
+        .getByRole('button', { name: /Catalog pack/ })
+        .click();
+      await user
+        .getByRole('dialog', { name: 'Catalog pack', exact: true })
+        .getByRole('listitem')
+        .filter({ hasText: 'Pack first' })
+        .getByRole('button', { name: 'Prepare this file', exact: true })
+        .click();
+      await expect.poll(() => attempts).toBe(1);
+      await user.keyboard.press('Escape');
+      const row = user
+        .getByRole('region', { name: 'Preparing datapacks', exact: true })
+        .locator('.datapack-change')
+        .filter({ hasText: 'Pack first' });
+      await browserExpect(row).toContainText(en['errors.content_storage_unavailable']);
+      await browserExpect(row).toContainText('Preparation failed');
+      await accessible();
+      await user.screenshot({
+        path: resolve(
+          '.codex/local/m5-browser/screenshots/minecraft-datapacks-preparation-error-en.png',
+        ),
+        fullPage: true,
+      });
+      await row.getByRole('button', { name: 'Check again', exact: true }).click();
+      await expect.poll(() => attempts).toBe(2);
+      await browserExpect(row).not.toContainText(en['errors.content_storage_unavailable']);
+      await browserExpect(row).toContainText('Preparing…');
+      releaseRetry();
+      await browserExpect(row).toContainText(en['errors.content_storage_unavailable']);
+    } finally {
+      releaseRetry();
+      await user.unroute(acquisitionUrl);
+    }
   });
 });

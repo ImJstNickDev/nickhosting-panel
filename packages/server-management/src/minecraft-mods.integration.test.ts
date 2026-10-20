@@ -400,6 +400,38 @@ describe('Minecraft Mods durable preparation and publication', () => {
     });
     expect(f.listFiles.mock.calls.filter(([, path]) => path === '')).toHaveLength(1);
   });
+  it('retries a rejected storage admission and creates a missing mods directory before upload', async () => {
+    const f = await catalogFixture();
+    f.directories.delete('mods');
+    const createDirectory = vi.spyOn(f.adapter, 'createDirectory');
+    const upload = f.uploadFile.getMockImplementation();
+    f.uploadFile.mockImplementation(async (...args) => {
+      expect(f.directories.has('mods')).toBe(true);
+      if (!upload) throw new Error('Missing upload fixture');
+      await upload(...args);
+    });
+    f.env.NH_CONTENT_SOURCE_FREE_BYTES = String(Number.MAX_SAFE_INTEGER);
+    await f.select();
+    await f.service.drain();
+    expect((await f.service.snapshot(f.context, f.serverId)).changes[0]).toMatchObject({
+      state: 'failed',
+      error: 'content_storage_unavailable',
+    });
+    expect(await f.db.selectFrom('minecraft_sources').select('id').execute()).toEqual([]);
+    expect(createDirectory).not.toHaveBeenCalled();
+    expect(f.uploadFile).not.toHaveBeenCalled();
+    f.env.NH_CONTENT_SOURCE_FREE_BYTES = '0';
+    const selected = await f.select();
+    await f.service.drain();
+    expect(createDirectory).toHaveBeenCalledExactlyOnceWith(expect.any(String), '', 'mods');
+    expect((await f.service.snapshot(f.context, f.serverId)).changes[0]?.state).toBe('ready');
+    await f.service.apply(f.context, f.serverId, {
+      revision: selected.revision,
+      idempotencyKey: randomUUID(),
+    });
+    expect(f.files.get('mods/example.jar')).toEqual(f.bytes);
+    expect(f.sendCommand).not.toHaveBeenCalled();
+  });
   it('prepares verified pending bytes, publishes with a single rename and never powers/reloads a running server', async () => {
     const f = await catalogFixture();
     const selected = await f.select();

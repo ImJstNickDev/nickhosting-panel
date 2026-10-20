@@ -14,6 +14,7 @@ import { Tooltip } from '../../components/tooltip.js';
 import { ConfirmDialog, ErrorNotice } from '../../components/ui.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { gameUiClient } from '../../features/integrations.js';
+import { contentPreparationErrorKey } from './content-preparation-error.js';
 import { MinecraftDatapackCatalog } from './datapack-catalog.js';
 import { DatapackDependencies } from './datapack-dependencies.js';
 import { prepareMinecraftWorldFolder } from './world-folder-archive.js';
@@ -34,6 +35,7 @@ type Preparation = {
   optionalProjectIds?: string[];
   disablePaths?: string[];
   requestKey: string;
+  error?: unknown;
 };
 export function DatapackIcon({
   name,
@@ -202,6 +204,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
         const next = preparationQueue.current.find((item) => item.state === 'queued');
         if (!next) break;
         next.state = 'preparing';
+        next.error = undefined;
         publishPreparations();
         try {
           // Resolve metadata once during preparation, never from the Apply handler.
@@ -235,6 +238,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
           }
         } catch (failure) {
           next.state = 'failed';
+          next.error = failure;
           if (alive.current) setError(failure);
         }
         publishPreparations();
@@ -294,6 +298,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
     item.disablePaths = disablePaths;
     item.requestKey = idempotencyKey();
     item.state = 'queued';
+    item.error = undefined;
     publishPreparations();
     setDependencyDetails(undefined);
     void drainPreparations();
@@ -581,6 +586,9 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
                     <span>
                       <strong>{item.file.name}</strong>
                       <small>{t(key(item.state))}</small>
+                      {item.state === 'failed' && item.error !== undefined && (
+                        <small>{t(contentPreparationErrorKey(item.error))}</small>
+                      )}
                       {item.plan?.blockers.map((blocker) => (
                         <small key={`${blocker.projectId}:${blocker.reason}`}>
                           {blocker.name}: {t(key(`dependencies.blocker.${blocker.reason}`))}
@@ -673,6 +681,9 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
                     <small>
                       {t(key(`action.${change.action}`))} · {t(key(change.state))}
                     </small>
+                    {change.state === 'failed' && change.error && (
+                      <small>{t(contentPreparationErrorKey(change.error))}</small>
+                    )}
                   </span>
                   <Tooltip content={t(key('discard'))}>
                     <button

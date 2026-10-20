@@ -9,6 +9,7 @@ export const domainErrorCodes = [
   'content_dependency_missing',
   'content_dependency_conflict',
   'content_plan_expired',
+  'content_storage_unavailable',
   // Retryable only when this request has not entered its effect callback.
   'operation_busy',
   'rate_limited',
@@ -45,6 +46,7 @@ const defaultStatuses: Record<DomainErrorCode, number> = {
   content_dependency_missing: 409,
   content_dependency_conflict: 409,
   content_plan_expired: 409,
+  content_storage_unavailable: 409,
   operation_busy: 409,
   rate_limited: 429,
   invitation_invalid: 400,
