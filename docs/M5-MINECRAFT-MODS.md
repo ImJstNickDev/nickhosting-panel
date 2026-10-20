@@ -41,11 +41,20 @@ remain in metadata. Category synonyms use canonical identities without collapsin
 unrelated categories. Unknown metadata is not silently presented as server-safe.
 
 Modrinth's declared environment, where available, takes precedence over its older
-client/server compatibility pair. CurseForge does not expose the same universal
-execution-environment field. Archive metadata can supply that information during
-the existing preparation inspection; listing installed files does not download
-every JAR. Files without matching provenance remain visible as local files with
-unknown catalog metadata.
+client/server compatibility pair. CurseForge carries explicit `Client`/`Server`
+Environment tags in each file's `gameVersions`; these are normalized separately
+from Minecraft versions and loader tags. Search/detail responses already include
+`latestFiles`, so project summaries require no extra per-project requests.
+Consistent declarations across tagged files supply the project summary; conflicting
+declarations remain unknown. A particular version uses only its own tags, never
+the project summary to fill missing metadata. Client-only versions retain the
+explicit force requirement. See the official [File](https://docs.curseforge.com/rest-api/#tocS_File)
+and [Mod](https://docs.curseforge.com/rest-api/#tocS_Mod) response schemas.
+
+Archive metadata can supply missing side information during the existing
+preparation inspection; listing installed files does not download every JAR.
+Files without matching provenance remain visible as local files with unknown
+catalog metadata.
 
 Required dependencies are resolved together, optional dependencies are explicit,
 and embedded dependencies are not independently downloaded. Repeated references

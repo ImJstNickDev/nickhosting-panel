@@ -55,11 +55,35 @@ export function modrinthEnvironment(input: {
     ].filter((v): v is string => Boolean(v)),
   };
 }
-export const unknownModEnvironment = (): ModEnvironment => ({
-  kind: 'unknown',
-  source: 'unknown',
-  original: [],
-});
+/** CurseForge's Environment version type is carried alongside Minecraft/loader tags. */
+export function curseforgeEnvironment(gameVersions: readonly string[]): ModEnvironment {
+  const original = ['Client', 'Server'].filter((side) => gameVersions.includes(side));
+  return {
+    kind:
+      original.length === 2
+        ? 'both'
+        : original[0] === 'Client'
+          ? 'client'
+          : original[0] === 'Server'
+            ? 'server'
+            : 'unknown',
+    source: 'curseforge',
+    original,
+  };
+}
+
+/** Summarize declared sides only; distinct file declarations must not become "Both". */
+export function curseforgeProjectEnvironment(
+  files: readonly { gameVersions: readonly string[] }[],
+): ModEnvironment {
+  const declared = files
+    .map((file) => curseforgeEnvironment(file.gameVersions))
+    .filter((environment) => environment.kind !== 'unknown');
+  const first = declared[0];
+  return first && declared.every((environment) => environment.kind === first.kind)
+    ? first
+    : curseforgeEnvironment([]);
+}
 
 /** Only genuine synonyms are merged; unrelated provider topics retain distinct labels. */
 export function normalizeModTags(

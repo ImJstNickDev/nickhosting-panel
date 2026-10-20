@@ -328,8 +328,11 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
                 }
                 return json({
                   ...item,
-                  description: `# ${item.name}\nA useful addition to your world.\n\n## Features\n- Explore new possibilities\n- Configure your play style\n\n[Documentation](https://example.test/docs)\n<script>window.fixtureInjection=true</script>`,
-                  descriptionFormat: 'markdown',
+                  description:
+                    item.provider === 'curseforge'
+                      ? `<h2>${item.name}</h2><p>A useful addition<br onclick="window.fixtureInjection=true">to your world.</p><hr><p>Read the <a href="https://example.test/docs">documentation</a>.</p><img src="https://example.test/banner.png" alt="Project banner" onerror="window.fixtureInjection=true"><img src="javascript:window.fixtureInjection=true"><script>window.fixtureInjection=true</script>`
+                      : `# ${item.name}\nA useful addition to your world.\n\n## Features\n- Explore new possibilities\n- Configure your play style\n\n[Documentation](https://example.test/docs)\n<script>window.fixtureInjection=true</script>`,
+                  descriptionFormat: item.provider === 'curseforge' ? 'html' : 'markdown',
                 });
               }
               errors.push(`Unexpected endpoint ${req.method} ${url.pathname}`);
@@ -455,6 +458,55 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
       writes.every((item) => item.path === `${base}/selection` || item.path === `${base}/apply`),
     ).toBe(true);
   });
+  it.each(['en', 'it'] as const)(
+    'renders CurseForge HTML void tags and gated images without crashing (%s)',
+    async (locale) => {
+      if (locale === 'it') await page.setViewportSize({ width: 390, height: 844 });
+      await page.addInitScript((value) => localStorage.setItem('nh.locale', value), locale);
+      let imageRequests = 0;
+      await page.route('https://example.test/banner.png', async (route) => {
+        imageRequests++;
+        await route.fulfill({
+          contentType: 'image/png',
+          body: Buffer.from(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ioAAAAASUVORK5CYII=',
+            'base64',
+          ),
+        });
+      });
+      await page.goto(`${origin}mods-fixture`);
+      await page
+        .getByRole('combobox', { name: locale === 'it' ? 'Catalogo' : 'Catalog', exact: true })
+        .click();
+      await page.getByRole('option', { name: 'CurseForge', exact: true }).click();
+      await page
+        .getByRole('button', {
+          name: locale === 'it' ? 'Informazioni su Evergreen' : 'About Evergreen',
+        })
+        .click();
+      const description = page.locator('.mods-description');
+      await check(description).toContainText('to your world.');
+      await check(description.locator('br')).toHaveCount(1);
+      await check(description.locator('hr')).toHaveCount(1);
+      await check(description.locator('img')).toHaveCount(0);
+      expect(imageRequests).toBe(0);
+      await check(description.getByRole('link', { name: 'documentation' })).toHaveAttribute(
+        'rel',
+        'noopener noreferrer',
+      );
+      await description
+        .getByRole('button', { name: locale === 'it' ? 'Carica immagini' : 'Load images' })
+        .click();
+      await check(description.getByRole('img', { name: 'Project banner' })).toBeVisible();
+      await check.poll(() => imageRequests).toBe(1);
+      expect(await description.locator('img').getAttribute('referrerpolicy')).toBe('no-referrer');
+      expect(await page.evaluate(() => 'fixtureInjection' in window)).toBe(false);
+      expect(writes).toHaveLength(0);
+      await capture(
+        `mods-curseforge-description-${locale}-${locale === 'it' ? 'mobile' : 'desktop'}`,
+      );
+    },
+  );
   it('requires an explicit inline confirmation for a version mismatch', async () => {
     await open();
     await page.getByRole('button', { name: 'About Evergreen' }).click();

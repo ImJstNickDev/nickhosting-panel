@@ -15,6 +15,7 @@ import {
   stageContent,
 } from './index.js';
 import type { ModSelection } from './mod-catalog.js';
+import { curseforgeEnvironment } from './mod-metadata.js';
 
 const target = { minecraftVersion: '1.21.1', loader: 'fabric' as const };
 const root = (projectId: string, extra: Partial<ModSelection> = {}): ModSelection => ({
@@ -250,6 +251,94 @@ describe('normalized Mods catalogs', () => {
     );
     expect((await provider.modDetails('1')).descriptionFormat).toBe('html');
     expect((await provider.modVersions('1', { target })).items[0]?.channel).toBe('release');
+  });
+  it.each([
+    [['Client'], 'client'],
+    [['Server'], 'server'],
+    [['Client', 'Server'], 'both'],
+    [[], 'unknown'],
+  ] as const)(
+    'normalizes CurseForge Environment tags %j without extra reads',
+    async (tags, kind) => {
+      const gameVersions = ['1.21.1', 'Fabric', ...tags];
+      const { provider, json } = cf(
+        [cfProject(1, { latestFiles: [{ gameVersions }] })],
+        [cfFile(2, 1, { gameVersions })],
+      );
+      const expected = { kind, source: 'curseforge', original: [...tags] };
+      expect((await provider.searchMods({ query: '', target })).items[0]?.environment).toEqual(
+        expected,
+      );
+      expect(json).toHaveBeenCalledTimes(1);
+      expect((await provider.modDetails('1')).environment).toEqual(expected);
+      expect(json).toHaveBeenCalledTimes(3);
+      const listed = await provider.modVersions('1', { target });
+      expect(json).toHaveBeenCalledTimes(5);
+      expect(listed.items[0]).toMatchObject({
+        environment: expected,
+        gameVersions: ['1.21.1'],
+        loaders: ['fabric'],
+        compatibility: kind === 'client' ? ['client-only'] : [],
+      });
+      expect(listed.recommendedId).toBe(kind === 'client' ? undefined : '2');
+    },
+  );
+  it('summarizes declared project sides without guessing untagged or different file environments', async () => {
+    const { provider } = cf(
+      [
+        cfProject(1, {
+          latestFiles: [
+            { gameVersions: ['1.21.1', 'Fabric', 'Client', 'Server'] },
+            { gameVersions: ['1.20.1', 'Forge'] },
+          ],
+        }),
+        cfProject(2, {
+          latestFiles: [
+            { gameVersions: ['1.21.1', 'Fabric', 'Client'] },
+            { gameVersions: ['1.21.1', 'Forge', 'Server'] },
+          ],
+        }),
+      ],
+      [cfFile(3, 1)],
+    );
+    const search = await provider.searchMods({ query: '', target });
+    expect(search.items.map((item) => item.environment.kind)).toEqual(['both', 'unknown']);
+    // A project summary must not fill missing evidence for one particular download.
+    expect((await provider.modVersions('1', { target })).items[0]?.environment).toEqual({
+      kind: 'unknown',
+      source: 'curseforge',
+      original: [],
+    });
+  });
+  it('deduplicates environment tags without interpreting category or unrelated version labels', () => {
+    expect(curseforgeEnvironment(['Server', 'Client', 'Client', 'Fabric'])).toEqual({
+      kind: 'both',
+      source: 'curseforge',
+      original: ['Client', 'Server'],
+    });
+    expect(curseforgeEnvironment(['Server Utility', 'Java 21', '1.21.1']).kind).toBe('unknown');
+  });
+  it('requires explicit force for a CurseForge client-only file and preserves its declaration', async () => {
+    const { provider } = cf(
+      [cfProject(1, { latestFiles: [{ gameVersions: ['Client', 'Server'] }] })],
+      [cfFile(2, 1, { gameVersions: ['1.21.1', 'Fabric', 'Client'] })],
+    );
+    const blocked = await provider.resolveMods([root('1', { versionId: '2' })], target);
+    expect(blocked.catalog.blocked[0]?.reason).toBe('incompatible-version');
+    expect(blocked.plan.artifacts).toHaveLength(0);
+    const forced = await provider.resolveMods(
+      [root('1', { versionId: '2', forceIncompatible: true })],
+      target,
+    );
+    expect(forced.catalog.blocked).toEqual([]);
+    expect(forced.catalog.items[0]).toMatchObject({
+      forced: true,
+      version: {
+        environment: { kind: 'client', source: 'curseforge', original: ['Client'] },
+        compatibility: ['client-only'],
+      },
+    });
+    expect(forced.plan.artifacts).toHaveLength(1);
   });
 });
 

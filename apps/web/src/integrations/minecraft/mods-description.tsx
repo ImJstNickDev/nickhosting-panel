@@ -77,7 +77,11 @@ export function ModsDescription({ text, format }: { text: string; format: 'markd
   function render(node: RootContent, key: string): ReactNode {
     if (node.type === 'text') return node.value;
     if (node.type !== 'element') return null;
-    const children = node.children.map((child, index) => render(child, `${key}-${index}`));
+    // These and img below are the only void elements allowed by the sanitizer.
+    // React rejects even an empty children array on a void element.
+    if (node.tagName === 'br' || node.tagName === 'hr') {
+      return createElement(node.tagName, { key });
+    }
     if (node.tagName === 'img') {
       const src = String(node.properties.src ?? '');
       if (!src.startsWith('https://')) return null;
@@ -92,6 +96,7 @@ export function ModsDescription({ text, format }: { text: string; format: 'markd
         />
       ) : null;
     }
+    const children = node.children.map((child, index) => render(child, `${key}-${index}`));
     if (node.tagName === 'a') {
       const href = String(node.properties.href ?? '');
       if (!/^https?:\/\//i.test(href)) return <span key={key}>{children}</span>;

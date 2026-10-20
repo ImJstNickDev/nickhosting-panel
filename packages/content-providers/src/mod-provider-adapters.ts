@@ -21,11 +21,12 @@ import {
 } from './mod-catalog.js';
 import {
   catalogImage,
+  curseforgeEnvironment,
+  curseforgeProjectEnvironment,
   modCompatibility,
   modrinthEnvironment,
   normalizeModTags,
   recommendedModVersion,
-  unknownModEnvironment,
 } from './mod-metadata.js';
 import {
   type ModCandidate,
@@ -102,6 +103,7 @@ const cfProject = z.object({
   logo: z.object({ thumbnailUrl: z.string() }).nullable().optional(),
   isAvailable: z.boolean(),
   allowModDistribution: z.boolean().nullable().optional(),
+  latestFiles: z.array(z.object({ gameVersions: z.array(z.string()).default([]) })).default([]),
 });
 const cfFile = z.object({
   id: numeric,
@@ -230,7 +232,7 @@ function cfPublicProject(project: CFProject): ModCatalogProject {
     authors: project.authors.map((author) => author.name),
     downloads: project.downloadCount,
     tags: normalizeModTags('curseforge', project.categories),
-    environment: unknownModEnvironment(),
+    environment: curseforgeProjectEnvironment(project.latestFiles),
   };
 }
 function cfHash(file: CFFile): string | undefined {
@@ -256,7 +258,7 @@ function cfPublicVersion(
     file.isAvailable &&
     Boolean(file.downloadUrl);
   const artifact = validJar(file.fileName, file.downloadUrl) && Boolean(cfHash(file));
-  const env = unknownModEnvironment();
+  const env = curseforgeEnvironment(file.gameVersions);
   return {
     provider: 'curseforge',
     id: String(file.id),

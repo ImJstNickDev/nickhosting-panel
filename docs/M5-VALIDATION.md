@@ -14784,3 +14784,33 @@ activation, M6 work, DNS or Blueprint change. PR #21 stays open and unmerged.
   server, game power operation, production deployment or historical-data cleanup.
   Source cache, published world, receipts and original migration copies remain
   retained. PR #21 stays open/unmerged; rollback preserves receipts and game data.
+
+## CurseForge Mods descriptions and environment metadata — 2026-10-20
+
+- The description renderer no longer supplies React children to sanitized `br`
+  or `hr` elements. External images remain opt-in and link/HTML sanitization is
+  unchanged. Three rendering regressions reproduced the original exception before
+  the fix; parsing alone had not exercised React's void-element constraint.
+- CurseForge project summaries use explicit Environment tags already present in
+  `latestFiles[].gameVersions`; each version uses only its own `gameVersions`.
+  Category names never establish execution side. Missing or conflicting project
+  metadata stays unknown, and client-only downloads retain the explicit-force
+  requirement. There are no additional per-project HTTP requests or schema changes.
+- 37 focused provider/description tests pass, including environment normalization,
+  request counts, recommendation/force behavior and real React rendering.
+  Two Firefox regressions pass in English desktop and Italian mobile with zero
+  page errors and zero Axe violations. Reviewed screenshots:
+  [desktop](screenshots/m5/mods-curseforge-description-en-desktop.png) and
+  [mobile](screenshots/m5/mods-curseforge-description-it-mobile.png).
+  These browser regressions use isolated catalog/transfer fixtures.
+- Live read-only checks through the configured development API return 200:
+  Fabric API declares both sides, Sodium client-only and Spark REST server-only.
+  Search and version responses preserve the corresponding tags. A separate
+  authenticated Firefox visit opens the real CurseForge Fabric API description
+  without errors, shows Client & server, and confirms HTTPS/WSS HMR.
+  No mods were selected, downloaded or installed during these checks.
+- Root/web TypeScript, focused Biome and diff checks pass; independent technical
+  and UI review found no blockers. Existing source watchers load the fix; all
+  eleven dev services remain healthy. No manual restart/rebuild, migration,
+  Panel/Wings/Blueprint change, production deployment or test-asset cleanup.
+  Rollback is a source revert; retained user data is unaffected. PR21 stays open.
