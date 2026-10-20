@@ -527,6 +527,68 @@ describe('Mods graph selection', () => {
       ).plan.artifacts,
     ).toHaveLength(0);
   });
+  it.each(['curseforge', 'modrinth'] as const)(
+    'distinguishes a missing compatible dependency from a blocked download on %s',
+    async (name) => {
+      const available =
+        name === 'curseforge'
+          ? cf(
+              [cfProject(1), cfProject(2)],
+              [
+                cfFile(10, 1, { dependencies: [{ modId: 2, relationType: 3 }] }),
+                cfFile(20, 2, { gameVersions: ['1.21.2', 'Fabric'] }),
+              ],
+            )
+          : mr(
+              [project('1'), project('2')],
+              [
+                version('10', '1', {
+                  dependencies: [{ project_id: '2', dependency_type: 'required' }],
+                }),
+                version('20', '2', { game_versions: ['1.21.2'] }),
+              ],
+            );
+      const { provider, json } = available;
+      const result = await provider.resolveMods([root('1')], target);
+      expect(result.catalog.blocked).toEqual([
+        expect.objectContaining({
+          projectId: '2',
+          requiredBy: '1',
+          reason: 'incompatible-version',
+        }),
+      ]);
+      expect(result.catalog.items.map((item) => item.project.id)).toEqual(['1']);
+      expect(result.plan.artifacts.some((artifact) => artifact.projectId === '2')).toBe(false);
+      // Classification reuses the existing filtered lookup, without probing other targets.
+      const calls = json.mock.calls.map(([url]) => url);
+      expect(calls).toHaveLength(4);
+      expect(calls.some((url) => url.includes('1.21.2'))).toBe(false);
+
+      const blocked =
+        name === 'curseforge'
+          ? cf([cfProject(1, { allowModDistribution: false })], [cfFile(10, 1)])
+          : mr(
+              [project('1')],
+              [
+                version('10', '1', {
+                  files: [{ ...version('10', '1').files[0], filename: 'bad.zip' }],
+                }),
+              ],
+            );
+      expect(
+        (await blocked.provider.resolveMods([root('1')], target)).catalog.blocked[0]?.reason,
+      ).toBe('unavailable');
+    },
+  );
+  it('reports unpinned client-only candidates as incompatible instead of download-unavailable', async () => {
+    const { provider } = cf(
+      [cfProject(1)],
+      [cfFile(10, 1, { gameVersions: ['1.21.1', 'Fabric', 'Client'] })],
+    );
+    expect((await provider.resolveMods([root('1')], target)).catalog.blocked[0]?.reason).toBe(
+      'incompatible-version',
+    );
+  });
   it('walks CF stable selection beyond the first page and uses beta only if no stable exists', async () => {
     const files = [
       ...Array.from({ length: 50 }, (_, i) => cfFile(100 + i, 1, { releaseType: 2 })),

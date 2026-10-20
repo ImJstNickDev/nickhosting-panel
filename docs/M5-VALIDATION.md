@@ -14814,3 +14814,30 @@ activation, M6 work, DNS or Blueprint change. PR #21 stays open and unmerged.
   eleven dev services remain healthy. No manual restart/rebuild, migration,
   Panel/Wings/Blueprint change, production deployment or test-asset cleanup.
   Rollback is a source revert; retained user data is unaffected. PR21 stays open.
+
+## Missing compatible Mods dependency diagnostics — 2026-10-20
+
+JEI's latest stable CurseForge Fabric file advertises Minecraft 26.1 compatibility,
+but its required MezzConfig dependency has no matching file for that target.
+Its files and upstream Fabric manifest target 26.1.2. The resolver correctly
+blocked preparation, but incorrectly described this as an unavailable download.
+
+Both catalog adapters now retain whether the existing lookup found a compatible
+version before filtering downloadable candidates. The shared resolver returns
+`incompatible-version` when none exists, while genuine distribution/artifact
+failures remain `unavailable`. No additional lookup, automatic dependency skip,
+version widening, cross-provider fallback or automatic parent downgrade is added.
+Persisted draft diagnostics remain unchanged until the user updates the selection.
+
+Validation: 35 catalog/resolution tests, root TypeScript, focused Biome and diff
+checks pass; independent review found no blockers. Isolated regressions cover
+both providers, missing compatible dependencies, unavailable artifacts,
+client-only selection and unchanged request counts. No frontend layout changes.
+
+A read-only resolution through the configured dev provider confirms the actual
+26.1/Fabric target: JEI 29.47.0.110 (file 9193051) is blocked by MezzConfig with
+the corrected reason; explicitly choosing JEI 29.34.0.90 (file 8771076) resolves
+without blockers. This is provider-metadata validation, not gameplay evidence.
+No download, installation, draft mutation, service restart, migration or
+Panel/Wings change occurred. All eleven dev services remain healthy. No test
+assets created/cleaned; source-revert rollback leaves data intact. PR21 stays open.

@@ -451,6 +451,7 @@ export class ModrinthModCatalog {
           if (!actualId) fail('dependency_identity');
           const rawProject = prefetchedProject ?? (await project(actualId));
           let selected = pinned;
+          let compatibleVersionFound = false;
           const installed = installedVersion(actualId);
           if (!selected && installed) {
             const current = await version(installed);
@@ -463,14 +464,18 @@ export class ModrinthModCatalog {
               memo(`versions:${actualId}`, () =>
                 this.versions(actualId, target, false, options.signal),
               ));
-            const preferred = recommendedModVersion(
-              all.map((raw) => mrPublicVersion(raw, rawProject, target)),
-              options.preferBeta,
-            );
+            const versions = all.map((raw) => mrPublicVersion(raw, rawProject, target));
+            compatibleVersionFound = versions.some((version) => !version.compatibility.length);
+            const preferred = recommendedModVersion(versions, options.preferBeta);
             selected = all.find((raw) => raw.id === preferred?.id);
           }
           const publicProject = mrPublicProject(rawProject);
-          if (!selected) return { project: publicProject, dependencies: [] };
+          if (!selected)
+            return {
+              project: publicProject,
+              dependencies: [],
+              blockedReason: compatibleVersionFound ? 'unavailable' : 'incompatible-version',
+            };
           const publicVersion = mrPublicVersion(selected, rawProject, target);
           const file = mrPrimary(selected);
           const artifact: ContentArtifact | undefined =
@@ -647,6 +652,7 @@ export class CurseForgeModCatalog {
             initialPage,
           ]);
           let selected = pinned;
+          let compatibleVersionFound = false;
           const installed = installedVersion(pid);
           if (!selected && installed) {
             const current = await file(pid, installed);
@@ -659,9 +665,12 @@ export class CurseForgeModCatalog {
               const page = await memo(`files:${pid}:${offset}`, () =>
                 this.files(pid, target, offset, false, options.signal, 50),
               );
-              const candidates = page.files
+              const compatible = page.files
                 .map((raw) => ({ raw, public: cfPublicVersion(raw, rawProject, target) }))
-                .filter((entry) => entry.public.available && !entry.public.compatibility.length)
+                .filter((entry) => !entry.public.compatibility.length);
+              compatibleVersionFound ||= compatible.length > 0;
+              const candidates = compatible
+                .filter((entry) => entry.public.available)
                 .sort((a, b) => b.public.publishedAt.localeCompare(a.public.publishedAt));
               beta ??= candidates.find((entry) => entry.public.channel === 'beta')?.raw;
               selected = candidates.find(
@@ -674,7 +683,17 @@ export class CurseForgeModCatalog {
             selected ??= beta;
           }
           const publicProject = cfPublicProject(rawProject);
-          if (!selected) return { project: publicProject, dependencies: [] };
+          if (!selected)
+            return {
+              project: publicProject,
+              dependencies: [],
+              blockedReason:
+                !rawProject.isAvailable ||
+                rawProject.allowModDistribution === false ||
+                compatibleVersionFound
+                  ? 'unavailable'
+                  : 'incompatible-version',
+            };
           const publicVersion = cfPublicVersion(selected, rawProject, target);
           const sha1 = cfHash(selected);
           const artifact: ContentArtifact | undefined =

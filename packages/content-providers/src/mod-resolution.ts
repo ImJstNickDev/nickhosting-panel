@@ -20,6 +20,7 @@ export interface ModCandidate {
   project: ModCatalogProject;
   version?: ModCatalogVersion;
   artifact?: ContentArtifact;
+  blockedReason?: 'incompatible-version' | 'unavailable';
   dependencies: {
     projectId?: string;
     versionId?: string;
@@ -178,7 +179,13 @@ export async function resolveModGraph(options: {
       const forced =
         rootMap.get(pid)?.forceIncompatible === true && Boolean(rootMap.get(pid)?.versionId);
       if (!version) {
-        block(pid, pin, candidate.project.name, request.requiredBy, 'unavailable');
+        block(
+          pid,
+          pin,
+          candidate.project.name,
+          request.requiredBy,
+          candidate.blockedReason ?? 'unavailable',
+        );
         continue;
       }
       if (version.compatibility.length && !forced) {

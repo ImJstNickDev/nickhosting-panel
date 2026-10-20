@@ -61,6 +61,10 @@ and embedded dependencies are not independently downloaded. Repeated references
 share resolution work. Installed mod receipts and retained datapack requirements
 participate in final dependency/conflict validation. Removing a consumer does not
 automatically remove dependencies that another selection may still need.
+An empty compatible-version lookup is reported separately from an unavailable
+download. A parent project's advertised Minecraft range does not override the
+range of a required dependency. The resolver neither skips that dependency nor
+silently changes the user's Minecraft target, provider or selected parent version.
 
 Fabric identity is extracted during the existing JAR inspection. Identical
 artifacts from both catalogs can share one published JAR only when their Fabric
