@@ -14870,3 +14870,26 @@ handoff; no manual restart/rebuild, migration, Blueprint/Panel/Wings change or
 production deployment. Isolated fixture schemas/files were cleaned by their own
 harness; historical test evidence and real game data remain intact. Source-revert
 rollback retains the unchanged schema and application/game state. PR21 remains open.
+
+## Mods alternative lookup contract regression — 2026-10-20
+
+The alternatives service forwarded the selection's `provider` discriminator into
+the provider-local strict resolver schema, causing HTTP500 for valid Modrinth and
+CurseForge requests. It now projects provider-local roots exactly as ordinary
+preparation does, retaining version pins, force flags and optional selections.
+No request limit, compatibility requirement or dependency policy changes.
+
+Two HTTP regressions traverse the actual service, adapters and resolver with only
+the external catalog transport mocked. Both reproduced the strict-schema failure
+before the fix; all eight cases in `minecraft-mods.integration.test.ts` pass after
+it. They assert unchanged draft revision/selection and no download, Wings read or
+file-change job. Root TypeScript, focused Biome and diff checks pass; independent
+review found no blockers.
+
+Read-only authenticated Firefox verification through the real dev HTTPS endpoint
+returns 200 for JEI alternatives: five candidates checked, no eligible alternative,
+and the bounded-search indicator retained. The draft remains unchanged; no browser
+errors, HTTPS200 and WSS HMR confirmed. No real downloads, installations, manual
+service restart, migration or Panel/Wings/Blueprint changes. Only isolated fixture
+state is used by automated tests. Source-revert rollback preserves all data;
+PR21 stays open and unmerged.

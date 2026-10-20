@@ -1293,7 +1293,9 @@ export function createMinecraftModsService(options: {
       if (!info.supported || !info.installed) throw new DomainError('integration_unavailable');
       if (!current || current.revision !== revision) throw new DomainError('conflict');
       const selection = parse(minecraftModSelectionSchema, current.selection);
-      const roots = selection.roots.filter((root) => root.provider === name);
+      const roots = selection.roots
+        .filter((root) => root.provider === name)
+        .map(({ provider: _, ...root }) => root);
       if (!roots.some((root) => root.projectId === projectId)) throw new DomainError('not_found');
       return cachedAdvice(
         db,

@@ -205,6 +205,101 @@ describe('Mods HTTP catalog and mutation boundaries', () => {
     expect(download).not.toHaveBeenCalled();
   });
 
+  it.each(['modrinth', 'curseforge'] as const)(
+    'resolves %s alternatives through the real provider contract without changing the draft',
+    async (provider) => {
+      const projectId = provider === 'modrinth' ? 'testmod' : '238222';
+      const versionId = provider === 'modrinth' ? 'version1' : '9193051';
+      const selected = {
+        roots: [{ provider, projectId, forceIncompatible: false, optionalProjectIds: [] }],
+        preferBeta: false,
+        idempotencyKey: randomUUID(),
+      };
+      await database.db
+        .insertInto('minecraft_mod_drafts')
+        .values({
+          server_id: serverId,
+          revision: 3,
+          actor_user_id: actor.actorUserId,
+          state: 'ready',
+          selection: JSON.stringify(selected),
+          blockers: '[]',
+          optional: '[]',
+          error: null,
+        })
+        .execute();
+      if (provider === 'curseforge') {
+        const file = {
+          id: Number(versionId),
+          modId: Number(projectId),
+          gameId: 432,
+          displayName: 'Fixture version',
+          fileName: 'fixture.jar',
+          fileLength: 100,
+          fileDate: '2026-10-10T00:00:00Z',
+          releaseType: 1,
+          gameVersions: ['1.21.1', 'Fabric', 'Client', 'Server'],
+          isAvailable: true,
+          downloadUrl: 'https://mediafilez.forgecdn.net/files/fixture.jar',
+          hashes: [{ algo: 1, value: 'a'.repeat(40) }],
+          dependencies: [],
+        };
+        json.mockImplementation(async (input) => {
+          const path = new URL(input).pathname;
+          if (path.endsWith(`/mods/${projectId}`))
+            return {
+              data: {
+                id: Number(projectId),
+                gameId: 432,
+                classId: 6,
+                slug: 'fixture',
+                name: 'Fixture',
+                summary: '',
+                downloadCount: 1,
+                authors: [],
+                isAvailable: true,
+                latestFiles: [file],
+              },
+            };
+          if (path.endsWith(`/mods/${projectId}/files`))
+            return {
+              data: [file],
+              pagination: { index: 0, pageSize: 20, resultCount: 1, totalCount: 1 },
+            };
+          throw new Error(`Unexpected fixture provider URL: ${path}`);
+        });
+      }
+      const response = await app.request(
+        `${base()}/alternatives/${provider}/${projectId}?revision=3`,
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        revision: 3,
+        provider,
+        projectId,
+        items: [{ id: versionId }],
+        checked: 1,
+        limited: false,
+      });
+      expect(providerRead).not.toHaveBeenCalled();
+      expect(download).not.toHaveBeenCalled();
+      const unchanged = await database.db
+        .selectFrom('minecraft_mod_drafts')
+        .selectAll()
+        .where('server_id', '=', serverId)
+        .executeTakeFirstOrThrow();
+      expect(unchanged.selection).toEqual(selected);
+      expect(unchanged.revision).toBe(3);
+      expect(
+        await database.db
+          .selectFrom('minecraft_mod_changes')
+          .select('id')
+          .where('server_id', '=', serverId)
+          .execute(),
+      ).toEqual([]);
+    },
+  );
+
   it('serves updates without Wings reads and protects cached advice after session revocation', async () => {
     await database.db
       .insertInto('minecraft_mod_receipts')
