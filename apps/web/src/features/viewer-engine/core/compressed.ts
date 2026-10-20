@@ -8,7 +8,7 @@ interface CompressedPage {
 
 /** Compound tar formats remain archive browsers. */
 export function isSingleCompressed(source: ViewerSource) {
-  return ['gz', 'bz2', 'xz', 'zst'].includes(viewerExtension(source.name));
+  return ['gz', 'bz2', 'xz', 'zst'].includes(viewerExtension(source.name, source.gameId));
 }
 
 /** Shares Atlas' first-page cache, including its bounded page size and lifetime. */

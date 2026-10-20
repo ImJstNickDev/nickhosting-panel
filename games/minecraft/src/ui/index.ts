@@ -9,6 +9,7 @@ import {
 import { z } from 'zod';
 import { minecraftContentRuntimes } from '../content-capabilities.js';
 import { minecraftPropertyEnumName } from '../property-enums.js';
+import { minecraftViewerMessages } from '../viewers/catalog.js';
 import {
   createMinecraftUiController,
   MinecraftUiError,
@@ -23,11 +24,13 @@ import { minecraftWorldsMessages } from './worlds-catalog.js';
 
 export { minecraftFormattingTokens } from '../message-formatting.js';
 export * from '../message-layout.js';
+export { minecraftViewers } from '../viewers/index.js';
 export * from './controller.js';
 
 const namespace = 'games.minecraft';
 const k = (name: string) => `${namespace}.${name}`;
 const translated: Record<string, [string, string]> = {
+  ...minecraftViewerMessages,
   ...minecraftPlayersMessages,
   ...minecraftDatapacksMessages,
   ...minecraftModsMessages,

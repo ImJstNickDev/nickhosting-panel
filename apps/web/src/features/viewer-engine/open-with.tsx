@@ -59,7 +59,7 @@ export function OpenWith({
     Boolean(selected && !suggested.some((item) => item.id === selected)),
   );
   const choices = showAll ? all : suggested;
-  const extension = viewerExtension(source.name);
+  const extension = viewerExtension(source.name, source.gameId);
   const [scope, setScope] = useState<ViewerPreference['scope'] | 'once'>('once');
   const [pending, setPending] = useState<ViewerId>();
   const submitting = useRef(false);

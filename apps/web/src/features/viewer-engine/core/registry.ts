@@ -1,3 +1,4 @@
+import type { GameViewerSource } from '@nickhosting/game-sdk/ui';
 import { fileEditorAvailability } from '../../../../../../packages/core/src/file-content.js';
 import { gameViewerRegistry } from '../trusted-viewers.js';
 import { documentViews } from './document-registry.js';
@@ -13,18 +14,7 @@ export type ViewerId =
   | 'pdf'
   | 'markdown'
   | `${string}:${string}`;
-export interface ViewerSource {
-  path: string;
-  name: string;
-  size: number;
-  /** An entry of the archive at path; never interpreted as a real server path. */
-  entry?: string;
-  /** Ordered nested archive members, relative to their containing archive. */
-  archives?: string[];
-  gameId?: string;
-  /** In-document heading/block destination, supplied by a trusted document navigator. */
-  fragment?: string;
-}
+export type ViewerSource = GameViewerSource;
 export interface ViewerPreference {
   scope: 'server' | 'game' | 'global';
   extension: string;
@@ -100,13 +90,26 @@ export const builtinViewers: readonly ViewerDefinition[] = [
   { id: 'text', label: 'viewer.name.text', description: 'file.editor', extensions: [] },
 ];
 
-export function viewerExtension(name: string) {
+export function viewerExtension(name: string, gameId?: string) {
   const lower = name.toLowerCase();
-  const compound = ['tar.gz', 'tar.bz2', 'tar.xz', 'tar.zst'].find((extension) =>
-    lower.endsWith(`.${extension}`),
-  );
+  const extensions = (gameId && gameCompoundExtensions.get(gameId)) || builtinCompoundExtensions;
+  const compound = extensions.find((extension) => lower.endsWith(`.${extension}`));
   return compound ?? (lower.includes('.') ? lower.slice(lower.lastIndexOf('.') + 1) : '');
 }
+const compounds = (extensions: readonly string[]) =>
+  [...new Set(extensions)]
+    .filter((extension) => extension.includes('.'))
+    .sort((left, right) => right.length - left.length || left.localeCompare(right));
+const builtinCompoundExtensions = compounds(builtinViewers.flatMap((viewer) => viewer.extensions));
+const gameCompoundExtensions = new Map(
+  [...new Set(gameViewerRegistry.all().map((viewer) => viewer.descriptor.gameId))].map((gameId) => [
+    gameId,
+    compounds([
+      ...builtinCompoundExtensions,
+      ...gameViewerRegistry.forGame(gameId).flatMap((viewer) => viewer.descriptor.extensions),
+    ]),
+  ]),
+);
 /** Known runnable modules for this context; filename matches are only suggestions. */
 export function selectableViewers(source: ViewerSource): ViewerDefinition[] {
   const gameViewers: ViewerDefinition[] = gameViewerRegistry
@@ -124,8 +127,10 @@ export function selectableViewers(source: ViewerSource): ViewerDefinition[] {
   );
 }
 export function availableViewers(source: ViewerSource): ViewerDefinition[] {
-  const extension = viewerExtension(source.name);
+  const extension = viewerExtension(source.name, source.gameId);
   return selectableViewers(source).filter((viewer) => {
+    const gameViewer = gameViewerRegistry.get(viewer.id);
+    if (gameViewer?.matches && !gameViewer.matches(source)) return false;
     if (
       viewer.id === 'text' ||
       documentViews(source.name).some((item) => item.id === viewer.id && !item.standalone)
@@ -143,7 +148,8 @@ export function savedViewer(
   const selectable = selectableViewers(source);
   for (const scope of ['server', 'game', 'global'] as const) {
     const preference = preferences.find(
-      (item) => item.scope === scope && item.extension === viewerExtension(source.name),
+      (item) =>
+        item.scope === scope && item.extension === viewerExtension(source.name, source.gameId),
     );
     if (preference && selectable.some((item) => item.id === preference.viewerId))
       return preference.viewerId;

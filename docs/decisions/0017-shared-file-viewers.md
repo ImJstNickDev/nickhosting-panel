@@ -4,6 +4,16 @@ Status: Accepted implementation direction, deployment pending explicit approval
 Date: 2026-10-13
 Milestone: M5; tracking [issue #26](https://github.com/ImJstNickDev/nickhosting-panel/issues/26)
 
+## First integration-owned viewer — 2026-10-21
+
+Minecraft contributes Modscope through the compiled viewer registry, with its
+parser and React renderer in the game package. The SDK now owns the source/host
+contract and an optional source-match suggestion hook. Fileman injects bounded,
+cached archive access and viewer switching; it retains authority, chrome,
+cancellation and personal-default precedence. Game-specific matching and metadata
+interpretation do not enter the shell or backend. See
+[Modscope formats and boundaries](../M5-MINECRAFT-MODS-VIEWER.md).
+
 ## Decision
 
 The file manager has one viewer engine. It owns access, cancellation, selection,

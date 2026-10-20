@@ -1,5 +1,10 @@
 # M5 viewer format implementation and dependency evidence
 
+[Modscope](M5-MINECRAFT-MODS-VIEWER.md) is Minecraft's first integration-owned
+viewer: bounded JAR metadata inspection through Fileman's shared archive host.
+Its supported loader descriptors and primary-source references are documented
+there; it is not a builtin or an installation/compatibility checker.
+
 Quill adds the shared Markdown view; its syntax, Obsidian link/inclusion behavior,
 resource budgets and dependency decisions are specified in [M5 Quill](M5-QUILL.md).
 

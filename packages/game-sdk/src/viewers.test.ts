@@ -15,12 +15,40 @@ describe('compiled first-party file viewers', () => {
     expect(registry.forGame('other-game')).toEqual([]);
     expect(registry.forGame(undefined)).toEqual([]);
     expect(registry.forGame('fixture-game')).toHaveLength(1);
+    expect(registry.all()).toHaveLength(1);
     expect(registry.forFile('fixture-game', 'txt')).toEqual([]);
     expect(registry.forFile('other-game', 'dat')).toEqual([]);
     expect(registry.forFile('fixture-game', 'DAT')).toHaveLength(1);
     expect(load).not.toHaveBeenCalled();
     expect(await registry.get('fixture-game:data')?.load()).toEqual({ renderFixture: true });
     expect(load).toHaveBeenCalledOnce();
+  });
+  it('keeps compiled path suggestions separate from descriptors and executable availability', () => {
+    const module = defineTrustedGameViewer(
+      {
+        id: 'fixture-game:archive-info',
+        gameId: 'fixture-game',
+        labelKey: 'games.fixture-game.viewers.archive',
+        extensions: ['jar', 'jar.disabled'],
+        readOnly: true,
+      },
+      async () => ({}),
+      (source) => source.path.startsWith('mods/') && !source.entry && !source.archives?.length,
+    );
+    const registry = createTrustedViewerRegistry([module]);
+    expect(module.matches?.({ path: 'mods/test.jar', name: 'test.jar', size: 10 })).toBe(true);
+    expect(module.matches?.({ path: 'test.jar', name: 'test.jar', size: 10 })).toBe(false);
+    // An explicit selection remains possible outside the suggestion path.
+    expect(registry.forFile('fixture-game', 'jar')).toEqual([module]);
+    expect(() =>
+      defineTrustedGameViewer(module.descriptor as never, module.load, 'mods/*' as never),
+    ).toThrow();
+    expect(() =>
+      createTrustedViewerRegistry([{ ...module, matches: 'mods/*' as never }]),
+    ).toThrow();
+    expect(() =>
+      defineTrustedGameViewer({ ...module.descriptor, matches: 'mods/*' } as never, module.load),
+    ).toThrow();
   });
   it('rejects duplicate modules, injected namespaces and API-shaped non-executable loaders', () => {
     const descriptor = {

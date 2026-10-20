@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { canUseDocumentView, documentViews } from './document-registry.js';
 import {
   availableViewers,
@@ -8,8 +8,80 @@ import {
   viewerExtension,
 } from './registry.js';
 
+vi.mock('../trusted-viewers.js', async () => {
+  const { createTrustedViewerRegistry, defineTrustedGameViewer } = await import(
+    '@nickhosting/game-sdk/ui'
+  );
+  return {
+    gameViewerRegistry: createTrustedViewerRegistry([
+      defineTrustedGameViewer(
+        {
+          id: 'fixture-game:mod-info',
+          gameId: 'fixture-game',
+          labelKey: 'games.fixture-game.viewers.mod',
+          extensions: ['jar', 'jar.disabled', 'jar.pending'],
+          readOnly: true,
+        },
+        async () => ({}),
+        (source) => source.path.startsWith('mods/') && !source.entry && !source.archives?.length,
+      ),
+    ]),
+  };
+});
+
 const file = (name: string, size = 100): ViewerSource => ({ name, path: `world/${name}`, size });
 describe('trusted viewer selection', () => {
+  it('prioritizes integration suggestions only in their game and path, retaining explicit choices', () => {
+    const mod = { ...file('test.jar'), path: 'mods/test.jar', gameId: 'fixture-game' };
+    expect(availableViewers(mod).map((viewer) => viewer.id)).toEqual([
+      'fixture-game:mod-info',
+      'archive',
+    ]);
+    expect(preferredViewer(mod)).toBe('fixture-game:mod-info');
+    expect(preferredViewer({ ...mod, gameId: undefined })).toBe('archive');
+    expect(preferredViewer({ ...mod, gameId: 'other-game' })).toBe('archive');
+    expect(preferredViewer({ ...mod, path: 'server.jar' })).toBe('archive');
+    expect(preferredViewer({ ...mod, path: 'pack.zip', entry: 'mods/test.jar' })).toBe('archive');
+    expect(preferredViewer({ ...mod, archives: ['nested.jar'] })).toBe('archive');
+    expect(preferredViewer(mod, [{ scope: 'server', extension: 'jar', viewerId: 'archive' }])).toBe(
+      'archive',
+    );
+    const elsewhere = { ...mod, path: 'downloads/test.jar' };
+    expect(selectableViewers(elsewhere).map((viewer) => viewer.id)).toContain(
+      'fixture-game:mod-info',
+    );
+    expect(
+      preferredViewer(elsewhere, [
+        { scope: 'game', extension: 'jar', viewerId: 'fixture-game:mod-info' },
+      ]),
+    ).toBe('fixture-game:mod-info');
+  });
+  it('recognizes contributed compound suffixes without hardcoded game formats', () => {
+    expect(viewerExtension('test.JAR.DISABLED', 'fixture-game')).toBe('jar.disabled');
+    expect(viewerExtension('test.jar.pending', 'fixture-game')).toBe('jar.pending');
+    expect(viewerExtension('test.JAR.DISABLED', 'other-game')).toBe('disabled');
+    expect(viewerExtension('test.jar.pending')).toBe('pending');
+    expect(
+      preferredViewer({
+        path: 'mods/test.jar.disabled',
+        name: 'test.jar.disabled',
+        size: 10,
+        gameId: 'fixture-game',
+      }),
+    ).toBe('fixture-game:mod-info');
+    expect(viewerExtension('test.disabled')).toBe('disabled');
+    expect(
+      preferredViewer(
+        {
+          path: 'mods/test.jar.disabled',
+          name: 'test.jar.disabled',
+          size: 10,
+          gameId: 'other-game',
+        },
+        [{ scope: 'global', extension: 'disabled', viewerId: 'archive' }],
+      ),
+    ).toBe('archive');
+  });
   it('uses Quill and Scribe for bounded Markdown documents and archive members', () => {
     for (const name of ['README.md', 'notes.markdown', 'notes.mdown', 'notes.mkd']) {
       expect(preferredViewer(file(name))).toBe('markdown');

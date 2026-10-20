@@ -14971,3 +14971,50 @@ selection/recheck to use the new preparation behavior. Recovery remains bounded;
 cases requiring coordinated backtracking can still show actionable blockers.
 Rollback is a source revert, preserving database and files. PR21 stays open and
 unmerged; issue #18 remains a separate production-release boundary.
+
+## Modscope integration-owned Minecraft viewer — 2026-10-21
+
+The first game-owned viewer lives entirely under Minecraft's viewer contribution:
+descriptor, lazy renderer, metadata parser, styles and EN/IT catalog. Fileman
+supplies its existing shell, preferences, source authority and cached archive
+reads through a generic SDK host. Minecraft JARs in `mods/`, including disabled
+and pending suffixes, prefer Modscope; explicit preferences still win and Atlas
+remains available. No duplicated provider transport or new Blueprint endpoint.
+
+Validation: the final combined run passes 79 metadata-parser, SDK/registry/host
+and archive/icon cases. Nine Firefox browser journeys pass; the four affected cases also pass
+after correcting mobile title compression and isolating contributed compound
+suffixes to their game. Coverage includes loader formats, multiple mods, missing
+and malformed descriptors, read retry, cancellation, confined member reads,
+hostile icon/link data, scoped preferences, Atlas switching, refresh restoration
+and keyboard navigation. Desktop EN/mobile IT Axe checks report zero violations;
+no horizontal overflow or browser exceptions. Root/web/browser types, runtime
+and production frontend builds, localization (2,682 keys), scoped Biome and diff
+checks pass. The frontend build retains its existing large-chunk warnings.
+Independent parser/architecture/security review found no remaining blockers.
+
+Screenshots from real Firefox with isolated archive fixtures were reviewed:
+[desktop EN](screenshots/m5/modscope-desktop-en.png),
+[mobile IT](screenshots/m5/modscope-mobile-it.png),
+[loading](screenshots/m5/modscope-loading-en.png),
+[no metadata](screenshots/m5/modscope-empty-en.png) and
+[read error](screenshots/m5/modscope-error-en.png).
+
+A separate authenticated, read-only real-dev smoke opened the already installed
+Jade JAR and restored it after refresh. HTTPS200 and secure WSS HMR were confirmed,
+with no browser errors. Each opening requested only `fabric.mod.json` and
+`icon.png`; there were zero whole-JAR browser reads. Fileman's existing read-only
+directory-prefetch POST was allowed, while mutation requests were blocked; none
+were attempted. The private live screenshot/session evidence stays untracked.
+
+No game files, accounts, provider settings, database schema, ports, mounts or
+production services changed. No manual restart, rebuild, migration or
+Panel/Wings/Blueprint update was performed; the normal Vite source watcher
+reinitialized after its resolver configuration changed. All eleven development
+services remained healthy. Automated fixtures were isolated and cleaned by their
+harness; no live test assets were created. Metadata describes the JAR and is not
+a claim of runtime/gameplay compatibility. Unsupported metadata remains available
+through Atlas. Rollback is a source revert with existing preferences falling back
+through the registry; preserve all data. PR21 stays open and unmerged, M6 and
+production-release gates remain unchanged. See the
+[format and extension contract](M5-MINECRAFT-MODS-VIEWER.md).

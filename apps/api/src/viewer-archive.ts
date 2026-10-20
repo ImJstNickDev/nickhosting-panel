@@ -281,7 +281,20 @@ export async function createArchiveViewer(
       signal,
       controller,
     });
-  if (name.endsWith('.zip') || name.endsWith('.jar')) {
+  // Explicit archive viewers may inspect a ZIP whose filename carries an
+  // application suffix. Sniff only otherwise-unknown names; ordinary formats
+  // keep their existing path and no game-specific suffix reaches this layer.
+  const knownSuffix = /\.(?:zip|jar|tar|tgz|gz|bz2|xz|zst)$/.test(name);
+  let zipSignature = false;
+  if (!knownSuffix && source.size >= 4) {
+    const prefix = await source.read(0, 4, signal);
+    zipSignature =
+      prefix.length === 4 &&
+      prefix[0] === 0x50 &&
+      prefix[1] === 0x4b &&
+      ((prefix[2] === 3 && prefix[3] === 4) || (prefix[2] === 5 && prefix[3] === 6));
+  }
+  if (name.endsWith('.zip') || name.endsWith('.jar') || zipSignature) {
     const zip = await fromRandomAccessReaderPromise(new ZipSource(source, signal), source.size, {
       lazyEntries: true,
       autoClose: false,

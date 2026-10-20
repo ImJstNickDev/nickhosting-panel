@@ -69,6 +69,25 @@ async function tar(symlink = false) {
   return Buffer.concat(chunks);
 }
 describe('archive virtual folders', () => {
+  it.each(['example.jar.disabled', 'example.jar.pending', 'container.unknown'])(
+    'recognizes ZIP bytes with an unknown filename suffix: %s',
+    async (name) => {
+      const { viewer, source } = await setup(
+        await zip([['fabric.mod.json', '{"id":"example"}']]),
+        name,
+      );
+      expect(viewer.format).toBe('zip');
+      expect(source.read).toHaveBeenCalledWith(0, 4, expect.any(AbortSignal));
+      expect(await new Response((await viewer.open('fabric.mod.json')).stream).text()).toBe(
+        '{"id":"example"}',
+      );
+    },
+  );
+  it('rejects non-ZIP bytes under an unknown suffix', async () => {
+    await expect(
+      setup(Buffer.from('not a zip file'), 'example.jar.disabled'),
+    ).rejects.toMatchObject({ code: 'viewer_archive_unsupported' });
+  });
   it('reads ZIP/JAR index with coalesced ranges and opens only the selected entry', async () => {
     const bytes = await zip(
       Array.from({ length: 1000 }, (_, index) => [`folder/${index}.txt`, `entry ${index}`]),

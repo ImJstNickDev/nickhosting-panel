@@ -12,7 +12,7 @@ if (compiled.status !== 0) process.exit(compiled.status ?? 1);
 for (const file of ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml'])
   await cp(file, `${output}/${file}`);
 function compiledExports(value) {
-  if (typeof value === 'string') return value.replace(/\.ts$/, '.js');
+  if (typeof value === 'string') return value.replace(/\.tsx?$/, '.js');
   if (Array.isArray(value)) return value.map(compiledExports);
   if (value && typeof value === 'object')
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, compiledExports(v)]));

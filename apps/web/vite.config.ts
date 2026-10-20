@@ -7,6 +7,8 @@ import { developmentNetwork } from './vite-network.js';
 export default defineConfig(({ command }) => ({
   plugins: [react(), pdfjsAssets()],
   resolve: {
+    // First-party game viewers share the host's React runtime and TOML parser.
+    dedupe: ['react', 'react-dom', 'smol-toml'],
     alias: [
       ...(command === 'serve'
         ? [

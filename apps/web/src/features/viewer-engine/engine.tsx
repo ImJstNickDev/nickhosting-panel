@@ -20,6 +20,7 @@ import {
 } from './core/registry.js';
 import type { ArchiveExtraction, ViewerProps } from './core/types.js';
 import { ViewerDownload } from './download-action.js';
+import { GameViewerMount } from './game-viewer-host.js';
 import { ViewerLoading } from './loading.js';
 import { OpenWith, OpenWithIcon } from './open-with.js';
 import { useViewerPreferences } from './preferences.js';
@@ -437,7 +438,13 @@ export function FileViewer({
                 ) : decodeEnabled && !decodedSource ? (
                   <ViewerLoading />
                 ) : GameViewer ? (
-                  <GameViewer {...props} />
+                  <GameViewerMount
+                    viewer={GameViewer}
+                    source={renderSource}
+                    serverId={serverId}
+                    identity={identity}
+                    onViewerChange={choose}
+                  />
                 ) : viewer === 'image' ? (
                   <Image {...props} />
                 ) : viewer === 'audio' || viewer === 'video' ? (
@@ -466,7 +473,9 @@ export function FileViewer({
             source={renderSource}
             displayName={visibleSource.name}
             archivePreferenceExtension={
-              isSingleCompressed(visibleSource) ? viewerExtension(visibleSource.name) : undefined
+              isSingleCompressed(visibleSource)
+                ? viewerExtension(visibleSource.name, visibleSource.gameId)
+                : undefined
             }
             serverId={serverId}
             selected={viewer}
