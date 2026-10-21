@@ -316,3 +316,13 @@ upload or extraction. Focused coverage includes 31 publication units, earlier
 integration cases, 512 PHP harness checks on installed dependencies, 15 package
 checks, typecheck/Biome and independent review. The real 48-directory cold-call
 probe passed three times with the extension-only directory fix.
+
+### Server archive manifest recognition
+
+A server ZIP may contain an inventory named `manifest.json` which is not a
+CurseForge pack manifest. Generic server archives identify CurseForge metadata by
+its `manifestType` marker before interpreting it. A declared CurseForge manifest
+still receives full validation and must agree with the companion pack's runtime;
+unrelated inventories do not override that runtime. Dedicated CurseForge manifest
+archives remain strict. This handles server bundles such as VerityCraft without
+weakening download integrity checks or changing staging budgets.
