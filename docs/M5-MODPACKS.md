@@ -117,15 +117,35 @@ regressions. Desktop/mobile accessibility scans reported no serious or critical
 violations. Root/web typechecks, EN/IT catalog checks, frontend/runtime builds
 and scoped Biome passed. Existing large-bundle build warnings remain.
 
-All runtime/file mutations in these checks used isolated fixtures. The live
-development environment remains on the preceding revision until Owner activation
-approval; no real modpack installation is claimed by this validation.
+All runtime/file mutations in these checks used isolated fixtures; no real modpack
+installation is claimed by this validation.
 
 Activation requires a new development dependency image, the explicit migration,
 and recreation of only API, worker and Vite with the existing Compose overlays.
 No Blueprint release, Panel/Wings edit, DNS change or game-server test is required
 for activation. PR #21 remains open and unmerged. Issue #18 and production release
 boundaries remain unchanged.
+
+Development activation completed with explicit Owner approval on 2026-10-21.
+Only migration050 was applied; all49 previous checksums were preserved. Only API,
+worker and Vite were recreated with the reviewed dependency image. All13 observed
+development/provider services remained healthy; the other10 container identities,
+images and start times were unchanged. Mounts, network attachments, published ports,
+environment hashes and existing user/server/session counts were preserved.
+
+Authenticated read-only Firefox checks passed HTTPS, WSS HMR, desktop/mobile
+catalog and project views, plus search/details/version reads for all six providers.
+The first live check caught upstream400 responses for empty FTB/Technic searches;
+empty browsing now uses their official public catalogs, hydrates only visible
+results with at most four simultaneous requests, and shares the metadata cache.
+All25 catalog regressions passed after this correction. No frontend errors,
+horizontal overflow or mutation requests occurred in the final browser pass.
+ATLauncher permission and client-only/missing-server-package restrictions remain
+visible. New operation/receipt tables and runtime-transition markers were empty
+immediately after activation. A subsequent preparation remained blocked by its
+runtime requirement, with no held storage, published files or runtime effects;
+its record was preserved. Independent infrastructure and correction reviews
+passed; rollback was not needed.
 
 Rollback retains the additive database schema and operation/receipt history.
 Before reverting active code, ensure no modpack application is in progress or

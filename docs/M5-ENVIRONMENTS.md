@@ -1914,7 +1914,10 @@ is intentionally deferred; ATLauncher is browse-only pending CDN permission.
 Migration `050_minecraft_modpacks.sql` is additive. Activation needs the updated
 dependency image for API/worker/Vite and the explicit migrator with the current
 private Compose overlay chain. No Panel/Wings/Blueprint change is part of this
-feature. The development activation and exact rollback commands require the
-operation-specific approval described above; development source is prepared in
-an isolated checkout until that approval. Keep the database and all operation
-receipts when rolling back application code.
+feature. The Owner-approved development activation completed on 2026-10-21:
+only050 was applied and only API/worker/Vite were recreated. Existing data,
+environment, mounts, networks and ports were preserved. Read-only Firefox checks
+passed HTTPS, WSS HMR and all six provider catalogs; no real pack was installed.
+Keep the database, applied migration and all operation receipts when rolling back
+application code. Exact private preimages and commands remain in the local
+activation record; [M5-MODPACKS.md](M5-MODPACKS.md) records the verification limits.

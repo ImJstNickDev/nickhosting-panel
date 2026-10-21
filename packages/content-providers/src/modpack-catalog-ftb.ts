@@ -114,11 +114,33 @@ export class FtbModpackCatalog implements ModpackCatalog {
   }
   async search(input: ModpackCatalogSearchInput = {}, signal?: AbortSignal) {
     const { offset, limit } = pageInput(input);
+    const query = queryInput(input.query);
+    // FTB rejects an empty search term. Its app browses the public ID catalogue,
+    // then reads only visible packs; these records are shared with details/versions.
+    if (!query) {
+      const raw = z
+        .object({ packs: z.array(numericId).max(1000) })
+        .parse(await this.client.json(`${this.base}/all`, signal));
+      const ids = [...new Set(raw.packs)];
+      const page = ids.slice(offset, offset + limit);
+      const items = [];
+      for (let index = 0; index < page.length; index += 4) {
+        signal?.throwIfAborted();
+        items.push(
+          ...(await Promise.all(
+            page
+              .slice(index, index + 4)
+              .map(async (id) => this.publicProject(await this.project(String(id), signal))),
+          )),
+        );
+      }
+      return modpackCatalogProjectsSchema.parse({ items, offset, limit, total: ids.length });
+    }
     const raw = z
       .object({ packs: z.array(projectSchema).max(1000) })
       .parse(
         await this.client.json(
-          `${this.base}/search/1000/detailed/?${new URLSearchParams({ term: queryInput(input.query), platform: 'ftb' })}`,
+          `${this.base}/search/1000/detailed/?${new URLSearchParams({ term: query, platform: 'ftb' })}`,
           signal,
         ),
       );

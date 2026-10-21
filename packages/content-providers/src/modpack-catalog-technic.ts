@@ -14,6 +14,7 @@ import {
   downloadUrl,
   identifier,
   ModpackMetadataClient,
+  pageInput,
   publicUrl,
   queryInput,
   slicePage,
@@ -74,9 +75,50 @@ export class TechnicModpackCatalog implements ModpackCatalog {
     // SafeContentHttp additionally enforces the configured exact origin and public DNS.
     return `${downloadUrl(p.solder).replace(/\/$/, '')}/modpack/${identifier(p.name)}`;
   }
+  private publicProject(p: z.infer<typeof projectSchema>) {
+    return {
+      id: p.name,
+      provider: this.provider,
+      name: p.displayName,
+      summary: p.description.slice(0, 4096),
+      websiteUrl: publicUrl(p.platformUrl),
+      imageUrl: publicUrl(p.icon?.url),
+      authors: [p.user],
+      downloads: p.installs,
+    };
+  }
   async search(input: ModpackCatalogSearchInput = {}, signal?: AbortSignal) {
+    const query = queryInput(input.query);
+    if (!query) {
+      // The official launcher discovers featured packs from its public Solder
+      // catalogue; the Platform search endpoint requires a nonempty query.
+      const raw = z
+        .object({ modpacks: z.record(str, z.object({ name: str })) })
+        .parse(
+          await this.client.json('https://solder.technicpack.net/api/modpack?include=full', signal),
+        );
+      const ids = Object.entries(raw.modpacks).map(([id, pack]) => {
+        if (id !== pack.name) fail('modpack_identity');
+        return id;
+      });
+      if (ids.length > 1000) fail('modpack_metadata_limit');
+      const { offset, limit } = pageInput(input);
+      const page = ids.slice(offset, offset + limit);
+      const items = [];
+      for (let index = 0; index < page.length; index += 4) {
+        signal?.throwIfAborted();
+        items.push(
+          ...(await Promise.all(
+            page
+              .slice(index, index + 4)
+              .map(async (id) => this.publicProject(await this.project(id, signal))),
+          )),
+        );
+      }
+      return modpackCatalogProjectsSchema.parse({ items, offset, limit, total: ids.length });
+    }
     const params = new URLSearchParams({
-      q: queryInput(input.query),
+      q: query,
       build: await this.build(signal),
     });
     const result = z
@@ -112,14 +154,7 @@ export class TechnicModpackCatalog implements ModpackCatalog {
   async details(id: string, signal?: AbortSignal) {
     const p = await this.project(id, signal);
     return modpackCatalogDetailsSchema.parse({
-      id: p.name,
-      provider: this.provider,
-      name: p.displayName,
-      summary: p.description.slice(0, 4096),
-      websiteUrl: publicUrl(p.platformUrl),
-      imageUrl: publicUrl(p.icon?.url),
-      authors: [p.user],
-      downloads: p.installs,
+      ...this.publicProject(p),
       description: p.description,
       descriptionFormat: 'html',
     });

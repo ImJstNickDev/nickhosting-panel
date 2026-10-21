@@ -241,15 +241,48 @@ function ftb(
 ) {
   const mock = transport({
     'api.feed-the-beast.com/v1/modpacks/modpack/1': ftbProject,
+    'api.feed-the-beast.com/v1/modpacks/modpack/all': { packs: [1] },
     'api.feed-the-beast.com/v1/modpacks/modpack/1/2': { ...ftbVersion, files },
     'api.feed-the-beast.com/v1/modpacks/modpack/search/1000/detailed/': { packs: [ftbProject] },
   });
   return { ...mock, catalog: createModpackCatalog('ftb', { http: mock.http }) };
 }
 describe('FTB modpack catalog', () => {
+  it('browses public IDs with only visible metadata, four concurrent reads and cache reuse', async () => {
+    const ids = Array.from({ length: 25 }, (_, index) => index + 1);
+    let active = 0;
+    let maximum = 0;
+    const json = vi.fn(async (input: string) => {
+      const path = new URL(input).pathname;
+      if (path.endsWith('/all')) return { packs: ids };
+      expect(path).not.toContain('/search/');
+      const id = Number(path.split('/').at(-1));
+      active++;
+      maximum = Math.max(maximum, active);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      active--;
+      return { ...ftbProject, id, name: `Pack ${id}` };
+    });
+    const http: ContentHttp = { json, download: vi.fn() };
+    const catalog = createModpackCatalog('ftb', { http });
+    expect(await catalog.search({ query: '  ', offset: 3, limit: 5 })).toMatchObject({
+      items: [4, 5, 6, 7, 8].map((id) => ({ id: String(id) })),
+      offset: 3,
+      limit: 5,
+      total: 25,
+    });
+    expect(maximum).toBe(4);
+    expect(json).toHaveBeenCalledTimes(6);
+    await catalog.details('4');
+    await catalog.search({ offset: 3, limit: 5 });
+    expect(json).toHaveBeenCalledTimes(6);
+    expect(http.download).not.toHaveBeenCalled();
+  });
   it('uses one detailed search and exact manifest requirements without executing the installer', async () => {
     const { catalog, http } = ftb();
-    expect(await catalog.search()).toMatchObject({ items: [{ name: 'FTB Fixture' }] });
+    expect(await catalog.search({ query: 'FTB' })).toMatchObject({
+      items: [{ name: 'FTB Fixture' }],
+    });
     expect(await catalog.resolve('1', '2')).toMatchObject({
       kind: 'files',
       target: { minecraftVersion: '1.21.1', loader: 'neoforge', loaderVersion: '21.1.72' },
@@ -316,6 +349,31 @@ function technic() {
   return { ...mock, catalog: createModpackCatalog('technic', { http: mock.http }) };
 }
 describe('Technic modpack catalog', () => {
+  it('uses the public Solder catalogue for a blank search, sharing metadata with details', async () => {
+    const { catalog, http, json } = technic();
+    json.mockImplementationOnce(async (url) => {
+      expect(url).toBe('https://solder.technicpack.net/api/modpack?include=full');
+      return { modpacks: { tekkit: { name: 'tekkit' } } };
+    });
+    expect(await catalog.search({ query: '  ' })).toMatchObject({
+      items: [{ id: 'tekkit', name: 'Tekkit' }],
+      total: 1,
+    });
+    const calls = json.mock.calls.length;
+    await catalog.details('tekkit');
+    expect(json.mock.calls).toHaveLength(calls);
+    expect(json.mock.calls.some(([url]) => new URL(url).pathname === '/search')).toBe(false);
+    expect(http.download).not.toHaveBeenCalled();
+  });
+  it('keeps explicit Technic terms on the normal search endpoint', async () => {
+    const { catalog, json } = technic();
+    expect(await catalog.search({ query: 'Tekkit' })).toMatchObject({ items: [{ id: 'tekkit' }] });
+    expect(json.mock.calls.map(([url]) => new URL(url).pathname)).toEqual([
+      '/launcher/version/stable4',
+      '/search',
+    ]);
+    expect(new URL(json.mock.calls[1]?.[0] ?? '').searchParams.get('q')).toBe('Tekkit');
+  });
   it('binds non-Solder server-pack selection to the advertised version and archive URL', async () => {
     const routes = (version: string) => ({
       'api.technicpack.net/launcher/version/stable4': { build: 1170 },
