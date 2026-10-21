@@ -158,11 +158,19 @@ modified. Retry/name regressions include desktop/mobile Firefox screenshots in
 The same isolated check prepared official ATLauncher Fossilized v2.1.14: 786
 staged server files, including two downloads without manifest sizes, and exact
 Minecraft 1.12.2 / Forge 14.23.5.2864 requirements. It used the declared origins and
-stayed below the 1 GiB test staging budget. Focused validation passed 258 unit
+stayed below the 1 GiB test staging budget. Focused validation passed 267 unit
 tests, 19 isolated integration tests and 14 Firefox cases; typechecks, frontend
 build, scoped Biome and independent review passed. Existing large-bundle warnings
 and absent private Minecraft preview assets in the isolated checkout remain build
 warnings. These are preparation checks, not real server installations.
+
+The live default ATLauncher version page exposed five older Fossilized recipes
+with duplicate declared mod paths. Known invalid recipe metadata now marks only
+that version unavailable; transport, cancellation and provenance failures still
+propagate. Direct preparation remains strict. The corrected page returned 15
+available and five unavailable versions, and authenticated dev Firefox checks
+confirmed Antimatter's name, enabled retry, HTTPS, secure HMR and mobile layout.
+No actual preparation retry/application was submitted through the live UI.
 
 Activation requires a new development dependency image, the explicit migration,
 and recreation of only API, worker and Vite with the existing Compose overlays.

@@ -1923,6 +1923,19 @@ Keep the database, applied migration and all operation receipts when rolling bac
 application code. Exact private preimages and commands remain in the local
 activation record; [M5-MODPACKS.md](M5-MODPACKS.md) records the verification limits.
 
+The Modpack recovery/ATLauncher follow-up was activated through source hot reload
+on 2026-10-21. No dependency image, migration, container recreation, Panel/Wings or
+Blueprint change was required. The final provider-only edit needed a normal source
+watcher notification via the API/worker entry files' timestamps; their contents
+were unchanged. All13 observed dev/provider containers retained their identities,
+images, start times, mounts, networks and ports and remained healthy. Read-only
+Firefox checks confirmed the failed Antimatter operation's project name/retry UI
+and the ATLauncher version page on desktop/mobile, with HTTPS and WSS HMR working.
+The failed operation was preserved for the Owner to retry. Only temporary local
+provider preparation artifacts were created and cleaned; no game files changed.
+Rollback needs only the previous source revision and watcher reload, retaining
+all existing operation records; do not switch code during an active application.
+
 ### Forge runtime catalog
 
 Forge uses a durable local catalog containing exact Maven coordinates and the
