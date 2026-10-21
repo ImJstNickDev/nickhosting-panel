@@ -295,3 +295,24 @@ directory reads used by publication admission: requests run in bounded concurren
 chunks and are awaited directly, without Guzzle Pool/EachPromise aggregation.
 The configured concurrency, per-directory errors, deadlines and byte budgets remain.
 This avoids changing shared Panel dependencies.
+
+Publication inspection traverses from root and batches only existing required child
+directories. Known-absent branches are not queried: Wings can return a generic
+error for missing paths. Errors for an observed existing directory, or a file/symlink
+ancestor, still stop publication. Each parent is read once per phase.
+
+### Activation evidence (2026-10-21)
+
+Blueprint 1.8.2 installed through the native Blueprint command. Shared Panel
+Composer files and Guzzle/Promises sources remained unchanged; full before/after
+ownership/mode metadata matched across 32 game roots. Only NickHosting dev API and
+worker required a restart to load the final shared-package change.
+
+The retained Antimatter Chemistry operation completed through the existing Owner
+recovery action: 902 applied files, cleaned staging, released transfer claim and
+server operation lock. The game remained stopped; no repeat installer, archive
+upload or extraction. Focused coverage includes 31 publication units, earlier
+107 recovery integration cases plus receipt-settlement regression, two final bridge
+integration cases, 512 PHP harness checks on installed dependencies, 15 package
+checks, typecheck/Biome and independent review. The real 48-directory cold-call
+probe passed three times with the extension-only directory fix.
