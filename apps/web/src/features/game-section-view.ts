@@ -17,6 +17,8 @@ export interface GameSectionViewProps {
   runtimeState: string;
   canManage: boolean;
   pending: boolean;
+  /** The server's exact active operation is confirmed paused; only its recovery may proceed. */
+  recoverableOperationId?: string;
   operation?: { state: string; effectState: string | null };
   /** Actual acknowledged transfer totals from the durable operation, when available. */
   fileTransfer?: {

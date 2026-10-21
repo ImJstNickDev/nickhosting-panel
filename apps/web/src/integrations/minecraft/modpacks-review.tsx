@@ -107,6 +107,7 @@ export function ModpackReview(props: {
   installed?: MinecraftModpacksSnapshot['installed'];
   canManage: boolean;
   busy: boolean;
+  canRecover: boolean;
   onBack: () => void;
   onApply: (backup: boolean) => void;
   onDiscard: () => void;
@@ -288,11 +289,7 @@ export function ModpackReview(props: {
           {operation.state === 'uncertain' && (
             <div className="modpacks-recovery">
               <p>{t(k('recoverHint'))}</p>
-              <button
-                type="button"
-                disabled={props.busy || !props.canManage}
-                onClick={props.onRecover}
-              >
+              <button type="button" disabled={!props.canRecover} onClick={props.onRecover}>
                 {t(k('recover'))}
               </button>
             </div>

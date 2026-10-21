@@ -117,6 +117,12 @@ function Modpacks(props: GameSectionViewProps) {
     props.pending ||
     busy ||
     Boolean(operation && applying.has(operation.state));
+  const canRecover =
+    props.canManage &&
+    !busy &&
+    !snapshot.error &&
+    operation?.state === 'uncertain' &&
+    (!props.pending || props.recoverableOperationId === operation.id);
   useEffect(() => {
     if (!firstSnapshot.current && data) {
       firstSnapshot.current = true;
@@ -349,6 +355,7 @@ function Modpacks(props: GameSectionViewProps) {
                 version={operationVersion}
                 canManage={props.canManage}
                 busy={busy || props.pending}
+                canRecover={canRecover}
                 onBack={() => setView('discover')}
                 onApply={apply}
                 onDiscard={discard}
@@ -373,6 +380,7 @@ function Modpacks(props: GameSectionViewProps) {
                   );
                 }}
                 onRecover={() => {
+                  if (!canRecover) return;
                   void mutate(() => controller.recover(props.serverId, operation.id));
                 }}
               />

@@ -696,6 +696,14 @@ export function GameSections({
   if (!module || !section) return <Empty text={t('gameUi.missingSection')} />;
   const SectionView = getGameSectionView(section.renderer);
   const refreshError = server.error ?? loaded.error;
+  const recoverableOperationId =
+    server.data?.permissions.manage === true &&
+    server.data.activeOperationId === operationId &&
+    operationState === 'uncertain' &&
+    !operation.error &&
+    !refreshError
+      ? operationId
+      : undefined;
   const retryReads = () => {
     void server.refetch();
     void loaded.refetch();
@@ -749,6 +757,7 @@ export function GameSections({
             runtimeState={server.data.runtimeState}
             canManage={server.data.permissions.manage === true}
             pending={pendingOperation || serverOperationPending || Boolean(refreshError)}
+            recoverableOperationId={recoverableOperationId}
             operation={
               operation.data && {
                 state: operation.data.state,

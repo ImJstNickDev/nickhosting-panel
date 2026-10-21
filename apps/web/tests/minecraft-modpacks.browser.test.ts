@@ -74,6 +74,9 @@ describe('Minecraft Modpacks full-page experience', () => {
   let pending = false;
   let prepareState: 'ready' | 'blocked' | 'uncertain' | 'failed' | 'error' = 'ready';
   let count = 0;
+  let core: { activeOperationId: string; manage: boolean; state: string };
+  let recoveryGate: Promise<void> | undefined;
+  let recoveryResumes = false;
   beforeAll(async () => {
     vite = await createServer({
       root: `${process.cwd()}/apps/web`,
@@ -83,8 +86,8 @@ describe('Minecraft Modpacks full-page experience', () => {
       plugins: [
         {
           name: 'modpacks-fixture',
-          configureServer(server) {
-            server.middlewares.use(async (req, res, next) => {
+          configureServer(viteServer) {
+            viteServer.middlewares.use(async (req, res, next) => {
               const url = new URL(req.url ?? '/', 'http://fixture');
               if (url.pathname === '/modpacks-fixture') {
                 res.setHeader('Content-Type', 'text/html');
@@ -105,6 +108,23 @@ describe('Minecraft Modpacks full-page experience', () => {
                 for await (const part of req) raw += part;
                 body = raw ? JSON.parse(raw) : {};
                 writes.push({ path: `${req.method} ${url.pathname}`, body });
+              }
+              if (url.pathname === `/v1/platform/servers/${server}`)
+                return json({
+                  id: server,
+                  name: 'Fixture',
+                  gameId: 'minecraft',
+                  runtimeId: 'fabric',
+                  runtimeState: 'stopped',
+                  permissions: { read: true, manage: core.manage },
+                  capabilities: { files: true },
+                  activeOperationId: core.activeOperationId,
+                });
+              if (url.pathname === `/v1/platform/jobs/${core.activeOperationId}`)
+                return json({ serverId: server, state: core.state, effectState: null });
+              if (url.pathname === `/v1/servers/${server}/events/stream`) {
+                res.statusCode = 204;
+                return res.end();
               }
               if (url.pathname === base) return json(snapshot);
               if (url.pathname === `${base}/catalog`)
@@ -205,7 +225,14 @@ describe('Minecraft Modpacks full-page experience', () => {
                 snapshot.operation = null;
                 return json(snapshot);
               }
-              if (url.pathname.endsWith('/recover')) return json(snapshot);
+              if (url.pathname.endsWith('/recover')) {
+                await recoveryGate;
+                if (recoveryResumes && snapshot.operation) {
+                  snapshot.operation.state = 'apply_queued';
+                  core.state = 'queued';
+                }
+                return json(snapshot);
+              }
               errors.push(`Unexpected ${req.method} ${url.pathname}`);
               return json({ code: 'not_found' }, 404);
             });
@@ -232,6 +259,9 @@ describe('Minecraft Modpacks full-page experience', () => {
     pending = false;
     prepareState = 'ready';
     count = 0;
+    core = { activeOperationId: op, manage: true, state: 'uncertain' };
+    recoveryGate = undefined;
+    recoveryResumes = false;
     context = await browser.newContext({ viewport: { width: 1360, height: 1000 } });
     page = await context.newPage();
     page.on('pageerror', (error) => errors.push(error.message));
@@ -257,6 +287,126 @@ describe('Minecraft Modpacks full-page experience', () => {
     await page.getByRole('button', { name: 'About Copper Valley', exact: true }).click();
     await check(page.getByRole('button', { name: 'Prepare this version' })).toBeVisible();
   }
+  async function openPausedCore() {
+    snapshot.operation = {
+      id: op,
+      selection: {
+        provider: 'modrinth',
+        projectId: 'copper-valley',
+        versionId: '2.4',
+        mode: 'install',
+        worldPolicy: 'preserve',
+        fileDecisions: {},
+        idempotencyKey: 'paused-installation',
+      },
+      state: 'uncertain',
+      phase: 'runtime',
+      progress: null,
+      pack: { project: project(), version: version() },
+      target,
+      runtimeSupported: true,
+      planDigest: 'a'.repeat(64),
+      changes: { write: 104, remove: 0, preserve: 8, bytes: 123456789 },
+      deletePaths: [],
+      blockers: [],
+      error: 'runtime_transition_uncertain',
+      backupId: null,
+      restartRequired: false,
+      createdAt: '2026-10-21T12:00:00Z',
+      updatedAt: '2026-10-21T12:00:00Z',
+    };
+    await page.goto(`${origin}modpacks-fixture?core&operation=${op}`);
+    await check(page.locator('.modpacks-recovery button')).toBeVisible();
+  }
+  it('recovers the exact paused active operation through Core without unlocking other mutations', async () => {
+    await openPausedCore();
+    const recover = page.getByRole('button', { name: 'Verify and resume', exact: true });
+    await check(recover).toBeEnabled();
+    await check(page.getByRole('button', { name: 'Discard preparation' })).toBeDisabled();
+    await check(page.getByRole('button', { name: 'Install pack', exact: true })).toBeDisabled();
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/modpacks-core-recovery-desktop-en.png',
+      fullPage: true,
+    });
+    let release = () => {};
+    recoveryGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    recoveryResumes = true;
+    try {
+      await recover.click();
+      await check(recover).toBeDisabled();
+      await recover.evaluate((button: HTMLButtonElement) => button.click());
+      expect(writes).toHaveLength(1);
+      expect(writes[0]?.path).toBe(`POST ${base}/operations/${op}/recover`);
+    } finally {
+      release();
+    }
+    await check(recover).toHaveCount(0);
+    await check(page.getByRole('button', { name: 'Install pack', exact: true })).toBeDisabled();
+    expect(writes).toHaveLength(1);
+  });
+  it.each(['different-operation', 'running', 'read-only'] as const)(
+    'keeps recovery locked through Core for %s',
+    async (scenario) => {
+      if (scenario === 'different-operation')
+        core.activeOperationId = '20000000-0000-4000-8000-000000000002';
+      if (scenario === 'running') core.state = 'running';
+      if (scenario === 'read-only') core.manage = false;
+      await openPausedCore();
+      await check(
+        page.getByRole('button', { name: 'Verify and resume', exact: true }),
+      ).toBeDisabled();
+      expect(writes).toEqual([]);
+    },
+  );
+  it.each(['server', 'game-section', 'game-operation', 'minecraft-modpacks'] as const)(
+    'locks paused recovery after a failed %s refresh',
+    async (query) => {
+      await openPausedCore();
+      const recover = page.getByRole('button', { name: 'Verify and resume', exact: true });
+      await check(recover).toBeEnabled();
+      const path =
+        query === 'server'
+          ? `/v1/platform/servers/${server}`
+          : query === 'game-operation'
+            ? `/v1/platform/jobs/${op}`
+            : base;
+      await page.route(`**${path}`, (route) =>
+        route.fulfill({ status: 503, json: { code: 'internal_error' } }),
+      );
+      await page.evaluate(
+        `import('/src/api/client.ts').then(({ queryClient }) => queryClient.invalidateQueries({ queryKey: ['${query}'] }))`,
+      );
+      await check(page.getByRole('alert')).toBeVisible();
+      await check(recover).toBeDisabled();
+      expect(writes).toEqual([]);
+    },
+  );
+  it('keeps paused Core recovery usable on Italian mobile', async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.addInitScript(() => localStorage.setItem('nh.locale', 'it'));
+    await openPausedCore();
+    await check(
+      page.getByRole('button', { name: 'Verifica e riprendi', exact: true }),
+    ).toBeEnabled();
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/modpacks-core-recovery-mobile-it.png',
+      fullPage: true,
+    });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    expect(
+      (
+        await new AxeBuilder({ page })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+    expect(writes).toEqual([]);
+  });
   it('browses six catalogs and details without preparing; stable is selected by default', async () => {
     await open();
     await details();
@@ -312,6 +462,7 @@ describe('Minecraft Modpacks full-page experience', () => {
     await page.keyboard.press('Enter');
     await check(catalog).toHaveText('CurseForge');
     await check(catalog).toBeFocused();
+    await check(page.locator('.mods-results')).toHaveAttribute('aria-busy', 'false');
     await page.keyboard.press('Tab');
     const opener = page.getByRole('button', { name: 'About Copper Valley', exact: true });
     await check(opener).toBeFocused();
