@@ -205,3 +205,42 @@ Before reverting active code, ensure no modpack application is in progress or
 uncertain. Restore the prior source revision and service images; never drop the
 new tables or delete staged/retired game files to force an operation out of the
 queue.
+
+### Interrupted runtime configuration
+
+The Application API startup PATCH can return a server without allocation
+relationships. Runtime transitions confirm that write with the normal full server
+GET before checking identity and the exact egg, image, startup and environment.
+An incomplete PATCH representation is not evidence of a different server.
+
+**Verify and resume** can reuse an existing prepared operation when its durable
+journal proves that stopping (and any requested backup) completed, the exact
+startup configuration is already present, and neither installation nor publication
+was dispatched. Recovery checks current authority and the original reviewed file
+plan, then queues the same operation under the current caller. It preserves staged
+downloads, backup and prior running state; it does not repeat the startup PATCH,
+stop or backup. A possibly dispatched installer or ambiguous publication remains
+uncertain and is never replayed by this path.
+
+Console and Activity project the modpack operation's actual state and phase rather
+than the synthetic reinstall job's default phase. An uncertain operation links
+directly to its Modpacks review without an indefinite preparation animation.
+Gateway snapshots withdraw the route of an active reinstall until that operation
+releases the server. Existing route configuration is preserved, other routes stay
+eligible, and provider identity validation remains unchanged.
+
+Regression coverage includes incomplete PATCH responses, valid full GET identity,
+unchanged/partially advanced registry bindings, replacement Owner recovery after
+session revocation, ambiguous installer/publication rejection, and preserved
+stop/backup/staging. Isolated runtime/service/context/publication checks passed
+52 cases; route registry/context checks passed58 cases (the context suite overlaps).
+Seven API cases, 25 Firefox cases, focused projection units, root/web typechecks,
+EN/IT catalogs, frontend build and independent code/visual review passed. Existing
+large-chunk and private Minecraft-asset warnings remain in isolated builds.
+
+Reviewed uncertainty states:
+[desktop English](screenshots/m5/modpack-runtime-uncertain-en-desktop.png) and
+[mobile Italian](screenshots/m5/modpack-runtime-uncertain-it-mobile.png).
+These checks use isolated providers and database schemas; they do not claim a real
+Forge installation. Source rollback must preserve the pending operation and its
+prepared files, and must not run underneath an active runtime transition.

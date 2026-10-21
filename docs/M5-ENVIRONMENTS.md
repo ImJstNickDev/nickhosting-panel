@@ -1936,6 +1936,17 @@ provider preparation artifacts were created and cleaned; no game files changed.
 Rollback needs only the previous source revision and watcher reload, retaining
 all existing operation records; do not switch code during an active application.
 
+Runtime transition recovery uses the normal full Application GET to confirm a
+startup PATCH, whose response may omit allocation relationships. The explicit
+Modpacks **Verify and resume** action can requeue a proved pre-installer transition
+with the original prepared files and choices; it never repeats an ambiguously
+dispatched installer. Console and Activity display the authoritative Modpack
+state. Gateway snapshots temporarily withdraw only active reinstall routes, so a
+legitimate egg change cannot invalidate the entire snapshot. No migration,
+dependency, Blueprint update or provider configuration change is needed for this
+source-only correction. Keep operation journals and staging during recovery;
+never clear a running/uncertain operation with manual database edits.
+
 ### Forge runtime catalog
 
 Forge uses a durable local catalog containing exact Maven coordinates and the
