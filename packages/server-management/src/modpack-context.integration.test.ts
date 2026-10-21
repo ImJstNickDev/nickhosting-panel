@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { authSessionId } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
+import { type FilemanReadService, filemanTransferManifestSchema } from '@nickhosting/game-sdk';
 import type { ApplicationServer, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { minecraftModpackPrepareSchema } from '../../../games/minecraft/src/modpack-contracts.js';
@@ -182,6 +183,7 @@ describe('Modpacks real lifecycle and Fileman context', () => {
             path: 'mods/pack.jar',
             size: contents.length,
             sha256: createHash('sha256').update(contents).digest('hex'),
+            modifiedAt: '2026-01-01T00:00:00Z',
           },
         ],
       };
@@ -249,6 +251,27 @@ describe('Modpacks real lifecycle and Fileman context', () => {
       const recovered = await createModpackContext(options);
       await recovered.preflightPublication(prepared, plan);
       expect(await readFile(join(directory, 'publication.zip'))).toEqual(archive);
+      const fileman = recovered.context.fileman;
+      if (!fileman) throw new Error('Expected Fileman');
+      fileman.readScope = () =>
+        ({
+          listMany: async (paths: readonly string[]) =>
+            paths.map((directory) => ({ directory, files: [] })),
+        }) as unknown as FilemanReadService;
+      fileman.uploadArchive = vi.fn(async (input) => {
+        const completed = await input.completion;
+        const manifest = filemanTransferManifestSchema.parse({
+          id: input.id,
+          destinationRoot: input.destinationRoot,
+          files: completed.files,
+        });
+        expect(manifest.files[0]).not.toHaveProperty('modifiedAt');
+        throw new Error('checked_transfer_manifest');
+      });
+      await expect(recovered.publication.publish(prepared, plan)).rejects.toThrow(
+        'checked_transfer_manifest',
+      );
+      expect(fileman.uploadArchive).toHaveBeenCalledTimes(1);
       await writeFile(join(directory, 'publication.zip'), Buffer.alloc(archive.length, 42));
       const changed = await createModpackContext(options);
       await expect(changed.preflightPublication(prepared, plan)).rejects.toMatchObject({

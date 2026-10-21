@@ -333,7 +333,11 @@ export async function createModpackContext(options: {
       let sourceSha256: string;
       let contentLength: number;
       let sealed: Stats;
-      const selected = files.map((file) => ({ ...file, path: `${destinationRoot}/${file.path}` }));
+      const selected = files.map((file) => ({
+        path: `${destinationRoot}/${file.path}`,
+        size: file.size,
+        sha256: file.sha256,
+      }));
       if (retained || saved) {
         if (saved && saved.binding !== binding) throw new DomainError('operation_uncertain');
         // The path belongs to this prepared attempt. Never follow a replacement
@@ -432,7 +436,11 @@ export async function createModpackContext(options: {
       await fileman.assertArchiveResumable({
         id: `modpack.${pack.id}`,
         destinationRoot: stagingRoot,
-        files: plan.write.map((file) => ({ ...file, path: `${stagingRoot}/${file.path}` })),
+        files: plan.write.map((file) => ({
+          path: `${stagingRoot}/${file.path}`,
+          size: file.size,
+          sha256: file.sha256,
+        })),
         archive: (operation.plan.fileArchive as { request?: unknown } | undefined)?.request
           ? undefined
           : await recoverArchive(
