@@ -368,6 +368,21 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
       .where('server.deleted_at', 'is', null)
       .where('server.connection_mode', '=', 'gateway')
       .where('server.pterodactyl_uuid', 'is not', null)
+      // An active reinstall may be between provider startup configuration and
+      // registry confirmation. Withdraw only this route until the operation
+      // releases it; never validate or renew a route with a transitional egg.
+      .where((eb) =>
+        eb.not(
+          eb.exists(
+            eb
+              .selectFrom('server_operations as installing')
+              .select('installing.job_id')
+              .whereRef('installing.job_id', '=', 'server.active_operation_id')
+              .whereRef('installing.server_id', '=', 'server.id')
+              .where('installing.action', '=', 'reinstall'),
+          ),
+        ),
+      )
       .where('node.enabled', '=', true)
       .where('node.physical_host_id', '=', config.gatewayPhysicalHostId)
       .orderBy('route.id')

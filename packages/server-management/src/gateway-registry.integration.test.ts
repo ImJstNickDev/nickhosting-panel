@@ -60,6 +60,71 @@ const input = () => ({
   transport: 'tcp' as const,
 });
 describe('durable explicit Gateway route registry', () => {
+  it('withdraws an active reinstall without renewing its lease, then restores its route', async () => {
+    const route = await setGatewayRoute(f.db, f.owner, input(), env);
+    const before = await getGatewaySnapshot(f.db, env);
+    const lease = await f.db
+      .selectFrom('gateway_routes')
+      .select('lease_expires_at')
+      .where('id', '=', route.id)
+      .executeTakeFirstOrThrow();
+    const job = await f.db
+      .selectFrom('server_operations')
+      .select('job_id')
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('server_operations')
+      .set({ action: 'reinstall' })
+      .where('job_id', '=', job.job_id)
+      .execute();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: job.job_id })
+      .where('id', '=', serverId)
+      .execute();
+    expect((await getGatewaySnapshot(f.db, env)).routes).toEqual([]);
+    expect(
+      await f.db
+        .selectFrom('gateway_routes')
+        .select('lease_expires_at')
+        .where('id', '=', route.id)
+        .executeTakeFirstOrThrow(),
+    ).toEqual(lease);
+    await expect(requireGatewayRoute(f.db, route.id, undefined, env)).rejects.toThrow('not_found');
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: null })
+      .where('id', '=', serverId)
+      .execute();
+    expect((await getGatewaySnapshot(f.db, env)).routes[0]).toMatchObject({
+      id: route.id,
+      public: before.routes[0]?.public,
+      backend: before.routes[0]?.backend,
+    });
+  });
+  it.each(['start', 'stop'] as const)(
+    'keeps an active %s eligible for normal Gateway validation',
+    async (action) => {
+      const route = await setGatewayRoute(f.db, f.owner, input(), env);
+      const job = await f.db
+        .selectFrom('server_operations')
+        .select('job_id')
+        .where('server_id', '=', serverId)
+        .executeTakeFirstOrThrow();
+      await f.db
+        .updateTable('server_operations')
+        .set({ action })
+        .where('job_id', '=', job.job_id)
+        .execute();
+      await f.db
+        .updateTable('managed_servers')
+        .set({ active_operation_id: job.job_id })
+        .where('id', '=', serverId)
+        .execute();
+      expect((await getGatewaySnapshot(f.db, env)).routes[0]?.id).toBe(route.id);
+    },
+  );
   it('exports a sleeping server as blocked after reconciliation observes an external start', async () => {
     await setGatewayRoute(f.db, f.owner, input(), env);
     expect((await getGatewaySnapshot(f.db, env)).routes[0]?.mode).toBe('sleeping');

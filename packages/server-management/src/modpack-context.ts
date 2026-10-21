@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type AuthContext, DomainError } from '@nickhosting/core';
-import { assertStoragePolicyIdle, type Database } from '@nickhosting/database';
+import { assertStoragePolicyIdle, type Database, notifyGatewayChange } from '@nickhosting/database';
 import { type Kysely, sql } from 'kysely';
 import { buildModpackTransferArchive } from '../../content-providers/src/modpack-transfer.js';
 import { type Environment, lockResources } from './admission.js';
@@ -120,6 +120,7 @@ export async function createModpackContext(options: {
         .set({ active_operation_id: pack.id, updated_at: new Date() })
         .where('id', '=', server.id)
         .execute();
+      await notifyGatewayChange(tx);
     });
   }
   let operation = await db
@@ -365,5 +366,6 @@ export async function completeModpackJob(db: Kysely<Database>, row: MinecraftMod
       .where('id', '=', row.server_id)
       .where('active_operation_id', '=', row.id)
       .execute();
+    await notifyGatewayChange(tx);
   });
 }
