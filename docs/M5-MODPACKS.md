@@ -289,3 +289,9 @@ after rename (Wings may acknowledge a rename whose source is absent). Actual fil
 mtimes are captured there and persisted for future change detection. New in-flight
 stage journals may omit mtimes until that readback: do not downgrade to older code
 while such publication is active. Existing journals remain accepted.
+
+Blueprint 1.8.2 applies the same installed-library compatibility fix to batched
+directory reads used by publication admission: requests run in bounded concurrent
+chunks and are awaited directly, without Guzzle Pool/EachPromise aggregation.
+The configured concurrency, per-directory errors, deadlines and byte budgets remain.
+This avoids changing shared Panel dependencies.

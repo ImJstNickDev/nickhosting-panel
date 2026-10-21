@@ -1,6 +1,6 @@
 # NickHosting Blueprint bridge
 
-Version **1.8.1**, targeting Pterodactyl **1.15.1** and Blueprint
+Version **1.8.2**, targeting Pterodactyl **1.15.1** and Blueprint
 **beta-2026-08**. Native PHP contracts retain compatibility with Panel **1.11.11**
 for coordinated rollback; the framework target and live deployment evidence are
 separate from that library-level compatibility. The monorepo is the source of truth; `.blueprint/dev` is optional
@@ -430,7 +430,7 @@ uses Laravel fakes. It exercises transaction rollback, idempotency, encryption,
 authorization, identity invalidation, delivery retry and configuration transforms.
 It is not a MySQL lock-concurrency or real HTTP middleware test. Packaging uses
 an explicit file allowlist, excludes secrets/tests/docs, rejects symlinks and
-existing output, and defaults to ignored `build/blueprint/1.8.1/nickhosting.blueprint`.
+existing output, and defaults to ignored `build/blueprint/1.8.2/nickhosting.blueprint`.
 
 The [extension-only update procedure](UPDATE-INSTALLED.md) supports the reviewed
 1.5.0 → 1.6.0 and 1.6.0 → 1.6.1 transitions. Its default is a read-only plan;
@@ -557,7 +557,7 @@ The in-memory PHP tests exercise native JWT signing, policy, model observer,
 transaction rollback and exact ownership using the installed framework vendor
 libraries without bootstrapping the Panel or accessing its database.
 
-### Archive receipt recovery (1.8.1)
+### Archive receipt recovery (1.8.2)
 
 An exact uncertain archive commit may reconcile a complete retained extraction or
 published marked tree without uploading or extracting it again. Partial or changed
