@@ -326,3 +326,10 @@ still receives full validation and must agree with the companion pack's runtime;
 unrelated inventories do not override that runtime. Dedicated CurseForge manifest
 archives remain strict. This handles server bundles such as VerityCraft without
 weakening download integrity checks or changing staging budgets.
+
+JAR metadata inspection has a separate bounded entry-scan allowance (250,000),
+independent of the 20,000 files permitted for archive extraction. JAR resources
+remain opaque: only selected metadata records are read, with the existing size,
+compression, duplicate and integrity checks. Resource-heavy mods such as Chipped
+can therefore be inspected without incorrectly treating their internal resources
+as files being published to the game server.
