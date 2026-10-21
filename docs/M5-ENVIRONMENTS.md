@@ -1948,3 +1948,14 @@ Rollback retains the additive row, all existing users, mappings, runtime records
 operation receipts and game data. If a Forge server or Modpack runtime transition
 has been created, keep a Forge-capable application until a scoped recovery is
 reviewed. Do not revert support underneath an installed Forge server.
+
+Owner-approved development activation completed on 2026-10-21. Only migration051
+was applied; all prior migration checksums and existing user/server/session counts
+were preserved. API/worker/Vite loaded through their existing watchers. Only the
+development Gateway was manually restarted; all container identities, images,
+networks, mounts and ports remained unchanged. All eleven dev services and the
+observed Panel/Wings containers are healthy. Authenticated Firefox desktop/mobile
+checks passed HTTPS, the synced Forge catalog and secure HMR without page errors.
+Discovery returned 52 supported Minecraft releases and 4,222 exact coordinates.
+No Forge mapping, game server, real installation or pack transition was created
+as part of activation; the Owner configures the mapping and performs gameplay tests.
