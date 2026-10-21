@@ -31,6 +31,10 @@ export interface UploadAdmissionOptions {
   /** Concurrent independent requests each need their bounded multipart overhead. */
   multipartCount?: number;
 }
+export type UploadCapacityOptions = Pick<
+  UploadAdmissionOptions,
+  'availableBytes' | 'providerLargestFileBytes' | 'multipartCount'
+>;
 export function uploadStagingAvailableBytes(snapshot: {
   bavail: bigint;
   bsize: bigint;
@@ -63,15 +67,7 @@ function lockKey(id: string) {
   return `:nickhosting:upload:${id}`;
 }
 
-/** The caller must retain its existing server lock and pinned connection. */
-export async function reserveUploadIngestion(
-  connection: Kysely<Database>,
-  context: AuthContext,
-  serverId: string,
-  declaredBytes: number,
-  env: Environment = {},
-  options: UploadAdmissionOptions = {},
-) {
+function uploadReservedBytes(declaredBytes: number, options: UploadCapacityOptions): number {
   const multipartCount = options.multipartCount ?? 1;
   const multipartBytes = uploadMultipartAllowanceBytes * multipartCount;
   if (
@@ -83,12 +79,107 @@ export async function reserveUploadIngestion(
     declaredBytes > Math.floor((Number.MAX_SAFE_INTEGER - multipartBytes) / 2)
   )
     throw new DomainError('validation_failed', 413);
+  return 2 * declaredBytes + multipartBytes;
+}
+
+/** Read-only capacity snapshot; callers authorize access and must still reserve
+ * atomically before dispatch. This does not acquire a claim or retain capacity. */
+export async function assertUploadIngestionCapacity(
+  connection: Kysely<Database>,
+  serverId: string,
+  declaredBytes: number,
+  env: Environment = {},
+  options: UploadCapacityOptions = {},
+) {
+  const reservedBytes = uploadReservedBytes(declaredBytes, options);
+  await assertStoragePolicyIdle(connection);
+  const server = await connection
+    .selectFrom('managed_servers')
+    .selectAll()
+    .where('id', '=', serverId)
+    .where('deleted_at', 'is', null)
+    .executeTakeFirst();
+  if (!server?.pterodactyl_id || !server.pterodactyl_uuid) throw new DomainError('conflict');
+  const node = await connection
+    .selectFrom('managed_nodes')
+    .selectAll()
+    .where('id', '=', server.node_id)
+    .executeTakeFirstOrThrow();
+  const stored = await connection
+    .selectFrom('physical_hosts')
+    .selectAll()
+    .where('id', '=', node.physical_host_id)
+    .executeTakeFirstOrThrow();
+  const host = resolveHostOverride(stored, env);
+  const policy = effectiveUploadPolicy(host, env);
+  if (
+    !node.enabled ||
+    !host.enabled ||
+    !policy ||
+    !env.NH_OBSERVER_ID ||
+    env.NH_OBSERVER_ID !== host.observer_id
+  )
+    throw new DomainError('configuration_invalid');
+  const providerBytes = options.providerLargestFileBytes ?? declaredBytes;
+  if (
+    !Number.isSafeInteger(providerBytes) ||
+    providerBytes < 0 ||
+    providerBytes > declaredBytes ||
+    providerBytes > policy.providerMaxFileBytes
+  )
+    throw new DomainError('validation_failed', 413);
+  const existing = await connection
+    .selectFrom('upload_ingestion_claims')
+    .select('id')
+    .where('physical_host_id', '=', host.id)
+    .executeTakeFirst();
+  if (existing) throw new DomainError('conflict');
+  if (reservedBytes > policy.temporaryDiskBudgetBytes)
+    throw new DomainError('validation_failed', 413);
+  const observe = options.availableBytes ?? availableBytes;
+  const [free, destinationFree] = await Promise.all([
+    observe(policy.temporaryDiskPath),
+    observe(host.local_disk_path),
+  ]);
+  const outstanding = await unresolvedTransferBytes(connection);
+  const stagingHeadroom = BigInt(policy.temporaryDiskHeadroomBytes);
+  const configuredDestinationHeadroom = BigInt(host.disk_headroom_mib) * 1024n ** 2n;
+  const destinationHeadroom =
+    stagingHeadroom > configuredDestinationHeadroom
+      ? stagingHeadroom
+      : configuredDestinationHeadroom;
+  if (
+    free < outstanding + BigInt(reservedBytes) + stagingHeadroom ||
+    destinationFree < outstanding + BigInt(reservedBytes) + destinationHeadroom
+  )
+    throw new DomainError('resources_unavailable');
+  const scope = {
+    observerId: host.observer_id,
+    nodeId: node.id,
+    pterodactylNodeId: node.pterodactyl_node_id,
+    pterodactylServerId: server.pterodactyl_id,
+    pterodactylServerUuid: server.pterodactyl_uuid,
+    externalId: server.external_id,
+    policy,
+  };
+  return { hostId: host.id, reservedBytes, scope };
+}
+
+/** The caller must retain its existing server lock and pinned connection. */
+export async function reserveUploadIngestion(
+  connection: Kysely<Database>,
+  context: AuthContext,
+  serverId: string,
+  declaredBytes: number,
+  env: Environment = {},
+  options: UploadAdmissionOptions = {},
+) {
+  uploadReservedBytes(declaredBytes, options);
   const claimId = options.claimId === undefined ? randomUUID() : parse(z.uuid(), options.claimId);
   let locked = false;
   try {
     await connection.transaction().execute(async (tx) => {
       await lockResources(tx);
-      await assertStoragePolicyIdle(tx);
       const server = await tx
         .selectFrom('managed_servers')
         .selectAll()
@@ -118,69 +209,13 @@ export async function reserveUploadIngestion(
         )
           throw new DomainError('forbidden');
       } else if (server.active_operation_id) throw new DomainError('conflict');
-      const node = await tx
-        .selectFrom('managed_nodes')
-        .selectAll()
-        .where('id', '=', server.node_id)
-        .executeTakeFirstOrThrow();
-      const stored = await tx
-        .selectFrom('physical_hosts')
-        .selectAll()
-        .where('id', '=', node.physical_host_id)
-        .executeTakeFirstOrThrow();
-      const host = resolveHostOverride(stored, env);
-      const policy = effectiveUploadPolicy(host, env);
-      if (
-        !node.enabled ||
-        !host.enabled ||
-        !policy ||
-        !env.NH_OBSERVER_ID ||
-        env.NH_OBSERVER_ID !== host.observer_id
-      )
-        throw new DomainError('configuration_invalid');
-      const providerBytes = options.providerLargestFileBytes ?? declaredBytes;
-      if (
-        !Number.isSafeInteger(providerBytes) ||
-        providerBytes < 0 ||
-        providerBytes > declaredBytes ||
-        providerBytes > policy.providerMaxFileBytes
-      )
-        throw new DomainError('validation_failed', 413);
-      const existing = await tx
-        .selectFrom('upload_ingestion_claims')
-        .select('id')
-        .where('physical_host_id', '=', host.id)
-        .executeTakeFirst();
-      if (existing) throw new DomainError('conflict');
-      const reservedBytes = 2 * declaredBytes + multipartBytes;
-      if (reservedBytes > policy.temporaryDiskBudgetBytes)
-        throw new DomainError('validation_failed', 413);
-      const observe = options.availableBytes ?? availableBytes;
-      const [free, destinationFree] = await Promise.all([
-        observe(policy.temporaryDiskPath),
-        observe(host.local_disk_path),
-      ]);
-      const outstanding = await unresolvedTransferBytes(tx);
-      const stagingHeadroom = BigInt(policy.temporaryDiskHeadroomBytes);
-      const configuredDestinationHeadroom = BigInt(host.disk_headroom_mib) * 1024n ** 2n;
-      const destinationHeadroom =
-        stagingHeadroom > configuredDestinationHeadroom
-          ? stagingHeadroom
-          : configuredDestinationHeadroom;
-      if (
-        free < outstanding + BigInt(reservedBytes) + stagingHeadroom ||
-        destinationFree < outstanding + BigInt(reservedBytes) + destinationHeadroom
-      )
-        throw new DomainError('resources_unavailable');
-      const scope = {
-        observerId: host.observer_id,
-        nodeId: node.id,
-        pterodactylNodeId: node.pterodactyl_node_id,
-        pterodactylServerId: server.pterodactyl_id,
-        pterodactylServerUuid: server.pterodactyl_uuid,
-        externalId: server.external_id,
-        policy,
-      };
+      const { hostId, reservedBytes, scope } = await assertUploadIngestionCapacity(
+        tx,
+        serverId,
+        declaredBytes,
+        env,
+        options,
+      );
       const scopeHash = createHash('sha256').update(JSON.stringify(scope)).digest('hex');
       const result = await sql<{
         acquired: boolean;
@@ -193,7 +228,7 @@ export async function reserveUploadIngestion(
         .insertInto('upload_ingestion_claims')
         .values({
           id: claimId,
-          physical_host_id: host.id,
+          physical_host_id: hostId,
           server_id: server.id,
           actor_user_id: context.actorUserId,
           declared_bytes: String(declaredBytes),
@@ -205,7 +240,7 @@ export async function reserveUploadIngestion(
       await recordAudit(tx, context, 'server.upload.reserved', {
         claimId,
         serverId,
-        hostId: host.id,
+        hostId,
         declaredBytes,
         reservedBytes,
         scopeHash,
