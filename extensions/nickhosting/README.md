@@ -564,6 +564,14 @@ published marked tree without uploading or extracting it again. Partial or chang
 trees remain uncertain. MySQL connection-scoped locks serialize original requests
 and retries, including receipt writes after external effects. No migration is added.
 
-Use official Guzzle 7.15.3 with Promises 2.5.2 (or a later compatible fixed pair).
-The 7.15.2 / 2.5.1 pair can reject completed parallel requests while verifying a
-tree. Do not replace the native Pool with a separate scheduler to mask this bug.
+Normal archive commits trust Wings' synchronous successful decompression response;
+no recursive tree read follows a successful extraction. Manifest/path constraints,
+destination collision checks and rename confirmation remain. Only an uncertain
+receipt triggers full manifest reconciliation, using bounded sequential listings
+rather than Guzzle Pool. No Panel dependency update is required.
+
+A confirmed extraction receipt records Wings success, not an independent inventory
+or checksum proof. Wings may skip members denied by its configured file denylist;
+world imports trust that native behavior. Modpack publication still reads back its
+final destinations before recording applied file metadata. Unknown extraction
+outcomes use manifest reconciliation and do not infer success from archive presence.

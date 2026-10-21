@@ -276,9 +276,16 @@ the original job actor. Publication without a runtime transition remains outside
 this bounded recovery path. The earlier replacement-Owner service test did not
 establish end-to-end admission of a first upload by a different Owner.
 
-The live failure was reproduced with Guzzle 7.15.2 / Promises 2.5.1: parallel
-verification failed despite Wings having fully extracted the archive. Official
-Guzzle 7.15.3 **and** Promises 2.5.2 fixed three identical read-only reproductions;
-updating only Guzzle did not. The reviewed Composer candidate changes those two
-packages only. Panel activation requires separate approval; source preparation
-and isolated tests do not imply that the live dependencies have been updated.
+Normal archive extraction now trusts the synchronous successful Wings response.
+Blueprint does not recursively list the extracted tree on that path. Unknown
+outcomes still require exact manifest reconciliation before continuation; archive
+preflight and recovery listings avoid the defective aggregate Pool path in the
+installed Panel libraries. Guzzle/Promises and Panel configuration remain unchanged.
+The earlier official-dependency update proposal was not activated.
+
+The normal modpack path also skips a second enumeration of staged archive members.
+It guards original destinations before retirement, then reads back final destinations
+after rename (Wings may acknowledge a rename whose source is absent). Actual file
+mtimes are captured there and persisted for future change detection. New in-flight
+stage journals may omit mtimes until that readback: do not downgrade to older code
+while such publication is active. Existing journals remain accepted.
