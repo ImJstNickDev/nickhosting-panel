@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { createLogger, type LogRecord, SecretCodec } from '@nickhosting/core';
+import { authSessionId, createLogger, type LogRecord, SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import {
   minecraftDigest,
@@ -556,6 +556,125 @@ describe('host-bound Minecraft runtime image evidence', () => {
     });
     return { ...operation, external, observer, codec, management };
   }
+  async function pendingModpackImage(value: Awaited<ReturnType<typeof installed>>) {
+    const operationId = randomUUID();
+    const choice = await inspectMinecraftCombination(f.db, choiceId, env);
+    await f.db
+      .insertInto('minecraft_modpack_operations')
+      .values({
+        id: operationId,
+        server_id: value.serverId,
+        actor_user_id: f.context.actorUserId,
+        actor_session_id: f.context[authSessionId] as string,
+        subject_user_id: f.context.subjectUserId,
+        support_session_id: null,
+        resource_owner_id: f.context.subjectUserId,
+        physical_host_id: f.hostId,
+        held_bytes: '0',
+        staging_root: null,
+        idempotency_key: randomUUID(),
+        selection: '{}',
+        state: 'applied',
+        phase: 'complete',
+        progress: 'null',
+        prepared: 'null',
+        plan: 'null',
+        plan_digest: null,
+        blockers: '[]',
+        apply_request: 'null',
+        apply_actor_user_id: f.context.actorUserId,
+        apply_actor_session_id: f.context[authSessionId] as string,
+        apply_subject_user_id: f.context.subjectUserId,
+        apply_support_session_id: null,
+        apply_idempotency_key: randomUUID(),
+        journal: '[]',
+        runtime_transition: JSON.stringify({
+          state: 'verified',
+          mappingDigest: choice.mappingDigest,
+          target: { combinationId: choiceId, mappingId: choice.mapping.id },
+        }),
+        backup_id: null,
+        restart_required: true,
+        error: null,
+        lease_token: null,
+        lease_until: null,
+      })
+      .execute();
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({
+        runtime_image_digest: null,
+        runtime_image_transition: JSON.stringify({
+          operationId,
+          combinationId: choiceId,
+          after: '2026-10-09T09:59:00.000Z',
+        }),
+      })
+      .where('server_id', '=', value.serverId)
+      .execute();
+    return operationId;
+  }
+  it('Modpacks image transition leaves the old container unpinned during first-start preflight', async () => {
+    const value = await installed();
+    await pendingModpackImage(value);
+    await expect(
+      value.management.assertMinecraftRuntimeImage(value.serverId, f.db, false),
+    ).resolves.toMatchObject({ expected: null, observed: null, verified: false });
+    expect(
+      (
+        await f.db
+          .selectFrom('minecraft_server_profiles')
+          .select('runtime_image_digest')
+          .where('server_id', '=', value.serverId)
+          .executeTakeFirstOrThrow()
+      ).runtime_image_digest,
+    ).toBeNull();
+    value.observer.processStartedAt.mockResolvedValue('2026-10-09T09:58:00.000000001Z');
+    await expect(
+      value.management.lifecycle.observeProcessStart(value.serverId, f.db),
+    ).rejects.toThrow('integration_unavailable');
+  });
+  it('Modpacks image transition pins only the fresh attested epoch and then enforces that image', async () => {
+    const value = await installed();
+    await pendingModpackImage(value);
+    const next = `sha256:${'c'.repeat(64)}`;
+    value.observer.imageIdentity.mockResolvedValue(next);
+    await expect(
+      value.management.lifecycle.observeProcessStart(value.serverId, f.db),
+    ).resolves.toBe('2026-10-09T10:00:00.000000001Z');
+    expect(
+      await f.db
+        .selectFrom('minecraft_server_profiles')
+        .select(['runtime_image_digest', 'runtime_image_transition'])
+        .where('server_id', '=', value.serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ runtime_image_digest: next, runtime_image_transition: null });
+    value.observer.imageIdentity.mockResolvedValue(`sha256:${'d'.repeat(64)}`);
+    await expect(
+      value.management.assertMinecraftRuntimeImage(value.serverId, f.db, false),
+    ).rejects.toThrow('provenance_mismatch');
+  });
+  it('Modpacks image transition refuses unverified runtime journals even before power dispatch', async () => {
+    const value = await installed();
+    const operationId = await pendingModpackImage(value);
+    await f.db
+      .updateTable('minecraft_modpack_operations')
+      .set({ runtime_transition: JSON.stringify({ state: 'installation-dispatched' }) })
+      .where('id', '=', operationId)
+      .execute();
+    await expect(
+      value.management.assertMinecraftRuntimeImage(value.serverId, f.db, false),
+    ).rejects.toThrow('provenance_mismatch');
+    expect(
+      (
+        await f.db
+          .selectFrom('minecraft_server_profiles')
+          .select('runtime_image_digest')
+          .where('server_id', '=', value.serverId)
+          .executeTakeFirstOrThrow()
+      ).runtime_image_digest,
+    ).toBeNull();
+  });
   it.each(['consent', 'schedule'] as const)(
     'rechecks scheduled %s revocation after deferred durable power preparation',
     async (revoked) => {

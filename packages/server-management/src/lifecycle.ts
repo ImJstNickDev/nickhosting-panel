@@ -397,6 +397,9 @@ export async function processServerOperation(
     .where('job_id', '=', jobId)
     .executeTakeFirst();
   if (!initial) return 'missing';
+  // Modpacks owns this durable Fileman/installation context and its dispatch
+  // journal. Generic lifecycle delivery must never replay a legacy content plan.
+  if (initial.plan.modpackOperationId) return 'deferred';
   let timing: OperationTiming | undefined;
   try {
     if (
@@ -487,6 +490,7 @@ export async function processServerOperation(
       ...loadedOperation
     } = loaded;
     let operation: Operation = loadedOperation;
+    if (operation.plan.modpackOperationId) return 'deferred';
     const job = {
       state: job_state,
       next_attempt_at: job_next_attempt_at,
@@ -3537,7 +3541,11 @@ export async function reconcileManagedServer(
       .where('job.state', '=', 'failed')
       .where('job.completed_at', 'is not', null)
       .executeTakeFirst();
-    if (failedInstallation && failedInstallation.plan.installConfirmed !== true) {
+    if (
+      failedInstallation &&
+      !failedInstallation.plan.modpackOperationId &&
+      failedInstallation.plan.installConfirmed !== true
+    ) {
       // A terminal failed job is not installation proof. Release its capacity
       // only after the host observer proves BOTH installer and game stopped.
       // Identity/configuration/observer errors must leave the reservation intact.
@@ -3774,6 +3782,7 @@ export async function resolveUncertainOperation(
       .where('server_id', '=', serverId)
       .executeTakeFirst();
     if (!server || !operation) throw new DomainError('not_found');
+    if (operation.plan.modpackOperationId) throw new DomainError('operation_uncertain');
     if (
       server.active_operation_id !== operation.job_id ||
       !operation.effect_started_at ||

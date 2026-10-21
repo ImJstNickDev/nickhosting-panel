@@ -54,6 +54,7 @@ import {
   minecraftContentAllowsOnline,
   minecraftStoredConfigurationSchema,
 } from './minecraft-content-contracts.js';
+import { assertNoModpackPublication } from './minecraft-modpack-schema.js';
 import { requireMinecraftChoice } from './minecraft-registry.js';
 import { bindMinecraftSource } from './minecraft-sources.js';
 import { backupSchemaAvailable } from './provider-backup-events.js';
@@ -808,6 +809,7 @@ export async function enqueueLockedServerOperation(
       : 'server:manage',
   );
   if (server.active_operation_id) throw new DomainError('conflict');
+  await assertNoModpackPublication(tx, serverId);
   if (value.action === 'start' || value.action === 'restart') {
     const mapping = await tx
       .selectFrom('runtime_egg_mappings')

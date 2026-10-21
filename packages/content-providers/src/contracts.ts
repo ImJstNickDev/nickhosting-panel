@@ -189,6 +189,21 @@ export function validateContentPlan(input: unknown): ContentPlan {
   return plan;
 }
 export interface ContentHttp {
+  /** Read-only metadata bulk queries (e.g. CurseForge pinned file IDs), never mutations. */
+  jsonPost?(
+    url: string,
+    body: unknown,
+    options?: { headers?: Readonly<Record<string, string>>; signal?: AbortSignal },
+  ): Promise<unknown>;
+  text?(
+    url: string,
+    options?: { headers?: Readonly<Record<string, string>>; signal?: AbortSignal },
+  ): Promise<string>;
+  downloadModpack?(
+    artifact: import('./modpack-recipes.js').ModpackDownload,
+    destination: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<{ sha256: string; size: number }>;
   json(
     url: string,
     options?: { headers?: Readonly<Record<string, string>>; signal?: AbortSignal },

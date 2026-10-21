@@ -86,6 +86,7 @@ describe('M5 server browser filters, ownership and bounded views', () => {
           installed_manifest: JSON.stringify(profile.installed_manifest),
           content_state: JSON.stringify(profile.content_state),
           configuration_state: JSON.stringify(profile.configuration_state),
+          runtime_image_transition: JSON.stringify(profile.runtime_image_transition),
         })
         .execute();
     }

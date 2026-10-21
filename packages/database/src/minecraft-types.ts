@@ -26,6 +26,7 @@ export interface MinecraftTables {
     configuration: Json;
     installed: Generated<boolean>;
     runtime_image_digest: Generated<string | null>;
+    runtime_image_transition: ColumnType<unknown, string | undefined, string>;
     installed_manifest: ColumnType<unknown, string | undefined, string>;
     content_state: ColumnType<unknown, string | undefined, string>;
     configuration_state: ColumnType<unknown, string | undefined, string>;

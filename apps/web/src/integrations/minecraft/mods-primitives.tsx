@@ -212,10 +212,10 @@ export function ModsEmpty({ children, action }: { children: ReactNode; action?: 
     </div>
   );
 }
-export function ModsSkeleton({ rows = 5 }: { rows?: number }) {
+export function ModsSkeleton({ rows = 5, label }: { rows?: number; label?: string }) {
   const t = useAddonsT();
   return (
-    <div className="mods-skeleton" role="status" aria-label={t(modsKey('loading'))}>
+    <div className="mods-skeleton" role="status" aria-label={label ?? t(modsKey('loading'))}>
       {Array.from({ length: rows }, (_, i) => (
         <div key={i.toString()} aria-hidden="true">
           <i />

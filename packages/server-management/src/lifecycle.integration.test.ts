@@ -9,6 +9,7 @@ import {
   type BackupActivity,
   type BuildUpdate,
   type GuardedDirectoryDelete,
+  type PrivateTransferCache,
   type PterodactylAdapter,
   PterodactylError,
   type Resources,
@@ -18,6 +19,7 @@ import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { BackendAllocationPool } from './allocation-pool.js';
 import { removeFilemanDirectory } from './fileman-directory.js';
+import { createInstallationCollector } from './installation-collector.js';
 import {
   type LifecycleOptions,
   processServerOperation,
@@ -473,6 +475,40 @@ async function fixture(
 }
 
 describe('durable provider lifecycle with real PostgreSQL', () => {
+  it('does not dispatch a Modpacks synthetic reinstall through generic lifecycle', async () => {
+    const f = await fixture('reinstall', { modpackOperationId: randomUUID() });
+    const before = await f.operation();
+    expect(await f.run()).toBe('deferred');
+    expect(await f.operation()).toEqual(before);
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+    expect(f.adapter.reinstall).not.toHaveBeenCalled();
+  });
+  it('does not attach the generic installation collector to a Modpacks operation', async () => {
+    const f = await fixture('reinstall', { modpackOperationId: randomUUID() });
+    let released!: () => void;
+    const done = new Promise<void>((resolve) => {
+      released = resolve;
+    });
+    const prepare = vi.fn(async () => {});
+    const adapter = vi.fn(async () => f.options.adapter);
+    const collector = createInstallationCollector({
+      db: f.db,
+      cache: { get: async () => undefined, put: async () => {} } as unknown as PrivateTransferCache,
+      adapter,
+      prepare,
+      wake: vi.fn(async () => {}),
+      leaseKey: (id) => id,
+      lease: async (_id, _token, operation) => {
+        if (operation === 'release') released();
+        return true;
+      },
+    });
+    collector.ensure(f.jobId, f.serverId);
+    await done;
+    await collector.close();
+    expect(prepare).not.toHaveBeenCalled();
+    expect(adapter).not.toHaveBeenCalled();
+  });
   it.each([
     'credential_missing',
     'permission_denied',
@@ -3510,6 +3546,18 @@ describe('unlocked reconciliation collection and atomic stale-result fencing', (
 });
 
 describe('terminal failed installation reservation recovery', () => {
+  it('retains Modpacks installer reservations for its own recovery authority', async () => {
+    const f = await failedInstallation('reinstall');
+    await f.db
+      .updateTable('server_operations')
+      .set({ plan: JSON.stringify({ modpackOperationId: f.jobId }) })
+      .where('job_id', '=', f.jobId)
+      .execute();
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(await f.installationReservation()).toBeDefined();
+    expect(f.options.confirmInitialInstallationStopped).not.toHaveBeenCalled();
+    expect(f.options.verifyInitialInstallation).not.toHaveBeenCalled();
+  });
   async function failedInstallation(action: 'provision' | 'reinstall' = 'provision') {
     const f = await fixture('reinstall');
     await f.db

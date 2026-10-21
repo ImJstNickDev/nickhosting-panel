@@ -8,6 +8,8 @@ import {
   validateMinecraftRuntimeMapping,
 } from '@nickhosting/minecraft';
 import type { ApplicationServer, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
+import { sql } from 'kysely';
+import { z } from 'zod';
 import type { DB, Environment } from './admission.js';
 import {
   assertMinecraftDeclaredEnvironment,
@@ -288,6 +290,7 @@ export async function requireMinecraftRuntimeImageEvidence(
   serverId: string,
   observed: string | null,
   env: Environment = {},
+  verifiedProcessEpoch?: string,
 ): Promise<{
   expected: string | null;
   observed: string | null;
@@ -325,6 +328,73 @@ export async function requireMinecraftRuntimeImageEvidence(
     // future container replacement must preserve that identity.
     if (observed !== null && !/^sha256:[a-f0-9]{64}$/.test(observed))
       throw new DomainError('provenance_mismatch');
+    if (
+      profile.runtime_image_transition !== null &&
+      profile.runtime_image_transition !== undefined
+    ) {
+      const transition = z
+        .object({ operationId: z.uuid(), combinationId: z.uuid(), after: z.iso.datetime() })
+        .strict()
+        .safeParse(profile.runtime_image_transition);
+      if (
+        !transition.success ||
+        transition.data.combinationId !== profile.combination_id ||
+        profile.runtime_image_digest !== null
+      )
+        throw new DomainError('provenance_mismatch');
+      const operation = await db
+        .selectFrom('minecraft_modpack_operations')
+        .select(['state', 'resource_owner_id', 'runtime_transition'])
+        .where('id', '=', transition.data.operationId)
+        .where('server_id', '=', serverId)
+        .executeTakeFirst();
+      const journal = z
+        .object({
+          state: z.literal('verified'),
+          mappingDigest: z.string(),
+          target: z.object({ combinationId: z.uuid(), mappingId: z.uuid() }),
+        })
+        .safeParse(operation?.runtime_transition);
+      if (
+        operation?.state !== 'applied' ||
+        operation.resource_owner_id !== server.owner_id ||
+        !journal.success ||
+        journal.data.mappingDigest !== choice.mappingDigest ||
+        journal.data.target.combinationId !== profile.combination_id ||
+        journal.data.target.mappingId !== server.mapping_id
+      )
+        throw new DomainError('provenance_mismatch');
+      // Reinstall keeps the previous stopped game container. Only the existing
+      // process-epoch verifier can attest the new container after first start.
+      // Startup preflight must not pin the old container's otherwise valid image.
+      if (
+        !observed ||
+        !verifiedProcessEpoch ||
+        !Number.isFinite(Date.parse(verifiedProcessEpoch)) ||
+        Date.parse(verifiedProcessEpoch) <= Date.parse(transition.data.after)
+      )
+        return { expected: null, observed: null, verified: false, report: null };
+      await db
+        .updateTable('minecraft_server_profiles')
+        .set({ runtime_image_digest: observed, runtime_image_transition: 'null' })
+        .where('server_id', '=', serverId)
+        .where('combination_id', '=', profile.combination_id)
+        .where('runtime_image_digest', 'is', null)
+        .where(
+          sql<string>`runtime_image_transition->>'operationId'`,
+          '=',
+          transition.data.operationId,
+        )
+        .execute();
+      const pinned = await db
+        .selectFrom('minecraft_server_profiles')
+        .select(['runtime_image_digest', 'runtime_image_transition'])
+        .where('server_id', '=', serverId)
+        .executeTakeFirstOrThrow();
+      if (pinned.runtime_image_digest !== observed || pinned.runtime_image_transition !== null)
+        throw new DomainError('provenance_mismatch');
+      return { expected: observed, observed, verified: true, report: null };
+    }
     let expected = profile.runtime_image_digest;
     if (observed !== null && profile.installed && expected === null) {
       await db

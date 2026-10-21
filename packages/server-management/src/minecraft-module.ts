@@ -242,6 +242,7 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
       | ReturnType<PterodactylAdapter['getApplicationServer']>,
     observerPreflight?: Promise<void>,
     validateEggMetadata = true,
+    verifiedProcessEpoch?: string,
   ) {
     const profile = await connection
       .selectFrom('minecraft_server_profiles')
@@ -280,6 +281,7 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
       serverId,
       observed,
       env,
+      verifiedProcessEpoch,
     );
     if (requireObserved && !evidence.verified) throw new DomainError('integration_unavailable');
     return evidence;
@@ -448,6 +450,7 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
         remote,
         observerPreflight,
         false,
+        before ?? undefined,
       );
       const after = await readAgain();
       if (before !== after) throw new DomainError('operation_uncertain');

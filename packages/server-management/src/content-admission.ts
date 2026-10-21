@@ -17,6 +17,7 @@ import {
 import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources } from './admission.js';
+import { minecraftModpackSchemaAvailable } from './minecraft-modpack-schema.js';
 import { authorizeServer, parse } from './registry.js';
 import { unresolvedTransferBytes } from './transfer-capacity.js';
 import { uploadStagingAvailableBytes } from './upload-admission.js';
@@ -60,6 +61,9 @@ async function observeContentDisk(root: string): Promise<ContentDiskSnapshot> {
  * integration uses one ledger and one global accounting path, never a game-local
  * copy. Aggregate in PostgreSQL instead of loading every archive into memory. */
 export async function readContentClaimUsage(db: Kysely<Database>): Promise<ContentClaimUsage[]> {
+  const modpacks = (await minecraftModpackSchemaAvailable(db))
+    ? sql`union all select 'minecraft', resource_owner_id, held_bytes, case when state in ('preparing', 'applying', 'uncertain') then 1 else 0 end from minecraft_modpack_operations where held_bytes > 0`
+    : sql``;
   const result = await sql<{ game_id: string; owner_id: string; bytes: string; active: string }>`
     select game_id, owner_id, sum(bytes)::text as bytes, sum(active)::text as active from (
       select game_id, owner_user_id as owner_id, reserved_bytes as bytes,
@@ -70,6 +74,7 @@ export async function readContentClaimUsage(db: Kysely<Database>): Promise<Conte
         case when j.state in ('queued', 'running', 'uncertain') then 1 else 0 end
       from minecraft_staging_claims c join operation_jobs j on j.id = c.job_id
       where c.state = 'reserved'
+      ${modpacks}
     ) claims group by game_id, owner_id
   `.execute(db);
   return result.rows.map((row) => ({
@@ -127,7 +132,7 @@ export function assertContentCapacity(
 export async function assertContentAdmission(
   db: Kysely<Database>,
   config: PlatformConfig,
-  input: { gameId: string; ownerId: string; bytes: bigint; root: string },
+  input: { gameId: string; ownerId: string; bytes: bigint; root: string; active?: number },
   options: ContentAdmissionOptions = {},
 ) {
   assertContentCapacity(config, await readContentClaimUsage(db), input);

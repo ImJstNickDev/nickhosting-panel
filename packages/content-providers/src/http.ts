@@ -15,6 +15,7 @@ import {
   fail,
   unavailable,
 } from './contracts.js';
+import type { ModpackDownload } from './modpack-recipes.js';
 
 const blocked = new BlockList();
 const blockedV6 = new BlockList();
@@ -113,6 +114,7 @@ export class SafeContentHttp implements ContentHttp {
     headers: Readonly<Record<string, string>> = {},
     signal?: AbortSignal,
     downloadRedirects = false,
+    jsonBody?: string,
   ): Promise<IncomingMessage> {
     const url = validateDownloadUrl(input, this.options.allowedOrigins);
     if (
@@ -141,7 +143,7 @@ export class SafeContentHttp implements ContentHttp {
       const req = request(
         url,
         {
-          method: 'GET',
+          method: jsonBody === undefined ? 'GET' : 'POST',
           agent: false,
           family: address.family,
           signal,
@@ -149,6 +151,12 @@ export class SafeContentHttp implements ContentHttp {
             ...headers,
             'User-Agent': this.options.userAgent,
             'Accept-Encoding': 'identity',
+            ...(jsonBody === undefined
+              ? {}
+              : {
+                  'Content-Type': 'application/json',
+                  'Content-Length': Buffer.byteLength(jsonBody),
+                }),
           },
           lookup: (_host, _options, callback) => callback(null, address.address, address.family),
         },
@@ -191,7 +199,7 @@ export class SafeContentHttp implements ContentHttp {
       deadline.unref();
       req.on('close', () => clearTimeout(deadline));
       req.on('error', reject);
-      req.end();
+      req.end(jsonBody);
     });
   }
   private async downloadResponse(input: string, signal?: AbortSignal): Promise<IncomingMessage> {
@@ -242,8 +250,30 @@ export class SafeContentHttp implements ContentHttp {
     url: string,
     options: { headers?: Readonly<Record<string, string>>; signal?: AbortSignal } = {},
   ): Promise<unknown> {
+    return JSON.parse(await this.text(url, options)) as unknown;
+  }
+  async text(
+    url: string,
+    options: { headers?: Readonly<Record<string, string>>; signal?: AbortSignal } = {},
+  ): Promise<string> {
+    return this.metadata(url, options);
+  }
+  async jsonPost(
+    url: string,
+    body: unknown,
+    options: { headers?: Readonly<Record<string, string>>; signal?: AbortSignal } = {},
+  ): Promise<unknown> {
+    const encoded = JSON.stringify(body);
+    if (!encoded || Buffer.byteLength(encoded) > 256 * 1024) fail('metadata_request_size');
+    return JSON.parse(await this.metadata(url, options, encoded)) as unknown;
+  }
+  private async metadata(
+    url: string,
+    options: { headers?: Readonly<Record<string, string>>; signal?: AbortSignal },
+    jsonBody?: string,
+  ): Promise<string> {
     return this.retry(async () => {
-      const response = await this.response(url, options.headers, options.signal);
+      const response = await this.response(url, options.headers, options.signal, false, jsonBody);
       let size = 0;
       const chunks: Buffer[] = [];
       try {
@@ -252,7 +282,7 @@ export class SafeContentHttp implements ContentHttp {
           if (size > this.options.maxJsonBytes) fail('metadata_size');
           chunks.push(Buffer.from(chunk));
         }
-        return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+        return Buffer.concat(chunks).toString('utf8');
       } finally {
         response.destroy();
       }
@@ -264,6 +294,44 @@ export class SafeContentHttp implements ContentHttp {
     options: { signal?: AbortSignal } = {},
   ): Promise<{ sha256: string; size: number }> {
     const artifact = artifactSchema.parse(input);
+    return this.streamDownload(artifact, destination, options, artifact.integrity !== 'spiget-tls');
+  }
+  /** Recipe downloads have their own bounded policy; the existing artifact contract stays strict. */
+  async downloadModpack(
+    artifact: ModpackDownload,
+    destination: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ sha256: string; size: number }> {
+    const lengths: Record<string, number> = { md5: 32, sha1: 40, sha256: 64, sha512: 128 };
+    if (
+      !Array.isArray(artifact.urls) ||
+      !artifact.urls.length ||
+      artifact.urls.length > 8 ||
+      (artifact.size !== undefined &&
+        (!Number.isSafeInteger(artifact.size) || artifact.size < 0)) ||
+      !artifact.hashes ||
+      Object.entries(artifact.hashes).some(
+        ([name, value]) =>
+          !lengths[name] ||
+          typeof value !== 'string' ||
+          value.length !== lengths[name] ||
+          !/^[a-f0-9]+$/.test(value),
+      )
+    )
+      fail('modpack_download');
+    return this.streamDownload(
+      { ...artifact, size: artifact.size ?? this.options.maxDownloadBytes },
+      destination,
+      options,
+      artifact.size !== undefined,
+    );
+  }
+  private async streamDownload(
+    artifact: { size: number; hashes: Record<string, string | undefined>; urls: string[] },
+    destination: string,
+    options: { signal?: AbortSignal },
+    exactSize: boolean,
+  ): Promise<{ sha256: string; size: number }> {
     if (artifact.size > this.options.maxDownloadBytes) fail('download_size');
     // All alternatives must be approved before any request, including unused fallback URLs.
     for (const url of artifact.urls) validateDownloadUrl(url, this.options.allowedOrigins);
@@ -291,7 +359,7 @@ export class SafeContentHttp implements ContentHttp {
           createWriteStream(destination, { flags: 'wx', mode: 0o600 }),
           { signal: options.signal },
         );
-        if (artifact.integrity !== 'spiget-tls' && size !== artifact.size) fail('download_size');
+        if (exactSize && size !== artifact.size) fail('download_size');
         const actual = Object.fromEntries(
           [...hashes].map(([name, hash]) => [name, hash.digest('hex')]),
         );

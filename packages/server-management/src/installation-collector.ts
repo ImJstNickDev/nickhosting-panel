@@ -82,6 +82,7 @@ export function createInstallationCollector(options: {
       if (binding && binding !== identity) return false;
       if (identity) binding ??= identity;
       return row &&
+        !row.plan.modpackOperationId &&
         !row.plan.installConfirmed &&
         ['queued', 'running'].includes(row.state) &&
         row.pterodactyl_identifier &&

@@ -1375,6 +1375,32 @@ export async function configureMinecraftProvision(
   return true;
 }
 
+/** An explicit runtime transition attests only installer-owned outputs. Existing
+ * properties, identities, worlds and legacy pack selection are never replayed. */
+export async function attestMinecraftRuntimeInstallation(
+  context: MinecraftReadContext & Pick<GameLifecycleContext, 'assertStopped'>,
+  options: Pick<MinecraftContentOptions, 'env' | 'observedImageDigest'>,
+): Promise<{ files: { path: string; sha256: string; size: number }[] }> {
+  await context.authorize();
+  await context.assertStopped();
+  const result = await verifyInstalledRuntime(context, options);
+  await context.authorize();
+  await context.assertStopped();
+  const updated = await context.db
+    .updateTable('minecraft_server_profiles')
+    .set({
+      installed: true,
+      installed_manifest: JSON.stringify(result.verified),
+      updated_at: new Date(),
+    })
+    .where('server_id', '=', context.server.id)
+    .where('combination_id', '=', result.choice.row.id)
+    .returning('server_id')
+    .executeTakeFirst();
+  if (!updated) throw new DomainError('provenance_mismatch');
+  return { files: result.verified };
+}
+
 async function ensureRemoteDirectory(
   context: GameLifecycleContext,
   path: string,

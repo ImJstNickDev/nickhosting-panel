@@ -170,6 +170,33 @@ export class CurseForgeProvider {
   private async get(path: string, signal?: AbortSignal): Promise<unknown> {
     return (await this.request(path, signal)).data;
   }
+  /** Read-only catalog boundary shared with the modpack adapter; the API key never leaves this class. */
+  async modpackMetadata(path: string, signal?: AbortSignal): Promise<unknown> {
+    if (
+      !/^\/(?:categories\?gameId=432&classesOnly=true|mods\/search\?[^#\r\n]*|mods\/[1-9][0-9]*(?:\/description|\/files(?:\/[1-9][0-9]*|\?[^#\r\n]*)?)?)$/.test(
+        path,
+      )
+    )
+      fail('modpack_metadata_path');
+    return this.request(path, signal);
+  }
+  /** Exact pinned records only: never expands dependency relations or substitutes latest files. */
+  async modpackBulk(
+    kind: 'files' | 'projects',
+    ids: readonly number[],
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    if (!ids.length || ids.length > 50 || ids.some((id) => !Number.isSafeInteger(id) || id < 1))
+      fail('modpack_bulk_ids');
+    if (!this.http.jsonPost) unavailable('modpack_bulk_transport');
+    return responseSchema.parse(
+      await this.http.jsonPost(
+        `${this.base}${kind === 'files' ? '/mods/files' : '/mods'}`,
+        kind === 'files' ? { fileIds: ids } : { modIds: ids, filterPcOnly: false },
+        { headers: { 'x-api-key': this.#key }, signal },
+      ),
+    ).data;
+  }
   private getCatalogClass(
     kind: 'worlds' | 'data-packs' | 'bukkit-plugins',
     signal?: AbortSignal,

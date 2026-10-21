@@ -15,12 +15,16 @@ import {
   refreshHostObservations,
   wakeInstallationOperation,
 } from '@nickhosting/server-management';
+import { minecraftModpackSchemaAvailable } from '../../../packages/server-management/src/minecraft-modpack-schema.js';
+import { minecraftContentProviders } from '../../../packages/server-management/src/minecraft-world-catalog.js';
+import { createMinecraftModpackBridge } from '../../../packages/server-management/src/modpack-bridge.js';
 import { startHostObservationLoop } from './host-observations.js';
 import {
   pollFabricMetadata,
   pollMinecraftMetadata,
   pollPaperMetadata,
 } from './minecraft-metadata.js';
+import { startMinecraftModpackLoop } from './minecraft-modpacks.js';
 import { refreshProviderFeeds, startProviderFeedLoop } from './provider-feed.js';
 import { reconcileServers } from './reconcile.js';
 import { pollSchedules } from './schedules.js';
@@ -73,9 +77,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       processor: async (jobId) => {
         const row = await db
           .selectFrom('server_operations')
-          .select('job_id')
+          .select(['job_id', 'plan'])
           .where('job_id', '=', jobId)
           .executeTakeFirst();
+        if (typeof row?.plan.modpackOperationId === 'string') return 'modpack-owned';
         return row ? (await management()).process(jobId) : processJob(db, jobId);
       },
     });
@@ -167,6 +172,24 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       },
       () => logger.log('warn', 'provider.feed_unavailable'),
     );
+    const modpacks = startMinecraftModpackLoop({
+      notificationPool: pool,
+      unavailable: () => logger.log('warn', 'minecraft.modpack_worker_unavailable'),
+      service: async () => {
+        if (!(await minecraftModpackSchemaAvailable(db))) return null;
+        if (!env.NH_SECRETS_MASTER_KEY) return null;
+        const keyId = env.NH_SECRETS_KEY_ID ?? 'primary';
+        const codec = new SecretCodec({
+          activeKeyId: keyId,
+          keys: { [keyId]: encryptionKeyFromBase64(env.NH_SECRETS_MASTER_KEY) },
+        });
+        const [runtime, content] = await Promise.all([
+          management(),
+          minecraftContentProviders(db, codec, env),
+        ]);
+        return createMinecraftModpackBridge({ db, runtime, env, ...content.providers });
+      },
+    });
     let stopping = false;
     let schedulesHealthy = true;
     const workerInstanceId = randomUUID();
@@ -259,6 +282,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           observations.close(),
           providerFeeds.close(),
           providerAccounts.close(),
+          modpacks.close(),
         ]);
         try {
           await installations?.close();

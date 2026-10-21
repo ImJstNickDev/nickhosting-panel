@@ -17,6 +17,8 @@ import {
   minecraftContentCapabilities,
 } from './controller.js';
 import { minecraftDatapacksMessages } from './datapacks-catalog.js';
+import { minecraftModpacksMessages } from './modpacks-catalog.js';
+import { createMinecraftModpacksController } from './modpacks-controller.js';
 import { minecraftModsMessages } from './mods-catalog.js';
 import { createMinecraftModsController } from './mods-controller.js';
 import { minecraftPlayersMessages } from './players-catalog.js';
@@ -35,6 +37,7 @@ const translated: Record<string, [string, string]> = {
   ...minecraftPlayersMessages,
   ...minecraftDatapacksMessages,
   ...minecraftModsMessages,
+  ...minecraftModpacksMessages,
   ...minecraftPluginsMessages,
   ...minecraftWorldsMessages,
   'messages.disconnected': ['Failed to connect to the server', 'Connessione al server fallita'],
@@ -505,50 +508,12 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
       id: 'modpacks',
       aliases: ['content'],
       titleKey: k('sections.modpacks'),
-      loader: 'content',
+      loader: 'modpacks',
+      renderer: 'minecraft-modpacks',
       requiredPermissions: ['server:read'],
       requiredCapabilities: ['files'],
-      columns: [
-        { id: 'path', labelKey: k('fields.path') },
-        { id: 'installed_at', labelKey: k('fields.installedAt'), format: 'date' },
-      ],
-      forms: [
-        {
-          id: 'verify',
-          titleKey: k('forms.verify'),
-          fields: [],
-          action: action('verify', 'files'),
-        },
-        {
-          id: 'replace-pack',
-          titleKey: k('forms.replacePack'),
-          fields: [
-            field('archiveRef', {
-              type: 'archive',
-              accept: ['.mrpack', '.zip'],
-              handler: 'upload-modpack',
-              required: true,
-              catalog: {
-                searchHandler: 'modpack-search',
-                versionsHandler: 'modpack-versions',
-                acquireHandler: 'modpack-acquire',
-              },
-            }),
-            field('wipeConsent', { type: 'boolean', required: true, mustBeTrue: true }),
-            field('backupBefore', { type: 'boolean', required: true }),
-            field('expectedDeletePaths', {
-              type: 'preview',
-              handler: 'wipe-preview',
-              maxItems: 1000,
-              required: true,
-            }),
-          ],
-          action: action('replace', 'files', {
-            destructive: true,
-            confirmationKey: k('warnings.replacePack'),
-          }),
-        },
-      ],
+      columns: [],
+      forms: [],
     },
   ],
   ports: [{ role: 'game', labelKey: k('ports.game'), transports: ['tcp'], required: true }],
@@ -792,6 +757,13 @@ export const minecraftUiModule = defineTrustedGameUiModule({
         },
         context.signal,
       );
+    },
+    modpacks: async (client, context): Promise<UiSectionData> => {
+      const modpacks = await createMinecraftModpacksController(client).snapshot(
+        server(context),
+        context.signal,
+      );
+      return { values: {}, rows: [], metadata: { modpacks } };
     },
     plugins: async (client, context): Promise<UiSectionData> => {
       const plugins = await createMinecraftModsController(client, 'plugins').snapshot(

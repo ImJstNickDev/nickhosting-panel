@@ -70,6 +70,60 @@ const artifact = {
   kind: 'override' as const,
   serverSide: 'required' as const,
 };
+it('uses bounded authenticated JSON POST for read-only bulk metadata', async () => {
+  response(200, Buffer.from('{"data":[]}'));
+  await expect(
+    client().jsonPost(
+      'https://cdn.modrinth.com/mods/files',
+      { fileIds: [1, 2] },
+      { headers: { 'x-api-key': 'fixture' } },
+    ),
+  ).resolves.toEqual({ data: [] });
+  expect(mocks.request.mock.calls[0]?.[1]).toMatchObject({
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': 'fixture' },
+  });
+  await expect(
+    client().jsonPost('https://cdn.modrinth.com/mods/files', 'x'.repeat(256 * 1024)),
+  ).rejects.toThrow();
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+});
+it('limits HTML metadata and preserves the existing redirect refusal', async () => {
+  response(200, Buffer.from('<h1>Pack</h1>'));
+  await expect(client().text('https://cdn.modrinth.com/page')).resolves.toBe('<h1>Pack</h1>');
+  response(200, Buffer.from('too long'));
+  await expect(client({ maxJsonBytes: 3 }).text('https://cdn.modrinth.com/page')).rejects.toThrow();
+});
+it('bounds unknown-size provider archives and seals streamed SHA256', async () => {
+  const path = await destination();
+  response(200, body);
+  expect(
+    await client().downloadModpack(
+      {
+        filename: 'pack.zip',
+        urls: artifact.urls,
+        hashes: { md5: createHash('md5').update(body).digest('hex') },
+      },
+      path,
+    ),
+  ).toEqual({ size: body.length, sha256: createHash('sha256').update(body).digest('hex') });
+});
+it('does not bypass size or digest failures in modpack downloads', async () => {
+  response(200, body);
+  await expect(
+    client({ maxDownloadBytes: 2 }).downloadModpack(
+      { filename: 'pack.zip', urls: artifact.urls, hashes: {} },
+      await destination(),
+    ),
+  ).rejects.toThrow();
+  response(200, body);
+  await expect(
+    client().downloadModpack(
+      { filename: 'pack.zip', urls: artifact.urls, hashes: { md5: 'a'.repeat(32) } },
+      await destination(),
+    ),
+  ).rejects.toThrow();
+});
 it('pins validated DNS to the HTTPS socket and streams integrity-checked bytes', async () => {
   const path = await destination();
   response(200, body);

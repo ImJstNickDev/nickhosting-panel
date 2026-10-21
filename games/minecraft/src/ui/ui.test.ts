@@ -79,10 +79,27 @@ describe('Minecraft browser module and exact API contracts', () => {
       (section) => section.id === 'modpacks',
     );
     expect(packs?.aliases).toEqual(['content']);
-    expect(packs?.forms.map((form) => form.id)).toEqual(['verify', 'replace-pack']);
+    expect(packs).toMatchObject({
+      loader: 'modpacks',
+      renderer: 'minecraft-modpacks',
+      forms: [],
+      columns: [],
+    });
     expect(
       minecraftUiModule.descriptor.sections.find((section) => section.id === 'datapacks')?.forms,
     ).toEqual([]);
+  });
+  it('loads modpacks from its durable snapshot without a content profile rediscovery', async () => {
+    const client = clientFixture();
+    const snapshot = { installed: null, operation: null };
+    client.request.mockResolvedValue(snapshot);
+    expect(await minecraftUiModule.handlers.modpacks?.(client, { serverId, values: {} })).toEqual({
+      values: {},
+      rows: [],
+      metadata: { modpacks: snapshot },
+    });
+    expect(client.request).toHaveBeenCalledOnce();
+    expect(client.request.mock.calls[0]?.[0]).toBe(`/v1/servers/${serverId}/minecraft/modpacks`);
   });
   it('loads datapacks from world-scoped inventory instead of tracked content receipts', async () => {
     const client = clientFixture();

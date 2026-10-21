@@ -1903,3 +1903,18 @@ full private Compose env-file chain after building the current app image. Migrat
 secrets, accounts and storage are preserved. The Gateway process must reload its
 compiled Paper declaration before first Paper use. Reverting code should retain
 the additive schema/catalog and any created Paper server records.
+
+## Modpack catalogs and installation (M5)
+
+The Minecraft Modpacks tab now has a provider catalog, preparation and reviewed
+installation workflow. See [M5-MODPACKS.md](M5-MODPACKS.md) for provider limits,
+preservation rules, APIs and recovery behavior. Forge/NeoForge runtime development
+is intentionally deferred; ATLauncher is browse-only pending CDN permission.
+
+Migration `050_minecraft_modpacks.sql` is additive. Activation needs the updated
+dependency image for API/worker/Vite and the explicit migrator with the current
+private Compose overlay chain. No Panel/Wings/Blueprint change is part of this
+feature. The development activation and exact rollback commands require the
+operation-specific approval described above; development source is prepared in
+an isolated checkout until that approval. Keep the database and all operation
+receipts when rolling back application code.

@@ -77,6 +77,31 @@ export function parseMinecraftProperties(source: string): Readonly<Record<string
     ),
   );
 }
+/** Internal text serializer. Callers authorize and validate the property keys/values. */
+function mergedPropertyLines(
+  parsed: PropertyLine[],
+  changes: Readonly<Record<string, string>>,
+): string {
+  const replacement = new Map(Object.entries(changes));
+  if ([...replacement].some(([key, value]) => !key || key.includes('\0') || value.includes('\0')))
+    return invalid('minecraft_properties_invalid');
+  const lines = parsed.map((line) => {
+    if (!line.key || !replacement.has(line.key)) return line.raw;
+    const value = replacement.get(line.key) ?? '';
+    replacement.delete(line.key);
+    return `${escapeProperty(line.key)}=${escapeProperty(value)}`;
+  });
+  if (lines.at(-1) === '') lines.pop();
+  for (const [key, value] of replacement)
+    lines.push(`${escapeProperty(key)}=${escapeProperty(value)}`);
+  return `${lines.join('\n')}\n`;
+}
+export function mergeMinecraftPropertiesText(
+  source: string,
+  changes: Readonly<Record<string, string>>,
+): string {
+  return mergedPropertyLines(propertyLines(source), changes);
+}
 const booleans = new Set([
   'pvp',
   'white-list',
@@ -150,16 +175,7 @@ export function editMinecraftProperties(
       minecraftPropertyEnumValue(key, value, parsed.find((line) => line.key === key)?.value),
     );
   }
-  const lines = parsed.map((line) => {
-    if (!line.key || !replacement.has(line.key)) return line.raw;
-    const value = replacement.get(line.key) ?? '';
-    replacement.delete(line.key);
-    return `${escapeProperty(line.key)}=${escapeProperty(value)}`;
-  });
-  if (lines.at(-1) === '') lines.pop();
-  for (const [key, value] of replacement)
-    lines.push(`${escapeProperty(key)}=${escapeProperty(value)}`);
-  const content = `${lines.join('\n')}\n`;
+  const content = mergedPropertyLines(parsed, Object.fromEntries(replacement));
   return {
     content,
     beforeSha256: createHash('sha256').update(source).digest('hex'),

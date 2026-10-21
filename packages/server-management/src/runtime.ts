@@ -55,6 +55,7 @@ import {
   verifyManagedIdentity,
 } from './lifecycle.js';
 import { minecraftContentAllowsOnline } from './minecraft-content-contracts.js';
+import { assertNoModpackPublication } from './minecraft-modpack-schema.js';
 import { createMinecraftModuleRuntime } from './minecraft-module.js';
 import { createMinecraftWorldPreparation } from './minecraft-world-preparation.js';
 import type { OperationTiming } from './operation-timing.js';
@@ -1222,6 +1223,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
         if (!server.pterodactyl_id || !server.pterodactyl_identifier)
           throw new DomainError('conflict');
         if (write && server.active_operation_id) throw new DomainError('conflict');
+        if (write) await assertNoModpackPublication(connection, serverId);
         if (write) await assertStorageMutationAllowed(connection, storageCleanup);
         if (write && !sharedUpload && identityMode !== 'upload-prepare')
           await assertNoPendingUpload(connection, serverId);
