@@ -103,6 +103,15 @@ Reviewed browser screenshots use isolated fixture data:
 
 ## Activation and rollback
 
+Development activation completed on 2026-10-21 after Owner approval, using
+implementation commit `3992253f7ce09d315049d143a6cb78e1aad61a1a`. Only migration
+049 was applied; existing records and earlier migration checksums were preserved.
+The one-shot migrator completed and was removed normally. Application and provider
+containers retained their IDs, images, mounts, networks and start times; no recovery
+restart was needed. Live Firefox checks passed for HTTPS, secure HMR, desktop/mobile
+Plugins, all four real catalog searches and both placeholder providers. No live
+plugin installation was performed.
+
 Development source hot reload does not apply SQL migrations. Build the migrator
 image and apply migration 049 only after approval of the concrete activation
 operation, using the complete existing Compose environment chain. No Blueprint,
