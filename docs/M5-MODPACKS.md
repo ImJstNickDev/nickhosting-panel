@@ -219,8 +219,8 @@ startup configuration is already present, and neither installation nor publicati
 was dispatched. Recovery checks current authority and the original reviewed file
 plan, then queues the same operation under the current caller. It preserves staged
 downloads, backup and prior running state; it does not repeat the startup PATCH,
-stop or backup. A possibly dispatched installer or ambiguous publication remains
-uncertain and is never replayed by this path.
+stop or backup. A possibly dispatched installer remains uncertain and is never
+replayed by this path. Publication has the separate bounded recovery below.
 
 Console and Activity project the modpack operation's actual state and phase rather
 than the synthetic reinstall job's default phase. An uncertain operation links
@@ -258,3 +258,27 @@ Reviewed uncertainty states:
 These checks use isolated providers and database schemas; they do not claim a real
 Forge installation. Source rollback must preserve the pending operation and its
 prepared files, and must not run underneath an active runtime transition.
+
+## Retained publication recovery (Blueprint 1.8.1)
+
+After a verified runtime installation, Verify and resume can continue publication
+from an exact retained archive receipt. It reuses the original manifest, ingestion
+claim and request; it does not rebuild, upload or decompress the archive again.
+Recovery is admitted only before publication rename batches/rollback have begun,
+with the original completed stop/backup/runtime journal prefix. The bridge verifies
+an already extracted or already renamed complete tree and rejects partial,
+changed, extra or symlink entries. Connection-scoped locking serializes receipt
+reconciliation; losing that connection cannot overwrite a newer result.
+
+Current authorization is checked again. A different authorized Owner can recover
+an existing retained archive claim; recovery before the first upload still requires
+the original job actor. Publication without a runtime transition remains outside
+this bounded recovery path. The earlier replacement-Owner service test did not
+establish end-to-end admission of a first upload by a different Owner.
+
+The live failure was reproduced with Guzzle 7.15.2 / Promises 2.5.1: parallel
+verification failed despite Wings having fully extracted the archive. Official
+Guzzle 7.15.3 **and** Promises 2.5.2 fixed three identical read-only reproductions;
+updating only Guzzle did not. The reviewed Composer candidate changes those two
+packages only. Panel activation requires separate approval; source preparation
+and isolated tests do not imply that the live dependencies have been updated.
