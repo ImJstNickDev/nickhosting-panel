@@ -304,13 +304,13 @@ export function planMinecraftModpack(input: {
         }
       } else if (files.has(root)) remove.push(root);
     }
-    if (selection.worldPolicy === 'reset')
-      for (const root of worldRoots) {
-        if (protectedPaths.some((path) => overlaps(root, path)))
-          blockers.push({ reason: 'protected-path', path: root });
-        else if (files.has(root)) remove.push(root);
-      }
   }
+  if (selection.worldPolicy === 'reset' && (selection.mode === 'replace' || selection.install))
+    for (const root of worldRoots) {
+      if (protectedPaths.some((path) => overlaps(root, path)))
+        blockers.push({ reason: 'protected-path', path: root });
+      else if (files.has(root)) remove.push(root);
+    }
   const removals = unique(remove).filter(
     (path, _index, values) => !values.some((parent) => parent !== path && under(path, parent)),
   );

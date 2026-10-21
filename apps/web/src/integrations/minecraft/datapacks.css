@@ -413,3 +413,47 @@
 .datapack-dependencies .dialog-close-icon:hover {
   background: var(--surface-subtle, #f1f3f5);
 }
+
+.minecraft-datapacks > [hidden] {
+  display: none;
+}
+.minecraft-datapack-store {
+  min-width: 0;
+  min-height: 480px;
+}
+.datapack-store-header {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+.datapack-store-header h3 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+.minecraft-datapack-store .world-catalog-body {
+  height: min(68vh, 820px);
+  scrollbar-gutter: stable;
+}
+.minecraft-datapack-store .world-catalog-toolbar > input {
+  min-width: 0;
+}
+.minecraft-datapack-store .catalog-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+}
+.minecraft-datapack-store .catalog-back:hover {
+  color: var(--text);
+}
+@media (max-width: 560px) {
+  .datapack-store-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+}

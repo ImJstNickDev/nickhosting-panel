@@ -588,6 +588,7 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     await check
       .poll(() => snapshot.changes.find((item) => item.name === 'Evergreen')?.metadata?.channel)
       .toBe('release');
+    await page.locator('.catalog-back').click();
     await page.getByRole('checkbox', { name: 'Select Copper Toolkit', exact: true }).check();
     await check(page.getByRole('button', { name: 'Install (2)', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Install (2)', exact: true }).click();
@@ -640,15 +641,13 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
       await check(description).toContainText('to your world.');
       await check(description.locator('br')).toHaveCount(1);
       await check(description.locator('hr')).toHaveCount(1);
-      await check(description.locator('img')).toHaveCount(0);
-      expect(imageRequests).toBe(0);
+      await check(description.locator('img')).toHaveCount(1);
+      await check(description.locator('img')).toHaveAttribute('loading', 'lazy');
       await check(description.getByRole('link', { name: 'documentation' })).toHaveAttribute(
         'rel',
         'noopener noreferrer',
       );
-      await description
-        .getByRole('button', { name: locale === 'it' ? 'Carica immagini' : 'Load images' })
-        .click();
+      await check(description.getByRole('button')).toHaveCount(0);
       await check(description.getByRole('img', { name: 'Project banner' })).toBeVisible();
       await check.poll(() => imageRequests).toBe(1);
       expect(await description.locator('img').getAttribute('referrerpolicy')).toBe('no-referrer');
@@ -774,6 +773,7 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     await check(page.getByRole('button', { name: 'Apply', exact: true })).toBeEnabled();
     await check(page.locator('.mods-review-controls')).toContainText('beta');
     await page.getByRole('button', { name: 'Back to Discover' }).click();
+    await page.locator('.catalog-back').click();
     await page.getByRole('checkbox', { name: 'Select Copper Toolkit' }).check();
     await check.poll(() => snapshot.roots.length).toBe(2);
     expect(snapshot.roots[0]?.versionId).toBe('evergreen-beta');

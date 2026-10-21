@@ -8,7 +8,10 @@ import type { createDatabase } from '@nickhosting/database';
 import { authorizeServer, type ManagementRuntime, parse } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
-import { modpackProviderSchema } from '../../../packages/content-providers/src/modpack-catalog.js';
+import {
+  modpackCategoryIdSchema,
+  modpackProviderSchema,
+} from '../../../packages/content-providers/src/modpack-catalog.js';
 import { minecraftModpackSchemaAvailable } from '../../../packages/server-management/src/minecraft-modpack-schema.js';
 import { minecraftContentProviders } from '../../../packages/server-management/src/minecraft-world-catalog.js';
 import { createMinecraftModpackBridge } from '../../../packages/server-management/src/modpack-bridge.js';
@@ -25,6 +28,7 @@ const search = z.strictObject({
   provider: modpackProviderSchema,
   query: z.string().max(200).default(''),
   offset,
+  category: modpackCategoryIdSchema.optional(),
 });
 export function registerMinecraftModpackRoutes(
   app: Hono<{ Variables: Variables }>,
@@ -121,6 +125,13 @@ export function registerMinecraftModpackRoutes(
   app.get(`${base}/catalog/search`, async (c) => {
     const query = parse(search, c.req.query());
     return c.json(await (await provider(c, query.provider)).search(query, c.req.raw.signal));
+  });
+  app.get(`${base}/catalog/categories`, async (c) => {
+    const query = parse(z.strictObject({ provider: modpackProviderSchema }), c.req.query());
+    const selected = await provider(c, query.provider);
+    return c.json(
+      selected.categories ? await selected.categories(c.req.raw.signal) : { items: [] },
+    );
   });
   app.get(`${base}/catalog/:provider/:projectId`, async (c) => {
     const name = parse(modpackProviderSchema, c.req.param('provider'));

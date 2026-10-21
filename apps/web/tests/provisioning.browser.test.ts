@@ -376,6 +376,32 @@ describe('post-create installation journey', () => {
     expect(writes).toHaveLength(1);
     expect(writes[0]?.body).toMatchObject({ action: 'reinstall', confirm: true });
   });
+  it('discovers durable modpack preparation on direct Console entry and refresh before an apply job exists', async () => {
+    advance('preparing');
+    installState = 'installed';
+    operationId = null;
+    snapshot = {
+      ...snapshot,
+      action: 'reinstall',
+      stages: [],
+      logs: [],
+      logsAvailable: false,
+      workflow: {
+        titleKey: 'games.minecraft.sections.modpacks',
+        statusKey: 'games.minecraft.modpacks.preparing',
+        phaseKey: 'games.minecraft.modpacks.downloading',
+        review: { sectionId: 'modpacks', labelKey: 'games.minecraft.modpacks.review' },
+      },
+    };
+    await page.goto(`${origin}provisioning-fixture`);
+    await check(page.locator('.provisioning-panel')).toBeVisible();
+    await check(page.locator('.provisioning-panel')).toHaveAttribute('data-state', 'active');
+    expect(reads).toContain(`/v1/servers/${id}/provisioning`);
+    await page.reload();
+    await check(page.locator('.provisioning-panel')).toBeVisible();
+    await check(page.locator('.provisioning-panel')).toHaveAttribute('data-state', 'active');
+    expect(writes).toEqual([]);
+  });
   it('shows a modpack runtime uncertainty without active animation and links to its recovery review', async () => {
     advance('installing', 'uncertain');
     installState = 'installed';

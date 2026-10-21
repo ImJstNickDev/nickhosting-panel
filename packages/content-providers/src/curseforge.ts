@@ -173,7 +173,7 @@ export class CurseForgeProvider {
   /** Read-only catalog boundary shared with the modpack adapter; the API key never leaves this class. */
   async modpackMetadata(path: string, signal?: AbortSignal): Promise<unknown> {
     if (
-      !/^\/(?:categories\?gameId=432&classesOnly=true|mods\/search\?[^#\r\n]*|mods\/[1-9][0-9]*(?:\/description|\/files(?:\/[1-9][0-9]*|\?[^#\r\n]*)?)?)$/.test(
+      !/^\/(?:categories\?gameId=432&(?:classesOnly=true|classId=[1-9][0-9]*)|mods\/search\?[^#\r\n]*|mods\/[1-9][0-9]*(?:\/description|\/files(?:\/[1-9][0-9]*|\?[^#\r\n]*)?)?)$/.test(
         path,
       )
     )

@@ -1,9 +1,11 @@
 # Minecraft Modpacks (M5)
 
 The Minecraft integration provides an installed-pack view, a searchable catalog,
-project details and a full-page preparation/review flow. Browsing is read-only.
-Preparing a selected version does not stop the server. Applying the reviewed plan
-uses the ordinary managed server boundary, stops a running process, optionally
+full-page project details and a durable one-click Install flow. Browsing and
+Check for Updates are read-only. Install records the selected version and options,
+then opens Console while the worker prepares and applies the exact plan. Blockers
+remain available in Review installation; a clean plan needs no second confirmation.
+Application uses the ordinary managed server boundary, stops a running process, optionally
 creates a confirmed backup, installs the exact required runtime and publishes the
 prepared files. A previously running server resumes through normal admission.
 Failed or interrupted effects never trigger a blind second installer invocation.
@@ -82,10 +84,14 @@ receipt. There is no recursive cleanup of unrelated server data.
 
 ## Updates and replacement
 
-- Updating the same pack changes only its receipt-owned files. Locally changed
-  configurations and world/player data are preserved by default.
-- Changing to another pack requires an explicit replacement review, including
-  exact deletion paths, backup choice and whether worlds should be preserved.
+- Check for Updates compares the installed version with the provider’s latest
+  available stable recommendation, reports no update or opens that pack with the
+  new version selected. It never prepares or applies a pack by itself.
+- Install defaults Keep worlds and Create a backup first to off. World reset is
+  an explicit part of this intent, including an update; protected runtime and
+  identity paths remain excluded. Users can enable either option before Install.
+- Existing manual prepare/apply API clients retain their explicit review behavior.
+  Locally changed configuration conflicts still require a file decision.
 - Pack `server.properties` is merged through the existing Minecraft parser using
   supported gameplay settings. Network/authentication settings, operator and
   whitelist policy, world selection and generation settings remain local.
@@ -113,7 +119,7 @@ snapshots omit filesystem staging paths, credentials and internal journals.
 
 Routes are under `/v1/servers/:id/minecraft/modpacks`:
 
-- `GET /`, `/catalog`, `/catalog/search`, `/catalog/:provider/:projectId` and
+- `GET /`, `/catalog`, `/catalog/categories?provider=…`, `/catalog/search`, `/catalog/:provider/:projectId` and
   `/catalog/:provider/:projectId/versions`.
 - `POST /prepare`, `POST /apply`.
 - `DELETE /operations/:id`, `POST /operations/:id/recover`.
@@ -349,3 +355,21 @@ publication targets, and the retained local ZIP must match the durable transfer
 binding. Existing runtime verification and operation locks remain required. Recovery
 reads the local ZIP seal, not every game file through Wings. Ambiguous or dispatched
 transfers continue to use the existing receipt-based recovery path.
+
+## Catalog interaction (October 2026)
+
+Discover shows provider categories at the left when available. Modrinth filters
+server-capable environments before pagination; CurseForge supports categoryId but
+no documented server-pack-only search parameter. No extra request per search
+result is introduced. Project details replace the results, retaining the list,
+filters and scroll position for Back. Versions use a compact picker with more
+versions loaded inside it; descriptions load sanitized HTTPS images lazily.
+Mods and Plugins share the full-page detail/Back behavior; Datapack browsing is
+inline instead of a dialog. Their existing selection/preparation queues remain.
+
+`selection.install = {backupBefore: boolean}` is an optional persisted intent on
+POST /prepare. The worker atomically records the prepared plan, exact digest and
+delete set with apply_queued only when unblocked, then reauthorizes the original
+actor before effects. Navigation/reload does not cancel it; retries retain the
+intent. Console projects preparation directly before a synthetic provider job
+exists, including blocked/failure states. No migration or new dependency is needed.

@@ -1,5 +1,6 @@
 import type { ContentTarget } from './contracts.js';
 import type {
+  ModpackCatalogCategories,
   ModpackCatalogDetails,
   ModpackCatalogPageInput,
   ModpackCatalogProjects,
@@ -54,6 +55,7 @@ export type ModpackRecipe = ModpackRecipeIdentity &
   );
 export interface ModpackCatalog {
   readonly provider: ModpackProvider;
+  categories?(signal?: AbortSignal): Promise<ModpackCatalogCategories>;
   search(input?: ModpackCatalogSearchInput, signal?: AbortSignal): Promise<ModpackCatalogProjects>;
   details(projectId: string, signal?: AbortSignal): Promise<ModpackCatalogDetails>;
   versions(

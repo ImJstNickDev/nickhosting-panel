@@ -135,6 +135,23 @@ describe('Modpack API boundaries', () => {
     expect(f.service.prepare).not.toHaveBeenCalled();
     expect(f.catalog.resolve).not.toHaveBeenCalled();
   });
+  it('serves categories through the authorized catalog and passes category filters', async () => {
+    const f = fixture();
+    const response = await f.app.request(`${base}/catalog/categories?provider=ftb`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ items: [] });
+    expect(
+      (await f.app.request(`${base}/catalog/search?provider=modrinth&category=adventure`)).status,
+    ).toBe(200);
+    expect(f.catalog.search).toHaveBeenCalledWith(
+      { provider: 'modrinth', query: '', offset: 0, category: 'adventure' },
+      expect.any(AbortSignal),
+    );
+    expect(
+      (await f.app.request(`${base}/catalog/search?provider=modrinth&category=bad%3Afacet`)).status,
+    ).toBe(400);
+    expect(f.service.prepare).not.toHaveBeenCalled();
+  });
   it('only explicit preparation/application request intents enter the durable service', async () => {
     const f = fixture();
     const input = {

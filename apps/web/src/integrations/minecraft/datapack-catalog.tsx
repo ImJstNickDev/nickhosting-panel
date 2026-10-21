@@ -7,8 +7,10 @@ import { useQuery } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { useFormat, useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
-import { Dialog, ErrorNotice } from '../../components/ui.js';
+import { ErrorNotice } from '../../components/ui.js';
 import { gameUiClient } from '../../features/integrations.js';
+import { ViewerSelect } from '../../features/viewer-engine/viewer-select.js';
+import { ModsIcon } from './mods-primitives.js';
 import './world-catalog.css';
 
 const controller = createMinecraftUiController(gameUiClient);
@@ -46,6 +48,8 @@ export function MinecraftDatapackCatalog({
   const [error, setError] = useState<unknown>();
   const searchInput = useRef<HTMLInputElement>(null);
   const results = useRef<HTMLDivElement>(null);
+  const listScroll = useRef(0);
+  const opener = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
     const timer = setTimeout(() => {
       setQuery(search.trim());
@@ -79,8 +83,14 @@ export function MinecraftDatapackCatalog({
   const changePage = project ? setFileOffset : setOffset;
   const loading = configuration.isPending || (available && result.isPending);
   useEffect(() => {
-    if (project) results.current?.focus();
-    else searchInput.current?.focus();
+    if (project) {
+      if (results.current) results.current.scrollTop = 0;
+      results.current?.focus({ preventScroll: true });
+    } else {
+      if (results.current) results.current.scrollTop = listScroll.current;
+      if (opener.current?.isConnected) opener.current.focus({ preventScroll: true });
+      else searchInput.current?.focus({ preventScroll: true });
+    }
   }, [project]);
   function prepare(file: WorldCatalogFile) {
     if (!project || disabled || !file.available) return;
@@ -88,65 +98,44 @@ export function MinecraftDatapackCatalog({
   }
 
   return (
-    <Dialog
-      open
-      title={project?.name ?? t(key('browse'))}
-      onClose={onClose}
-      closeIcon
-      className="minecraft-world-catalog minecraft-datapack-catalog"
-      initialFocusSelector="[data-catalog-focus]"
-    >
+    <section className="minecraft-datapack-store" aria-label={project?.name ?? t(key('browse'))}>
+      <header className="datapack-store-header">
+        <button
+          type="button"
+          className="catalog-back"
+          onClick={() => (project ? setProject(undefined) : onClose())}
+        >
+          <ModsIcon name="back" />
+          {t(key(project ? 'catalog.back' : 'backToInstalled'))}
+        </button>
+        {project && <h3>{project.name}</h3>}
+      </header>
       <div className="world-catalog-toolbar">
-        {project ? (
-          <Tooltip content={t(key('catalog.back'))}>
-            <button
-              type="button"
-              className="datapack-action"
-              aria-label={t(key('catalog.back'))}
-              disabled={false}
-              onClick={() => {
-                setProject(undefined);
+        {!project && (
+          <>
+            <input
+              type="search"
+              ref={searchInput}
+              aria-label={t(key('search'))}
+              placeholder={t(key('search'))}
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+            <ViewerSelect
+              label={t(key('catalog.provider'))}
+              value={provider}
+              options={[
+                { value: 'modrinth', label: 'Modrinth' },
+                { value: 'curseforge', label: 'CurseForge' },
+              ]}
+              onChange={(value) => {
+                setProvider(value as typeof provider);
+                setOffset(0);
                 setError(undefined);
               }}
-            >
-              <svg
-                viewBox="0 0 24 24"
-                width="18"
-                height="18"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.7"
-                aria-hidden="true"
-              >
-                <path d="m14 5-7 7 7 7M7 12h14" />
-              </svg>
-            </button>
-          </Tooltip>
-        ) : (
-          <input
-            type="search"
-            ref={searchInput}
-            data-catalog-focus
-            aria-label={t(key('search'))}
-            placeholder={t(key('search'))}
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
+            />
+          </>
         )}
-        <select
-          aria-label={t(key('catalog.provider'))}
-          value={provider}
-          disabled={false}
-          onChange={(event) => {
-            setProvider(event.target.value as typeof provider);
-            setProject(undefined);
-            setOffset(0);
-            setError(undefined);
-          }}
-        >
-          <option value="modrinth">Modrinth</option>
-          <option value="curseforge">CurseForge</option>
-        </select>
         {project && (
           <Tooltip content={t(key('catalog.project'))}>
             <a
@@ -262,7 +251,9 @@ export function MinecraftDatapackCatalog({
                 <button
                   type="button"
                   className="world-catalog-project"
-                  onClick={() => {
+                  onClick={(event) => {
+                    listScroll.current = results.current?.scrollTop ?? 0;
+                    opener.current = event.currentTarget;
                     setProject(item);
                     setFileOffset(0);
                   }}
@@ -314,6 +305,6 @@ export function MinecraftDatapackCatalog({
           </button>
         </nav>
       )}
-    </Dialog>
+    </section>
   );
 }

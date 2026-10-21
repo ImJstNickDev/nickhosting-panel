@@ -69,9 +69,19 @@ export function createMinecraftModpacksController(client: GameUiClient) {
         await client.request(path(serverId, '/catalog'), { signal }),
       );
     },
+    async categories(serverId: string, provider: ModpackProvider, signal?: AbortSignal) {
+      return z
+        .object({ items: z.array(z.object({ id: z.string(), name: z.string() })) })
+        .parse(
+          await client.request(
+            path(serverId, `/catalog/categories?provider=${modpackProviderSchema.parse(provider)}`),
+            { signal },
+          ),
+        );
+    },
     async search(
       serverId: string,
-      input: { provider: ModpackProvider; query: string; offset: number },
+      input: { provider: ModpackProvider; query: string; offset: number; category?: string },
       signal?: AbortSignal,
     ) {
       const params = new URLSearchParams({
@@ -79,6 +89,7 @@ export function createMinecraftModpacksController(client: GameUiClient) {
         query: z.string().max(200).parse(input.query),
         offset: String(offsetSchema.parse(input.offset)),
       });
+      if (input.category) params.set('category', identity.parse(input.category));
       return modpackCatalogProjectsSchema.parse(
         await client.request(path(serverId, `/catalog/search?${params}`), { signal }),
       );
@@ -108,6 +119,9 @@ export function createMinecraftModpacksController(client: GameUiClient) {
       );
     },
     prepare,
+    install(serverId: string, input: MinecraftModpackSelection) {
+      return prepare(serverId, { ...input, install: input.install ?? { backupBefore: false } });
+    },
     retry(serverId: string, operation: MinecraftModpackOperation, idempotencyKey: string) {
       if (operation.state !== 'failed' || idempotencyKey === operation.selection.idempotencyKey)
         throw new TypeError('A failed preparation retry requires a new intent');

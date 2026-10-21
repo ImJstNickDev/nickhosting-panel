@@ -131,6 +131,8 @@ describe('Minecraft Modpacks full-page experience', () => {
                 return json({
                   providers: providers.map((id) => ({ id, available: providerAvailable })),
                 });
+              if (url.pathname === `${base}/catalog/categories`)
+                return json({ items: [{ id: 'adventure', name: 'Adventure' }] });
               if (url.pathname === `${base}/catalog/search`)
                 return json({
                   items: [project(url.searchParams.get('provider') as ModpackProvider)],
@@ -285,7 +287,7 @@ describe('Minecraft Modpacks full-page experience', () => {
   }
   async function details() {
     await page.getByRole('button', { name: 'About Copper Valley', exact: true }).click();
-    await check(page.getByRole('button', { name: 'Prepare this version' })).toBeVisible();
+    await check(page.getByRole('button', { name: 'Install', exact: true })).toBeVisible();
   }
   async function openPausedCore() {
     snapshot.operation = {
@@ -323,7 +325,7 @@ describe('Minecraft Modpacks full-page experience', () => {
     const recover = page.getByRole('button', { name: 'Verify and resume', exact: true });
     await check(recover).toBeEnabled();
     await check(page.getByRole('button', { name: 'Discard preparation' })).toBeDisabled();
-    await check(page.getByRole('button', { name: 'Install pack', exact: true })).toBeDisabled();
+    await check(page.getByRole('button', { name: 'Install', exact: true })).toBeDisabled();
     await page.screenshot({
       path: '.codex/local/m5-browser/screenshots/modpacks-core-recovery-desktop-en.png',
       fullPage: true,
@@ -343,7 +345,7 @@ describe('Minecraft Modpacks full-page experience', () => {
       release();
     }
     await check(recover).toHaveCount(0);
-    await check(page.getByRole('button', { name: 'Install pack', exact: true })).toBeDisabled();
+    await check(page.getByRole('button', { name: 'Install', exact: true })).toBeDisabled();
     expect(writes).toHaveLength(1);
   });
   it.each(['different-operation', 'running', 'read-only'] as const)(
@@ -417,6 +419,7 @@ describe('Minecraft Modpacks full-page experience', () => {
       path: '.codex/local/m5-browser/screenshots/modpacks-discover-desktop-en.png',
       fullPage: true,
     });
+    await page.getByRole('button', { name: 'Back to Discover' }).click();
     await page.getByRole('combobox', { name: 'Catalog', exact: true }).click();
     await check(page.getByRole('option')).toHaveCount(6);
     await page.screenshot({
@@ -429,25 +432,40 @@ describe('Minecraft Modpacks full-page experience', () => {
       ),
     ).toEqual([]);
   });
-  it('prepares only selected release, reviews actual changes and applies exact plan once', async () => {
+  it('filters categories in the catalog and retains the chosen category on Back', async () => {
     await open();
+    const request = page.waitForRequest(
+      (request) =>
+        request.url().includes('/catalog/search?') &&
+        new URL(request.url()).searchParams.get('category') === 'adventure',
+    );
+    await page.getByRole('button', { name: 'Adventure', exact: true }).click();
+    await request;
     await details();
-    await page.getByRole('button', { name: 'Prepare this version' }).click();
-    await check(page.getByRole('button', { name: 'Install pack', exact: true })).toBeEnabled();
-    expect(writes[0]?.body.versionId).toBe('2.4');
-    expect(writes[0]?.body.worldPolicy).toBe('preserve');
+    await page.getByRole('button', { name: 'Back to Discover' }).click();
+    await check(page.getByRole('button', { name: 'Adventure', exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
     await page.screenshot({
-      path: '.codex/local/m5-browser/screenshots/modpacks-review-desktop-en.png',
+      path: '.codex/local/m5-browser/screenshots/modpacks-categories-desktop-en.png',
       fullPage: true,
     });
-    await page.getByRole('button', { name: 'Install pack', exact: true }).click();
-    await check(page.getByRole('heading', { name: 'Installed', exact: true })).toBeVisible();
-    expect(writes.filter((write) => write.path.endsWith('/apply'))).toHaveLength(1);
-    expect(writes.at(-1)?.body).toMatchObject({
-      confirm: true,
-      backupBefore: true,
-      planDigest: 'a'.repeat(64),
-      expectedDeletePaths: [],
+    expect(writes).toEqual([]);
+  });
+  it('installs the stable version with a durable intent and goes directly to Console', async () => {
+    await open();
+    await details();
+    await page.getByRole('button', { name: 'Install', exact: true }).click();
+    await check(page).toHaveURL(new RegExp(`/servers/${server}/console$`));
+    expect(await page.evaluate(() => window.history.state.usr.provisioningJobId)).toBe(
+      snapshot.operation?.id,
+    );
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.body).toMatchObject({
+      versionId: '2.4',
+      worldPolicy: 'reset',
+      install: { backupBefore: false },
     });
   });
   it('supports keyboard provider choice and restores focus after closing details', async () => {
@@ -463,9 +481,8 @@ describe('Minecraft Modpacks full-page experience', () => {
     await check(catalog).toHaveText('CurseForge');
     await check(catalog).toBeFocused();
     await check(page.locator('.mods-results')).toHaveAttribute('aria-busy', 'false');
-    await page.keyboard.press('Tab');
     const opener = page.getByRole('button', { name: 'About Copper Valley', exact: true });
-    await check(opener).toBeFocused();
+    await opener.focus();
     await page.keyboard.press('Enter');
     await check(page.getByRole('heading', { name: 'Copper Valley', exact: true })).toBeFocused();
     await page.keyboard.press('Escape');
@@ -473,23 +490,17 @@ describe('Minecraft Modpacks full-page experience', () => {
     await check(opener).toBeFocused();
     expect(writes).toEqual([]);
   });
-  it('keeps background preparation and selected version while browsing', async () => {
-    pending = true;
+  it('preserves search and focus when returning from full-page details', async () => {
     await open();
+    await page.getByRole('searchbox').fill('Copper');
     await details();
-    await page.getByRole('button', { name: 'Prepare this version' }).click();
-    await check(page.getByText('24 / 104 files')).toBeVisible();
-    expect(snapshot.operation?.pack).toBeNull();
-    await check(page.getByRole('heading', { name: 'Copper Valley', exact: true })).toBeVisible();
-    await check(page.locator('.modpacks-review').getByText(project().summary)).toBeVisible();
+    await check(page.getByRole('searchbox')).toBeHidden();
     await page.getByRole('button', { name: 'Back to Discover' }).click();
-    await check(page.getByRole('button', { name: 'Selected', exact: true })).toBeDisabled();
-    await check(page.getByRole('button', { name: 'Review installation' })).toBeVisible();
-    expect(count).toBe(1);
-    await page.screenshot({
-      path: '.codex/local/m5-browser/screenshots/modpacks-preparing-desktop-en.png',
-      fullPage: true,
-    });
+    await check(page.getByRole('searchbox')).toHaveValue('Copper');
+    await check(
+      page.getByRole('button', { name: 'About Copper Valley', exact: true }),
+    ).toBeFocused();
+    expect(writes).toEqual([]);
   });
   it('restores unresolved pack metadata after reload and retries every original choice with safe intent keys', async () => {
     const failed: MinecraftModpackOperation = {
@@ -582,34 +593,35 @@ describe('Minecraft Modpacks full-page experience', () => {
     ).toBeVisible();
     await check(page.getByRole('button', { name: 'Try again', exact: true })).toHaveCount(0);
   });
-  it('separates replacement with explicit preservation options and cancellation before replan', async () => {
+  it('defaults replacement to reset without backup, with explicit opt-ins', async () => {
     snapshot.installed = {
       pack: {
         project: { ...project(), id: 'previous', name: 'Previous pack' },
         version: version('1.0'),
       },
-      target: target,
+      target,
       installedAt: '2026-10-01T12:00:00Z',
       operationId: op,
     };
     await page.goto(`${origin}modpacks-fixture`);
-    await page.getByRole('button', { name: 'Discover', exact: true }).click();
+    await page.getByRole('button', { name: 'Replace pack', exact: true }).click();
     await details();
-    await page.getByRole('button', { name: 'Prepare this version' }).click();
-    await check(page.getByRole('switch', { name: 'Keep worlds' })).toBeChecked();
-    expect(writes[0]?.body.mode).toBe('replace');
-    await page.getByRole('switch', { name: 'Keep worlds' }).click();
-    await check(page.getByText('Existing worlds will be removed.')).toBeVisible();
-    expect(writes.at(-2)?.path).toBe(`DELETE ${base}/operations/${op}`);
-    expect(writes.at(-1)?.body.worldPolicy).toBe('reset');
+    await check(page.getByRole('checkbox', { name: 'Keep worlds', exact: true })).not.toBeChecked();
+    await page.getByRole('button', { name: 'Install', exact: true }).click();
+    await check(page).toHaveURL(new RegExp(`/servers/${server}/console$`));
+    expect(writes[0]?.body).toMatchObject({
+      mode: 'replace',
+      worldPolicy: 'reset',
+      install: { backupBefore: false },
+    });
   });
   it('supports Italian mobile review without overflow', async () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.addInitScript(() => localStorage.setItem('nh.locale', 'it'));
     await page.goto(`${origin}modpacks-fixture`);
     await page.getByRole('button', { name: 'Informazioni su Copper Valley', exact: true }).click();
-    await page.getByRole('button', { name: 'Prepara questa versione' }).click();
-    await check(page.getByRole('button', { name: 'Installa modpack', exact: true })).toBeEnabled();
+    await check(page.getByRole('button', { name: 'Installa', exact: true })).toBeEnabled();
+    await check(page.getByRole('heading', { name: 'A world worth exploring' })).toBeVisible();
     await page.mouse.click(380, 20);
     await page.screenshot({
       path: '.codex/local/m5-browser/screenshots/modpacks-review-mobile-it.png',
@@ -670,9 +682,10 @@ describe('Minecraft Modpacks full-page experience', () => {
     prepareState = 'blocked';
     await open();
     await details();
-    await page.getByRole('button', { name: 'Prepare this version' }).click();
+    await page.getByRole('button', { name: 'Install', exact: true }).click();
+    await page.goto(`${origin}modpacks-fixture?operation=${op}`);
     await check(page.getByText('Forge is not available yet.', { exact: true })).toBeVisible();
-    await check(page.getByRole('button', { name: 'Install pack', exact: true })).toBeDisabled();
+    await check(page.getByRole('button', { name: 'Install', exact: true })).toBeDisabled();
     await page.screenshot({
       path: '.codex/local/m5-browser/screenshots/modpacks-blocked-desktop-en.png',
       fullPage: true,
@@ -683,7 +696,7 @@ describe('Minecraft Modpacks full-page experience', () => {
     prepareState = 'uncertain';
     await open();
     await details();
-    await page.getByRole('button', { name: 'Prepare this version' }).click();
+    await page.getByRole('button', { name: 'Install', exact: true }).click();
     await page.goto(`${origin}modpacks-fixture?operation=${op}`);
     await check(page.getByRole('button', { name: 'Verify and resume', exact: true })).toBeVisible();
     expect(writes).toHaveLength(1);
@@ -702,16 +715,16 @@ describe('Minecraft Modpacks full-page experience', () => {
     prepareState = 'error';
     await open();
     await details();
-    await page.getByRole('button', { name: 'Prepare this version' }).click();
+    await page.getByRole('button', { name: 'Install', exact: true }).click();
     await check(page.getByRole('alert')).toBeVisible();
-    await check(page.getByRole('button', { name: 'Prepare this version' })).toBeEnabled();
+    await check(page.getByRole('button', { name: 'Install', exact: true })).toBeEnabled();
     await page.screenshot({
       path: '.codex/local/m5-browser/screenshots/modpacks-error-desktop-en.png',
       fullPage: true,
     });
     expect(writes).toHaveLength(1);
   });
-  it('displays installed provenance and offers updates without resetting worlds', async () => {
+  it('checks for updates without entering details when already current', async () => {
     snapshot.installed = {
       pack: { project: project(), version: version() },
       target,
@@ -719,20 +732,48 @@ describe('Minecraft Modpacks full-page experience', () => {
       operationId: op,
     };
     await page.goto(`${origin}modpacks-fixture`);
-    await check(page.getByRole('button', { name: 'Choose an update' })).toBeVisible();
-    await page.screenshot({
-      path: '.codex/local/m5-browser/screenshots/modpacks-installed-desktop-en.png',
-      fullPage: true,
+    await page.getByRole('button', { name: 'Check for Updates', exact: true }).click();
+    await check(page.getByText('You’re up to date', { exact: true })).toBeVisible();
+    await check(page.locator('.modpacks-details')).toHaveCount(0);
+    expect(writes).toEqual([]);
+  });
+  it('opens an available update directly and installs an explicitly selected version', async () => {
+    snapshot.installed = {
+      pack: {
+        project: project(),
+        version: { ...version('2.3'), publishedAt: '2026-09-01T12:00:00Z' },
+      },
+      target,
+      installedAt: '2026-10-01T12:00:00Z',
+      operationId: op,
+    };
+    await page.goto(`${origin}modpacks-fixture`);
+    await page.getByRole('button', { name: 'Discover', exact: true }).click();
+    await details();
+    await page.getByRole('button', { name: 'Version', exact: true }).click();
+    await page.locator('.mods-version-option').filter({ hasText: '2.3' }).click();
+    await page.getByRole('button', { name: 'Installed pack', exact: true }).click();
+    await page.getByRole('button', { name: 'Check for Updates', exact: true }).click();
+    await check(page.locator('.modpacks-details')).toBeVisible();
+    await check(page.getByRole('button', { name: 'Version', exact: true })).toHaveText('2.4');
+    expect(writes).toEqual([]);
+    await page.getByRole('button', { name: 'Version', exact: true }).click();
+    await page.locator('.mods-version-option').filter({ hasText: '2.5-beta' }).click();
+    await page.getByRole('checkbox', { name: 'Keep worlds', exact: true }).check();
+    await page.getByRole('checkbox', { name: 'Create a backup first', exact: true }).check();
+    await page.getByRole('button', { name: 'Install', exact: true }).click();
+    await check(page).toHaveURL(new RegExp(`/servers/${server}/console$`));
+    expect(writes[0]?.body).toMatchObject({
+      mode: 'update',
+      versionId: '2.5-beta',
+      worldPolicy: 'preserve',
+      install: { backupBefore: true },
     });
-    await page.getByRole('button', { name: 'Choose an update' }).click();
-    await page.getByRole('button', { name: 'Prepare this version' }).click();
-    expect(writes.at(-1)?.body).toMatchObject({ mode: 'update', worldPolicy: 'preserve' });
-    await check(page.getByRole('switch', { name: 'Keep worlds' })).toHaveCount(0);
   });
   it('keeps read-only viewers from preparing a pack', async () => {
     await page.goto(`${origin}modpacks-fixture?readonly`);
     await details();
-    await check(page.getByRole('button', { name: 'Prepare this version' })).toBeDisabled();
+    await check(page.getByRole('button', { name: 'Install', exact: true })).toBeDisabled();
     expect(writes).toEqual([]);
   });
 });

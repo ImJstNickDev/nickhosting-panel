@@ -119,7 +119,7 @@ export function ModpackReview(props: {
   const t = useT();
   const format = useFormat();
   const operation = props.operation;
-  const [backup, setBackup] = useState(true);
+  const [backup, setBackup] = useState(false);
   const [blockerPage, setBlockerPage] = useState(0);
   const [deletePage, setDeletePage] = useState(0);
   const blockerOffset =

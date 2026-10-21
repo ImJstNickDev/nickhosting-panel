@@ -1,6 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { useLocation } from 'react-router';
 import { ApiError, api, apiError, consumeEvents, queryClient } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
@@ -149,16 +148,14 @@ function useResourceStaleness(updatedAt: number) {
 export function ConsolePage({ serverId }: { serverId: string }) {
   const t = useT();
   const server = useServer(serverId);
-  const location = useLocation();
   const expectedSetup = ['pending', 'installing', 'failed'].includes(
     server.data?.installationState ?? '',
   );
   const provisioning = useProvisioning(
     serverId,
-    Boolean(
-      server.data &&
-        (expectedSetup || server.data.activeOperationId || location.state?.provisioningJobId),
-    ),
+    // Pack preparation has no provider job yet; read its durable progress on
+    // entry too, so direct navigation and reload do not hide an Install intent.
+    Boolean(server.data),
     server.data?.activeOperationId,
   );
   const setup =

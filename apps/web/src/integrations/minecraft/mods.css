@@ -1234,3 +1234,43 @@
 .addons-coming-soon .mods-empty {
   min-height: 0;
 }
+
+/* Catalog details replace the list without unmounting its search/scroll state. */
+.mods-discover-page .mods-catalog-layout[data-details] {
+  grid-template-columns: minmax(0, 1fr);
+}
+.mods-discover-page .mods-details {
+  position: static;
+  max-height: none;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+}
+.mods-discover-page [hidden] {
+  display: none;
+}
+.catalog-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 8px 0;
+  margin-bottom: 18px;
+  font: inherit;
+  cursor: pointer;
+}
+.catalog-back:hover {
+  color: var(--text);
+}
+.mods-discover-page .mods-details .catalog-back > svg {
+  width: 18px;
+  height: 18px;
+}
+.mods-discover-page .mods-description {
+  max-width: 100%;
+}

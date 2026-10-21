@@ -1,7 +1,7 @@
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
 import type { PrivateTransferCache } from '@nickhosting/pterodactyl-adapter';
-import type { Kysely } from 'kysely';
+import { type Kysely, sql } from 'kysely';
 import {
   loadModpackProvisioning,
   type ModpackProvisioning,
@@ -184,6 +184,36 @@ export async function getServerProvisioning(
     .orderBy('job.created_at', 'desc')
     .limit(1)
     .executeTakeFirst();
+  // One-click installation starts before a provider job exists. Keep that durable
+  // preparation visible in Console, including blockers, without inventing a job.
+  const preparation = await db
+    .selectFrom('minecraft_modpack_operations')
+    .select(['id', 'server_id', 'state', 'phase', 'error', 'created_at', 'updated_at'])
+    .where('server_id', '=', serverId)
+    .where(sql<boolean>`selection->'install' is not null`)
+    .where('state', 'not in', ['cancelled', 'applied'])
+    .orderBy('created_at', 'desc')
+    .limit(1)
+    .executeTakeFirst();
+  if (
+    preparation &&
+    (!row || preparation.created_at > row.created_at) &&
+    preparation.id !== row?.job_id
+  ) {
+    const presentation = modpackProvisioningPresentation(preparation);
+    return {
+      ...presentation,
+      jobId: preparation.id,
+      action: 'reinstall' as const,
+      startedAt: preparation.created_at.toISOString(),
+      updatedAt: preparation.updated_at.toISOString(),
+      completedAt: presentation.state === 'failed' ? preparation.updated_at.toISOString() : null,
+      stages: [],
+      logs: [],
+      logsAvailable: false,
+      canReinstall: false,
+    };
+  }
   if (!row) return null;
   if (
     row.state === 'succeeded' &&

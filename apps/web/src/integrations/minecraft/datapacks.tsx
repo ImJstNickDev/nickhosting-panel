@@ -450,364 +450,391 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
     );
   return (
     <section className="minecraft-datapacks" aria-label={t('games.minecraft.sections.datapacks')}>
-      <div className="datapack-toolbar">
-        <label className="datapack-world">
-          <span>{t(key('world'))}</span>
-          <select
-            value={world}
-            aria-label={t(key('world'))}
-            disabled={Boolean(busy || progress || preparing)}
-            onChange={(event) => {
-              setWorld(event.target.value);
-              setPage(0);
-              setInspected(undefined);
-              setError(undefined);
-            }}
+      <div hidden={catalog}>
+        <div className="datapack-toolbar">
+          <label className="datapack-world">
+            <span>{t(key('world'))}</span>
+            <select
+              value={world}
+              aria-label={t(key('world'))}
+              disabled={Boolean(busy || progress || preparing)}
+              onChange={(event) => {
+                setWorld(event.target.value);
+                setPage(0);
+                setInspected(undefined);
+                setError(undefined);
+              }}
+            >
+              {(data?.worlds ?? initial?.worlds ?? []).map((item) => (
+                <option key={item.name} value={item.name}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="datapack-search">
+            <DatapackIcon name="search" />
+            <input
+              type="search"
+              value={search}
+              placeholder={t(key('search'))}
+              aria-label={t(key('search'))}
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setPage(0);
+              }}
+            />
+          </div>
+          <div className="datapack-tools">
+            {action('browse', 'search', () => setCatalog(true))}
+            {action(
+              'upload',
+              'upload',
+              () => {
+                replacement.current = undefined;
+                picker.current?.click();
+              },
+              disabled || nativePending || Boolean(progress) || preparing,
+            )}
+            {action(
+              'folder',
+              'folder',
+              () => folderPicker.current?.click(),
+              disabled || nativePending || Boolean(progress) || preparing,
+            )}
+            {action(
+              'refresh',
+              'refresh',
+              () => void refresh(),
+              inventory.isFetching || Boolean(busy),
+            )}
+          </div>
+        </div>
+        <input
+          hidden
+          type="file"
+          accept=".zip,application/zip"
+          ref={picker}
+          onChange={(event) => void upload(event.target.files)}
+        />
+        <input
+          hidden
+          type="file"
+          multiple
+          {...{ webkitdirectory: '' }}
+          ref={folderPicker}
+          onChange={(event) => void upload(event.target.files, true)}
+        />
+        {error || inventory.error ? <ErrorNotice error={error ?? inventory.error} /> : null}
+        {!props.canManage && <p className="datapack-note">{t(key('readonly'))}</p>}
+        {inventory.isPending ? (
+          <div
+            className="datapack-skeleton"
+            role="status"
+            aria-busy="true"
+            aria-label={t(key('loading'))}
           >
-            {(data?.worlds ?? initial?.worlds ?? []).map((item) => (
-              <option key={item.name} value={item.name}>
-                {item.name}
-              </option>
+            {[0, 1, 2].map((item) => (
+              <span key={item} />
             ))}
-          </select>
-        </label>
-        <div className="datapack-search">
-          <DatapackIcon name="search" />
-          <input
-            type="search"
-            value={search}
-            placeholder={t(key('search'))}
-            aria-label={t(key('search'))}
-            onChange={(event) => {
-              setSearch(event.target.value);
-              setPage(0);
-            }}
-          />
-        </div>
-        <div className="datapack-tools">
-          {action('browse', 'search', () => setCatalog(true))}
-          {action(
-            'upload',
-            'upload',
-            () => {
-              replacement.current = undefined;
-              picker.current?.click();
-            },
-            disabled || nativePending || Boolean(progress) || preparing,
-          )}
-          {action(
-            'folder',
-            'folder',
-            () => folderPicker.current?.click(),
-            disabled || nativePending || Boolean(progress) || preparing,
-          )}
-          {action(
-            'refresh',
-            'refresh',
-            () => void refresh(),
-            inventory.isFetching || Boolean(busy),
-          )}
-        </div>
-      </div>
-      <input
-        hidden
-        type="file"
-        accept=".zip,application/zip"
-        ref={picker}
-        onChange={(event) => void upload(event.target.files)}
-      />
-      <input
-        hidden
-        type="file"
-        multiple
-        {...{ webkitdirectory: '' }}
-        ref={folderPicker}
-        onChange={(event) => void upload(event.target.files, true)}
-      />
-      {error || inventory.error ? <ErrorNotice error={error ?? inventory.error} /> : null}
-      {!props.canManage && <p className="datapack-note">{t(key('readonly'))}</p>}
-      {inventory.isPending ? (
-        <div
-          className="datapack-skeleton"
-          role="status"
-          aria-busy="true"
-          aria-label={t(key('loading'))}
-        >
-          {[0, 1, 2].map((item) => (
-            <span key={item} />
-          ))}
-        </div>
-      ) : data && !data.supported ? (
-        <p className="datapack-empty">{t(key('unsupported'))}</p>
-      ) : !data?.worlds.length ? null : (
-        <>
-          {data.world !== data.selectedWorld && (
-            <p className="datapack-note">{t(key('inactive'))}</p>
-          )}
-          {progress && (
-            <div className="datapack-upload" role="status">
-              <span>
-                <strong>{progress.name}</strong>
-                <small>{t(key(progress.phase))}</small>
-              </span>
-              {progress.phase === 'uploading' && progress.total ? (
-                <progress
-                  aria-label={t(key('uploading'))}
-                  value={progress.sent}
-                  max={progress.total}
-                />
-              ) : null}
-              {progress.phase !== 'staging' && (
-                <Tooltip content={t(key('cancelUpload'))}>
-                  <button
-                    type="button"
-                    className="datapack-action"
-                    aria-label={t(key('cancelUpload'))}
-                    onClick={() => transfer.current?.abort()}
-                  >
-                    <DatapackIcon name="close" />
-                  </button>
-                </Tooltip>
-              )}
-            </div>
-          )}
-          {preparations.some(
-            (item) =>
-              item.world === world && (item.state !== 'ready' || item.plan?.optional.length),
-          ) && (
-            <section className="datapack-changes" aria-label={t(key('preparations'))}>
-              {preparations
-                .filter(
-                  (item) =>
-                    item.world === world && (item.state !== 'ready' || item.plan?.optional.length),
-                )
-                .map((item) => (
-                  <div className="datapack-change" key={item.identity}>
-                    <span>
-                      <strong>{item.file.name}</strong>
-                      <small>{t(key(item.state))}</small>
-                      {item.state === 'failed' && item.error !== undefined && (
-                        <small>{t(contentPreparationErrorKey(item.error))}</small>
-                      )}
-                      {item.plan?.blockers.map((blocker) => (
-                        <small key={`${blocker.projectId}:${blocker.reason}`}>
-                          {blocker.name}: {t(key(`dependencies.blocker.${blocker.reason}`))}
-                        </small>
-                      ))}
-                    </span>
-                    {item.plan && (
-                      <Tooltip content={t(key('dependencies.details'))}>
-                        <button
-                          type="button"
-                          className="datapack-action"
-                          aria-label={t(key('actionFor'), {
-                            action: t(key('dependencies.details')),
-                            name: item.file.name,
-                          })}
-                          disabled={['queued', 'preparing'].includes(item.state)}
-                          onClick={() => {
-                            setCatalog(false);
-                            setDependencyDetails(item.identity);
-                          }}
-                        >
-                          <DatapackIcon name="inspect" />
-                        </button>
-                      </Tooltip>
-                    )}
-                    {item.state === 'failed' && (
-                      <Tooltip content={t(key('dependencies.retry'))}>
-                        <button
-                          type="button"
-                          className="datapack-action"
-                          aria-label={t(key('dependencies.retry'))}
-                          onClick={() =>
-                            revisePreparation(
-                              item.identity,
-                              item.optionalProjectIds ?? [],
-                              item.disablePaths ?? [],
-                            )
-                          }
-                        >
-                          <DatapackIcon name="refresh" />
-                        </button>
-                      </Tooltip>
-                    )}
-                    {item.state !== 'preparing' && (
-                      <Tooltip
-                        content={t(
-                          key(
-                            item.state === 'ready' || item.state === 'failed'
-                              ? 'dependencies.hide'
-                              : 'dependencies.removeQueue',
-                          ),
-                        )}
-                      >
-                        <button
-                          className="datapack-action"
-                          type="button"
-                          aria-label={t(key('actionFor'), {
-                            action: t(
-                              key(
-                                item.state === 'ready' || item.state === 'failed'
-                                  ? 'dependencies.hide'
-                                  : 'dependencies.removeQueue',
-                              ),
-                            ),
-                            name: item.file.name,
-                          })}
-                          onClick={() => {
-                            preparationQueue.current = preparationQueue.current.filter(
-                              (candidate) =>
-                                candidate.identity !== item.identity ||
-                                candidate.world !== item.world,
-                            );
-                            publishPreparations();
-                          }}
-                        >
-                          <DatapackIcon name="close" />
-                        </button>
-                      </Tooltip>
-                    )}
-                  </div>
-                ))}
-            </section>
-          )}
-          {changes.length > 0 && (
-            <section className="datapack-changes" aria-label={t(key('changes'))}>
-              {changes.map((change) => (
-                <div key={change.id} className="datapack-change">
-                  <span>
-                    <strong>{change.name}</strong>
-                    <small>
-                      {t(key(`action.${change.action}`))} · {t(key(change.state))}
-                    </small>
-                    {change.state === 'failed' && change.error && (
-                      <small>{t(contentPreparationErrorKey(change.error))}</small>
-                    )}
-                  </span>
-                  <Tooltip content={t(key('discard'))}>
+          </div>
+        ) : data && !data.supported ? (
+          <p className="datapack-empty">{t(key('unsupported'))}</p>
+        ) : !data?.worlds.length ? null : (
+          <>
+            {data.world !== data.selectedWorld && (
+              <p className="datapack-note">{t(key('inactive'))}</p>
+            )}
+            {progress && (
+              <div className="datapack-upload" role="status">
+                <span>
+                  <strong>{progress.name}</strong>
+                  <small>{t(key(progress.phase))}</small>
+                </span>
+                {progress.phase === 'uploading' && progress.total ? (
+                  <progress
+                    aria-label={t(key('uploading'))}
+                    value={progress.sent}
+                    max={progress.total}
+                  />
+                ) : null}
+                {progress.phase !== 'staging' && (
+                  <Tooltip content={t(key('cancelUpload'))}>
                     <button
                       type="button"
                       className="datapack-action"
-                      aria-label={t(key('actionFor'), {
-                        action: t(key('discard')),
-                        name: change.name,
-                      })}
-                      disabled={
-                        disabled ||
-                        !(change.cancellable ?? ['ready', 'failed'].includes(change.state))
-                      }
-                      onClick={() =>
-                        void mutate(`cancel:${change.id}`, () =>
-                          controller.cancelDatapackChange(props.serverId, change.id),
-                        )
-                      }
+                      aria-label={t(key('cancelUpload'))}
+                      onClick={() => transfer.current?.abort()}
                     >
                       <DatapackIcon name="close" />
                     </button>
                   </Tooltip>
-                </div>
-              ))}
-            </section>
-          )}
-          {rows.length ? (
-            <ul className="datapack-list">
-              {rows.map((pack) => {
-                const changed = changes.some((change) => change.name === pack.name);
-                const metadata =
-                  inspected === pack.path && inspection.data
-                    ? inspection.data.metadata
-                    : pack.metadata;
-                const compatibility = metadata?.compatibility ?? pack.compatibility;
-                const nativeEnable = pack.state === 'enabled' && pack.nativeState === 'disabled';
-                const enable = pack.state === 'disabled' || nativeEnable;
-                const nativeBlocked =
-                  nativeEnable &&
-                  (changes.length > 0 || !data.running || world !== data.selectedWorld);
-                return (
-                  <li key={pack.id} className="datapack-row">
-                    <span className="datapack-icon">
-                      <DatapackIcon name="pack" />
-                    </span>
-                    <div className="datapack-identity">
-                      <strong>{pack.name}</strong>
-                      {metadata?.description && <p>{metadata.description}</p>}
-                      <div className="datapack-details">
-                        <span>
-                          {t(
+                )}
+              </div>
+            )}
+            {preparations.some(
+              (item) =>
+                item.world === world && (item.state !== 'ready' || item.plan?.optional.length),
+            ) && (
+              <section className="datapack-changes" aria-label={t(key('preparations'))}>
+                {preparations
+                  .filter(
+                    (item) =>
+                      item.world === world &&
+                      (item.state !== 'ready' || item.plan?.optional.length),
+                  )
+                  .map((item) => (
+                    <div className="datapack-change" key={item.identity}>
+                      <span>
+                        <strong>{item.file.name}</strong>
+                        <small>{t(key(item.state))}</small>
+                        {item.state === 'failed' && item.error !== undefined && (
+                          <small>{t(contentPreparationErrorKey(item.error))}</small>
+                        )}
+                        {item.plan?.blockers.map((blocker) => (
+                          <small key={`${blocker.projectId}:${blocker.reason}`}>
+                            {blocker.name}: {t(key(`dependencies.blocker.${blocker.reason}`))}
+                          </small>
+                        ))}
+                      </span>
+                      {item.plan && (
+                        <Tooltip content={t(key('dependencies.details'))}>
+                          <button
+                            type="button"
+                            className="datapack-action"
+                            aria-label={t(key('actionFor'), {
+                              action: t(key('dependencies.details')),
+                              name: item.file.name,
+                            })}
+                            disabled={['queued', 'preparing'].includes(item.state)}
+                            onClick={() => {
+                              setCatalog(false);
+                              setDependencyDetails(item.identity);
+                            }}
+                          >
+                            <DatapackIcon name="inspect" />
+                          </button>
+                        </Tooltip>
+                      )}
+                      {item.state === 'failed' && (
+                        <Tooltip content={t(key('dependencies.retry'))}>
+                          <button
+                            type="button"
+                            className="datapack-action"
+                            aria-label={t(key('dependencies.retry'))}
+                            onClick={() =>
+                              revisePreparation(
+                                item.identity,
+                                item.optionalProjectIds ?? [],
+                                item.disablePaths ?? [],
+                              )
+                            }
+                          >
+                            <DatapackIcon name="refresh" />
+                          </button>
+                        </Tooltip>
+                      )}
+                      {item.state !== 'preparing' && (
+                        <Tooltip
+                          content={t(
                             key(
-                              pack.nativeState === 'disabled' && pack.state === 'enabled'
-                                ? 'nativeDisabled'
-                                : pack.state,
+                              item.state === 'ready' || item.state === 'failed'
+                                ? 'dependencies.hide'
+                                : 'dependencies.removeQueue',
                             ),
                           )}
-                        </span>
-                        <span className={`datapack-compatibility--${compatibility}`}>
-                          {t(key(`compatibility.${compatibility}`))}
-                        </span>
-                      </div>
-                    </div>
-                    <div className="datapack-row-actions">
-                      <Tooltip content={t(key('inspect'))}>
-                        <button
-                          type="button"
-                          className="datapack-action"
-                          aria-expanded={inspected === pack.path}
-                          aria-label={t(key('actionFor'), {
-                            action: t(key('inspect')),
-                            name: pack.name,
-                          })}
-                          onClick={() =>
-                            setInspected((current) =>
-                              current === pack.path ? undefined : pack.path,
-                            )
-                          }
                         >
-                          <DatapackIcon name="inspect" />
-                        </button>
-                      </Tooltip>
-                      {pack.state !== 'pending' && (
-                        <>
-                          <Tooltip
-                            content={t(
+                          <button
+                            className="datapack-action"
+                            type="button"
+                            aria-label={t(key('actionFor'), {
+                              action: t(
+                                key(
+                                  item.state === 'ready' || item.state === 'failed'
+                                    ? 'dependencies.hide'
+                                    : 'dependencies.removeQueue',
+                                ),
+                              ),
+                              name: item.file.name,
+                            })}
+                            onClick={() => {
+                              preparationQueue.current = preparationQueue.current.filter(
+                                (candidate) =>
+                                  candidate.identity !== item.identity ||
+                                  candidate.world !== item.world,
+                              );
+                              publishPreparations();
+                            }}
+                          >
+                            <DatapackIcon name="close" />
+                          </button>
+                        </Tooltip>
+                      )}
+                    </div>
+                  ))}
+              </section>
+            )}
+            {changes.length > 0 && (
+              <section className="datapack-changes" aria-label={t(key('changes'))}>
+                {changes.map((change) => (
+                  <div key={change.id} className="datapack-change">
+                    <span>
+                      <strong>{change.name}</strong>
+                      <small>
+                        {t(key(`action.${change.action}`))} · {t(key(change.state))}
+                      </small>
+                      {change.state === 'failed' && change.error && (
+                        <small>{t(contentPreparationErrorKey(change.error))}</small>
+                      )}
+                    </span>
+                    <Tooltip content={t(key('discard'))}>
+                      <button
+                        type="button"
+                        className="datapack-action"
+                        aria-label={t(key('actionFor'), {
+                          action: t(key('discard')),
+                          name: change.name,
+                        })}
+                        disabled={
+                          disabled ||
+                          !(change.cancellable ?? ['ready', 'failed'].includes(change.state))
+                        }
+                        onClick={() =>
+                          void mutate(`cancel:${change.id}`, () =>
+                            controller.cancelDatapackChange(props.serverId, change.id),
+                          )
+                        }
+                      >
+                        <DatapackIcon name="close" />
+                      </button>
+                    </Tooltip>
+                  </div>
+                ))}
+              </section>
+            )}
+            {rows.length ? (
+              <ul className="datapack-list">
+                {rows.map((pack) => {
+                  const changed = changes.some((change) => change.name === pack.name);
+                  const metadata =
+                    inspected === pack.path && inspection.data
+                      ? inspection.data.metadata
+                      : pack.metadata;
+                  const compatibility = metadata?.compatibility ?? pack.compatibility;
+                  const nativeEnable = pack.state === 'enabled' && pack.nativeState === 'disabled';
+                  const enable = pack.state === 'disabled' || nativeEnable;
+                  const nativeBlocked =
+                    nativeEnable &&
+                    (changes.length > 0 || !data.running || world !== data.selectedWorld);
+                  return (
+                    <li key={pack.id} className="datapack-row">
+                      <span className="datapack-icon">
+                        <DatapackIcon name="pack" />
+                      </span>
+                      <div className="datapack-identity">
+                        <strong>{pack.name}</strong>
+                        {metadata?.description && <p>{metadata.description}</p>}
+                        <div className="datapack-details">
+                          <span>
+                            {t(
                               key(
-                                nativeEnable && changes.length > 0
-                                  ? 'applyFirst'
-                                  : nativeEnable && (!data.running || world !== data.selectedWorld)
-                                    ? 'nativeOffline'
-                                    : enable
-                                      ? 'enable'
-                                      : 'disable',
+                                pack.nativeState === 'disabled' && pack.state === 'enabled'
+                                  ? 'nativeDisabled'
+                                  : pack.state,
                               ),
                             )}
+                          </span>
+                          <span className={`datapack-compatibility--${compatibility}`}>
+                            {t(key(`compatibility.${compatibility}`))}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="datapack-row-actions">
+                        <Tooltip content={t(key('inspect'))}>
+                          <button
+                            type="button"
+                            className="datapack-action"
+                            aria-expanded={inspected === pack.path}
+                            aria-label={t(key('actionFor'), {
+                              action: t(key('inspect')),
+                              name: pack.name,
+                            })}
+                            onClick={() =>
+                              setInspected((current) =>
+                                current === pack.path ? undefined : pack.path,
+                              )
+                            }
                           >
-                            <button
-                              type="button"
-                              className="datapack-action"
-                              aria-label={t(key('actionFor'), {
-                                action: t(key(enable ? 'enable' : 'disable')),
-                                name: pack.name,
-                              })}
-                              disabled={
-                                disabled ||
-                                nativePending ||
-                                nativeBlocked ||
-                                changed ||
-                                preparing ||
-                                Boolean(progress)
-                              }
-                              onClick={() => void stage(enable ? 'enable' : 'disable', pack)}
+                            <DatapackIcon name="inspect" />
+                          </button>
+                        </Tooltip>
+                        {pack.state !== 'pending' && (
+                          <>
+                            <Tooltip
+                              content={t(
+                                key(
+                                  nativeEnable && changes.length > 0
+                                    ? 'applyFirst'
+                                    : nativeEnable &&
+                                        (!data.running || world !== data.selectedWorld)
+                                      ? 'nativeOffline'
+                                      : enable
+                                        ? 'enable'
+                                        : 'disable',
+                                ),
+                              )}
                             >
-                              <DatapackIcon name={enable ? 'enable' : 'disable'} />
-                            </button>
-                          </Tooltip>
-                          {pack.kind === 'zip' && (
-                            <Tooltip content={t(key('replace'))}>
                               <button
                                 type="button"
                                 className="datapack-action"
                                 aria-label={t(key('actionFor'), {
-                                  action: t(key('replace')),
+                                  action: t(key(enable ? 'enable' : 'disable')),
+                                  name: pack.name,
+                                })}
+                                disabled={
+                                  disabled ||
+                                  nativePending ||
+                                  nativeBlocked ||
+                                  changed ||
+                                  preparing ||
+                                  Boolean(progress)
+                                }
+                                onClick={() => void stage(enable ? 'enable' : 'disable', pack)}
+                              >
+                                <DatapackIcon name={enable ? 'enable' : 'disable'} />
+                              </button>
+                            </Tooltip>
+                            {pack.kind === 'zip' && (
+                              <Tooltip content={t(key('replace'))}>
+                                <button
+                                  type="button"
+                                  className="datapack-action"
+                                  aria-label={t(key('actionFor'), {
+                                    action: t(key('replace')),
+                                    name: pack.name,
+                                  })}
+                                  disabled={
+                                    disabled ||
+                                    nativePending ||
+                                    changed ||
+                                    preparing ||
+                                    Boolean(progress)
+                                  }
+                                  onClick={() => {
+                                    replacement.current = pack;
+                                    picker.current?.click();
+                                  }}
+                                >
+                                  <DatapackIcon name="replace" />
+                                </button>
+                              </Tooltip>
+                            )}
+                            <Tooltip content={t(key('delete'))}>
+                              <button
+                                type="button"
+                                className="datapack-action datapack-action--danger"
+                                aria-label={t(key('actionFor'), {
+                                  action: t(key('delete')),
                                   name: pack.name,
                                 })}
                                 disabled={
@@ -817,163 +844,142 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
                                   preparing ||
                                   Boolean(progress)
                                 }
-                                onClick={() => {
-                                  replacement.current = pack;
-                                  picker.current?.click();
-                                }}
+                                onClick={() => setRemove(pack)}
                               >
-                                <DatapackIcon name="replace" />
+                                <DatapackIcon name="delete" />
                               </button>
                             </Tooltip>
-                          )}
-                          <Tooltip content={t(key('delete'))}>
-                            <button
-                              type="button"
-                              className="datapack-action datapack-action--danger"
-                              aria-label={t(key('actionFor'), {
-                                action: t(key('delete')),
-                                name: pack.name,
-                              })}
-                              disabled={
-                                disabled ||
-                                nativePending ||
-                                changed ||
-                                preparing ||
-                                Boolean(progress)
-                              }
-                              onClick={() => setRemove(pack)}
-                            >
-                              <DatapackIcon name="delete" />
-                            </button>
-                          </Tooltip>
-                        </>
-                      )}
-                    </div>
-                    {inspected === pack.path && (
-                      <div className="datapack-inspection" aria-live="polite">
-                        {inspection.error ? (
-                          <ErrorNotice
-                            error={inspection.error}
-                            retry={() => void inspection.refetch()}
-                          />
-                        ) : inspection.isPending ? (
-                          <span className="datapack-inspection-skeleton" aria-hidden="true" />
-                        ) : inspection.data?.reason === 'too_large' ? (
-                          <p>{t(key('tooLarge'))}</p>
-                        ) : metadata ? (
-                          <>
-                            <span>
-                              {t(key('format'))}: {metadata.formatMin?.join('.') ?? '—'} –{' '}
-                              {metadata.formatMax?.join('.') ?? '—'}
-                            </span>
-                            {metadata.features.length > 0 && (
-                              <code>{metadata.features.join(', ')}</code>
-                            )}
                           </>
-                        ) : (
-                          <p>{t(key('compatibility.unknown'))}</p>
                         )}
                       </div>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          ) : (
-            <p className="datapack-empty">{t(key(search ? 'noResults' : 'empty'))}</p>
-          )}
-          {pages > 1 && (
-            <nav className="datapack-pages" aria-label={t(key('search'))}>
-              <button
-                type="button"
-                className="secondary"
-                disabled={currentPage === 0}
-                onClick={() => setPage(currentPage - 1)}
-              >
-                {t(key('previous'))}
-              </button>
-              <span>{t(key('page'), { page: currentPage + 1, pages })}</span>
-              <button
-                type="button"
-                className="secondary"
-                disabled={currentPage >= pages - 1}
-                onClick={() => setPage(currentPage + 1)}
-              >
-                {t(key('next'))}
-              </button>
-            </nav>
-          )}
-          {(changes.length > 0 || data.reload.state !== 'not_required') && (
-            <footer className="datapack-apply">
-              <div aria-live="polite">
-                {data.reload.state !== 'not_required' && (
-                  <>
-                    <p>
-                      {t(
-                        key(
-                          data.reload.state === 'required' &&
-                            (!data.running || world !== data.selectedWorld)
-                            ? 'inactive'
-                            : `reload.${data.reload.state}`,
-                        ),
+                      {inspected === pack.path && (
+                        <div className="datapack-inspection" aria-live="polite">
+                          {inspection.error ? (
+                            <ErrorNotice
+                              error={inspection.error}
+                              retry={() => void inspection.refetch()}
+                            />
+                          ) : inspection.isPending ? (
+                            <span className="datapack-inspection-skeleton" aria-hidden="true" />
+                          ) : inspection.data?.reason === 'too_large' ? (
+                            <p>{t(key('tooLarge'))}</p>
+                          ) : metadata ? (
+                            <>
+                              <span>
+                                {t(key('format'))}: {metadata.formatMin?.join('.') ?? '—'} –{' '}
+                                {metadata.formatMax?.join('.') ?? '—'}
+                              </span>
+                              {metadata.features.length > 0 && (
+                                <code>{metadata.features.join(', ')}</code>
+                              )}
+                            </>
+                          ) : (
+                            <p>{t(key('compatibility.unknown'))}</p>
+                          )}
+                        </div>
                       )}
-                    </p>
-                    <Link to={`/servers/${props.serverId}/console`}>{t(key('console'))}</Link>
-                  </>
-                )}
-              </div>
-              {(changes.some((change) => change.state === 'uncertain') ||
-                data.reload.state === 'uncertain') && (
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <p className="datapack-empty">{t(key(search ? 'noResults' : 'empty'))}</p>
+            )}
+            {pages > 1 && (
+              <nav className="datapack-pages" aria-label={t(key('search'))}>
                 <button
                   type="button"
                   className="secondary"
-                  disabled={disabled || preparing}
-                  onClick={() =>
-                    void mutate(`recover:${world}`, () =>
-                      controller.recoverDatapacks(props.serverId, world),
-                    )
-                  }
+                  disabled={currentPage === 0}
+                  onClick={() => setPage(currentPage - 1)}
                 >
-                  {t(key('recover'))}
+                  {t(key('previous'))}
                 </button>
-              )}
-              {(changes.length > 0 || (data.running && world === data.selectedWorld)) && (
-                <button type="button" disabled={!applyAllowed} onClick={() => void apply()}>
-                  {t(key(busy === `apply:${world}` ? 'applying' : 'apply'))}
+                <span>{t(key('page'), { page: currentPage + 1, pages })}</span>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={currentPage >= pages - 1}
+                  onClick={() => setPage(currentPage + 1)}
+                >
+                  {t(key('next'))}
                 </button>
-              )}
-            </footer>
-          )}
-        </>
-      )}
-      {(() => {
-        const item = preparations.find(
-          (candidate) => candidate.identity === dependencyDetails && candidate.world === world,
-        );
-        return item?.plan ? (
-          <DatapackDependencies
-            name={item.file.name}
-            plan={item.plan}
-            selectedOptional={item.optionalProjectIds ?? []}
-            busy={disabled || ['queued', 'preparing'].includes(item.state)}
-            onClose={() => setDependencyDetails(undefined)}
-            onPrepare={(optional, disables) => revisePreparation(item.identity, optional, disables)}
-          />
-        ) : null;
-      })()}
-      <ConfirmDialog
-        open={Boolean(remove)}
-        title={t(key('deleteTitle'), { name: remove?.name ?? '' })}
-        onClose={() => setRemove(undefined)}
-        confirmLabel={t(key('delete'))}
-        destructive
-        onConfirm={async () => {
-          if (remove) await stage('delete', remove);
-          setRemove(undefined);
-        }}
-      >
-        <p>{t(key('deleteBody'))}</p>
-      </ConfirmDialog>
+              </nav>
+            )}
+            {(changes.length > 0 || data.reload.state !== 'not_required') && (
+              <footer className="datapack-apply">
+                <div aria-live="polite">
+                  {data.reload.state !== 'not_required' && (
+                    <>
+                      <p>
+                        {t(
+                          key(
+                            data.reload.state === 'required' &&
+                              (!data.running || world !== data.selectedWorld)
+                              ? 'inactive'
+                              : `reload.${data.reload.state}`,
+                          ),
+                        )}
+                      </p>
+                      <Link to={`/servers/${props.serverId}/console`}>{t(key('console'))}</Link>
+                    </>
+                  )}
+                </div>
+                {(changes.some((change) => change.state === 'uncertain') ||
+                  data.reload.state === 'uncertain') && (
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={disabled || preparing}
+                    onClick={() =>
+                      void mutate(`recover:${world}`, () =>
+                        controller.recoverDatapacks(props.serverId, world),
+                      )
+                    }
+                  >
+                    {t(key('recover'))}
+                  </button>
+                )}
+                {(changes.length > 0 || (data.running && world === data.selectedWorld)) && (
+                  <button type="button" disabled={!applyAllowed} onClick={() => void apply()}>
+                    {t(key(busy === `apply:${world}` ? 'applying' : 'apply'))}
+                  </button>
+                )}
+              </footer>
+            )}
+          </>
+        )}
+        {(() => {
+          const item = preparations.find(
+            (candidate) => candidate.identity === dependencyDetails && candidate.world === world,
+          );
+          return item?.plan ? (
+            <DatapackDependencies
+              name={item.file.name}
+              plan={item.plan}
+              selectedOptional={item.optionalProjectIds ?? []}
+              busy={disabled || ['queued', 'preparing'].includes(item.state)}
+              onClose={() => setDependencyDetails(undefined)}
+              onPrepare={(optional, disables) =>
+                revisePreparation(item.identity, optional, disables)
+              }
+            />
+          ) : null;
+        })()}
+        <ConfirmDialog
+          open={Boolean(remove)}
+          title={t(key('deleteTitle'), { name: remove?.name ?? '' })}
+          onClose={() => setRemove(undefined)}
+          confirmLabel={t(key('delete'))}
+          destructive
+          onConfirm={async () => {
+            if (remove) await stage('delete', remove);
+            setRemove(undefined);
+          }}
+        >
+          <p>{t(key('deleteBody'))}</p>
+        </ConfirmDialog>
+      </div>
       {catalog && (
         <MinecraftDatapackCatalog
           serverId={props.serverId}

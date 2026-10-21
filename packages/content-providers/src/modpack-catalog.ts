@@ -91,7 +91,22 @@ export const modpackCatalogVersionsSchema = z
   .strict();
 export type ModpackCatalogVersions = z.infer<typeof modpackCatalogVersionsSchema>;
 
+export const modpackCategoryIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-zA-Z0-9_-]+$/);
+export const modpackCatalogCategoriesSchema = z
+  .object({
+    items: z
+      .array(z.object({ id: modpackCategoryIdSchema, name: z.string().min(1).max(256) }).strict())
+      .max(1000),
+  })
+  .strict();
+export type ModpackCatalogCategories = z.infer<typeof modpackCatalogCategoriesSchema>;
+
 export interface ModpackCatalogSearchInput {
+  category?: string;
   query?: string;
   offset?: number;
   limit?: number;

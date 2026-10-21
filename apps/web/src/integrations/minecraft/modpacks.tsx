@@ -1,6 +1,6 @@
-import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router';
+import { keepPreviousData, useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { lazy, Suspense, useEffect, useId, useRef, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router';
 import {
   createMinecraftModpacksController,
   type MinecraftModpackOperation,
@@ -28,6 +28,7 @@ import {
   ModsAction,
   ModsArtwork,
   ModsChannel,
+  ModsCheckbox,
   ModsEmpty,
   ModsIcon,
   ModsSkeleton,
@@ -50,6 +51,10 @@ export function MinecraftModpacksSection(props: GameSectionViewProps) {
 function Modpacks(props: GameSectionViewProps) {
   const t = useT();
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [detailRevision, setDetailRevision] = useState(0);
+  const [noUpdates, setNoUpdates] = useState(false);
   const requestedOperation = searchParams.get('operation');
   const initial = props.data.metadata?.modpacks as MinecraftModpacksSnapshot | undefined;
   const snapshot = useQuery({
@@ -151,7 +156,11 @@ function Modpacks(props: GameSectionViewProps) {
       setBusy(false);
     }
   }
-  function choose(selected: ModpackCatalogProject, version: ModpackCatalogVersion) {
+  function choose(
+    selected: ModpackCatalogProject,
+    version: ModpackCatalogVersion,
+    options: { keepWorlds: boolean; backupBefore: boolean },
+  ) {
     setProject(selected);
     setSelectedPack({ project: selected, version });
     const same =
@@ -159,18 +168,21 @@ function Modpacks(props: GameSectionViewProps) {
     const mode = data?.installed ? (same ? 'update' : 'replace') : 'install';
     void mutate(async () => {
       if (operation) await controller.discard(props.serverId, operation.id);
-      const result = await controller.prepare(props.serverId, {
+      const result = await controller.install(props.serverId, {
         provider: selected.provider,
         projectId: selected.id,
         versionId: version.id,
         mode,
-        worldPolicy: 'preserve',
+        worldPolicy: options.keepWorlds ? 'preserve' : 'reset',
         fileDecisions: {},
+        install: { backupBefore: options.backupBefore },
         idempotencyKey: requestKey(
-          `prepare:${operation?.id ?? 'new'}:${selected.provider}:${selected.id}:${version.id}:preserve`,
+          `prepare:${operation?.id ?? 'new'}:${selected.provider}:${selected.id}:${version.id}:${options.keepWorlds}:${options.backupBefore}`,
         ),
       });
-      setView('review');
+      navigate(`/servers/${props.serverId}/console`, {
+        state: { provisioningJobId: result.operation?.id },
+      });
       return result;
     });
   }
@@ -210,6 +222,43 @@ function Modpacks(props: GameSectionViewProps) {
       setView('discover');
       return result;
     });
+  }
+  async function checkUpdates() {
+    if (!data?.installed || checkingUpdates) return;
+    setCheckingUpdates(true);
+    setNoUpdates(false);
+    setError(undefined);
+    try {
+      const current = data.installed.pack;
+      const versions = await controller.versions(
+        props.serverId,
+        current.project.provider,
+        current.project.id,
+        0,
+      );
+      const latest = recommendedPackVersion(versions.items);
+      queryClient.setQueryData(
+        [...q(props.serverId, 'versions'), current.project.provider, current.project.id],
+        { pages: [versions], pageParams: [0] },
+      );
+      if (
+        !latest ||
+        latest.id === current.version.id ||
+        (latest.publishedAt &&
+          current.version.publishedAt &&
+          Date.parse(latest.publishedAt) <= Date.parse(current.version.publishedAt))
+      ) {
+        setNoUpdates(true);
+      } else {
+        setDetailRevision((value) => value + 1);
+        setProject(current.project);
+        setView('discover');
+      }
+    } catch (cause) {
+      setError(cause);
+    } finally {
+      setCheckingUpdates(false);
+    }
   }
   const installed = data?.installed;
   return (
@@ -269,6 +318,7 @@ function Modpacks(props: GameSectionViewProps) {
               serverId={props.serverId}
               visible={view === 'discover'}
               project={project}
+              detailRevision={detailRevision}
               onProject={setProject}
               disabled={locked}
               onChoose={choose}
@@ -312,13 +362,11 @@ function Modpacks(props: GameSectionViewProps) {
                   <button
                     type="button"
                     className="mods-primary"
-                    onClick={() => {
-                      setProject(installed.pack.project);
-                      setView('discover');
-                    }}
+                    disabled={checkingUpdates}
+                    onClick={() => void checkUpdates()}
                   >
                     <ModsIcon name="refresh" />
-                    {t(k('checkUpdates'))}
+                    {t(k(checkingUpdates ? 'checkingUpdates' : 'checkUpdates'))}
                   </button>
                   <button
                     type="button"
@@ -331,6 +379,12 @@ function Modpacks(props: GameSectionViewProps) {
                     {t(k('replace'))}
                   </button>
                 </div>
+                {noUpdates && (
+                  <p className="modpacks-update-result" role="status">
+                    <ModsIcon name="check" />
+                    {t(k('noUpdates'))}
+                  </p>
+                )}
               </article>
             ) : (
               <ModsEmpty
@@ -408,9 +462,14 @@ function ModpackDiscover(props: {
   serverId: string;
   visible: boolean;
   project?: ModpackCatalogProject;
+  detailRevision: number;
   onProject: (project?: ModpackCatalogProject) => void;
   disabled: boolean;
-  onChoose: (project: ModpackCatalogProject, version: ModpackCatalogVersion) => void;
+  onChoose: (
+    project: ModpackCatalogProject,
+    version: ModpackCatalogVersion,
+    options: { keepWorlds: boolean; backupBefore: boolean },
+  ) => void;
   operation?: MinecraftModpackOperation;
   operationProject?: ModpackCatalogProject;
 }) {
@@ -419,9 +478,12 @@ function ModpackDiscover(props: {
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
   const [offset, setOffset] = useState(0);
+  const [category, setCategory] = useState('');
+  const scrollPosition = useRef(0);
   const opener = useRef<HTMLButtonElement | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
+  const detailView = useRef<HTMLElement>(null);
   useEffect(() => {
     const timer = setTimeout(() => {
       setQuery(search.trim());
@@ -435,11 +497,15 @@ function ModpackDiscover(props: {
     if (projectProvider) setProvider(projectProvider);
   }, [projectProvider]);
   useEffect(() => {
-    if (identity && props.visible) heading.current?.focus({ preventScroll: true });
+    if (identity && props.visible) {
+      heading.current?.focus({ preventScroll: true });
+      detailView.current?.scrollIntoView({ block: 'start', behavior: 'instant' });
+    }
   }, [identity, props.visible]);
   function close() {
     props.onProject(undefined);
     requestAnimationFrame(() => {
+      window.scrollTo({ top: scrollPosition.current, behavior: 'instant' });
       if (opener.current?.isConnected) opener.current.focus({ preventScroll: true });
       else input.current?.focus({ preventScroll: true });
     });
@@ -451,9 +517,20 @@ function ModpackDiscover(props: {
     enabled: props.visible,
   });
   const available = config.data?.providers.find((item) => item.id === provider)?.available === true;
+  const categories = useQuery({
+    queryKey: [...q(props.serverId, 'categories'), provider],
+    queryFn: ({ signal }) => controller.categories(props.serverId, provider, signal),
+    staleTime: 300_000,
+    enabled: props.visible && available,
+  });
   const projects = useQuery({
-    queryKey: [...q(props.serverId, 'search'), provider, query, offset],
-    queryFn: ({ signal }) => controller.search(props.serverId, { provider, query, offset }, signal),
+    queryKey: [...q(props.serverId, 'search'), provider, query, offset, category],
+    queryFn: ({ signal }) =>
+      controller.search(
+        props.serverId,
+        { provider, query, offset, category: category || undefined },
+        signal,
+      ),
     staleTime: 60_000,
     placeholderData: keepPreviousData,
     enabled: available && props.visible,
@@ -473,7 +550,7 @@ function ModpackDiscover(props: {
   const project = details.data ?? props.project;
   return (
     <div className="mods-discover">
-      <div className="mods-search-toolbar">
+      <div className="mods-search-toolbar" hidden={Boolean(project)}>
         <label className="mods-search">
           <ModsIcon name="search" />
           <input
@@ -494,6 +571,7 @@ function ModpackDiscover(props: {
           onChange={(value) => {
             setProvider(value as ModpackProvider);
             setOffset(0);
+            setCategory('');
             props.onProject(undefined);
           }}
         />
@@ -529,17 +607,48 @@ function ModpackDiscover(props: {
           <ModsIcon name="check" />
         </button>
       )}
-      {(config.error || projects.error) && (
+      {(config.error || projects.error || categories.error) && (
         <ErrorNotice
-          error={config.error ?? projects.error}
+          error={config.error ?? projects.error ?? categories.error}
           retry={() => {
             void config.refetch();
             void projects.refetch();
+            void categories.refetch();
           }}
         />
       )}
-      <div className="mods-catalog-layout" data-details={Boolean(project) || undefined}>
-        <div className="mods-results" aria-busy={projects.isFetching}>
+      <div className="modpacks-catalog-layout" data-details={Boolean(project) || undefined}>
+        <aside
+          className="modpacks-categories"
+          hidden={Boolean(project) || !categories.data?.items.length}
+          aria-label={t(k('categories'))}
+        >
+          <h4>{t(k('categories'))}</h4>
+          <button
+            type="button"
+            aria-pressed={!category}
+            onClick={() => {
+              setCategory('');
+              setOffset(0);
+            }}
+          >
+            {t(k('allCategories'))}
+          </button>
+          {categories.data?.items.map((item) => (
+            <button
+              type="button"
+              key={item.id}
+              aria-pressed={category === item.id}
+              onClick={() => {
+                setCategory(item.id);
+                setOffset(0);
+              }}
+            >
+              {item.name}
+            </button>
+          ))}
+        </aside>
+        <div hidden={Boolean(project)} className="mods-results" aria-busy={projects.isFetching}>
           {config.isPending || (available && projects.isPending) ? (
             <ModsSkeleton label={t(k('loading'))} />
           ) : !available ? (
@@ -562,6 +671,7 @@ function ModpackDiscover(props: {
                     aria-label={t(k('details'), { name: item.name })}
                     onClick={(event) => {
                       opener.current = event.currentTarget;
+                      scrollPosition.current = window.scrollY;
                       props.onProject(item);
                     }}
                   >
@@ -592,6 +702,7 @@ function ModpackDiscover(props: {
         </div>
         {project && (
           <aside
+            ref={detailView}
             className="mods-details modpacks-details"
             aria-label={t(k('details'), { name: project.name })}
             onKeyDown={(event) => {
@@ -601,6 +712,10 @@ function ModpackDiscover(props: {
               }
             }}
           >
+            <button type="button" className="modpacks-back" onClick={close}>
+              <ModsIcon name="back" />
+              {t(k('back'))}
+            </button>
             <header className="mods-details-header">
               <ModsArtwork image={project.imageUrl} name={project.name} />
               <div>
@@ -611,11 +726,10 @@ function ModpackDiscover(props: {
                   <small>{t(k('authors'), { authors: project.authors.join(', ') })}</small>
                 )}
               </div>
-              <ModsAction icon="close" label={t(k('closeDetails'))} onClick={close} />
             </header>
             <p className="mods-details-summary">{project.summary}</p>
             <PackVersions
-              key={modpackIdentity(project)}
+              key={`${modpackIdentity(project)}:${props.detailRevision}`}
               serverId={props.serverId}
               project={project}
               disabled={props.disabled}
@@ -667,91 +781,170 @@ function PackVersions(props: {
   project: ModpackCatalogProject;
   disabled: boolean;
   operation?: MinecraftModpackOperation;
-  onChoose: (project: ModpackCatalogProject, version: ModpackCatalogVersion) => void;
+  onChoose: (
+    project: ModpackCatalogProject,
+    version: ModpackCatalogVersion,
+    options: { keepWorlds: boolean; backupBefore: boolean },
+  ) => void;
 }) {
   const t = useT();
   const format = useFormat();
-  const [offset, setOffset] = useState(0);
-  const [selected, setSelected] = useState<string>();
-  const versions = useQuery({
-    queryKey: [...q(props.serverId, 'versions'), props.project.provider, props.project.id, offset],
-    queryFn: ({ signal }) =>
-      controller.versions(props.serverId, props.project.provider, props.project.id, offset, signal),
+  const id = useId();
+  const [open, setOpen] = useState(false);
+  const [selected, setSelected] = useState<ModpackCatalogVersion>();
+  const [keepWorlds, setKeepWorlds] = useState(false);
+  const [backupBefore, setBackupBefore] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const panel = useRef<HTMLFieldSetElement>(null);
+  const versions = useInfiniteQuery({
+    queryKey: [...q(props.serverId, 'versions'), props.project.provider, props.project.id],
+    initialPageParam: 0,
+    queryFn: ({ signal, pageParam }) =>
+      controller.versions(
+        props.serverId,
+        props.project.provider,
+        props.project.id,
+        pageParam,
+        signal,
+      ),
+    getNextPageParam: (last) =>
+      last.offset + last.limit < last.total ? last.offset + last.limit : undefined,
     staleTime: 300_000,
   });
-  const recommended = recommendedPackVersion(versions.data?.items ?? []);
-  const chosen = versions.data?.items.find(
-    (item) => item.id === (selected ?? recommended?.id ?? versions.data?.items[0]?.id),
-  );
+  useEffect(() => {
+    if (open) panel.current?.focus({ preventScroll: true });
+  }, [open]);
+  const items = versions.data?.pages.flatMap((page) => page.items) ?? [];
+  const chosen = selected ?? recommendedPackVersion(versions.data?.pages[0]?.items ?? []);
   const same =
     props.operation?.selection.provider === props.project.provider &&
     props.operation.selection.projectId === props.project.id &&
     props.operation.selection.versionId === chosen?.id;
   return (
     <div className="modpacks-version-picker">
-      <div className="modpacks-version-label">
-        <strong>{t(k('version'))}</strong>
-        {!selected && recommended?.channel === 'release' && <small>{t(k('latestStable'))}</small>}
-      </div>
-      {versions.error ? (
-        <ErrorNotice
-          error={versions.error}
-          retry={() => {
-            void versions.refetch();
-          }}
-        />
-      ) : versions.isPending ? (
+      {versions.error && (
+        <ErrorNotice error={versions.error} retry={() => void versions.refetch()} />
+      )}
+      {versions.isPending ? (
         <ModsSkeleton label={t(k('loading'))} rows={1} />
-      ) : versions.data?.items.length === 0 ? (
-        <p>{t(k('noVersions'))}</p>
       ) : (
         <>
-          <ViewerSelect
-            label={t(k('version'))}
-            value={chosen?.id ?? ''}
-            className="mods-select modpacks-version-select"
-            options={(versions.data?.items ?? []).map((version) => ({
-              value: version.id,
-              label: `${version.version}${version.channel === 'beta' ? ' · BETA' : version.channel === 'alpha' ? ' · ALPHA' : ''}${!version.available ? ` · ${t(k(`unavailable.${version.unavailableReason ?? 'unresolved'}`))}` : ''}`,
-            }))}
-            onChange={setSelected}
-          />
-          {chosen && (
-            <>
-              <div className="modpacks-version-facts">
-                <span>{chosen.minecraftVersions.join(', ')}</span>
-                <span>{chosen.loaders.join(', ')}</span>
-                {chosen.bytes !== undefined && <span>{format.bytes(chosen.bytes)}</span>}
-                {chosen.channel !== 'unknown' && <ModsChannel channel={chosen.channel} />}
-              </div>
-              {!chosen.available && (
-                <p className="modpacks-notice">
-                  <ModsIcon name="warning" />
-                  {t(k(`unavailable.${chosen.unavailableReason ?? 'unresolved'}`))}
-                </p>
-              )}
+          <div className="modpacks-install-row">
+            <div className="mods-version-picker">
               <button
+                ref={trigger}
                 type="button"
-                className="mods-primary"
-                disabled={props.disabled || !chosen.available || same}
-                onClick={() => props.onChoose(props.project, chosen)}
+                className="mods-version-trigger"
+                aria-expanded={open}
+                aria-controls={id}
+                aria-label={t(k('version'))}
+                onClick={() => setOpen(!open)}
               >
-                <ModsIcon name={same ? 'check' : 'download'} />
-                {t(k(same ? 'selected' : 'choose'))}
+                <ModsIcon name="version" />
+                <span>{chosen?.version ?? t(k('noVersions'))}</span>
+                <ModsIcon name="chevron" />
               </button>
-            </>
+              {open && (
+                <fieldset
+                  ref={panel}
+                  id={id}
+                  className="mods-version-panel"
+                  tabIndex={-1}
+                  aria-label={t(k('version'))}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      event.stopPropagation();
+                      setOpen(false);
+                      trigger.current?.focus();
+                    }
+                  }}
+                >
+                  <div className="mods-version-list">
+                    {items.map((version) => (
+                      <button
+                        key={version.id}
+                        type="button"
+                        className="mods-version-option"
+                        aria-pressed={chosen?.id === version.id}
+                        disabled={!version.available}
+                        onClick={() => {
+                          setSelected(version);
+                          setOpen(false);
+                          trigger.current?.focus({ preventScroll: true });
+                        }}
+                      >
+                        <span>
+                          <strong>{version.version}</strong>
+                          {version.channel !== 'unknown' && (
+                            <ModsChannel channel={version.channel} />
+                          )}
+                        </span>
+                        <small>
+                          {[
+                            version.minecraftVersions.join(', '),
+                            version.loaders.join(', '),
+                            version.publishedAt ? format.date(version.publishedAt) : undefined,
+                            version.bytes === undefined ? undefined : format.bytes(version.bytes),
+                          ]
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </small>
+                        {!version.available && (
+                          <small>
+                            {t(k(`unavailable.${version.unavailableReason ?? 'unresolved'}`))}
+                          </small>
+                        )}
+                      </button>
+                    ))}
+                    {versions.hasNextPage && (
+                      <button
+                        className="modpacks-quiet"
+                        type="button"
+                        disabled={versions.isFetchingNextPage}
+                        onClick={() => void versions.fetchNextPage()}
+                      >
+                        {t(versions.isFetchingNextPage ? 'web.loading' : 'web.loadMore')}
+                      </button>
+                    )}
+                  </div>
+                </fieldset>
+              )}
+            </div>
+            <button
+              type="button"
+              className="mods-primary"
+              disabled={props.disabled || !chosen?.available || same}
+              onClick={() =>
+                chosen && props.onChoose(props.project, chosen, { keepWorlds, backupBefore })
+              }
+            >
+              <ModsIcon name="download" />
+              {t(k('install'))}
+            </button>
+          </div>
+          {chosen && (
+            <div className="modpacks-version-facts">
+              <span>{chosen.minecraftVersions.join(', ')}</span>
+              <span>{chosen.loaders.join(', ')}</span>
+              {chosen.bytes !== undefined && <span>{format.bytes(chosen.bytes)}</span>}
+              {!selected && chosen.channel === 'release' && <span>{t(k('latestStable'))}</span>}
+            </div>
           )}
-          {versions.data && versions.data.total > versions.data.limit && (
-            <PackPagination
-              offset={offset}
-              limit={versions.data.limit}
-              total={versions.data.total}
-              onChange={(value) => {
-                setOffset(value);
-                setSelected(undefined);
-              }}
+          <div className="modpacks-install-options">
+            <ModsCheckbox
+              label={t(k('preserveWorlds'))}
+              checked={keepWorlds}
+              disabled={props.disabled}
+              onChange={setKeepWorlds}
             />
-          )}
+            <ModsCheckbox
+              label={t(k('backup'))}
+              checked={backupBefore}
+              disabled={props.disabled}
+              onChange={setBackupBefore}
+            />
+          </div>
+          {!keepWorlds && <p className="modpacks-muted">{t(k('worldsReset'))}</p>}
         </>
       )}
     </div>

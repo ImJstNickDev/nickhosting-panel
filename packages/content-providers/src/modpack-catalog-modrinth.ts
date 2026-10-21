@@ -5,9 +5,11 @@ import {
   type ModpackCatalogPageInput,
   type ModpackCatalogSearchInput,
   type ModpackCatalogVersion,
+  modpackCatalogCategoriesSchema,
   modpackCatalogDetailsSchema,
   modpackCatalogProjectsSchema,
   modpackCatalogVersionsSchema,
+  modpackCategoryIdSchema,
 } from './modpack-catalog.js';
 import {
   download,
@@ -101,13 +103,39 @@ export class ModrinthModpackCatalog implements ModpackCatalog {
       .json(`https://api.modrinth.com/v2/project/${identifier(id)}`, signal)
       .then(projectSchema.parse);
   }
+  async categories(signal?: AbortSignal) {
+    const categories = z
+      .array(z.object({ name: str, project_type: str }))
+      .max(1000)
+      .parse(await this.client.json('https://api.modrinth.com/v2/tag/category', signal));
+    return modpackCatalogCategoriesSchema.parse({
+      items: categories
+        .filter((category) => category.project_type === 'modpack')
+        .map((category) => ({ id: category.name, name: category.name.replaceAll('-', ' ') })),
+    });
+  }
   async search(input: ModpackCatalogSearchInput = {}, signal?: AbortSignal) {
     const { offset, limit } = pageInput(input);
     const params = new URLSearchParams({
       query: queryInput(input.query),
       offset: String(offset),
       limit: String(limit),
-      facets: JSON.stringify([['project_type:modpack']]),
+      // Filter at the provider, before pagination; client-only packs cannot be installed here.
+      facets: JSON.stringify([
+        ['project_type:modpack'],
+        [
+          'client_and_server',
+          'client_only_server_optional',
+          'server_only',
+          'server_only_client_optional',
+          'dedicated_server_only',
+          'client_or_server',
+          'client_or_server_prefers_both',
+        ].map((value) => `environment:${value}`),
+        ...(input.category
+          ? [[`categories:${modpackCategoryIdSchema.parse(input.category)}`]]
+          : []),
+      ]),
     });
     const result = z
       .object({

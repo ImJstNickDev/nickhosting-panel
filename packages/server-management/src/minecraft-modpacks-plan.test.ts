@@ -227,6 +227,29 @@ describe('Modpack preparation policy', () => {
     ];
     expect(planMinecraftModpack(f).remove).toEqual(['mods', 'world']);
   });
+  it.each(['install', 'update'] as const)(
+    'honors explicit %s intent world policy without bypassing protected paths',
+    (mode) => {
+      const f = fixture();
+      f.selection = minecraftModpackPrepareSchema.parse({
+        ...f.selection,
+        mode,
+        worldPolicy: 'reset',
+        install: {},
+      });
+      f.observation.entries = [{ path: 'world', kind: 'directory', size: 0 }];
+      expect(planMinecraftModpack(f).remove).toContain('world');
+      f.selection.worldPolicy = 'preserve';
+      expect(planMinecraftModpack(f).remove).not.toContain('world');
+      f.selection.worldPolicy = 'reset';
+      f.observation.protectedPaths.push('world/private');
+      expect(planMinecraftModpack(f).remove).not.toContain('world');
+      expect(planMinecraftModpack(f).blockers).toContainEqual({
+        reason: 'protected-path',
+        path: 'world',
+      });
+    },
+  );
   it('does not delete a root containing a configuration the user kept', () => {
     const f = fixture();
     f.selection.mode = 'replace';

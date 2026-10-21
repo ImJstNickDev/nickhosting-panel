@@ -1,6 +1,6 @@
 import type { Root, RootContent } from 'hast';
 import { fromHtml } from 'hast-util-from-html';
-import { createElement, type ReactNode, useMemo, useState } from 'react';
+import { createElement, type ReactNode, useMemo } from 'react';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
@@ -65,7 +65,6 @@ export function parseModDescription(value: string, format: 'markdown' | 'html'):
 }
 export function ModsDescription({ text, format }: { text: string; format: 'markdown' | 'html' }) {
   const t = useAddonsT();
-  const [images, setImages] = useState(false);
   const tree = useMemo(() => {
     try {
       return parseModDescription(text, format);
@@ -73,7 +72,6 @@ export function ModsDescription({ text, format }: { text: string; format: 'markd
       return undefined;
     }
   }, [text, format]);
-  let hasImages = false;
   function render(node: RootContent, key: string): ReactNode {
     if (node.type === 'text') return node.value;
     if (node.type !== 'element') return null;
@@ -85,16 +83,16 @@ export function ModsDescription({ text, format }: { text: string; format: 'markd
     if (node.tagName === 'img') {
       const src = String(node.properties.src ?? '');
       if (!src.startsWith('https://')) return null;
-      hasImages = true;
-      return images ? (
+      return (
         <img
           key={key}
           src={src}
           alt={String(node.properties.alt ?? '')}
           loading="lazy"
+          decoding="async"
           referrerPolicy="no-referrer"
         />
-      ) : null;
+      );
     }
     const children = node.children.map((child, index) => render(child, `${key}-${index}`));
     if (node.tagName === 'a') {
@@ -112,11 +110,6 @@ export function ModsDescription({ text, format }: { text: string; format: 'markd
   return (
     <div className="mods-description">
       {body?.length ? body : <p>{text || t(modsKey('descriptionUnavailable'))}</p>}
-      {hasImages && !images && (
-        <button type="button" className="secondary" onClick={() => setImages(true)}>
-          {t(modsKey('loadImages'))}
-        </button>
-      )}
     </div>
   );
 }

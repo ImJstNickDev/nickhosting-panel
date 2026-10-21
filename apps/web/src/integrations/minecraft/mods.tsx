@@ -469,13 +469,20 @@ function DiscoverMods(
   const detailsHeading = useRef<HTMLHeadingElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const detailOpener = useRef<HTMLButtonElement | null>(null);
+  const listScroll = useRef(0);
   const activeProject = props.project ? projectIdentity(props.project) : undefined;
   useEffect(() => {
-    if (props.visible && activeProject) detailsHeading.current?.focus({ preventScroll: true });
+    if (props.visible && activeProject) {
+      detailsHeading.current
+        ?.closest('.mods-details')
+        ?.scrollIntoView({ block: 'start', behavior: 'instant' });
+      detailsHeading.current?.focus({ preventScroll: true });
+    }
   }, [props.visible, activeProject]);
   function closeDetails() {
     props.onCloseProject();
     requestAnimationFrame(() => {
+      window.scrollTo({ top: listScroll.current, behavior: 'instant' });
       const target = detailOpener.current;
       if (target?.isConnected && target.offsetParent !== null)
         target.focus({ preventScroll: true });
@@ -535,8 +542,8 @@ function DiscoverMods(
   });
   const project = details.data ?? props.project;
   return (
-    <div className="mods-discover">
-      <div className="mods-search-toolbar">
+    <div className="mods-discover mods-discover-page">
+      <div className="mods-search-toolbar" hidden={Boolean(project)}>
         <label className="mods-search">
           <ModsIcon name="search" />
           <input
@@ -574,7 +581,7 @@ function DiscoverMods(
           </button>
         </Tooltip>
       </div>
-      {!comingSoon && (
+      {!project && !comingSoon && (
         <div className="mods-catalog-options">
           <ModsCheckbox
             checked={includeIncompatible}
@@ -606,7 +613,7 @@ function DiscoverMods(
         </div>
       ) : (
         <div className="mods-catalog-layout" data-details={Boolean(project) || undefined}>
-          <div className="mods-results" aria-busy={projects.isFetching}>
+          <div className="mods-results" hidden={Boolean(project)} aria-busy={projects.isFetching}>
             {config.isPending || (available && projects.isPending) ? (
               <ModsSkeleton />
             ) : !available ? (
@@ -643,6 +650,7 @@ function DiscoverMods(
                         className="mods-project-open"
                         aria-label={t(modsKey('details'), { name: item.name })}
                         onClick={(event) => {
+                          listScroll.current = window.scrollY;
                           detailOpener.current = event.currentTarget;
                           props.onProject(item);
                         }}
@@ -685,6 +693,10 @@ function DiscoverMods(
                 }
               }}
             >
+              <button type="button" className="catalog-back" onClick={closeDetails}>
+                <ModsIcon name="back" />
+                {t(modsKey('back'))}
+              </button>
               <header className="mods-details-header">
                 <ModsArtwork image={project.imageUrl} name={project.name} />
                 <div>
@@ -695,11 +707,6 @@ function DiscoverMods(
                     <small>{t(modsKey('authors'), { authors: project.authors.join(', ') })}</small>
                   )}
                 </div>
-                <ModsAction
-                  icon="close"
-                  label={t(modsKey('closeDetails'))}
-                  onClick={closeDetails}
-                />
               </header>
               <p className="mods-details-summary">{project.summary}</p>
               <ModsTags side={project.environment.kind} tags={project.tags} />

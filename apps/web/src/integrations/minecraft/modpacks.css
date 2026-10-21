@@ -478,3 +478,127 @@
 .minecraft-modpacks .mods-skeleton :is(i, span) {
   background: color-mix(in srgb, var(--surface) 84%, var(--muted));
 }
+
+.modpacks-catalog-layout {
+  display: grid;
+  grid-template-columns: minmax(140px, 190px) minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+.modpacks-catalog-layout[data-details],
+.modpacks-catalog-layout:has(.modpacks-categories[hidden]) {
+  grid-template-columns: minmax(0, 1fr);
+}
+.minecraft-modpacks [hidden] {
+  display: none;
+}
+.modpacks-categories {
+  display: grid;
+  gap: 3px;
+  max-height: 65vh;
+  overflow-y: auto;
+}
+.modpacks-categories h4 {
+  margin: 8px 10px 12px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 550;
+}
+.modpacks-categories button {
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+  padding: 9px 10px;
+  font-size: 0.82rem;
+  border-radius: 7px;
+}
+.modpacks-categories button:hover {
+  background: var(--mods-quiet);
+  color: var(--text);
+}
+.modpacks-categories button[aria-pressed="true"] {
+  background: var(--mods-selected);
+  color: var(--text);
+}
+.modpacks-catalog-layout .modpacks-details {
+  position: static;
+  max-height: none;
+  overflow: visible;
+  border: 0;
+  padding: clamp(16px, 2vw, 28px);
+  min-width: 0;
+  width: 100%;
+}
+.modpacks-details .mods-details-header {
+  margin-top: 18px;
+}
+.modpacks-details .mods-description {
+  max-width: 100%;
+}
+.modpacks-details .modpacks-back {
+  margin: 0;
+}
+.modpacks-install-row {
+  display: flex;
+  align-items: start;
+  gap: 12px;
+}
+.modpacks-install-row > .mods-version-picker {
+  flex: 1;
+  max-width: 480px;
+}
+.modpacks-install-row .mods-version-panel {
+  position: absolute;
+  z-index: 5;
+  inset-inline: 0;
+  box-shadow: 0 10px 30px #0002;
+}
+.modpacks-install-row > .mods-primary {
+  min-height: 36px;
+}
+.modpacks-install-options {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+.modpacks-update-result {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: 18px;
+}
+@container (max-width: 620px) {
+  .modpacks-catalog-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+  .modpacks-categories {
+    display: flex;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding-bottom: 4px;
+  }
+  .modpacks-categories h4 {
+    display: none;
+  }
+  .modpacks-categories button {
+    flex: 0 0 auto;
+  }
+}
+
+.modpacks-details .mods-details-header > .mods-artwork {
+  width: 64px;
+  height: 64px;
+  flex-basis: 64px;
+  font-size: 1.8rem;
+  border-radius: 12px;
+}
+.modpacks-details .mods-details-header h3 {
+  font-size: clamp(1.15rem, 2vw, 1.5rem);
+}

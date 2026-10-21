@@ -1,5 +1,9 @@
 /** Modpack lifecycle vocabulary, kept separate from individual add-on selection. */
 export const minecraftModpacksMessages: Record<string, [string, string]> = {
+  'modpacks.noUpdates': ['You’re up to date', 'Il modpack è aggiornato'],
+  'modpacks.checkingUpdates': ['Checking…', 'Controllo…'],
+  'modpacks.categories': ['Categories', 'Categorie'],
+  'modpacks.allCategories': ['All categories', 'Tutte le categorie'],
   'modpacks.inspecting': ['Checking files', 'Controllo dei file'],
   'modpacks.checking': ['Checking installation', 'Controllo dell’installazione'],
   'modpacks.stopping': ['Stopping server', 'Arresto del server'],
@@ -123,10 +127,10 @@ export const minecraftModpacksMessages: Record<string, [string, string]> = {
     'Verify the last step and resume this installation when possible.',
     'Verifica l’ultimo passaggio e riprendi questa installazione quando possibile.',
   ],
-  'modpacks.install': ['Install pack', 'Installa modpack'],
+  'modpacks.install': ['Install', 'Installa'],
   'modpacks.update': ['Update pack', 'Aggiorna modpack'],
   'modpacks.replace': ['Replace pack', 'Sostituisci modpack'],
-  'modpacks.checkUpdates': ['Choose an update', 'Scegli un aggiornamento'],
+  'modpacks.checkUpdates': ['Check for Updates', 'Controlla aggiornamenti'],
   'modpacks.replaceWarning': [
     'The selected pack replaces the current pack.',
     'Il modpack scelto sostituisce quello attuale.',

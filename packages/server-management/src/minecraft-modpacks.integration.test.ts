@@ -168,6 +168,57 @@ describe('Modpacks durable preparation and apply', () => {
     };
   }
 
+  it('durably installs without a browser apply request and defaults to no backup', async () => {
+    const f = await fixture();
+    const queued = await f.service.prepare(f.context, f.serverId, {
+      ...f.selection,
+      install: {},
+    });
+    if (!queued.operation) throw new Error('Expected operation');
+    const id = queued.operation.id;
+    await f.service.process(id);
+    const prepared = await f.service.snapshot(f.context, f.serverId);
+    expect(prepared.operation?.state).toBe('apply_queued');
+    expect(f.calls).toEqual([]);
+    const row = await f.db
+      .selectFrom('minecraft_modpack_operations')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirstOrThrow();
+    expect(row.apply_actor_user_id).toBe(row.actor_user_id);
+    expect(row.apply_request).toMatchObject({ planDigest: row.plan_digest, backupBefore: false });
+    await f.service.process(id);
+    expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('applied');
+    expect(f.calls).not.toContain('backup');
+    const count = f.calls.length;
+    await f.service.process(id);
+    expect(f.calls).toHaveLength(count);
+  });
+
+  it('rechecks current authority before an automatically queued apply', async () => {
+    const f = await fixture();
+    const queued = await f.service.prepare(f.context, f.serverId, { ...f.selection, install: {} });
+    if (!queued.operation) throw new Error('Expected operation');
+    await f.service.process(queued.operation.id);
+    vi.mocked(f.hooks.authorize).mockRejectedValue(new DomainError('forbidden'));
+    await f.service.process(queued.operation.id);
+    expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('failed');
+    expect(f.calls).toEqual([]);
+  });
+
+  it('does not autoapply an Install intent when runtime resolution is blocked', async () => {
+    const f = await fixture();
+    vi.mocked(f.hooks.resolveRuntime).mockResolvedValue(null);
+    const queued = await f.service.prepare(f.context, f.serverId, {
+      ...f.selection,
+      install: { backupBefore: false },
+    });
+    if (!queued.operation) throw new Error('Expected operation');
+    await f.service.process(queued.operation.id);
+    expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('blocked');
+    expect(f.calls).toEqual([]);
+  });
+
   it('prepares without game effects, binds a durable manifest, and replays selection idempotently', async () => {
     const f = await fixture();
     const first = await f.prepare();

@@ -32,13 +32,18 @@ export const minecraftModpackPrepareSchema = z
     fileDecisions: z
       .record(minecraftModpackPathSchema, z.enum(['keep-local', 'use-pack']))
       .default({}),
+    install: z.strictObject({ backupBefore: z.boolean().default(false) }).optional(),
     idempotencyKey: key,
   })
   .strict()
-  .refine((value) => value.mode === 'replace' || value.worldPolicy === 'preserve', {
-    path: ['worldPolicy'],
-    message: 'Only explicit replacement may reset worlds',
-  });
+  .refine(
+    (value) =>
+      value.mode === 'replace' || value.worldPolicy === 'preserve' || Boolean(value.install),
+    {
+      path: ['worldPolicy'],
+      message: 'World reset requires explicit replacement or an Install intent',
+    },
+  );
 export type MinecraftModpackSelection = z.infer<typeof minecraftModpackPrepareSchema>;
 export const minecraftModpackApplySchema = z
   .object({

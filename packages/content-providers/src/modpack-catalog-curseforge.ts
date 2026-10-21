@@ -5,6 +5,7 @@ import {
   type ModpackCatalogPageInput,
   type ModpackCatalogSearchInput,
   type ModpackCatalogVersion,
+  modpackCatalogCategoriesSchema,
   modpackCatalogDetailsSchema,
   modpackCatalogProjectsSchema,
   modpackCatalogVersionsSchema,
@@ -198,6 +199,21 @@ export class CurseForgeModpackCatalog implements ModpackCatalog {
         `https://www.curseforge.com/minecraft/modpacks/${encodeURIComponent(p.slug)}`,
     };
   }
+  async categories(signal?: AbortSignal) {
+    const classId = await this.classId(signal);
+    const categories = z
+      .array(z.object({ id: numericId, name: str, classId: numericId.nullable().optional() }))
+      .max(1000)
+      .parse(await this.data(`/categories?gameId=432&classId=${classId}`, signal));
+    return modpackCatalogCategoriesSchema.parse({
+      items: categories
+        .filter(
+          (category) =>
+            category.id !== classId && (category.classId == null || category.classId === classId),
+        )
+        .map((category) => ({ id: String(category.id), name: category.name })),
+    });
+  }
   async search(input: ModpackCatalogSearchInput = {}, signal?: AbortSignal) {
     const { offset, limit } = pageInput(input);
     const params = new URLSearchParams({
@@ -209,6 +225,7 @@ export class CurseForgeModpackCatalog implements ModpackCatalog {
       sortField: '2',
       sortOrder: 'desc',
     });
+    if (input.category) params.set('categoryId', String(cfId(input.category)));
     const raw = z
       .object({
         data: z.array(projectSchema).max(50),

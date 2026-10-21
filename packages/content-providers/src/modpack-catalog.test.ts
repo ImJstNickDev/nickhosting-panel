@@ -77,6 +77,28 @@ describe('Modrinth modpack catalog', () => {
     expect(JSON.stringify(results)).not.toContain('cdn.modrinth.com/pack.mrpack');
     expect(results[0]).toMatchObject({ items: [{ id: 'pack', provider: 'modrinth' }] });
   });
+  it('filters discovery to server environments and the selected category before pagination', async () => {
+    const { catalog, json } = modrinth();
+    await catalog.search({ category: 'adventure' });
+    const url = new URL(json.mock.calls[0]?.[0] ?? '');
+    const facets = JSON.parse(url.searchParams.get('facets') ?? 'null');
+    expect(facets).toContainEqual(['categories:adventure']);
+    expect(facets[1]).toContain('environment:client_and_server');
+    expect(facets[1]).not.toContain('environment:client_only');
+    expect(facets[1]).not.toContain('environment:singleplayer_only');
+  });
+  it('discovers only modpack categories without exposing upstream SVG', async () => {
+    const mock = transport({
+      'api.modrinth.com/v2/tag/category': [
+        { name: 'adventure', project_type: 'modpack', icon: '<svg />' },
+        { name: 'utility', project_type: 'mod' },
+      ],
+    });
+    const catalog = createModpackCatalog('modrinth', { http: mock.http });
+    expect(await catalog.categories?.()).toEqual({
+      items: [{ id: 'adventure', name: 'adventure' }],
+    });
+  });
   it('retains exact selected archive and leaves loader version to the manifest', async () => {
     const { catalog, http, json } = modrinth();
     const recipe = await catalog.resolve('pack', 'v1');
@@ -522,5 +544,33 @@ describe('bounded catalog metadata cache', () => {
     ).rejects.toThrow();
     expect(await cache.get('a', async () => 1)).toBe(1);
     await expect(cache.get('a', async () => 2, AbortSignal.abort())).rejects.toThrow();
+  });
+});
+
+describe('CurseForge modpack category filtering', () => {
+  it('uses the provider category taxonomy and search categoryId, without a fictitious server-pack filter', async () => {
+    const json = vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.pathname.endsWith('/categories'))
+        return {
+          data: url.searchParams.has('classesOnly')
+            ? [{ id: 4471, slug: 'modpacks' }]
+            : [
+                { id: 4472, classId: 4471, name: 'Tech' },
+                { id: 99, classId: 6, name: 'Other' },
+              ],
+        };
+      return { data: [], pagination: { totalCount: 0 } };
+    });
+    const http: ContentHttp = { json, text: vi.fn(), download: vi.fn() };
+    const catalog = createModpackCatalog('curseforge', {
+      http,
+      curseforge: new CurseForgeProvider(http, { apiKey: 'fixture' }),
+    });
+    expect(await catalog.categories?.()).toEqual({ items: [{ id: '4472', name: 'Tech' }] });
+    await catalog.search({ category: '4472' });
+    const url = new URL(json.mock.calls.at(-1)?.[0] ?? '');
+    expect(url.searchParams.get('categoryId')).toBe('4472');
+    expect(url.searchParams.has('isServerPack')).toBe(false);
   });
 });

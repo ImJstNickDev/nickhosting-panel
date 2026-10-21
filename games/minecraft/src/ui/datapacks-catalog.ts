@@ -1,5 +1,6 @@
 /** The Minecraft integration owns its datapack vocabulary. */
 export const minecraftDatapacksMessages: Record<string, [string, string]> = {
+  'datapacks.backToInstalled': ['Back to installed datapacks', 'Torna ai datapack installati'],
   'datapacks.dependencies.dependency': ['Dependency', 'Dipendenza'],
   'datapacks.dependencies.hide': ['Hide preparation', 'Nascondi preparazione'],
   'datapacks.dependencies.removeQueue': ['Remove from queue', 'Rimuovi dalla coda'],

@@ -89,6 +89,22 @@ describe('Modpack UI controller', () => {
       body,
     });
   });
+  it('sends an explicit durable install intent with backup disabled by default', async () => {
+    const { controller, request } = setup();
+    await controller.install(server, {
+      provider: 'modrinth',
+      projectId: 'pack',
+      versionId: 'v1',
+      mode: 'replace',
+      worldPolicy: 'reset',
+      fileDecisions: {},
+      idempotencyKey: 'install1',
+    });
+    expect(request).toHaveBeenCalledWith(`/v1/servers/${server}/minecraft/modpacks/prepare`, {
+      method: 'POST',
+      body: expect.objectContaining({ install: { backupBefore: false }, worldPolicy: 'reset' }),
+    });
+  });
   it('forbids world reset for an update before transport', () => {
     const { controller, request } = setup();
     expect(() =>

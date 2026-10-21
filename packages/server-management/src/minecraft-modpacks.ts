@@ -489,6 +489,9 @@ export function createMinecraftModpacksService(options: {
           projectId: selection.projectId,
           versionId: selection.versionId,
           mode: selection.mode,
+          ...(selection.install
+            ? { install: true, backupBefore: selection.install.backupBefore }
+            : {}),
         });
         await notifyJobOutbox(tx);
       });
@@ -772,18 +775,46 @@ export function createMinecraftModpacksService(options: {
                 runtime,
               });
               await check();
+              const planDigest = modpackDigest({ prepared, plan });
+              const install = selection.install && !plan.blockers.length && plan.runtime;
+              const applyRequest = install
+                ? minecraftModpackApplySchema.parse({
+                    operationId,
+                    planDigest,
+                    confirm: true,
+                    backupBefore: selection.install?.backupBefore ?? false,
+                    expectedDeletePaths: plan.remove,
+                    idempotencyKey: selection.idempotencyKey,
+                  })
+                : null;
+              // Persist the exact resolved plan and the original Install intent together.
+              // The apply worker reauthorizes this actor before any server effect.
               await update({
-                state: plan.blockers.length ? 'blocked' : 'ready',
+                state: plan.blockers.length ? 'blocked' : install ? 'apply_queued' : 'ready',
+                ...(applyRequest
+                  ? {
+                      apply_request: JSON.stringify(applyRequest),
+                      apply_actor_user_id: claimed.actor_user_id,
+                      apply_actor_session_id: claimed.actor_session_id,
+                      apply_subject_user_id: claimed.subject_user_id,
+                      apply_support_session_id: claimed.support_session_id,
+                      apply_idempotency_key: selection.idempotencyKey,
+                    }
+                  : {}),
                 phase: 'ready',
                 prepared: JSON.stringify(prepared),
                 plan: JSON.stringify(plan),
-                plan_digest: modpackDigest({ prepared, plan }),
+                plan_digest: planDigest,
                 blockers: JSON.stringify(plan.blockers),
                 error: null,
                 lease_token: null,
                 lease_until: null,
                 updated_at: new Date(),
               });
+              if (applyRequest) {
+                await notifyJobOutbox(db);
+                wake();
+              }
             } else {
               const prepared = preparedModpackSchema.parse(claimed.prepared);
               const plan = modpackPlanSchema.parse(claimed.plan);

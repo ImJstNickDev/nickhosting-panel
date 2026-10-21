@@ -395,16 +395,16 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
     ).toBeEnabled();
     expect((await provider.files()).has('world/datapacks/browser.zip')).toBe(true);
   });
-  it('prepares selected catalog files in background while browsing, and preserves the queue when the dialog closes', async () => {
+  it('prepares selected catalog files in background while browsing, and preserves the queue when returning to installed datapacks', async () => {
     let release = () => {};
     downloadGate = new Promise<void>((resolve) => {
       release = resolve;
     });
     try {
       await user.getByRole('button', { name: 'Find datapacks', exact: true }).click();
-      const dialog = user.getByRole('dialog', { name: 'Find datapacks', exact: true });
+      const dialog = user.getByRole('region', { name: 'Find datapacks', exact: true });
       await dialog.getByRole('button', { name: /Catalog pack/ }).click();
-      const files = user.getByRole('dialog', { name: 'Catalog pack', exact: true });
+      const files = user.getByRole('region', { name: 'Catalog pack', exact: true });
       await files
         .getByRole('listitem')
         .filter({ hasText: 'Pack first' })
@@ -413,9 +413,9 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
       await expect.poll(() => download.mock.calls.length).toBe(1);
       await files.getByRole('button', { name: 'Back to results', exact: true }).click();
       await browserExpect(
-        user.getByRole('dialog', { name: 'Find datapacks', exact: true }),
+        user.getByRole('region', { name: 'Find datapacks', exact: true }),
       ).toBeVisible();
-      await user.keyboard.press('Escape');
+      await user.getByRole('button', { name: 'Back to installed datapacks', exact: true }).click();
       await browserExpect(
         user.getByRole('region', { name: 'Preparing datapacks', exact: true }),
       ).toBeVisible();
@@ -458,10 +458,10 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
     const before = download.mock.calls.length;
     await user.getByRole('button', { name: 'Find datapacks', exact: true }).click();
     await user
-      .getByRole('dialog', { name: 'Find datapacks', exact: true })
+      .getByRole('region', { name: 'Find datapacks', exact: true })
       .getByRole('button', { name: /Catalog pack/ })
       .click();
-    const files = user.getByRole('dialog', { name: 'Catalog pack', exact: true });
+    const files = user.getByRole('region', { name: 'Catalog pack', exact: true });
     await files
       .getByRole('listitem')
       .filter({ hasText: 'Pack blocked' })
@@ -519,10 +519,10 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
     await user.reload();
     await user.getByRole('button', { name: 'Find datapacks', exact: true }).click();
     await user
-      .getByRole('dialog', { name: 'Find datapacks', exact: true })
+      .getByRole('region', { name: 'Find datapacks', exact: true })
       .getByRole('button', { name: /Catalog pack/ })
       .click();
-    const catalog = user.getByRole('dialog', { name: 'Catalog pack', exact: true });
+    const catalog = user.getByRole('region', { name: 'Catalog pack', exact: true });
     await catalog
       .getByRole('listitem')
       .filter({ hasText: 'Pack second' })
@@ -629,10 +629,10 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
     ).toBeVisible();
     await user.getByRole('button', { name: 'Trova datapack', exact: true }).click();
     await user
-      .getByRole('dialog', { name: 'Trova datapack', exact: true })
+      .getByRole('region', { name: 'Trova datapack', exact: true })
       .getByRole('button', { name: /Catalog pack/ })
       .click();
-    const catalog = user.getByRole('dialog', { name: 'Catalog pack', exact: true });
+    const catalog = user.getByRole('region', { name: 'Catalog pack', exact: true });
     await catalog
       .getByRole('listitem')
       .filter({ hasText: 'Pack blocked' })
@@ -718,19 +718,25 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
     });
     try {
       await user.goto(route());
+      // Earlier journeys install another version of this project in world. Keep this
+      // transport-error test on the untouched world, without bypassing the planner.
+      await user
+        .getByRole('combobox', { name: 'World', exact: true })
+        .selectOption('archive-world');
       await user.getByRole('button', { name: 'Find datapacks', exact: true }).click();
       await user
-        .getByRole('dialog', { name: 'Find datapacks', exact: true })
+        .getByRole('region', { name: 'Find datapacks', exact: true })
         .getByRole('button', { name: /Catalog pack/ })
         .click();
       await user
-        .getByRole('dialog', { name: 'Catalog pack', exact: true })
+        .getByRole('region', { name: 'Catalog pack', exact: true })
         .getByRole('listitem')
         .filter({ hasText: 'Pack first' })
         .getByRole('button', { name: 'Prepare this file', exact: true })
         .click();
       await expect.poll(() => attempts).toBe(1);
-      await user.keyboard.press('Escape');
+      await user.getByRole('button', { name: 'Back to results', exact: true }).click();
+      await user.getByRole('button', { name: 'Back to installed datapacks', exact: true }).click();
       const row = user
         .getByRole('region', { name: 'Preparing datapacks', exact: true })
         .locator('.datapack-change')
