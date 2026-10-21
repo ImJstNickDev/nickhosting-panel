@@ -1,4 +1,10 @@
 import { parse as parseToml } from 'smol-toml';
+import {
+  type JarArchiveEntry,
+  type JarArchiveReader,
+  type JarMetadataIssue,
+  readJarDescriptors,
+} from './jar-descriptors.js';
 
 export type ModLoader = 'fabric' | 'quilt' | 'forge' | 'neoforge' | 'forge-neoforge';
 export type ModEnvironment = 'client' | 'server' | 'both';
@@ -33,37 +39,15 @@ export interface ModMetadata {
   dependencies: ModDependency[];
   iconPath?: string;
 }
-export interface ModMetadataIssue {
-  source: string;
-  code:
-    | 'invalid_metadata'
-    | 'too_large'
-    | 'unsupported_schema'
-    | 'unsafe_path'
-    | 'unresolved_version';
-}
+export type ModMetadataIssue = JarMetadataIssue;
 export interface ModArchiveMetadata {
   mods: ModMetadata[];
   issues: ModMetadataIssue[];
   sources: string[];
 }
-export interface ModArchiveReader {
-  list(
-    directory: string,
-    signal: AbortSignal,
-    query?: string,
-  ): Promise<{ entries: readonly ModArchiveEntry[]; total: number }>;
-  read(path: string, maxBytes: number, signal: AbortSignal): Promise<Uint8Array>;
-}
-export interface ModArchiveEntry {
-  name: string;
-  path: string;
-  directory: boolean;
-  size: number;
-}
+export type ModArchiveReader = JarArchiveReader;
+export type ModArchiveEntry = JarArchiveEntry;
 
-const descriptorLimit = 256 * 1024;
-const totalLimit = 1024 * 1024;
 const itemLimit = 256;
 const rootDescriptors = ['fabric.mod.json', 'quilt.mod.json', 'quilt.mod.json5', 'mcmod.info'];
 const metaDescriptors = ['mods.toml', 'neoforge.mods.toml'];
@@ -486,76 +470,19 @@ export async function readModArchive(
   archive: ModArchiveReader,
   signal: AbortSignal,
 ): Promise<ModArchiveMetadata> {
-  signal.throwIfAborted();
-  const result: ModArchiveMetadata = { mods: [], issues: [], sources: [] };
+  const { sources, texts, issues, remaining } = await readJarDescriptors(
+    archive,
+    signal,
+    [...rootDescriptors, ...metaDescriptors.map((name) => `META-INF/${name}`)],
+    { unsupported: ['quilt.mod.json5'] },
+  );
+  const result: ModArchiveMetadata = { mods: [], issues, sources };
   const issue: Issue = (source, code) => {
     if (!result.issues.some((entry) => entry.source === source && entry.code === code))
       result.issues.push({ source, code });
   };
-  const known = new Map<string, ModArchiveEntry>();
-  async function find(directory: string, names: readonly string[]) {
-    const first = await archive.list(directory, signal);
-    const prefix = directory ? `${directory}/` : '';
-    const exact = (entries: readonly ModArchiveEntry[], name: string) =>
-      entries.find((entry) => entry.name === name && entry.path === `${prefix}${name}`);
-    await Promise.all(
-      names.map(async (name) => {
-        let found = exact(first.entries, name);
-        if (!found && first.total > first.entries.length) {
-          const filtered = await archive.list(directory, signal, name);
-          found = exact(filtered.entries, name);
-          if (!found && filtered.total > filtered.entries.length)
-            issue(`${prefix}${name}`, 'too_large');
-        }
-        if (found) known.set(found.path, found);
-      }),
-    );
-  }
-  await find('', [...rootDescriptors, 'META-INF']);
-  if (known.get('META-INF')?.directory) await find('META-INF', metaDescriptors);
-  const descriptors = [...rootDescriptors, ...metaDescriptors.map((name) => `META-INF/${name}`)]
-    .map((path) => known.get(path))
-    .filter((entry): entry is ModArchiveEntry => !!entry && !entry.directory);
-  let remaining = totalLimit;
-  const texts = new Map<string, string>();
-  const reads: Promise<void>[] = [];
-  for (const descriptor of descriptors) {
-    result.sources.push(descriptor.path);
-    if (descriptor.path === 'quilt.mod.json5') {
-      // Quilt only accepts JSON5 under a development-only loader flag.
-      issue(descriptor.path, 'unsupported_schema');
-      continue;
-    }
-    if (
-      !Number.isSafeInteger(descriptor.size) ||
-      descriptor.size < 0 ||
-      descriptor.size > Math.min(descriptorLimit, remaining)
-    ) {
-      issue(descriptor.path, 'too_large');
-      continue;
-    }
-    remaining -= descriptor.size;
-    reads.push(
-      (async () => {
-        const bytes = await archive.read(descriptor.path, descriptorLimit, signal);
-        signal.throwIfAborted();
-        if (bytes.byteLength > descriptorLimit || bytes.byteLength > descriptor.size) {
-          issue(descriptor.path, 'too_large');
-          return;
-        }
-        try {
-          texts.set(descriptor.path, new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-        } catch {
-          issue(descriptor.path, 'invalid_metadata');
-        }
-      })(),
-    );
-  }
-  await Promise.all(reads);
-  signal.throwIfAborted();
   const parsed = new Map<string, unknown>();
-  for (const descriptor of descriptors) {
-    const source = descriptor.path;
+  for (const source of sources) {
     const value = texts.get(source);
     if (value === undefined) continue;
     try {

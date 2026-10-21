@@ -14,6 +14,11 @@ cancellation and personal-default precedence. Game-specific matching and metadat
 interpretation do not enter the shell or backend. See
 [Modscope formats and boundaries](../M5-MINECRAFT-MODS-VIEWER.md).
 
+Plugscope follows the same contract for plugin JARs. Both viewers share a bounded
+descriptor reader and presentation components within Minecraft; their format
+interpretation stays separate. No plugin-specific branches were added to Fileman,
+the SDK or the backend. See [Plugscope](../M5-MINECRAFT-PLUGINS-VIEWER.md).
+
 ## Decision
 
 The file manager has one viewer engine. It owns access, cancellation, selection,

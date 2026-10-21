@@ -10,6 +10,15 @@ export function matchesMinecraftMod(source: GameViewerSource) {
   );
 }
 
+export function matchesMinecraftPlugin(source: GameViewerSource) {
+  return (
+    source.gameId === 'minecraft' &&
+    !source.entry &&
+    !source.archives?.length &&
+    /^\/?plugins\/(?:[^/]+\/)*[^/]+\.jar(?:\.(?:disabled|pending))?$/i.test(source.path)
+  );
+}
+
 export const minecraftViewers = [
   defineTrustedGameViewer(
     {
@@ -21,5 +30,16 @@ export const minecraftViewers = [
     },
     () => import('./mod-viewer.js'),
     matchesMinecraftMod,
+  ),
+  defineTrustedGameViewer(
+    {
+      id: 'minecraft:plugscope',
+      gameId: 'minecraft',
+      labelKey: 'games.minecraft.viewers.plugscope.name',
+      extensions: ['jar', 'jar.disabled', 'jar.pending'],
+      readOnly: true,
+    },
+    () => import('./plugin-viewer.js'),
+    matchesMinecraftPlugin,
   ),
 ] as const;

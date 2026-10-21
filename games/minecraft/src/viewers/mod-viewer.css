@@ -348,3 +348,84 @@
     margin-top: 16px;
   }
 }
+
+/* Plugscope contributes descriptor-specific content to the shared JAR viewer shell. */
+.mc-plugscope-art {
+  color: var(--blue);
+}
+.mc-plugscope-dependency {
+  flex-direction: column;
+}
+.mc-plugscope-dependency-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.mc-plugscope-inventory,
+.mc-plugscope-technical {
+  margin-top: 24px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+  font-size: 13px;
+}
+.mc-plugscope-inventory > summary,
+.mc-plugscope-technical > summary {
+  cursor: pointer;
+  padding-block: 4px;
+  font-weight: 650;
+}
+.mc-plugscope-inventory > summary > span {
+  margin-left: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+}
+.mc-plugscope-inventory-body {
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-top: 12px;
+  padding-right: 8px;
+}
+.mc-plugscope-entry {
+  border-bottom: 1px solid var(--line);
+  padding-block: 11px;
+  font-size: 12px;
+}
+.mc-plugscope-entry summary {
+  cursor: pointer;
+  line-height: 1.6;
+}
+.mc-plugscope-entry summary > span {
+  display: block;
+  color: var(--muted);
+  margin: 5px 0 0 15px;
+}
+.mc-plugscope-entry dl,
+.mc-plugscope-technical dl {
+  margin: 16px 0 0 15px;
+  display: grid;
+  gap: 14px;
+}
+.mc-plugscope-entry p {
+  margin: 12px 0 0 15px;
+  line-height: 1.7;
+}
+.mc-plugscope-technical dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+.mc-plugscope-default {
+  color: var(--muted);
+  margin-block: 0 12px;
+  font-size: 12px;
+}
+@media (max-width: 680px) {
+  .mc-plugscope .mc-modscope-requirement {
+    flex: 0 1 38%;
+  }
+}

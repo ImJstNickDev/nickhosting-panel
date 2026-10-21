@@ -5,6 +5,10 @@ viewer: bounded JAR metadata inspection through Fileman's shared archive host.
 Its supported loader descriptors and primary-source references are documented
 there; it is not a builtin or an installation/compatibility checker.
 
+[Plugscope](M5-MINECRAFT-PLUGINS-VIEWER.md) extends the same integration-owned
+model to Bukkit/Spigot, Paper, BungeeCord and Velocity descriptors, sharing
+Minecraft's descriptor reader and UI components with Modscope.
+
 Quill adds the shared Markdown view; its syntax, Obsidian link/inclusion behavior,
 resource budgets and dependency decisions are specified in [M5 Quill](M5-QUILL.md).
 
