@@ -63,3 +63,17 @@ settings are created by activation. No production deployment or M6 work.
 Rollback only this change and retain the additive Paper catalog/schema. Preserve
 all game/profile/runtime records. Once Paper servers exist, retain Paper-capable
 code pending review rather than reverting their supported runtime.
+
+## Development activation — 2026-10-21
+
+Owner-approved activation applied only migration048. The existing worker populated
+all68 Paper versions automatically and scheduled the next refresh15minutes later.
+Only the development Gateway was restarted to load the compiled Paper declaration;
+API/worker/UI used their existing development reload path.
+
+Authenticated Firefox checks on the real development app passed: HTTPS200,
+Paper catalog200 with68versions, secure HMR, no JavaScript errors or horizontal
+mobile overflow. All11 development containers are healthy; their IDs, images,
+mounts, networks and ports are unchanged. Panel/Wings were neither changed nor
+restarted. Existing accounts, managed servers and mappings were preserved.
+No Paper mapping or game server was created: the Owner setup above is the next step.
