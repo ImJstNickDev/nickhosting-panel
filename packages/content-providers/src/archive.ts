@@ -88,15 +88,17 @@ async function visitZip(
   });
   let total = 0;
   let count = 0;
+  const maxEntries = metadataNames ? limits.maxJarEntries : limits.maxEntries;
   const seen = new Set<string>();
   try {
+    if (zip.entryCount > maxEntries) fail('archive_budget');
     await new Promise<void>((resolve, reject) => {
       zip.on('error', reject);
       zip.on('end', resolve);
       zip.on('entry', (entry: Entry) => {
         void (async () => {
           count++;
-          if (count > limits.maxEntries) fail('archive_budget');
+          if (count > maxEntries) fail('archive_budget');
           // Valid JARs can contain case-sensitive resource names and repeated
           // unrelated META-INF records. They are not files we will extract.
           if (metadataNames && !metadataNames.has(entry.fileName)) return;

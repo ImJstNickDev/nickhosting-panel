@@ -65,12 +65,40 @@ describe('JAR metadata inspection', () => {
       details: { contentReason: 'archive_duplicate' },
     });
   });
+  it('scans large JAR inventories without increasing the extraction entry limit', async () => {
+    const path = await jar([
+      ...Array.from({ length: 20001 }, (_, index): [string, string] => [
+        `assets/resource-${index}.json`,
+        '{}',
+      ]),
+      ['fabric.mod.json', JSON.stringify({ id: 'largemod', environment: '*' })],
+    ]);
+    expect(await inspectJarMetadata(path)).toEqual({
+      environment: 'both',
+      fabric: { id: 'largemod' },
+    });
+    let visited = false;
+    await expect(
+      visitArchive(path, async () => {
+        visited = true;
+      }),
+    ).rejects.toMatchObject({ details: { contentReason: 'archive_budget' } });
+    expect(visited).toBe(false);
+  });
+  it('rejects a JAR over its separate entry cap before reading selected metadata', async () => {
+    const path = await jar([
+      ['fabric.mod.json', 'malformed JSON must never be read'],
+      ['opaque/a.txt', 'a'],
+      ['opaque/b.txt', 'b'],
+    ]);
+    await expect(inspectJarMetadata(path, { maxJarEntries: 2 })).rejects.toMatchObject({
+      details: { contentReason: 'archive_budget' },
+    });
+  });
   it('bounds skipped entry count and the metadata actually read', async () => {
-    await expect(inspectJarMetadata(await jar(resources), { maxEntries: 2 })).rejects.toMatchObject(
-      {
-        details: { contentReason: 'archive_budget' },
-      },
-    );
+    await expect(
+      inspectJarMetadata(await jar(resources), { maxJarEntries: 2 }),
+    ).rejects.toMatchObject({ details: { contentReason: 'archive_budget' } });
     const path = await jar([
       ['fabric.mod.json', JSON.stringify({ id: 'testmod', version: 'x'.repeat(2000) })],
     ]);

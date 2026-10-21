@@ -109,6 +109,8 @@ export const contentPlanSchema = z
 export type ContentPlan = z.infer<typeof contentPlanSchema>;
 export interface ContentLimits {
   maxEntries: number;
+  /** Central-directory records scanned without extracting opaque JAR resources. */
+  maxJarEntries: number;
   maxArchiveBytes: number;
   maxExpandedBytes: number;
   maxFileBytes: number;
@@ -118,6 +120,7 @@ export interface ContentLimits {
 }
 export const defaultContentLimits: ContentLimits = {
   maxEntries: 20000,
+  maxJarEntries: 250000,
   maxArchiveBytes: 8 * 1024 ** 3,
   maxExpandedBytes: 16 * 1024 ** 3,
   maxFileBytes: 8 * 1024 ** 3,
