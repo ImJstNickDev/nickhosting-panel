@@ -26,6 +26,7 @@ export * from './minecraft-content.js';
 export * from './minecraft-metadata.js';
 export * from './minecraft-registry.js';
 export * from './minecraft-sources.js';
+export * from './paper-catalog.js';
 export * from './platform-queries.js';
 export { ensureProviderAccounts, resolveProviderCredential } from './provider-accounts.js';
 export * from './provider-backup-events.js';

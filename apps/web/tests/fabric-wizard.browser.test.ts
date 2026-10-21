@@ -13,10 +13,12 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 
 const id = '10000000-0000-4000-8000-000000000001';
 const fabricId = `fabric:${id}:26.1`;
+const paperId = `paper:${id}:26.1`;
 /** Actual wizard and integration module; local API catalog/creation responses are isolated. */
 describe('Fabric independent catalog wizard', () => {
   let vite: ViteDevServer, browser: Browser, context: BrowserContext, page: Page, origin: string;
   let reads: string[], writes: Array<{ path: string; body: unknown }>, errors: string[];
+  let paperOnly: boolean;
   beforeAll(async () => {
     vite = await createServer({
       root: `${process.cwd()}/apps/web`,
@@ -39,6 +41,7 @@ describe('Fabric independent catalog wizard', () => {
     reads = [];
     writes = [];
     errors = [];
+    paperOnly = false;
     context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     page = await context.newPage();
     page.on('pageerror', (error) => errors.push(error.message));
@@ -73,7 +76,7 @@ describe('Fabric independent catalog wizard', () => {
           {
             id: 'minecraft',
             access: { canCreate: true },
-            manifest: { runtimes: ['vanilla', 'fabric'] },
+            manifest: { runtimes: paperOnly ? ['paper'] : ['vanilla', 'fabric'] },
           },
         ]);
       if (path === '/v1/platform/quotas')
@@ -107,16 +110,28 @@ describe('Fabric independent catalog wizard', () => {
           expiresAt: new Date(Date.now() + 900000).toISOString(),
         });
       if (path === '/v1/minecraft/choices')
-        return response([
-          { id, version: '26.1', runtime: 'vanilla', releaseType: 'release' },
-          { id: fabricId, version: '26.1', runtime: 'fabric', releaseType: 'release' },
-          {
-            id: `fabric:${id}:1.16.5`,
-            version: '1.16.5',
-            runtime: 'fabric',
-            releaseType: 'release',
-          },
-        ]);
+        return response(
+          paperOnly
+            ? [
+                { id: paperId, version: '26.1', runtime: 'paper', releaseType: 'release' },
+                {
+                  id: `paper:${id}:1.21.11`,
+                  version: '1.21.11',
+                  runtime: 'paper',
+                  releaseType: 'release',
+                },
+              ]
+            : [
+                { id, version: '26.1', runtime: 'vanilla', releaseType: 'release' },
+                { id: fabricId, version: '26.1', runtime: 'fabric', releaseType: 'release' },
+                {
+                  id: `fabric:${id}:1.16.5`,
+                  version: '1.16.5',
+                  runtime: 'fabric',
+                  releaseType: 'release',
+                },
+              ],
+        );
       if (path === '/v1/minecraft/fabric/catalog')
         return response({
           latestInstallerVersion: '1.1.2',
@@ -224,6 +239,72 @@ describe('Fabric independent catalog wizard', () => {
     expect(reads.filter((path) => path === '/v1/minecraft/choices')).toHaveLength(1);
     expect(reads.filter((path) => path === '/v1/minecraft/fabric/catalog')).toHaveLength(1);
   });
+  it.each(['en', 'it'] as const)(
+    'creates Paper with only a Minecraft version in %s',
+    async (locale) => {
+      paperOnly = true;
+      if (locale === 'it') {
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.addInitScript(() => localStorage.setItem('nh.locale', 'it'));
+      }
+      await page.goto(`${origin}domains-fixture?view=wizard`);
+      await page.getByRole('button', { name: 'Minecraft', exact: true }).click();
+      await next(locale);
+      const paper = page.getByRole('radio', { name: 'Paper', exact: true });
+      await paper.focus();
+      await paper.press('Space');
+      await check(paper).toBeChecked();
+      await next(locale);
+      await page
+        .getByLabel(locale === 'it' ? 'Nome del server' : 'Server name', { exact: true })
+        .fill('Paper fixture');
+      await next(locale);
+      await page
+        .locator('.installer-version')
+        .filter({ has: page.getByRole('radio', { name: '26.1', exact: true }) })
+        .click();
+      await check(page.getByRole('radio', { name: '1.21.11', exact: true })).toBeVisible();
+      await check(page.getByLabel(/Loader|Build/i)).toHaveCount(0);
+      await page.screenshot({
+        path: `.codex/local/m5-browser/screenshots/paper-wizard-version-${locale}.png`,
+        fullPage: true,
+      });
+      expect(
+        (
+          await new AxeBuilder({ page })
+            .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+            .analyze()
+        ).violations,
+      ).toEqual([]);
+      await next(locale);
+      await check(
+        page.getByRole('heading', {
+          name: locale === 'it' ? 'Scegli un indirizzo' : 'Choose an address',
+          exact: true,
+        }),
+      ).toBeVisible();
+      for (let step = 0; step < 4; step++) await next(locale);
+      await check(page.getByLabel(/Loader|Build/i)).toHaveCount(0);
+      await page
+        .getByRole('button', {
+          name: locale === 'it' ? 'Crea server' : 'Create server',
+          exact: true,
+        })
+        .click();
+      await check(page.getByTestId('created-console')).toHaveText(`/servers/${id}/console`);
+      const body = writes.at(-1)?.body as { minecraft: Record<string, unknown> };
+      expect(body.minecraft).toMatchObject({ choiceId: paperId, configuration: { eula: true } });
+      expect(body.minecraft).not.toHaveProperty('loaderVersion');
+      expect(body.minecraft).not.toHaveProperty('buildId');
+      expect(reads.filter((path) => path === '/v1/minecraft/choices')).toHaveLength(1);
+      expect(reads.some((path) => path.includes('/catalog'))).toBe(false);
+      expect(writes.map(({ path }) => path)).toEqual([
+        '/v1/games/minecraft/connection-suggestion',
+        '/v1/games/minecraft/connection-reservation',
+        '/v1/minecraft/servers',
+      ]);
+    },
+  );
   it('retains Loader choice across Minecraft changes and removes the step after returning to Vanilla', async () => {
     await open();
     await page

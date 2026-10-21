@@ -1,7 +1,8 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import {
+  fetchPaperCatalog,
   minecraftDigest,
   minecraftManifest,
   minecraftVerificationChecks,
@@ -1089,6 +1090,177 @@ describe('Minecraft backend API authorization and user projection', () => {
         })
       ).status,
     ).toBe(409);
+  });
+  it('restricts Paper discovery refresh to Owners and queues without contacting providers', async () => {
+    const endpoint = '/v1/owner/minecraft/paper/catalog';
+    expect((await app.request(endpoint)).status).toBe(403);
+    actor = fixture.owner;
+    expect((await app.request(endpoint)).status).toBe(200);
+    expect((await post(endpoint, {})).status).toBe(202);
+    expect(management).not.toHaveBeenCalled();
+    expect(
+      (
+        await fixture.db
+          .selectFrom('minecraft_metadata_sync')
+          .select('requested_at')
+          .where('id', '=', 'paper')
+          .executeTakeFirstOrThrow()
+      ).requested_at,
+    ).not.toBeNull();
+  });
+  it('creates Paper with latest cached build and preserves retry identity across build updates', async () => {
+    const id = await eligibleChoice(false);
+    Object.assign(routeEnv, {
+      NH_GATEWAY_ENABLED: 'true',
+      NH_GATEWAY_ID: randomUUID(),
+      NH_GATEWAY_PHYSICAL_HOST_ID: fixture.hostId,
+    });
+    // Match a Gateway-only deployment: no public direct endpoint is configured.
+    await fixture.db
+      .updateTable('managed_nodes')
+      .set({
+        backend_allocation_pool: JSON.stringify(fixture.backendAllocationPool),
+      })
+      .where('id', '=', fixture.nodeId)
+      .execute();
+    await fixture.db
+      .updateTable('runtime_egg_mappings')
+      .set({
+        runtime_id: 'paper',
+        port_roles: JSON.stringify([{ role: 'game', protocols: ['tcp'], primary: true }]),
+      })
+      .where('id', '=', fixture.mappingId)
+      .execute();
+    const mapping = await fixture.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', fixture.mappingId)
+      .executeTakeFirstOrThrow();
+    const old = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirstOrThrow();
+    const combination = {
+      ...(old.combination as Record<string, unknown>),
+      profile: 'paper',
+      buildId: '100',
+    };
+    const runtime = {
+      ...(old.resolved_runtime as Record<string, unknown>),
+      profile: 'paper',
+      buildId: 100,
+      installation: { kind: 'server-jar', args: [] },
+    };
+    const binding = {
+      ...(old.binding as Record<string, unknown>),
+      profile: 'paper',
+      installationKind: 'server-jar',
+      declaredEggVariables: ['MINECRAFT_VERSION', 'BUILD_NUMBER'],
+      bindings: { release: 'MINECRAFT_VERSION', buildId: 'BUILD_NUMBER' },
+    };
+    await fixture.db
+      .updateTable('minecraft_combinations')
+      .set({
+        combination: JSON.stringify(combination),
+        resolved_runtime: JSON.stringify(runtime),
+        binding: JSON.stringify(binding),
+        mapping_digest: minecraftMappingDigest(mapping),
+        enabled: false,
+      })
+      .where('id', '=', id)
+      .execute();
+    const makeSnapshot = (build: number) =>
+      fetchPaperCatalog({
+        read: async (url) => {
+          const value = url.endsWith('/paper')
+            ? { project: { id: 'paper' }, versions: { '1.21': ['1.21.1'] } }
+            : url.includes('/builds/')
+              ? {
+                  id: build,
+                  time: '2026-10-20T00:00:00Z',
+                  channel: 'STABLE',
+                  downloads: {
+                    'server:default': {
+                      url: `https://fill-data.papermc.io/v1/objects/${'a'.repeat(64)}/paper.jar`,
+                      size: 1,
+                      checksums: { sha256: 'a'.repeat(64) },
+                    },
+                  },
+                }
+              : { version: { id: '1.21.1', java: { version: { minimum: 21 } } }, builds: [build] };
+          const bytes = Buffer.from(JSON.stringify(value));
+          return {
+            bytes,
+            evidence: {
+              url,
+              sha256: createHash('sha256').update(bytes).digest('hex'),
+              retrievedAt: new Date().toISOString(),
+            },
+          };
+        },
+      });
+    const snapshot = await makeSnapshot(100);
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({ manifest_json: JSON.stringify(snapshot), last_success_at: new Date() })
+      .where('id', '=', 'paper')
+      .execute();
+    const choiceId = `paper:${fixture.mappingId}:1.21.1`;
+    const choices = await (await app.request('/v1/minecraft/choices')).json();
+    expect(choices.find((choice: { id: string }) => choice.id === choiceId)).toMatchObject({
+      capabilities: { gateway: true, sleepWake: true },
+    });
+    const input = {
+      ...createInput(choiceId),
+      minecraft: createInput(choiceId).minecraft,
+    };
+    const response = await post('/v1/minecraft/servers', input);
+    expect(await response.clone().json()).not.toHaveProperty('code');
+    expect(response.status).toBe(202);
+    const created = await response.json();
+    const profile = await fixture.db
+      .selectFrom('minecraft_server_profiles')
+      .select('combination_id')
+      .where('server_id', '=', created.serverId)
+      .executeTakeFirstOrThrow();
+    expect(profile.combination_id).toBe(id);
+    expect(
+      await fixture.db
+        .selectFrom('managed_servers')
+        .select('connection_mode')
+        .where('id', '=', created.serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ connection_mode: 'gateway' });
+    expect(
+      await fixture.db
+        .selectFrom('gateway_routes')
+        .select(['enabled', 'transport'])
+        .where('server_id', '=', created.serverId)
+        .execute(),
+    ).toEqual([{ enabled: false, transport: 'tcp' }]);
+
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({
+        manifest_json: JSON.stringify(await makeSnapshot(101)),
+      })
+      .where('id', '=', 'paper')
+      .execute();
+    management.mockClear();
+    expect(await (await post('/v1/minecraft/servers', input)).json()).toEqual(created);
+    expect(management).not.toHaveBeenCalled();
+    expect((await post('/v1/minecraft/servers', { ...input, name: 'Changed replay' })).status).toBe(
+      409,
+    );
+    expect(
+      (
+        await post('/v1/minecraft/servers', {
+          ...input,
+          minecraft: { ...input.minecraft, loaderVersion: '0.16.9' },
+        })
+      ).status,
+    ).toBe(400);
   });
   it('does not silently ignore Loader selections on registered UUID choices', async () => {
     const choiceId = await eligibleChoice(false);

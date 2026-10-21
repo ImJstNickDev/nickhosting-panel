@@ -186,10 +186,11 @@ export const minecraftCapabilityDeclaration = {
 export const minecraftGatewayDeclarations = {
   vanilla: minecraftCapabilityDeclaration,
   fabric: { id: 'minecraft/fabric', version: 1 },
+  paper: { id: 'minecraft/paper', version: 1 },
 } as const;
 
 export function minecraftGatewayDeclaration(profile: MinecraftCombination['profile']) {
-  return profile === 'vanilla' || profile === 'fabric'
+  return profile === 'vanilla' || profile === 'fabric' || profile === 'paper'
     ? minecraftGatewayDeclarations[profile]
     : undefined;
 }
@@ -218,7 +219,7 @@ export function minecraftDeclaredCapabilities(
     'profile' | 'release' | 'releaseType' | 'family' | 'protocolId'
   >,
 ) {
-  const installation = ['vanilla', 'fabric'].includes(combination.profile);
+  const installation = ['vanilla', 'fabric', 'paper'].includes(combination.profile);
   const gateway = minecraftGatewaySupported(combination);
   const playerIdle =
     gateway &&

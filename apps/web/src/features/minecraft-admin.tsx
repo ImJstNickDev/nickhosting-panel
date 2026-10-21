@@ -18,6 +18,7 @@ import {
 import { PendingCatalogSearch } from './minecraft-admin-navigation.js';
 import { CreationState, MinecraftAdminIcon } from './minecraft-admin-presentation.js';
 import { RegisterCombination } from './minecraft-admin-register.js';
+import { PaperVersionCatalog } from './paper-version-catalog.js';
 import { VersionCatalogFrame } from './version-catalog-frame.js';
 
 export { MinecraftCatalogScan } from './minecraft-admin-scan.js';
@@ -81,6 +82,7 @@ export function OwnerMinecraftPage() {
   const runtime =
     runtimes.find((r) => r.id === params.get('runtime'))?.id ?? runtimes[0]?.id ?? 'vanilla';
   const fabricDiscovery = runtime === 'fabric';
+  const paperDiscovery = runtime === 'paper';
   const fabricKind =
     params.get('fabricKind') === 'loaders'
       ? 'loaders'
@@ -122,7 +124,7 @@ export function OwnerMinecraftPage() {
   };
   const catalog = useQuery<WorkspaceResponse>({
     queryKey: ['owner-minecraft-compatibility', 'workspace', scope, query],
-    enabled: Boolean(mapping) && !fabricDiscovery,
+    enabled: Boolean(mapping) && !fabricDiscovery && !paperDiscovery,
     staleTime: 60_000,
     placeholderData: (previous, previousQuery) =>
       previousQuery?.queryKey[2] === scope ? keepPreviousData(previous) : undefined,
@@ -429,6 +431,8 @@ export function OwnerMinecraftPage() {
       </fieldset>
       {fabricDiscovery ? (
         <FabricVersionCatalog kind={fabricKind} navigation={catalogNavigation} />
+      ) : paperDiscovery ? (
+        <PaperVersionCatalog navigation={catalogNavigation} />
       ) : (
         <>
           <VersionCatalogFrame

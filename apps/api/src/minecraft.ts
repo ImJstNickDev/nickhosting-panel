@@ -19,6 +19,7 @@ import {
   enqueueServerOperation,
   findManagedCreationRequest,
   getFabricCatalog,
+  getPaperCatalog,
   importMinecraftEvidence,
   inspectMinecraftCombination,
   inspectMinecraftWorlds,
@@ -35,8 +36,10 @@ import {
   registerFabricCatalogCombination,
   registerMinecraftCombination,
   requestFabricCatalogRefresh,
+  requestPaperCatalogRefresh,
   requireMinecraftChoice,
   resolveFabricCreationChoice,
+  resolvePaperCreationChoice,
   setMinecraftAvailability,
   setMinecraftBulkAvailability,
   syncFabricRegisteredCatalog,
@@ -108,6 +111,17 @@ export function registerMinecraftRoutes(
     parse(z.object({}).strict(), await body(c));
     c.header('Cache-Control', 'no-store');
     return c.json(await requestFabricCatalogRefresh(db), 202);
+  });
+  app.get('/v1/owner/minecraft/paper/catalog', async (c) => {
+    await owner(c);
+    c.header('Cache-Control', 'no-store');
+    return c.json(await getPaperCatalog(db));
+  });
+  app.post('/v1/owner/minecraft/paper/catalog', async (c) => {
+    await owner(c);
+    parse(z.object({}).strict(), await body(c));
+    c.header('Cache-Control', 'no-store');
+    return c.json(await requestPaperCatalogRefresh(db), 202);
   });
   app.get('/v1/minecraft/fabric/catalog', async (c) => {
     const games = await gameCatalog(db, await principal(c));
@@ -415,9 +429,11 @@ export function registerMinecraftRoutes(
     const context = await principal(c);
     const input = parse(minecraftCreateSchema, await body(c));
     const fabric = input.minecraft.choiceId.startsWith('fabric:');
+    const paper = input.minecraft.choiceId.startsWith('paper:');
+    const catalogChoice = fabric || paper;
     if (fabric !== (input.minecraft.loaderVersion !== undefined))
       throw new DomainError('validation_failed');
-    if (fabric) {
+    if (catalogChoice) {
       const previous = await findManagedCreationRequest(
         db,
         context,
@@ -438,7 +454,15 @@ export function registerMinecraftRoutes(
           },
           env,
         )
-      : await requireMinecraftChoice(db, context, input.minecraft.choiceId, env);
+      : paper
+        ? await resolvePaperCreationChoice(
+            db,
+            (await management()).adapter,
+            context,
+            { choiceId: input.minecraft.choiceId },
+            env,
+          )
+        : await requireMinecraftChoice(db, context, input.minecraft.choiceId, env);
     const { service, options: content } = await contentOptions(context);
     const prepared = await prepareMinecraftCreationConfig(
       db,
@@ -463,7 +487,7 @@ export function registerMinecraftRoutes(
         env,
         {
           minecraftInitialContent: prepared.initialContent,
-          ...(fabric ? { creationRequest: input } : {}),
+          ...(catalogChoice ? { creationRequest: input } : {}),
         },
       ),
       202,

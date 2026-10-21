@@ -1,5 +1,20 @@
 export const minecraftAdminWebMessages: Record<string, readonly [string, string]> = {
   'versions.minecraftVersions': ['Minecraft versions', 'Versioni Minecraft'],
+  'paperCatalog.title': ['Paper versions', 'Versioni Paper'],
+  'paperCatalog.latestBuild': ['Latest build', 'Ultima build'],
+  'paperCatalog.buildPolicy': [
+    'The newest build is selected automatically when creating a server.',
+    'Alla creazione del server viene selezionata automaticamente la build più recente.',
+  ],
+  'paperCatalog.notSynced': [
+    'The Paper catalog has not been synced yet.',
+    'Il catalogo Paper non è ancora stato sincronizzato.',
+  ],
+  'paperCatalog.channel.STABLE': ['Stable', 'Stabile'],
+  'paperCatalog.channel.RECOMMENDED': ['Recommended', 'Consigliata'],
+  'paperCatalog.channel.EXPERIMENTAL': ['Experimental', 'Sperimentale'],
+  'paperCatalog.channel.ALPHA': ['Alpha', 'Alpha'],
+  'paperCatalog.channel.BETA': ['Beta', 'Beta'],
   'fabricCatalog.queued': ['Queued…', 'In coda…'],
   'fabricCatalog.view': ['Fabric version view', 'Vista versioni Fabric'],
   'fabricCatalog.discovery': ['Discovery', 'Catalogo'],

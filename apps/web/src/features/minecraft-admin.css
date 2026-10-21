@@ -737,29 +737,44 @@ fieldset.version-catalog-datasets {
   font-size: 0.75rem;
   font-weight: 500;
 }
-.fabric-version-catalog {
+.fabric-version-catalog,
+.paper-version-catalog {
   min-width: 0;
 }
-.fabric-catalog-table table {
+.fabric-catalog-table table,
+.paper-catalog-table table {
   table-layout: fixed;
 }
-.fabric-catalog-table :where(td) {
+.fabric-catalog-table :where(td),
+.paper-catalog-table :where(td) {
   white-space: normal;
   overflow-wrap: anywhere;
 }
 .fabric-catalog-table th:first-child {
   width: 45%;
 }
+.paper-catalog-table th:first-child {
+  width: 40%;
+}
+.paper-catalog-table th:last-child {
+  width: 20%;
+}
+.paper-build-channel {
+  display: block;
+  font-size: 0.75rem;
+}
 
 .fabric-latest {
   margin-inline-start: 0.6rem;
 }
-.fabric-catalog-table .fabric-catalog-empty {
+.fabric-catalog-table .fabric-catalog-empty,
+.paper-catalog-table .paper-catalog-empty {
   text-align: center;
   padding: 3rem 1rem;
   color: var(--muted);
 }
-.fabric-catalog-status {
+.fabric-catalog-status,
+.paper-catalog-status {
   display: flex;
   flex: 1;
   align-items: center;
@@ -831,21 +846,23 @@ fieldset.version-catalog-datasets {
 
 @media (max-width: 640px) {
   .version-catalog-body
-    .minecraft-versions-table:not(.fabric-catalog-table)
+    .minecraft-versions-table:not(.fabric-catalog-table, .paper-catalog-table)
     :is(th, td):nth-child(3),
   .version-catalog-body
-    .minecraft-versions-table:not(.fabric-catalog-table)
+    .minecraft-versions-table:not(.fabric-catalog-table, .paper-catalog-table)
     :is(th, td):nth-child(4):not([colspan]),
   .version-catalog-body
-    .minecraft-versions-table:not(.fabric-catalog-table)
+    .minecraft-versions-table:not(.fabric-catalog-table, .paper-catalog-table)
     :is(th, td):nth-child(5) {
     display: none;
   }
-  .version-catalog-body .minecraft-versions-table:not(.fabric-catalog-table) table {
+  .version-catalog-body
+    .minecraft-versions-table:not(.fabric-catalog-table, .paper-catalog-table)
+    table {
     white-space: normal;
   }
   .version-catalog-body
-    .minecraft-versions-table:not(.fabric-catalog-table)
+    .minecraft-versions-table:not(.fabric-catalog-table, .paper-catalog-table)
     .minecraft-creation-state {
     white-space: normal;
   }

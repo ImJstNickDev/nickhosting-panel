@@ -1,13 +1,17 @@
 import type { createLogger } from '@nickhosting/core';
 import { type createDatabase, getSettings } from '@nickhosting/database';
-import { refreshFabricCatalog, refreshMinecraftMetadata } from '@nickhosting/server-management';
+import {
+  refreshFabricCatalog,
+  refreshMinecraftMetadata,
+  refreshPaperCatalog,
+} from '@nickhosting/server-management';
 
 type DB = ReturnType<typeof createDatabase>['db'];
 type Environment = Readonly<Record<string, string | undefined>>;
 type Logger = ReturnType<typeof createLogger>;
-/** Each provider has its own scheduling loop; a long Fabric discovery cannot delay Mojang. */
+/** Each provider has its own scheduling loop; one slow discovery cannot delay another. */
 async function pollMetadata(
-  name: 'minecraft' | 'fabric',
+  name: 'minecraft' | 'fabric' | 'paper',
   refresh: typeof refreshMinecraftMetadata,
   db: DB,
   env: Environment,
@@ -27,4 +31,7 @@ export function pollMinecraftMetadata(db: DB, env: Environment, logger: Logger) 
 }
 export function pollFabricMetadata(db: DB, env: Environment, logger: Logger) {
   return pollMetadata('fabric', refreshFabricCatalog, db, env, logger);
+}
+export function pollPaperMetadata(db: DB, env: Environment, logger: Logger) {
+  return pollMetadata('paper', refreshPaperCatalog, db, env, logger);
 }

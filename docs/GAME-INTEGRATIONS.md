@@ -827,3 +827,59 @@ pair. Signed reports remain Owner diagnostics.
 
 Legacy Owner registration endpoints remain available for diagnostic integrations;
 they are not called by the Fabric wizard or required by Owner version management.
+
+
+## Paper catalog and creation
+
+Paper uses the official [Fill v3 API](https://docs.papermc.io/misc/downloads-service/).
+An identifying User-Agent comes from `contentMetadataUserAgent`. The worker refreshes
+an independent, durable local catalog every 15 minutes; Owner **Sync versions**
+queues that same job. Browsing and choosing versions never waits for Fill. Failed
+refreshes retain the last complete catalog, with visible stale/error status.
+
+Discovery reads the project/version metadata with at most two concurrent requests,
+then only fetches a build document when its selected number changes. It chooses
+the highest build number, including non-stable channels, matching the requested
+latest-build policy. The Owner catalog shows channel, build and Java requirement.
+Raw metadata provenance is retained privately for exact resolution; it is not sent
+to ordinary clients. Sync publishes atomically and uses the same bounded lease,
+request coalescing and shutdown behavior as Fabric.
+
+A public choice identifies the mapping and Minecraft version. Creation resolves
+its build once from the accepted snapshot and lazily creates an immutable runtime
+record. A repeated idempotency key returns the original request even after sync
+publishes a newer build. The current actor, rollout, node and mapping remain
+authoritative. Provider metadata and Minecraft protocol resolution occur only
+when an exact runtime is first registered, not for each wizard listing.
+
+The **PaperUpdated** default binder requires `MINECRAFT_VERSION`, `BUILD_NUMBER`
+and `SERVER_JARFILE`. It sets the exact version/build and defaults the JAR to
+`server.jar`. If the egg declares `DL_PATH`, it receives the pinned official
+Fill-data download, preventing the egg's fallback-to-latest from changing the
+selected artifact. Other declared egg variables need explicit mapping values.
+Existing advanced/static bindings remain available. NickHosting never edits eggs.
+
+Integration-defined images use `ghcr.io/ptero-eggs/yolks:java_<major>`, validated
+against the actual mapped egg. Baselines follow [Paper recommendations](https://docs.papermc.io/paper/getting-started/):
+
+| Minecraft release | Recommended Java |
+| --- | --- |
+| 1.7.10–1.11 | 8 |
+| 1.12–1.16.4 | 11 |
+| 1.16.5 | 16 |
+| 1.17–1.19 | 17 |
+| 1.20–1.21.11 | 21 |
+| 26.1+ | 25 |
+
+Higher upstream Java requirements take precedence. Unrecognized/snapshot versions
+use upstream requirements rather than guessed ranges. Missing advertised images
+remain a mapping configuration error. Installation verifies the pinned server JAR
+through the existing receipt pipeline; power operations do not download it again.
+The exceptional Vanilla first-install artifact recovery remains Vanilla-only;
+Paper uses the normal installer completion signal.
+
+Migration `048_paper_catalog.sql` adds a Paper row to the existing metadata sync
+table. It changes no users, game servers, mappings or existing combinations. Workers
+skip Paper before that row exists. Rollback the application code while retaining
+the additive catalog row; do not drop any installed server profiles or runtime
+records. Previously created Paper servers require a Paper-capable application.

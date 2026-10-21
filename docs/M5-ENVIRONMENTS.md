@@ -1887,3 +1887,19 @@ published world, durable receipts and original storage-migration copies.
 Rollback is a NickHosting code revert plus a scoped development worker restart;
 never reset an uncertain operation, repeat extraction or delete staged game data
 as part of code rollback.
+
+### Paper runtime catalog
+
+Paper discovery is a separate local snapshot refreshed by the worker every 15
+minutes and by **Owner → Minecraft → Versions → Paper → Sync versions**. The
+wizard selects Minecraft version; the newest Paper build is frozen automatically
+at creation. Configure a PaperUpdated mapping with integration-defined images and
+enable the existing Minecraft rollout. No mapping or game server is created by
+activation. See [Paper catalog and creation](GAME-INTEGRATIONS.md#paper-catalog-and-creation).
+
+Development activation requires the normal explicit migration command with the
+full private Compose env-file chain after building the current app image. Migration
+048 only adds a Paper metadata row and extends its ID constraint. Existing servers,
+secrets, accounts and storage are preserved. The Gateway process must reload its
+compiled Paper declaration before first Paper use. Reverting code should retain
+the additive schema/catalog and any created Paper server records.

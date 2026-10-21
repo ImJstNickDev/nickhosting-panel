@@ -255,8 +255,9 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       semantic?: boolean;
     },
     interactive = false,
+    serverJarProfile: 'vanilla' | 'paper' = 'vanilla',
   ) {
-    const profile = launcher ? 'fabric' : 'vanilla';
+    const profile = launcher ? 'fabric' : serverJarProfile;
     const image = 'fixture-java:21';
     const startup = `java -jar ${launcher ? (launcher.boundPath ?? 'fabric-server-launch.jar') : 'server.jar'} nogui`;
     const f = await managementFixture(database.db, { interactive });
@@ -2672,29 +2673,36 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       await expect(verifyMinecraftInitialInstallation(context, options)).rejects.toThrow();
     },
   );
-  it('verifies a declaration-backed Vanilla installation without signatures and still rejects changed artifacts', async () => {
-    const { f, serverId, files, context, options } = await minecraftFixture();
-    await f.db.deleteFrom('minecraft_verification_evidence').execute();
-    options.env = {};
-    expect(await configureMinecraftProvision(context, options)).toBe(true);
-    const profile = await f.db
-      .selectFrom('minecraft_server_profiles')
-      .select(['installed', 'installed_manifest'])
-      .where('server_id', '=', serverId)
-      .executeTakeFirstOrThrow();
-    expect(profile.installed).toBe(true);
-    expect(profile.installed_manifest).toEqual([
-      {
-        path: 'server.jar',
-        size: files.get('server.jar')?.length,
-        sha256: createHash('sha256')
-          .update(files.get('server.jar') ?? '')
-          .digest('hex'),
-      },
-    ]);
-    files.set('server.jar', Buffer.from('changed runtime jar'));
-    await expect(assertMinecraftLaunchInputs(context, options)).rejects.toThrow('conflict');
-  });
+  it.each(['vanilla', 'paper'] as const)(
+    'verifies a declaration-backed %s installation without signatures and still rejects changed artifacts',
+    async (runtimeProfile) => {
+      const { f, serverId, files, context, options } = await minecraftFixture(
+        undefined,
+        false,
+        runtimeProfile,
+      );
+      await f.db.deleteFrom('minecraft_verification_evidence').execute();
+      options.env = {};
+      expect(await configureMinecraftProvision(context, options)).toBe(true);
+      const profile = await f.db
+        .selectFrom('minecraft_server_profiles')
+        .select(['installed', 'installed_manifest'])
+        .where('server_id', '=', serverId)
+        .executeTakeFirstOrThrow();
+      expect(profile.installed).toBe(true);
+      expect(profile.installed_manifest).toEqual([
+        {
+          path: 'server.jar',
+          size: files.get('server.jar')?.length,
+          sha256: createHash('sha256')
+            .update(files.get('server.jar') ?? '')
+            .digest('hex'),
+        },
+      ]);
+      files.set('server.jar', Buffer.from('changed runtime jar'));
+      await expect(assertMinecraftLaunchInputs(context, options)).rejects.toThrow('conflict');
+    },
+  );
 
   it('applies declared modern whitelist configuration before a first generated properties file', async () => {
     const { f, serverId, files, context, options } = await minecraftFixture();

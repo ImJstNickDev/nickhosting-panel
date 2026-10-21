@@ -104,7 +104,7 @@ async function attest(kind: 'protocol-fixture' | 'real-server' = 'real-server') 
   );
 }
 describe('Minecraft Owner evidence and user eligibility', () => {
-  it('loads more than 1000 declared choices in six bounded queries and orders all families by local dates', async () => {
+  it('loads more than 1000 declared choices in eight bounded queries and orders all families by local dates', async () => {
     const source = await f.db
       .selectFrom('minecraft_combinations')
       .selectAll()
@@ -156,7 +156,7 @@ describe('Minecraft Owner evidence and user eligibility', () => {
       },
     });
     const choices = await minecraftCatalog(measured, f.context, env);
-    expect(count).toBe(6);
+    expect(count).toBe(8);
     expect(choices.filter((choice) => entries.some((row) => row.id === choice.id))).toHaveLength(
       1001,
     );
@@ -174,7 +174,7 @@ describe('Minecraft Owner evidence and user eligibility', () => {
     ).toBe(false);
   });
   it('bulk choices retain undeclared runtime signatures, private testing and availability gates', async () => {
-    const paper = { ...combination, profile: 'paper' };
+    const paper = { ...combination, profile: 'folia' };
     await f.db
       .updateTable('minecraft_combinations')
       .set({ combination: JSON.stringify(paper), enabled: true })

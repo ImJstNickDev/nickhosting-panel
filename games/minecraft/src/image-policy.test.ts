@@ -30,7 +30,7 @@ describe('Minecraft integration-owned images', () => {
   });
   it('honors the resolved loader requirement rather than Vanilla release ranges', () => {
     expect(resolveMinecraftImage(runtime(21, '1.20.1', 'paper')).image).toBe(
-      'ghcr.io/pterodactyl/yolks:java_21',
+      'ghcr.io/ptero-eggs/yolks:java_21',
     );
     expect(resolveMinecraftImage(runtime(17, '1.20.1', 'vanilla')).image).toBe(
       'ghcr.io/pterodactyl/yolks:java_17',
@@ -56,5 +56,13 @@ describe('Minecraft integration-owned images', () => {
       );
       expect(profile.supportedGameVersions).toEqual([]);
     }
+  });
+  it('uses only the PaperUpdated image family and its explicitly advertised majors', () => {
+    for (const major of [8, 11, 16, 17, 21, 22, 25])
+      expect(resolveMinecraftImage(runtime(major, 'fixture', 'paper')).image).toBe(
+        `ghcr.io/ptero-eggs/yolks:java_${major}`,
+      );
+    for (const major of [18, 19, 20, 23, 24, 26])
+      expect(() => resolveMinecraftImage(runtime(major, 'fixture', 'paper'))).toThrow();
   });
 });

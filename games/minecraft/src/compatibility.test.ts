@@ -15,7 +15,7 @@ const combination: MinecraftCombination = {
   releaseType: 'release',
   protocolId: 777,
   family: 'netty',
-  profile: 'paper',
+  profile: 'folia',
   javaMajor: 25,
   runtimeDigest: 'a'.repeat(64),
   protocolSource: { url: 'https://example.com/metadata', sha256: 'b'.repeat(64) },
@@ -43,39 +43,42 @@ const evidence: MinecraftEvidence = {
 };
 const now = new Date('2026-10-09T13:00:00Z');
 describe('Minecraft compatibility evidence', () => {
-  it('declares Fabric installation and Gateway sleep/wake for known modern protocols', () => {
-    const fabric = { ...combination, profile: 'fabric' as const };
-    expect(minecraftDeclaredCapabilities(fabric)).toMatchObject({
-      installation: true,
-      directConnection: true,
-      playerManagement: true,
-      gateway: true,
-      wake: true,
-      sleepWake: true,
-    });
-    for (const unsupported of [
-      { ...fabric, family: 'unknown' as const },
-      { ...fabric, protocolId: null },
-      { ...fabric, family: 'legacy' as const, release: '1.6.4' },
-      ...(['paper', 'folia', 'forge'] as const).map((profile) => ({ ...fabric, profile })),
-    ]) {
-      expect(minecraftDeclaredCapabilities(unsupported)).toMatchObject({
-        gateway: false,
-        wake: false,
-        sleepWake: false,
+  it.each(['fabric', 'paper'] as const)(
+    'declares %s installation and Gateway sleep/wake for known modern protocols',
+    (profile) => {
+      const fabric = { ...combination, profile };
+      expect(minecraftDeclaredCapabilities(fabric)).toMatchObject({
+        installation: true,
+        directConnection: true,
+        playerManagement: true,
+        gateway: true,
+        wake: true,
+        sleepWake: true,
       });
-    }
-    expect(() =>
-      assertMinecraftChoice({
-        combination: fabric,
-        enabled: true,
-        mappingDigest: 'a'.repeat(64),
-        choiceDigest: 'b'.repeat(64),
-        evidence: [],
-        privateTester: false,
-      }),
-    ).not.toThrow();
-  });
+      for (const unsupported of [
+        { ...fabric, family: 'unknown' as const },
+        { ...fabric, protocolId: null },
+        { ...fabric, family: 'legacy' as const, release: '1.6.4' },
+        ...(['folia', 'forge'] as const).map((profile) => ({ ...fabric, profile })),
+      ]) {
+        expect(minecraftDeclaredCapabilities(unsupported)).toMatchObject({
+          gateway: false,
+          wake: false,
+          sleepWake: false,
+        });
+      }
+      expect(() =>
+        assertMinecraftChoice({
+          combination: fabric,
+          enabled: true,
+          mappingDigest: 'a'.repeat(64),
+          choiceDigest: 'b'.repeat(64),
+          evidence: [],
+          privateTester: false,
+        }),
+      ).not.toThrow();
+    },
+  );
   it('real installation bootstrap enables only explicit private testing and cannot claim verification', () => {
     const bootstrap: MinecraftEvidence = {
       ...evidence,
@@ -234,7 +237,7 @@ describe('Minecraft compatibility evidence', () => {
     expect(() => assertMinecraftChoice({ ...input, privateTester: true }, now)).not.toThrow();
     expect(publicMinecraftChoice('choice', combination)).toEqual({
       id: 'choice',
-      runtime: 'paper',
+      runtime: 'folia',
       capabilities: minecraftDeclaredCapabilities(combination),
       version: '26.3',
       releaseType: 'release',
@@ -351,7 +354,7 @@ describe('compiled Vanilla capabilities', () => {
       expect(minecraftDeclaredCapabilities({ ...selected, releaseType: 'snapshot' }).gateway).toBe(
         true,
       );
-      expect(minecraftDeclaredCapabilities({ ...selected, profile: 'paper' }).installation).toBe(
+      expect(minecraftDeclaredCapabilities({ ...selected, profile: 'folia' }).installation).toBe(
         false,
       );
     }

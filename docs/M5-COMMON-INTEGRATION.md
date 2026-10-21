@@ -17,6 +17,23 @@ below describe the historical audit, not an additional current Vanilla gate.
 Other runtimes are not automatically promoted. Identity, installation integrity,
 admission, permissions and truthful evidence remain required.
 
+## Owner Paper runtime amendment — 2026-10-21
+
+Paper is selectable through Owner-enabled PaperUpdated mappings and the existing
+Minecraft rollout. Users select Minecraft, then Paper, then a Minecraft version;
+NickHosting resolves the newest cached build automatically and freezes its exact
+artifact URL, SHA256, image and egg environment. Existing servers and retries keep
+the original build. No build selector or eager combination registration is needed.
+
+The compiled Paper declaration supports installation, player management and the
+shared modern Java Gateway, readiness and idle/sleep/wake contracts for known
+protocols. These are integration capabilities, not a claim that every Paper build
+has been tested with a real server/client. Folia, Forge and other undeclared
+runtimes retain their previous controls. No provider egg, node or mapping is
+created automatically.
+
+See [Paper catalog and creation](GAME-INTEGRATIONS.md#paper-catalog-and-creation).
+
 ## Owner Fabric policy amendment — 2026-10-19
 
 The Owner explicitly authorizes Fabric creation from independent locally cached

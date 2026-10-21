@@ -42,9 +42,9 @@ export function MinecraftCatalogScan() {
   const currentScope = useRef(scope);
   currentScope.current = scope;
   const runScope = useRef('');
-  const fabricDiscovery = runtime === 'fabric';
+  const independentDiscovery = runtime === 'fabric' || runtime === 'paper';
   useLayoutEffect(() => {
-    if (fabricDiscovery) {
+    if (independentDiscovery) {
       setTargets(null);
       return;
     }
@@ -69,7 +69,7 @@ export function MinecraftCatalogScan() {
       }
     }
     return () => observer?.disconnect();
-  }, [location.pathname, fabricDiscovery]);
+  }, [location.pathname, independentDiscovery]);
   useEffect(() => {
     if (lastScope.current !== scope) {
       controller.current?.abort();

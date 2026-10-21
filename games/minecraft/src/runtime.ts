@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import { paperJavaMajor } from './paper-policy.js';
 import { vanillaJavaMajor } from './vanilla-policy.js';
 
 export const minecraftRuntimeProfiles = ['vanilla', 'paper', 'folia', 'fabric', 'forge'] as const;
@@ -174,7 +175,7 @@ export const minecraftRuntimeRequestSchema = z
   .object({
     release: releaseVersion,
     profile: z.enum(minecraftRuntimeProfiles),
-    buildId: z.number().int().positive().optional(),
+    buildId: z.number().int().nonnegative().optional(),
     loaderVersion: exactVersion.optional(),
     installerVersion: exactVersion.optional(),
   })
@@ -236,7 +237,9 @@ export async function resolveMinecraftRuntime(
   let javaMajor =
     request.profile === 'vanilla' || request.profile === 'fabric'
       ? vanillaJavaMajor(request.release, entry.type, release.javaVersion?.majorVersion)
-      : (release.javaVersion?.majorVersion ?? fail('minecraft_java_unknown'));
+      : request.profile === 'paper'
+        ? (release.javaVersion?.majorVersion ?? 8)
+        : (release.javaVersion?.majorVersion ?? fail('minecraft_java_unknown'));
   let upstreamSupport: string | undefined;
   let upstreamChannel: string | undefined;
   let artifacts: RuntimeArtifact[] = [
@@ -255,7 +258,11 @@ export async function resolveMinecraftRuntime(
         version: z.object({
           id: exactVersion,
           support: z.object({ status: z.string().max(100) }).optional(),
-          java: z.object({ version: z.object({ minimum: javaVersion }) }),
+          java: z.object({
+            version: z.object({
+              minimum: request.profile === 'paper' ? z.number().int().min(6).max(100) : javaVersion,
+            }),
+          }),
         }),
         builds: z.array(z.number().int()).max(100_000),
       }),
@@ -281,7 +288,14 @@ export async function resolveMinecraftRuntime(
     upstreamSupport = version.version.support?.status;
     upstreamChannel = build.channel;
     const artifact = build.downloads['server:default'];
-    javaMajor = Math.max(javaMajor, version.version.java.version.minimum);
+    javaMajor =
+      request.profile === 'paper'
+        ? paperJavaMajor(
+            request.release,
+            version.version.java.version.minimum,
+            release.javaVersion?.majorVersion,
+          )
+        : Math.max(javaMajor, version.version.java.version.minimum);
     artifacts = [
       {
         role: 'server',

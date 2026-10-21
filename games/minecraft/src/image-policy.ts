@@ -28,8 +28,23 @@ export const minecraftFabricImagePolicy = runtimeImagePolicySchema.parse({
   })),
 });
 
+/** PaperUpdated advertises this maintained family and these Java majors. An
+ * integration mapping still verifies the chosen tag against its actual egg. */
+export const minecraftPaperImagePolicy = runtimeImagePolicySchema.parse({
+  mode: 'rules',
+  rules: [8, 11, 16, 17, 21, 22, 25].map((major) => ({
+    id: `java-${major}`,
+    requirements: { javaMajor: String(major) },
+    image: `ghcr.io/ptero-eggs/yolks:java_${major}`,
+  })),
+});
+
 export function minecraftRuntimeImagePolicy(profile: ResolvedMinecraftRuntime['profile']) {
-  return profile === 'fabric' ? minecraftFabricImagePolicy : minecraftImagePolicy;
+  return profile === 'fabric'
+    ? minecraftFabricImagePolicy
+    : profile === 'paper'
+      ? minecraftPaperImagePolicy
+      : minecraftImagePolicy;
 }
 
 /** Runtime resolution already validates the exact release/build/loader against

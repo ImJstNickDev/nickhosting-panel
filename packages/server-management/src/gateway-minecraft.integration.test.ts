@@ -169,49 +169,52 @@ async function register() {
   );
 }
 describe('Minecraft declared-capability Gateway registration', () => {
-  it('activates Fabric routes and automation without reports while retaining mapping identity checks', async () => {
-    await f.db
-      .updateTable('runtime_egg_mappings')
-      .set({ runtime_id: 'fabric' })
-      .where('id', '=', f.mappingId)
-      .execute();
-    const mapping = await f.db
-      .selectFrom('runtime_egg_mappings')
-      .selectAll()
-      .where('id', '=', f.mappingId)
-      .executeTakeFirstOrThrow();
-    await f.db
-      .updateTable('minecraft_combinations')
-      .set({
-        combination: JSON.stringify({
-          ...combination,
-          profile: 'fabric',
-          loaderVersion: '0.19.5',
-          installerVersion: '1.1.2',
-        }),
-        mapping_digest: minecraftMappingDigest(mapping),
-      })
-      .where('id', '=', choiceId)
-      .execute();
-    await register();
-    const snapshot = await getGatewaySnapshot(f.db, env);
-    expect(snapshot.routes[0]?.protocol?.minecraft).toMatchObject({
-      supportSource: 'integration',
-      declarationId: 'minecraft/fabric',
-      declarationVersion: 1,
-      release: '26.1',
-      protocolId: 775,
-    });
-    expect(await getGatewayState(f.db, serverId, { env })).toMatchObject({
-      enabled: true,
-    });
-    await f.db
-      .updateTable('runtime_egg_mappings')
-      .set({ docker_image: 'changed/image:25' })
-      .where('id', '=', f.mappingId)
-      .execute();
-    expect((await getGatewaySnapshot(f.db, env)).routes).toEqual([]);
-  });
+  it.each(['fabric', 'paper'])(
+    'activates %s routes and automation without reports while retaining mapping identity checks',
+    async (profile) => {
+      await f.db
+        .updateTable('runtime_egg_mappings')
+        .set({ runtime_id: profile })
+        .where('id', '=', f.mappingId)
+        .execute();
+      const mapping = await f.db
+        .selectFrom('runtime_egg_mappings')
+        .selectAll()
+        .where('id', '=', f.mappingId)
+        .executeTakeFirstOrThrow();
+      await f.db
+        .updateTable('minecraft_combinations')
+        .set({
+          combination: JSON.stringify({
+            ...combination,
+            profile,
+            loaderVersion: '0.19.5',
+            installerVersion: '1.1.2',
+          }),
+          mapping_digest: minecraftMappingDigest(mapping),
+        })
+        .where('id', '=', choiceId)
+        .execute();
+      await register();
+      const snapshot = await getGatewaySnapshot(f.db, env);
+      expect(snapshot.routes[0]?.protocol?.minecraft).toMatchObject({
+        supportSource: 'integration',
+        declarationId: `minecraft/${profile}`,
+        declarationVersion: 1,
+        release: '26.1',
+        protocolId: 775,
+      });
+      expect(await getGatewayState(f.db, serverId, { env })).toMatchObject({
+        enabled: true,
+      });
+      await f.db
+        .updateTable('runtime_egg_mappings')
+        .set({ docker_image: 'changed/image:25' })
+        .where('id', '=', f.mappingId)
+        .execute();
+      expect((await getGatewaySnapshot(f.db, env)).routes).toEqual([]);
+    },
+  );
   it('shares locally bound message variables with editor previews and never exposes listener addresses', async () => {
     await register();
     const values = { version: '26.1', runtime: 'Vanilla', address: '' };

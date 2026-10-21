@@ -12,6 +12,8 @@ import {
   minecraftEvidenceSchema,
   minecraftManifestUrl,
   minecraftSupport,
+  paperCatalogMetadataClient,
+  paperEggBinding,
   publicMinecraftChoice,
   resolveMinecraftImage,
   vanillaEggBinding,
@@ -31,6 +33,7 @@ import { type DB, type Environment, lockResources } from './admission.js';
 import { getFabricCatalog } from './fabric-catalog.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { cachedMinecraftManifest, getMinecraftMetadataStatus } from './minecraft-metadata.js';
+import { getPaperCatalog, getPaperCatalogSnapshot } from './paper-catalog.js';
 import { ownerOnly, parse } from './registry.js';
 
 type Mapping = Selectable<Database['runtime_egg_mappings']>;
@@ -144,7 +147,11 @@ async function registerCombination(
   const egg = await adapter.getEgg(mapping.nest_id, mapping.egg_id);
   const suppliedBinding =
     value.binding ??
-    (runtime.profile === 'fabric' ? fabricEggBinding : vanillaEggBinding)({
+    (runtime.profile === 'fabric'
+      ? fabricEggBinding
+      : runtime.profile === 'paper'
+        ? paperEggBinding
+        : vanillaEggBinding)({
       runtime,
       variables: egg.relationships?.variables?.data.map((entry) => entry.attributes) ?? [],
       environment: mapping.environment,
@@ -216,7 +223,7 @@ async function registerCombination(
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
     const current = await currentInteractiveContext(tx, context, env);
-    if (forCreation) await assertFabricCreationAccess(tx, current, mapping.id);
+    if (forCreation) await assertCatalogCreationAccess(tx, current, mapping.id, runtime.profile);
     else ownerOnly(current);
     const latest = await tx
       .selectFrom('runtime_egg_mappings')
@@ -255,8 +262,13 @@ async function registerCombination(
   });
 }
 
-/** Fabric catalogs describe independent choices, not a precomputed Cartesian product. */
-async function assertFabricCreationAccess(db: DB, context: AuthContext, mappingId: string) {
+/** Lazy registrations retain the same current actor, rollout and mapping authority. */
+async function assertCatalogCreationAccess(
+  db: DB,
+  context: AuthContext,
+  mappingId: string,
+  profile: string,
+) {
   assertPermission(context, 'server:manage', { ownerUserId: context.subjectUserId });
   const [mapping, rollout] = await Promise.all([
     db
@@ -284,27 +296,32 @@ async function assertFabricCreationAccess(db: DB, context: AuthContext, mappingI
     !mapping?.enabled ||
     !mapping.nodeEnabled ||
     mapping.game_id !== 'minecraft' ||
-    mapping.runtime_id !== 'fabric'
+    mapping.runtime_id !== profile ||
+    !['fabric', 'paper'].includes(profile)
   )
     throw new DomainError('integration_unavailable');
   const { nodeEnabled: _nodeEnabled, ...identity } = mapping;
   return identity;
 }
 
-async function fabricCreationCatalog(db: DB) {
-  const [catalog, mappings, releases, protocols] = await Promise.all([
+async function runtimeCreationCatalog(db: DB) {
+  const [catalog, paper, mappings, releases, protocols] = await Promise.all([
     getFabricCatalog(db),
+    getPaperCatalog(db),
     db
       .selectFrom('runtime_egg_mappings as mapping')
       .innerJoin('managed_nodes as node', 'node.id', 'mapping.node_id')
-      .select('mapping.id')
+      .select(['mapping.id', 'mapping.runtime_id'])
       .where('mapping.game_id', '=', 'minecraft')
-      .where('mapping.runtime_id', '=', 'fabric')
+      .where('mapping.runtime_id', 'in', ['fabric', 'paper'])
       .where('mapping.enabled', '=', true)
       .where('node.enabled', '=', true)
       .orderBy('mapping.id')
       .execute(),
-    db.selectFrom('minecraft_release_metadata').select(['id', 'release_time']).execute(),
+    db
+      .selectFrom('minecraft_release_metadata')
+      .select(['id', 'release_time', 'release_type'])
+      .execute(),
     // Reuse protocol facts already resolved locally, across runtimes. This is one
     // bulk read, never a metadata request (or a query) for every catalog version.
     db
@@ -317,10 +334,11 @@ async function fabricCreationCatalog(db: DB) {
       .orderBy('created_at', 'desc')
       .execute(),
   ]);
-  if (!catalog.synced || !catalog.latestInstallerVersion || !catalog.loaders.length) return [];
+
   const dates = new Map(
     releases.map((release) => [release.id, release.release_time?.toISOString() ?? null]),
   );
+  const releaseTypes = new Map(releases.map((release) => [release.id, release.release_type]));
   const knownProtocols = new Map(
     protocols.map(({ combination }) => {
       const known = minecraftCombinationSchema.parse(combination);
@@ -328,14 +346,27 @@ async function fabricCreationCatalog(db: DB) {
     }),
   );
   return mappings.flatMap((mapping) =>
-    catalog.games.map((game) => ({
-      id: `fabric:${mapping.id}:${game.version}`,
+    (mapping.runtime_id === 'fabric'
+      ? catalog.synced && catalog.latestInstallerVersion && catalog.loaders.length
+        ? catalog.games
+        : []
+      : paper.synced
+        ? paper.versions.map((entry) => ({
+            version: entry.version,
+            stable:
+              (releaseTypes.get(entry.version) ??
+                (/^\d+\.\d+(?:\.\d+)?$/.test(entry.version) ? 'release' : 'snapshot')) ===
+              'release',
+          }))
+        : []
+    ).map((game) => ({
+      id: `${mapping.runtime_id}:${mapping.id}:${game.version}`,
       version: game.version,
-      runtime: 'fabric' as const,
+      runtime: mapping.runtime_id as 'fabric' | 'paper',
       releaseType: game.stable ? ('release' as const) : ('snapshot' as const),
       releaseTime: dates.get(game.version) ?? null,
       capabilities: minecraftDeclaredCapabilities({
-        profile: 'fabric',
+        profile: mapping.runtime_id as 'fabric' | 'paper',
         release: game.version,
         releaseType: game.stable ? 'release' : 'snapshot',
         family: knownProtocols.get(game.version)?.family ?? 'unknown',
@@ -360,7 +391,7 @@ export async function resolveFabricCreationChoice(
   const mappingId = parse(z.uuid(), match[1]);
   const catalog = await getFabricCatalog(db);
   const current = await currentInteractiveContext(db, context, env);
-  const mapping = await assertFabricCreationAccess(db, current, mappingId);
+  const mapping = await assertCatalogCreationAccess(db, current, mappingId, 'fabric');
   if (!catalog.synced || !catalog.latestInstallerVersion)
     throw new DomainError('integration_unavailable');
   const runtime = parse(minecraftRuntimeRequestSchema, {
@@ -403,6 +434,63 @@ export async function resolveFabricCreationChoice(
     { mappingId, runtime },
     env,
     { ...options, metadata },
+    true,
+  );
+  return requireMinecraftChoice(db, current, registered.id, env);
+}
+
+/** Resolve latest once from the accepted local catalog, then persist the exact build.
+ * Subsequent creation retries are served by the request idempotency record. */
+export async function resolvePaperCreationChoice(
+  db: Kysely<Database>,
+  adapter: PterodactylAdapter,
+  context: AuthContext,
+  input: { choiceId: string },
+  env: Environment = {},
+  options: { metadata?: RuntimeMetadataClient; protocols?: typeof fetchMinecraftProtocols } = {},
+) {
+  const match = /^paper:([a-f0-9-]{36}):(.+)$/.exec(input.choiceId);
+  if (!match) throw new DomainError('validation_failed');
+  const mappingId = parse(z.uuid(), match[1]);
+  const [snapshot, current] = await Promise.all([
+    getPaperCatalogSnapshot(db),
+    currentInteractiveContext(db, context, env),
+  ]);
+  const mapping = await assertCatalogCreationAccess(db, current, mappingId, 'paper');
+  if (!snapshot) throw new DomainError('integration_unavailable');
+  const version = snapshot.versions.find((entry) => entry.version === match[2]);
+  if (!version) throw new DomainError('validation_failed');
+  const existing = await db
+    .selectFrom('minecraft_combinations')
+    .select('id')
+    .where('mapping_id', '=', mappingId)
+    .where('mapping_digest', '=', minecraftMappingDigest(mapping))
+    .where(sql<string>`combination->>'profile'`, '=', 'paper')
+    .where(sql<string>`combination->>'release'`, '=', version.version)
+    .where(sql<string>`combination->>'buildId'`, '=', String(version.buildId))
+    .orderBy('created_at', 'desc')
+    .executeTakeFirst();
+  if (existing) return requireMinecraftChoice(db, current, existing.id, env);
+  const { values } = await getSettings(db, env);
+  const upstream =
+    options.metadata ??
+    createRuntimeMetadataClient({ userAgent: values.contentMetadataUserAgent ?? '' });
+  const fallback: RuntimeMetadataClient = {
+    read: (url) =>
+      !options.metadata && url === minecraftManifestUrl
+        ? cachedMinecraftManifest(db)
+        : upstream.read(url),
+  };
+  const registered = await registerCombination(
+    db,
+    adapter,
+    current,
+    {
+      mappingId,
+      runtime: { profile: 'paper', release: version.version, buildId: version.buildId },
+    },
+    env,
+    { ...options, metadata: paperCatalogMetadataClient(snapshot, fallback) },
     true,
   );
   return requireMinecraftChoice(db, current, registered.id, env);
@@ -551,7 +639,8 @@ function minecraftChoiceBlockReason(
   choice: ReturnType<typeof inspectLoadedCombination>,
   privateTester: boolean,
 ): 'choice-disabled' | 'mapping-disabled' | 'mapping-changed' | 'evidence-required' | null {
-  if (!choice.row.enabled && choice.combination.profile !== 'fabric') return 'choice-disabled';
+  if (!choice.row.enabled && !['fabric', 'paper'].includes(choice.combination.profile))
+    return 'choice-disabled';
   if (!choice.mapping.enabled) return 'mapping-disabled';
   if (choice.row.mapping_digest !== choice.mappingDigest) return 'mapping-changed';
   try {
@@ -624,7 +713,7 @@ export async function minecraftCatalog(db: DB, context: AuthContext, env: Enviro
   const loaded = await inspectMinecraftCombinations(db, rows, env, false);
   const choices = [];
   for (const choice of loaded) {
-    if (choice.combination.profile === 'fabric') continue;
+    if (['fabric', 'paper'].includes(choice.combination.profile)) continue;
     try {
       assertLoadedMinecraftChoice(choice, rollout, context);
       choices.push({
@@ -639,7 +728,7 @@ export async function minecraftCatalog(db: DB, context: AuthContext, env: Enviro
         throw error;
     }
   }
-  choices.push(...(await fabricCreationCatalog(db)));
+  choices.push(...(await runtimeCreationCatalog(db)));
   const compare = new Intl.Collator('en', { numeric: true }).compare;
   return choices.sort(
     (left, right) =>
