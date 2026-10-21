@@ -169,7 +169,7 @@ class FileOperationRepository extends DaemonRepository
                     if ($failure !== null) { return Create::promiseFor(null); }
                     try {
                         return $this->read($client, 'list-directory',
-                            ['directory' => '/' . $scratch . ($directory === '' ? '' : '/' . $directory)],
+                            ['directory' => '/' . implode('/', array_filter([$scratch, $directory], fn ($part) => $part !== ''))],
                             self::DIRECTORY_BYTES, $deadline)->then(function (string $body) use ($wanted, $deadline) {
                                 $entries = $this->parseEntries($body);
                                 abort_unless(count($entries) === count($wanted), 409);
@@ -202,6 +202,58 @@ class FileOperationRepository extends DaemonRepository
         finally { $onStage($name, ($this->now() - $started) * 1000); }
     }
 
+    private function archiveEntry(array $entries, string $name): ?array
+    {
+        $matches = array_values(array_filter($entries, fn ($entry) => isset($entry['name']) && strcasecmp($entry['name'], $name) === 0));
+        abort_if(count($matches) > 1 || (count($matches) === 1 && $matches[0]['name'] !== $name), 409);
+        return $matches[0] ?? null;
+    }
+
+    private function archivePayload(array $entries): array
+    {
+        $payload = $this->archiveEntry($entries, 'payload.zip');
+        abort_unless($payload !== null && ($payload['file'] ?? null) === true && ($payload['symlink'] ?? null) === false
+            && is_int($payload['size'] ?? null) && $payload['size'] >= 0
+            && is_string($payload['modified'] ?? null) && $payload['modified'] !== '', 409);
+        return ['size' => $payload['size'], 'modified' => $payload['modified']];
+    }
+
+    private function archiveTree(array $files): array
+    {
+        $expected = [];
+        foreach ($files as $file) {
+            $parts = explode('/', $file['path']);
+            $name = array_pop($parts); $parent = implode('/', $parts);
+            if (isset($expected[$parent][$name])) { abort(422); }
+            $expected[$parent][$name] = ['file' => true, 'size' => $file['size']];
+            while (count($parts) > 1) {
+                $name = array_pop($parts); $parent = implode('/', $parts);
+                if (isset($expected[$parent][$name]) && $expected[$parent][$name]['file']) { abort(422); }
+                $expected[$parent][$name] = ['file' => false];
+            }
+        }
+        return $expected;
+    }
+
+    private function publishArchiveTree(ClientInterface $client, string $scratch, string $destination, array $payload, ?callable $beforeWrite, ?callable $onStage): void
+    {
+        // A fresh target check belongs immediately before publish, not before decompression.
+        $this->stage('destination_check', function () use ($client, $destination) {
+            abort_unless($this->archiveEntry($this->entries($client, ''), $destination) === null, 409);
+        }, $onStage);
+        if ($beforeWrite !== null) { $beforeWrite('publishing', $payload); }
+        $this->stage('rename', fn () => $this->mutate($client, 'PUT', 'rename', ['root' => '/', 'files' => [['from' => $scratch . '/' . $destination, 'to' => $destination]]]), $onStage);
+        $this->stage('readback', function () use ($client, $scratch, $destination, $payload) {
+            [$publishedRoot, $remaining] = $this->entriesPair($client, '', $scratch);
+            $published = $this->archiveEntry($publishedRoot, $destination);
+            abort_unless($published !== null && ($published['file'] ?? null) === false && ($published['symlink'] ?? null) === false, 409);
+            // Wings rename can return 204 for a missing source. Check both sides before cleanup.
+            abort_unless(count($remaining) === 1 && $this->archivePayload($remaining) === $payload, 409);
+        }, $onStage);
+        if ($beforeWrite !== null) { $beforeWrite('cleaning', $payload); }
+        $this->stage('cleanup', fn () => $this->mutate($client, 'POST', 'delete', ['root' => '/', 'files' => [$scratch]]), $onStage);
+    }
+
     public function commitArchive(string $operationId, string $destination, array $files, ?callable $beforeDispatch = null, ?callable $onStage = null): void
     {
         // DaemonRepository creates a new client on each call. Keep this one local
@@ -210,7 +262,7 @@ class FileOperationRepository extends DaemonRepository
         $scratch = '.nickhosting-import-' . $operationId;
         // The source archive is produced by Core's validated streaming ZIP encoder.
         // The digest binds the durable request; it does not cause another archive download.
-        $expected = $this->stage('preflight', function () use ($client, $scratch, $destination, $files) {
+        [$expected, $payload] = $this->stage('preflight', function () use ($client, $scratch, $destination, $files) {
             [$root, $scratchEntries] = $this->entriesPair($client, '', $scratch);
             foreach ($root as $entry) {
                 abort_if(strcasecmp($entry['name'], $destination) === 0, 409);
@@ -220,42 +272,56 @@ class FileOperationRepository extends DaemonRepository
             }
             abort_unless(count($scratchEntries) === 1 && $scratchEntries[0]['name'] === 'payload.zip'
                 && ($scratchEntries[0]['file'] ?? null) === true && ($scratchEntries[0]['symlink'] ?? null) === false, 409);
-            $expected = ['' => ['payload.zip' => ['file' => true, 'size' => $scratchEntries[0]['size']], $destination => ['file' => false]]];
-            foreach ($files as $file) {
-                $parts = explode('/', $file['path']);
-                $name = array_pop($parts); $parent = implode('/', $parts);
-                if (isset($expected[$parent][$name])) { abort(422); }
-                $expected[$parent][$name] = ['file' => true, 'size' => $file['size']];
-                while (count($parts) > 1) {
-                    $name = array_pop($parts); $parent = implode('/', $parts);
-                    if (isset($expected[$parent][$name]) && $expected[$parent][$name]['file']) { abort(422); }
-                    $expected[$parent][$name] = ['file' => false];
-                }
-            }
-            return $expected;
+            $payload = $this->archivePayload($scratchEntries);
+            return [['' => ['payload.zip' => ['file' => true, 'size' => $payload['size']], $destination => ['file' => false]]]
+                + $this->archiveTree($files), $payload];
         }, $onStage);
-        if ($beforeDispatch !== null) { $beforeDispatch(); }
+        if ($beforeDispatch !== null) { $beforeDispatch('extracting', $payload); }
         $this->stage('decompress', fn () => $this->mutate($client, 'POST', 'decompress', ['root' => '/' . $scratch, 'file' => 'payload.zip']), $onStage);
         // Account for every extracted entry, including denied/ignored paths and empty artifacts.
         // A rolling window avoids waiting for the slowest member of each pair.
         $this->stage('verify_tree', fn () => $this->verifyTree($client, $scratch, $expected), $onStage);
-        // A fresh target check belongs immediately before publish, not before decompression.
-        $this->stage('destination_check', function () use ($client, $destination) {
-            foreach ($this->entries($client, '') as $entry) { abort_if(strcasecmp($entry['name'], $destination) === 0, 409); }
-        }, $onStage);
-        $this->stage('rename', fn () => $this->mutate($client, 'PUT', 'rename', ['root' => '/', 'files' => [['from' => $scratch . '/' . $destination, 'to' => $destination]]]), $onStage);
-        $this->stage('readback', function () use ($client, $scratch, $destination) {
-            [$publishedRoot, $remaining] = $this->entriesPair($client, '', $scratch);
-            $published = false;
-            foreach ($publishedRoot as $entry) {
-                if ($entry['name'] === $destination) { $published = $entry['file'] === false && $entry['symlink'] === false; }
+        $this->publishArchiveTree($client, $scratch, $destination, $payload, $beforeDispatch, $onStage);
+    }
+
+    /** The controller holds the original receipt's lock and verifies its fingerprint.
+     * Observe the complete retained tree; never replay upload or decompression. */
+    public function recoverArchive(string $operationId, string $destination, array $files, ?array $recovery, callable $beforeWrite, ?callable $onStage = null): void
+    {
+        if ($recovery !== null) {
+            abort_unless(($recovery['schemaVersion'] ?? null) === 1 && ($recovery['kind'] ?? null) === 'archive'
+                && in_array($recovery['phase'] ?? null, ['extracting', 'publishing', 'cleaning'], true)
+                && is_int($recovery['payload']['size'] ?? null) && $recovery['payload']['size'] >= 0
+                && is_string($recovery['payload']['modified'] ?? null) && $recovery['payload']['modified'] !== '', 409);
+        }
+        $client = $this->getHttpClient();
+        $scratch = '.nickhosting-import-' . $operationId;
+        $root = $this->stage('preflight', fn () => $this->entries($client, ''), $onStage);
+        $source = $this->archiveEntry($root, $scratch);
+        $published = $this->archiveEntry($root, $destination);
+        foreach ([$source, $published] as $entry) {
+            if ($entry !== null) { abort_unless(($entry['file'] ?? null) === false && ($entry['symlink'] ?? null) === false, 409); }
+        }
+        $remaining = $source === null ? [] : $this->entries($client, $scratch);
+        $payload = $source === null ? null : $this->archivePayload($remaining);
+        if ($payload !== null && $recovery !== null) { abort_unless($payload === $recovery['payload'], 409); }
+        if ($published !== null) {
+            // An old receipt with no rename marker cannot prove ownership of an
+            // already-existing destination, even when its file sizes happen to match.
+            abort_unless($recovery !== null && in_array($recovery['phase'], ['publishing', 'cleaning'], true)
+                && ($source === null || count($remaining) === 1), 409);
+            $this->stage('verify_tree', fn () => $this->verifyTree($client, '', $this->archiveTree($files)), $onStage);
+            if ($source !== null) {
+                $beforeWrite('cleaning', $payload);
+                $this->stage('cleanup', fn () => $this->mutate($client, 'POST', 'delete', ['root' => '/', 'files' => [$scratch]]), $onStage);
             }
-            abort_unless($published, 409);
-            // Wings rename can return 204 for a missing source. Check both sides before cleanup.
-            abort_unless(count($remaining) === 1 && $remaining[0]['name'] === 'payload.zip'
-                && $remaining[0]['file'] === true && $remaining[0]['symlink'] === false, 409);
-        }, $onStage);
-        $this->stage('cleanup', fn () => $this->mutate($client, 'POST', 'delete', ['root' => '/', 'files' => [$scratch]]), $onStage);
+            return;
+        }
+        abort_unless($source !== null && $payload !== null, 409);
+        $expected = ['' => ['payload.zip' => ['file' => true, 'size' => $payload['size']], $destination => ['file' => false]]]
+            + $this->archiveTree($files);
+        $this->stage('verify_tree', fn () => $this->verifyTree($client, $scratch, $expected), $onStage);
+        $this->publishArchiveTree($client, $scratch, $destination, $payload, $beforeWrite, $onStage);
     }
 
     public function deleteDirectory(string $path): void

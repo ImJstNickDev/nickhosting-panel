@@ -7,6 +7,22 @@ use Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\FileO
 use Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\ArchiveCommitController;
 use Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\UploadPublicationController;
 
+// Model separate HTTP workers contending for one connection-scoped MySQL lock.
+// Only this SQLite :memory: connection is touched; no Panel DB is bootstrapped.
+$archiveLocks = [];
+$archivePdo = DB::connection()->getPdo();
+$archivePdo->sqliteCreateFunction('GET_LOCK', function ($key, $timeout) use (&$archiveLocks) {
+    if (isset($archiveLocks[$key])) { return 0; }
+    $archiveLocks[$key] = 1;
+    return 1;
+}, 2);
+$archivePdo->sqliteCreateFunction('IS_USED_LOCK', function ($key) use (&$archiveLocks) { return $archiveLocks[$key] ?? null; }, 1);
+$archivePdo->sqliteCreateFunction('CONNECTION_ID', fn () => 1, 0);
+$archivePdo->sqliteCreateFunction('RELEASE_LOCK', function ($key) use (&$archiveLocks) {
+    if (($archiveLocks[$key] ?? null) !== 1) { return 0; }
+    unset($archiveLocks[$key]); return 1;
+}, 1);
+
 class MemoryFileOperationRepository extends FileOperationRepository
 {
     public GuzzleHttp\Client $client;
@@ -147,14 +163,175 @@ foreach ([[true,false],[false,true]] as $failure) {
     $archiveInput['operationId'] = $failure[0] ? '12345678-1234-4234-8234-123456789102' : '12345678-1234-4234-8234-123456789103';
     $operationRequests = []; $archiveController = new ArchiveCommitController(operationRepo(archiveResponses($archiveInput,...$failure), $operationRequests));
     check($archiveController(operationRequest('archive-commit',$archiveInput),$uploadServer)->getData(true)['state'] === 'uncertain', 'missing extracted file or missing rename readback cannot succeed');
-    $beforeReplay=count($operationRequests);
-    check($archiveController(operationRequest('archive-commit',$archiveInput),$uploadServer)->getData(true)['state'] === 'uncertain' && count($operationRequests)===$beforeReplay,
-        'partial archive operation preserves stage without replay or cleanup');
+    $beforeReplay=count(array_filter($operationRequests,fn($call)=>$call['request']->getMethod()!=='GET'));
+    check($archiveController(operationRequest('archive-commit',$archiveInput),$uploadServer)->getData(true)['state'] === 'uncertain'
+        && count(array_filter($operationRequests,fn($call)=>$call['request']->getMethod()!=='GET'))===$beforeReplay,
+        'partial archive reconciliation reads remnants without repeating mutation or cleanup');
 }
 $archiveInput['operationId']='12345678-1234-4234-8234-123456789104'; $operationRequests=[];
 $archiveController = new ArchiveCommitController(operationRepo([operationListing([operationEntry('imported')]), operationListing([operationEntry('payload.zip',true,42)])],$operationRequests));
 denied(fn()=>$archiveController(operationRequest('archive-commit',$archiveInput),$uploadServer),409,'existing destination is rejected before extraction');
 check(count($operationRequests)===2 && DB::table('nickhosting_file_operations')->where('operation_id',$archiveInput['operationId'])->value('state')==='rejected','collision has no uncertain publication and no native write');
+
+$archiveRecoveryNumber = 400;
+function archiveRecoveryInput(): array {
+    global $archiveRecoveryNumber, $uploadServer;
+    return ['operationId'=>'12345678-1234-4234-8234-'.str_pad((string)++$archiveRecoveryNumber,12,'0',STR_PAD_LEFT),
+        'identity'=>Protocol::identity($uploadServer), 'destinationRoot'=>'imported', 'archiveSha256'=>str_repeat('b',64),
+        'files'=>[['path'=>'imported/level.dat','size'=>123]]];
+}
+function seedArchiveRecovery(array $input, string $state='uncertain', ?array $context=null): void {
+    global $uploadServer, $uploadUser;
+    $manifest=$input['files']; usort($manifest,fn($a,$b)=>strcmp($a['path'],$b['path']));
+    DB::table('nickhosting_file_operations')->insert(['operation_id'=>$input['operationId'], 'server_uuid'=>$uploadServer->uuid,
+        'owner_id'=>$uploadUser->id, 'fingerprint'=>hash('sha256',json_encode(['archive',$input['identity'],$input['destinationRoot'],$input['archiveSha256'],$manifest],JSON_THROW_ON_ERROR)),
+        'state'=>$state,'recovery_context'=>$context===null?null:json_encode($context,JSON_THROW_ON_ERROR),'created_at'=>now(),'updated_at'=>now()]);
+}
+function archiveRecoveryContext(string $phase): array {
+    return ['schemaVersion'=>1,'kind'=>'archive','phase'=>$phase,'payload'=>['size'=>42,'modified'=>'2026-10-18T12:00:00Z']];
+}
+function archiveRecoveryResponses(array $input): array {
+    $scratch=operationEntry('.nickhosting-import-'.$input['operationId']);
+    $payload=operationEntry('payload.zip',true,42); $destination=operationEntry($input['destinationRoot']);
+    return [operationListing([$scratch]),operationListing([$payload,$destination]),
+        operationListing([$payload,$destination]),operationListing([operationEntry('level.dat',true,$input['files'][0]['size'])]),
+        operationListing([$scratch]),new GuzzleHttp\Psr7\Response(204),operationListing([$scratch,$destination]),
+        operationListing([$payload]),new GuzzleHttp\Psr7\Response(204)];
+}
+foreach ([null,'extracting','publishing'] as $phase) {
+    $input=archiveRecoveryInput(); seedArchiveRecovery($input,'uncertain',$phase===null?null:archiveRecoveryContext($phase));
+    $operationRequests=[]; $states=[]; $contexts=[];
+    $repo=operationRepo(archiveRecoveryResponses($input),$operationRequests,function($request)use($input,&$states,&$contexts){
+        if($request->getMethod()!=='GET') {
+            $row=DB::table('nickhosting_file_operations')->where('operation_id',$input['operationId'])->first();
+            $states[]=$row->state; $contexts[]=json_decode($row->recovery_context,true);
+        }
+    });
+    $controller=new ArchiveCommitController($repo);
+    $receipt=$controller(operationRequest('archive-commit',$input),$uploadServer)->getData(true);
+    $mutations=array_values(array_filter($operationRequests,fn($call)=>$call['request']->getMethod()!=='GET'));
+    check($receipt['state']==='confirmed' && count($mutations)===2
+        && str_ends_with((string)$mutations[0]['request']->getUri(),'/rename')
+        && str_ends_with((string)$mutations[1]['request']->getUri(),'/delete'),
+        'exact extracted archive recovery publishes without upload or decompression '.($phase??'legacy'));
+    check($states===['sent','sent'] && array_column($contexts,'phase')===['publishing','cleaning'],
+        'archive recovery records each exact dispatch before provider effect '.($phase??'legacy'));
+    $countBefore=count($operationRequests);
+    check($controller(operationRequest('archive-commit',$input),$uploadServer)->getData(true)===$receipt && count($operationRequests)===$countBefore,
+        'recovered archive confirmed replay never repeats an effect '.($phase??'legacy'));
+}
+foreach (['payload-only','missing-file','extra-file','extra-directory','symlink','size','both-present','missing-payload','root-symlink','legacy-published','payload-changed'] as $failure) {
+    $input=archiveRecoveryInput();
+    $context=$failure==='legacy-published'?null:archiveRecoveryContext('extracting');
+    seedArchiveRecovery($input,'uncertain',$context);
+    $responses=archiveRecoveryResponses($input);
+    $scratch=operationEntry('.nickhosting-import-'.$input['operationId']); $payload=operationEntry('payload.zip',true,42); $destination=operationEntry('imported');
+    if($failure==='payload-only') { $responses[1]=$responses[2]=operationListing([$payload]); }
+    if($failure==='missing-file') { $responses[3]=operationListing([]); }
+    if($failure==='extra-file') { $responses[3]=operationListing([operationEntry('level.dat',true,123),operationEntry('unexpected',true,0)]); }
+    if($failure==='extra-directory') { $responses[3]=operationListing([operationEntry('level.dat',true,123),operationEntry('empty')]); }
+    if($failure==='symlink') { $responses[3]=operationListing([array_replace(operationEntry('level.dat',true,123),['symlink'=>true])]); }
+    if($failure==='size') { $responses[3]=operationListing([operationEntry('level.dat',true,124)]); }
+    if($failure==='both-present') { $responses[0]=operationListing([$scratch,$destination]); }
+    if($failure==='missing-payload') { $responses[1]=operationListing([$destination]); }
+    if($failure==='root-symlink') { $responses[0]=operationListing([array_replace($scratch,['symlink'=>true])]); }
+    if($failure==='legacy-published') { $responses[0]=operationListing([$scratch,$destination]); $responses[1]=operationListing([$payload]); }
+    if($failure==='payload-changed') { $responses[1]=operationListing([array_replace($payload,['modified'=>'2026-10-19T12:00:00Z']),$destination]); }
+    $operationRequests=[]; $controller=new ArchiveCommitController(operationRepo($responses,$operationRequests));
+    check($controller(operationRequest('archive-commit',$input),$uploadServer)->getData(true)['state']==='uncertain'
+        && count(array_filter($operationRequests,fn($call)=>$call['request']->getMethod()!=='GET'))===0,
+        'archive recovery preserves every remnant on ambiguous proof '.$failure);
+}
+foreach ([true,false] as $scratchPresent) {
+    $input=archiveRecoveryInput(); seedArchiveRecovery($input,'sent',archiveRecoveryContext('publishing'));
+    $scratch=operationEntry('.nickhosting-import-'.$input['operationId']); $payload=operationEntry('payload.zip',true,42);
+    $responses=[operationListing($scratchPresent?[$scratch,operationEntry('imported')]:[operationEntry('imported')])];
+    if($scratchPresent) { $responses[]=operationListing([$payload]); }
+    $responses[]=operationListing([operationEntry('level.dat',true,123)]);
+    if($scratchPresent) { $responses[]=new GuzzleHttp\Psr7\Response(204); }
+    $operationRequests=[]; $controller=new ArchiveCommitController(operationRepo($responses,$operationRequests));
+    check($controller(operationRequest('archive-commit',$input),$uploadServer)->getData(true)['state']==='confirmed'
+        && count(array_filter($operationRequests,fn($call)=>$call['request']->getMethod()!=='GET'))===($scratchPresent?1:0),
+        'archive recovery confirms exact already-published tree and only cleans matching scratch '.($scratchPresent?'retained':'absent'));
+}
+$input=archiveRecoveryInput(); $input['destinationRoot']='.nickhosting-pack-stage';
+$input['files']=[['path'=>$input['destinationRoot'].'/level.dat','size'=>0]]; seedArchiveRecovery($input);
+$operationRequests=[]; $controller=new ArchiveCommitController(operationRepo(archiveRecoveryResponses($input),$operationRequests));
+check($controller(operationRequest('archive-commit',$input),$uploadServer)->getData(true)['state']==='confirmed',
+    'archive recovery supports an exact hidden staging destination and zero-byte file');
+
+$input=archiveRecoveryInput(); seedArchiveRecovery($input,'prepared'); $operationRequests=[];
+$controller=new ArchiveCommitController(operationRepo([],$operationRequests));
+check($controller(operationRequest('archive-commit',$input),$uploadServer)->getData(true)['state']==='uncertain' && $operationRequests===[],
+    'prepared archive receipt never authorizes decompression replay');
+foreach (['archiveSha256','destinationRoot','identity','files'] as $field) {
+    $changed=$input;
+    if($field==='archiveSha256') { $changed[$field]=str_repeat('a',64); }
+    if($field==='destinationRoot') { $changed[$field]='other'; $changed['files'][0]['path']='other/level.dat'; }
+    if($field==='identity') { $changed[$field]['externalId']='foreign'; }
+    if($field==='files') { $changed[$field][0]['size']++; }
+    denied(fn()=>$controller(operationRequest('archive-commit',$changed),$uploadServer),409,'archive recovery rejects changed exact receipt '.$field);
+}
+check($operationRequests===[],'mismatched recovery receipts have no provider access');
+
+// Nested invocation models a second HTTP worker while the original holds the lock.
+$input=archiveRecoveryInput(); $operationRequests=[]; $nested=0; $controller=null;
+$repo=operationRepo(archiveResponses($input),$operationRequests,function($request)use($input,&$controller,&$nested){
+    if($nested>=2) { return; }
+    if($nested===0 || str_ends_with((string)$request->getUri(),'/decompress')) {
+        global $uploadServer;
+        $row=DB::table('nickhosting_file_operations')->where('operation_id',$input['operationId'])->first();
+        check($row->state===($nested===0?'prepared':'sent'),'archive receipt intent is durable before native dispatch '.$nested);
+        $nested++;
+        denied(fn()=>$controller(operationRequest('archive-commit',$input),$uploadServer),409,'concurrent archive request cannot enter the locked receipt');
+    }
+});
+$controller=new ArchiveCommitController($repo);
+check($controller(operationRequest('archive-commit',$input),$uploadServer)->getData(true)['state']==='confirmed' && $nested===2,
+    'original archive request retains the receipt lock across preflight and effects');
+check($archiveLocks===[],'all archive receipt locks release after success and denial');
+$input=archiveRecoveryInput(); $input['operationId']='ABCDEFAB-ABCD-4ABC-8ABC-ABCDEFABCDEF';
+$caseLock='nickhosting-archive-'.strtolower($input['operationId']); $archiveLocks[$caseLock]=2; $operationRequests=[];
+$controller=new ArchiveCommitController(operationRepo([],$operationRequests));
+denied(fn()=>$controller(operationRequest('archive-commit',$input),$uploadServer),409,'UUID case aliases share the same archive receipt lock');
+check($operationRequests===[] && $archiveLocks[$caseLock]===2,'busy alias cannot read provider or release another request lock');
+unset($archiveLocks[$caseLock]);
+
+foreach (['preflight','decompress','delete'] as $lostAt) {
+    $input=archiveRecoveryInput(); $operationRequests=[]; $lost=false;
+    $lockKey='nickhosting-archive-'.$input['operationId'];
+    $repo=operationRepo(archiveResponses($input),$operationRequests,function($request)use($input,$lostAt,$lockKey,&$lost,&$archiveLocks){
+        if(!$lost && ($lostAt==='preflight' || str_ends_with((string)$request->getUri(),'/'.$lostAt))) {
+            $lost=true;
+            // The old connection loses its lock; a newer request confirms the receipt.
+            $archiveLocks[$lockKey]=2;
+            DB::table('nickhosting_file_operations')->where('operation_id',$input['operationId'])->update(['state'=>'confirmed']);
+        }
+    });
+    $controller=new ArchiveCommitController($repo);
+    if($lostAt==='preflight') {
+        denied(fn()=>$controller(operationRequest('archive-commit',$input),$uploadServer),409,'lost receipt lock refuses first archive effect');
+    } else {
+        check($controller(operationRequest('archive-commit',$input),$uploadServer)->getData(true)['state']==='uncertain',
+            'lost receipt lock returns uncertainty after dispatch '.$lostAt);
+    }
+    check(DB::table('nickhosting_file_operations')->where('operation_id',$input['operationId'])->value('state')==='confirmed'
+        && $archiveLocks[$lockKey]===2,'stale archive request never overwrites confirmation or releases newer lock '.$lostAt);
+    unset($archiveLocks[$lockKey]);
+}
+
+class ArchiveUnchangedStatement extends PDOStatement {
+    protected function __construct() {}
+    public function rowCount(): int { return str_starts_with($this->queryString,'UPDATE ') && str_contains($this->queryString,'nickhosting_file_operations') ? 0 : parent::rowCount(); }
+}
+$statementClass=$archivePdo->getAttribute(PDO::ATTR_STATEMENT_CLASS);
+$archivePdo->setAttribute(PDO::ATTR_STATEMENT_CLASS,[ArchiveUnchangedStatement::class]);
+try {
+    $input=archiveRecoveryInput(); seedArchiveRecovery($input,'sent',archiveRecoveryContext('publishing')); $operationRequests=[];
+    $controller=new ArchiveCommitController(operationRepo(archiveRecoveryResponses($input),$operationRequests));
+    check($controller(operationRequest('archive-commit',$input),$uploadServer)->getData(true)['state']==='confirmed',
+        'MySQL zero changed-row receipt updates verify exact retained values on the pinned connection');
+} finally { $archivePdo->setAttribute(PDO::ATTR_STATEMENT_CLASS,$statementClass); }
 
 // Public invocations acquire fresh node-bound clients; no persistent client may
 // survive a later setServer(), including after an unsuccessful inspection.
@@ -355,8 +532,8 @@ check($traceFailed['state']==='uncertain' && array_keys($traceFailed['timings'])
     'failed trace includes failed stage duration without publish or cleanup timings');
 $traceCount=count($operationRequests);
 $traceReplay=$traceController(operationRequest('archive-commit',$traceInput),$uploadServer)->getData(true);
-check($traceReplay['state']==='uncertain' && !isset($traceReplay['timings']) && count($operationRequests)===$traceCount,
-    'uncertain trace replay preserves stage and has no repeated work or historical timing');
+check($traceReplay['state']==='uncertain' && !isset($traceReplay['timings']['decompress']) && !isset($traceReplay['timings']['rename']),
+    'uncertain trace reconciliation preserves stage and never repeats decompression or invents historical timing');
 
 // Native Wings rename refuses overwrites. Publication keeps the old file until
 // both rename sides have been observed, and persists intent before the first write.
