@@ -1,10 +1,10 @@
 import type { ContentTarget } from './contracts.js';
 import type {
+  ContentCatalogProvider,
   ModAvailabilityHints,
   ModCatalogVersion,
   ModCompatibilityIssue,
   ModEnvironment,
-  ModProvider,
   ModTag,
 } from './mod-catalog.js';
 
@@ -99,7 +99,7 @@ export function curseforgeProjectEnvironment(
 
 /** Only genuine synonyms are merged; unrelated provider topics retain distinct labels. */
 export function normalizeModTags(
-  provider: ModProvider,
+  provider: ContentCatalogProvider,
   values: { slug: string; name?: string }[],
 ): ModTag[] {
   const aliases: Record<string, [string, string]> = {

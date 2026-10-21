@@ -44,6 +44,7 @@ export async function resolveModsAutomatically(input: {
   let roots = input.roots;
   let resolved = await input.provider.resolveMods(roots, input.target, {
     preferBeta: input.preferBeta,
+    maxVersionChecks: input.maxVersions,
     installedVersions: input.installedVersions,
     signal: input.signal,
     metadataMemo,

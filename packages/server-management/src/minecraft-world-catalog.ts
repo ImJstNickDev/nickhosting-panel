@@ -12,6 +12,7 @@ import {
 } from '@nickhosting/core';
 import { type Database, getSecret, getSettings } from '@nickhosting/database';
 import type { Kysely } from 'kysely';
+import { minecraftPluginOrigins } from '../../../games/minecraft/src/plugin-origins.js';
 import type { Environment } from './admission.js';
 import { authorizeMinecraftWorldCatalog } from './minecraft-sources.js';
 import {
@@ -50,6 +51,7 @@ export async function minecraftContentProviders(
   const origins = [
     'https://api.modrinth.com',
     'https://api.curseforge.com',
+    ...minecraftPluginOrigins,
     ...contentPolicyValues(values, 'minecraft').downloadOrigins,
   ];
   const fingerprint = createHash('sha256')

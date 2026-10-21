@@ -1,20 +1,28 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type {
+  ContentCatalogProvider,
   MinecraftModMetadata,
   MinecraftModQueueItem,
   MinecraftModRoot,
   MinecraftModsSnapshot,
   ModCatalogProject,
   ModCatalogVersion,
-  ModProvider,
 } from '../../../../../games/minecraft/src/ui/mods-controller.js';
 import { idempotencyKey, queryClient } from '../../api/client.js';
-import { useFormat, useT } from '../../app/i18n.js';
+import { useFormat } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
 import { ErrorNotice } from '../../components/ui.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { ViewerSelect } from '../../features/viewer-engine/viewer-select.js';
+import {
+  type AddonCatalog,
+  AddonsContext,
+  addonProviderLabel,
+  addonsScopes,
+  useAddons,
+  useAddonsT,
+} from './addons-context.js';
 import { contentPreparationErrorKey } from './content-preparation-error.js';
 import {
   currentModUpdates,
@@ -39,7 +47,7 @@ import {
   projectIdentity,
 } from './mods-primitives.js';
 import { ModsBlocker } from './mods-resolution.js';
-import { modsController, modsQueryKey, useModsSelection } from './mods-selection.js';
+import { useModsSelection } from './mods-selection.js';
 import { useModsToggles } from './mods-toggles.js';
 import { ModsVersions } from './mods-versions.js';
 import './mods.css';
@@ -71,8 +79,23 @@ function projectFromMetadata(metadata: MinecraftModMetadata): ModCatalogProject 
 }
 
 export function MinecraftModsSection(props: GameSectionViewProps) {
-  const t = useT();
-  const initial = props.data.metadata?.mods as Snapshot | undefined;
+  return (
+    <AddonsContext.Provider value={addonsScopes.mods}>
+      <MinecraftAddonsSection key={props.serverId} {...props} />
+    </AddonsContext.Provider>
+  );
+}
+export function MinecraftPluginsSection(props: GameSectionViewProps) {
+  return (
+    <AddonsContext.Provider value={addonsScopes.plugins}>
+      <MinecraftAddonsSection key={props.serverId} {...props} />
+    </AddonsContext.Provider>
+  );
+}
+function MinecraftAddonsSection(props: GameSectionViewProps) {
+  const t = useAddonsT();
+  const { kind, controller: modsController, queryKey: modsQueryKey } = useAddons();
+  const initial = props.data.metadata?.[kind] as Snapshot | undefined;
   const inventory = useQuery({
     queryKey: modsQueryKey(props.serverId),
     queryFn: ({ signal }) => modsController.snapshot(props.serverId, signal),
@@ -216,7 +239,7 @@ export function MinecraftModsSection(props: GameSectionViewProps) {
     try {
       await modsController.apply(props.serverId, intent);
       const result = await inventory.refetch();
-      await queryClient.invalidateQueries({ queryKey: ['minecraft-mods-restart', props.serverId] });
+      await queryClient.invalidateQueries({ queryKey: modsQueryKey(props.serverId, 'restart') });
       if (result.data && !result.error && !result.data.changes.length && !result.data.error) {
         applyIntent.current = undefined;
         setApplied(true);
@@ -252,7 +275,11 @@ export function MinecraftModsSection(props: GameSectionViewProps) {
     selectedFile,
   };
   return (
-    <section className="minecraft-mods" aria-label={t('games.minecraft.sections.mods')}>
+    <section
+      className="minecraft-mods"
+      data-kind={kind}
+      aria-label={t(`games.minecraft.sections.${kind}`)}
+    >
       <header className="mods-header">
         {view === 'review' ? (
           <div className="mods-review-heading">
@@ -267,7 +294,7 @@ export function MinecraftModsSection(props: GameSectionViewProps) {
             </h2>
           </div>
         ) : (
-          <fieldset className="mods-tabs" aria-label={t('games.minecraft.sections.mods')}>
+          <fieldset className="mods-tabs" aria-label={t(`games.minecraft.sections.${kind}`)}>
             <button
               type="button"
               aria-pressed={view === 'installed'}
@@ -431,9 +458,10 @@ function DiscoverMods(
     onSelect(project: ModCatalogProject, checked: boolean): void;
   },
 ) {
-  const t = useT(),
+  const t = useAddonsT(),
     format = useFormat();
-  const [provider, setProvider] = useState<ModProvider>('modrinth');
+  const { controller: modsController, queryKey: modsQueryKey, providers } = useAddons();
+  const [provider, setProvider] = useState<AddonCatalog>('modrinth');
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
   const [offset, setOffset] = useState(0);
@@ -462,17 +490,18 @@ function DiscoverMods(
     return () => clearTimeout(timer);
   }, [search]);
   const config = useQuery({
-    queryKey: ['minecraft-mods-catalog', props.serverId],
+    queryKey: modsQueryKey(props.serverId, 'catalog'),
     queryFn: ({ signal }) => modsController.catalog(props.serverId, signal),
     staleTime: 60_000,
     enabled: props.visible,
   });
+  const comingSoon = provider === 'voxel' || provider === 'builtbybit';
   const available =
+    !comingSoon &&
     config.data?.providers.some((item) => item.id === provider && item.available) === true;
   const projects = useQuery({
     queryKey: [
-      'minecraft-mods-search',
-      props.serverId,
+      ...modsQueryKey(props.serverId, 'search'),
       provider,
       query,
       offset,
@@ -481,7 +510,7 @@ function DiscoverMods(
     queryFn: ({ signal }) =>
       modsController.search(
         props.serverId,
-        { provider, query, offset, includeIncompatible },
+        { provider: provider as ContentCatalogProvider, query, offset, includeIncompatible },
         signal,
       ),
     staleTime: 60_000,
@@ -489,16 +518,20 @@ function DiscoverMods(
     enabled: available && props.visible,
   });
   const details = useQuery({
-    queryKey: ['minecraft-mod-details', props.serverId, props.project?.provider, props.project?.id],
+    queryKey: [
+      ...modsQueryKey(props.serverId, 'details'),
+      props.project?.provider,
+      props.project?.id,
+    ],
     queryFn: ({ signal }) =>
       modsController.details(
         props.serverId,
-        props.project?.provider ?? provider,
+        props.project?.provider ?? 'modrinth',
         props.project?.id ?? '',
         signal,
       ),
     staleTime: 5 * 60_000,
-    enabled: Boolean(props.project) && props.visible,
+    enabled: Boolean(props.project) && props.visible && !comingSoon,
   });
   const project = details.data ?? props.project;
   return (
@@ -508,6 +541,7 @@ function DiscoverMods(
           <ModsIcon name="search" />
           <input
             ref={searchInput}
+            disabled={comingSoon}
             type="search"
             aria-label={t(modsKey('search'))}
             placeholder={t(modsKey('search'))}
@@ -519,12 +553,10 @@ function DiscoverMods(
           label={t(modsKey('provider'))}
           value={provider}
           className="mods-select"
-          options={[
-            { value: 'modrinth', label: 'Modrinth' },
-            { value: 'curseforge', label: 'CurseForge' },
-          ]}
+          options={providers.map((value) => ({ value, label: addonProviderLabel[value] }))}
           onChange={(value) => {
-            setProvider(value as ModProvider);
+            setProvider(value as AddonCatalog);
+            props.onCloseProject();
             setOffset(0);
           }}
         />
@@ -534,7 +566,7 @@ function DiscoverMods(
             className="mods-beta-toggle"
             aria-label={t(modsKey('betaPreference'))}
             aria-pressed={props.selection.preferBeta}
-            disabled={props.disabled}
+            disabled={props.disabled || comingSoon}
             onClick={() => props.selection.setPreferBeta(!props.selection.preferBeta)}
           >
             <span>β</span>
@@ -542,22 +574,24 @@ function DiscoverMods(
           </button>
         </Tooltip>
       </div>
-      <div className="mods-catalog-options">
-        <ModsCheckbox
-          checked={includeIncompatible}
-          onChange={(value) => {
-            setIncludeIncompatible(value);
-            setOffset(0);
-          }}
-          label={t(modsKey('showAllProjects'))}
-        />
-        {props.data && (
-          <span>
-            {props.data.version} · {props.data.loader}
-          </span>
-        )}
-      </div>
-      {(config.error || projects.error) && (
+      {!comingSoon && (
+        <div className="mods-catalog-options">
+          <ModsCheckbox
+            checked={includeIncompatible}
+            onChange={(value) => {
+              setIncludeIncompatible(value);
+              setOffset(0);
+            }}
+            label={t(modsKey('showAllProjects'))}
+          />
+          {props.data && (
+            <span>
+              {props.data.version} · {props.data.loader}
+            </span>
+          )}
+        </div>
+      )}
+      {!comingSoon && (config.error || projects.error) && (
         <ErrorNotice
           error={config.error ?? projects.error}
           retry={() => {
@@ -566,155 +600,165 @@ function DiscoverMods(
           }}
         />
       )}
-      <div className="mods-catalog-layout" data-details={Boolean(project) || undefined}>
-        <div className="mods-results" aria-busy={projects.isFetching}>
-          {config.isPending || (available && projects.isPending) ? (
-            <ModsSkeleton />
-          ) : !available ? (
-            <ModsEmpty>{t(modsKey('unavailable'))}</ModsEmpty>
-          ) : projects.data?.items.length === 0 ? (
-            <ModsEmpty>{t(modsKey('noResults'))}</ModsEmpty>
-          ) : (
-            <ul className="mods-project-list">
-              {projects.data?.items.map((item) => {
-                const selected = props.selected(item);
-                const root = props.selection.roots.find((root) => sameProject(root, item)) ?? {
-                  provider: item.provider,
-                  projectId: item.id,
-                };
-                const state = modRootState(props.data, root, props.selection.saving);
-                return (
-                  <li
-                    key={projectIdentity(item)}
-                    className="mods-project"
-                    data-selected={selected || undefined}
-                    data-current={
-                      (project && projectIdentity(project) === projectIdentity(item)) || undefined
-                    }
-                  >
-                    <ModsCheckbox
-                      label={t(modsKey('select'), { name: item.name })}
-                      checked={selected}
-                      onChange={(value) => props.onSelect(item, value)}
-                      disabled={props.disabled}
-                      compact
-                    />
-                    <button
-                      type="button"
-                      className="mods-project-open"
-                      aria-label={t(modsKey('details'), { name: item.name })}
-                      onClick={(event) => {
-                        detailOpener.current = event.currentTarget;
-                        props.onProject(item);
-                      }}
-                    >
-                      <ModsArtwork image={item.imageUrl} name={item.name} />
-                      <span className="mods-project-copy">
-                        <span className="mods-project-title">
-                          <strong>{item.name}</strong>
-                          {selected && (
-                            <span className="mods-inline-state" data-state={state}>
-                              {t(modsKey(state))}
-                            </span>
-                          )}
-                        </span>
-                        <span className="mods-project-summary">{item.summary}</span>
-                        <ModsTags side={item.environment.kind} tags={item.tags} compact />
-                      </span>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-          {(projects.data?.total ?? 0) > 20 && (
-            <ModsPagination
-              offset={offset}
-              total={projects.data?.total ?? 0}
-              onChange={setOffset}
-            />
-          )}
+      {comingSoon ? (
+        <div className="addons-coming-soon">
+          <ModsEmpty>{t(modsKey('comingSoon'))}</ModsEmpty>
         </div>
-        {project && (
-          <aside
-            className="mods-details"
-            aria-label={t(modsKey('details'), { name: project.name })}
-            onKeyDown={(event) => {
-              if (event.key === 'Escape') {
-                event.stopPropagation();
-                closeDetails();
-              }
-            }}
-          >
-            <header className="mods-details-header">
-              <ModsArtwork image={project.imageUrl} name={project.name} />
-              <div>
-                <h3 ref={detailsHeading} tabIndex={-1}>
-                  {project.name}
-                </h3>
-                {project.authors.length > 0 && (
-                  <small>{t(modsKey('authors'), { authors: project.authors.join(', ') })}</small>
+      ) : (
+        <div className="mods-catalog-layout" data-details={Boolean(project) || undefined}>
+          <div className="mods-results" aria-busy={projects.isFetching}>
+            {config.isPending || (available && projects.isPending) ? (
+              <ModsSkeleton />
+            ) : !available ? (
+              <ModsEmpty>{t(modsKey('unavailable'))}</ModsEmpty>
+            ) : projects.data?.items.length === 0 ? (
+              <ModsEmpty>{t(modsKey('noResults'))}</ModsEmpty>
+            ) : (
+              <ul className="mods-project-list">
+                {projects.data?.items.map((item) => {
+                  const selected = props.selected(item);
+                  const root = props.selection.roots.find((root) => sameProject(root, item)) ?? {
+                    provider: item.provider,
+                    projectId: item.id,
+                  };
+                  const state = modRootState(props.data, root, props.selection.saving);
+                  return (
+                    <li
+                      key={projectIdentity(item)}
+                      className="mods-project"
+                      data-selected={selected || undefined}
+                      data-current={
+                        (project && projectIdentity(project) === projectIdentity(item)) || undefined
+                      }
+                    >
+                      <ModsCheckbox
+                        label={t(modsKey('select'), { name: item.name })}
+                        checked={selected}
+                        onChange={(value) => props.onSelect(item, value)}
+                        disabled={props.disabled}
+                        compact
+                      />
+                      <button
+                        type="button"
+                        className="mods-project-open"
+                        aria-label={t(modsKey('details'), { name: item.name })}
+                        onClick={(event) => {
+                          detailOpener.current = event.currentTarget;
+                          props.onProject(item);
+                        }}
+                      >
+                        <ModsArtwork image={item.imageUrl} name={item.name} />
+                        <span className="mods-project-copy">
+                          <span className="mods-project-title">
+                            <strong>{item.name}</strong>
+                            {selected && (
+                              <span className="mods-inline-state" data-state={state}>
+                                {t(modsKey(state))}
+                              </span>
+                            )}
+                          </span>
+                          <span className="mods-project-summary">{item.summary}</span>
+                          <ModsTags side={item.environment.kind} tags={item.tags} compact />
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            {(projects.data?.total ?? 0) > 20 && (
+              <ModsPagination
+                offset={offset}
+                total={projects.data?.total ?? 0}
+                onChange={setOffset}
+              />
+            )}
+          </div>
+          {project && (
+            <aside
+              className="mods-details"
+              aria-label={t(modsKey('details'), { name: project.name })}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.stopPropagation();
+                  closeDetails();
+                }
+              }}
+            >
+              <header className="mods-details-header">
+                <ModsArtwork image={project.imageUrl} name={project.name} />
+                <div>
+                  <h3 ref={detailsHeading} tabIndex={-1}>
+                    {project.name}
+                  </h3>
+                  {project.authors.length > 0 && (
+                    <small>{t(modsKey('authors'), { authors: project.authors.join(', ') })}</small>
+                  )}
+                </div>
+                <ModsAction
+                  icon="close"
+                  label={t(modsKey('closeDetails'))}
+                  onClick={closeDetails}
+                />
+              </header>
+              <p className="mods-details-summary">{project.summary}</p>
+              <ModsTags side={project.environment.kind} tags={project.tags} />
+              <div className="mods-details-actions">
+                <ModsCheckbox
+                  label={t(modsKey('select'), { name: project.name })}
+                  checked={props.selected(project)}
+                  onChange={(value) => props.onSelect(project, value)}
+                  disabled={props.disabled}
+                />
+                {project.websiteUrl.startsWith('https://') && (
+                  <Tooltip content={t(modsKey('openProject'))}>
+                    <a
+                      className="mods-icon-action"
+                      aria-label={t(modsKey('openProject'))}
+                      href={project.websiteUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <ModsIcon name="external" />
+                    </a>
+                  </Tooltip>
                 )}
               </div>
-              <ModsAction icon="close" label={t(modsKey('closeDetails'))} onClick={closeDetails} />
-            </header>
-            <p className="mods-details-summary">{project.summary}</p>
-            <ModsTags side={project.environment.kind} tags={project.tags} />
-            <div className="mods-details-actions">
-              <ModsCheckbox
-                label={t(modsKey('select'), { name: project.name })}
-                checked={props.selected(project)}
-                onChange={(value) => props.onSelect(project, value)}
+              <ModsVersions
+                key={projectIdentity(project)}
+                serverId={props.serverId}
+                provider={project.provider}
+                projectId={project.id}
+                selected={props.selectedFile(project)}
+                preferBeta={props.selection.preferBeta}
                 disabled={props.disabled}
+                onSelect={(file, force) => props.onVersion(project, file, force)}
               />
-              {project.websiteUrl.startsWith('https://') && (
-                <Tooltip content={t(modsKey('openProject'))}>
-                  <a
-                    className="mods-icon-action"
-                    aria-label={t(modsKey('openProject'))}
-                    href={project.websiteUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <ModsIcon name="external" />
-                  </a>
-                </Tooltip>
+              {details.error && (
+                <ErrorNotice error={details.error} retry={() => void details.refetch()} />
               )}
-            </div>
-            <ModsVersions
-              key={projectIdentity(project)}
-              serverId={props.serverId}
-              provider={project.provider}
-              projectId={project.id}
-              selected={props.selectedFile(project)}
-              preferBeta={props.selection.preferBeta}
-              disabled={props.disabled}
-              onSelect={(file, force) => props.onVersion(project, file, force)}
-            />
-            {details.error && (
-              <ErrorNotice error={details.error} retry={() => void details.refetch()} />
-            )}
-            {details.isPending ? (
-              <ModsSkeleton rows={3} />
-            ) : (
-              details.data && (
-                <Suspense fallback={<ModsSkeleton rows={3} />}>
-                  <ModsDescription
-                    key={projectIdentity(project)}
-                    text={details.data.description}
-                    format={details.data.descriptionFormat}
-                  />
-                </Suspense>
-              )
-            )}
-            {project.downloads > 0 && (
-              <p className="mods-project-downloads">
-                {t(modsKey('downloads'), { count: format.number(project.downloads, 0) })}
-              </p>
-            )}
-          </aside>
-        )}
-      </div>
+              {details.isPending ? (
+                <ModsSkeleton rows={3} />
+              ) : (
+                details.data && (
+                  <Suspense fallback={<ModsSkeleton rows={3} />}>
+                    <ModsDescription
+                      key={projectIdentity(project)}
+                      text={details.data.description}
+                      format={details.data.descriptionFormat}
+                    />
+                  </Suspense>
+                )
+              )}
+              {project.downloads > 0 && (
+                <p className="mods-project-downloads">
+                  {t(modsKey('downloads'), { count: format.number(project.downloads, 0) })}
+                </p>
+              )}
+            </aside>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -728,8 +772,9 @@ function InstalledMods(
     onDiscard(changeId: string): void;
   },
 ) {
-  const t = useT(),
+  const t = useAddonsT(),
     format = useFormat();
+  const { kind, controller: modsController, queryKey: modsQueryKey } = useAddons();
   const [search, setSearch] = useState('');
   const [side, setSide] = useState('all');
   const [category, setCategory] = useState('');
@@ -738,8 +783,7 @@ function InstalledMods(
   const hasCatalogPacks = packs.some((pack) => pack.metadata);
   const updates = useQuery({
     queryKey: [
-      'minecraft-mod-updates',
-      props.serverId,
+      ...modsQueryKey(props.serverId, 'updates'),
       props.data?.version,
       props.data?.loader,
       installedModsFingerprint(props.data),
@@ -809,19 +853,21 @@ function InstalledMods(
             }}
           />
         </label>
-        <ViewerSelect
-          label={t(modsKey('environment'))}
-          value={side}
-          className="mods-select"
-          options={['all', 'server', 'client', 'both', 'unknown'].map((value) => ({
-            value,
-            label: t(modsKey(`side.${value}`)),
-          }))}
-          onChange={(value) => {
-            setSide(value);
-            setOffset(0);
-          }}
-        />
+        {kind === 'mods' && (
+          <ViewerSelect
+            label={t(modsKey('environment'))}
+            value={side}
+            className="mods-select"
+            options={['all', 'server', 'client', 'both', 'unknown'].map((value) => ({
+              value,
+              label: t(modsKey(`side.${value}`)),
+            }))}
+            onChange={(value) => {
+              setSide(value);
+              setOffset(0);
+            }}
+          />
+        )}
         {categories.size > 0 && (
           <ViewerSelect
             label={t(modsKey('categories'))}
@@ -1023,7 +1069,8 @@ function ReviewMods(
     onBack(): void;
   },
 ) {
-  const t = useT();
+  const t = useAddonsT();
+
   const [forcing, setForcing] = useState<string>();
   const resolving = props.selection.saving || props.data?.preparing;
   const changes = props.data?.changes ?? [];
@@ -1040,7 +1087,7 @@ function ReviewMods(
   }
   function optional(
     projectId: string,
-    provider: ModProvider,
+    provider: ContentCatalogProvider,
     requiredBy: string[],
     checked: boolean,
   ) {
@@ -1104,7 +1151,7 @@ function ReviewMods(
                   <div className="mods-review-copy">
                     <strong>{project.name}</strong>
                     <span className="mods-review-meta">
-                      <span>{root.provider === 'modrinth' ? 'Modrinth' : 'CurseForge'}</span>
+                      <span>{addonProviderLabel[root.provider]}</span>
                       {change?.metadata && <ModsChannel channel={change.metadata.channel} />}
                       {root.forceIncompatible && (
                         <span className="mods-forced">{t(modsKey('forced'))}</span>
@@ -1349,7 +1396,8 @@ function QueuedChange({
   disabled: boolean;
   onDiscard(): void;
 }) {
-  const t = useT();
+  const t = useAddonsT();
+
   return (
     <li className="mods-review-row">
       <div className="mods-review-main">

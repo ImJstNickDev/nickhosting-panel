@@ -50,3 +50,10 @@ export interface MinecraftModTables {
   minecraft_mod_receipts: { server_id: string; path: string; receipt: Json };
   minecraft_mod_restart: { server_id: string; changed_at: Date };
 }
+
+/** Separate durable namespace, sharing the exact publication lifecycle schema. */
+export type MinecraftPluginTables = {
+  [K in keyof MinecraftModTables as K extends `minecraft_mod_${infer Name}`
+    ? `minecraft_plugin_${Name}`
+    : never]: MinecraftModTables[K];
+};

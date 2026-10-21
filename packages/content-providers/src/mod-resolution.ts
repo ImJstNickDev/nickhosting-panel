@@ -8,10 +8,10 @@ import {
 } from './contracts.js';
 import { dependencyMemo } from './datapack-resolution.js';
 import {
+  type ContentCatalogProvider,
   type ModAvailabilityHints,
   type ModCatalogProject,
   type ModCatalogVersion,
-  type ModProvider,
   type ModResolution,
   type ModSelection,
   modResolutionSchema,
@@ -26,6 +26,7 @@ export interface ModCandidate {
   blockedReason?: 'incompatible-version' | 'unavailable' | 'alpha-only';
   availabilityHints?: ModAvailabilityHints;
   dependencies: {
+    name?: string;
     projectId?: string;
     versionId?: string;
     relation: 'required' | 'optional' | 'embedded' | 'incompatible';
@@ -33,6 +34,8 @@ export interface ModCandidate {
 }
 export interface ResolveModsOptions {
   preferBeta?: boolean;
+  /** Bound provider version selection; avoids walking years of nightly releases. */
+  maxVersionChecks?: number;
   signal?: AbortSignal;
   installedVersions?: ReadonlyMap<string, string>;
   /** Request-scoped raw metadata reuse; candidate graphs remain independent. */
@@ -61,7 +64,7 @@ export interface ResolvedMods {
 
 /** A single memoized graph across all selected roots. No downloaded bytes or remote effects. */
 export async function resolveModGraph(options: {
-  provider: ModProvider;
+  provider: ContentCatalogProvider;
   roots: ModSelection[];
   target: ContentTarget;
   limit: number;
@@ -248,7 +251,7 @@ export async function resolveModGraph(options: {
         const depId = pinned?.project.id ?? dependency.projectId;
         if (!depId) {
           if (dependency.relation === 'required')
-            block('unknown', dependency.versionId, 'unknown', pid, 'unresolved');
+            block('unknown', dependency.versionId, dependency.name ?? 'unknown', pid, 'unresolved');
           continue;
         }
         const ref = {

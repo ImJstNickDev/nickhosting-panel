@@ -143,6 +143,61 @@ describe('Mods HTTP catalog and mutation boundaries', () => {
     });
   });
 
+  it('exposes plugin catalogs and placeholders only for plugin runtimes, rejecting cross-mode writes', async () => {
+    const profile = await database.db
+      .selectFrom('minecraft_server_profiles')
+      .select('combination_id')
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const combination = await database.db
+      .selectFrom('minecraft_combinations')
+      .select('combination')
+      .where('id', '=', profile.combination_id)
+      .executeTakeFirstOrThrow();
+    await database.db
+      .updateTable('minecraft_combinations')
+      .set({
+        combination: JSON.stringify({ ...(combination.combination as object), profile: 'paper' }),
+      })
+      .where('id', '=', profile.combination_id)
+      .execute();
+    const plugins = `/v1/servers/${serverId}/minecraft/plugins`;
+    const catalog = await app.request(`${plugins}/catalog`);
+    expect(catalog.status).toBe(200);
+    expect(await catalog.json()).toEqual({
+      providers: [
+        { id: 'modrinth', available: true },
+        { id: 'hangar', available: true },
+        { id: 'spiget', available: true },
+        { id: 'curseforge', available: true },
+        { id: 'voxel', available: false, comingSoon: true },
+        { id: 'builtbybit', available: false, comingSoon: true },
+      ],
+    });
+    for (const [path, body] of [
+      [
+        '/selection',
+        { roots: [{ provider: 'voxel', projectId: 'test' }], idempotencyKey: randomUUID() },
+      ],
+      ['/changes', { path: 'mods/foreign.jar', action: 'delete', idempotencyKey: randomUUID() }],
+      [
+        '/toggle',
+        { path: 'plugins/../outside.jar', action: 'disable', idempotencyKey: randomUUID() },
+      ],
+    ] as const) {
+      const response = await app.request(`${plugins}${path}`, {
+        method: path === '/selection' ? 'PUT' : 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(400);
+    }
+    expect((await app.request(`${plugins}/catalog/search?provider=voxel`)).status).toBe(400);
+    expect(json).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
+    expect(providerRead).not.toHaveBeenCalled();
+  });
+
   it('serves typed metadata without provider secrets, signed URLs or filesystem checks', async () => {
     expect(await (await app.request(`${base()}/catalog`)).json()).toEqual({
       providers: [

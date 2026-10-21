@@ -9,7 +9,7 @@ export const contentTargetSchema = z
   })
   .strict();
 export type ContentTarget = z.infer<typeof contentTargetSchema>;
-export const hashesSchema = z
+const artifactHashesSchema = z
   .object({
     sha512: z
       .string()
@@ -24,15 +24,17 @@ export const hashesSchema = z
       .regex(/^[a-f0-9]{40}$/)
       .optional(),
   })
-  .strict()
-  .refine((h) => Object.keys(h).length > 0);
+  .strict();
+export const hashesSchema = artifactHashesSchema.refine((h) => Object.keys(h).length > 0);
 export type ContentHashes = z.infer<typeof hashesSchema>;
 export const artifactSchema = z
   .object({
     path: z.string(),
     urls: z.array(z.string().url()).min(1).max(8),
     size: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-    hashes: hashesSchema,
+    hashes: artifactHashesSchema,
+    /** SpiGet publishes no digests/exact sizes: size is a bounded ceiling, staging seals SHA256. */
+    integrity: z.literal('spiget-tls').optional(),
     projectId: z.string().optional(),
     versionId: z.string().optional(),
     kind: z.enum(['mod', 'plugin', 'override']),
@@ -46,11 +48,26 @@ export const artifactSchema = z
       .max(4)
       .optional(),
   })
-  .strict();
+  .strict()
+  .refine((artifact) => {
+    if (artifact.integrity !== 'spiget-tls') return Object.keys(artifact.hashes).length > 0;
+    if (
+      artifact.kind !== 'plugin' ||
+      Object.keys(artifact.hashes).length ||
+      artifact.urls.length !== 1 ||
+      !/^[1-9][0-9]*$/.test(artifact.projectId ?? '') ||
+      !/^[1-9][0-9]*$/.test(artifact.versionId ?? '')
+    )
+      return false;
+    return (
+      artifact.urls[0] ===
+      `https://api.spiget.org/v2/resources/${artifact.projectId}/versions/${artifact.versionId}/download/proxy`
+    );
+  });
 export type ContentArtifact = z.infer<typeof artifactSchema>;
 export const incompatibleContentSchema = z
   .object({
-    provider: z.enum(['modrinth', 'curseforge']),
+    provider: z.enum(['modrinth', 'curseforge', 'hangar', 'spiget']),
     projectId: z.string().min(1).max(128),
     versionId: z.string().min(1).max(128).optional(),
   })
@@ -77,7 +94,7 @@ export const contentPlanSchema = z
       .array(
         z
           .object({
-            provider: z.enum(['modrinth', 'curseforge']),
+            provider: z.enum(['modrinth', 'curseforge', 'hangar', 'spiget']),
             projectId: z.string(),
             versionId: z.string(),
             dependencies: z.array(z.string()),

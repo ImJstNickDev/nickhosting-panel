@@ -1,16 +1,15 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import type {
+  ContentCatalogProvider,
   MinecraftModsSnapshot,
   ModCatalogProject,
   ModCatalogVersion,
-  ModProvider,
 } from '../../../../../games/minecraft/src/ui/mods-controller.js';
-import { useT } from '../../app/i18n.js';
 import { ErrorNotice } from '../../components/ui.js';
+import { useAddons, useAddonsT } from './addons-context.js';
 import { modBlockerChain } from './mods-model.js';
 import { ModsChannel, ModsIcon, modsKey } from './mods-primitives.js';
-import { modsController } from './mods-selection.js';
 import { ModsVersions } from './mods-versions.js';
 
 type Blocker = MinecraftModsSnapshot['blockers'][number];
@@ -23,7 +22,11 @@ const knownReasons = new Set([
   'unresolved',
   'datapack_dependency',
 ]);
-function blockerProject(provider: ModProvider, id: string, name: string): ModCatalogProject {
+function blockerProject(
+  provider: ContentCatalogProvider,
+  id: string,
+  name: string,
+): ModCatalogProject {
   return {
     provider,
     id,
@@ -56,7 +59,7 @@ export function ModsBlocker({
   onVersion(project: ModCatalogProject, version: ModCatalogVersion, force: boolean): void;
   selectedFile(project: ModCatalogProject): { id: string; name: string } | undefined;
 }) {
-  const t = useT();
+  const t = useAddonsT();
   const provider = item.provider;
   const roots =
     item.roots ??
@@ -161,14 +164,14 @@ function ModsAlternative({
   disabled: boolean;
   onSelect(file: ModCatalogVersion): void;
 }) {
-  const t = useT();
+  const t = useAddonsT();
+  const { controller: modsController, queryKey } = useAddons();
   const [requestedScope, setRequestedScope] = useState<string>();
   const scope = `${revision}:${target}`;
   const requested = requestedScope === scope;
   const result = useQuery({
     queryKey: [
-      'minecraft-mod-alternatives',
-      serverId,
+      ...queryKey(serverId, 'alternatives'),
       project.provider,
       project.id,
       revision,

@@ -7,7 +7,7 @@ import remarkGfm from 'remark-gfm';
 import remarkParse from 'remark-parse';
 import remarkRehype from 'remark-rehype';
 import { unified } from 'unified';
-import { useT } from '../../app/i18n.js';
+import { useAddonsT } from './addons-context.js';
 import { modsKey } from './mods-primitives.js';
 
 // Same installed Markdown/sanitizer pipeline as Quill, without its document features,
@@ -64,7 +64,7 @@ export function parseModDescription(value: string, format: 'markdown' | 'html'):
   return sanitizer.runSync(root) as Root;
 }
 export function ModsDescription({ text, format }: { text: string; format: 'markdown' | 'html' }) {
-  const t = useT();
+  const t = useAddonsT();
   const [images, setImages] = useState(false);
   const tree = useMemo(() => {
     try {

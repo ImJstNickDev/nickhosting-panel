@@ -161,4 +161,95 @@ describe('Minecraft Mods browser contracts', () => {
     await expect(controller.alternatives(serverId, 'curseforge', '123', -1)).rejects.toThrow();
     expect(request).not.toHaveBeenCalled();
   });
+  it('isolates plugin transport and validates providers and directories before writes', async () => {
+    const request = vi.fn<GameUiClient['request']>().mockResolvedValue({ revision: 1 });
+    const plugins = createMinecraftModsController({ request }, 'plugins');
+    const body = {
+      roots: [
+        {
+          provider: 'hangar' as const,
+          projectId: 'world-tools',
+          versionId: '1.0+paper',
+          optionalProjectIds: [],
+          forceIncompatible: false,
+        },
+      ],
+      preferBeta: false,
+      idempotencyKey: 'plugin-selection',
+    };
+    await plugins.select(serverId, body);
+    expect(request).toHaveBeenLastCalledWith(
+      `/v1/servers/${serverId}/minecraft/plugins/selection`,
+      { method: 'PUT', body },
+    );
+    request.mockClear();
+    await expect(
+      createMinecraftModsController({ request }).select(serverId, body),
+    ).rejects.toThrow();
+    await expect(
+      plugins.toggle(serverId, {
+        path: 'mods/file.jar',
+        action: 'disable',
+        idempotencyKey: 'wrong-directory',
+      }),
+    ).rejects.toThrow();
+    expect(request).not.toHaveBeenCalled();
+    request.mockResolvedValue({
+      state: 'published',
+      path: 'plugins/file.jar.disabled',
+      restartRequired: true,
+    });
+    await plugins.toggle(serverId, {
+      path: 'plugins/file.jar',
+      action: 'disable',
+      idempotencyKey: 'plugin-toggle',
+    });
+    expect(request).toHaveBeenLastCalledWith(`/v1/servers/${serverId}/minecraft/plugins/toggle`, {
+      method: 'POST',
+      body: { path: 'plugins/file.jar', action: 'disable', idempotencyKey: 'plugin-toggle' },
+    });
+  });
+  it('accepts explicit future catalogs as unavailable without exposing them as selection providers', async () => {
+    const request = vi.fn<GameUiClient['request']>().mockResolvedValue({
+      providers: [
+        { id: 'voxel', available: false, comingSoon: true },
+        { id: 'builtbybit', available: false, comingSoon: true },
+        { id: 'spiget', available: true },
+      ],
+    });
+    const plugins = createMinecraftModsController({ request }, 'plugins');
+    expect((await plugins.catalog(serverId)).providers).toHaveLength(3);
+    request.mockClear();
+    await expect(
+      plugins.select(serverId, {
+        roots: [
+          {
+            provider: 'voxel' as 'modrinth',
+            projectId: 'test',
+            forceIncompatible: false,
+            optionalProjectIds: [],
+          },
+        ],
+        preferBeta: false,
+        idempotencyKey: 'invalid-future-provider',
+      }),
+    ).rejects.toThrow();
+    expect(request).not.toHaveBeenCalled();
+  });
+  it('accepts opaque plugin catalog version names in update receipts', async () => {
+    const request = vi.fn<GameUiClient['request']>().mockResolvedValue({
+      checkedAt: '2026-10-21T12:00:00Z',
+      items: [
+        {
+          path: 'plugins/world-tools.jar',
+          provider: 'hangar',
+          projectId: 'world-tools',
+          currentVersionId: '2.0+paper',
+          status: 'current',
+        },
+      ],
+    });
+    const plugins = createMinecraftModsController({ request }, 'plugins');
+    expect((await plugins.updates(serverId, false)).items[0]?.currentVersionId).toBe('2.0+paper');
+  });
 });

@@ -9,7 +9,7 @@ import type { AuthTables } from './identity-types.js';
 import type { JobTables } from './job-types.js';
 import type { MinecraftDatapackTables } from './minecraft-datapack-types.js';
 import type { MinecraftMetadataTables } from './minecraft-metadata-types.js';
-import type { MinecraftModTables } from './minecraft-mod-types.js';
+import type { MinecraftModTables, MinecraftPluginTables } from './minecraft-mod-types.js';
 import type { MinecraftSourceTables } from './minecraft-source-types.js';
 import type { MinecraftTables } from './minecraft-types.js';
 import type { ProviderAccountTables } from './provider-account-types.js';
@@ -27,6 +27,7 @@ export interface Database
     MinecraftTables,
     MinecraftDatapackTables,
     MinecraftModTables,
+    MinecraftPluginTables,
     MinecraftMetadataTables,
     MinecraftSourceTables,
     ScheduleTables,

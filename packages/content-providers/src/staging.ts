@@ -133,11 +133,35 @@ export async function stageContent(
     for (const artifact of plan.artifacts) {
       options.signal?.throwIfAborted();
       const target = join(files, artifact.path);
+      const sealPath = join(
+        job,
+        `seal-${createHash('sha256').update(artifact.path).digest('hex')}.json`,
+      );
       await contentStageDirectory(dirname(target));
       // Recovered files are verified against source hashes, never trusted by presence.
       if (await exists(target)) {
         const actual = await digestFile(target);
-        if (actual.size !== artifact.size) fail('stage_existing_mismatch');
+        if (artifact.integrity === 'spiget-tls') {
+          if (!(await exists(sealPath))) {
+            // A crash before sealing is not a completed download; reacquire instead of trusting bytes.
+            await rm(target);
+            fail('stage_existing_unsealed');
+          } else {
+            const info = await lstat(sealPath);
+            if (!info.isFile() || info.isSymbolicLink() || info.size > 1024)
+              fail('stage_existing_mismatch');
+            const seal = JSON.parse(await readFile(sealPath, 'utf8')) as {
+              size?: number;
+              sha256?: string;
+            };
+            if (
+              seal.size !== actual.size ||
+              seal.sha256 !== actual.sha256 ||
+              actual.size > artifact.size
+            )
+              fail('stage_existing_mismatch');
+          }
+        } else if (actual.size !== artifact.size) fail('stage_existing_mismatch');
         const hashes = Object.fromEntries(
           Object.keys(artifact.hashes).map((name) => [name, createHash(name)]),
         );
@@ -174,7 +198,9 @@ export async function stageContent(
         });
         const actual = await digestFile(temporary);
         if (
-          actual.size !== artifact.size ||
+          (artifact.integrity === 'spiget-tls'
+            ? actual.size > artifact.size
+            : actual.size !== artifact.size) ||
           reported.sha256 !== actual.sha256 ||
           reported.size !== actual.size
         )
@@ -200,6 +226,10 @@ export async function stageContent(
               artifact.kind === 'mod' && artifact.allowClientOnly === true,
             )
           : undefined;
+        if (artifact.integrity === 'spiget-tls') {
+          if (await exists(sealPath)) await rm(sealPath);
+          await readWriteExclusive(sealPath, JSON.stringify(actual));
+        }
         await rename(temporary, target);
         manifest.push({
           path: artifact.path,

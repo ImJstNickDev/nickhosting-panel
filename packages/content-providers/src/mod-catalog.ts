@@ -3,6 +3,10 @@ import { z } from 'zod';
 /** Browser-safe catalog contract. Provider secrets and artifact URLs never enter this module. */
 export const modProviderSchema = z.enum(['modrinth', 'curseforge']);
 export type ModProvider = z.infer<typeof modProviderSchema>;
+export const contentCatalogProviderSchema = z.enum(['modrinth', 'curseforge', 'hangar', 'spiget']);
+export type ContentCatalogProvider = z.infer<typeof contentCatalogProviderSchema>;
+export const pluginProviderSchema = contentCatalogProviderSchema;
+export type PluginProvider = z.infer<typeof pluginProviderSchema>;
 const identifier = z.string().min(1).max(128);
 export const modEnvironmentSchema = z
   .object({
@@ -17,7 +21,7 @@ export const modEnvironmentSchema = z
         'prefers-both',
       ])
       .optional(),
-    source: z.enum(['modrinth', 'curseforge', 'archive', 'unknown']),
+    source: z.enum(['modrinth', 'curseforge', 'hangar', 'spiget', 'archive', 'unknown']),
     original: z.array(z.string().max(128)).max(32),
   })
   .strict();
@@ -26,14 +30,14 @@ export const modTagSchema = z
   .object({
     id: identifier,
     label: z.string().min(1).max(128),
-    source: modProviderSchema,
+    source: contentCatalogProviderSchema,
     original: z.string().max(128),
   })
   .strict();
 export type ModTag = z.infer<typeof modTagSchema>;
 export const modCatalogProjectSchema = z
   .object({
-    provider: modProviderSchema,
+    provider: contentCatalogProviderSchema,
     id: identifier,
     name: z.string().min(1).max(512),
     summary: z.string().max(4096),
@@ -60,7 +64,7 @@ export const modCompatibilityIssueSchema = z.enum([
 export type ModCompatibilityIssue = z.infer<typeof modCompatibilityIssueSchema>;
 export const modCatalogVersionSchema = z
   .object({
-    provider: modProviderSchema,
+    provider: contentCatalogProviderSchema,
     id: identifier,
     projectId: identifier,
     name: z.string().min(1).max(512),
@@ -105,7 +109,11 @@ export const modSelectionSchema = z
   .strict();
 export type ModSelection = z.infer<typeof modSelectionSchema>;
 const refSchema = z
-  .object({ provider: modProviderSchema, projectId: identifier, versionId: identifier.optional() })
+  .object({
+    provider: contentCatalogProviderSchema,
+    projectId: identifier,
+    versionId: identifier.optional(),
+  })
   .strict();
 export const modResolutionItemSchema = z
   .object({

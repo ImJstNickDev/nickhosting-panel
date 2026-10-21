@@ -72,6 +72,6 @@ export const minecraftManifest = gameManifestSchema.parse({
       requiredCapability: 'players',
     },
   ],
-  contentProviders: ['modrinth', 'curseforge'],
+  contentProviders: ['modrinth', 'curseforge', 'hangar', 'spiget'],
   localizations: { namespace: 'games.minecraft', locales: ['en', 'it'] },
 });

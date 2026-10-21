@@ -39,6 +39,9 @@ import {
   resolveModGraph,
 } from './mod-resolution.js';
 
+import { pluginCompatibility, pluginLoaders } from './plugin-metadata.js';
+
+type CatalogKind = 'mod' | 'plugin';
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 const numeric = z.number().int().positive();
 const environment = z.union([z.string(), z.array(z.string()).max(32)]).optional();
@@ -170,14 +173,14 @@ function mrPrimary(version: MRVersion) {
   const primary = candidates.filter((file) => file.primary);
   return primary.length === 1 ? primary[0] : primary.length === 0 ? candidates[0] : undefined;
 }
-function mrPublicProject(project: MRProject): ModCatalogProject {
+function mrPublicProject(project: MRProject, kind: CatalogKind = 'mod'): ModCatalogProject {
   const imageUrl = catalogImage(project.icon_url, ['cdn.modrinth.com']);
   return {
     provider: 'modrinth',
     id: project.id,
     name: project.title,
     summary: project.description,
-    websiteUrl: `https://modrinth.com/mod/${encodeURIComponent(project.slug)}`,
+    websiteUrl: `https://modrinth.com/${kind}/${encodeURIComponent(project.slug)}`,
     ...(imageUrl ? { imageUrl } : {}),
     authors: [],
     downloads: project.downloads,
@@ -194,6 +197,7 @@ function mrPublicVersion(
   version: MRVersion,
   project: MRProject,
   target: ContentTarget,
+  kind: CatalogKind = 'mod',
 ): ModCatalogVersion {
   const file = mrPrimary(version);
   const env =
@@ -215,11 +219,16 @@ function mrPublicVersion(
     channel: version.version_type,
     available,
     ...(!available ? { unavailableReason: 'artifact' as const } : {}),
-    compatibility: modCompatibility(version.game_versions, version.loaders, env, target),
+    compatibility: (kind === 'plugin' ? pluginCompatibility : modCompatibility)(
+      version.game_versions,
+      version.loaders,
+      env,
+      target,
+    ),
     environment: env,
   };
 }
-function cfPublicProject(project: CFProject): ModCatalogProject {
+function cfPublicProject(project: CFProject, kind: CatalogKind = 'mod'): ModCatalogProject {
   const imageUrl = catalogImage(project.logo?.thumbnailUrl, [
     'media.forgecdn.net',
     'mediafilez.forgecdn.net',
@@ -229,12 +238,15 @@ function cfPublicProject(project: CFProject): ModCatalogProject {
     id: String(project.id),
     name: project.name,
     summary: project.summary,
-    websiteUrl: `https://www.curseforge.com/minecraft/mc-mods/${encodeURIComponent(project.slug)}`,
+    websiteUrl: `https://www.curseforge.com/minecraft/${kind === 'plugin' ? 'bukkit-plugins' : 'mc-mods'}/${encodeURIComponent(project.slug)}`,
     ...(imageUrl ? { imageUrl } : {}),
     authors: project.authors.map((author) => author.name),
     downloads: project.downloadCount,
     tags: normalizeModTags('curseforge', project.categories),
-    environment: curseforgeProjectEnvironment(project.latestFiles),
+    environment:
+      kind === 'plugin'
+        ? { kind: 'server', source: 'curseforge', original: ['Bukkit Plugins'] }
+        : curseforgeProjectEnvironment(project.latestFiles),
   };
 }
 function cfHash(file: CFFile): string | undefined {
@@ -245,10 +257,14 @@ function cfPublicVersion(
   file: CFFile,
   project: CFProject,
   target: ContentTarget,
+  kind: CatalogKind = 'mod',
 ): ModCatalogVersion {
-  const loaders = file.gameVersions.flatMap((version) =>
-    loaderNames[version] ? [loaderNames[version]] : [],
-  );
+  const loaders =
+    kind === 'plugin'
+      ? ['bukkit']
+      : file.gameVersions.flatMap((version) =>
+          loaderNames[version] ? [loaderNames[version]] : [],
+        );
   const gameVersions = file.gameVersions.filter(
     (version) =>
       !loaderNames[version] &&
@@ -260,7 +276,10 @@ function cfPublicVersion(
     file.isAvailable &&
     Boolean(file.downloadUrl);
   const artifact = validJar(file.fileName, file.downloadUrl) && Boolean(cfHash(file));
-  const env = curseforgeEnvironment(file.gameVersions);
+  const env =
+    kind === 'plugin'
+      ? { kind: 'server' as const, source: 'curseforge' as const, original: ['Bukkit Plugins'] }
+      : curseforgeEnvironment(file.gameVersions);
   return {
     provider: 'curseforge',
     id: String(file.id),
@@ -279,7 +298,12 @@ function cfPublicVersion(
       : !artifact
         ? { unavailableReason: 'artifact' as const }
         : {}),
-    compatibility: modCompatibility(gameVersions, loaders, env, target),
+    compatibility: (kind === 'plugin' ? pluginCompatibility : modCompatibility)(
+      gameVersions,
+      loaders,
+      env,
+      target,
+    ),
     environment: env,
   };
 }
@@ -317,16 +341,25 @@ export class ModrinthModCatalog {
   constructor(
     private readonly read: Read,
     private readonly limits: ContentLimits,
+    private readonly kind: CatalogKind = 'mod',
   ) {}
+  private publicProject(project: MRProject) {
+    return mrPublicProject(project, this.kind);
+  }
+  private publicVersion(version: MRVersion, project: MRProject, target: ContentTarget) {
+    return mrPublicVersion(version, project, target, this.kind);
+  }
   private async project(pid: string, signal?: AbortSignal): Promise<MRProject> {
     id.parse(pid);
     const project = mrProject.parse(await this.read(`/project/${encodeURIComponent(pid)}`, signal));
     if (
       project.id !== pid ||
-      (project.project_type !== 'mod' &&
-        !project.loaders.some((loader) =>
-          ['fabric', 'forge', 'quilt', 'neoforge'].includes(loader),
-        ))
+      (this.kind === 'plugin'
+        ? !project.loaders.some((loader) => ['paper', 'spigot', 'bukkit', 'folia'].includes(loader))
+        : project.project_type !== 'mod' &&
+          !project.loaders.some((loader) =>
+            ['fabric', 'forge', 'quilt', 'neoforge'].includes(loader),
+          ))
     )
       fail('content_kind');
     return project;
@@ -341,7 +374,10 @@ export class ModrinthModCatalog {
     const params = new URLSearchParams({ include_changelog: 'false' });
     if (!includeIncompatible) {
       params.set('game_versions', JSON.stringify([target.minecraftVersion]));
-      params.set('loaders', JSON.stringify([target.loader]));
+      params.set(
+        'loaders',
+        JSON.stringify(this.kind === 'plugin' ? pluginLoaders(target) : [target.loader]),
+      );
     }
     const versions = z
       .array(mrVersion)
@@ -372,16 +408,18 @@ export class ModrinthModCatalog {
       metadata(`mr:version:${vid}`, () => this.version(vid, signal)),
     ]);
     if (version.project_id !== pid) fail('dependency_identity');
-    return mrPublicVersion(version, project, target);
+    return this.publicVersion(version, project, target);
   }
   async search(input: ModCatalogSearchInput): Promise<ModCatalogProjects> {
     const offset = offsetValue(input.offset);
     if (input.query.length > 256) fail('search');
-    const facets = [['all_project_types:mod']];
+    const facets = [[`all_project_types:${this.kind}`]];
     if (!input.includeIncompatible)
       facets.push(
         [`versions:${input.target.minecraftVersion}`],
-        [`categories:${input.target.loader}`],
+        (this.kind === 'plugin' ? pluginLoaders(input.target) : [input.target.loader]).map(
+          (loader) => `categories:${loader}`,
+        ),
       );
     const params = new URLSearchParams({
       query: input.query,
@@ -420,7 +458,7 @@ export class ModrinthModCatalog {
       limit: 20,
       total: result.total_hits,
       items: result.hits.map((hit) => ({
-        ...mrPublicProject({
+        ...this.publicProject({
           ...hit,
           id: hit.project_id,
           project_type: 'mod',
@@ -435,7 +473,7 @@ export class ModrinthModCatalog {
   async details(pid: string, signal?: AbortSignal): Promise<ModCatalogDetails> {
     const project = await this.project(pid, signal);
     return modCatalogDetailsSchema.parse({
-      ...mrPublicProject(project),
+      ...this.publicProject(project),
       description: project.body,
       descriptionFormat: 'markdown',
     });
@@ -450,7 +488,7 @@ export class ModrinthModCatalog {
         this.versions(pid, input.target, input.includeIncompatible ?? false, input.signal),
       ),
     ]);
-    const all = raw.map((version) => mrPublicVersion(version, project, input.target));
+    const all = raw.map((version) => this.publicVersion(version, project, input.target));
     const items = input.includeIncompatible
       ? all
       : all.filter((version) => version.compatibility.length === 0);
@@ -491,7 +529,7 @@ export class ModrinthModCatalog {
       target,
       limit: this.limits.maxDependencies,
       signal: options.signal,
-      project: async (pid) => mrPublicProject(await project(pid)),
+      project: async (pid) => this.publicProject(await project(pid)),
       load: (pid, vid) =>
         memo(`candidate:${pid ?? ''}:${vid ?? ''}`, async (): Promise<ModCandidate> => {
           const knownProject = pid ? project(pid) : undefined;
@@ -517,7 +555,7 @@ export class ModrinthModCatalog {
           if (!selected && installed) {
             const current = await version(installed);
             if (current.project_id !== actualId) fail('dependency_identity');
-            if (mrPublicVersion(current, rawProject, target).compatibility.length === 0)
+            if (this.publicVersion(current, rawProject, target).compatibility.length === 0)
               selected = current;
           }
           if (!selected) {
@@ -525,13 +563,13 @@ export class ModrinthModCatalog {
               metadata(mrVersionsKey(actualId, target), () =>
                 this.versions(actualId, target, false, options.signal),
               ));
-            const versions = all.map((raw) => mrPublicVersion(raw, rawProject, target));
+            const versions = all.map((raw) => this.publicVersion(raw, rawProject, target));
             observed = versions;
             compatibleVersionFound = versions.some((version) => !version.compatibility.length);
             const preferred = recommendedModVersion(versions, options.preferBeta);
             selected = all.find((raw) => raw.id === preferred?.id);
           }
-          const publicProject = mrPublicProject(rawProject);
+          const publicProject = this.publicProject(rawProject);
           if (!selected) {
             const alphaOnly = observed.some(
               (version) =>
@@ -545,7 +583,7 @@ export class ModrinthModCatalog {
                   ),
                 options.signal,
               );
-              if (hints) observed = hints.map((raw) => mrPublicVersion(raw, rawProject, target));
+              if (hints) observed = hints.map((raw) => this.publicVersion(raw, rawProject, target));
             }
             return {
               project: publicProject,
@@ -558,19 +596,22 @@ export class ModrinthModCatalog {
               availabilityHints: modAvailabilityHints(observed),
             };
           }
-          const publicVersion = mrPublicVersion(selected, rawProject, target);
+          const publicVersion = this.publicVersion(selected, rawProject, target);
           const file = mrPrimary(selected);
           const artifact: ContentArtifact | undefined =
             file && publicVersion.available
               ? {
-                  path: `mods/${file.filename}`,
+                  path: `${this.kind === 'plugin' ? 'plugins' : 'mods'}/${file.filename}`,
                   urls: [file.url],
                   size: file.size,
                   hashes: file.hashes,
                   projectId: actualId,
                   versionId: selected.id,
-                  kind: 'mod',
-                  serverSide: publicVersion.environment.kind === 'unknown' ? 'unknown' : 'required',
+                  kind: this.kind,
+                  serverSide:
+                    this.kind === 'plugin' || publicVersion.environment.kind !== 'unknown'
+                      ? 'required'
+                      : 'unknown',
                 }
               : undefined;
           return {
@@ -592,13 +633,25 @@ export class CurseForgeModCatalog {
   constructor(
     private readonly read: Read,
     private readonly limits: ContentLimits,
+    private readonly kind: CatalogKind = 'mod',
+    private readonly catalogClass: (signal?: AbortSignal) => Promise<number> = async () => 6,
   ) {}
+  private publicProject(project: CFProject) {
+    return cfPublicProject(project, this.kind);
+  }
+  private publicVersion(file: CFFile, project: CFProject, target: ContentTarget) {
+    return cfPublicVersion(file, project, target, this.kind);
+  }
   private async response(path: string, signal?: AbortSignal) {
     return cfResponse.parse(await this.read(path, signal));
   }
   private async project(pid: string, signal?: AbortSignal): Promise<CFProject> {
     const project = cfProject.parse((await this.response(`/mods/${cfId(pid)}`, signal)).data);
-    if (String(project.id) !== pid || project.gameId !== 432 || project.classId !== 6)
+    if (
+      String(project.id) !== pid ||
+      project.gameId !== 432 ||
+      project.classId !== (await this.catalogClass(signal))
+    )
       fail('content_kind');
     return project;
   }
@@ -621,9 +674,9 @@ export class CurseForgeModCatalog {
     const params = new URLSearchParams({ index: String(offset), pageSize: String(pageSize) });
     if (!includeIncompatible) {
       const loader = loaderIds[target.loader];
-      if (!loader) fail('curseforge_loader');
+      if (this.kind === 'mod' && !loader) fail('curseforge_loader');
       params.set('gameVersion', target.minecraftVersion);
-      params.set('modLoaderType', String(loader));
+      if (this.kind === 'mod') params.set('modLoaderType', String(loader));
     }
     const response = await this.response(`/mods/${cfId(pid)}/files?${params}`, signal);
     const files = z.array(cfFile).max(pageSize).parse(response.data);
@@ -652,14 +705,14 @@ export class CurseForgeModCatalog {
       metadata(`cf:project:${pid}`, () => this.project(pid, signal)),
       metadata(`cf:file:${pid}:${vid}`, () => this.file(pid, vid, signal)),
     ]);
-    return cfPublicVersion(file, project, target);
+    return this.publicVersion(file, project, target);
   }
   async search(input: ModCatalogSearchInput): Promise<ModCatalogProjects> {
     const offset = offsetValue(input.offset);
     if (input.query.length > 256) fail('search');
     const params = new URLSearchParams({
       gameId: '432',
-      classId: '6',
+      classId: String(await this.catalogClass(input.signal)),
       searchFilter: input.query,
       index: String(offset),
       pageSize: '20',
@@ -668,13 +721,14 @@ export class CurseForgeModCatalog {
     });
     if (!input.includeIncompatible) {
       const loader = loaderIds[input.target.loader];
-      if (!loader) fail('curseforge_loader');
+      if (this.kind === 'mod' && !loader) fail('curseforge_loader');
       params.set('gameVersion', input.target.minecraftVersion);
-      params.set('modLoaderType', String(loader));
+      if (this.kind === 'mod') params.set('modLoaderType', String(loader));
     }
     const response = await this.response(`/mods/search?${params}`, input.signal);
     const projects = z.array(cfProject).max(20).parse(response.data);
-    if (projects.some((project) => project.gameId !== 432 || project.classId !== 6))
+    const classId = await this.catalogClass(input.signal);
+    if (projects.some((project) => project.gameId !== 432 || project.classId !== classId))
       fail('content_kind');
     if (
       !response.pagination ||
@@ -686,7 +740,7 @@ export class CurseForgeModCatalog {
       offset,
       limit: 20,
       total: response.pagination.totalCount,
-      items: projects.map(cfPublicProject),
+      items: projects.map((project) => this.publicProject(project)),
     });
   }
   async details(pid: string, signal?: AbortSignal): Promise<ModCatalogDetails> {
@@ -695,7 +749,7 @@ export class CurseForgeModCatalog {
       this.response(`/mods/${cfId(pid)}/description`, signal),
     ]);
     return modCatalogDetailsSchema.parse({
-      ...cfPublicProject(project),
+      ...this.publicProject(project),
       description: z.string().parse(description.data),
       descriptionFormat: 'html',
     });
@@ -716,7 +770,7 @@ export class CurseForgeModCatalog {
           metadata(`cf:file:${pid}:${file.id}`, () => Promise.resolve(file)),
         ),
       );
-    const items = page.files.map((file) => cfPublicVersion(file, project, input.target));
+    const items = page.files.map((file) => this.publicVersion(file, project, input.target));
     // This is a recommendation within the requested page; automatic selection walks lazily below.
     return modCatalogVersionsSchema.parse({
       offset,
@@ -746,7 +800,7 @@ export class CurseForgeModCatalog {
       target,
       limit: this.limits.maxDependencies,
       signal: options.signal,
-      project: async (pid) => cfPublicProject(await project(pid)),
+      project: async (pid) => this.publicProject(await project(pid)),
       load: (pid, vid) =>
         memo(`candidate:${pid ?? ''}:${vid ?? ''}`, async (): Promise<ModCandidate> => {
           if (!pid) fail('dependency_identity');
@@ -768,7 +822,7 @@ export class CurseForgeModCatalog {
           const installed = installedVersion(pid);
           if (!selected && installed) {
             const current = await file(pid, installed);
-            if (cfPublicVersion(current, rawProject, target).compatibility.length === 0)
+            if (this.publicVersion(current, rawProject, target).compatibility.length === 0)
               selected = current;
           }
           if (!selected) {
@@ -778,7 +832,7 @@ export class CurseForgeModCatalog {
                 this.files(pid, target, offset, false, options.signal, 50),
               );
               const compatible = page.files
-                .map((raw) => ({ raw, public: cfPublicVersion(raw, rawProject, target) }))
+                .map((raw) => ({ raw, public: this.publicVersion(raw, rawProject, target) }))
                 .filter((entry) => !entry.public.compatibility.length);
               if (observed.length < 20)
                 observed.push(
@@ -799,7 +853,7 @@ export class CurseForgeModCatalog {
             }
             selected ??= beta;
           }
-          const publicProject = cfPublicProject(rawProject);
+          const publicProject = this.publicProject(rawProject);
           if (!selected) {
             const distributionDenied =
               !rawProject.isAvailable || rawProject.allowModDistribution === false;
@@ -812,7 +866,7 @@ export class CurseForgeModCatalog {
                 options.signal,
               );
               if (hints)
-                observed = hints.files.map((raw) => cfPublicVersion(raw, rawProject, target));
+                observed = hints.files.map((raw) => this.publicVersion(raw, rawProject, target));
             }
             return {
               project: publicProject,
@@ -827,19 +881,19 @@ export class CurseForgeModCatalog {
               availabilityHints: modAvailabilityHints(observed),
             };
           }
-          const publicVersion = cfPublicVersion(selected, rawProject, target);
+          const publicVersion = this.publicVersion(selected, rawProject, target);
           const sha1 = cfHash(selected);
           const artifact: ContentArtifact | undefined =
             publicVersion.available && selected.downloadUrl && sha1
               ? {
-                  path: `mods/${selected.fileName}`,
+                  path: `${this.kind === 'plugin' ? 'plugins' : 'mods'}/${selected.fileName}`,
                   urls: [selected.downloadUrl],
                   size: selected.fileLength,
                   hashes: { sha1 },
                   projectId: pid,
                   versionId: String(selected.id),
-                  kind: 'mod',
-                  serverSide: 'unknown',
+                  kind: this.kind,
+                  serverSide: this.kind === 'plugin' ? 'required' : 'unknown',
                 }
               : undefined;
           const relations = {

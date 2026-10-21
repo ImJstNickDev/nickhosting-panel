@@ -3,8 +3,8 @@ import type {
   MinecraftModMetadata,
   ModCatalogProject,
 } from '../../../../../games/minecraft/src/ui/mods-controller.js';
-import { useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
+import { useAddonsT } from './addons-context.js';
 
 export const modsKey = (name: string) => `games.minecraft.mods.${name}`;
 const translatedTags = new Set([
@@ -185,7 +185,7 @@ export function ModsTags({
   tags?: { id: string; label: string }[];
   compact?: boolean;
 }) {
-  const t = useT();
+  const t = useAddonsT();
   return (
     <div className="mods-tags">
       <span className="mods-side" data-side={side}>
@@ -213,7 +213,7 @@ export function ModsEmpty({ children, action }: { children: ReactNode; action?: 
   );
 }
 export function ModsSkeleton({ rows = 5 }: { rows?: number }) {
-  const t = useT();
+  const t = useAddonsT();
   return (
     <div className="mods-skeleton" role="status" aria-label={t(modsKey('loading'))}>
       {Array.from({ length: rows }, (_, i) => (
@@ -235,7 +235,7 @@ export function ModsPagination({
   total: number;
   onChange(offset: number): void;
 }) {
-  const t = useT();
+  const t = useAddonsT();
   const pages = Math.max(1, Math.ceil(total / 20));
   return (
     <div className="mods-pagination">

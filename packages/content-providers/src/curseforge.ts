@@ -138,6 +138,7 @@ export class CurseForgeProvider {
   private readonly base: string;
   private readonly limits: ContentLimits;
   private readonly modCatalog: CurseForgeModCatalog;
+  private readonly pluginCatalog: CurseForgeModCatalog;
   private readonly catalogClasses = new Map<string, Promise<number>>();
   constructor(
     readonly http: ContentHttp,
@@ -151,6 +152,12 @@ export class CurseForgeProvider {
       (path, signal) => this.request(path, signal),
       this.limits,
     );
+    this.pluginCatalog = new CurseForgeModCatalog(
+      (path, signal) => this.request(path, signal),
+      this.limits,
+      'plugin',
+      (signal) => this.getCatalogClass('bukkit-plugins', signal),
+    );
   }
   private async request(path: string, signal?: AbortSignal) {
     return responseSchema.parse(
@@ -163,7 +170,10 @@ export class CurseForgeProvider {
   private async get(path: string, signal?: AbortSignal): Promise<unknown> {
     return (await this.request(path, signal)).data;
   }
-  private getCatalogClass(kind: 'worlds' | 'data-packs', signal?: AbortSignal): Promise<number> {
+  private getCatalogClass(
+    kind: 'worlds' | 'data-packs' | 'bukkit-plugins',
+    signal?: AbortSignal,
+  ): Promise<number> {
     signal?.throwIfAborted();
     const cached = this.catalogClasses.get(kind);
     if (cached) return cached;
@@ -648,5 +658,26 @@ export class CurseForgeProvider {
   }
   resolveMods(roots: ModSelection[], target: ContentTarget, options: ResolveModsOptions = {}) {
     return this.modCatalog.resolve(roots, target, options);
+  }
+  searchPlugins(input: ModCatalogSearchInput) {
+    return this.pluginCatalog.search(input);
+  }
+  pluginDetails(projectId: string, signal?: AbortSignal) {
+    return this.pluginCatalog.details(projectId, signal);
+  }
+  pluginVersions(projectId: string, input: ModCatalogVersionsInput) {
+    return this.pluginCatalog.listVersions(projectId, input);
+  }
+  pluginVersion(
+    projectId: string,
+    versionId: string,
+    target: ContentTarget,
+    signal?: AbortSignal,
+    metadataMemo?: ResolveModsOptions['metadataMemo'],
+  ) {
+    return this.pluginCatalog.getVersion(projectId, versionId, target, signal, metadataMemo);
+  }
+  resolvePlugins(roots: ModSelection[], target: ContentTarget, options: ResolveModsOptions = {}) {
+    return this.pluginCatalog.resolve(roots, target, options);
   }
 }

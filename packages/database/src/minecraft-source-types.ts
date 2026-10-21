@@ -26,8 +26,8 @@ export interface MinecraftSourceTables {
     server_id: string | null;
     idempotency_key: string;
     identity_digest: string;
-    kind: 'world' | 'modpack' | 'datapack' | 'mod';
-    origin: 'upload' | 'modrinth' | 'curseforge';
+    kind: 'world' | 'modpack' | 'datapack' | 'mod' | 'plugin';
+    origin: 'upload' | 'modrinth' | 'curseforge' | 'hangar' | 'spiget';
     declared_bytes: string;
     reserved_bytes: string;
     expected_hashes: ColumnType<unknown, string, string>;

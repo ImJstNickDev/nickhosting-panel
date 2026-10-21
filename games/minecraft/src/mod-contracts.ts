@@ -1,8 +1,17 @@
 import { z } from 'zod';
-import { modCatalogVersionSchema } from '../../../packages/content-providers/src/mod-catalog.js';
+import {
+  type ContentCatalogProvider,
+  modCatalogVersionSchema,
+  pluginProviderSchema,
+} from '../../../packages/content-providers/src/mod-catalog.js';
 
 export const minecraftModProviderSchema = z.enum(['modrinth', 'curseforge']);
 const identifier = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
+const catalogId = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[^/\\\p{C}]+$/u);
 export const minecraftModSelectionSchema = z.strictObject({
   roots: z
     .array(
@@ -38,18 +47,22 @@ export const minecraftModToggleResultSchema = z.object({
   path: minecraftModInstalledChangeSchema.shape.path,
   restartRequired: z.boolean(),
 });
-export type MinecraftModSelection = z.infer<typeof minecraftModSelectionSchema>;
+export type MinecraftModSelection = Omit<z.infer<typeof minecraftModSelectionSchema>, 'roots'> & {
+  roots: (Omit<z.infer<typeof minecraftModSelectionSchema>['roots'][number], 'provider'> & {
+    provider: ContentCatalogProvider;
+  })[];
+};
 export type MinecraftModRoot = MinecraftModSelection['roots'][number];
 export type MinecraftModSide = 'server' | 'client' | 'both' | 'unknown';
 export const minecraftModBlockerSchema = z.object({
-  projectId: identifier,
+  projectId: catalogId,
   name: z.string(),
   reason: z.string(),
-  provider: minecraftModProviderSchema.optional(),
-  versionId: identifier.optional(),
-  requiredBy: identifier.optional(),
+  provider: pluginProviderSchema.optional(),
+  versionId: catalogId.optional(),
+  requiredBy: catalogId.optional(),
   requiredByName: z.string().optional(),
-  roots: z.array(z.object({ projectId: identifier, name: z.string() })).optional(),
+  roots: z.array(z.object({ projectId: catalogId, name: z.string() })).optional(),
   availableMinecraftVersions: z.array(z.string()).max(20).optional(),
   availableLoaders: z.array(z.string()).max(20).optional(),
   availableChannels: z
@@ -63,9 +76,9 @@ export const minecraftModUpdatesSchema = z.object({
   items: z.array(
     z.object({
       path: z.string(),
-      provider: minecraftModProviderSchema,
-      projectId: identifier,
-      currentVersionId: identifier,
+      provider: pluginProviderSchema,
+      projectId: catalogId,
+      currentVersionId: catalogId,
       status: z.enum(['update', 'current', 'limited', 'unavailable']),
       version: modCatalogVersionSchema.optional(),
     }),
@@ -74,26 +87,26 @@ export const minecraftModUpdatesSchema = z.object({
 export type MinecraftModUpdates = z.infer<typeof minecraftModUpdatesSchema>;
 export const minecraftModAlternativesSchema = z.object({
   revision: z.number().int().nonnegative(),
-  provider: minecraftModProviderSchema,
-  projectId: identifier,
+  provider: pluginProviderSchema,
+  projectId: catalogId,
   items: z.array(modCatalogVersionSchema).max(1),
   checked: z.number().int().nonnegative(),
   limited: z.boolean(),
 });
 export type MinecraftModAlternatives = z.infer<typeof minecraftModAlternativesSchema>;
 export interface MinecraftModAlias {
-  provider: 'modrinth' | 'curseforge';
+  provider: ContentCatalogProvider;
   projectId: string;
   versionId?: string;
 }
 export interface MinecraftModTag {
   id: string;
   label: string;
-  source?: 'modrinth' | 'curseforge';
+  source?: ContentCatalogProvider;
   original?: string;
 }
 export interface MinecraftModMetadata {
-  provider: 'modrinth' | 'curseforge';
+  provider: ContentCatalogProvider;
   projectId: string;
   versionId: string;
   name: string;
@@ -145,7 +158,7 @@ export interface MinecraftModsSnapshot {
   changes: MinecraftModQueueItem[];
   blockers: z.infer<typeof minecraftModBlockerSchema>[];
   optional: {
-    provider: 'modrinth' | 'curseforge';
+    provider: ContentCatalogProvider;
     projectId: string;
     name: string;
     requiredBy: string[];

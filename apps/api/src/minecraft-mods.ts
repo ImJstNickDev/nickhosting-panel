@@ -1,13 +1,14 @@
-import {
-  type ContentHttp,
-  type CurseForgeProvider,
-  ModrinthProvider,
-} from '@nickhosting/content-providers';
+import type { ContentHttp, CurseForgeProvider } from '@nickhosting/content-providers';
 import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
 import type { createDatabase } from '@nickhosting/database';
 import { authorizeServer, type ManagementRuntime, parse } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
+import {
+  modProviderSchema,
+  pluginProviderSchema,
+} from '../../../packages/content-providers/src/mod-catalog.js';
+import { minecraftAddonProviders } from '../../../packages/server-management/src/minecraft-addon-providers.js';
 import { minecraftModSchemaAvailable } from '../../../packages/server-management/src/minecraft-mod-schema.js';
 import { createMinecraftModsService } from '../../../packages/server-management/src/minecraft-mods.js';
 import { minecraftContentProviders } from '../../../packages/server-management/src/minecraft-world-catalog.js';
@@ -23,23 +24,33 @@ type Options = {
   codec?: SecretCodec;
   contentHttp?: ContentHttp;
 };
-const providerId = z.enum(['modrinth', 'curseforge']),
-  projectId = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
+const projectId = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 const boolean = z
   .enum(['true', 'false'])
   .transform((value) => value === 'true')
   .default(false);
 const search = z.strictObject({
-  provider: providerId,
+  provider: pluginProviderSchema,
   query: z.string().max(256).default(''),
   offset: z.coerce.number().int().min(0).max(9980).default(0),
   includeIncompatible: boolean,
 });
 export function registerMinecraftModRoutes(app: Hono<{ Variables: Variables }>, options: Options) {
+  registerMinecraftAddonRoutes(app, options, 'mod');
+  registerMinecraftAddonRoutes(app, options, 'plugin');
+}
+function registerMinecraftAddonRoutes(
+  app: Hono<{ Variables: Variables }>,
+  options: Options,
+  kind: 'mod' | 'plugin',
+) {
+  const providerId = kind === 'plugin' ? pluginProviderSchema : modProviderSchema;
   const { db, env, principal, body, management } = options,
-    base = '/v1/servers/:id/minecraft/mods';
+    base =
+      kind === 'plugin' ? '/v1/servers/:id/minecraft/plugins' : '/v1/servers/:id/minecraft/mods';
   const service = async (withProviders = false) => {
-    if (!(await minecraftModSchemaAvailable(db))) throw new DomainError('integration_unavailable');
+    if (!(await minecraftModSchemaAvailable(db, kind)))
+      throw new DomainError('integration_unavailable');
     const runtime = await management();
     const content: { http?: ContentHttp; curseforge?: CurseForgeProvider } = withProviders
       ? options.codec
@@ -47,7 +58,7 @@ export function registerMinecraftModRoutes(app: Hono<{ Variables: Variables }>, 
             .providers ?? {})
         : await runtime.minecraftOptions()
       : {};
-    return createMinecraftModsService({ db, env, runtime, ...content });
+    return createMinecraftModsService({ db, env, runtime, ...content, kind });
   };
   app.get(base, async (c) => {
     c.header('cache-control', 'no-store');
@@ -115,37 +126,44 @@ export function registerMinecraftModRoutes(app: Hono<{ Variables: Variables }>, 
       ? ((await minecraftContentProviders(db, options.codec, env, options.contentHttp)).providers ??
         {})
       : await runtime.minecraftOptions();
-    const profile = await createMinecraftModsService({ db, env, runtime }).profile(
+    const profile = await createMinecraftModsService({ db, env, runtime, kind }).profile(
       c.req.param('id') ?? '',
     );
     if (!profile.supported) throw new DomainError('integration_unavailable');
     return {
       content,
       target: profile.target,
-      modrinth: content.http ? new ModrinthProvider(content.http) : undefined,
+      providers: minecraftAddonProviders({ ...content, kind }),
     };
   };
   app.get(`${base}/catalog`, async (c) => {
-    const { content, modrinth } = await catalog(c);
+    const { providers } = await catalog(c);
     return c.json({
-      providers: [
-        { id: 'modrinth', available: !!modrinth },
-        { id: 'curseforge', available: !!content.curseforge },
-      ],
+      providers:
+        kind === 'plugin'
+          ? [
+              ...(['modrinth', 'hangar', 'spiget', 'curseforge'] as const).map((id) => ({
+                id,
+                available: !!providers[id],
+              })),
+              { id: 'voxel', available: false, comingSoon: true },
+              { id: 'builtbybit', available: false, comingSoon: true },
+            ]
+          : modProviderSchema.options.map((id) => ({ id, available: !!providers[id] })),
     });
   });
   app.get(`${base}/catalog/search`, async (c) => {
-    const query = parse(search, c.req.query()),
-      { content, modrinth, target } = await catalog(c);
-    const provider = query.provider === 'modrinth' ? modrinth : content.curseforge;
+    const query = parse(search.extend({ provider: providerId }), c.req.query()),
+      { providers, target } = await catalog(c);
+    const provider = providers[query.provider];
     if (!provider) throw new DomainError('integration_unavailable');
     return c.json(await provider.searchMods({ ...query, target, signal: c.req.raw.signal }));
   });
   app.get(`${base}/catalog/:provider/:projectId`, async (c) => {
     const name = parse(providerId, c.req.param('provider')),
       id = parse(projectId, c.req.param('projectId')),
-      { content, modrinth } = await catalog(c);
-    const provider = name === 'modrinth' ? modrinth : content.curseforge;
+      { providers } = await catalog(c);
+    const provider = providers[name];
     if (!provider) throw new DomainError('integration_unavailable');
     return c.json(await provider.modDetails(id, c.req.raw.signal));
   });
@@ -160,8 +178,8 @@ export function registerMinecraftModRoutes(app: Hono<{ Variables: Variables }>, 
         }),
         c.req.query(),
       ),
-      { content, modrinth, target } = await catalog(c);
-    const provider = name === 'modrinth' ? modrinth : content.curseforge;
+      { providers, target } = await catalog(c);
+    const provider = providers[name];
     if (!provider) throw new DomainError('integration_unavailable');
     return c.json(await provider.modVersions(id, { ...query, target, signal: c.req.raw.signal }));
   });

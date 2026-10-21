@@ -7,6 +7,7 @@ export * from './curseforge.js';
 export * from './datapack-catalog.js';
 export * from './disk.js';
 export * from './file-verification.js';
+export * from './hangar.js';
 export * from './http.js';
 export * from './mod-catalog.js';
 export { modrinthEnvironment, normalizeModTags, recommendedModVersion } from './mod-metadata.js';
@@ -19,5 +20,6 @@ export type {
 export { createModMetadataMemo } from './mod-resolution.js';
 export * from './modpack.js';
 export * from './modrinth.js';
+export * from './spiget.js';
 export * from './staging.js';
 export * from './world-catalog.js';

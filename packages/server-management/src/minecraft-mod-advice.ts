@@ -4,8 +4,8 @@ import type {
   MinecraftModUpdates,
 } from '../../../games/minecraft/src/mod-contracts.js';
 import type {
+  ContentCatalogProvider,
   ModCatalogVersion,
-  ModProvider,
   ModSelection,
 } from '../../content-providers/src/mod-catalog.js';
 import { recommendedModVersion } from '../../content-providers/src/mod-metadata.js';
@@ -65,10 +65,10 @@ export async function modAdviceVersions(
 }
 
 export async function modUpdateAdvice(input: {
-  packs: { path: string; provider: ModProvider; projectId: string; versionId: string }[];
+  packs: { path: string; provider: ContentCatalogProvider; projectId: string; versionId: string }[];
   target: ContentTarget;
   preferBeta: boolean;
-  provider(name: ModProvider): ModAdviceProvider;
+  provider(name: ContentCatalogProvider): ModAdviceProvider;
   signal?: AbortSignal;
 }): Promise<MinecraftModUpdates> {
   const work = new Map<
@@ -174,6 +174,7 @@ export async function findModAlternative(input: {
       preferBeta: input.preferBeta,
       signal: input.signal,
       metadataMemo,
+      maxVersionChecks: input.maxVersions,
       installedVersions: input.installedVersions,
     });
     checked++;
@@ -233,7 +234,7 @@ export async function findModAlternative(input: {
  * through normal selection/preparation, including installed and cross-provider checks. */
 export async function modAlternativeAdvice(input: {
   provider: ModAdviceProvider;
-  name: ModProvider;
+  name: ContentCatalogProvider;
   projectId: string;
   roots: ModSelection[];
   revision: number;

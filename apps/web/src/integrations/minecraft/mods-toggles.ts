@@ -1,7 +1,7 @@
 import { useMutation, useMutationState } from '@tanstack/react-query';
 import type { MinecraftModsSnapshot } from '../../../../../games/minecraft/src/mod-contracts.js';
 import { ApiError, idempotencyKey, queryClient } from '../../api/client.js';
-import { modsController, modsQueryKey } from './mods-selection.js';
+import { useAddons } from './addons-context.js';
 
 type Pack = MinecraftModsSnapshot['packs'][number];
 type Toggle = { path: string; action: 'enable' | 'disable'; idempotencyKey: string };
@@ -30,11 +30,12 @@ function changedPack(pack: Pack, input: Toggle): Pack {
 
 /** Pending intents live in QueryClient, so changing tabs does not cancel a rename. */
 export function useModsToggles(serverId: string, snapshot: MinecraftModsSnapshot | undefined) {
-  const mutationKey = ['minecraft-mod-toggle', serverId];
+  const { controller: modsController, queryKey: modsQueryKey } = useAddons();
+  const mutationKey = modsQueryKey(serverId, 'toggle');
   const mutation = useMutation({
     mutationKey,
     // Rapid clicks on different rows remain responsive without competing for Fileman's lock.
-    scope: { id: `minecraft-mod-toggle:${serverId}` },
+    scope: { id: mutationKey.join(':') },
     mutationFn: async (input: Toggle) => {
       const result = await modsController.toggle(serverId, input);
       if (result.state !== 'published')
@@ -60,7 +61,7 @@ export function useModsToggles(serverId: string, snapshot: MinecraftModsSnapshot
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: modsQueryKey(serverId) });
-      void queryClient.invalidateQueries({ queryKey: ['minecraft-mods-restart', serverId] });
+      void queryClient.invalidateQueries({ queryKey: modsQueryKey(serverId, 'restart') });
     },
   });
   const states = useMutationState({

@@ -20,6 +20,7 @@ import { minecraftDatapacksMessages } from './datapacks-catalog.js';
 import { minecraftModsMessages } from './mods-catalog.js';
 import { createMinecraftModsController } from './mods-controller.js';
 import { minecraftPlayersMessages } from './players-catalog.js';
+import { minecraftPluginsMessages } from './plugins-catalog.js';
 import { minecraftWorldsMessages } from './worlds-catalog.js';
 
 export { minecraftFormattingTokens } from '../message-formatting.js';
@@ -34,6 +35,7 @@ const translated: Record<string, [string, string]> = {
   ...minecraftPlayersMessages,
   ...minecraftDatapacksMessages,
   ...minecraftModsMessages,
+  ...minecraftPluginsMessages,
   ...minecraftWorldsMessages,
   'messages.disconnected': ['Failed to connect to the server', 'Connessione al server fallita'],
   'messages.back': ['Back to Server List', 'Torna alla lista dei server'],
@@ -478,14 +480,12 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
     {
       id: 'plugins',
       titleKey: k('sections.plugins'),
-      loader: 'content',
+      loader: 'plugins',
+      renderer: 'minecraft-plugins',
       runtimeIds: [...minecraftContentRuntimes.plugins],
       requiredPermissions: ['server:read'],
       requiredCapabilities: ['files'],
-      columns: [
-        { id: 'path', labelKey: k('fields.path') },
-        { id: 'installed_at', labelKey: k('fields.installedAt'), format: 'date' },
-      ],
+      columns: [],
       forms: [],
     },
     {
@@ -792,6 +792,13 @@ export const minecraftUiModule = defineTrustedGameUiModule({
         },
         context.signal,
       );
+    },
+    plugins: async (client, context): Promise<UiSectionData> => {
+      const plugins = await createMinecraftModsController(client, 'plugins').snapshot(
+        server(context),
+        context.signal,
+      );
+      return { values: {}, rows: [], metadata: { plugins, installed: plugins.installed } };
     },
     mods: async (client, context): Promise<UiSectionData> => {
       const mods = await createMinecraftModsController(client).snapshot(

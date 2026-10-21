@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  createMinecraftModsController,
-  type MinecraftModRoot,
-  type MinecraftModSelection,
-  type MinecraftModsSnapshot,
+import type {
+  MinecraftModRoot,
+  MinecraftModSelection,
+  MinecraftModsSnapshot,
 } from '../../../../../games/minecraft/src/ui/mods-controller.js';
 import { idempotencyKey, queryClient } from '../../api/client.js';
-import { gameUiClient } from '../../features/integrations.js';
+import { addonsScopes, useAddons } from './addons-context.js';
 
-export const modsController = createMinecraftModsController(gameUiClient);
+export const modsController = addonsScopes.mods.controller;
 export const modsQueryKey = (serverId: string) => ['minecraft-mods', serverId] as const;
 
 /**
@@ -16,6 +15,7 @@ export const modsQueryKey = (serverId: string) => ['minecraft-mods', serverId] a
  * explicit retry with the same key. Aborting a fetch never pretends to cancel staging.
  */
 export function useModsSelection(serverId: string, snapshot: MinecraftModsSnapshot | undefined) {
+  const { controller: modsController, queryKey: modsQueryKey } = useAddons();
   const [roots, setRoots] = useState<MinecraftModRoot[]>(snapshot?.roots ?? []);
   const [preferBeta, setPreferBeta] = useState(snapshot?.preferBeta ?? false);
   const [saving, setSaving] = useState(false);
@@ -89,7 +89,7 @@ export function useModsSelection(serverId: string, snapshot: MinecraftModsSnapsh
       current.busy = false;
       if (alive.current) setSaving(false);
     }
-  }, [serverId]);
+  }, [serverId, modsController, modsQueryKey]);
   function change(
     next: MinecraftModRoot[] | ((value: MinecraftModRoot[]) => MinecraftModRoot[]),
     beta = state.current.preferBeta,

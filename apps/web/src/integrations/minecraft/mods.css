@@ -1225,3 +1225,12 @@
     flex-wrap: wrap;
   }
 }
+
+.addons-coming-soon {
+  display: grid;
+  place-items: center;
+  min-height: min(52vh, 32rem);
+}
+.addons-coming-soon .mods-empty {
+  min-height: 0;
+}

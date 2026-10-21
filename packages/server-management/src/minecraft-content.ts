@@ -1660,7 +1660,7 @@ const inventorySchema = z
     sha256: z.string().regex(/^[a-f0-9]{64}$/),
     projectId: z.string().optional(),
     versionId: z.string().optional(),
-    provider: z.enum(['modrinth', 'curseforge']).optional(),
+    provider: z.enum(['modrinth', 'curseforge', 'hangar', 'spiget']).optional(),
     dependencies: z.array(z.string()).optional(),
     incompatible: z.array(incompatibleContentSchema).optional(),
   })

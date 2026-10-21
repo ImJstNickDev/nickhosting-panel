@@ -10,14 +10,22 @@ const MinecraftModRestartNotice = lazy(() =>
 /** Bundled contributions follow the same section capability/runtime declaration.
  * Other games don't acquire a Minecraft request or an extra polling loop. */
 export function GameConsoleNotices({ server, state }: { server?: ServerInfo; state?: string }) {
-  if (
-    !server ||
-    !availableGameSections(server).some((section) => section.renderer === 'minecraft-mods')
-  )
-    return null;
+  if (!server) return null;
+  const sections = availableGameSections(server);
+  const kind = sections.some((section) => section.renderer === 'minecraft-plugins')
+    ? 'plugins'
+    : sections.some((section) => section.renderer === 'minecraft-mods')
+      ? 'mods'
+      : undefined;
+  if (!kind) return null;
   return (
     <Suspense fallback={null}>
-      <MinecraftModRestartNotice serverId={server.id} state={state} revision={server.updatedAt} />
+      <MinecraftModRestartNotice
+        kind={kind}
+        serverId={server.id}
+        state={state}
+        revision={server.updatedAt}
+      />
     </Suspense>
   );
 }

@@ -1,11 +1,12 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useId, useRef, useState } from 'react';
 import type {
+  ContentCatalogProvider,
   ModCatalogVersion,
-  ModProvider,
 } from '../../../../../games/minecraft/src/ui/mods-controller.js';
-import { useFormat, useT } from '../../app/i18n.js';
+import { useFormat } from '../../app/i18n.js';
 import { ErrorNotice } from '../../components/ui.js';
+import { useAddons, useAddonsT } from './addons-context.js';
 import {
   ModsChannel,
   ModsCheckbox,
@@ -14,7 +15,6 @@ import {
   ModsSkeleton,
   modsKey,
 } from './mods-primitives.js';
-import { modsController } from './mods-selection.js';
 
 export function ModsVersions({
   serverId,
@@ -26,14 +26,15 @@ export function ModsVersions({
   onSelect,
 }: {
   serverId: string;
-  provider: ModProvider;
+  provider: ContentCatalogProvider;
   projectId: string;
   selected?: { id: string; name: string };
   preferBeta: boolean;
   disabled?: boolean;
   onSelect(version: ModCatalogVersion, force: boolean): void;
 }) {
-  const t = useT();
+  const t = useAddonsT();
+  const { controller: modsController, queryKey } = useAddons();
   const format = useFormat();
   const id = useId();
   const [open, setOpen] = useState(false);
@@ -44,7 +45,7 @@ export function ModsVersions({
   const panel = useRef<HTMLFieldSetElement>(null);
   const forceCancel = useRef<HTMLButtonElement>(null);
   const versions = useQuery({
-    queryKey: ['minecraft-mod-versions', serverId, provider, projectId, all, offset, preferBeta],
+    queryKey: [...queryKey(serverId, 'versions'), provider, projectId, all, offset, preferBeta],
     queryFn: ({ signal }) =>
       modsController.versions(
         serverId,

@@ -5,6 +5,7 @@ import {
   type ContentHttp,
   CurseForgeProvider,
   ModrinthProvider,
+  SpigetProvider,
 } from '@nickhosting/content-providers';
 import { authSessionId, SecretCodec } from '@nickhosting/core';
 import { updateSettings } from '@nickhosting/database';
@@ -17,6 +18,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ZipFile } from 'yazl';
 import { createMinecraftModsService } from './minecraft-mods.js';
+import { createMinecraftSourceStore } from './minecraft-sources.js';
 import { createManagementRuntime } from './runtime.js';
 import { managementFixture } from './test-fixtures.js';
 
@@ -39,7 +41,7 @@ describe('Minecraft Mods durable preparation and publication', () => {
     if (root) await rm(root, { recursive: true, force: true });
   });
 
-  async function fixture(running = true) {
+  async function fixture(running = true, kind: 'mod' | 'plugin' = 'mod') {
     const f = await managementFixture(database.db, { interactive: true });
     const serverId = await f.server();
     await f.db
@@ -73,7 +75,7 @@ describe('Minecraft Mods durable preparation and publication', () => {
           releaseType: 'release',
           protocolId: 767,
           family: 'netty',
-          profile: 'fabric',
+          profile: kind === 'plugin' ? 'paper' : 'fabric',
           loaderVersion: '0.16.10',
           javaMajor: 21,
           runtimeDigest: 'a'.repeat(64),
@@ -250,7 +252,7 @@ describe('Minecraft Mods durable preparation and publication', () => {
       codec: new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } }),
       env,
     });
-    const service = createMinecraftModsService({ db: f.db, runtime, env });
+    const service = createMinecraftModsService({ db: f.db, runtime, env, kind });
     drainCleanup = () => service.drain();
     return {
       ...f,
@@ -268,8 +270,8 @@ describe('Minecraft Mods durable preparation and publication', () => {
     };
   }
 
-  async function catalogFixture(environment = '*') {
-    const f = await fixture();
+  async function catalogFixture(environment = '*', kind: 'mod' | 'plugin' = 'mod') {
+    const f = await fixture(true, kind);
     const zip = new ZipFile();
     zip.addBuffer(
       Buffer.from(JSON.stringify({ schemaVersion: 1, id: 'fixture', version: '1.0', environment })),
@@ -281,13 +283,13 @@ describe('Minecraft Mods durable preparation and publication', () => {
     const bytes = Buffer.concat(chunks),
       sha256 = createHash('sha256').update(bytes).digest('hex');
     const artifact = {
-      path: 'mods/example.jar',
+      path: `${kind === 'plugin' ? 'plugins' : 'mods'}/example.jar`,
       urls: ['https://example.test/example.jar'],
       size: bytes.length,
       hashes: { sha256 },
       projectId: 'example',
       versionId: 'v1',
-      kind: 'mod' as const,
+      kind,
       serverSide: 'required' as const,
     };
     const http = {
@@ -360,9 +362,15 @@ describe('Minecraft Mods durable preparation and publication', () => {
       },
     };
     const resolve = vi
-      .spyOn(ModrinthProvider.prototype, 'resolveMods')
+      .spyOn(ModrinthProvider.prototype, kind === 'plugin' ? 'resolvePlugins' : 'resolveMods')
       .mockResolvedValue(resolution);
-    const service = createMinecraftModsService({ db: f.db, runtime: f.runtime, env: f.env, http });
+    const service = createMinecraftModsService({
+      db: f.db,
+      runtime: f.runtime,
+      env: f.env,
+      http,
+      kind,
+    });
     drainCleanup = () => service.drain();
     const select = (roots = [{ provider: 'modrinth', projectId: 'example' }]) =>
       service.select(f.context, f.serverId, {
@@ -372,6 +380,182 @@ describe('Minecraft Mods durable preparation and publication', () => {
       });
     return { ...f, service, http, bytes, artifact, project, version, resolution, resolve, select };
   }
+  it('publishes plugins with the shared lifecycle, creates the missing directory and isolates mod state', async () => {
+    const f = await catalogFixture('*', 'plugin');
+    f.files.set('mods/keep.jar', Buffer.from('unrelated mod'));
+    await f.db
+      .insertInto('minecraft_mod_drafts')
+      .values({
+        server_id: f.serverId,
+        actor_user_id: f.context.actorUserId,
+        revision: 12,
+        selection: JSON.stringify({ roots: [], preferBeta: false, idempotencyKey: 'other-mode' }),
+        state: 'ready',
+        blockers: '[]',
+        optional: '[]',
+        error: null,
+      })
+      .execute();
+    expect((await f.service.snapshot(f.context, f.serverId)).packs).toEqual([]);
+    const selected = await f.select();
+    await f.service.drain();
+    const ready = await f.service.snapshot(f.context, f.serverId);
+    expect(ready.preparing).toBe(false);
+    expect(ready.error).toBeUndefined();
+    expect(ready.changes).toHaveLength(1);
+    expect(ready.changes[0]).toMatchObject({ state: 'ready', path: 'plugins/example.jar' });
+    expect(f.directories.has('plugins')).toBe(true);
+    expect(f.files.has('plugins/example.jar')).toBe(false);
+    await f.service.apply(f.context, f.serverId, {
+      revision: selected.revision,
+      idempotencyKey: randomUUID(),
+    });
+    expect(f.files.get('plugins/example.jar')).toEqual(f.bytes);
+    expect(f.files.get('mods/keep.jar')?.toString()).toBe('unrelated mod');
+    expect(f.renameFiles).toHaveBeenCalledTimes(1);
+    const installed = await f.service.snapshot(f.context, f.serverId);
+    expect(installed.packs[0]).toMatchObject({ path: 'plugins/example.jar', state: 'enabled' });
+    expect(installed.restart.required).toBe(true);
+    expect(await f.db.selectFrom('minecraft_mod_receipts').selectAll().execute()).toEqual([]);
+    expect(
+      (await f.db.selectFrom('minecraft_mod_drafts').selectAll().executeTakeFirstOrThrow())
+        .revision,
+    ).toBe(12);
+    await f.service.toggle(f.context, f.serverId, {
+      path: 'plugins/example.jar',
+      action: 'disable',
+      idempotencyKey: randomUUID(),
+    });
+    expect(f.files.has('plugins/example.jar.disabled')).toBe(true);
+    expect(f.files.has('plugins/example.jar')).toBe(false);
+    expect(f.sendCommand).not.toHaveBeenCalled();
+    await expect(
+      f.service.toggle(f.context, f.serverId, {
+        path: 'mods/keep.jar',
+        action: 'disable',
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+  });
+
+  it('seals rounded SpiGet downloads to exact bytes before upload and publication', async () => {
+    const f = await catalogFixture('*', 'plugin');
+    const artifact = {
+      ...f.artifact,
+      size: 16384,
+      hashes: {},
+      integrity: 'spiget-tls' as const,
+      projectId: '123',
+      versionId: '456',
+      urls: ['https://api.spiget.org/v2/resources/123/versions/456/download/proxy'],
+    };
+    vi.spyOn(SpigetProvider.prototype, 'resolvePlugins').mockResolvedValue({
+      ...f.resolution,
+      plan: { ...f.resolution.plan, artifacts: [artifact] },
+      catalog: {
+        ...f.resolution.catalog,
+        items: f.resolution.catalog.items.map((item) => ({
+          ...item,
+          project: { ...item.project, provider: 'spiget', id: '123' },
+          version: {
+            ...item.version,
+            provider: 'spiget',
+            projectId: '123',
+            id: '456',
+            bytes: 16384,
+          },
+        })),
+      },
+    });
+    f.service = createMinecraftModsService({
+      db: f.db,
+      runtime: f.runtime,
+      env: f.env,
+      http: f.http,
+      kind: 'plugin',
+    });
+    drainCleanup = () => f.service.drain();
+    const selected = await f.service.select(f.context, f.serverId, {
+      roots: [{ provider: 'spiget', projectId: '123' }],
+      idempotencyKey: randomUUID(),
+    });
+    await f.service.drain();
+    const ready = await f.service.snapshot(f.context, f.serverId);
+    expect(ready.error).toBeUndefined();
+    expect(ready.changes[0]).toMatchObject({ state: 'ready', size: f.bytes.length });
+    const source = await f.db
+      .selectFrom('minecraft_sources')
+      .selectAll()
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    expect(source.kind).toBe('plugin');
+    expect(source.origin).toBe('spiget');
+    expect(Number(source.declared_bytes)).toBe(f.bytes.length);
+    expect(Number(source.reserved_bytes)).toBe(f.bytes.length + 65536);
+    expect(source.expected_hashes).toEqual({
+      sha256: createHash('sha256').update(f.bytes).digest('hex'),
+    });
+    expect(source.source_seal).toBeTruthy();
+    expect(f.http.download).toHaveBeenCalledTimes(1);
+    expect(f.uploadFile).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringMatching(/^plugins\/.*\.pending$/),
+      expect.objectContaining({ contentLength: f.bytes.length, maxBytes: f.bytes.length }),
+    );
+    await f.service.apply(f.context, f.serverId, {
+      revision: selected.revision,
+      idempotencyKey: randomUUID(),
+    });
+    expect(f.files.get('plugins/example.jar')).toEqual(f.bytes);
+    const store = createMinecraftSourceStore(f.db, f.context, f.env, { http: f.http });
+    await expect(
+      store.acquireMod(
+        {
+          kind: 'plugin',
+          provider: 'spiget',
+          projectId: '123',
+          versionId: '456',
+          serverId: f.serverId,
+          idempotencyKey: randomUUID(),
+        },
+        { ...artifact, urls: ['https://example.test/unverified.jar'] },
+      ),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+    expect(f.http.download).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a plugin catalog artifact outside plugins before acquisition or remote writes', async () => {
+    const f = await catalogFixture('*', 'plugin');
+    f.artifact.path = 'mods/foreign.jar';
+    await f.select();
+    await f.service.drain();
+    const value = await f.service.snapshot(f.context, f.serverId);
+    expect(value.changes[0]).toMatchObject({ state: 'failed', error: 'provenance_mismatch' });
+    expect(f.http.download).not.toHaveBeenCalled();
+    expect(f.uploadFile).not.toHaveBeenCalled();
+    expect(f.renameFiles).not.toHaveBeenCalled();
+  });
+
+  it('keeps mod request providers narrow and prevents plugin writes on a mod-only runtime', async () => {
+    const f = await fixture();
+    await expect(
+      f.service.select(f.context, f.serverId, {
+        roots: [{ provider: 'hangar', projectId: '1' }],
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+    const plugins = createMinecraftModsService({
+      db: f.db,
+      env: f.env,
+      runtime: f.runtime,
+      kind: 'plugin',
+    });
+    await expect(
+      plugins.select(f.context, f.serverId, { roots: [], idempotencyKey: randomUUID() }),
+    ).rejects.toMatchObject({ code: 'integration_unavailable' });
+    expect(f.uploadFile).not.toHaveBeenCalled();
+  });
+
   async function installedMod(
     f: Awaited<ReturnType<typeof fixture>>,
     path: string,

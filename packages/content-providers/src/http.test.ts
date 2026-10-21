@@ -303,3 +303,47 @@ it('honors cancellation before network or disk side effects', async () => {
   expect(mocks.request).not.toHaveBeenCalled();
   await expect(readFile(path)).rejects.toThrow();
 });
+
+it('bounds and hashes a SpiGet exact version download without inventing its advertised size', async () => {
+  const path = await destination();
+  const http = client({ allowedOrigins: ['https://api.spiget.org'], attempts: 1 });
+  const jar = {
+    path: 'plugins/example.jar',
+    urls: ['https://api.spiget.org/v2/resources/1/versions/10/download/proxy'],
+    size: 1000,
+    hashes: {},
+    kind: 'plugin' as const,
+    serverSide: 'required' as const,
+    projectId: '1',
+    versionId: '10',
+    integrity: 'spiget-tls' as const,
+  };
+  response(200, body);
+  expect(await http.download(jar, path)).toEqual({
+    sha256: createHash('sha256').update(body).digest('hex'),
+    size: body.length,
+  });
+  expect(await readFile(path)).toEqual(body);
+});
+it('refuses a SpiGet response larger than its bounded ceiling and removes partial bytes', async () => {
+  const path = await destination();
+  const http = client({ allowedOrigins: ['https://api.spiget.org'], attempts: 1 });
+  response(200, body);
+  await expect(
+    http.download(
+      {
+        path: 'plugins/example.jar',
+        urls: ['https://api.spiget.org/v2/resources/1/versions/10/download/proxy'],
+        size: 1,
+        hashes: {},
+        kind: 'plugin',
+        serverSide: 'required',
+        projectId: '1',
+        versionId: '10',
+        integrity: 'spiget-tls',
+      },
+      path,
+    ),
+  ).rejects.toThrow();
+  await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+});

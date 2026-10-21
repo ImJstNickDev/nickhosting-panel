@@ -131,9 +131,15 @@ export class ModrinthProvider {
       (path, signal) => this.http.json(`${this.origin}${path}`, { signal }),
       this.limits,
     );
+    this.pluginCatalog = new ModrinthModCatalog(
+      (path, signal) => this.http.json(`${this.origin}${path}`, { signal }),
+      this.limits,
+      'plugin',
+    );
   }
   private readonly limits: ContentLimits;
   private readonly modCatalog: ModrinthModCatalog;
+  private readonly pluginCatalog: ModrinthModCatalog;
   async searchDatapacks(
     query: string,
     offset = 0,
@@ -606,5 +612,26 @@ export class ModrinthProvider {
   }
   resolveMods(roots: ModSelection[], target: ContentTarget, options: ResolveModsOptions = {}) {
     return this.modCatalog.resolve(roots, target, options);
+  }
+  searchPlugins(input: ModCatalogSearchInput) {
+    return this.pluginCatalog.search(input);
+  }
+  pluginDetails(projectId: string, signal?: AbortSignal) {
+    return this.pluginCatalog.details(projectId, signal);
+  }
+  pluginVersions(projectId: string, input: ModCatalogVersionsInput) {
+    return this.pluginCatalog.listVersions(projectId, input);
+  }
+  pluginVersion(
+    projectId: string,
+    versionId: string,
+    target: ContentTarget,
+    signal?: AbortSignal,
+    metadataMemo?: ResolveModsOptions['metadataMemo'],
+  ) {
+    return this.pluginCatalog.getVersion(projectId, versionId, target, signal, metadataMemo);
+  }
+  resolvePlugins(roots: ModSelection[], target: ContentTarget, options: ResolveModsOptions = {}) {
+    return this.pluginCatalog.resolve(roots, target, options);
   }
 }

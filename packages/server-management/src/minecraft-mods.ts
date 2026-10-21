@@ -7,7 +7,6 @@ import {
   type ContentTarget,
   type CurseForgeProvider,
   inspectJarMetadata,
-  ModrinthProvider,
 } from '@nickhosting/content-providers';
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import { type Database, getSettings, recordAudit } from '@nickhosting/database';
@@ -28,9 +27,18 @@ import {
   minecraftModSelectionSchema,
   minecraftModToggleSchema,
 } from '../../../games/minecraft/src/mod-contracts.js';
-import type { ModResolutionItem } from '../../content-providers/src/mod-catalog.js';
+import {
+  minecraftPluginInstalledChangeSchema,
+  minecraftPluginSelectionSchema,
+  minecraftPluginToggleSchema,
+} from '../../../games/minecraft/src/plugin-contracts.js';
+import type {
+  ContentCatalogProvider,
+  ModResolutionItem,
+} from '../../content-providers/src/mod-catalog.js';
 import type { Environment } from './admission.js';
 import { currentInteractiveContext } from './interactive-context.js';
+import { minecraftAddonProviders } from './minecraft-addon-providers.js';
 import { datapackReceipts, datapackStateRows } from './minecraft-datapack-dependencies.js';
 import { modAlternativeAdvice, modUpdateAdvice } from './minecraft-mod-advice.js';
 import { resolveModsAutomatically } from './minecraft-mod-auto-resolution.js';
@@ -42,12 +50,12 @@ import { assertServerStorageCapacity, serverStorageLimitBytes } from './storage-
 import { reserveUploadIngestion } from './upload-admission.js';
 
 const ref = z.object({
-  provider: z.enum(['modrinth', 'curseforge']),
+  provider: z.enum(['modrinth', 'curseforge', 'hangar', 'spiget']),
   projectId: z.string(),
   versionId: z.string().optional(),
 });
 const meta = z.object({
-  provider: z.enum(['modrinth', 'curseforge']),
+  provider: z.enum(['modrinth', 'curseforge', 'hangar', 'spiget']),
   projectId: z.string(),
   versionId: z.string(),
   name: z.string(),
@@ -59,7 +67,7 @@ const meta = z.object({
     z.object({
       id: z.string(),
       label: z.string(),
-      source: z.enum(['modrinth', 'curseforge']).optional(),
+      source: z.enum(['modrinth', 'curseforge', 'hangar', 'spiget']).optional(),
       original: z.string().optional(),
     }),
   ),
@@ -208,8 +216,33 @@ export function createMinecraftModsService(options: {
   env?: Environment;
   http?: ContentHttp;
   curseforge?: CurseForgeProvider;
+  kind?: 'mod' | 'plugin';
 }) {
-  const { db, runtime, env = {} } = options;
+  const { db, runtime, env = {}, kind = 'mod' } = options;
+  const directory = kind === 'plugin' ? 'plugins' : 'mods';
+  const tables =
+    kind === 'plugin'
+      ? ({
+          drafts: 'minecraft_plugin_drafts',
+          changes: 'minecraft_plugin_changes',
+          applies: 'minecraft_plugin_applies',
+          receipts: 'minecraft_plugin_receipts',
+          restart: 'minecraft_plugin_restart',
+        } as const)
+      : ({
+          drafts: 'minecraft_mod_drafts',
+          changes: 'minecraft_mod_changes',
+          applies: 'minecraft_mod_applies',
+          receipts: 'minecraft_mod_receipts',
+          restart: 'minecraft_mod_restart',
+        } as const);
+  const selectionSchema =
+    kind === 'plugin' ? minecraftPluginSelectionSchema : minecraftModSelectionSchema;
+  const installedChangeSchema =
+    kind === 'plugin' ? minecraftPluginInstalledChangeSchema : minecraftModInstalledChangeSchema;
+  const toggleSchema = kind === 'plugin' ? minecraftPluginToggleSchema : minecraftModToggleSchema;
+  const taskKey = (serverId: string) => `${kind}:${serverId}`;
+  const providers = minecraftAddonProviders({ ...options, kind });
   const runningTasks = tasks.get(db) ?? new Map();
   tasks.set(db, runningTasks);
   const cleanupTasks = cleanups.get(db) ?? new Map<string, Promise<void>>();
@@ -218,11 +251,11 @@ export function createMinecraftModsService(options: {
     inventories.get(db) ?? new Map<string, { expires: number; entries: readonly FilemanEntry[] }>();
   inventories.set(db, inventoryCache);
   function queueCleanup(context: AuthContext, serverId: string) {
-    if (cleanupTasks.has(serverId)) return;
+    if (cleanupTasks.has(taskKey(serverId))) return;
     const promise = (async () => {
       await new Promise((resolve) => setTimeout(resolve, 25));
       const candidates = await db
-        .selectFrom('minecraft_mod_changes')
+        .selectFrom(tables.changes)
         .selectAll()
         .where('server_id', '=', serverId)
         .where('state', 'in', ['cancelled', 'applied'])
@@ -237,12 +270,12 @@ export function createMinecraftModsService(options: {
             row.state === 'applied' &&
             row.action !== 'delete' &&
             !plan.retired.length &&
-            !(plan.reuse && plan.from === `mods/.nh-${row.id}.jar.pending`)
+            !(plan.reuse && plan.from === `${directory}/.nh-${row.id}.jar.pending`)
           );
         })
       ) {
         await db
-          .updateTable('minecraft_mod_changes')
+          .updateTable(tables.changes)
           .set({ cleanup_done: true })
           .where(
             'id',
@@ -262,16 +295,19 @@ export function createMinecraftModsService(options: {
             if (
               row.state === 'cancelled' &&
               row.action === 'install' &&
-              plan.from === `mods/.nh-${row.id}.jar.pending`
+              plan.from === `${directory}/.nh-${row.id}.jar.pending`
             )
               paths.push(plan.from);
             if (row.state === 'applied') {
-              if (plan.reuse && plan.from === `mods/.nh-${row.id}.jar.pending`)
+              if (plan.reuse && plan.from === `${directory}/.nh-${row.id}.jar.pending`)
                 paths.push(plan.from);
               for (const retired of plan.retired)
-                if (retired.to.startsWith(`mods/.nh-${row.id}-`) && retired.to.endsWith('.retired'))
+                if (
+                  retired.to.startsWith(`${directory}/.nh-${row.id}-`) &&
+                  retired.to.endsWith('.retired')
+                )
                   paths.push(retired.to);
-              if (row.action === 'delete' && plan.to === `mods/.nh-${row.id}.retired`)
+              if (row.action === 'delete' && plan.to === `${directory}/.nh-${row.id}.retired`)
                 paths.push(plan.to);
             }
           }
@@ -289,7 +325,7 @@ export function createMinecraftModsService(options: {
               throw new DomainError('operation_uncertain');
           }
           await connection
-            .updateTable('minecraft_mod_changes')
+            .updateTable(tables.changes)
             .set({ cleanup_done: true })
             .where(
               'id',
@@ -303,18 +339,13 @@ export function createMinecraftModsService(options: {
     })().catch(() => {
       /* Durable cleanup flags allow a later visit/selection to retry only generated retired paths. */
     });
-    cleanupTasks.set(serverId, promise);
+    cleanupTasks.set(taskKey(serverId), promise);
     void promise.finally(() => {
-      if (cleanupTasks.get(serverId) === promise) cleanupTasks.delete(serverId);
+      if (cleanupTasks.get(taskKey(serverId)) === promise) cleanupTasks.delete(taskKey(serverId));
     });
   }
-  const provider = (name: 'modrinth' | 'curseforge') => {
-    const result =
-      name === 'modrinth' && options.http
-        ? new ModrinthProvider(options.http)
-        : name === 'curseforge'
-          ? options.curseforge
-          : undefined;
+  const provider = (name: ContentCatalogProvider) => {
+    const result = providers[name];
     if (!result) throw new DomainError('integration_unavailable');
     return result;
   };
@@ -351,19 +382,19 @@ export function createMinecraftModsService(options: {
     return {
       installed: value.installed,
       target,
-      supported: minecraftContentCapabilities(target.loader).mods,
+      supported: minecraftContentCapabilities(target.loader)[directory],
     };
   }
   async function draft(connection: Kysely<Database>, serverId: string) {
     return connection
-      .selectFrom('minecraft_mod_drafts')
+      .selectFrom(tables.drafts)
       .selectAll()
       .where('server_id', '=', serverId)
       .executeTakeFirst();
   }
   async function rows(connection: Kysely<Database>, serverId: string) {
     return connection
-      .selectFrom('minecraft_mod_changes')
+      .selectFrom(tables.changes)
       .selectAll()
       .where('server_id', '=', serverId)
       .where('state', 'in', active)
@@ -371,7 +402,7 @@ export function createMinecraftModsService(options: {
       .execute();
   }
   async function list(files: FilemanReadService) {
-    const result = (await files.listMany(['mods']))[0];
+    const result = (await files.listMany([directory]))[0];
     if (result && 'files' in result) return result.files;
     if (result && 'error' in result && result.error === 'not_found') return [];
     // Wings can report a missing directory as HTTP 500. Confirm absence from
@@ -381,7 +412,7 @@ export function createMinecraftModsService(options: {
       result &&
       'error' in result &&
       result.error === 'unavailable' &&
-      !(await files.list('')).some((entry) => entry.name === 'mods')
+      !(await files.list('')).some((entry) => entry.name === directory)
     )
       return [];
     throw new DomainError('integration_unavailable');
@@ -392,7 +423,7 @@ export function createMinecraftModsService(options: {
     entries: readonly FilemanEntry[],
   ) {
     const stored = await connection
-      .selectFrom('minecraft_mod_receipts')
+      .selectFrom(tables.receipts)
       .selectAll()
       .where('server_id', '=', serverId)
       .execute();
@@ -410,7 +441,7 @@ export function createMinecraftModsService(options: {
   async function restartStatus(context: AuthContext, serverId: string, alreadyAuthorized = false) {
     if (!alreadyAuthorized) await authorized(context, serverId);
     const marker = await db
-      .selectFrom('minecraft_mod_restart')
+      .selectFrom(tables.restart)
       .selectAll()
       .where('server_id', '=', serverId)
       .executeTakeFirst();
@@ -433,14 +464,14 @@ export function createMinecraftModsService(options: {
       Date.parse(started) <= marker.changed_at.getTime();
     if (!required) {
       const removed = await db
-        .deleteFrom('minecraft_mod_restart')
+        .deleteFrom(tables.restart)
         .where('server_id', '=', serverId)
         .where('changed_at', '=', marker.changed_at)
         .returning('server_id')
         .executeTakeFirst();
       if (!removed) {
         const newer = await db
-          .selectFrom('minecraft_mod_restart')
+          .selectFrom(tables.restart)
           .select('changed_at')
           .where('server_id', '=', serverId)
           .executeTakeFirst();
@@ -519,6 +550,7 @@ export function createMinecraftModsService(options: {
           name: plan.metadata?.name,
         });
     }
+    if (kind === 'plugin') return;
     // Retained catalog datapacks share this graph. One directory batch, no per-file requests.
     const worlds = await connection
       .selectFrom('minecraft_datapack_changes')
@@ -603,7 +635,7 @@ export function createMinecraftModsService(options: {
       });
     }
     await connection
-      .updateTable('minecraft_mod_drafts')
+      .updateTable(tables.drafts)
       .set({ blockers: JSON.stringify(blockers) })
       .where('server_id', '=', serverId)
       .where('revision', '=', current.revision)
@@ -616,6 +648,7 @@ export function createMinecraftModsService(options: {
     });
   }
   async function coalesce(context: AuthContext, serverId: string, revision: number) {
+    if (kind === 'plugin') return; // Fabric-only runtime IDs; plugins need no duplicate inventory pass.
     await runtime.fileMutationAccess(
       context,
       serverId,
@@ -651,12 +684,12 @@ export function createMinecraftModsService(options: {
             other.plan.requiredBy = [...new Set([...other.plan.requiredBy, ...plan.requiredBy])];
             other.plan.dependency &&= plan.dependency;
             await connection
-              .updateTable('minecraft_mod_changes')
+              .updateTable(tables.changes)
               .set({ plan: JSON.stringify(other.plan) })
               .where('id', '=', other.row.id)
               .execute();
             await connection
-              .updateTable('minecraft_mod_changes')
+              .updateTable(tables.changes)
               .set({ state: 'cancelled' })
               .where('id', '=', row.id)
               .execute();
@@ -677,7 +710,7 @@ export function createMinecraftModsService(options: {
             plan.dependencies = uniqueRefs([...plan.dependencies, ...existing.plan.dependencies]);
             plan.conflicts = uniqueRefs([...plan.conflicts, ...existing.plan.conflicts]);
             await connection
-              .updateTable('minecraft_mod_changes')
+              .updateTable(tables.changes)
               .set({ plan: JSON.stringify(plan) })
               .where('id', '=', row.id)
               .execute();
@@ -694,7 +727,7 @@ export function createMinecraftModsService(options: {
     selection: MinecraftModSelection,
     signal: AbortSignal,
   ) {
-    await cleanupTasks.get(serverId);
+    await cleanupTasks.get(taskKey(serverId));
     const [info, config] = await Promise.all([profile(db, serverId), getSettings(db, env)]);
     if (!info.supported || !info.installed) throw new DomainError('integration_unavailable');
     const observed = await runtime.fileReadScope(
@@ -703,31 +736,29 @@ export function createMinecraftModsService(options: {
       async (files, _id, connection) => receipts(connection, serverId, await list(files)),
     );
     const resolved = await Promise.all(
-      (['modrinth', 'curseforge'] as const)
-        .filter((name) => selection.roots.some((root) => root.provider === name))
-        .map(async (name) => {
-          const output = await resolveModsAutomatically({
-            provider: provider(name),
-            roots: selection.roots
-              .filter((root) => root.provider === name)
-              .map(({ provider: _, ...root }) => root),
-            target: info.target,
-            maxVersions: config.values.minecraftModAlternativeLimit,
-            replacePinned: true,
-            preferBeta: selection.preferBeta,
-            signal,
-            installedVersions: new Map(
-              observed
-                .filter((row) => row.path.endsWith('.jar'))
-                .flatMap((row) =>
-                  identities(row.plan)
-                    .filter((identity) => identity.provider === name && identity.versionId)
-                    .map((identity) => [identity.projectId, identity.versionId as string] as const),
-                ),
-            ),
-          });
-          return { name, ...output };
-        }),
+      [...new Set(selection.roots.map((root) => root.provider))].map(async (name) => {
+        const output = await resolveModsAutomatically({
+          provider: provider(name),
+          roots: selection.roots
+            .filter((root) => root.provider === name)
+            .map(({ provider: _, ...root }) => root),
+          target: info.target,
+          maxVersions: config.values.minecraftModAlternativeLimit,
+          replacePinned: true,
+          preferBeta: selection.preferBeta,
+          signal,
+          installedVersions: new Map(
+            observed
+              .filter((row) => row.path.endsWith('.jar'))
+              .flatMap((row) =>
+                identities(row.plan)
+                  .filter((identity) => identity.provider === name && identity.versionId)
+                  .map((identity) => [identity.projectId, identity.versionId as string] as const),
+              ),
+          ),
+        });
+        return { name, ...output };
+      }),
     );
     signal.throwIfAborted();
     const blockers: MinecraftModsSnapshot['blockers'] = resolved.flatMap((result) =>
@@ -817,7 +848,7 @@ export function createMinecraftModsService(options: {
       await checkRevision(connection, serverId, revision);
       signal.throwIfAborted();
       await connection
-        .updateTable('minecraft_mod_drafts')
+        .updateTable(tables.drafts)
         .set({ blockers: JSON.stringify(blockers), optional: JSON.stringify(optional) })
         .where('server_id', '=', serverId)
         .execute();
@@ -837,7 +868,7 @@ export function createMinecraftModsService(options: {
           plan.conflicts = item.conflicts;
         }
         await connection
-          .updateTable('minecraft_mod_changes')
+          .updateTable(tables.changes)
           .set({ revision, plan: JSON.stringify(plan) })
           .where('id', '=', row.id)
           .execute();
@@ -845,7 +876,7 @@ export function createMinecraftModsService(options: {
       const cancelled = prior.filter((row) => !reused.has(row.id));
       if (cancelled.length)
         await connection
-          .updateTable('minecraft_mod_changes')
+          .updateTable(tables.changes)
           .set({ state: 'cancelled', updated_at: new Date() })
           .where(
             'id',
@@ -866,7 +897,7 @@ export function createMinecraftModsService(options: {
           replaced.length > 0 &&
           replaced.every((row) => row.path.endsWith('.disabled'));
         const plan: Plan = {
-          from: `mods/.nh-${id}.jar.pending`,
+          from: `${directory}/.nh-${id}.jar.pending`,
           to: `${artifact.path}${preserveDisabled ? '.disabled' : ''}`,
           size: artifact.size,
           metadata: metadata(item),
@@ -895,13 +926,13 @@ export function createMinecraftModsService(options: {
             )
             .map((row) => ({
               from: row.path,
-              to: `mods/.nh-${id}-${digest(row.path).slice(0, 8)}.retired`,
+              to: `${directory}/.nh-${id}-${digest(row.path).slice(0, 8)}.retired`,
               size: row.plan.size,
               modifiedAt: row.plan.modifiedAt,
             })),
         };
         await connection
-          .insertInto('minecraft_mod_changes')
+          .insertInto(tables.changes)
           .values({
             id,
             server_id: serverId,
@@ -947,7 +978,7 @@ export function createMinecraftModsService(options: {
       let dispatched = false;
       try {
         await db
-          .updateTable('minecraft_mod_changes')
+          .updateTable(tables.changes)
           .set({ state: 'preparing', updated_at: new Date() })
           .where('id', '=', id)
           .execute();
@@ -957,6 +988,7 @@ export function createMinecraftModsService(options: {
         });
         const source = await store.acquireMod(
           {
+            kind,
             provider: item.project.provider,
             projectId: item.project.id,
             versionId: item.version.id,
@@ -965,12 +997,19 @@ export function createMinecraftModsService(options: {
           },
           artifact,
         );
-        const archive = await store.modArchiveResolver(source.id, serverId);
+        const archive = await store.jarArchiveResolver(source.id, serverId, kind);
+        // The source store has sealed exact bytes, including providers with rounded sizes.
+        artifact = {
+          ...artifact,
+          size: source.bytes,
+          hashes: { sha256: archive.sha256 },
+          integrity: undefined,
+        };
         const jar = await inspectJarMetadata(archive.path);
-        const side = jar.environment;
+        const side = kind === 'plugin' ? 'server' : jar.environment;
         if (side === 'client' && !item.forced) {
           const row = await db
-            .selectFrom('minecraft_mod_changes')
+            .selectFrom(tables.changes)
             .select('plan')
             .where('id', '=', id)
             .executeTakeFirstOrThrow();
@@ -983,7 +1022,7 @@ export function createMinecraftModsService(options: {
             plan.metadata.environment = { kind: 'client', source: 'archive', original: [] };
           }
           await db
-            .updateTable('minecraft_mod_changes')
+            .updateTable(tables.changes)
             .set({ plan: JSON.stringify(plan), error: 'client_only' })
             .where('id', '=', id)
             .execute();
@@ -1000,16 +1039,17 @@ export function createMinecraftModsService(options: {
                 throw new DomainError('content_plan_expired');
               signal.throwIfAborted();
               const row = await connection
-                .selectFrom('minecraft_mod_changes')
+                .selectFrom(tables.changes)
                 .selectAll()
                 .where('id', '=', id)
                 .executeTakeFirstOrThrow();
               if (row.state !== 'preparing') throw new DomainError('conflict');
               const plan = parse(planSchema, row.plan);
               plan.sourceId = source.id;
+              plan.size = artifact.size;
               plan.sha256 = archive.sha256;
-              plan.runtimeModId = jar.fabric?.id;
-              plan.runtimeModVersion = jar.fabric?.version;
+              plan.runtimeModId = kind === 'mod' ? jar.fabric?.id : undefined;
+              plan.runtimeModVersion = kind === 'mod' ? jar.fabric?.version : undefined;
               if (side !== 'unknown' && plan.metadata && plan.metadata.side !== side) {
                 plan.metadata.side = side;
                 plan.metadata.environment = { kind: side, source: 'archive', original: [] };
@@ -1017,9 +1057,9 @@ export function createMinecraftModsService(options: {
               const files = runtime.fileReadPhase(identifier, server);
               if (!modsDirectoryReady) {
                 const root = await files.list('');
-                const mods = root.find((entry) => entry.name === 'mods');
+                const mods = root.find((entry) => entry.name === directory);
                 if (mods && mods.kind !== 'directory') throw new DomainError('conflict');
-                if (!mods) await runtime.adapter.createDirectory(identifier, '', 'mods');
+                if (!mods) await runtime.adapter.createDirectory(identifier, '', directory);
                 modsDirectoryReady = true;
               }
               if (serverStorageLimitBytes(server.limits.disk) !== null)
@@ -1044,7 +1084,7 @@ export function createMinecraftModsService(options: {
                     .executeTakeFirstOrThrow()
                 ).scope_hash;
                 await connection
-                  .updateTable('minecraft_mod_changes')
+                  .updateTable(tables.changes)
                   .set({ plan: JSON.stringify(plan) })
                   .where('id', '=', id)
                   .execute();
@@ -1076,7 +1116,7 @@ export function createMinecraftModsService(options: {
                 });
                 await claim.complete();
                 await connection
-                  .updateTable('minecraft_mod_changes')
+                  .updateTable(tables.changes)
                   .set({ state: 'ready', updated_at: new Date() })
                   .where('id', '=', id)
                   .where('state', '=', 'preparing')
@@ -1098,7 +1138,7 @@ export function createMinecraftModsService(options: {
         );
       } catch (error) {
         await db
-          .updateTable('minecraft_mod_changes')
+          .updateTable(tables.changes)
           .set({
             state: dispatched ? 'uncertain' : 'failed',
             error:
@@ -1124,14 +1164,14 @@ export function createMinecraftModsService(options: {
     selection: MinecraftModSelection,
   ) {
     const abort = new AbortController();
-    const old = runningTasks.get(serverId);
+    const old = runningTasks.get(taskKey(serverId));
     old?.abort.abort();
     const promise = (async () => {
       await old?.promise.catch(() => {});
       try {
         await prepare(context, serverId, revision, selection, abort.signal);
         await db
-          .updateTable('minecraft_mod_drafts')
+          .updateTable(tables.drafts)
           .set({ state: 'ready', updated_at: new Date() })
           .where('server_id', '=', serverId)
           .where('revision', '=', revision)
@@ -1139,18 +1179,19 @@ export function createMinecraftModsService(options: {
         queueCleanup(context, serverId);
       } catch (error) {
         await db
-          .updateTable('minecraft_mod_drafts')
+          .updateTable(tables.drafts)
           .set({ state: 'failed', error: code(error), updated_at: new Date() })
           .where('server_id', '=', serverId)
           .where('revision', '=', revision)
           .execute();
       }
     })();
-    runningTasks.set(serverId, { revision, abort, promise });
+    runningTasks.set(taskKey(serverId), { revision, abort, promise });
     void promise
       .catch(() => {})
       .finally(() => {
-        if (runningTasks.get(serverId)?.revision === revision) runningTasks.delete(serverId);
+        if (runningTasks.get(taskKey(serverId))?.revision === revision)
+          runningTasks.delete(taskKey(serverId));
       });
   }
   async function finish(
@@ -1166,13 +1207,13 @@ export function createMinecraftModsService(options: {
       const plan = parse(planSchema, row.plan);
       const entry = entries.find((item) => item.name === leaf(plan.to));
       await connection
-        .deleteFrom('minecraft_mod_receipts')
+        .deleteFrom(tables.receipts)
         .where('server_id', '=', serverId)
         .where('path', 'in', [plan.from, ...plan.retired.map((item) => item.from), plan.to])
         .execute();
       if (row.action !== 'delete' && entry?.modifiedAt)
         await connection
-          .insertInto('minecraft_mod_receipts')
+          .insertInto(tables.receipts)
           .values({
             server_id: serverId,
             path: plan.to,
@@ -1180,7 +1221,7 @@ export function createMinecraftModsService(options: {
           })
           .execute();
       await connection
-        .updateTable('minecraft_mod_changes')
+        .updateTable(tables.changes)
         .set({ state: 'applied', updated_at: new Date() })
         .where('id', '=', row.id)
         .execute();
@@ -1188,7 +1229,7 @@ export function createMinecraftModsService(options: {
     const now = new Date();
     if (changes.some((row) => !parse(planSchema, row.plan).reuse))
       await connection
-        .insertInto('minecraft_mod_restart')
+        .insertInto(tables.restart)
         .values({ server_id: serverId, changed_at: now })
         .onConflict((c) => c.column('server_id').doUpdateSet({ changed_at: now }))
         .execute();
@@ -1198,20 +1239,18 @@ export function createMinecraftModsService(options: {
       .where('id', '=', serverId)
       .execute();
     await connection
-      .updateTable('minecraft_mod_applies')
+      .updateTable(tables.applies)
       .set({ state: 'published', updated_at: now })
       .where('id', '=', applyId)
       .execute();
     if (!changes.every((row) => parse(planSchema, row.plan).isolated))
       await connection
-        .updateTable('minecraft_mod_drafts')
+        .updateTable(tables.drafts)
         .set({
           selection: JSON.stringify({
             roots: [],
-            preferBeta: parse(
-              minecraftModSelectionSchema,
-              (await draft(connection, serverId))?.selection,
-            ).preferBeta,
+            preferBeta: parse(selectionSchema, (await draft(connection, serverId))?.selection)
+              .preferBeta,
             idempotencyKey: applyId,
           }),
           state: 'ready',
@@ -1224,7 +1263,7 @@ export function createMinecraftModsService(options: {
       if (pendingDraft && pendingDraft.state !== 'preparing')
         await refreshDraftGraph(connection, serverId, pendingDraft, files, entries);
     }
-    await recordAudit(connection, current, 'minecraft.mods.applied', {
+    await recordAudit(connection, current, `minecraft.${directory}.applied`, {
       serverId,
       applyId,
       count: changes.length,
@@ -1233,7 +1272,7 @@ export function createMinecraftModsService(options: {
         return row.action === 'delete' ? plan.from : plan.to;
       }),
     });
-    inventoryCache.delete(serverId);
+    inventoryCache.delete(taskKey(serverId));
   }
   async function verifyMoves(files: FilemanReadService, moves: z.infer<typeof moveSchema>[]) {
     const entries = await list(files);
@@ -1277,12 +1316,12 @@ export function createMinecraftModsService(options: {
       };
     } catch (error) {
       await connection
-        .updateTable('minecraft_mod_applies')
+        .updateTable(tables.applies)
         .set({ state: 'uncertain', updated_at: new Date() })
         .where('id', '=', id)
         .execute();
       await connection
-        .updateTable('minecraft_mod_changes')
+        .updateTable(tables.changes)
         .set({ state: 'uncertain', error: code(error), updated_at: new Date() })
         .where(
           'id',
@@ -1305,7 +1344,7 @@ export function createMinecraftModsService(options: {
       const [info, stored] = await Promise.all([
         profile(db, serverId),
         db
-          .selectFrom('minecraft_mod_receipts')
+          .selectFrom(tables.receipts)
           .select(['path', 'receipt'])
           .where('server_id', '=', serverId)
           .orderBy('path')
@@ -1332,7 +1371,7 @@ export function createMinecraftModsService(options: {
       const limited = packs.length !== allPacks.length;
       return cachedAdvice(
         db,
-        digest(['updates', serverId, info.target, preferBeta, packs, limited]),
+        digest([kind, 'updates', serverId, info.target, preferBeta, packs, limited]),
         async () => ({
           ...(await modUpdateAdvice({
             packs,
@@ -1348,7 +1387,7 @@ export function createMinecraftModsService(options: {
     async alternatives(
       context: AuthContext,
       serverId: string,
-      name: 'modrinth' | 'curseforge',
+      name: ContentCatalogProvider,
       projectId: string,
       revision: number,
     ): Promise<MinecraftModAlternatives> {
@@ -1361,7 +1400,7 @@ export function createMinecraftModsService(options: {
       const maxVersions = config.values.minecraftModAlternativeLimit;
       if (!info.supported || !info.installed) throw new DomainError('integration_unavailable');
       if (!current || current.revision !== revision) throw new DomainError('conflict');
-      const selection = parse(minecraftModSelectionSchema, current.selection);
+      const selection = parse(selectionSchema, current.selection);
       const roots = selection.roots
         .filter((root) => root.provider === name)
         .map(({ provider: _, ...root }) => root);
@@ -1369,6 +1408,7 @@ export function createMinecraftModsService(options: {
       return cachedAdvice(
         db,
         digest([
+          kind,
           'alternatives-v2',
           serverId,
           info.target,
@@ -1408,8 +1448,8 @@ export function createMinecraftModsService(options: {
             draft(connection, serverId),
             rows(connection, serverId),
           ]);
-          const cached = inventoryCache.get(serverId);
-          const preparing = current?.state === 'preparing' && !!runningTasks.get(serverId);
+          const cached = inventoryCache.get(taskKey(serverId));
+          const preparing = current?.state === 'preparing' && !!runningTasks.get(taskKey(serverId));
           const entries =
             info.installed && info.supported
               ? preparing && cached && cached.expires > Date.now()
@@ -1421,11 +1461,11 @@ export function createMinecraftModsService(options: {
               inventoryCache.delete(inventoryCache.keys().next().value as string);
             // Metadata only; a final non-preparing snapshot always refreshes the directory.
             if (entries.length <= 2000 && JSON.stringify(entries).length <= 1024 ** 2)
-              inventoryCache.set(serverId, { expires: Date.now() + 30_000, entries });
+              inventoryCache.set(taskKey(serverId), { expires: Date.now() + 30_000, entries });
           }
           const existing = await receipts(connection, serverId, entries);
           const selected = current
-            ? parse(minecraftModSelectionSchema, current.selection)
+            ? parse(selectionSchema, current.selection)
             : { roots: [], preferBeta: false };
           const own = changes.filter(
             (row) => row.action !== 'install' || row.revision === current?.revision,
@@ -1453,18 +1493,19 @@ export function createMinecraftModsService(options: {
                   !entry.name.startsWith('.'),
               )
               .map((entry) => ({
-                id: `mods/${entry.name}`,
-                path: `mods/${entry.name}`,
+                id: `${directory}/${entry.name}`,
+                path: `${directory}/${entry.name}`,
                 name: entry.name,
                 size: entry.size,
                 state: entry.name.endsWith('.disabled')
                   ? ('disabled' as const)
                   : ('enabled' as const),
                 metadata:
-                  existing.find((item) => item.path === `mods/${entry.name}`)?.plan.metadata ??
-                  null,
+                  existing.find((item) => item.path === `${directory}/${entry.name}`)?.plan
+                    .metadata ?? null,
                 aliases:
-                  existing.find((item) => item.path === `mods/${entry.name}`)?.plan.aliases ?? [],
+                  existing.find((item) => item.path === `${directory}/${entry.name}`)?.plan
+                    .aliases ?? [],
               })),
             changes: own.map((row) => {
               const plan = parse(planSchema, row.plan);
@@ -1497,7 +1538,7 @@ export function createMinecraftModsService(options: {
       );
     },
     async select(context: AuthContext, serverId: string, input: unknown) {
-      const value = parse(minecraftModSelectionSchema, input);
+      const value = parse(selectionSchema, input);
       const { actor } = await authorized(context, serverId, true);
       const info = await profile(db, serverId);
       if (!info.supported || !info.installed) throw new DomainError('integration_unavailable');
@@ -1507,12 +1548,12 @@ export function createMinecraftModsService(options: {
       )
         throw new DomainError('validation_failed');
       const outcome = await db.transaction().execute(async (tx) => {
-        await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`mods:${serverId}`},0))`.execute(
+        await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${directory}:${serverId}`},0))`.execute(
           tx,
         );
         const previous = await draft(tx, serverId);
         if (previous) {
-          const old = parse(minecraftModSelectionSchema, previous.selection);
+          const old = parse(selectionSchema, previous.selection);
           if (old.idempotencyKey === value.idempotencyKey) {
             if (digest(old) !== digest(value)) throw new DomainError('conflict');
             return { revision: previous.revision, fresh: false };
@@ -1524,7 +1565,7 @@ export function createMinecraftModsService(options: {
           throw new DomainError('operation_uncertain');
         const next = (previous?.revision ?? 0) + 1;
         await tx
-          .insertInto('minecraft_mod_drafts')
+          .insertInto(tables.drafts)
           .values({
             server_id: serverId,
             revision: next,
@@ -1549,7 +1590,7 @@ export function createMinecraftModsService(options: {
           )
           .execute();
         await tx
-          .updateTable('minecraft_mod_changes')
+          .updateTable(tables.changes)
           .set({ state: 'cancelled', updated_at: new Date() })
           .where('server_id', '=', serverId)
           .where('action', '=', 'install')
@@ -1560,21 +1601,22 @@ export function createMinecraftModsService(options: {
       const { revision } = outcome;
       if (
         outcome.fresh &&
-        (!runningTasks.has(serverId) || runningTasks.get(serverId)?.revision !== revision)
+        (!runningTasks.has(taskKey(serverId)) ||
+          runningTasks.get(taskKey(serverId))?.revision !== revision)
       )
         launch(actor, serverId, revision, value);
       return { revision };
     },
     async change(context: AuthContext, serverId: string, input: unknown) {
-      const value = parse(minecraftModInstalledChangeSchema, input);
+      const value = parse(installedChangeSchema, input);
       await authorized(context, serverId, true);
-      await cleanupTasks.get(serverId);
+      await cleanupTasks.get(taskKey(serverId));
       const result = await runtime.fileMutationAccess(
         context,
         serverId,
         async (identifier, connection, current, server) => {
           const previous = await connection
-            .selectFrom('minecraft_mod_changes')
+            .selectFrom(tables.changes)
             .selectAll()
             .where('server_id', '=', serverId)
             .where('actor_user_id', '=', current.actorUserId)
@@ -1597,7 +1639,7 @@ export function createMinecraftModsService(options: {
           const id = randomUUID(),
             to =
               value.action === 'delete'
-                ? `mods/.nh-${id}.retired`
+                ? `${directory}/.nh-${id}.retired`
                 : value.action === 'enable'
                   ? value.path.replace(/\.disabled$/, '')
                   : `${value.path}.disabled`;
@@ -1613,7 +1655,7 @@ export function createMinecraftModsService(options: {
           const currentDraft = await draft(connection, serverId);
           if (!currentDraft)
             await connection
-              .insertInto('minecraft_mod_drafts')
+              .insertInto(tables.drafts)
               .values({
                 server_id: serverId,
                 revision: 0,
@@ -1643,7 +1685,7 @@ export function createMinecraftModsService(options: {
             retired: [],
           };
           await connection
-            .insertInto('minecraft_mod_changes')
+            .insertInto(tables.changes)
             .values({
               id,
               server_id: serverId,
@@ -1663,9 +1705,9 @@ export function createMinecraftModsService(options: {
       return result;
     },
     async toggle(context: AuthContext, serverId: string, input: unknown) {
-      const value = parse(minecraftModToggleSchema, input);
+      const value = parse(toggleSchema, input);
       await authorized(context, serverId, true);
-      await cleanupTasks.get(serverId);
+      await cleanupTasks.get(taskKey(serverId));
       const result = await runtime.fileMutationAccess(
         context,
         serverId,
@@ -1688,18 +1730,18 @@ export function createMinecraftModsService(options: {
                   path: string;
                 }
             > => {
-              await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`mods:${serverId}`},0))`.execute(
+              await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${directory}:${serverId}`},0))`.execute(
                 tx,
               );
               const previous = await tx
-                .selectFrom('minecraft_mod_changes')
+                .selectFrom(tables.changes)
                 .selectAll()
                 .where('server_id', '=', serverId)
                 .where('actor_user_id', '=', current.actorUserId)
                 .where('idempotency_key', '=', value.idempotencyKey)
                 .executeTakeFirst();
               const previousApply = await tx
-                .selectFrom('minecraft_mod_applies')
+                .selectFrom(tables.applies)
                 .selectAll()
                 .where('server_id', '=', serverId)
                 .where('actor_user_id', '=', current.actorUserId)
@@ -1781,7 +1823,7 @@ export function createMinecraftModsService(options: {
               const id = randomUUID();
               const revision = (await draft(tx, serverId))?.revision ?? 0;
               const change = await tx
-                .insertInto('minecraft_mod_changes')
+                .insertInto(tables.changes)
                 .values({
                   id,
                   server_id: serverId,
@@ -1802,7 +1844,7 @@ export function createMinecraftModsService(options: {
                 { from: plan.from, to: plan.to, size: plan.size, modifiedAt: plan.modifiedAt },
               ];
               await tx
-                .insertInto('minecraft_mod_applies')
+                .insertInto(tables.applies)
                 .values({
                   id,
                   server_id: serverId,
@@ -1836,10 +1878,10 @@ export function createMinecraftModsService(options: {
     async cancel(context: AuthContext, serverId: string, changeId: string) {
       parse(z.uuid(), changeId);
       await authorized(context, serverId, true);
-      await cleanupTasks.get(serverId);
+      await cleanupTasks.get(taskKey(serverId));
       await runtime.fileMutationAccess(context, serverId, async (_id, connection) => {
         const row = await connection
-          .selectFrom('minecraft_mod_changes')
+          .selectFrom(tables.changes)
           .selectAll()
           .where('id', '=', changeId)
           .where('server_id', '=', serverId)
@@ -1849,7 +1891,7 @@ export function createMinecraftModsService(options: {
           throw new DomainError('operation_uncertain');
         if (row.action === 'install') throw new DomainError('validation_failed');
         await connection
-          .updateTable('minecraft_mod_changes')
+          .updateTable(tables.changes)
           .set({ state: 'cancelled', updated_at: new Date() })
           .where('id', '=', changeId)
           .execute();
@@ -1859,17 +1901,17 @@ export function createMinecraftModsService(options: {
     async apply(context: AuthContext, serverId: string, input: unknown) {
       const value = parse(minecraftModApplySchema, input);
       await authorized(context, serverId, true);
-      await cleanupTasks.get(serverId);
+      await cleanupTasks.get(taskKey(serverId));
       const result = await runtime.fileMutationAccess(
         context,
         serverId,
         async (identifier, connection, current, server) => {
           const dispatch = await connection.transaction().execute(async (tx) => {
-            await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`mods:${serverId}`},0))`.execute(
+            await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${directory}:${serverId}`},0))`.execute(
               tx,
             );
             const previous = await tx
-              .selectFrom('minecraft_mod_applies')
+              .selectFrom(tables.applies)
               .selectAll()
               .where('server_id', '=', serverId)
               .where('actor_user_id', '=', current.actorUserId)
@@ -1940,7 +1982,7 @@ export function createMinecraftModsService(options: {
             }
             const id = randomUUID();
             await tx
-              .insertInto('minecraft_mod_applies')
+              .insertInto(tables.applies)
               .values({
                 id,
                 server_id: serverId,
@@ -1953,7 +1995,7 @@ export function createMinecraftModsService(options: {
               })
               .execute();
             await tx
-              .updateTable('minecraft_mod_changes')
+              .updateTable(tables.changes)
               .set({ state: 'dispatched', updated_at: new Date() })
               .where(
                 'id',
@@ -1972,20 +2014,20 @@ export function createMinecraftModsService(options: {
     },
     async recover(context: AuthContext, serverId: string) {
       await authorized(context, serverId, true);
-      await cleanupTasks.get(serverId);
+      await cleanupTasks.get(taskKey(serverId));
       return runtime.uploadBatchAccess(
         context,
         serverId,
         async (identifier, connection, current, server) => {
           const applies = await connection
-            .selectFrom('minecraft_mod_applies')
+            .selectFrom(tables.applies)
             .selectAll()
             .where('server_id', '=', serverId)
             .where('state', 'in', ['dispatched', 'uncertain'])
             .execute();
           const pendingChanges = applies.length
             ? await connection
-                .selectFrom('minecraft_mod_changes')
+                .selectFrom(tables.changes)
                 .selectAll()
                 .where('server_id', '=', serverId)
                 .where(
@@ -2005,7 +2047,8 @@ export function createMinecraftModsService(options: {
               })
             );
           });
-          if (!isolated.length && runningTasks.has(serverId)) throw new DomainError('conflict');
+          if (!isolated.length && runningTasks.has(taskKey(serverId)))
+            throw new DomainError('conflict');
           let recovered = 0;
           for (const apply of isolated.length ? isolated : applies) {
             const moves = parse(z.array(moveSchema), apply.moves);
@@ -2041,7 +2084,7 @@ export function createMinecraftModsService(options: {
           for (const row of interrupted) {
             const plan = parse(planSchema, row.plan);
             if (
-              plan.from !== `mods/.nh-${row.id}.jar.pending` ||
+              plan.from !== `${directory}/.nh-${row.id}.jar.pending` ||
               !plan.sha256 ||
               !plan.claimId ||
               !plan.claimScope
@@ -2116,11 +2159,11 @@ export function createMinecraftModsService(options: {
                   .where('scope_hash', '=', plan.claimScope as string)
                   .execute();
                 await tx
-                  .updateTable('minecraft_mod_changes')
+                  .updateTable(tables.changes)
                   .set({ state: 'ready', error: null, updated_at: new Date() })
                   .where('id', '=', row.id)
                   .execute();
-                await recordAudit(tx, current, 'minecraft.mods.preparation_reconciled', {
+                await recordAudit(tx, current, `minecraft.${directory}.preparation_reconciled`, {
                   serverId,
                   changeId: row.id,
                 });
@@ -2133,7 +2176,7 @@ export function createMinecraftModsService(options: {
             }
           }
           await connection
-            .updateTable('minecraft_mod_changes')
+            .updateTable(tables.changes)
             .set({ state: 'failed', error: 'operation_uncertain', updated_at: new Date() })
             .where('server_id', '=', serverId)
             .where('state', 'in', ['preparing', 'queued'])
@@ -2141,7 +2184,7 @@ export function createMinecraftModsService(options: {
           const currentDraft = await draft(connection, serverId);
           if (currentDraft?.state === 'preparing')
             await connection
-              .updateTable('minecraft_mod_drafts')
+              .updateTable(tables.drafts)
               .set({ state: 'failed', error: 'operation_uncertain' })
               .where('server_id', '=', serverId)
               .execute();

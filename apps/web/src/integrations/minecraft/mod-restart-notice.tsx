@@ -17,10 +17,12 @@ const restartSchema = z.object({
  * A console connection or a "running" message alone never clears it. */
 export function MinecraftModRestartNotice({
   serverId,
+  kind = 'mods',
   state,
   revision,
 }: {
   serverId: string;
+  kind?: 'mods' | 'plugins';
   state?: string;
   revision?: string;
 }) {
@@ -37,11 +39,11 @@ export function MinecraftModRestartNotice({
         ].join(':')
       : undefined;
   const status = useQuery({
-    queryKey: ['minecraft-mods-restart', serverId, identity],
+    queryKey: [`minecraft-${kind}-restart`, serverId, identity],
     enabled: Boolean(identity),
     queryFn: async ({ signal }) =>
       restartSchema.parse(
-        await api(`${serverPath(serverId)}/minecraft/mods/restart-status`, { signal }),
+        await api(`${serverPath(serverId)}/minecraft/${kind}/restart-status`, { signal }),
       ),
     refetchOnMount: 'always',
     staleTime: 5000,
@@ -51,7 +53,7 @@ export function MinecraftModRestartNotice({
       query.state.data?.required && ['starting', 'running'].includes(state ?? '') ? 10000 : false,
     retry: false,
   });
-  const observation = `${identity}:${serverId}:${state}:${revision}`;
+  const observation = `${identity}:${serverId}:${kind}:${state}:${revision}`;
   const previous = useRef(observation);
   useEffect(() => {
     if (previous.current === observation) return;
@@ -78,7 +80,13 @@ export function MinecraftModRestartNotice({
       </svg>
       <span>
         {t(
-          status.data?.required ? 'service.modsRestartRequired' : 'service.modsRestartUnavailable',
+          kind === 'plugins'
+            ? status.data?.required
+              ? 'games.minecraft.plugins.restartRequired'
+              : 'games.minecraft.plugins.restartUnavailable'
+            : status.data?.required
+              ? 'service.modsRestartRequired'
+              : 'service.modsRestartUnavailable',
         )}
       </span>
       {status.error ? (
@@ -91,8 +99,8 @@ export function MinecraftModRestartNotice({
           {t('web.retry')}
         </button>
       ) : (
-        <Link to={`/servers/${encodeURIComponent(serverId)}/game/mods`}>
-          {t('service.modsReview')}
+        <Link to={`/servers/${encodeURIComponent(serverId)}/game/${kind}`}>
+          {t(kind === 'plugins' ? 'games.minecraft.plugins.reviewInstalled' : 'service.modsReview')}
         </Link>
       )}
     </div>

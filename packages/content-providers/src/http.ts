@@ -291,7 +291,7 @@ export class SafeContentHttp implements ContentHttp {
           createWriteStream(destination, { flags: 'wx', mode: 0o600 }),
           { signal: options.signal },
         );
-        if (size !== artifact.size) fail('download_size');
+        if (artifact.integrity !== 'spiget-tls' && size !== artifact.size) fail('download_size');
         const actual = Object.fromEntries(
           [...hashes].map(([name, hash]) => [name, hash.digest('hex')]),
         );

@@ -19,6 +19,8 @@ const eventLabels: Record<string, string> = {
   'server.metadata.updated': 'settingsUpdated',
   'minecraft.mods.applied': 'modsApplied',
   'minecraft.mods.preparation_reconciled': 'modsReconciled',
+  'minecraft.plugins.applied': 'pluginsApplied',
+  'minecraft.plugins.preparation_reconciled': 'pluginsReconciled',
   'server.automation_consent.updated': 'automationUpdated',
   'server.dns.assigned': 'addressCreated',
   'server.dns.updated': 'addressUpdated',

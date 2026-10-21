@@ -43,6 +43,20 @@ async function audit(
 }
 
 describe('unified activity', () => {
+  it('shows plugin publication and recovery only in the authorized server activity', async () => {
+    const serverId = await f.server();
+    const stranger = await managementFixture(f.db, { interactive: true });
+    await audit(serverId, 'minecraft.plugins.applied', { count: 2, outcome: 'succeeded' });
+    await audit(serverId, 'minecraft.plugins.preparation_reconciled', { outcome: 'succeeded' });
+    const result = await listUnifiedActivity(f.db, f.context, { serverId, category: 'settings' });
+    expect(result.items.map((item) => item.action).sort()).toEqual([
+      'minecraft.plugins.applied',
+      'minecraft.plugins.preparation_reconciled',
+    ]);
+    expect(result.items.every((item) => item.actor?.id === f.context.actorUserId)).toBe(true);
+    expect((await listUnifiedActivity(f.db, stranger.context)).items).toEqual([]);
+  });
+
   it('joins lifecycle jobs and audit history, groups explicit operations and retains pending historical intent', async () => {
     const serverId = await f.server();
     const job = await enqueueServerOperation(f.db, f.context, serverId, {

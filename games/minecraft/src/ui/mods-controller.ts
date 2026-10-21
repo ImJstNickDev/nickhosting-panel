@@ -1,11 +1,13 @@
 import type { GameUiClient } from '@nickhosting/game-sdk/ui';
 import { z } from 'zod';
 import {
-  type ModProvider,
+  type ContentCatalogProvider,
+  contentCatalogProviderSchema,
   modCatalogDetailsSchema,
   modCatalogProjectsSchema,
   modCatalogVersionsSchema,
   modProviderSchema,
+  pluginProviderSchema,
 } from '../../../../packages/content-providers/src/mod-catalog.js';
 import {
   type MinecraftModSelection,
@@ -19,14 +21,20 @@ import {
   minecraftModToggleSchema,
   minecraftModUpdatesSchema,
 } from '../mod-contracts.js';
+import {
+  minecraftPluginInstalledChangeSchema,
+  minecraftPluginSelectionSchema,
+  minecraftPluginToggleResultSchema,
+  minecraftPluginToggleSchema,
+} from '../plugin-contracts.js';
 
 export type {
+  ContentCatalogProvider,
   ModCatalogDetails,
   ModCatalogProject,
   ModCatalogVersion,
   ModCatalogVersions,
   ModEnvironment,
-  ModProvider,
   ModTag,
 } from '../../../../packages/content-providers/src/mod-catalog.js';
 export type {
@@ -40,7 +48,7 @@ export type {
 } from '../mod-contracts.js';
 
 const metadata = z.object({
-  provider: modProviderSchema,
+  provider: contentCatalogProviderSchema,
   projectId: z.string(),
   versionId: z.string(),
   name: z.string(),
@@ -55,7 +63,7 @@ const metadata = z.object({
 const aliases = z
   .array(
     z.object({
-      provider: modProviderSchema,
+      provider: contentCatalogProviderSchema,
       projectId: z.string(),
       versionId: z.string().optional(),
     }),
@@ -69,7 +77,10 @@ export const minecraftModsSnapshotSchema: z.ZodType<MinecraftModsSnapshot> = z.o
   loader: z.string(),
   revision: z.number().int().nonnegative(),
   preferBeta: z.boolean(),
-  roots: minecraftModSelectionSchema.shape.roots,
+  roots: z.union([
+    minecraftModSelectionSchema.shape.roots,
+    minecraftPluginSelectionSchema.shape.roots,
+  ]),
   preparing: z.boolean(),
   error: z.string().optional(),
   packs: z.array(
@@ -104,7 +115,7 @@ export const minecraftModsSnapshotSchema: z.ZodType<MinecraftModsSnapshot> = z.o
   blockers: z.array(minecraftModBlockerSchema),
   optional: z.array(
     z.object({
-      provider: modProviderSchema,
+      provider: contentCatalogProviderSchema,
       projectId: z.string(),
       name: z.string(),
       requiredBy: z.array(z.string()),
@@ -114,17 +125,29 @@ export const minecraftModsSnapshotSchema: z.ZodType<MinecraftModsSnapshot> = z.o
 });
 
 /** One protected same-origin transport. Background preparation is a durable API operation. */
-export function createMinecraftModsController(client: GameUiClient) {
+export function createMinecraftModsController(
+  client: GameUiClient,
+  kind: 'mods' | 'plugins' = 'mods',
+) {
+  const providerSchema = kind === 'plugins' ? pluginProviderSchema : modProviderSchema;
+  const projectIdSchema =
+    kind === 'plugins'
+      ? minecraftPluginSelectionSchema.shape.roots.element.shape.projectId
+      : minecraftModSelectionSchema.shape.roots.element.shape.projectId;
+  const selectionSchema =
+    kind === 'plugins' ? minecraftPluginSelectionSchema : minecraftModSelectionSchema;
+  const changeSchema =
+    kind === 'plugins' ? minecraftPluginInstalledChangeSchema : minecraftModInstalledChangeSchema;
+  const toggleSchema = kind === 'plugins' ? minecraftPluginToggleSchema : minecraftModToggleSchema;
+  const toggleResultSchema =
+    kind === 'plugins' ? minecraftPluginToggleResultSchema : minecraftModToggleResultSchema;
   const path = (serverId: string, suffix = '') =>
-    `/v1/servers/${z.uuid().parse(serverId)}/minecraft/mods${suffix}`;
-  const projectPath = (serverId: string, provider: ModProvider, projectId: string) =>
+    `/v1/servers/${z.uuid().parse(serverId)}/minecraft/${kind}${suffix}`;
+  const projectPath = (serverId: string, provider: ContentCatalogProvider, projectId: string) =>
     path(
       serverId,
-      `/catalog/${modProviderSchema.parse(provider)}/${encodeURIComponent(
-        z
-          .string()
-          .regex(/^[A-Za-z0-9_-]{1,128}$/)
-          .parse(projectId),
+      `/catalog/${providerSchema.parse(provider)}/${encodeURIComponent(
+        projectIdSchema.parse(projectId),
       )}`,
     );
   return {
@@ -135,18 +158,29 @@ export function createMinecraftModsController(client: GameUiClient) {
       return z
         .object({
           providers: z.array(
-            z.object({ id: modProviderSchema, available: z.boolean() }).passthrough(),
+            z
+              .object({
+                id: z.union([contentCatalogProviderSchema, z.enum(['voxel', 'builtbybit'])]),
+                available: z.boolean(),
+                comingSoon: z.boolean().optional(),
+              })
+              .passthrough(),
           ),
         })
         .parse(await client.request(path(serverId, '/catalog'), { signal }));
     },
     async search(
       serverId: string,
-      input: { provider: ModProvider; query: string; offset: number; includeIncompatible: boolean },
+      input: {
+        provider: ContentCatalogProvider;
+        query: string;
+        offset: number;
+        includeIncompatible: boolean;
+      },
       signal?: AbortSignal,
     ) {
       const params = new URLSearchParams({
-        provider: input.provider,
+        provider: providerSchema.parse(input.provider),
         query: input.query,
         offset: String(input.offset),
         includeIncompatible: String(input.includeIncompatible),
@@ -157,7 +191,7 @@ export function createMinecraftModsController(client: GameUiClient) {
     },
     async details(
       serverId: string,
-      provider: ModProvider,
+      provider: ContentCatalogProvider,
       projectId: string,
       signal?: AbortSignal,
     ) {
@@ -167,7 +201,7 @@ export function createMinecraftModsController(client: GameUiClient) {
     },
     async versions(
       serverId: string,
-      provider: ModProvider,
+      provider: ContentCatalogProvider,
       projectId: string,
       input: { offset: number; includeIncompatible: boolean; preferBeta: boolean },
       signal?: AbortSignal,
@@ -190,21 +224,18 @@ export function createMinecraftModsController(client: GameUiClient) {
     },
     async alternatives(
       serverId: string,
-      provider: ModProvider,
+      provider: ContentCatalogProvider,
       projectId: string,
       revision: number,
       signal?: AbortSignal,
     ) {
-      const project = z
-        .string()
-        .regex(/^[A-Za-z0-9_-]{1,128}$/)
-        .parse(projectId);
+      const project = projectIdSchema.parse(projectId);
       const current = z.number().int().nonnegative().parse(revision);
       return minecraftModAlternativesSchema.parse(
         await client.request(
           path(
             serverId,
-            `/alternatives/${modProviderSchema.parse(provider)}/${encodeURIComponent(project)}?revision=${current}`,
+            `/alternatives/${providerSchema.parse(provider)}/${encodeURIComponent(project)}?revision=${current}`,
           ),
           { signal },
         ),
@@ -214,21 +245,21 @@ export function createMinecraftModsController(client: GameUiClient) {
       return z.object({ revision: z.number().int().nonnegative() }).parse(
         await client.request(path(serverId, '/selection'), {
           method: 'PUT',
-          body: minecraftModSelectionSchema.parse(input),
+          body: selectionSchema.parse(input),
         }),
       );
     },
     async change(serverId: string, input: z.infer<typeof minecraftModInstalledChangeSchema>) {
       return client.request(path(serverId, '/changes'), {
         method: 'POST',
-        body: minecraftModInstalledChangeSchema.parse(input),
+        body: changeSchema.parse(input),
       });
     },
     async toggle(serverId: string, input: z.infer<typeof minecraftModToggleSchema>) {
-      return minecraftModToggleResultSchema.parse(
+      return toggleResultSchema.parse(
         await client.request(path(serverId, '/toggle'), {
           method: 'POST',
-          body: minecraftModToggleSchema.parse(input),
+          body: toggleSchema.parse(input),
         }),
       );
     },

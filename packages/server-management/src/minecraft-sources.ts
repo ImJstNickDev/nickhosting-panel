@@ -3,6 +3,7 @@ import { type BigIntStats, constants } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
+  artifactSchema,
   type ContentArtifact,
   type ContentFileVerification,
   type ContentHttp,
@@ -444,7 +445,13 @@ export function createMinecraftSourceStore(
     hashes: unknown;
     projectId?: string;
     versionId?: string;
+    integrity?: 'spiget-tls';
   }) {
+    if (input.integrity && (input.kind !== 'plugin' || input.origin !== 'spiget'))
+      throw new DomainError('provenance_mismatch');
+    const expectedHashes = input.integrity
+      ? z.strictObject({}).parse(input.hashes)
+      : hashesSchema.parse(input.hashes);
     const identity = createHash('sha256')
       .update(
         JSON.stringify({
@@ -452,7 +459,8 @@ export function createMinecraftSourceStore(
           origin: input.origin,
           serverId: input.serverId ?? null,
           bytes: input.bytes,
-          hashes: hashesSchema.parse(input.hashes),
+          hashes: expectedHashes,
+          integrity: input.integrity,
           projectId: input.projectId ?? null,
           versionId: input.versionId ?? null,
         }),
@@ -536,6 +544,7 @@ export function createMinecraftSourceStore(
       authorize: () => Promise<void>,
     ) => Promise<ContentFileVerification | undefined>,
     signal?: AbortSignal,
+    boundedSpiget = false,
   ) {
     return rowLock(db, reference, async (connection) => {
       let row = await ownedSource(connection, await reauthorize(connection), reference);
@@ -576,6 +585,24 @@ export function createMinecraftSourceStore(
         // Provider acquisition retains its full-file verification fallback.
         const verified =
           (await transfer(row, abort, authorize)) ?? (await hashSource(row, authorize));
+        if (boundedSpiget) {
+          const bytes = verified.identity.size;
+          if (
+            row.kind !== 'plugin' ||
+            row.origin !== 'spiget' ||
+            bytes < 1n ||
+            bytes > BigInt(row.declared_bytes)
+          )
+            throw new DomainError('provenance_mismatch');
+          // SpiGet supplies no upstream hash and rounds its advertised size. Only
+          // its canonical TLS endpoint may use a ceiling; publication seals exact bytes.
+          row = {
+            ...row,
+            declared_bytes: String(bytes),
+            reserved_bytes: String(bytes + 65536n),
+            expected_hashes: { sha256: verified.sha256 },
+          };
+        }
         const seal = await sealSource(row, verified);
         const { sha256 } = verified;
         // Do not let the background check share this pinned connection with the
@@ -591,6 +618,9 @@ export function createMinecraftSourceStore(
             .updateTable('minecraft_sources')
             .set({
               state: 'ready',
+              declared_bytes: row.declared_bytes,
+              reserved_bytes: row.reserved_bytes,
+              expected_hashes: JSON.stringify(row.expected_hashes),
               actual_sha256: sha256,
               source_seal: JSON.stringify(seal),
               updated_at: new Date(),
@@ -882,7 +912,8 @@ export function createMinecraftSourceStore(
     /** Internal catalog acquisition: same bounded source store and verified downloader as datapacks. */
     async acquireMod(
       input: {
-        provider: 'modrinth' | 'curseforge';
+        kind?: 'mod' | 'plugin';
+        provider: 'modrinth' | 'curseforge' | 'hangar' | 'spiget';
         projectId: string;
         versionId: string;
         serverId: string;
@@ -892,11 +923,15 @@ export function createMinecraftSourceStore(
       signal?: AbortSignal,
     ) {
       await authorizeScope(db, await reauthorize(), input.serverId);
+      artifact = parse(artifactSchema, artifact);
+      const kind = input.kind ?? 'mod';
+      const directory = kind === 'plugin' ? 'plugins' : 'mods';
       if (
-        artifact.kind !== 'mod' ||
+        (kind === 'mod' && !['modrinth', 'curseforge'].includes(input.provider)) ||
+        artifact.kind !== kind ||
         artifact.projectId !== input.projectId ||
         artifact.versionId !== input.versionId ||
-        !/^mods\/[^/]+\.jar$/.test(artifact.path) ||
+        !new RegExp(`^${directory}/[^/\\\\\\p{C}]+\\.jar$`, 'u').test(artifact.path) ||
         artifact.size < 1
       )
         throw new DomainError('provenance_mismatch');
@@ -904,10 +939,11 @@ export function createMinecraftSourceStore(
       if (!http) throw new DomainError('configuration_invalid');
       const row = await reserve({
         ...input,
-        kind: 'mod',
+        kind,
         origin: input.provider,
         bytes: artifact.size,
         hashes: artifact.hashes,
+        integrity: artifact.integrity,
       });
       return executeTransfer(
         row.id,
@@ -917,6 +953,7 @@ export function createMinecraftSourceStore(
           return { path, sha256: result.sha256, identity: await lstat(path, { bigint: true }) };
         },
         signal,
+        artifact.integrity === 'spiget-tls',
       );
     },
     async acquireWorldCatalog(input: unknown, signal?: AbortSignal) {
@@ -982,6 +1019,8 @@ export function createMinecraftSourceStore(
     },
     archiveResolver: async (reference: string, serverId: string) =>
       (await resolveSource(reference, 'modpack', serverId)).path,
+    jarArchiveResolver: (reference: string, serverId: string, kind: 'mod' | 'plugin') =>
+      resolveSource(reference, kind, serverId),
     modArchiveResolver: (reference: string, serverId: string) =>
       resolveSource(reference, 'mod', serverId),
     datapackArchiveResolver: (reference: string, serverId: string) =>
