@@ -92,7 +92,7 @@ $seen=[];$repo=directoryRepo(array_fill(0,48,new Response(200,[],'[]')),$seen);
 $queries=DB::connection()->getQueryLog();DB::connection()->disableQueryLog();
 check(count($seen)===48 && count($queries)===5,'48 listings use three setting reads and two managed-identity reads total');
 
-// Real Guzzle Pool with deferred fake promises, never a network socket.
+// Native Guzzle promises with deferred fake responses, never a network socket.
 $repo=new MemoryDirectoryRepository($app);$repo->setServer($uploadServer);
 $active=0;$peak=0;$calls=0;$timeouts=[];
 $repo->client=new GuzzleHttp\Client(['handler'=>function($request,$options)use(&$active,&$peak,&$calls,&$timeouts){
@@ -107,8 +107,53 @@ foreach([1,2,4]as$concurrency){
     $peak=0;$calls=0;
     $results=$repo->listDirectories(['a','b','c','d','e'],array_replace($directoryDefaults,['directoryConcurrency'=>$concurrency]));
     check($peak===$concurrency && $active===0 && $calls===5 && count(array_filter($results,fn($r)=>isset($r['files'])))===5,
-        'native async Pool enforces configured concurrency '.$concurrency);
+        'bounded native async batches enforce configured concurrency '.$concurrency);
 }
+
+// A native multi handler may settle other requests while waiting on one promise.
+// Complete each admitted batch in reverse order, including rejected requests, to
+// prove every slot is joined before admitting more work and results remain ordered.
+foreach ([1,2,4] as $concurrency) {
+    $active=0;$peak=0;$calls=0;$pending=[];$completed=[];$overlap=false;
+    $repo->client=new GuzzleHttp\Client(['handler'=>function($request,$options)use(&$active,&$peak,&$calls,&$pending,&$completed,&$overlap,$concurrency,$item){
+        if ($calls % $concurrency === 0 && $active !== 0) { $overlap=true; }
+        $index=$calls++;$active++;$peak=max($peak,$active);
+        $promise=new Promise(function()use(&$pending,&$active,&$completed,$item){
+            foreach (array_reverse(array_keys($pending)) as $index) {
+                [$promise,$options]=$pending[$index];unset($pending[$index]);$active--;$completed[]=$index;
+                if ($index===2) { $promise->reject(new RuntimeException('Read failed'));continue; }
+                $body=$index===7?'invalid-json':json_encode([array_replace($item,['name'=>'entry'.$index])]);
+                $response=new Response($index===1?404:200,[],$body);
+                try { $options['on_headers']($response);$options['sink']->write($body);$promise->resolve($response); }
+                catch (Throwable $error) { $promise->reject($error); }
+            }
+        });
+        $pending[$index]=[$promise,$options];return $promise;
+    }]);
+    $paths=array_map(fn($index)=>'directory'.$index,range(0,47));
+    $results=$repo->listDirectories($paths,array_replace($directoryDefaults,['directoryConcurrency'=>$concurrency]));
+    check($calls===48 && $peak===$concurrency && $active===0 && $pending===[] && !$overlap,
+        '48 native promises drain each bounded batch despite out-of-order failures at concurrency '.$concurrency);
+    check(array_column($results,'directory')===$paths && $results[1]['error']==='not_found'
+        && $results[2]['error']==='unavailable' && $results[7]['error']==='unavailable'
+        && count(array_filter($results,fn($result)=>isset($result['files'])))===45
+        && $results[47]['files'][0]['name']==='entry47',
+        'out-of-order completion preserves all successful and failed result slots at concurrency '.$concurrency);
+}
+
+$active=0;$calls=0;
+$repo->client=new GuzzleHttp\Client(['handler'=>function($request,$options)use(&$active,&$calls){
+    $index=$calls++;$active++;$promise=null;
+    $promise=new Promise(function()use(&$promise,&$active,$index,$options){
+        $active--;$response=new Response($index===0?429:200,[],'[]');
+        try { $options['on_headers']($response);$options['sink']->write('[]');$promise->resolve($response); }
+        catch (Throwable $error) { $promise->reject($error); }
+    });return $promise;
+}]);
+$results=$repo->listDirectories(['limited','already-admitted','queued-a','queued-b'],$directoryDefaults);
+check($calls===2 && $active===0 && $results[1]['files']===[]
+    && $results[0]['error']==='unavailable' && $results[2]['error']==='unavailable' && $results[3]['error']==='unavailable',
+    '429 drains the other admitted request and stops the next concurrent batch');
 
 // A whole-batch deadline includes paths still waiting for a concurrency slot.
 $repo->clock=0;$calls=0;

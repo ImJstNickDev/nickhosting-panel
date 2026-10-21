@@ -2,7 +2,6 @@
 
 namespace Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services;
 
-use GuzzleHttp\Pool;
 use GuzzleHttp\Promise\Create;
 use GuzzleHttp\Psr7\StreamDecoratorTrait;
 use GuzzleHttp\Psr7\Utils;
@@ -106,7 +105,27 @@ class DirectoryListingRepository extends DaemonRepository
                 };
             }
         };
-        (new Pool($client, $requests(), ['concurrency' => $settings['directoryConcurrency']]))->promise()->wait();
+        // Wait on native request promises directly: Pool/EachPromise can leave its
+        // aggregate unresolved when the installed cURL handler completes a batch.
+        $wait = function (array $pending) use ($deadline, &$results): void {
+            foreach ($pending as $index => $promise) {
+                try { $promise->wait(); }
+                catch (\Throwable $error) {
+                    // Still join every admitted request before starting another batch.
+                    $results[$index] = ['directory' => $results[$index]['directory'],
+                        'error' => $this->now() >= $deadline ? 'deadline_exceeded' : 'unavailable'];
+                }
+            }
+        };
+        $pending = [];
+        foreach ($requests() as $index => $request) {
+            $pending[$index] = $request();
+            if (count($pending) === $settings['directoryConcurrency']) {
+                $wait($pending);
+                $pending = [];
+            }
+        }
+        $wait($pending);
         return $results;
     }
 }
