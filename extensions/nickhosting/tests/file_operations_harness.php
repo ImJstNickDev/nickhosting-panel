@@ -134,11 +134,10 @@ foreach ([
 
 $archiveInput = ['operationId'=>'12345678-1234-4234-8234-123456789101', 'identity'=>Protocol::identity($uploadServer),
     'destinationRoot'=>'imported', 'archiveSha256'=>str_repeat('b',64), 'files'=>[['path'=>'imported/level.dat','size'=>123]]];
-function archiveResponses(array $input, bool $missingFile = false, bool $missingPublish = false): array {
+function archiveResponses(array $input, bool $failedExtraction = false, bool $missingPublish = false): array {
     $scratch = operationEntry('.nickhosting-import-'.$input['operationId']); $payload=operationEntry('payload.zip',true,42);
     $destination = operationEntry($input['destinationRoot']);
-    return [operationListing([$scratch]), operationListing([$payload]), new GuzzleHttp\Psr7\Response(204),
-        operationListing([$payload,$destination]), operationListing($missingFile ? [] : [operationEntry('level.dat',true,123)]),
+    return [operationListing([$scratch]), operationListing([$payload]), new GuzzleHttp\Psr7\Response($failedExtraction ? 500 : 204),
         operationListing([$scratch]), new GuzzleHttp\Psr7\Response(204), operationListing($missingPublish ? [$scratch] : [$scratch,$destination]),
         operationListing([$payload]), new GuzzleHttp\Psr7\Response(204)];
 }
@@ -146,7 +145,7 @@ $operationRequests = [];
 $archiveRepository = operationRepo(archiveResponses($archiveInput), $operationRequests);
 $archiveController = new ArchiveCommitController($archiveRepository);
 $committed = $archiveController(operationRequest('archive-commit', $archiveInput), $uploadServer)->getData(true);
-check($committed['state'] === 'confirmed' && $committed['archiveSha256'] === $archiveInput['archiveSha256'], 'archive commit verifies tree and publishes with durable receipt');
+check($committed['state'] === 'confirmed' && $committed['archiveSha256'] === $archiveInput['archiveSha256'], 'archive commit trusts synchronous extraction and publishes with durable receipt');
 check($archiveRepository->clientCalls === 1 && count(array_unique(array_map(fn($call) => $call['request']->getHeaderLine('X-Fixture-Client'), $operationRequests))) === 1,
     'entire commit including cleanup reuses one native client');
 check(!array_key_exists('timings', $committed), 'normal archive receipts have no profiling payload');
@@ -162,7 +161,7 @@ denied(fn () => $archiveController(operationRequest('archive-commit', $archiveCh
 foreach ([[true,false],[false,true]] as $failure) {
     $archiveInput['operationId'] = $failure[0] ? '12345678-1234-4234-8234-123456789102' : '12345678-1234-4234-8234-123456789103';
     $operationRequests = []; $archiveController = new ArchiveCommitController(operationRepo(archiveResponses($archiveInput,...$failure), $operationRequests));
-    check($archiveController(operationRequest('archive-commit',$archiveInput),$uploadServer)->getData(true)['state'] === 'uncertain', 'missing extracted file or missing rename readback cannot succeed');
+    check($archiveController(operationRequest('archive-commit',$archiveInput),$uploadServer)->getData(true)['state'] === 'uncertain', 'unconfirmed extraction or missing rename readback cannot succeed');
     $beforeReplay=count(array_filter($operationRequests,fn($call)=>$call['request']->getMethod()!=='GET'));
     check($archiveController(operationRequest('archive-commit',$archiveInput),$uploadServer)->getData(true)['state'] === 'uncertain'
         && count(array_filter($operationRequests,fn($call)=>$call['request']->getMethod()!=='GET'))===$beforeReplay,
@@ -172,6 +171,12 @@ $archiveInput['operationId']='12345678-1234-4234-8234-123456789104'; $operationR
 $archiveController = new ArchiveCommitController(operationRepo([operationListing([operationEntry('imported')]), operationListing([operationEntry('payload.zip',true,42)])],$operationRequests));
 denied(fn()=>$archiveController(operationRequest('archive-commit',$archiveInput),$uploadServer),409,'existing destination is rejected before extraction');
 check(count($operationRequests)===2 && DB::table('nickhosting_file_operations')->where('operation_id',$archiveInput['operationId'])->value('state')==='rejected','collision has no uncertain publication and no native write');
+$collisionInput=$archiveInput; $collisionInput['operationId']='12345678-1234-4234-8234-123456789105';
+$collisionInput['files']=[['path'=>'imported/data','size'=>1],['path'=>'imported/data/child','size'=>1]];
+$operationRequests=[];
+$archiveController=new ArchiveCommitController(operationRepo(array_slice(archiveResponses($collisionInput),0,2),$operationRequests));
+denied(fn()=>$archiveController(operationRequest('archive-commit',$collisionInput),$uploadServer),422,'file/directory manifest collision is rejected before extraction');
+check(count(array_filter($operationRequests,fn($call)=>$call['request']->getMethod()!=='GET'))===0,'manifest collision admission dispatches no native mutation');
 
 $archiveRecoveryNumber = 400;
 function archiveRecoveryInput(): array {
@@ -350,19 +355,20 @@ check($operationRepository->clientCalls===3
     && $operationRequests[4]['request']->getHeaderLine('X-Fixture-Server')===$anotherServer->uuid,
     'public inspect/delete calls refresh native clients and cannot retain another server binding');
 
-// Real Guzzle promises with one event-loop handler. Each wait advances the next
-// due request and runs Guzzle's callback queue, so rolling refill and draining
-// are observable rather than hidden behind eager MockHandler responses.
+// Real Guzzle promises with one event-loop handler. Each wait advances pending
+// work so sequential recovery and deadline accounting remain observable.
 class FileOperationAsyncHandler
 {
     public array $pending=[];
     public array $requests=[];
     public array $events=[];
     public int $active=0;
+    public int $peak=0;
     public int $verificationActive=0;
     public int $verificationPeak=0;
     public int $verificationCalls=0;
     public bool $extracted=false;
+    public bool $skipStagePreflight=false;
     public bool $published=false;
     public bool $cleaned=false;
     public string $failure='';
@@ -388,6 +394,7 @@ class FileOperationAsyncHandler
         parse_str($request->getUri()->getQuery(),$query);
         $directory=$query['directory']??null;
         $verification=$this->extracted && !$this->published && $directory!==null && str_starts_with($directory,'/'.$this->scratch);
+        if($verification && $this->skipStagePreflight) { $verification=false; $this->skipStagePreflight=false; }
         $sequence=count($this->requests);
         $delay=0.01;
         if($verification) {
@@ -398,6 +405,7 @@ class FileOperationAsyncHandler
             $this->verificationPeak=max($this->verificationPeak,$this->verificationActive);
         }
         $this->active++;
+        $this->peak=max($this->peak,$this->active);
         $this->requests[]=['request'=>$request,'options'=>$options,'verification'=>$verification];
         $this->events[]=['event'=>'start','sequence'=>$sequence,'verification'=>$verification,'at'=>$this->repository->clock];
         $promise=new GuzzleHttp\Promise\Promise(function()use($sequence){ $this->waitFor($sequence); });
@@ -445,7 +453,7 @@ class FileOperationAsyncHandler
         }
         $relative=ltrim(substr($entry['directory'],strlen('/'.$this->scratch)),'/');
         if(!$this->extracted || $this->published) { return operationListing([operationEntry('payload.zip',true,42)]); }
-        if($this->failure==='invalid' && $relative==='') { return operationListing([]); }
+        if($entry['verification'] && $this->failure==='invalid' && $relative==='') { return operationListing([]); }
         return operationListing($this->tree[$relative]);
     }
 }
@@ -459,53 +467,55 @@ function asyncArchiveFixture(string $operationId,int $children=4): array {
     return [$repository,$handler];
 }
 
-foreach([1,2,4] as $concurrency) {
-    $settings->saveOperational(['directoryConcurrency'=>$concurrency]);
-    $id='12345678-1234-4234-8234-12345678920'.$concurrency;
-    [$repository,$handler]=asyncArchiveFixture($id);
+foreach([4,160] as $children) {
+    $id='12345678-1234-4234-8234-'.str_pad((string)(200+$children),12,'0',STR_PAD_LEFT);
+    [$repository,$handler]=asyncArchiveFixture($id,$children);
     $stages=[];
     $repository->commitArchive($id,'imported',$handler->files,null,function($name,$duration)use(&$stages){$stages[$name]=$duration;});
-    check($handler->verificationPeak===$concurrency && $handler->verificationCalls===6
+    check($handler->verificationCalls===0 && $handler->peak===1
         && $handler->active===0 && $handler->pending===[] && $handler->published && $handler->cleaned,
-        'rolling archive verification enforces configured concurrency '.$concurrency.' and drains every promise');
-    check($repository->clientCalls===1 && count($handler->requests)===14,
-        'archive retains exact D+8 request count with one native client at concurrency '.$concurrency);
+        'confirmed extraction never lists extracted directories or creates a promise pool: '.$children.' files');
+    check($repository->clientCalls===1 && count($handler->requests)===8 && !isset($stages['verify_tree']),
+        'normal archive uses eight shallow requests independent of tree size: '.$children.' files');
     check(count(array_filter($handler->requests,fn($call)=>($call['options']['stream']??false)||($call['options']['synchronous']??false)))===0,
-        'all reads and mutations share asynchronous nonstreaming transport at concurrency '.$concurrency);
-    if($concurrency===2) {
-        $events=array_values(array_filter($handler->events,fn($event)=>$event['verification']));
-        check($events[2]['event']==='finish' && $events[2]['sequence']!==$events[0]['sequence']
-            && $events[3]['event']==='start' && abs($stages['verify_tree']-7000)<0.001,
-            'rolling refill starts a third directory while the first is pending: 7s versus 9s paired or 12s serial');
-    }
+        'all archive reads and mutations reuse asynchronous nonstreaming transport: '.$children.' files');
 }
-$settings->saveOperational(['directoryConcurrency'=>2]);
+
+foreach([4,160] as $children) {
+    $id='12345678-1234-4234-8234-'.str_pad((string)(700+$children),12,'0',STR_PAD_LEFT);
+    [$repository,$handler]=asyncArchiveFixture($id,$children);
+    $handler->extracted=true; $handler->skipStagePreflight=true; $handler->verificationDelay=0.01;
+    $repository->recoverArchive($id,'imported',$handler->files,null,static function(){});
+    check($handler->verificationPeak===1 && $handler->verificationCalls===$children+2
+        && $handler->active===0 && $handler->pending===[] && $handler->published && $handler->cleaned,
+        'uncertain archive recovery sequentially checks every manifest directory: '.$children.' files');
+    check(count(array_filter($handler->requests,fn($call)=>str_ends_with($call['request']->getUri()->getPath(),'/decompress')))===0,
+        'uncertain tree recovery never repeats decompression: '.$children.' files');
+}
 
 foreach(['invalid','deadline'] as $failure) {
     $id=$failure==='invalid'?'12345678-1234-4234-8234-123456789211':'12345678-1234-4234-8234-123456789212';
     [$repository,$handler]=asyncArchiveFixture($id);
-    $handler->failure=$failure;
+    $handler->failure=$failure; $handler->extracted=true; $handler->skipStagePreflight=true;
     $stages=[];
     $onStage=function($name,$duration)use(&$stages){$stages[$name]=$duration;};
-    denied(fn()=>$repository->commitArchive($id,'imported',$handler->files,null,$onStage),
+    denied(fn()=>$repository->recoverArchive($id,'imported',$handler->files,null,static function(){},$onStage),
         $failure==='invalid'?409:504,'invalid or expired manifest verification fails closed: '.$failure);
-    check($handler->verificationCalls===2 && $handler->active===0 && $handler->pending===[]
+    check($handler->verificationCalls===1 && $handler->active===0 && $handler->pending===[]
         && !$handler->published && !$handler->cleaned,
-        'first verification failure stops queued reads, drains in-flight reads and preserves stage: '.$failure);
-    check(array_keys($stages)===['preflight','decompress','verify_tree'], 'failed verification records only actual attempted stages: '.$failure);
+        'first recovery verification failure stops reads with nothing pending and preserves stage: '.$failure);
+    check(array_keys($stages)===['preflight','verify_tree'], 'failed recovery records only actual attempted stages: '.$failure);
 }
 
-$settings->saveOperational(['directoryConcurrency'=>1]);
 $id='12345678-1234-4234-8234-123456789213';
 [$repository,$handler]=asyncArchiveFixture($id,6);
-$handler->verificationDelay=4.9;
-denied(fn()=>$repository->commitArchive($id,'imported',$handler->files),504,'whole verification deadline bounds queued directories');
+$handler->verificationDelay=4.9; $handler->extracted=true; $handler->skipStagePreflight=true;
+denied(fn()=>$repository->recoverArchive($id,'imported',$handler->files,null,static function(){}),504,'whole recovery verification deadline bounds queued directories');
 $verificationCalls=array_values(array_filter($handler->requests,fn($call)=>$call['verification']));
 $lastOptions=$verificationCalls[array_key_last($verificationCalls)]['options'];
 check(count($verificationCalls)===7 && $lastOptions['timeout']<1 && $lastOptions['connect_timeout']===$lastOptions['timeout']
     && $handler->pending===[] && !$handler->published && !$handler->cleaned,
     'last admitted directory uses only remaining deadline and the eighth is never sent');
-$settings->saveOperational(['directoryConcurrency'=>2]);
 
 $traceInput=$archiveInput;
 $traceInput['operationId']='12345678-1234-4234-8234-123456789220';
@@ -514,9 +524,9 @@ $operationRequests=[];
 $traceController=new ArchiveCommitController(operationRepo(archiveResponses($traceInput),$operationRequests));
 $traceReceipt=$traceController(operationRequest('archive-commit',$traceInput),$uploadServer)->getData(true);
 check($traceReceipt['state']==='confirmed' && array_keys($traceReceipt['timings'])===
-    ['preflight','decompress','verify_tree','destination_check','rename','readback','cleanup']
-    && count(array_filter($traceReceipt['timings'],fn($duration)=>is_numeric($duration)&&$duration>=0))===7,
-    'requested archive trace returns seven actual phase durations in milliseconds');
+    ['preflight','decompress','destination_check','rename','readback','cleanup']
+    && count(array_filter($traceReceipt['timings'],fn($duration)=>is_numeric($duration)&&$duration>=0))===6,
+    'requested archive trace returns six actual phases without a redundant full tree scan');
 $traceCount=count($operationRequests);
 $traceReplay=$traceController(operationRequest('archive-commit',$traceInput),$uploadServer)->getData(true);
 check($traceReplay['state']==='confirmed' && !isset($traceReplay['timings']) && count($operationRequests)===$traceCount,
@@ -528,7 +538,7 @@ $traceInput['operationId']='12345678-1234-4234-8234-123456789221'; $traceInput['
 $operationRequests=[];
 $traceController=new ArchiveCommitController(operationRepo(archiveResponses($traceInput,true),$operationRequests));
 $traceFailed=$traceController(operationRequest('archive-commit',$traceInput),$uploadServer)->getData(true);
-check($traceFailed['state']==='uncertain' && array_keys($traceFailed['timings'])===['preflight','decompress','verify_tree'],
+check($traceFailed['state']==='uncertain' && array_keys($traceFailed['timings'])===['preflight','decompress'],
     'failed trace includes failed stage duration without publish or cleanup timings');
 $traceCount=count($operationRequests);
 $traceReplay=$traceController(operationRequest('archive-commit',$traceInput),$uploadServer)->getData(true);

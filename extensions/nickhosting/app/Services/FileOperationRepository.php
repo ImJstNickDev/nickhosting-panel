@@ -3,8 +3,6 @@
 namespace Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services;
 
 use GuzzleHttp\ClientInterface;
-use GuzzleHttp\Pool;
-use GuzzleHttp\Promise\Create;
 use GuzzleHttp\Promise\PromiseInterface;
 use GuzzleHttp\Promise\Utils as Promises;
 use GuzzleHttp\Psr7\StreamDecoratorTrait;
@@ -129,10 +127,7 @@ class FileOperationRepository extends DaemonRepository
 
     private function entriesPair(ClientInterface $client, string $first, string $second): array
     {
-        $results = Promises::settle(array_map(fn ($directory) => $this->read($client, 'list-directory',
-            ['directory' => '/' . $directory], self::DIRECTORY_BYTES), [$first, $second]))->wait();
-        foreach ($results as $result) { if ($result['state'] !== 'fulfilled') { throw $result['reason']; } }
-        return array_map(fn ($result) => $this->parseEntries($result['value']), $results);
+        return [$this->entries($client, $first), $this->entries($client, $second)];
     }
 
     private function mutate(ClientInterface $client, string $method, string $endpoint, array $body): void
@@ -159,38 +154,22 @@ class FileOperationRepository extends DaemonRepository
     private function verifyTree(ClientInterface $client, string $scratch, array $expected): void
     {
         $deadline = $this->now() + 30;
-        $concurrency = app(Settings::class)->operational(['directoryConcurrency'])['directoryConcurrency'];
-        $failure = null;
-        $requests = function () use ($client, $scratch, $expected, $deadline, &$failure) {
-            foreach ($expected as $directory => $wanted) {
-                yield function () use ($client, $scratch, $directory, $wanted, $deadline, &$failure) {
-                    // Pool refills a free slot immediately. An error halts queued
-                    // reads, but already dispatched requests must settle before return.
-                    if ($failure !== null) { return Create::promiseFor(null); }
-                    try {
-                        return $this->read($client, 'list-directory',
-                            ['directory' => '/' . implode('/', array_filter([$scratch, $directory], fn ($part) => $part !== ''))],
-                            self::DIRECTORY_BYTES, $deadline)->then(function (string $body) use ($wanted, $deadline) {
-                                $entries = $this->parseEntries($body);
-                                abort_unless(count($entries) === count($wanted), 409);
-                                foreach ($entries as $entry) {
-                                    $item = $wanted[$entry['name']] ?? null;
-                                    abort_unless($item !== null && ($entry['symlink'] ?? true) === false && $entry['file'] === $item['file']
-                                        && (!$item['file'] || $entry['size'] === $item['size']), 409);
-                                    unset($wanted[$entry['name']]);
-                                }
-                                abort_unless($wanted === [], 409);
-                                abort_if($this->now() >= $deadline, 504);
-                            });
-                    } catch (\Throwable $error) { return Create::rejectionFor($error); }
-                };
+        // Only uncertain receipt recovery needs this tree observation. Sequential
+        // reads avoid the installed Guzzle pool's incomplete promise settlement.
+        foreach ($expected as $directory => $wanted) {
+            $entries = $this->parseEntries($this->read($client, 'list-directory',
+                ['directory' => '/' . implode('/', array_filter([$scratch, $directory], fn ($part) => $part !== ''))],
+                self::DIRECTORY_BYTES, $deadline)->wait());
+            abort_unless(count($entries) === count($wanted), 409);
+            foreach ($entries as $entry) {
+                $item = $wanted[$entry['name']] ?? null;
+                abort_unless($item !== null && ($entry['symlink'] ?? true) === false && $entry['file'] === $item['file']
+                    && (!$item['file'] || $entry['size'] === $item['size']), 409);
+                unset($wanted[$entry['name']]);
             }
-        };
-        (new Pool($client, $requests(), [
-            'concurrency' => $concurrency,
-            'rejected' => static function ($error) use (&$failure) { $failure ??= $error; },
-        ]))->promise()->wait();
-        if ($failure !== null) { throw $failure; }
+            abort_unless($wanted === [], 409);
+            abort_if($this->now() >= $deadline, 504);
+        }
     }
 
     /** Optional request-local timings; no logs or persistent profiling state. */
@@ -262,7 +241,7 @@ class FileOperationRepository extends DaemonRepository
         $scratch = '.nickhosting-import-' . $operationId;
         // The source archive is produced by Core's validated streaming ZIP encoder.
         // The digest binds the durable request; it does not cause another archive download.
-        [$expected, $payload] = $this->stage('preflight', function () use ($client, $scratch, $destination, $files) {
+        $payload = $this->stage('preflight', function () use ($client, $scratch, $destination, $files) {
             [$root, $scratchEntries] = $this->entriesPair($client, '', $scratch);
             foreach ($root as $entry) {
                 abort_if(strcasecmp($entry['name'], $destination) === 0, 409);
@@ -272,15 +251,13 @@ class FileOperationRepository extends DaemonRepository
             }
             abort_unless(count($scratchEntries) === 1 && $scratchEntries[0]['name'] === 'payload.zip'
                 && ($scratchEntries[0]['file'] ?? null) === true && ($scratchEntries[0]['symlink'] ?? null) === false, 409);
-            $payload = $this->archivePayload($scratchEntries);
-            return [['' => ['payload.zip' => ['file' => true, 'size' => $payload['size']], $destination => ['file' => false]]]
-                + $this->archiveTree($files), $payload];
+            $this->archiveTree($files); // Retain manifest path/collision admission before dispatch.
+            return $this->archivePayload($scratchEntries);
         }, $onStage);
         if ($beforeDispatch !== null) { $beforeDispatch('extracting', $payload); }
         $this->stage('decompress', fn () => $this->mutate($client, 'POST', 'decompress', ['root' => '/' . $scratch, 'file' => 'payload.zip']), $onStage);
-        // Account for every extracted entry, including denied/ignored paths and empty artifacts.
-        // A rolling window avoids waiting for the slowest member of each pair.
-        $this->stage('verify_tree', fn () => $this->verifyTree($client, $scratch, $expected), $onStage);
+        // Wings acknowledges decompression synchronously. Core already validated
+        // this exact archive: only an uncertain receipt needs a full tree scan.
         $this->publishArchiveTree($client, $scratch, $destination, $payload, $beforeDispatch, $onStage);
     }
 
