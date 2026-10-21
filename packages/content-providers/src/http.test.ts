@@ -108,6 +108,135 @@ it('bounds unknown-size provider archives and seals streamed SHA256', async () =
     ),
   ).toEqual({ size: body.length, sha256: createHash('sha256').update(body).digest('hex') });
 });
+it('admits an unknown-size file from its existing GET headers before writing any bytes', async () => {
+  const path = await destination();
+  response(200, body, { 'content-length': String(body.length) });
+  const onSize = vi.fn(async (bytes: number) => {
+    expect(bytes).toBe(body.length);
+    await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+  await expect(
+    client().downloadModpack({ filename: 'mod.jar', urls: artifact.urls, hashes: {} }, path, {
+      maxBytes: 64,
+      onSize,
+    }),
+  ).resolves.toMatchObject({ size: body.length });
+  expect(onSize).toHaveBeenCalledExactlyOnceWith(body.length);
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  expect(mocks.request.mock.calls[0]?.[1].method).toBe('GET');
+  expect(await readFile(path)).toEqual(body);
+});
+it('reserves the bounded remaining allowance when Content-Length is absent', async () => {
+  const path = await destination();
+  response(200, body);
+  const onSize = vi.fn(async (_bytes: number) => {});
+  await expect(
+    client().downloadModpack({ filename: 'mod.jar', urls: artifact.urls, hashes: {} }, path, {
+      maxBytes: 32,
+      onSize,
+    }),
+  ).resolves.toMatchObject({ size: body.length });
+  expect(onSize).toHaveBeenCalledExactlyOnceWith(32);
+  const tooSmall = await destination();
+  response(200, body);
+  await expect(
+    client().downloadModpack({ filename: 'mod.jar', urls: artifact.urls, hashes: {} }, tooSmall, {
+      maxBytes: body.length - 1,
+      onSize,
+    }),
+  ).rejects.toMatchObject({ code: 'validation_failed' });
+  await expect(readFile(tooSmall)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+it.each(['-1', '1.5', '9007199254740992', String(body.length - 1), String(body.length + 1)])(
+  'rejects invalid or dishonest Content-Length %s and removes incomplete bytes',
+  async (length) => {
+    const path = await destination();
+    response(200, body, { 'content-length': length });
+    await expect(
+      client().downloadModpack({ filename: 'mod.jar', urls: artifact.urls, hashes: {} }, path, {
+        maxBytes: 32,
+        onSize: async () => {},
+      }),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+    expect(mocks.request).toHaveBeenCalledTimes(1);
+    await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  },
+);
+it('rejects a declared size over the remaining budget before reservation or disk writes', async () => {
+  const path = await destination();
+  response(200, body, { 'content-length': String(body.length) });
+  const onSize = vi.fn(async () => {});
+  await expect(
+    client().downloadModpack({ filename: 'mod.jar', urls: artifact.urls, hashes: {} }, path, {
+      maxBytes: body.length - 1,
+      onSize,
+    }),
+  ).rejects.toMatchObject({ code: 'validation_failed' });
+  expect(onSize).not.toHaveBeenCalled();
+  await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+it('does not remove existing data when reservation fails before opening the destination', async () => {
+  const path = await destination();
+  await writeFile(path, 'preserve');
+  response(200, body, { 'content-length': String(body.length) });
+  await expect(
+    client().downloadModpack({ filename: 'mod.jar', urls: artifact.urls, hashes: {} }, path, {
+      maxBytes: 32,
+      onSize: async () => {
+        throw new Error('quota');
+      },
+    }),
+  ).rejects.toThrow('quota');
+  expect(await readFile(path, 'utf8')).toBe('preserve');
+});
+it('honors cancellation during admission without creating a destination', async () => {
+  const path = await destination();
+  const controller = new AbortController();
+  let stream: PassThrough | undefined;
+  response(200, body, { 'content-length': String(body.length) }, (value) => {
+    stream = value;
+  });
+  await expect(
+    client().downloadModpack({ filename: 'mod.jar', urls: artifact.urls, hashes: {} }, path, {
+      signal: controller.signal,
+      maxBytes: 32,
+      onSize: async () => controller.abort(new Error('cancelled')),
+    }),
+  ).rejects.toThrow('cancelled');
+  expect(stream?.destroyed).toBe(true);
+  await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+it.each(['disconnect', 'abort'] as const)(
+  'handles a response error during pending admission and joins reservation before %s cleanup',
+  async (failure) => {
+    const path = await destination();
+    const controller = new AbortController();
+    let stream: PassThrough | undefined;
+    let admitted = false;
+    response(200, body, { 'content-length': String(body.length) }, (value) => {
+      stream = value;
+    });
+    await expect(
+      client().downloadModpack({ filename: 'mod.jar', urls: artifact.urls, hashes: {} }, path, {
+        signal: controller.signal,
+        maxBytes: 32,
+        onSize: async () => {
+          await new Promise<void>((resolve) => {
+            setImmediate(() => {
+              if (failure === 'abort') controller.abort(new Error('cancelled'));
+              stream?.destroy(new Error('response failed during admission'));
+              setImmediate(resolve);
+            });
+          });
+          admitted = true;
+        },
+      }),
+    ).rejects.toThrow(failure === 'abort' ? 'cancelled' : 'response failed during admission');
+    expect(admitted).toBe(true);
+    expect(stream?.destroyed).toBe(true);
+    await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  },
+);
 it('does not bypass size or digest failures in modpack downloads', async () => {
   response(200, body);
   await expect(

@@ -38,6 +38,7 @@ export interface ModpackStagingOptions {
     input: ModpackDownload,
     destination: string,
     signal?: AbortSignal,
+    options?: { maxBytes: number; onSize: (bytes: number) => Promise<void> },
   ): Promise<{ size: number; sha256: string }>;
   resolveCurseForgeFiles?(
     files: { projectId: number; fileId: number }[],
@@ -54,7 +55,7 @@ export interface ModpackStagingOptions {
     files: number;
     totalFiles: number;
     bytes: number;
-    totalBytes: number;
+    totalBytes: number | null;
   }): Promise<void>;
 }
 const mrpack = z.object({
@@ -223,7 +224,7 @@ export async function stageModpackRecipe(
     await options.checkTarget?.(value);
   };
   if (recipe.target) await acceptTarget(recipe.target);
-  let downloads: ModpackRecipeFile[] = recipe.kind === 'files' ? recipe.files : [];
+  let downloads: ModpackRecipeFile[] = recipe.files ?? [];
   const overrides = new Map<
     string,
     { source: string; path: string; size: number; layer: number }
@@ -328,7 +329,7 @@ export async function stageModpackRecipe(
       downloads = await options.resolveCurseForgeFiles(pins, options.signal);
       roots = [`${manifest.overrides}/`];
     } else {
-      const root = serverRoot(members);
+      const root = recipe.preserveRoot ? '' : serverRoot(members);
       const mr = manifestAt(`${root}modrinth.index.json`);
       const cf = manifestAt(`${root}manifest.json`);
       if (mr !== undefined) await acceptTarget(targetFromMrpack(mrpack.parse(mr).dependencies));
@@ -371,18 +372,25 @@ export async function stageModpackRecipe(
   assertModpackPaths(paths);
   if (paths.length > limits.maxEntries) fail('stage_budget');
   let totalBytes =
-    downloads.reduce((sum, file) => sum + (file.download.size ?? limits.maxFileBytes), 0) +
+    downloads.reduce((sum, file) => sum + (file.download.size ?? 0), 0) +
     [...overrides.values()].reduce((sum, file) => sum + file.size, 0);
   if (
     !Number.isSafeInteger(totalBytes) ||
     totalBytes > limits.maxExpandedBytes ||
-    downloads.some((file) => (file.download.size ?? limits.maxFileBytes) > limits.maxFileBytes)
+    downloads.some(
+      (file) =>
+        file.download.size !== undefined &&
+        (!Number.isSafeInteger(file.download.size) ||
+          file.download.size < 0 ||
+          file.download.size > limits.maxFileBytes),
+    )
   )
     fail('stage_budget');
   await options.reserve(archiveBytes + totalBytes);
   const staged: ModpackStagedFile[] = [];
   let completedBytes = 0,
     completedFiles = 0;
+  let unresolvedSizes = downloads.filter((file) => file.download.size === undefined).length;
   // Progress persistence is serialized, downloads remain concurrent. Coordinator may coalesce events.
   let progressTail: Promise<void> = Promise.resolve();
   const progress = () => {
@@ -390,7 +398,7 @@ export async function stageModpackRecipe(
       files: completedFiles,
       totalFiles: paths.length,
       bytes: completedBytes,
-      totalBytes,
+      totalBytes: unresolvedSizes ? null : totalBytes,
     };
     progressTail = progressTail.then(() => options.progress?.(snapshot));
     return progressTail;
@@ -399,12 +407,14 @@ export async function stageModpackRecipe(
   let cursor = 0;
   const abort = new AbortController();
   const signal = options.signal ? AbortSignal.any([options.signal, abort.signal]) : abort.signal;
+  const known = downloads.filter((file) => file.download.size !== undefined);
+  const unknown = downloads.filter((file) => file.download.size === undefined);
   const results = await Promise.allSettled(
-    Array.from({ length: Math.min(concurrency, downloads.length) }, async () => {
+    Array.from({ length: Math.min(concurrency, known.length) }, async () => {
       try {
         for (;;) {
           signal.throwIfAborted();
-          const file = downloads[cursor++];
+          const file = known[cursor++];
           if (!file) return;
           const destination = join(filesRoot, file.path);
           await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
@@ -418,6 +428,7 @@ export async function stageModpackRecipe(
             (await inspectJarEnvironment(destination, limits)) === 'client'
           ) {
             await rm(destination);
+            totalBytes -= saved.size;
             excludedFiles++;
             completedFiles++;
             await progress();
@@ -435,6 +446,46 @@ export async function stageModpackRecipe(
     }),
   );
   for (const result of results) if (result.status === 'rejected') throw result.reason;
+  // Unknown files cannot each consume the whole staging budget up front. The GET
+  // headers admit one bounded transfer at a time, before any of its bytes reach disk.
+  for (const file of unknown) {
+    signal.throwIfAborted();
+    const previousBytes = totalBytes;
+    const maximum = Math.min(limits.maxFileBytes, limits.maxExpandedBytes - totalBytes);
+    const destination = join(filesRoot, file.path);
+    await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+    let admitted: number | undefined;
+    const saved = checkedDownload(
+      await options.download(file.download, destination, signal, {
+        maxBytes: maximum,
+        onSize: async (bytes) => {
+          signal.throwIfAborted();
+          if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > maximum) fail('stage_budget');
+          await options.reserve(archiveBytes + totalBytes + bytes);
+          admitted = bytes;
+        },
+      }),
+      file.download,
+      admitted ?? -1,
+    );
+    signal.throwIfAborted();
+    if (
+      /\.jar$/i.test(file.path) &&
+      (await inspectJarEnvironment(destination, limits)) === 'client'
+    ) {
+      await rm(destination);
+      excludedFiles++;
+    } else {
+      staged.push({ path: file.path, ...saved });
+      completedBytes += saved.size;
+      totalBytes += saved.size;
+    }
+    // Release an absent-header allowance (or excluded client file) before the next GET.
+    if (totalBytes - previousBytes !== admitted) await options.reserve(archiveBytes + totalBytes);
+    unresolvedSizes--;
+    completedFiles++;
+    await progress();
+  }
   if (overrides.size) {
     const selected = new Map([...overrides.values()].map((file) => [file.source, file]));
     await visitArchive(

@@ -17,16 +17,33 @@ Failed or interrupted effects never trigger a blind second installer invocation.
 | Feed The Beast | Public pack/version metadata | Exact version file manifest; client-only files excluded |
 | Technic | Official platform metadata | Official matching server ZIP; client-only Solder bundles are not presented as server packages |
 | VoidsWrath | Official published catalog/pages | Explicit server download link; an unresolved Minecraft/loader requirement blocks installation |
-| ATLauncher | Official catalog and version metadata | Download disabled pending clarification of the provider's published third-party CDN restriction |
+| ATLauncher | Official public catalog and version metadata | Official server ZIP when supplied; otherwise the exact server declarations in `Configs.json`, plus its hashed `Configs.zip` and server-side files |
 
 Catalog metadata is cached with bounded size and TTL. Artifact acquisition uses
 the shared HTTPS transport, configured download origins, cancellation, byte limits
 and hash validation. Publisher origins are declared by the Minecraft integration;
 custom mirrors remain Owner settings. Provider API credentials stay server-side.
+Known-size files retain bounded parallel downloads. Files without a manifest size
+are admitted sequentially using the existing GET response's validated length,
+before writing; absent headers use a bounded remaining allowance. Streaming limits
+and hashes still apply, and progress omits the byte total until all sizes are known.
 
 The installer reference examined during research was not copied or executed.
 VoidsWrath in that reference used an installer vendor's JSON index, not an official
 VoidsWrath API. This implementation reads the official pages instead.
+
+ATLauncher recipes use its public server installation metadata: explicit `server`
+flags, separate server downloads and exact loader requirements. Configuration ZIPs
+retain their declared server-relative root. Browser-only downloads, unresolved
+dependencies, custom installer actions, patched legacy JARs and unsupported runtime
+requirements remain visible blockers rather than being silently skipped. The
+provider README's restriction concerning a third-party launcher is not treated as
+a blanket prohibition on every server download; this is not a license grant for
+redistributing its launcher assets or packs.
+
+References: [official public version API](https://wiki.atlauncher.com/api-docs/v1/objects/pack-version/),
+[server file declarations](https://github.com/ATLauncher/ATLauncher/blob/master/src/main/java/com/atlauncher/data/json/Mod.java),
+and [server installation/configuration ordering](https://github.com/ATLauncher/ATLauncher/blob/master/src/main/java/com/atlauncher/workers/InstanceInstaller.java).
 
 ## Runtime and files
 
@@ -51,6 +68,11 @@ are not executed. Paths, links and archive expansion limits are validated before
 publication. The private staging budget includes the STORE ZIP used for Fileman's
 bulk transfer. At most 10,000 changed files are published in one reviewed plan.
 
+Opaque mod JARs are inspected only for the metadata used to classify them. Duplicate
+unrelated resources and case-distinct Java resource names are not interpreted as
+filesystem collisions. Actual metadata ambiguity remains an error, and archives
+whose members are extracted still receive the normal path/collision checks.
+
 Fileman supplies shared metadata batches, signed streams, bulk archive transfer
 and publication receipts. Publication moves replaced files into an operation-owned
 rollback directory before moving new data into place; it verifies batched metadata
@@ -72,6 +94,10 @@ receipt. There is no recursive cleanup of unrelated server data.
   publication remains fenced until read-only reconciliation proves the outcome.
 - A restart failure does not erase a successful installation receipt. The UI
   reports that a start is still required.
+- A failed preparation can be retried without prepared pack metadata. The new
+  attempt retains the selected version, mode, world policy and file decisions;
+  transport retries reuse its idempotency key. Project names/descriptions resolve
+  independently from preparation, including after a page reload.
 
 Manual archive upload remains on the pre-existing backend contract; the new UI
 currently exposes the six provider catalogs rather than routing uploaded archives
@@ -121,6 +147,23 @@ and scoped Biome passed. Existing large-bundle build warnings remain.
 All runtime/file mutations in these checks used isolated fixtures; no real modpack
 installation is claimed by this validation.
 
+Recovery validation on 2026-10-21 reproduced the Antimatter Chemistry 1.4.10
+failure against its original server archive. Its CraftTweaker JAR contains repeated
+unrelated `META-INF` resources; a later JourneyMap JAR contains case-distinct license
+names. Metadata-only scanning now prepares all 902 server data files locally with
+the exact Minecraft 1.12.2 / Forge 14.23.5.2860 requirement. No game server was
+modified. Retry/name regressions include desktop/mobile Firefox screenshots in
+`docs/screenshots/m5/modpacks-failed-metadata-*`.
+
+The same isolated check prepared official ATLauncher Fossilized v2.1.14: 786
+staged server files, including two downloads without manifest sizes, and exact
+Minecraft 1.12.2 / Forge 14.23.5.2864 requirements. It used the declared origins and
+stayed below the 1 GiB test staging budget. Focused validation passed 258 unit
+tests, 19 isolated integration tests and 14 Firefox cases; typechecks, frontend
+build, scoped Biome and independent review passed. Existing large-bundle warnings
+and absent private Minecraft preview assets in the isolated checkout remain build
+warnings. These are preparation checks, not real server installations.
+
 Activation requires a new development dependency image, the explicit migration,
 and recreation of only API, worker and Vite with the existing Compose overlays.
 No Blueprint release, Panel/Wings edit, DNS change or game-server test is required
@@ -141,8 +184,9 @@ empty browsing now uses their official public catalogs, hydrates only visible
 results with at most four simultaneous requests, and shares the metadata cache.
 All25 catalog regressions passed after this correction. No frontend errors,
 horizontal overflow or mutation requests occurred in the final browser pass.
-ATLauncher permission and client-only/missing-server-package restrictions remain
-visible. New operation/receipt tables and runtime-transition markers were empty
+ATLauncher was initially browse-only; the server descriptor support above supersedes
+that restriction. Client-only/missing-server-package restrictions remain visible.
+New operation/receipt tables and runtime-transition markers were empty
 immediately after activation. A subsequent preparation remained blocked by its
 runtime requirement, with no held storage, published files or runtime effects;
 its record was preserved. Independent infrastructure and correction reviews

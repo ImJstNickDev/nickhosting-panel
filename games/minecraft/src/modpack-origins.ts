@@ -13,4 +13,5 @@ export const minecraftModpackOrigins = [
   'https://voidswrath.com',
   'https://vl4.voidswrath.com',
   'https://api.atlauncher.com',
+  'https://download.nodecdn.net',
 ] as const;

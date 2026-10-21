@@ -89,19 +89,26 @@ async function fixture(data: Record<string, Buffer>) {
   const root = await mkdtemp(join(tmpdir(), 'nh-modpack-stage-'));
   roots.push(root);
   const download = vi.fn(
-    async (input: ModpackDownload, destination: string, signal?: AbortSignal) => {
+    async (
+      input: ModpackDownload,
+      destination: string,
+      signal?: AbortSignal,
+      options?: Parameters<ModpackStagingOptions['download']>[3],
+    ) => {
       signal?.throwIfAborted();
       const bytes = data[new URL(input.urls[0] as string).pathname.slice(1)];
       if (!bytes) throw new Error('unexpected download');
       for (const [algo, expected] of Object.entries(input.hashes))
         if (digest(bytes, algo) !== expected) throw new Error('hash mismatch');
+      await options?.onSize(bytes.length);
+      signal?.throwIfAborted();
       await writeFile(destination, bytes, { flag: 'wx' });
       return { size: bytes.length, sha256: digest(bytes) };
     },
   );
   const reserve = vi.fn(async (_bytes: number) => {});
   const progress = vi.fn(
-    async (_event: { files: number; totalFiles: number; bytes: number; totalBytes: number }) => {},
+    async (_event: Parameters<NonNullable<ModpackStagingOptions['progress']>>[0]) => {},
   );
   const checkTarget = vi.fn(async (_value: unknown) => {});
   const options: ModpackStagingOptions = {
@@ -154,6 +161,171 @@ describe('modpack server data paths', () => {
 });
 
 describe('modpack staging', () => {
+  it('admits two unknown-size server downloads alongside archive configs without reserving each maximum', async () => {
+    const first = await zip({ 'fabric.mod.json': JSON.stringify({ environment: 'server' }) });
+    const second = await zip({ 'fabric.mod.json': JSON.stringify({ environment: '*' }) });
+    const config = 'configuration';
+    const data = await zip({ 'config/a.txt': config });
+    const budget = first.length + second.length + config.length;
+    const f = await fixture({ 'source.zip': data, 'first.jar': first, 'second.jar': second });
+    const original = f.options.download;
+    const result = await stageModpackRecipe(
+      archive('server-archive', data, {
+        target,
+        preserveRoot: true,
+        files: ['first', 'second'].map((name) => ({
+          path: `mods/${name}.jar`,
+          download: source(`${name}.jar`),
+          serverSide: 'required',
+        })),
+      }),
+      {
+        ...f.options,
+        limits: { maxFileBytes: budget, maxExpandedBytes: budget },
+        download: async (input, destination, signal, options) => {
+          if (options) {
+            expect(options.maxBytes).toBe(
+              input.filename === 'first.jar' ? budget - config.length : second.length,
+            );
+            const admit = options.onSize;
+            options = {
+              ...options,
+              onSize: async (size) => {
+                await expect(readFile(destination)).rejects.toMatchObject({ code: 'ENOENT' });
+                await admit(size);
+              },
+            };
+          }
+          return original(input, destination, signal, options);
+        },
+      },
+    );
+    expect(result.files.map((file) => file.path)).toEqual([
+      'config/a.txt',
+      'mods/first.jar',
+      'mods/second.jar',
+    ]);
+    expect(f.download.mock.calls.map(([input]) => input.filename)).toEqual([
+      'source.zip',
+      'first.jar',
+      'second.jar',
+    ]);
+    expect(f.reserve.mock.calls.map(([bytes]) => bytes)).toEqual([
+      data.length,
+      data.length + config.length,
+      data.length + config.length + first.length,
+      data.length + budget,
+    ]);
+    expect(f.progress.mock.calls[0]?.[0].totalBytes).toBeNull();
+    expect(f.progress.mock.calls[1]?.[0].totalBytes).toBeNull();
+    expect(f.progress.mock.calls.at(-1)?.[0].totalBytes).toBe(budget);
+  });
+  it('releases an absent-header allowance before the next unknown transfer', async () => {
+    const f = await fixture({});
+    const recipe: ModpackRecipe = {
+      ...identity,
+      kind: 'files',
+      target,
+      files: ['a', 'b'].map((name) => ({
+        path: `config/${name}.txt`,
+        download: source(`${name}.txt`),
+        serverSide: 'required',
+      })),
+      warnings: [],
+    };
+    const result = await stageModpackRecipe(recipe, {
+      ...f.options,
+      limits: { maxFileBytes: 10, maxExpandedBytes: 10 },
+      download: async (_input, destination, signal, options) => {
+        if (!options) throw new Error('Missing admission');
+        await options.onSize(options.maxBytes);
+        signal?.throwIfAborted();
+        await writeFile(destination, 'data', { flag: 'wx' });
+        return { size: 4, sha256: digest(Buffer.from('data')) };
+      },
+    });
+    expect(result.files).toHaveLength(2);
+    expect(f.reserve.mock.calls.map(([bytes]) => bytes)).toEqual([0, 10, 4, 10, 8]);
+  });
+  it('refuses unknown-size admission beyond the remaining budget before writing', async () => {
+    const f = await fixture({ 'a.txt': Buffer.from('four'), 'b.txt': Buffer.from('four') });
+    const recipe: ModpackRecipe = {
+      ...identity,
+      kind: 'files',
+      target,
+      files: ['a', 'b'].map((name) => ({
+        path: `config/${name}.txt`,
+        download: source(`${name}.txt`),
+        serverSide: 'required',
+      })),
+      warnings: [],
+    };
+    await expect(
+      stageModpackRecipe(recipe, {
+        ...f.options,
+        limits: { maxFileBytes: 6, maxExpandedBytes: 6 },
+      }),
+    ).rejects.toMatchObject({ details: { contentReason: 'stage_budget' } });
+    expect(f.reserve.mock.calls.map(([bytes]) => bytes)).toEqual([0, 4]);
+    await expect(readFile(join(f.options.directory, 'files/config/b.txt'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+  it('stops unknown downloads before disk writes when quota reservation cancels', async () => {
+    const f = await fixture({ 'a.txt': Buffer.from('data'), 'b.txt': Buffer.from('data') });
+    const controller = new AbortController();
+    const recipe: ModpackRecipe = {
+      ...identity,
+      kind: 'files',
+      target,
+      files: ['a', 'b'].map((name) => ({
+        path: `config/${name}.txt`,
+        download: source(`${name}.txt`),
+        serverSide: 'required',
+      })),
+      warnings: [],
+    };
+    await expect(
+      stageModpackRecipe(recipe, {
+        ...f.options,
+        signal: controller.signal,
+        reserve: async (bytes) => {
+          if (bytes > 0) controller.abort(new Error('cancelled'));
+        },
+      }),
+    ).rejects.toThrow('cancelled');
+    expect(f.download).toHaveBeenCalledTimes(1);
+    await expect(readFile(join(f.options.directory, 'files/config/a.txt'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+  it('combines a server-relative configuration archive with explicit server downloads', async () => {
+    const mod = await zip({
+      'fabric.mod.json': JSON.stringify({ id: 'servermod', environment: 'server' }),
+    });
+    const data = await zip({ 'custom/config/a.txt': 'server configuration' });
+    const f = await fixture({ 'source.zip': data, 'mod.jar': mod });
+    const result = await stageModpackRecipe(
+      archive('server-archive', data, {
+        target,
+        preserveRoot: true,
+        files: [
+          { path: 'mods/servermod.jar', download: source('mod.jar', mod), serverSide: 'required' },
+        ],
+      }),
+      f.options,
+    );
+    expect(result.target).toEqual(target);
+    expect(result.files.map((file) => file.path)).toEqual([
+      'custom/config/a.txt',
+      'mods/servermod.jar',
+    ]);
+    expect(await readFile(join(result.directory, 'custom/config/a.txt'), 'utf8')).toBe(
+      'server configuration',
+    );
+    expect(f.download).toHaveBeenCalledTimes(2);
+    expect(f.checkTarget).toHaveBeenCalledTimes(1);
+  });
   it('layers server overrides after common overrides, skips client content and hashes once during extraction', async () => {
     const downloaded = Buffer.from('downloaded');
     const client = Buffer.from('client');

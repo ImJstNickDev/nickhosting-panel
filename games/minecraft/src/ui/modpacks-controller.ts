@@ -9,6 +9,7 @@ import {
 } from '../../../../packages/content-providers/src/modpack-catalog.js';
 import {
   type MinecraftModpackApply,
+  type MinecraftModpackOperation,
   type MinecraftModpackSelection,
   minecraftModpackApplySchema,
   minecraftModpackPrepareSchema,
@@ -50,6 +51,13 @@ export function createMinecraftModpacksController(client: GameUiClient) {
       serverId,
       `/catalog/${modpackProviderSchema.parse(provider)}/${encodeURIComponent(identity.parse(projectId))}`,
     );
+  const prepare = (serverId: string, input: MinecraftModpackSelection) =>
+    client
+      .request(path(serverId, '/prepare'), {
+        method: 'POST',
+        body: minecraftModpackPrepareSchema.parse(input),
+      })
+      .then((value) => minecraftModpacksSnapshotSchema.parse(value));
   return {
     async snapshot(serverId: string, signal?: AbortSignal) {
       return minecraftModpacksSnapshotSchema.parse(
@@ -99,13 +107,13 @@ export function createMinecraftModpacksController(client: GameUiClient) {
         ),
       );
     },
-    prepare(serverId: string, input: MinecraftModpackSelection) {
-      return client
-        .request(path(serverId, '/prepare'), {
-          method: 'POST',
-          body: minecraftModpackPrepareSchema.parse(input),
-        })
-        .then((value) => minecraftModpacksSnapshotSchema.parse(value));
+    prepare,
+    retry(serverId: string, operation: MinecraftModpackOperation, idempotencyKey: string) {
+      if (operation.state !== 'failed' || idempotencyKey === operation.selection.idempotencyKey)
+        throw new TypeError('A failed preparation retry requires a new intent');
+      // Failed operations are terminal. Preserve their choices without cancelling them,
+      // so a transport failure leaves the original operation available to retry.
+      return prepare(serverId, { ...operation.selection, idempotencyKey });
     },
     apply(serverId: string, input: MinecraftModpackApply) {
       return client

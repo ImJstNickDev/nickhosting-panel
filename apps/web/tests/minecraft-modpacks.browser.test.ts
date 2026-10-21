@@ -11,6 +11,7 @@ import {
 import { createServer, type ViteDevServer } from 'vite';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type {
+  MinecraftModpackOperation,
   MinecraftModpackSelection,
   MinecraftModpacksSnapshot,
 } from '../../../games/minecraft/src/modpack-contracts.js';
@@ -32,11 +33,17 @@ const providers: ModpackProvider[] = [
   'voidswrath',
   'atlauncher',
 ];
-const project = (provider: ModpackProvider = 'modrinth'): ModpackCatalogProject => ({
+const project = (
+  provider: ModpackProvider = 'modrinth',
+  id = 'copper-valley',
+): ModpackCatalogProject => ({
   provider,
-  id: 'copper-valley',
-  name: 'Copper Valley',
-  summary: 'A carefully balanced world of exploration, automation and small discoveries.',
+  id,
+  name: id === '318032' ? 'Antimatter Chemistry' : 'Copper Valley',
+  summary:
+    id === '318032'
+      ? 'A quest-driven pack about chemistry and antimatter.'
+      : 'A carefully balanced world of exploration, automation and small discoveries.',
   websiteUrl: 'https://example.test/copper-valley',
   authors: ['Valley team'],
   downloads: 123456,
@@ -65,7 +72,7 @@ describe('Minecraft Modpacks full-page experience', () => {
   let errors: string[];
   let providerAvailable = true;
   let pending = false;
-  let prepareState: 'ready' | 'blocked' | 'uncertain' | 'error' = 'ready';
+  let prepareState: 'ready' | 'blocked' | 'uncertain' | 'failed' | 'error' = 'ready';
   let count = 0;
   beforeAll(async () => {
     vite = await createServer({
@@ -112,9 +119,9 @@ describe('Minecraft Modpacks full-page experience', () => {
                   total: 1,
                 });
               if (url.pathname.startsWith(`${base}/catalog/`)) {
-                const provider = url.pathname
+                const [provider, projectId] = url.pathname
                   .slice(`${base}/catalog/`.length)
-                  .split('/')[0] as ModpackProvider;
+                  .split('/') as [ModpackProvider, string];
                 if (url.pathname.endsWith('/versions'))
                   return json({
                     items: [version('2.5-beta', 'beta'), version(), version('2.3')],
@@ -123,7 +130,7 @@ describe('Minecraft Modpacks full-page experience', () => {
                     total: 3,
                   });
                 return json({
-                  ...project(provider),
+                  ...project(provider, projectId),
                   description:
                     '## A world worth exploring\n\nBuild a workshop, follow the rivers and discover new biomes.\n\n- Exploration and transport\n- Balanced progression\n- Cooperative play',
                   descriptionFormat: 'markdown',
@@ -139,7 +146,7 @@ describe('Minecraft Modpacks full-page experience', () => {
                 const selection = body as unknown as MinecraftModpackSelection;
                 const provider = selection.provider;
                 snapshot.operation = {
-                  id: op,
+                  id: `20000000-0000-4000-8000-${String(count).padStart(12, '0')}`,
                   selection,
                   state: pending ? 'preparing' : prepareState,
                   phase: pending ? 'downloading' : 'ready',
@@ -149,7 +156,13 @@ describe('Minecraft Modpacks full-page experience', () => {
                     completedBytes: pending ? 40000000 : 123456789,
                     totalBytes: 123456789,
                   },
-                  pack: { project: project(provider), version: version(selection.versionId) },
+                  pack:
+                    pending || prepareState === 'failed'
+                      ? null
+                      : {
+                          project: project(provider, selection.projectId),
+                          version: version(selection.versionId),
+                        },
                   target:
                     prepareState === 'blocked'
                       ? { ...target, loader: 'forge', loaderVersion: '52.1.0' }
@@ -185,7 +198,10 @@ describe('Minecraft Modpacks full-page experience', () => {
                 };
                 return json(snapshot);
               }
-              if (req.method === 'DELETE' && url.pathname === `${base}/operations/${op}`) {
+              if (
+                req.method === 'DELETE' &&
+                url.pathname === `${base}/operations/${snapshot.operation?.id}`
+              ) {
                 snapshot.operation = null;
                 return json(snapshot);
               }
@@ -312,6 +328,9 @@ describe('Minecraft Modpacks full-page experience', () => {
     await details();
     await page.getByRole('button', { name: 'Prepare this version' }).click();
     await check(page.getByText('24 / 104 files')).toBeVisible();
+    expect(snapshot.operation?.pack).toBeNull();
+    await check(page.getByRole('heading', { name: 'Copper Valley', exact: true })).toBeVisible();
+    await check(page.locator('.modpacks-review').getByText(project().summary)).toBeVisible();
     await page.getByRole('button', { name: 'Back to Discover' }).click();
     await check(page.getByRole('button', { name: 'Selected', exact: true })).toBeDisabled();
     await check(page.getByRole('button', { name: 'Review installation' })).toBeVisible();
@@ -320,6 +339,97 @@ describe('Minecraft Modpacks full-page experience', () => {
       path: '.codex/local/m5-browser/screenshots/modpacks-preparing-desktop-en.png',
       fullPage: true,
     });
+  });
+  it('restores unresolved pack metadata after reload and retries every original choice with safe intent keys', async () => {
+    const failed: MinecraftModpackOperation = {
+      id: '20000000-0000-4000-8000-000000000099',
+      selection: {
+        provider: 'curseforge',
+        projectId: '318032',
+        versionId: '5871978',
+        mode: 'replace',
+        worldPolicy: 'reset',
+        fileDecisions: { 'config/custom.cfg': 'keep-local', 'config/pack.cfg': 'use-pack' },
+        idempotencyKey: 'failed-intent',
+      },
+      state: 'failed',
+      phase: 'downloading',
+      progress: null,
+      pack: null,
+      target: null,
+      runtimeSupported: false,
+      planDigest: null,
+      changes: null,
+      deletePaths: [],
+      blockers: [],
+      error: 'validation_failed',
+      backupId: null,
+      restartRequired: false,
+      createdAt: '2026-10-21T12:00:00Z',
+      updatedAt: '2026-10-21T12:00:00Z',
+    };
+    snapshot.operation = failed;
+    await page.goto(`${origin}modpacks-fixture`);
+    await check(page.locator('.modpacks-selection-strip')).toContainText('Antimatter Chemistry');
+    await page.getByRole('button', { name: 'Review installation', exact: true }).click();
+    await check(
+      page.getByRole('heading', { name: 'Antimatter Chemistry', exact: true }),
+    ).toBeVisible();
+    await check(page.getByText(project('curseforge', '318032').summary)).toBeVisible();
+    expect(writes).toEqual([]);
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/modpacks-failed-metadata-desktop-en.png',
+      fullPage: true,
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/modpacks-failed-metadata-mobile-en.png',
+      fullPage: true,
+    });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    expect(
+      (await new AxeBuilder({ page }).analyze()).violations.filter((item) =>
+        ['serious', 'critical'].includes(item.impact ?? ''),
+      ),
+    ).toEqual([]);
+    const retry = page
+      .locator('.modpacks-recovery')
+      .getByRole('button', { name: 'Try again', exact: true });
+    prepareState = 'error';
+    await retry.click();
+    await check(page.getByRole('alert')).toBeVisible();
+    await check(retry).toBeEnabled();
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.path).toBe(`POST ${base}/prepare`);
+    const retryKey = writes[0]?.body.idempotencyKey;
+    expect(retryKey).not.toBe(failed.selection.idempotencyKey);
+    expect(writes[0]?.body).toEqual({ ...failed.selection, idempotencyKey: retryKey });
+    expect(snapshot.operation?.id).toBe(failed.id);
+
+    prepareState = 'failed';
+    await retry.click();
+    await check(page.getByRole('alert')).toHaveCount(0);
+    await check(retry).toBeEnabled();
+    expect(writes).toHaveLength(2);
+    expect(writes[1]).toEqual(writes[0]);
+    expect(snapshot.operation?.id).not.toBe(failed.id);
+
+    pending = true;
+    prepareState = 'ready';
+    await retry.click();
+    await check(page.getByText('24 / 104 files')).toBeVisible();
+    expect(writes).toHaveLength(3);
+    expect(writes[2]?.body.idempotencyKey).not.toBe(retryKey);
+    expect(writes[2]?.body).toEqual({
+      ...failed.selection,
+      idempotencyKey: writes[2]?.body.idempotencyKey,
+    });
+    await check(
+      page.getByRole('heading', { name: 'Antimatter Chemistry', exact: true }),
+    ).toBeVisible();
+    await check(page.getByRole('button', { name: 'Try again', exact: true })).toHaveCount(0);
   });
   it('separates replacement with explicit preservation options and cancellation before replan', async () => {
     snapshot.installed = {

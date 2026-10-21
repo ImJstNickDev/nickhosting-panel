@@ -65,6 +65,10 @@ function Modpacks(props: GameSectionViewProps) {
     initial?.installed ? 'installed' : 'discover',
   );
   const [project, setProject] = useState<ModpackCatalogProject>();
+  const [selectedPack, setSelectedPack] = useState<{
+    project: ModpackCatalogProject;
+    version: ModpackCatalogVersion;
+  }>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>();
   const firstSnapshot = useRef(Boolean(initial));
@@ -72,6 +76,35 @@ function Modpacks(props: GameSectionViewProps) {
   const mutationLock = useRef(false);
   const data = snapshot.data;
   const operation = active(data?.operation);
+  const selection = operation?.selection;
+  const operationDetails = useQuery({
+    queryKey: [...q(props.serverId, 'details'), selection?.provider, selection?.projectId],
+    queryFn: ({ signal }) =>
+      controller.details(
+        props.serverId,
+        selection?.provider ?? 'modrinth',
+        selection?.projectId ?? '',
+        signal,
+      ),
+    staleTime: 300_000,
+    enabled: Boolean(operation && !operation.pack),
+  });
+  const operationProject =
+    operation?.pack?.project ??
+    operationDetails.data ??
+    (selectedPack &&
+    selectedPack.project.provider === selection?.provider &&
+    selectedPack.project.id === selection?.projectId
+      ? selectedPack.project
+      : undefined);
+  const operationVersion =
+    operation?.pack?.version ??
+    (selectedPack &&
+    selectedPack.version.id === selection?.versionId &&
+    selectedPack.project.id === selection?.projectId &&
+    selectedPack.project.provider === selection?.provider
+      ? selectedPack.version
+      : undefined);
   const locked =
     !props.canManage ||
     props.pending ||
@@ -105,6 +138,8 @@ function Modpacks(props: GameSectionViewProps) {
     }
   }
   function choose(selected: ModpackCatalogProject, version: ModpackCatalogVersion) {
+    setProject(selected);
+    setSelectedPack({ project: selected, version });
     const same =
       data?.installed && modpackIdentity(data.installed.pack.project) === modpackIdentity(selected);
     const mode = data?.installed ? (same ? 'update' : 'replace') : 'install';
@@ -203,6 +238,14 @@ function Modpacks(props: GameSectionViewProps) {
           }}
         />
       )}
+      {operationDetails.error && !operation?.pack && (
+        <ErrorNotice
+          error={operationDetails.error}
+          retry={() => {
+            void operationDetails.refetch();
+          }}
+        />
+      )}
       {snapshot.isPending ? (
         <ModsSkeleton label={t(k('loading'))} />
       ) : (
@@ -216,6 +259,7 @@ function Modpacks(props: GameSectionViewProps) {
               disabled={locked}
               onChoose={choose}
               operation={operation}
+              operationProject={operationProject}
             />
           </div>
           {view === 'installed' &&
@@ -293,6 +337,8 @@ function Modpacks(props: GameSectionViewProps) {
             (operation ? (
               <ModpackReview
                 operation={operation}
+                project={operationProject}
+                version={operationVersion}
                 canManage={props.canManage}
                 busy={busy || props.pending}
                 onBack={() => setView('discover')}
@@ -310,7 +356,13 @@ function Modpacks(props: GameSectionViewProps) {
                   });
                 }}
                 onRetry={() => {
-                  if (operation.pack) choose(operation.pack.project, operation.pack.version);
+                  void mutate(() =>
+                    controller.retry(
+                      props.serverId,
+                      operation,
+                      requestKey(`retry:${operation.id}`),
+                    ),
+                  );
                 }}
                 onRecover={() => {
                   void mutate(() => controller.recover(props.serverId, operation.id));
@@ -344,6 +396,7 @@ function ModpackDiscover(props: {
   disabled: boolean;
   onChoose: (project: ModpackCatalogProject, version: ModpackCatalogVersion) => void;
   operation?: MinecraftModpackOperation;
+  operationProject?: ModpackCatalogProject;
 }) {
   const t = useT();
   const [provider, setProvider] = useState<ModpackProvider>('modrinth');
@@ -433,16 +486,15 @@ function ModpackDiscover(props: {
         <button
           type="button"
           className="modpacks-selection-strip"
-          onClick={() => props.operation?.pack && props.onProject(props.operation.pack.project)}
+          disabled={!props.operationProject}
+          onClick={() => props.operationProject && props.onProject(props.operationProject)}
         >
           <ModsArtwork
-            name={props.operation.pack?.project.name ?? props.operation.selection.projectId}
-            image={props.operation.pack?.project.imageUrl}
+            name={props.operationProject?.name ?? props.operation.selection.projectId}
+            image={props.operationProject?.imageUrl}
           />
           <span>
-            <strong>
-              {props.operation.pack?.project.name ?? props.operation.selection.projectId}
-            </strong>
+            <strong>{props.operationProject?.name ?? props.operation.selection.projectId}</strong>
             <small>
               {t(
                 k(

@@ -35,6 +35,10 @@ export type ModpackRecipe = ModpackRecipeIdentity &
         format: 'modrinth-index' | 'curseforge-manifest' | 'server-archive';
         download: ModpackDownload;
         target?: ContentTarget;
+        /** Publisher declares this configuration archive already relative to the server root. */
+        preserveRoot?: true;
+        /** Exact server-side files declared alongside a configuration archive. */
+        files?: ModpackRecipeFile[];
         /** Exact companion client archive supplies requirements, never client files. */
         targetManifest?: { format: 'curseforge-manifest'; download: ModpackDownload };
       }

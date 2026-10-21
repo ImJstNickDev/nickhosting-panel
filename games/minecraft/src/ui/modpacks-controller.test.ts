@@ -1,9 +1,39 @@
 import type { GameUiClient } from '@nickhosting/game-sdk/ui';
 import { describe, expect, it, vi } from 'vitest';
-import { createMinecraftModpacksController } from './modpacks-controller.js';
+import {
+  createMinecraftModpacksController,
+  type MinecraftModpackOperation,
+} from './modpacks-controller.js';
 
 const server = '10000000-0000-4000-8000-000000000001';
 const operationId = '20000000-0000-4000-8000-000000000001';
+const failed: MinecraftModpackOperation = {
+  id: operationId,
+  selection: {
+    provider: 'curseforge',
+    projectId: '318032',
+    versionId: '5871978',
+    mode: 'replace',
+    worldPolicy: 'reset',
+    fileDecisions: { 'config/custom.cfg': 'keep-local' },
+    idempotencyKey: 'original',
+  },
+  state: 'failed',
+  phase: 'downloading',
+  pack: null,
+  progress: null,
+  target: null,
+  runtimeSupported: false,
+  planDigest: null,
+  changes: null,
+  deletePaths: [],
+  blockers: [],
+  error: 'validation_failed',
+  backupId: null,
+  restartRequired: false,
+  createdAt: '2026-10-21T12:00:00Z',
+  updatedAt: '2026-10-21T12:00:00Z',
+};
 function setup(result: unknown = { installed: null, operation: null }) {
   const request = vi.fn(async () => result);
   return {
@@ -72,6 +102,32 @@ describe('Modpack UI controller', () => {
         idempotencyKey: 'intent',
       }),
     ).toThrow();
+    expect(request).not.toHaveBeenCalled();
+  });
+  it('retries an unresolved failed pack with every original choice and a new intent', async () => {
+    const { controller, request } = setup();
+    await controller.retry(server, failed, 'retry1');
+    expect(request).toHaveBeenCalledExactlyOnceWith(
+      `/v1/servers/${server}/minecraft/modpacks/prepare`,
+      {
+        method: 'POST',
+        body: { ...failed.selection, idempotencyKey: 'retry1' },
+      },
+    );
+    expect(failed.selection.idempotencyKey).toBe('original');
+  });
+  it('reuses the retry intent after a transport failure without discarding the failed operation', async () => {
+    const { controller, request } = setup();
+    request.mockRejectedValueOnce(new Error('Connection lost'));
+    await expect(controller.retry(server, failed, 'retry1')).rejects.toThrow('Connection lost');
+    await controller.retry(server, failed, 'retry1');
+    expect(request.mock.calls).toHaveLength(2);
+    expect(request.mock.calls[0]).toEqual(request.mock.calls[1]);
+  });
+  it('rejects replaying the failed intent or retrying an uncertain operation', () => {
+    const { controller, request } = setup();
+    expect(() => controller.retry(server, failed, 'original')).toThrow();
+    expect(() => controller.retry(server, { ...failed, state: 'uncertain' }, 'retry1')).toThrow();
     expect(request).not.toHaveBeenCalled();
   });
   it('binds apply to exact reviewed operation, digest, and deletions', async () => {

@@ -56,6 +56,17 @@ export async function visitArchive(
   options: Partial<ContentLimits> = {},
   visitDirectory?: (path: string) => Promise<void>,
 ): Promise<void> {
+  return visitZip(path, visit, options, visitDirectory);
+}
+/** Metadata inspection never extracts opaque JAR entries onto a filesystem.
+ * Only selected root records need extraction policy and ambiguity checks. */
+async function visitZip(
+  path: string | Uint8Array,
+  visit: (file: ArchiveFile) => Promise<void>,
+  options: Partial<ContentLimits>,
+  visitDirectory?: (path: string) => Promise<void>,
+  metadataNames?: ReadonlySet<string>,
+): Promise<void> {
   const limits = contentLimits(options);
   if (typeof path === 'string') {
     const stat = await lstat(path);
@@ -84,6 +95,11 @@ export async function visitArchive(
       zip.on('end', resolve);
       zip.on('entry', (entry: Entry) => {
         void (async () => {
+          count++;
+          if (count > limits.maxEntries) fail('archive_budget');
+          // Valid JARs can contain case-sensitive resource names and repeated
+          // unrelated META-INF records. They are not files we will extract.
+          if (metadataNames && !metadataNames.has(entry.fileName)) return;
           const name = safeArchivePath(entry.fileName);
           const key = name.replace(/\/$/, '').toLowerCase();
           if (seen.has(key)) fail('archive_duplicate');
@@ -92,10 +108,8 @@ export async function visitArchive(
           if (type !== 0 && type !== 0x8000 && type !== 0x4000) fail('archive_special_file');
           if ((entry.generalPurposeBitFlag & 1) !== 0) fail('archive_encrypted');
           if (![0, 8].includes(entry.compressionMethod)) fail('archive_compression');
-          count++;
           total += entry.uncompressedSize;
           if (
-            count > limits.maxEntries ||
             total > limits.maxExpandedBytes ||
             entry.uncompressedSize > limits.maxFileBytes ||
             (entry.uncompressedSize > 0 &&
@@ -184,7 +198,7 @@ export async function inspectJarMetadata(
 ): Promise<JarMetadata> {
   const observations: JarEnvironment[] = [];
   let fabric: JarMetadata['fabric'];
-  await visitArchive(
+  await visitZip(
     path,
     async (file) => {
       if (file.path === 'fabric.mod.json') {
@@ -210,6 +224,8 @@ export async function inspectJarMetadata(
       // Quilt/Forge/Paper metadata needs a reviewed loader-specific classifier, not a guessed side.
     },
     limits,
+    undefined,
+    new Set(['fabric.mod.json']),
   );
   const environment: JarEnvironment = observations.includes('client')
     ? 'client'

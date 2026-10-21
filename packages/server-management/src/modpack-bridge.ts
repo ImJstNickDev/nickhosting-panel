@@ -239,7 +239,8 @@ export function createMinecraftModpackBridge(options: {
             maxExpandedBytes: stagingBudget,
             maxFileBytes: stagingBudget,
           },
-          download: (artifact, destination, signal) => download(artifact, destination, { signal }),
+          download: (artifact, destination, signal, options) =>
+            download(artifact, destination, { ...options, signal }),
           ...(curseforge
             ? {
                 resolveCurseForgeFiles: (

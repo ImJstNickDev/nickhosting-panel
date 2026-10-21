@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import type {
   MinecraftModpackOperation,
   MinecraftModpacksSnapshot,
+  ModpackCatalogProject,
+  ModpackCatalogVersion,
 } from '../../../../../games/minecraft/src/ui/modpacks-controller.js';
 import { useFormat, useT } from '../../app/i18n.js';
 import {
@@ -100,6 +102,8 @@ function Choice({
 }
 export function ModpackReview(props: {
   operation: MinecraftModpackOperation;
+  project?: ModpackCatalogProject;
+  version?: ModpackCatalogVersion;
   installed?: MinecraftModpacksSnapshot['installed'];
   canManage: boolean;
   busy: boolean;
@@ -134,7 +138,8 @@ export function ModpackReview(props: {
     operation.runtimeSupported &&
     operation.blockers.length === 0 &&
     Boolean(operation.planDigest);
-  const pack = operation.pack;
+  const project = operation.pack?.project ?? props.project;
+  const version = operation.pack?.version ?? props.version;
   return (
     <div className="modpacks-review">
       <header className="mods-review-heading">
@@ -153,17 +158,18 @@ export function ModpackReview(props: {
         <div className="modpacks-review-main">
           <div className="modpacks-pack-heading">
             <ModsArtwork
-              image={pack?.project.imageUrl}
-              name={pack?.project.name ?? operation.selection.projectId}
+              image={project?.imageUrl}
+              name={project?.name ?? operation.selection.projectId}
             />
             <div>
               <span className="modpacks-provider">
                 {modpackProviders[operation.selection.provider]}
               </span>
               <h3 ref={heading} tabIndex={-1}>
-                {pack?.project.name ?? operation.selection.projectId}
+                {project?.name ?? operation.selection.projectId}
               </h3>
-              <p>{pack?.version.version ?? operation.selection.versionId}</p>
+              <p>{version?.version ?? operation.selection.versionId}</p>
+              {project?.summary && <p>{project.summary}</p>}
             </div>
           </div>
           {props.installed && (

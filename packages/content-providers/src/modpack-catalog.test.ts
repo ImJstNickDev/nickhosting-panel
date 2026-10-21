@@ -447,8 +447,8 @@ describe('VoidsWrath official catalog', () => {
   });
 });
 
-describe('ATLauncher metadata without CDN permission', () => {
-  it('offers real public metadata but never fetches install recipes or server archives', async () => {
+describe('ATLauncher public server packages', () => {
+  it('resolves an explicitly published server ZIP without downloading game artifacts', async () => {
     const p = {
       id: 1,
       name: 'Fixture',
@@ -458,14 +458,21 @@ describe('ATLauncher metadata without CDN permission', () => {
     };
     const { http, json } = transport({
       'api.atlauncher.com/v1/packs/full/public': { error: false, data: [p] },
-      'api.atlauncher.com/v1/pack/Fixture': { error: false, data: p },
+      'api.atlauncher.com/v1/pack/Fixture/1.0': {
+        error: false,
+        data: {
+          version: '1.0',
+          minecraftVersion: '1.21.1',
+          serverZipURL: 'https://download.nodecdn.net/containers/atl/server.zip',
+        },
+      },
     });
     const catalog = createModpackCatalog('atlauncher', { http });
     expect(await catalog.search()).toMatchObject({ items: [{ id: 'Fixture' }] });
     expect(await catalog.resolve('Fixture', '1.0')).toMatchObject({
-      kind: 'unavailable',
-      reason: 'permission',
-      version: { minecraftVersions: ['1.21.1'] },
+      kind: 'archive',
+      format: 'server-archive',
+      version: { minecraftVersions: ['1.21.1'], available: true },
     });
     expect(json.mock.calls.every(([url]) => url.startsWith('https://api.atlauncher.com/'))).toBe(
       true,

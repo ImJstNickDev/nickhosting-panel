@@ -202,7 +202,12 @@ export interface ContentHttp {
   downloadModpack?(
     artifact: import('./modpack-recipes.js').ModpackDownload,
     destination: string,
-    options?: { signal?: AbortSignal },
+    options?: {
+      signal?: AbortSignal;
+      maxBytes?: number;
+      /** Awaited before writing; validated Content-Length or the bounded fallback maximum. */
+      onSize?: (bytes: number) => Promise<void>;
+    },
   ): Promise<{ sha256: string; size: number }>;
   json(
     url: string,

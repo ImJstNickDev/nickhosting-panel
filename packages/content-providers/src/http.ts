@@ -300,7 +300,11 @@ export class SafeContentHttp implements ContentHttp {
   async downloadModpack(
     artifact: ModpackDownload,
     destination: string,
-    options: { signal?: AbortSignal } = {},
+    options: {
+      signal?: AbortSignal;
+      maxBytes?: number;
+      onSize?: (bytes: number) => Promise<void>;
+    } = {},
   ): Promise<{ sha256: string; size: number }> {
     const lengths: Record<string, number> = { md5: 32, sha1: 40, sha256: 64, sha512: 128 };
     if (
@@ -329,22 +333,40 @@ export class SafeContentHttp implements ContentHttp {
   private async streamDownload(
     artifact: { size: number; hashes: Record<string, string | undefined>; urls: string[] },
     destination: string,
-    options: { signal?: AbortSignal },
+    options: {
+      signal?: AbortSignal;
+      maxBytes?: number;
+      onSize?: (bytes: number) => Promise<void>;
+    },
     exactSize: boolean,
   ): Promise<{ sha256: string; size: number }> {
     if (artifact.size > this.options.maxDownloadBytes) fail('download_size');
+    if (
+      options.maxBytes !== undefined &&
+      (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 0)
+    )
+      fail('download_size');
+    const maximum = Math.min(artifact.size, options.maxBytes ?? this.options.maxDownloadBytes);
+    if (!Number.isSafeInteger(maximum) || maximum < 0 || (exactSize && artifact.size > maximum))
+      fail('download_size');
     // All alternatives must be approved before any request, including unused fallback URLs.
     for (const url of artifact.urls) validateDownloadUrl(url, this.options.allowedOrigins);
     return this.retry(async () => {
       const response = await this.downloadResponse(artifact.urls[0] as string, options.signal);
       let size = 0;
+      let expectedSize: number | undefined;
+      let writing = false;
+      let responseError = response.errored;
+      response.on('error', (error) => {
+        responseError = error;
+      });
       const hashes = new Map(
         Object.keys({ ...artifact.hashes, sha256: '' }).map((name) => [name, createHash(name)]),
       );
       const guard = new Transform({
         transform(chunk: Buffer, _encoding, callback) {
           size += chunk.length;
-          if (size > artifact.size) {
+          if (size > (expectedSize ?? maximum)) {
             callback(new DomainError('validation_failed', 400, { reason: 'download_size' }));
             return;
           }
@@ -353,6 +375,24 @@ export class SafeContentHttp implements ContentHttp {
         },
       });
       try {
+        const length = response.headers['content-length'];
+        if (length !== undefined) {
+          if (typeof length !== 'string' || !/^(0|[1-9]\d*)$/.test(length)) fail('download_size');
+          expectedSize = Number(length);
+          if (
+            !Number.isSafeInteger(expectedSize) ||
+            expectedSize > maximum ||
+            (exactSize && expectedSize !== artifact.size)
+          )
+            fail('download_size');
+        }
+        // Join admission even if the peer fails meanwhile: reservation must not
+        // finish after the caller has already cleaned up the staging attempt.
+        if (options.onSize) await options.onSize(expectedSize ?? maximum);
+        if (responseError) throw responseError;
+        options.signal?.throwIfAborted();
+        if (response.destroyed) unavailable('download_interrupted');
+        writing = true;
         await pipeline(
           response,
           guard,
@@ -360,6 +400,7 @@ export class SafeContentHttp implements ContentHttp {
           { signal: options.signal },
         );
         if (exactSize && size !== artifact.size) fail('download_size');
+        if (expectedSize !== undefined && size !== expectedSize) fail('download_size');
         const actual = Object.fromEntries(
           [...hashes].map(([name, hash]) => [name, hash.digest('hex')]),
         );
@@ -367,7 +408,7 @@ export class SafeContentHttp implements ContentHttp {
           fail('download_hash');
         return { sha256: actual.sha256 as string, size };
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST')
+        if (writing && (error as NodeJS.ErrnoException).code !== 'EEXIST')
           await rm(destination, { force: true });
         throw error;
       } finally {

@@ -1909,7 +1909,8 @@ the additive schema/catalog and any created Paper server records.
 The Minecraft Modpacks tab now has a provider catalog, preparation and reviewed
 installation workflow. See [M5-MODPACKS.md](M5-MODPACKS.md) for provider limits,
 preservation rules, APIs and recovery behavior. NeoForge runtime development
-is deferred; Forge support is described below. ATLauncher is browse-only pending CDN permission.
+is deferred; Forge support is described below. ATLauncher uses official server
+descriptors and explicit server files; unsupported installer semantics stay blocked.
 
 Migration `050_minecraft_modpacks.sql` is additive. Activation needs the updated
 dependency image for API/worker/Vite and the explicit migrator with the current
