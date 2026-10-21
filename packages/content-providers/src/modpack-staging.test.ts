@@ -427,6 +427,75 @@ describe('modpack staging', () => {
       f.download.mock.invocationCallOrder[1] as number,
     );
   });
+  it.each(['', 'Server/'])(
+    'uses companion requirements with a generic server inventory at %smanifest.json',
+    async (root) => {
+      const companion = await zip({ 'manifest.json': JSON.stringify(cf()) });
+      const data = await zip({
+        [`${root}manifest.json`]: JSON.stringify({ files: ['config/a.txt'] }),
+        [`${root}config/a.txt`]: 'server configuration',
+      });
+      const f = await fixture({ 'source.zip': data, 'client.zip': companion });
+      const result = await stageModpackRecipe(
+        archive('server-archive', data, {
+          targetManifest: {
+            format: 'curseforge-manifest',
+            download: source('client.zip', companion),
+          },
+        }),
+        f.options,
+      );
+      expect(result.target).toEqual(target);
+      expect(result.files.map((file) => file.path)).toEqual(['config/a.txt']);
+      expect(await readFile(join(result.directory, 'config/a.txt'), 'utf8')).toBe(
+        'server configuration',
+      );
+      expect(f.checkTarget).toHaveBeenCalledExactlyOnceWith(target);
+    },
+  );
+  it.each(['server-archive', 'curseforge-manifest'] as const)(
+    'still rejects malformed declared CurseForge metadata in a %s',
+    async (format) => {
+      const data = await zip({
+        'manifest.json': JSON.stringify({
+          manifestType: 'minecraftModpack',
+          files: ['config/a.txt'],
+        }),
+        'config/a.txt': 'data',
+      });
+      const f = await fixture({ 'source.zip': data });
+      await expect(
+        stageModpackRecipe(archive(format, data, { target }), f.options),
+      ).rejects.toMatchObject({ name: 'ZodError' });
+      expect(f.progress).not.toHaveBeenCalled();
+    },
+  );
+  it('rejects a declared server manifest that conflicts with the companion runtime', async () => {
+    const companion = await zip({ 'manifest.json': JSON.stringify(cf()) });
+    const data = await zip({
+      'manifest.json': JSON.stringify({
+        ...cf(),
+        minecraft: {
+          version: target.minecraftVersion,
+          modLoaders: [{ id: 'fabric-0.16.11', primary: true }],
+        },
+      }),
+      'config/a.txt': 'data',
+    });
+    const f = await fixture({ 'source.zip': data, 'client.zip': companion });
+    await expect(
+      stageModpackRecipe(
+        archive('server-archive', data, {
+          targetManifest: {
+            format: 'curseforge-manifest',
+            download: source('client.zip', companion),
+          },
+        }),
+        f.options,
+      ),
+    ).rejects.toMatchObject({ details: { contentReason: 'modpack_target_mismatch' } });
+    expect(f.progress).not.toHaveBeenCalled();
+  });
   it('recognizes a wrapped server archive manifest without stripping a real data-only root', async () => {
     const wrapped = await zip({
       'Server/manifest.json': JSON.stringify(cf()),

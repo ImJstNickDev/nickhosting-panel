@@ -333,7 +333,16 @@ export async function stageModpackRecipe(
       const mr = manifestAt(`${root}modrinth.index.json`);
       const cf = manifestAt(`${root}manifest.json`);
       if (mr !== undefined) await acceptTarget(targetFromMrpack(mrpack.parse(mr).dependencies));
-      if (cf !== undefined) await acceptTarget(curseTarget(cursepack.parse(cf)));
+      // Server archives can use manifest.json for their own file inventory. Only
+      // the explicit CurseForge type declares runtime requirements; once declared,
+      // validate the whole manifest and its agreement with any companion target.
+      if (
+        cf !== null &&
+        typeof cf === 'object' &&
+        'manifestType' in cf &&
+        cf.manifestType === 'minecraftModpack'
+      )
+        await acceptTarget(curseTarget(cursepack.parse(cf)));
       roots = [root];
     }
     for (const file of members) {
