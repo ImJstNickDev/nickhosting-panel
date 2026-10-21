@@ -333,3 +333,19 @@ remain opaque: only selected metadata records are read, with the existing size,
 compression, duplicate and integrity checks. Resource-heavy mods such as Chipped
 can therefore be inspected without incorrectly treating their internal resources
 as files being published to the game server.
+
+### Upload admission and pre-upload recovery
+
+Content preparation budgets and the physical host's Fileman upload policy are
+separate. Modpack application preflights the publication archive against the host
+policy before stopping the server or changing its runtime; atomic admission is
+still repeated when the transfer takes its capacity claim. The host's declared
+per-file ceiling must agree with Wings' actual maximum upload size.
+
+A locally rejected upload can resume without rerunning the installer. This is a
+separate recovery case from a dispatched archive commit: no upload claim or receipt,
+no commit request, no remote scratch/stage/rollback directory, unchanged original
+publication targets, and the retained local ZIP must match the durable transfer
+binding. Existing runtime verification and operation locks remain required. Recovery
+reads the local ZIP seal, not every game file through Wings. Ambiguous or dispatched
+transfers continue to use the existing receipt-based recovery path.
