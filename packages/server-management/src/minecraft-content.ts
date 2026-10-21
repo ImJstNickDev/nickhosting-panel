@@ -1291,10 +1291,15 @@ export async function configureMinecraftProvision(
         const source = snapshot.content;
         const edited = editMinecraftProperties(source, configuration.properties, {
           release: verified.choice.combination.release,
-          supportedKeys: source
-            ? Object.keys(parseMinecraftProperties(source))
-            : (verified.imageEvidence.report?.server?.supportedProperties ??
-              (verified.choice.capabilities.playerManagement ? ['white-list'] : [])),
+          // Egg templates can contain only bind settings until the first start.
+          // Their missing keys do not override declared bootstrap capabilities.
+          supportedKeys: [
+            ...new Set([
+              ...Object.keys(parseMinecraftProperties(source)),
+              ...(verified.imageEvidence.report?.server?.supportedProperties ?? []),
+              ...(verified.choice.capabilities.playerManagement ? ['white-list'] : []),
+            ]),
+          ],
         });
         changes.push(
           await plannedText(context, 'server.properties', edited.content, snapshot.hash),

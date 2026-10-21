@@ -2719,6 +2719,85 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     expect(await configureMinecraftProvision(context, options)).toBe(true);
     expect(files.get('server.properties')?.toString()).toContain('white-list=true');
   });
+  it.each([false, true])(
+    'bootstraps Paper whitelist=%s from an egg template without gameplay properties',
+    async (enabled) => {
+      const { f, serverId, files, context, options } = await minecraftFixture(
+        undefined,
+        false,
+        'paper',
+      );
+      await f.db.deleteFrom('minecraft_verification_evidence').execute();
+      options.env = {};
+      const template = '#Minecraft server properties\nserver-port=25565\nserver-ip=\n';
+      files.set('server.properties', Buffer.from(template));
+      const player = {
+        uuid: '12345678-1234-4234-8234-123456789012',
+        name: 'FixturePlayer',
+        source: 'mojang',
+        verifiedAt: new Date().toISOString(),
+        level: 4,
+        bypassesPlayerLimit: false,
+      };
+      await f.db
+        .updateTable('minecraft_server_profiles')
+        .set({
+          configuration: JSON.stringify({
+            eula: true,
+            properties: { 'white-list': enabled },
+            operators: [player.name],
+            whitelist: enabled ? [player.name] : [],
+            playerIdentities: { operators: [player], whitelist: enabled ? [player] : [] },
+          }),
+        })
+        .where('server_id', '=', serverId)
+        .execute();
+      expect(await configureMinecraftProvision(context, options)).toBe(true);
+      expect(files.get('server.properties')?.toString()).toBe(`${template}white-list=${enabled}\n`);
+      expect(JSON.parse(files.get('ops.json')?.toString() ?? '[]')).toEqual([
+        { uuid: player.uuid, name: player.name, level: 4, bypassesPlayerLimit: false },
+      ]);
+      if (enabled)
+        expect(JSON.parse(files.get('whitelist.json')?.toString() ?? '[]')).toEqual([
+          { uuid: player.uuid, name: player.name },
+        ]);
+      else expect(files.has('whitelist.json')).toBe(false);
+      expect(
+        (
+          await f.db
+            .selectFrom('minecraft_server_profiles')
+            .select('installed')
+            .where('server_id', '=', serverId)
+            .executeTakeFirstOrThrow()
+        ).installed,
+      ).toBe(true);
+    },
+  );
+  it('does not treat a partial Paper template as support for undeclared gameplay settings', async () => {
+    const { f, serverId, files, context, options } = await minecraftFixture(
+      undefined,
+      false,
+      'paper',
+    );
+    await f.db.deleteFrom('minecraft_verification_evidence').execute();
+    options.env = {};
+    const template = '#Minecraft server properties\nserver-port=25565\nserver-ip=\n';
+    files.set('server.properties', Buffer.from(template));
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({
+        configuration: JSON.stringify({ eula: true, properties: { 'simulation-distance': 8 } }),
+      })
+      .where('server_id', '=', serverId)
+      .execute();
+    const write = vi.spyOn(context.adapter, 'writeFile');
+    await expect(configureMinecraftProvision(context, options)).rejects.toMatchObject({
+      code: 'validation_failed',
+      details: { reason: 'minecraft_property_unavailable_in_release' },
+    });
+    expect(write).not.toHaveBeenCalled();
+    expect(files.get('server.properties')?.toString()).toBe(template);
+  });
   it('rejects unsupported legacy player management before any installation effects', async () => {
     const { f, combinationId, files, options } = await minecraftFixture();
     const choice = await f.db

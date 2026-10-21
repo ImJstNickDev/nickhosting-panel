@@ -77,3 +77,24 @@ mobile overflow. All11 development containers are healthy; their IDs, images,
 mounts, networks and ports are unchanged. Panel/Wings were neither changed nor
 restarted. Existing accounts, managed servers and mappings were preserved.
 No Paper mapping or game server was created: the Owner setup above is the next step.
+
+## Initial properties template regression — 2026-10-21
+
+The first Owner Paper installation exposed an incomplete-template case:
+PaperUpdated installs a `server.properties` containing only `server-port` and
+`server-ip`. Wings successfully installed the exact catalog JAR, but NickHosting
+rejected the wizard's `white-list` setting because it treated the initial file as
+the complete list of supported properties. Reinstalling repeated the same error
+in the configuration phase.
+
+Initial configuration now combines properties already present with the verified
+report and the integration's declared player-management support for `white-list`.
+It can append the missing bootstrap property while preserving the egg's existing
+values. Ordinary settings validation and protected-property restrictions remain
+unchanged. This correction requires neither an egg change nor a provider update.
+Failed operation history is retained; the Owner can retry using **Reinstall**.
+Both whitelist states reproduce the original failure and pass after the fix,
+including operator/whitelist files and preservation of the template's bind values.
+Seven focused lifecycle integration tests and29 properties/player tests pass;
+root TypeScript and targeted Biome checks pass. Actual reinstallation remains an
+Owner-driven check; no game files or provider settings were manually changed.
