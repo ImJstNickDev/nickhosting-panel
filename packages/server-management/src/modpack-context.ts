@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import { assertStoragePolicyIdle, type Database, notifyGatewayChange } from '@nickhosting/database';
 import { type Kysely, sql } from 'kysely';
+import { minecraftModpackPrepareSchema } from '../../../games/minecraft/src/modpack-contracts.js';
 import { buildModpackTransferArchive } from '../../content-providers/src/modpack-transfer.js';
 import { type Environment, lockResources } from './admission.js';
 import { createFilemanJobServices } from './fileman-transfers.js';
@@ -63,9 +64,15 @@ export async function createModpackContext(options: {
   currentAuth(): Promise<AuthContext>;
   timing?: OperationTiming;
   recovery?: boolean;
+  /** One-click installation may reserve and prepare the runtime while downloads run. */
+  preparingInstall?: boolean;
+  /** Valid only while this context remains under the same exclusive server lock. */
+  retainStoppedProof?: boolean;
 }) {
   const { db, runtime, env, operation: pack } = options;
   const timing = options.timing ?? createOperationTiming(false);
+  if (options.preparingInstall && !minecraftModpackPrepareSchema.parse(pack.selection).install)
+    throw new DomainError('validation_failed');
   const actor = await timing.measure('authSession', () => options.currentAuth());
   let server = await timing.measure('authorize', () =>
     authorizeServer(db, actor, pack.server_id, 'server:manage'),
@@ -166,7 +173,10 @@ export async function createModpackContext(options: {
         .executeTakeFirst();
       if (
         !pack.lease_token ||
-        currentOperation?.state !== 'applying' ||
+        !currentOperation ||
+        ![...(options.preparingInstall ? ['preparing'] : []), 'applying'].includes(
+          currentOperation?.state ?? '',
+        ) ||
         currentOperation.lease_token !== pack.lease_token ||
         !currentOperation.lease_until ||
         currentOperation.lease_until <= new Date()
@@ -188,19 +198,27 @@ export async function createModpackContext(options: {
     server = latest;
     return current;
   };
+  // Never persisted: a reconstructed worker must establish a fresh observation.
+  let stoppedProof = false;
   const assertStopped = async () => {
+    if (options.retainStoppedProof && stoppedProof) return;
     const states = await Promise.all(
       (['server', 'installer'] as const).map((kind) =>
         timing.measure('observerState', () => observer.stopped(uuid, kind)),
       ),
     );
     if (!states.every(Boolean)) throw new DomainError('conflict');
+    stoppedProof = true;
   };
   const update: GameLifecycleContext['update'] = async (patch) => {
     const { plan, ...rest } = patch;
     operation = await db
       .updateTable('server_operations')
-      .set({ ...rest, ...(plan ? { plan: JSON.stringify(plan) } : {}), updated_at: new Date() })
+      .set({
+        ...rest,
+        ...(plan ? { plan: sql`plan || ${JSON.stringify(plan)}::jsonb` } : {}),
+        updated_at: new Date(),
+      })
       .where('job_id', '=', pack.id)
       .returningAll()
       .executeTakeFirstOrThrow();
@@ -213,7 +231,13 @@ export async function createModpackContext(options: {
       ),
     );
     if (!installerStopped) throw new DomainError('conflict');
-    await update({ plan: { ...operation.plan, wasRunning: !stopped } });
+    await update({
+      plan: {
+        ...operation.plan,
+        wasRunning:
+          typeof operation.plan.wasRunning === 'boolean' ? operation.plan.wasRunning : !stopped,
+      },
+    });
     if (!stopped) {
       const result = await timing.measure('stopWait', () =>
         runtime.adapter.stopWithConfirmation(applicationId, identifier, {
@@ -233,8 +257,10 @@ export async function createModpackContext(options: {
         }),
       );
       if (!result.confirmed) throw new DomainError('operation_uncertain');
-      await assertStopped();
+      // The stop receipt is already authoritative; the exclusive operation
+      // prevents a NickHosting start until completion.
     }
+    stoppedProof = true;
     await db.transaction().execute(async (tx) => {
       await lockResources(tx);
       await tx.deleteFrom('resource_reservations').where('server_id', '=', server.id).execute();

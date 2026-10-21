@@ -386,14 +386,20 @@ export function createModpackPublication(options: {
     }
     return journal;
   };
+  // A receipt is reusable only within this uninterrupted publisher. After a
+  // worker restart the normal read-only recovery path proves the remote stage.
+  let stagedReceipt: ModpackPublicationJournal | undefined;
   const publish = async (
     prepared: PreparedMinecraftModpack,
     plan: MinecraftModpackPlan,
     resume = false,
+    stageOnly = false,
   ) => {
     const binding = validate(prepared, plan);
     let retained: ModpackPublicationJournal | null = null;
+    const reusable = stagedReceipt?.binding === binding ? stagedReceipt : null;
     if (resume) retained = await assertResumable(prepared, plan);
+    else if (reusable) retained = reusable;
     else if (await load(binding)) throw new DomainError('operation_uncertain');
     const { retire, retiredEntries } = retirement(plan);
     const publish = publicationMoves(plan);
@@ -422,7 +428,7 @@ export function createModpackPublication(options: {
         batches: [],
         rollbackCreated: false,
       }));
-    if (plan.write.length) {
+    if (!reusable && plan.write.length) {
       if ((!resume && !options.fileman.uploadArchive) || (resume && !options.fileman.resumeArchive))
         throw new DomainError('integration_unavailable');
       const expected = new Map(
@@ -468,15 +474,9 @@ export function createModpackPublication(options: {
           );
       if (!receipt) throw new DomainError('operation_uncertain');
       validateManifest(receipt.manifest);
-      // A confirmed extraction receipt supplies the sealed selection. Only the
-      // original targets need a fresh check before retirement. Uncertain recovery
-      // still observes the staged tree; normal publication captures mtimes in its
-      // final rename readback, without inventing a provider timestamp.
-      const staged = await inspect([
-        ...(resume ? expected.keys() : []),
-        ...plan.expected.map((entry) => entry.path),
-      ]);
-      if (!originalUnchanged(plan, staged)) throw new DomainError('conflict');
+      // Staging never reads or mutates installed paths. Runtime installation can
+      // continue independently; final publication checks its destinations once.
+      const staged = resume ? await inspect([...expected.keys()]) : new Map<string, FilemanEntry>();
       const stagePaths = new Set([...expected.keys()].flatMap((path) => [...parents(path), path]));
       if (
         resume &&
@@ -493,7 +493,15 @@ export function createModpackPublication(options: {
         return { ...file, modifiedAt: entry.modifiedAt };
       });
       journal = await save({ ...journal, state: 'staged', stageFiles });
-    } else journal = await save({ ...journal, state: 'staged' });
+    } else if (!reusable) journal = await save({ ...journal, state: 'staged' });
+    stagedReceipt = journal;
+    if (stageOnly) return;
+    if (plan.write.length || reusable) {
+      const current = await inspect(plan.expected.map((entry) => entry.path));
+      if (!originalUnchanged(plan, current)) throw new DomainError('conflict');
+    }
+    // Once publication begins, never reuse a stage receipt to replay mutations.
+    stagedReceipt = undefined;
     if (retire.length) {
       await timing.measure('authorize', () => options.authorize());
       journal = await save({ ...journal, state: 'retiring', rollbackCreated: true });
@@ -542,6 +550,8 @@ export function createModpackPublication(options: {
       modpackPlanSchema.parse(plan);
       return { ...roots };
     },
+    stage: (prepared: PreparedMinecraftModpack, plan: MinecraftModpackPlan) =>
+      publish(prepared, plan, false, true),
     publish: (prepared: PreparedMinecraftModpack, plan: MinecraftModpackPlan) =>
       publish(prepared, plan),
     resume: (prepared: PreparedMinecraftModpack, plan: MinecraftModpackPlan) =>

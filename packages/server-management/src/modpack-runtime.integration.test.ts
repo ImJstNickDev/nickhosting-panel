@@ -528,6 +528,31 @@ describe('Modpacks exact supported runtime transition', () => {
     expect(f.journal()?.state).toBe('verified');
   });
 
+  it('keeps an already installed exact runtime when a new pack uses the same binding', async () => {
+    const f = await fixture();
+    await configureModpackRuntime(f.options);
+    f.options.readTransition = async () => null;
+    await configureModpackRuntime(f.options);
+    expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(1);
+    expect(f.adapter.updateStartup).toHaveBeenCalledTimes(1);
+    expect(attestMinecraftRuntimeInstallation).toHaveBeenCalledTimes(1);
+    expect(f.journal()?.state).toBe('verified');
+  });
+
+  it('reinstalls an exact binding when its prior installation is not attested', async () => {
+    const f = await fixture();
+    await configureModpackRuntime(f.options);
+    f.options.readTransition = async () => null;
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({ installed: false })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    await configureModpackRuntime(f.options);
+    expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(2);
+    expect(attestMinecraftRuntimeInstallation).toHaveBeenCalledTimes(2);
+  });
+
   it('never repeats an installer when its dispatched outcome is ambiguous', async () => {
     const f = await fixture();
     vi.mocked(f.adapter.reinstallWithConfirmation).mockRejectedValue(new Error('Connection lost'));

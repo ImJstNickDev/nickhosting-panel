@@ -28,6 +28,7 @@ import {
   modpackFileSchema,
   modpackPlanSchema,
   modpackReceiptSchema,
+  modpackRuntimeBindingSchema,
   type PreparedMinecraftModpack,
   planMinecraftModpack,
   preparedModpackSchema,
@@ -55,10 +56,17 @@ export interface MinecraftModpackApplyScope {
     prepared: PreparedMinecraftModpack,
     plan: MinecraftModpackPlan,
   ): Promise<void>;
+  /** Stage only operation-owned bytes; safe to overlap runtime installation. */
+  stagePublication?(prepared: PreparedMinecraftModpack, plan: MinecraftModpackPlan): Promise<void>;
   /** Return only after independently confirming the physical process is stopped. */
   stop(): Promise<void>;
   /** Return only a completed, successful backup receipt; submission is insufficient. */
   backup(): Promise<string>;
+  /** Read-only proof after a worker restart; never dispatches an installer. */
+  assertPreparedRuntime?(
+    binding: MinecraftModpackRuntimeBinding,
+    source: { sourceMappingId: string; sourceCombinationId: string },
+  ): Promise<void>;
   /** Exact pinned combination; the bridge must not select a newer loader. */
   configureRuntime(binding: MinecraftModpackRuntimeBinding): Promise<void>;
   /** Re-prove the exact stopped, pre-installer transition before a resumed worker acts. */
@@ -87,6 +95,9 @@ export interface MinecraftModpackHooks {
     attemptId: string;
     selection: MinecraftModpackSelection;
     signal: AbortSignal;
+    /** Start the authorized install branch once the immutable manifest target is resolved. */
+    runtimeReady?(binding: MinecraftModpackRuntimeBinding): Promise<void>;
+    beforeInventory?(): Promise<void>;
     progress(
       phase: 'resolving' | 'downloading' | 'inspecting',
       value: MinecraftModpackProgress | null,
@@ -140,6 +151,44 @@ const journalSchema = z.array(
     at: z.iso.datetime(),
   }),
 );
+const runtimePreparationSchema = z
+  .object({
+    binding: modpackRuntimeBindingSchema,
+    sourceCombinationId: z.uuid(),
+    sourceMappingId: z.uuid(),
+    state: z.enum(['preparing', 'ready']),
+  })
+  .strict();
+function canAbandonPreparedRuntime(row: MinecraftModpackOperationRow): boolean {
+  const checkpoint = runtimePreparationSchema.safeParse(row.runtime_preparation);
+  const journal = journalSchema.safeParse(row.journal);
+  return (
+    row.state === 'uncertain' &&
+    row.lease_token === null &&
+    row.publication === null &&
+    checkpoint.success &&
+    checkpoint.data.state === 'ready' &&
+    journal.success &&
+    journal.data.some((entry) => entry.phase === 'runtime' && entry.state === 'confirmed') &&
+    journal.data.every(
+      (entry) =>
+        ['stopping', 'backup', 'runtime'].includes(entry.phase) &&
+        (entry.state === 'confirmed' ||
+          journal.data.some((other) => other.phase === entry.phase && other.state === 'confirmed')),
+    )
+  );
+}
+function canCancelUnstartedRuntime(row: MinecraftModpackOperationRow): boolean {
+  return (
+    runtimePreparationSchema.safeParse(row.runtime_preparation).success &&
+    row.state === 'uncertain' &&
+    row.lease_token === null &&
+    row.publication === null &&
+    row.runtime_transition === null &&
+    Array.isArray(row.journal) &&
+    row.journal.length === 0
+  );
+}
 const leaseMs = 60_000;
 const errorCode = (error: unknown) =>
   error instanceof DomainError ? error.code : 'integration_unavailable';
@@ -203,6 +252,14 @@ export function hasResumableModpackPublicationJournal(row: MinecraftModpackOpera
     'runtime:confirmed',
     'publishing:dispatched',
   ];
+  // Hidden staging overlaps the installer and precedes the publishing effect.
+  // A completed early runtime plus untouched stage is also a resumable prefix.
+  if (
+    runtimePreparationSchema.safeParse(row.runtime_preparation).success &&
+    journal.data.length === expected.length - 1 &&
+    journal.data.every((entry, index) => `${entry.phase}:${entry.state}` === expected[index])
+  )
+    return true;
   return (
     journal.data.length === expected.length &&
     journal.data.every((entry, index) => `${entry.phase}:${entry.state}` === expected[index])
@@ -306,6 +363,14 @@ export function createMinecraftModpacksService(options: {
       operation: row
         ? {
             id: row.id,
+            canCancel:
+              canAbandonPreparedRuntime(row) ||
+              canCancelUnstartedRuntime(row) ||
+              (row.runtime_preparation === null &&
+                cancellable.includes(row.state as (typeof cancellable)[number])),
+            ...(canAbandonPreparedRuntime(row)
+              ? { cancellationEffect: 'runtime-retained' as const }
+              : {}),
             selection: minecraftModpackPrepareSchema.parse(row.selection),
             state: row.state,
             phase: minecraftModpackPhaseSchema.parse(row.phase),
@@ -423,8 +488,11 @@ export function createMinecraftModpacksService(options: {
     async prepare(context: AuthContext, serverId: string, input: unknown) {
       const selection = parse(minecraftModpackPrepareSchema, input);
       await db.transaction().execute(async (tx) => {
+        if (selection.install) await lockResources(tx);
         await lock(tx, serverId);
         const { current, server } = await authorized(context, serverId, true, tx);
+        if (selection.install && server.active_operation_id)
+          throw new DomainError('operation_busy');
         const prior = await tx
           .selectFrom('minecraft_modpack_operations')
           .selectAll()
@@ -440,6 +508,8 @@ export function createMinecraftModpacksService(options: {
             throw new DomainError('conflict');
           return;
         }
+        if (selection.install && server.active_operation_id)
+          throw new DomainError('operation_busy');
         if (
           await tx
             .selectFrom('minecraft_modpack_operations')
@@ -508,16 +578,38 @@ export function createMinecraftModpacksService(options: {
         const row = await get(operationId, tx);
         if (row.server_id !== serverId) throw new DomainError('not_found');
         if (row.state === 'cancelled') return;
-        if (!cancellable.includes(row.state as (typeof cancellable)[number]))
+        const abandon = canAbandonPreparedRuntime(row) || canCancelUnstartedRuntime(row);
+        if (
+          !abandon &&
+          (row.runtime_preparation !== null ||
+            !cancellable.includes(row.state as (typeof cancellable)[number]))
+        )
           throw new DomainError('operation_busy');
-        await tx
+        const cancelled = await tx
           .updateTable('minecraft_modpack_operations')
           .set({ state: 'cancelled', updated_at: new Date() })
           .where('id', '=', operationId)
-          .execute();
+          .where((eb) =>
+            abandon
+              ? eb.and([
+                  eb('state', '=', 'uncertain'),
+                  eb('lease_token', 'is', null),
+                  sql<boolean>`(publication is null or publication = 'null'::jsonb)`,
+                ])
+              : eb.and([
+                  eb('runtime_preparation', 'is', null),
+                  eb('state', 'in', [...cancellable]),
+                ]),
+          )
+          .returning('id')
+          .executeTakeFirst();
+        if (!cancelled) throw new DomainError('operation_busy');
         await recordAudit(tx, current, 'minecraft.modpacks.cancelled', { serverId, operationId });
       });
       // A preparing worker owns its stage until it observes cancellation and stops writing.
+      const cancelled = await get(operationId);
+      if (cancelled.runtime_preparation !== null && cancelled.lease_token === null)
+        await cleanup(cancelled);
       wake();
       return snapshotValue(serverId);
     },
@@ -620,7 +712,10 @@ export function createMinecraftModpacksService(options: {
               .executeTakeFirst();
             if (!row || (row.lease_until && row.lease_until > new Date())) return null;
             if (terminal.includes(row.state)) return row;
-            if (row.state === 'applying') {
+            if (
+              row.state === 'applying' ||
+              (row.state === 'preparing' && row.runtime_preparation !== null)
+            ) {
               await tx
                 .updateTable('minecraft_modpack_operations')
                 .set({
@@ -695,9 +790,7 @@ export function createMinecraftModpacksService(options: {
               row.lease_until <= new Date()
             )
               throw new DomainError('conflict');
-            await timing.measure('authorize', () =>
-              hooks.authorize(row, claimed.state === 'applying'),
-            );
+            await timing.measure('authorize', () => hooks.authorize(row, row.state === 'applying'));
             return row;
           };
           const update = async (
@@ -713,6 +806,32 @@ export function createMinecraftModpacksService(options: {
               .executeTakeFirst();
             if (!row) throw new DomainError('conflict');
           };
+          let execution = claimed;
+          let earlyScope: MinecraftModpackApplyScope | undefined;
+          let preparedObservation: MinecraftModpackObservation | undefined;
+          let earlyRuntime: Promise<void> | undefined;
+          let earlyPrerequisites: Promise<void> | undefined;
+          let earlyLock: Promise<void> | undefined;
+          let releaseEarlyLock: (() => void) | undefined;
+          const earlyReleased = new Promise<void>((resolve) => {
+            releaseEarlyLock = resolve;
+          });
+          async function effect<T>(
+            phase: MinecraftModpackPhase,
+            work: () => Promise<T>,
+            alreadyDispatched = false,
+          ) {
+            const current = await check();
+            const journal = journalSchema.parse(current.journal);
+            if (!alreadyDispatched)
+              journal.push({ phase, state: 'dispatched', at: new Date().toISOString() });
+            await update({ phase, journal: JSON.stringify(journal), updated_at: new Date() });
+            const result = await work();
+            await check();
+            journal.push({ phase, state: 'confirmed', at: new Date().toISOString() });
+            await update({ journal: JSON.stringify(journal), updated_at: new Date() });
+            return result;
+          }
           try {
             await check();
             if (claimed.state === 'preparing') {
@@ -732,6 +851,120 @@ export function createMinecraftModpacksService(options: {
                   attemptId: token,
                   selection,
                   signal: controller.signal,
+                  beforeInventory: async () => {
+                    if (earlyPrerequisites) await earlyPrerequisites;
+                  },
+                  ...(selection.install
+                    ? {
+                        runtimeReady: async (binding: MinecraftModpackRuntimeBinding) => {
+                          if (earlyRuntime) throw new DomainError('conflict');
+                          const current = await check();
+                          const checkpoint =
+                            current.runtime_preparation === null
+                              ? null
+                              : runtimePreparationSchema.parse(current.runtime_preparation);
+                          if (
+                            checkpoint &&
+                            modpackDigest(checkpoint.binding) !== modpackDigest(binding)
+                          )
+                            throw new DomainError('provenance_mismatch');
+                          const source =
+                            checkpoint ??
+                            (await db
+                              .selectFrom('managed_servers as server')
+                              .innerJoin(
+                                'minecraft_server_profiles as profile',
+                                'profile.server_id',
+                                'server.id',
+                              )
+                              .select([
+                                'server.mapping_id as sourceMappingId',
+                                'profile.combination_id as sourceCombinationId',
+                              ])
+                              .where('server.id', '=', claimed.server_id)
+                              .executeTakeFirstOrThrow());
+                          const preparation = {
+                            binding,
+                            sourceMappingId: source.sourceMappingId,
+                            sourceCombinationId: source.sourceCombinationId,
+                          };
+                          await update({
+                            runtime_preparation: JSON.stringify({
+                              ...preparation,
+                              state: 'preparing',
+                            }),
+                          });
+                          let ready!: () => void;
+                          let failed!: (error: unknown) => void;
+                          const available = new Promise<void>((resolve, reject) => {
+                            ready = resolve;
+                            failed = reject;
+                          });
+                          earlyLock = hooks.withServerLock(
+                            await get(operationId),
+                            async (scope) => {
+                              earlyScope = scope;
+                              const prerequisites = Promise.withResolvers<void>();
+                              earlyPrerequisites = prerequisites.promise;
+                              void earlyPrerequisites.catch(() => {});
+                              earlyRuntime = (async () => {
+                                const journal = journalSchema.parse(
+                                  (await get(operationId)).journal,
+                                );
+                                const confirmed = (phase: MinecraftModpackPhase) =>
+                                  journal.some(
+                                    (entry) => entry.phase === phase && entry.state === 'confirmed',
+                                  );
+                                if (!confirmed('stopping'))
+                                  await effect('stopping', () => scope.stop());
+                                if (
+                                  selection.install?.backupBefore &&
+                                  confirmed('backup') &&
+                                  !(await get(operationId)).backup_id
+                                )
+                                  throw new DomainError('operation_uncertain');
+                                if (selection.install?.backupBefore && !confirmed('backup')) {
+                                  const backupId = await effect('backup', () => scope.backup());
+                                  if (!backupId) throw new DomainError('operation_uncertain');
+                                  await update({ backup_id: backupId });
+                                }
+                                prerequisites.resolve();
+                                if (confirmed('runtime') && checkpoint) {
+                                  if (!scope.assertPreparedRuntime)
+                                    throw new DomainError('operation_uncertain');
+                                  await scope.assertPreparedRuntime(binding, preparation);
+                                }
+                                if (!confirmed('runtime'))
+                                  await effect(
+                                    'runtime',
+                                    () => scope.configureRuntime(binding),
+                                    journal.some(
+                                      (entry) =>
+                                        entry.phase === 'runtime' && entry.state === 'dispatched',
+                                    ),
+                                  );
+                                await update({
+                                  runtime_preparation: JSON.stringify({
+                                    ...preparation,
+                                    state: 'ready',
+                                  }),
+                                });
+                              })();
+                              // Attach immediately: a failing runtime may finish before downloads do.
+                              void earlyRuntime.catch((error) => {
+                                prerequisites.reject(error);
+                                controller.abort();
+                              });
+                              ready();
+                              await earlyReleased;
+                              await earlyRuntime;
+                            },
+                          );
+                          void earlyLock.catch(failed);
+                          await available;
+                        },
+                      }
+                    : {}),
                   async progress(phase, value) {
                     controller.signal.throwIfAborted();
                     const complete = value !== null && value.completedFiles === value.totalFiles;
@@ -769,25 +1002,50 @@ export function createMinecraftModpacksService(options: {
               )
                 throw new DomainError('provenance_mismatch');
               await check();
+              if (earlyPrerequisites) await earlyPrerequisites;
               const previous = await receipt(claimed.server_id);
               const [observation, runtime] = await Promise.all([
                 timing.measure('inventory', () =>
                   hooks.inspect(claimed.server_id, prepared, previous?.receipt ?? null),
                 ),
-                timing.measure('resolveRuntime', () =>
-                  hooks.resolveRuntime(claimed.server_id, prepared),
+                timing.measure('resolveRuntime', async () =>
+                  earlyScope
+                    ? Promise.resolve(
+                        runtimePreparationSchema.parse((await get(operationId)).runtime_preparation)
+                          .binding,
+                      )
+                    : hooks.resolveRuntime(claimed.server_id, prepared),
                 ),
               ]);
+              if (earlyScope) preparedObservation = observation;
+              const runtimeCheckpoint = earlyScope
+                ? runtimePreparationSchema.parse((await get(operationId)).runtime_preparation)
+                : null;
               const plan = timing.measureSync('plan', () =>
                 planMinecraftModpack({
                   selection,
                   prepared,
-                  observation,
+                  observation: runtimeCheckpoint
+                    ? {
+                        ...observation,
+                        combinationId: runtimeCheckpoint.sourceCombinationId,
+                        mappingId: runtimeCheckpoint.sourceMappingId,
+                      }
+                    : observation,
                   previous,
                   runtime,
                 }),
               );
               await check();
+              if (earlyScope && plan.blockers.length) {
+                if (earlyRuntime) await earlyRuntime;
+                await update({
+                  prepared: JSON.stringify(prepared),
+                  plan: JSON.stringify(plan),
+                  plan_digest: modpackDigest({ prepared, plan }),
+                });
+                throw new MinecraftModpackBlockedError(plan.blockers);
+              }
               const planDigest = modpackDigest({ prepared, plan });
               const install = selection.install && !plan.blockers.length && plan.runtime;
               const applyRequest = install
@@ -803,7 +1061,13 @@ export function createMinecraftModpacksService(options: {
               // Persist the exact resolved plan and the original Install intent together.
               // The apply worker reauthorizes this actor before any server effect.
               await update({
-                state: plan.blockers.length ? 'blocked' : install ? 'apply_queued' : 'ready',
+                state: plan.blockers.length
+                  ? 'blocked'
+                  : install
+                    ? earlyScope
+                      ? 'applying'
+                      : 'apply_queued'
+                    : 'ready',
                 ...(applyRequest
                   ? {
                       apply_request: JSON.stringify(applyRequest),
@@ -820,15 +1084,17 @@ export function createMinecraftModpacksService(options: {
                 plan_digest: planDigest,
                 blockers: JSON.stringify(plan.blockers),
                 error: null,
-                lease_token: null,
-                lease_until: null,
+                ...(earlyScope ? {} : { lease_token: null, lease_until: null }),
                 updated_at: new Date(),
               });
-              if (applyRequest) {
+              if (earlyScope) execution = await get(operationId);
+              if (applyRequest && !earlyScope) {
                 await notifyJobOutbox(db);
                 wake();
               }
-            } else {
+            }
+            if (execution.state === 'applying') {
+              const claimed = execution;
               const prepared = preparedModpackSchema.parse(claimed.prepared);
               const plan = modpackPlanSchema.parse(claimed.plan);
               const request = minecraftModpackApplySchema.parse(claimed.apply_request);
@@ -840,12 +1106,13 @@ export function createMinecraftModpacksService(options: {
               )
                 throw new DomainError('conflict');
               await update({ phase: 'checking', updated_at: new Date() });
-              await hooks.withServerLock(claimed, async (scope) => {
+              const apply = async (scope: MinecraftModpackApplyScope) => {
                 await check();
                 const previous = await receipt(claimed.server_id);
                 if ((previous?.operationId ?? null) !== plan.previousOperationId)
                   throw new DomainError('conflict');
-                const resuming = journalSchema.parse(claimed.journal).length > 0;
+                const earlyPrepared = claimed.runtime_preparation !== null;
+                const resuming = !earlyScope && journalSchema.parse(claimed.journal).length > 0;
                 const resumingPublication = hasResumableModpackPublicationJournal(claimed);
                 if (resuming) {
                   if (resumingPublication) {
@@ -861,35 +1128,24 @@ export function createMinecraftModpacksService(options: {
                     await scope.assertRuntimeResumable(plan);
                   }
                 }
-                async function effect<T>(
-                  phase: MinecraftModpackPhase,
-                  work: () => Promise<T>,
-                  alreadyDispatched = false,
-                ) {
-                  const current = await check();
-                  const journal = journalSchema.parse(current.journal);
-                  if (!alreadyDispatched)
-                    journal.push({ phase, state: 'dispatched', at: new Date().toISOString() });
-                  await update({ phase, journal: JSON.stringify(journal), updated_at: new Date() });
-                  const result = await work();
-                  await check();
-                  journal.push({ phase, state: 'confirmed', at: new Date().toISOString() });
-                  await update({ journal: JSON.stringify(journal), updated_at: new Date() });
-                  return result;
-                }
+                if (earlyPrerequisites) await earlyPrerequisites;
                 if (!resumingPublication) await scope.preflightPublication(prepared, plan);
-                if (!resuming) await effect('stopping', () => scope.stop());
-                if (!resuming && request.backupBefore) {
+                if (earlyScope && scope.stagePublication)
+                  await scope.stagePublication(prepared, plan);
+                if (earlyRuntime) await earlyRuntime;
+                if (!earlyPrepared && !resuming) await effect('stopping', () => scope.stop());
+                if (!earlyPrepared && !resuming && request.backupBefore) {
                   const backupId = await effect('backup', () => scope.backup());
                   if (!backupId) throw new DomainError('operation_uncertain');
                   await update({ backup_id: backupId });
                 }
-                // A server can flush configurations while stopping. Inspect once after
-                // that boundary, before runtime changes or publication can overwrite them.
-                const observation = await scope.inspect(prepared, previous?.receipt ?? null);
+                // The uninterrupted Install scope already inventoried after stop/backup.
+                // Recovered and review-first operations need a fresh observation.
+                const observation =
+                  preparedObservation ?? (await scope.inspect(prepared, previous?.receipt ?? null));
                 assertMinecraftModpackPlanCurrent(
                   plan,
-                  resuming
+                  resuming || earlyPrepared
                     ? {
                         ...observation,
                         // The exact transition proof above authorizes only these registry
@@ -900,6 +1156,7 @@ export function createMinecraftModpacksService(options: {
                     : observation,
                 );
                 if (
+                  !earlyPrepared &&
                   !resumingPublication &&
                   plan.runtime &&
                   (plan.runtime.combinationId !== plan.sourceCombinationId ||
@@ -925,7 +1182,11 @@ export function createMinecraftModpacksService(options: {
                 if (!files) throw new DomainError('operation_uncertain');
                 verifiedFiles(plan, files);
                 await finish(claimed, prepared, plan, files, token, true);
-              });
+              };
+              if (earlyScope) await apply(earlyScope);
+              else await hooks.withServerLock(claimed, apply);
+              releaseEarlyLock?.();
+              if (earlyLock) await earlyLock;
               // Normal start admission acquires the same server lock. Files are
               // already durable and verified before relinquishing publication.
               clearInterval(heartbeat);
@@ -982,14 +1243,17 @@ export function createMinecraftModpacksService(options: {
               }
             }
           } catch (error) {
+            releaseEarlyLock?.();
+            if (earlyLock) await earlyLock.catch(() => {});
             const row = await get(operationId);
             if (row.lease_token === token && ['preparing', 'applying'].includes(row.state)) {
               const journal = journalSchema.parse(row.journal);
               const uncertain =
-                row.state === 'applying' &&
-                (journal.some((entry) =>
-                  ['runtime', 'publishing', 'restoring'].includes(entry.phase),
-                ) ||
+                (row.runtime_preparation !== null || row.state === 'applying') &&
+                (row.runtime_preparation !== null ||
+                  journal.some((entry) =>
+                    ['runtime', 'publishing', 'restoring'].includes(entry.phase),
+                  ) ||
                   journal.at(-1)?.state === 'dispatched');
               const blocked =
                 row.state === 'preparing' && error instanceof MinecraftModpackBlockedError;
@@ -1003,6 +1267,8 @@ export function createMinecraftModpacksService(options: {
               });
             }
           } finally {
+            releaseEarlyLock?.();
+            if (earlyLock) await earlyLock.catch(() => {});
             clearInterval(heartbeat);
             const row = await get(operationId);
             continueQueuedApply = row.state === 'apply_queued';
@@ -1051,6 +1317,45 @@ export function createMinecraftModpacksService(options: {
           const row = await get(operationId);
           if (row.server_id !== serverId) throw new DomainError('not_found');
           if (row.state !== 'uncertain') throw new DomainError('conflict');
+          if (row.runtime_preparation !== null && row.publication === null) {
+            runtimePreparationSchema.parse(row.runtime_preparation);
+            const entries = journalSchema.parse(row.journal);
+            if (
+              entries.some(
+                (entry) =>
+                  entry.state === 'dispatched' &&
+                  entry.phase !== 'runtime' &&
+                  !entries.some(
+                    (other) => other.phase === entry.phase && other.state === 'confirmed',
+                  ),
+              )
+            )
+              throw new DomainError('operation_uncertain');
+            // Resume the same pinned install intent; runtime dispatch markers remain intact.
+            await db
+              .updateTable('minecraft_modpack_operations')
+              .set({
+                state: 'queued',
+                prepared: 'null',
+                plan: 'null',
+                plan_digest: null,
+                apply_request: 'null',
+                error: null,
+                lease_token: null,
+                lease_until: null,
+                actor_user_id: current.actorUserId,
+                actor_session_id: current[authSessionId] as string,
+                subject_user_id: current.subjectUserId,
+                support_session_id: current.support?.id ?? null,
+                updated_at: new Date(),
+              })
+              .where('id', '=', row.id)
+              .where('state', '=', 'uncertain')
+              .execute();
+            await notifyJobOutbox(db);
+            wake();
+            return snapshotValue(serverId);
+          }
           const prepared = preparedModpackSchema.parse(row.prepared);
           const plan = modpackPlanSchema.parse(row.plan);
           if (row.plan_digest !== modpackDigest({ prepared, plan }))

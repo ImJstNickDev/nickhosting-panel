@@ -368,18 +368,38 @@ Mods and Plugins share the full-page detail/Back behavior; Datapack browsing is
 inline instead of a dialog. Their existing selection/preparation queues remain.
 
 `selection.install = {backupBefore: boolean}` is an optional persisted intent on
-POST /prepare. The worker atomically records the prepared plan, exact digest and
-delete set with apply_queued only when unblocked, then reauthorizes the original
-actor before effects. Navigation/reload does not cancel it; retries retain the
-intent. Console projects preparation directly before a synthetic provider job
-exists, including blocked/failure states. No migration or new dependency is needed.
+POST /prepare. Explicit Install fences NickHosting starts from acceptance. Once
+the manifest supplies a pinned supported runtime, the worker stops the server
+once, completes an optional backup, then prepares that runtime concurrently with
+pack downloads. Review-only preparation still has no server effects.
+
+Migration 052 adds the private `runtime_preparation` checkpoint. The same worker
+lease and server scope continue from preparation into application; the exact
+manifest, plan and delete set are persisted before publication. Hidden staging
+can overlap the installer after stop/backup completes; visible publication waits
+for both. No external Pterodactyl starts during this installation are an Owner
+operational guarantee. The retained scope reuses its stopped-process proof;
+a restarted/recovered worker must establish fresh proof.
+
+Failures after early lifecycle effects stay uncertain and retain their fence and
+checkpoint. Verify & Resume can redownload the same pinned selection, retaining
+a confirmed backup/runtime rather than replaying them. A dispatched installer
+whose completion cannot be proven is never blindly redispatched. Cancellation is
+available before the early-runtime boundary. After a fully confirmed runtime,
+an interrupted operation with no publication can instead be explicitly abandoned:
+the UI explains that the new runtime remains, existing pack files are unchanged,
+and the server stays stopped. Incomplete effects cannot be discarded. Navigation/reload does not
+cancel durable Install intent. Console projects preparation and later provider
+progress, including blocked/failure states.
 
 ### Debug timing
 
 With the existing log level set to `debug`, modpack attempts emit bounded
 `servers.modpack_preparation_timing`, `servers.modpack_application_timing` and
 `servers.modpack_worker_timing` summaries. Correlate by `operationId`; preparation
-attempts also carry their lease attempt ID. These are diagnostics, not persisted
+attempts also carry their lease attempt ID. An explicit Install worker timing
+now spans preparation and application; application timing includes the retained
+early-runtime scope. These overlap the download report and must not be summed. These are diagnostics, not persisted
 user activity or additional provider checks. At normal log levels they are disabled.
 
 Reports contain monotonic elapsed time, per-stage count/total/maximum and bounded
@@ -396,16 +416,19 @@ runtime change can materially change the result.
 
 A worker that has durably queued application immediately yields it back to the
 bounded two-slot scheduler; only cleanup/no-progress retries retain a cooldown.
-Competing completions cannot postpone an earlier scheduled wake. Preparation and
-application remain separate durable claims, so restart recovery is unchanged.
+Competing completions cannot postpone an earlier scheduled wake. Review-only
+preparation and later Apply remain separate claims. Explicit Install retains its
+claim and server scope through concurrent preparation and application.
 
 Publication verifies successful retirement at the moved roots before installing
 new files, then verifies descendants once when producing the final receipt.
 Uncertain recovery still checks the complete retained tree. Installer channel
 reauthorization uses current local authority; provider identity/startup is checked
 at dispatch and confirmation instead of at each channel authorization callback.
-Independent host/installer observations run concurrently. These changes do not
-start the installer before preparation and capacity admission have succeeded.
+Independent host/installer observations run concurrently. Runtime installation
+has its own capacity admission; pack download/storage admission continues in its
+parallel branch. Failed downloads may therefore leave the new runtime installed,
+but never publish an incomplete pack.
 
 ### Local archive preparation
 

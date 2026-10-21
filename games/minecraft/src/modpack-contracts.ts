@@ -126,6 +126,8 @@ export const minecraftModpackOperationSchema = z
     id: z.uuid(),
     selection: minecraftModpackPrepareSchema,
     state: minecraftModpackStateSchema,
+    canCancel: z.boolean().optional(),
+    cancellationEffect: z.literal('runtime-retained').optional(),
     phase: minecraftModpackPhaseSchema,
     progress: minecraftModpackProgressSchema.nullable(),
     pack: minecraftModpackPackSchema.nullable(),

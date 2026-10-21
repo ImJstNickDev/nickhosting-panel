@@ -19,14 +19,22 @@ export function minecraftModpackSchemaAvailable(db: Kysely<Database>): Promise<b
   checks.set(db, next);
   return next.value;
 }
-/** Preparation does not touch the server. Publication fences concurrent writers. */
+/** Explicit Install owns the server from admission; preview-only preparation does not. */
 export async function assertNoModpackPublication(db: Kysely<Database>, serverId: string) {
   if (!(await minecraftModpackSchemaAvailable(db))) return;
   const row = await db
     .selectFrom('minecraft_modpack_operations')
     .select('id')
     .where('server_id', '=', serverId)
-    .where('state', 'in', ['apply_queued', 'applying', 'uncertain'])
+    .where((eb) =>
+      eb.or([
+        eb('state', 'in', ['apply_queued', 'applying', 'uncertain']),
+        eb.and([
+          eb('state', 'in', ['queued', 'preparing']),
+          sql<boolean>`jsonb_typeof(selection->'install') = 'object'`,
+        ]),
+      ]),
+    )
     .executeTakeFirst();
   if (row) throw new DomainError('operation_busy');
 }

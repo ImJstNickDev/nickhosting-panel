@@ -133,12 +133,21 @@ export function ModpackReview(props: {
   const locked =
     props.busy ||
     !props.canManage ||
+    operation.canCancel === false ||
     ['apply_queued', 'applying', 'uncertain'].includes(operation.state);
   const ready =
     operation.state === 'ready' &&
     operation.runtimeSupported &&
     operation.blockers.length === 0 &&
     Boolean(operation.planDigest);
+  const choicesLocked =
+    locked &&
+    !(
+      operation.canCancel === true &&
+      operation.cancellationEffect === 'runtime-retained' &&
+      !props.busy &&
+      props.canManage
+    );
   const project = operation.pack?.project ?? props.project;
   const version = operation.pack?.version ?? props.version;
   return (
@@ -151,7 +160,7 @@ export function ModpackReview(props: {
         <ModsAction
           icon="close"
           label={t(k('cancel'))}
-          disabled={locked}
+          disabled={props.busy || !props.canManage || !(operation.canCancel ?? !locked)}
           onClick={props.onDiscard}
         />
       </header>
@@ -252,7 +261,7 @@ export function ModpackReview(props: {
                           <div className="modpacks-file-decision">
                             <button
                               type="button"
-                              disabled={locked}
+                              disabled={choicesLocked}
                               onClick={() =>
                                 props.onFileDecision?.(blocker.path ?? '', 'keep-local')
                               }
@@ -261,7 +270,7 @@ export function ModpackReview(props: {
                             </button>
                             <button
                               type="button"
-                              disabled={locked}
+                              disabled={choicesLocked}
                               onClick={() => props.onFileDecision?.(blocker.path ?? '', 'use-pack')}
                             >
                               {t(k('usePack'))}
@@ -322,7 +331,7 @@ export function ModpackReview(props: {
               title={t(k('preserveWorlds'))}
               hint={t(k('preserveWorldsHint'))}
               checked={operation.selection.worldPolicy === 'preserve'}
-              disabled={locked}
+              disabled={choicesLocked}
               onChange={(value) => props.onWorldPolicy(value ? 'preserve' : 'reset')}
             />
           ) : (

@@ -41,6 +41,7 @@ export interface MinecraftModpackTables {
     journal: Json;
     publication: ColumnType<unknown, string | undefined, string>;
     runtime_transition: ColumnType<unknown, string | undefined, string>;
+    runtime_preparation: ColumnType<unknown, string | undefined, string>;
     backup_id: string | null;
     restart_required: boolean;
     error: string | null;

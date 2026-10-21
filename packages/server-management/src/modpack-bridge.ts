@@ -12,7 +12,7 @@ import {
   contentPolicyValues,
   DomainError,
 } from '@nickhosting/core';
-import { type Database, getSettings } from '@nickhosting/database';
+import { type Database, getSettings, notifyGatewayChange } from '@nickhosting/database';
 import type { Kysely } from 'kysely';
 import { z } from 'zod';
 import { resolvePinnedCurseForgeFiles } from '../../content-providers/src/modpack-catalog-curseforge.js';
@@ -269,8 +269,9 @@ export function createMinecraftModpackBridge(options: {
                   }
                 : {}),
               checkTarget: async (target) => {
-                if (!(await getRuntime(input.operation, target)))
-                  throw new MinecraftModpackBlockedError([{ reason: 'runtime' }]);
+                const binding = await getRuntime(input.operation, target);
+                if (!binding) throw new MinecraftModpackBlockedError([{ reason: 'runtime' }]);
+                await input.runtimeReady?.(binding);
               },
               progress: (value) =>
                 input.progress('downloading', {
@@ -294,6 +295,7 @@ export function createMinecraftModpackBridge(options: {
             staged.files.reduce((sum, file) => sum + 320 + 2 * Buffer.byteLength(file.path), 0) +
             (staged.files.some((file) => file.path === 'server.properties') ? 2 * 1024 * 1024 : 0);
           await reserve(lastStageBytes);
+          await input.beforeInventory?.();
           const sanitized: ModpackPropertiesStage = staged.files.some(
             (file) => file.path === 'server.properties',
           )
@@ -349,7 +351,10 @@ export function createMinecraftModpackBridge(options: {
           const timing = createOperationTiming(logger?.isEnabled('debug') === true);
           let outcome = 'failed';
           try {
-            const currentAuth = () => modpackActor(connection, row, true, env);
+            const currentAuth = async () => {
+              const current = await operation(row.id);
+              return modpackActor(connection, current, current.state === 'applying', env);
+            };
             const host = await timing.measure('initialize', () =>
               createModpackContext({
                 db: connection,
@@ -358,6 +363,8 @@ export function createMinecraftModpackBridge(options: {
                 env,
                 currentAuth,
                 timing,
+                preparingInstall: row.state === 'preparing',
+                retainStoppedProof: true,
               }),
             );
             const result = await work({
@@ -369,6 +376,7 @@ export function createMinecraftModpackBridge(options: {
                   await binding(row.server_id),
                 ),
               preflightPublication: host.preflightPublication,
+              stagePublication: host.publication.stage,
               stop: host.stop,
               backup: host.backup,
               assertRuntimeResumable: async (plan) => {
@@ -412,6 +420,20 @@ export function createMinecraftModpackBridge(options: {
                 await host.publication.assertResumable(prepared, plan);
               },
               resumePublication: host.publication.resume,
+              assertPreparedRuntime: async (target, source) =>
+                assertModpackRuntimeVerified({
+                  db: connection,
+                  adapter: runtime.adapter,
+                  context: await currentAuth(),
+                  serverId: row.server_id,
+                  operationId: row.id,
+                  binding: target,
+                  ...source,
+                  env,
+                  authorize: host.context.authorize,
+                  assertStopped: host.assertStopped,
+                  readTransition: async () => (await operation(row.id)).runtime_transition,
+                }),
               configureRuntime: async (target) =>
                 configureModpackRuntime({
                   timing: timing.child('runtime'),
@@ -612,7 +634,10 @@ export function createMinecraftModpackBridge(options: {
         }),
       async cleanup(row) {
         if (row.state === 'applied') await completeModpackJob(db, row);
-        if (row.state === 'failed')
+        if (
+          row.state === 'failed' ||
+          (row.state === 'cancelled' && row.runtime_preparation !== null)
+        )
           await db.transaction().execute(async (tx) => {
             await lockResources(tx);
             await tx
@@ -625,11 +650,17 @@ export function createMinecraftModpackBridge(options: {
               .where('id', '=', row.id)
               .execute();
             await tx
+              .deleteFrom('installation_reservations')
+              .where('server_id', '=', row.server_id)
+              .where('operation_id', '=', row.id)
+              .execute();
+            await tx
               .updateTable('managed_servers')
               .set({ active_operation_id: null, updated_at: new Date() })
               .where('id', '=', row.server_id)
               .where('active_operation_id', '=', row.id)
               .execute();
+            await notifyGatewayChange(tx);
           });
         // Only local operation-owned staging is reclaimed here; remote originals are reclaimed after verified publication.
         if (!row.staging_root) return;

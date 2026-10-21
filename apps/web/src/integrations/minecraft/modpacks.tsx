@@ -11,7 +11,7 @@ import {
 } from '../../../../../games/minecraft/src/ui/modpacks-controller.js';
 import { idempotencyKey, queryClient } from '../../api/client.js';
 import { useFormat, useT } from '../../app/i18n.js';
-import { ErrorNotice } from '../../components/ui.js';
+import { ConfirmDialog, ErrorNotice } from '../../components/ui.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { gameUiClient } from '../../features/integrations.js';
 import { ViewerSelect } from '../../features/viewer-engine/viewer-select.js';
@@ -82,6 +82,10 @@ function Modpacks(props: GameSectionViewProps) {
     version: ModpackCatalogVersion;
   }>();
   const [busy, setBusy] = useState(false);
+  const [confirmation, setConfirmation] = useState<{
+    action: () => void;
+    reprepare: boolean;
+  }>();
   const [error, setError] = useState<unknown>();
   const firstSnapshot = useRef(Boolean(initial));
   const intent = useRef(new Map<string, string>());
@@ -121,6 +125,7 @@ function Modpacks(props: GameSectionViewProps) {
     !props.canManage ||
     props.pending ||
     busy ||
+    operation?.canCancel === false ||
     Boolean(operation && applying.has(operation.state));
   const canRecover =
     props.canManage &&
@@ -203,16 +208,25 @@ function Modpacks(props: GameSectionViewProps) {
       return result;
     });
   }
-  function reprepare(worldPolicy: 'preserve' | 'reset') {
+  function confirmRuntimeChange(action: () => void, reprepare = false) {
+    if (operation?.cancellationEffect === 'runtime-retained')
+      setConfirmation({ action, reprepare });
+    else action();
+  }
+  function reprepare(
+    changes: Partial<Pick<MinecraftModpackOperation['selection'], 'worldPolicy' | 'fileDecisions'>>,
+  ) {
     if (!operation) return;
-    void mutate(async () => {
-      await controller.discard(props.serverId, operation.id);
-      return controller.prepare(props.serverId, {
-        ...operation.selection,
-        worldPolicy,
-        idempotencyKey: requestKey(`prepare:${operation.id}:${worldPolicy}`),
+    confirmRuntimeChange(() => {
+      void mutate(async () => {
+        await controller.discard(props.serverId, operation.id);
+        return controller.prepare(props.serverId, {
+          ...operation.selection,
+          ...changes,
+          idempotencyKey: requestKey(`prepare:${operation.id}:${JSON.stringify(changes)}`),
+        });
       });
-    });
+    }, true);
   }
   function discard() {
     if (!operation) return;
@@ -408,20 +422,15 @@ function Modpacks(props: GameSectionViewProps) {
                 project={operationProject}
                 version={operationVersion}
                 canManage={props.canManage}
-                busy={busy || props.pending}
+                busy={busy || (props.pending && props.recoverableOperationId !== operation.id)}
                 canRecover={canRecover}
                 onBack={() => setView('discover')}
                 onApply={apply}
-                onDiscard={discard}
-                onWorldPolicy={reprepare}
+                onDiscard={() => confirmRuntimeChange(discard)}
+                onWorldPolicy={(worldPolicy) => reprepare({ worldPolicy })}
                 onFileDecision={(path, decision) => {
-                  void mutate(async () => {
-                    await controller.discard(props.serverId, operation.id);
-                    return controller.prepare(props.serverId, {
-                      ...operation.selection,
-                      fileDecisions: { ...operation.selection.fileDecisions, [path]: decision },
-                      idempotencyKey: requestKey(`decision:${operation.id}:${path}:${decision}`),
-                    });
+                  reprepare({
+                    fileDecisions: { ...operation.selection.fileDecisions, [path]: decision },
                   });
                 }}
                 onRetry={() => {
@@ -454,6 +463,23 @@ function Modpacks(props: GameSectionViewProps) {
             ))}
         </>
       )}
+      <ConfirmDialog
+        open={Boolean(confirmation)}
+        title={t(k(confirmation?.reprepare ? 'reprepareRetainedTitle' : 'cancelRetainedTitle'))}
+        confirmLabel={t(
+          k(confirmation?.reprepare ? 'reprepareRetainedConfirm' : 'cancelRetainedConfirm'),
+        )}
+        destructive
+        busy={busy}
+        onClose={() => setConfirmation(undefined)}
+        onConfirm={async () => {
+          const action = confirmation?.action;
+          setConfirmation(undefined);
+          action?.();
+        }}
+      >
+        <p>{t(k(confirmation?.reprepare ? 'reprepareRetainedBody' : 'cancelRetainedBody'))}</p>
+      </ConfirmDialog>
     </section>
   );
 }

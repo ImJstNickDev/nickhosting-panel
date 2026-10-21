@@ -463,6 +463,19 @@ export async function configureModpackRuntime(
     journal = { ...journal, state };
     await timing.measure('journalWrite', () => options.saveTransition(journal));
   };
+  if (
+    !saved &&
+    profile.installed &&
+    server.installation_state === 'installed' &&
+    server.mapping_id === binding.mappingId &&
+    profile.combination_id === binding.combinationId
+  ) {
+    // A pack replacement does not itself invalidate an already installed exact
+    // runtime. Keep its files and skip another installer entirely.
+    if (!matchesStartup(await remote())) throw new DomainError('provenance_mismatch');
+    await save('verified');
+    return;
+  }
   if (!saved) await save('planned');
   if (journal.state === 'verified') {
     await timing.measure('launchVerify', async () =>
@@ -477,6 +490,7 @@ export async function configureModpackRuntime(
     return;
   }
   let reserved = false;
+  let startupProof: ApplicationServer | undefined;
   if (journal.state === 'planned') {
     await timing.measure('admission', () => reserveInstallation(db, serverId, operationId, env));
     reserved = true;
@@ -488,10 +502,12 @@ export async function configureModpackRuntime(
     );
     // PATCH representations may omit allocation relationships. Only the full
     // Application GET can prove all identity dimensions and the changed startup.
-    if (!matchesStartup(await remote())) throw new DomainError('operation_uncertain');
+    startupProof = await remote();
+    if (!matchesStartup(startupProof)) throw new DomainError('operation_uncertain');
     await save('startup-confirmed');
   } else if (journal.state === 'startup-dispatched') {
-    if (!matchesStartup(await remote())) throw new DomainError('operation_uncertain');
+    startupProof = await remote();
+    if (!matchesStartup(startupProof)) throw new DomainError('operation_uncertain');
     await save('startup-confirmed');
   }
   if (journal.state === 'startup-confirmed') {
@@ -546,7 +562,7 @@ export async function configureModpackRuntime(
     });
     server = { ...server, mapping_id: binding.mappingId };
     await timing.measure('stopped', () => options.assertStopped());
-    const proof = await remote();
+    const proof = startupProof ?? (await remote());
     if (!matchesStartup(proof)) throw new DomainError('provenance_mismatch');
     await save('installation-dispatched');
     const outcome = await timing.measure('installerWait', () =>

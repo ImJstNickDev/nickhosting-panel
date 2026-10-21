@@ -242,6 +242,34 @@ function fixture(recovery = false) {
 }
 
 describe('Modpack publication', () => {
+  it('stages in the hidden operation directory without changing the installed pack, then publishes once', async () => {
+    const f = fixture();
+    const plan = f.plan();
+    await f.helper.stage(f.prepared, plan);
+    expect(f.journal()?.state).toBe('staged');
+    expect(f.tree.has('mods/old.jar')).toBe(true);
+    expect(f.tree.has('mods/new.jar')).toBe(false);
+    expect(f.adapter.renameFiles).not.toHaveBeenCalled();
+    expect(f.adapter.createDirectory).not.toHaveBeenCalled();
+    await f.helper.publish(f.prepared, plan);
+    expect(f.uploadArchive).toHaveBeenCalledTimes(1);
+    expect(f.archive).toHaveBeenCalledTimes(1);
+    expect(f.tree.has('mods/new.jar')).toBe(true);
+    expect(await f.helper.verify(f.prepared, plan)).not.toBeNull();
+  });
+
+  it('does not trust an in-memory staging receipt after reconstruction or overwrite changed destinations', async () => {
+    const f = fixture();
+    const plan = f.plan();
+    await f.helper.stage(f.prepared, plan);
+    await expect(f.resetHelper().publish(f.prepared, plan)).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    f.add('mods/old.jar', 'file', newTime);
+    await expect(f.helper.publish(f.prepared, plan)).rejects.toMatchObject({ code: 'conflict' });
+    expect(f.adapter.renameFiles).not.toHaveBeenCalled();
+  });
+
   it('reports publication phases with fixed labels and no paths', async () => {
     const f = fixture();
     let tick = 0;

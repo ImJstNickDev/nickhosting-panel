@@ -1991,3 +1991,38 @@ checks passed HTTPS, the synced Forge catalog and secure HMR without page errors
 Discovery returned 52 supported Minecraft releases and 4,222 exact coordinates.
 No Forge mapping, game server, real installation or pack transition was created
 as part of activation; the Owner configures the mapping and performs gameplay tests.
+
+### Parallel modpack installation
+
+Migration `052_modpack_runtime_preparation.sql` adds a nullable operation checkpoint.
+Explicit Install requests fence NickHosting starts and file mutations from admission.
+Once the pack manifest identifies its runtime, runtime preparation overlaps pack
+downloads and hidden staging; final publication waits for both branches. A matching,
+already installed runtime does not run its installer again. Preview-only preparation
+retains its existing behavior without modifying the server.
+
+The uninterrupted operation reuses its initial stopped-state confirmation. This
+deployment assumes the Owner does not start the server directly in Pterodactyl
+during pack installation. Worker recovery establishes fresh observations and retains
+runtime/publication checkpoints instead of blindly repeating dispatched effects.
+
+Activation uses the full private Compose env-file chain, an image containing
+migration052, and only the dev API/worker services. Preserve a rollback image first.
+Rollback must wait for active operations to finish or be recovered with the new code;
+retain the additive column and journals. Do not roll back game data or remove a
+checkpoint to bypass recovery. Panel, Wings and Blueprint require no change.
+
+Isolated checks cover runtime/download overlap, hidden-stage recovery, start
+fencing, and cancellation after a completed runtime. Firefox checks cover the
+disabled discard action during preparation and explicit retained-runtime
+confirmation, including applying a local-file conflict decision. Screenshots:
+[preparing](screenshots/m5/modpacks-parallel-preparing-desktop-en.png) and
+[retained runtime](screenshots/m5/modpacks-runtime-retained-desktop-en.png).
+
+Development activation completed on 2026-10-21 under the Owner's authorization.
+The shared development image was rebuilt and only migration052 was applied through
+the normal Compose migrator. API and worker were restarted in place; all eleven
+dev services are healthy and HTTPS returns 200. Existing accounts, managed servers
+and sessions are unchanged. Panel/Wings image IDs and start times are unchanged.
+No real modpack installation or game-server command was performed for validation.
+Debug timing remains enabled for the Owner's next comparable pack replacement.

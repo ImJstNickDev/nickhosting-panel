@@ -408,6 +408,91 @@ describe('Modpacks real lifecycle and Fileman context', () => {
     await expect(checking).rejects.toMatchObject({ code: 'conflict' });
   });
 
+  it('retains stop proof only inside the uninterrupted exclusive context', async () => {
+    const f = await fixture(false);
+    const host = await createModpackContext({ ...f.options, retainStoppedProof: true });
+    const observer = f.runtime.containerObserver;
+    if (!observer) throw new Error('Missing fixture observer');
+    const stopped = vi.mocked(observer.stopped);
+    await host.stop();
+    await host.assertStopped();
+    await host.context.assertStopped();
+    expect(stopped).toHaveBeenCalledTimes(2);
+    const recovered = await createModpackContext({ ...f.options, retainStoppedProof: true });
+    stopped.mockResolvedValue(false);
+    await expect(recovered.assertStopped()).rejects.toMatchObject({ code: 'conflict' });
+    expect(stopped).toHaveBeenCalledTimes(4);
+  });
+
+  it('merges independent host checkpoints without losing an archive or stop journal', async () => {
+    const f = await fixture(false);
+    const host = await createModpackContext(f.options);
+    await Promise.all([
+      host.context.update({ plan: { stopped: true, wasRunning: true } }),
+      host.context.update({ plan: { modpackArchive: { binding: 'sealed' } } }),
+    ]);
+    const row = await f.db
+      .selectFrom('server_operations')
+      .select('plan')
+      .where('job_id', '=', f.row.id)
+      .executeTakeFirstOrThrow();
+    expect(row.plan).toMatchObject({
+      stopped: true,
+      wasRunning: true,
+      modpackArchive: { binding: 'sealed' },
+      modpackOperationId: f.row.id,
+    });
+  });
+
+  it('prepares only explicit installation intents under their original live lease', async () => {
+    const f = await fixture(false);
+    const selection = minecraftModpackPrepareSchema.parse({
+      provider: 'modrinth',
+      projectId: 'pack',
+      versionId: 'v1',
+      mode: 'replace',
+      idempotencyKey: 'parallel',
+      install: { backupBefore: false },
+    });
+    const row = await f.db
+      .updateTable('minecraft_modpack_operations')
+      .set({
+        state: 'preparing',
+        selection: JSON.stringify(selection),
+        apply_actor_user_id: null,
+        apply_actor_session_id: null,
+        apply_subject_user_id: null,
+      })
+      .where('id', '=', f.row.id)
+      .returningAll()
+      .executeTakeFirstOrThrow();
+    const host = await createModpackContext({
+      ...f.options,
+      operation: row,
+      preparingInstall: true,
+    });
+    await host.stop();
+    await f.db
+      .updateTable('minecraft_modpack_operations')
+      .set({ state: 'applying' })
+      .where('id', '=', row.id)
+      .execute();
+    await host.authorize();
+    await f.db
+      .updateTable('minecraft_modpack_operations')
+      .set({ lease_token: randomUUID() })
+      .where('id', '=', row.id)
+      .execute();
+    await expect(host.authorize()).rejects.toMatchObject({ code: 'operation_uncertain' });
+    await expect(
+      createModpackContext({
+        ...f.options,
+        operation: { ...row, selection: { ...selection, install: undefined } },
+        preparingInstall: true,
+      }),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+  });
+
   it('creates one synthetic reinstall with the same operation id and no generic outbox delivery', async () => {
     const f = await fixture();
     const host = await withModpackServerLock(f.db, f.serverId, (db) =>

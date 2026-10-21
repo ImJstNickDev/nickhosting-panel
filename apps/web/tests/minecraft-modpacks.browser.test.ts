@@ -692,6 +692,60 @@ describe('Minecraft Modpacks full-page experience', () => {
     });
     expect(writes.filter((write) => write.path.endsWith('/apply'))).toHaveLength(0);
   });
+  it('locks discard while runtime preparation overlaps the pack download', async () => {
+    pending = true;
+    await open();
+    await details();
+    await page.getByRole('button', { name: 'Install', exact: true }).click();
+    expect(snapshot.operation?.state).toBe('preparing');
+    if (!snapshot.operation) throw new Error('Missing preparation');
+    snapshot.operation.canCancel = false;
+    await page.goto(`${origin}modpacks-fixture?operation=${op}`);
+    await check(page.getByRole('button', { name: 'Discard preparation' })).toBeDisabled();
+    expect(writes).toHaveLength(1);
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/modpacks-parallel-preparing-desktop-en.png',
+      fullPage: true,
+    });
+    expect(errors).toEqual([]);
+  });
+  it('explains the retained runtime before abandoning a completed preparation', async () => {
+    await openPausedCore();
+    if (!snapshot.operation) throw new Error('Missing preparation');
+    snapshot.operation.canCancel = true;
+    snapshot.operation.cancellationEffect = 'runtime-retained';
+    await page.reload();
+    const discard = page.getByRole('button', { name: 'Discard preparation' });
+    await check(discard).toBeEnabled();
+    await discard.click();
+    await check(page.getByRole('dialog')).toBeVisible();
+    await check(page.getByText(/The runtime has already been updated/)).toBeVisible();
+    expect(writes).toHaveLength(0);
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/modpacks-runtime-retained-desktop-en.png',
+      fullPage: true,
+    });
+    await page.getByRole('button', { name: 'Stop installation', exact: true }).click();
+    await check(page.getByRole('dialog')).not.toBeVisible();
+    expect(writes.at(-1)?.path).toBe(`DELETE ${base}/operations/${op}`);
+  });
+  it('confirms a local file decision before restarting preparation with the retained runtime', async () => {
+    await openPausedCore();
+    if (!snapshot.operation) throw new Error('Missing preparation');
+    snapshot.operation.canCancel = true;
+    snapshot.operation.cancellationEffect = 'runtime-retained';
+    snapshot.operation.selection.install = { backupBefore: false };
+    snapshot.operation.blockers = [{ reason: 'modified-file', path: 'config/local.toml' }];
+    await page.reload();
+    await page.getByRole('button', { name: 'Keep local', exact: true }).click();
+    await check(page.getByRole('dialog')).toBeVisible();
+    expect(writes).toHaveLength(0);
+    await page.getByRole('button', { name: 'Continue preparation', exact: true }).click();
+    await check.poll(() => writes.length).toBe(2);
+    expect(writes[0]?.path).toBe(`DELETE ${base}/operations/${op}`);
+    expect(writes[1]?.body.fileDecisions).toEqual({ 'config/local.toml': 'keep-local' });
+    expect(writes[1]?.body.install).toEqual({ backupBefore: false });
+  });
   it('keeps uncertain effects separate from retrying installation', async () => {
     prepareState = 'uncertain';
     await open();

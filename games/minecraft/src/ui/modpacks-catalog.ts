@@ -121,6 +121,18 @@ export const minecraftModpacksMessages: Record<string, [string, string]> = {
   'modpacks.uncertain': ['Check the installation outcome', 'Verifica l’esito dell’installazione'],
   'modpacks.cancelled': ['Cancelled', 'Annullato'],
   'modpacks.cancel': ['Discard preparation', 'Scarta preparazione'],
+  'modpacks.cancelRetainedTitle': ['Stop this installation?', 'Interrompere questa installazione?'],
+  'modpacks.cancelRetainedBody': [
+    'The runtime has already been updated. The server will stay stopped; the pack files have not been replaced. Install another pack or check compatibility before starting it.',
+    'Il runtime è già stato aggiornato. Il server resterà spento; i file del pack non sono stati sostituiti. Installa un altro pack o verifica la compatibilità prima di avviarlo.',
+  ],
+  'modpacks.cancelRetainedConfirm': ['Stop installation', 'Interrompi installazione'],
+  'modpacks.reprepareRetainedTitle': ['Apply this choice?', 'Applicare questa scelta?'],
+  'modpacks.reprepareRetainedBody': [
+    'The runtime is already prepared. Pack preparation will restart with this choice. The server stays stopped until installation finishes.',
+    'Il runtime è già pronto. La preparazione del pack ripartirà con questa scelta. Il server resterà spento fino al termine dell’installazione.',
+  ],
+  'modpacks.reprepareRetainedConfirm': ['Continue preparation', 'Continua preparazione'],
   'modpacks.retry': ['Try again', 'Riprova'],
   'modpacks.recover': ['Verify and resume', 'Verifica e riprendi'],
   'modpacks.recoverHint': [

@@ -98,6 +98,7 @@ describe('Modpacks durable preparation and apply', () => {
       configureRuntime: vi.fn(async () => {
         calls.push('runtime');
       }),
+      assertPreparedRuntime: vi.fn(async () => {}),
       assertRuntimeResumable: vi.fn(async () => {}),
       assertPublicationResumable: vi.fn(async () => {}),
       resumePublication: vi.fn(async () => {
@@ -225,6 +226,237 @@ describe('Modpacks durable preparation and apply', () => {
     const count = f.calls.length;
     await f.service.process(id);
     expect(f.calls).toHaveLength(count);
+  });
+
+  it('overlaps runtime with downloads and hidden staging, with one stop and backup before runtime', async () => {
+    const f = await fixture();
+    const runtimeStarted = Promise.withResolvers<void>();
+    const releaseRuntime = Promise.withResolvers<void>();
+    const stageStarted = Promise.withResolvers<void>();
+    f.scope.configureRuntime.mockImplementation(async () => {
+      f.calls.push('runtime');
+      runtimeStarted.resolve();
+      await releaseRuntime.promise;
+    });
+    const stagePublication = vi.fn(async () => {
+      f.calls.push('stage');
+      stageStarted.resolve();
+    });
+    f.hooks.withServerLock = async (_row, work) => work({ ...f.scope, stagePublication });
+    vi.mocked(f.hooks.prepare).mockImplementation(async (input) => {
+      await input.runtimeReady?.({
+        combinationId: f.combinationId,
+        mappingId: f.mappingId,
+        target: f.prepared.target,
+      });
+      await runtimeStarted.promise;
+      f.calls.push('download-complete');
+      return f.prepared;
+    });
+    const queued = await f.service.prepare(f.context, f.serverId, {
+      ...f.selection,
+      install: { backupBefore: true },
+    });
+    if (!queued.operation) throw new Error('Expected operation');
+    const id = queued.operation.id;
+    const processing = f.service.process(id);
+    await stageStarted.promise;
+    expect(f.calls).toEqual(['stop', 'backup', 'runtime', 'download-complete', 'stage']);
+    expect(f.scope.publish).not.toHaveBeenCalled();
+    expect((await f.service.snapshot(f.context, f.serverId)).operation?.canCancel).toBe(false);
+    await expect(f.service.cancel(f.context, f.serverId, id)).rejects.toMatchObject({
+      code: 'operation_busy',
+    });
+    releaseRuntime.resolve();
+    await processing;
+    expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('applied');
+    expect(f.scope.stop).toHaveBeenCalledTimes(1);
+    expect(f.scope.configureRuntime).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains early runtime on a download failure and resumes without reinstalling or repeating backup', async () => {
+    const f = await fixture();
+    vi.mocked(f.hooks.prepare).mockImplementation(async (input) => {
+      await input.runtimeReady?.({
+        combinationId: f.combinationId,
+        mappingId: f.mappingId,
+        target: f.prepared.target,
+      });
+      await vi.waitFor(async () => {
+        const row = await f.db
+          .selectFrom('minecraft_modpack_operations')
+          .select('runtime_preparation')
+          .where('id', '=', input.operation.id)
+          .executeTakeFirstOrThrow();
+        expect(row.runtime_preparation).toMatchObject({ state: 'ready' });
+      });
+      throw new DomainError('integration_unavailable');
+    });
+    const queued = await f.service.prepare(f.context, f.serverId, {
+      ...f.selection,
+      install: { backupBefore: true },
+    });
+    if (!queued.operation) throw new Error('Expected operation');
+    const id = queued.operation.id;
+    await f.service.process(id);
+    expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('uncertain');
+    expect(f.hooks.cleanup).not.toHaveBeenCalled();
+    expect(f.scope.publish).not.toHaveBeenCalled();
+    await f.service.recover(f.context, f.serverId, id);
+    vi.mocked(f.hooks.prepare).mockImplementation(async (input) => {
+      await input.runtimeReady?.({
+        combinationId: f.combinationId,
+        mappingId: f.mappingId,
+        target: f.prepared.target,
+      });
+      return f.prepared;
+    });
+    await f.service.process(id);
+    expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('applied');
+    expect(f.scope.configureRuntime).toHaveBeenCalledTimes(1);
+    expect(f.scope.stop).toHaveBeenCalledTimes(1);
+    expect(f.scope.backup).toHaveBeenCalledTimes(1);
+    expect(f.scope.assertPreparedRuntime).toHaveBeenCalledTimes(1);
+  });
+
+  it('resumes an interrupted early hidden stage without another stop, backup or installer', async () => {
+    const f = await fixture();
+    let operationId = '';
+    f.scope.configureRuntime.mockImplementation(async () => {
+      f.calls.push('runtime');
+      await f.db
+        .updateTable('minecraft_modpack_operations')
+        .set({ runtime_transition: JSON.stringify({ state: 'verified' }) })
+        .where('id', '=', operationId)
+        .execute();
+    });
+    const stagePublication = vi.fn(async () => {
+      await f.db
+        .updateTable('minecraft_modpack_operations')
+        .set({
+          publication: JSON.stringify({ state: 'staged', batches: [], rollbackCreated: false }),
+        })
+        .where('id', '=', operationId)
+        .execute();
+      throw new DomainError('integration_unavailable');
+    });
+    f.hooks.withServerLock = async (_row, work) => work({ ...f.scope, stagePublication });
+    vi.mocked(f.hooks.prepare).mockImplementation(async (input) => {
+      await input.runtimeReady?.({
+        combinationId: f.combinationId,
+        mappingId: f.mappingId,
+        target: f.prepared.target,
+      });
+      return f.prepared;
+    });
+    const queued = await f.service.prepare(f.context, f.serverId, {
+      ...f.selection,
+      install: { backupBefore: true },
+    });
+    if (!queued.operation) throw new Error('Expected operation');
+    operationId = queued.operation.id;
+    await f.service.process(operationId);
+    expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('uncertain');
+    expect(f.scope.publish).not.toHaveBeenCalled();
+    f.hooks.recover = vi.fn(async () => ({ state: 'resume-publication' as const }));
+    await f.service.recover(f.context, f.serverId, operationId);
+    await f.service.process(operationId);
+    expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('applied');
+    expect(f.scope.assertPublicationResumable).toHaveBeenCalledTimes(1);
+    expect(f.scope.resumePublication).toHaveBeenCalledTimes(1);
+    expect(f.scope.configureRuntime).toHaveBeenCalledTimes(1);
+    expect(f.scope.stop).toHaveBeenCalledTimes(1);
+    expect(f.scope.backup).toHaveBeenCalledTimes(1);
+    expect(stagePublication).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains an actionable conflict after early runtime and explicitly abandons without publishing', async () => {
+    const f = await fixture();
+    vi.mocked(f.hooks.inspect).mockResolvedValue({
+      ...f.observation,
+      entries: [{ path: 'mods/example.jar', kind: 'file', size: 9 }],
+    });
+    vi.mocked(f.hooks.prepare).mockImplementation(async (input) => {
+      await input.runtimeReady?.({
+        combinationId: f.combinationId,
+        mappingId: f.mappingId,
+        target: f.prepared.target,
+      });
+      return f.prepared;
+    });
+    const queued = await f.service.prepare(f.context, f.serverId, { ...f.selection, install: {} });
+    if (!queued.operation) throw new Error('Expected operation');
+    await f.service.process(queued.operation.id);
+    const snapshot = await f.service.snapshot(f.context, f.serverId);
+    expect(snapshot.operation).toMatchObject({
+      state: 'uncertain',
+      canCancel: true,
+      cancellationEffect: 'runtime-retained',
+      blockers: [{ reason: 'conflict', path: 'mods/example.jar' }],
+    });
+    expect(snapshot.operation?.pack?.project.id).toBe('pack');
+    expect(f.scope.publish).not.toHaveBeenCalled();
+    await f.service.cancel(f.context, f.serverId, queued.operation.id);
+    expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('cancelled');
+    expect(f.hooks.cleanup).toHaveBeenCalled();
+  });
+
+  it('allows cancellation if early host initialization failed before any server effect', async () => {
+    const f = await fixture();
+    f.hooks.withServerLock = async () => {
+      throw new DomainError('operation_busy');
+    };
+    vi.mocked(f.hooks.prepare).mockImplementation(async (input) => {
+      await input.runtimeReady?.({
+        combinationId: f.combinationId,
+        mappingId: f.mappingId,
+        target: f.prepared.target,
+      });
+      return f.prepared;
+    });
+    const queued = await f.service.prepare(f.context, f.serverId, { ...f.selection, install: {} });
+    if (!queued.operation) throw new Error('Expected operation');
+    await f.service.process(queued.operation.id);
+    const snapshot = await f.service.snapshot(f.context, f.serverId);
+    expect(snapshot.operation).toMatchObject({ state: 'uncertain', canCancel: true });
+    expect(snapshot.operation?.cancellationEffect).toBeUndefined();
+    expect(f.calls).toEqual([]);
+    await f.service.cancel(f.context, f.serverId, queued.operation.id);
+    expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('cancelled');
+  });
+
+  it('fences automatic Install while queued and preparing but leaves review-only preparation independent', async () => {
+    const f = await fixture();
+    const queued = await f.service.prepare(f.context, f.serverId, { ...f.selection, install: {} });
+    if (!queued.operation) throw new Error('Expected operation');
+    await expect(
+      enqueueServerOperation(f.db, f.context, f.serverId, {
+        action: 'start',
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'operation_busy' });
+    await f.db
+      .updateTable('minecraft_modpack_operations')
+      .set({ state: 'preparing' })
+      .where('id', '=', queued.operation.id)
+      .execute();
+    await expect(
+      enqueueServerOperation(f.db, f.context, f.serverId, {
+        action: 'start',
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'operation_busy' });
+    await f.service.cancel(f.context, f.serverId, queued.operation.id);
+    await f.service.prepare(f.context, f.serverId, {
+      ...f.selection,
+      idempotencyKey: randomUUID(),
+    });
+    await expect(
+      enqueueServerOperation(f.db, f.context, f.serverId, {
+        action: 'start',
+        idempotencyKey: randomUUID(),
+      }),
+    ).resolves.toBeTruthy();
   });
 
   it('rechecks current authority before an automatically queued apply', async () => {
