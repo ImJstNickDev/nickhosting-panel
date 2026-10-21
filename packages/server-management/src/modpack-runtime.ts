@@ -476,10 +476,11 @@ export async function configureModpackRuntime(
       throw new DomainError('provenance_mismatch');
     return;
   }
+  let reserved = false;
   if (journal.state === 'planned') {
     await timing.measure('admission', () => reserveInstallation(db, serverId, operationId, env));
+    reserved = true;
     await remote();
-    await timing.measure('stopped', () => options.assertStopped());
     await save('startup-dispatched');
     await timing.measure('authorize', () => options.authorize());
     await timing.measure('startupWrite', () =>
@@ -494,8 +495,10 @@ export async function configureModpackRuntime(
     await save('startup-confirmed');
   }
   if (journal.state === 'startup-confirmed') {
-    await timing.measure('admission', () => reserveInstallation(db, serverId, operationId, env));
-    await timing.measure('stopped', () => options.assertStopped());
+    // A fresh invocation already reserved before startup; recovery must renew
+    // that reservation before it can dispatch the installer.
+    if (!reserved)
+      await timing.measure('admission', () => reserveInstallation(db, serverId, operationId, env));
     await timing.measure('authorize', () => options.authorize());
     await db.transaction().execute(async (tx) => {
       const current = await tx
@@ -554,9 +557,12 @@ export async function configureModpackRuntime(
           timing: timing.child('installer'),
           verifiedServer: proof,
           serverUUID: server.pterodactyl_uuid as string,
+          // Relay authorization is a local session/ownership/lease check. The
+          // exact provider identity/startup is verified at dispatch and completion,
+          // not reread from Application API for every channel authorization.
           authorize: async () => {
             try {
-              await remote();
+              await timing.measure('authorize', () => options.authorize());
               return true;
             } catch {
               return false;
@@ -582,7 +588,7 @@ export async function configureModpackRuntime(
   } else if (journal.state === 'installation-dispatched')
     throw new DomainError('operation_uncertain');
   if (journal.state !== 'installation-confirmed') throw new DomainError('operation_uncertain');
-  await timing.measure('stopped', () => options.assertStopped());
+  // Attestation owns its before/after stopped checks around reading artifacts.
   await timing.measure('attestation', () =>
     attestMinecraftRuntimeInstallation(
       { db, adapter, server, authorize: options.authorize, assertStopped: options.assertStopped },

@@ -599,7 +599,7 @@ export function createMinecraftModpacksService(options: {
         .execute();
       return rows.map((row) => row.id);
     },
-    async process(operationId: string): Promise<void> {
+    async process(operationId: string): Promise<'continue' | undefined> {
       // A dedicated local lock prevents an expired lease from racing a still-running
       // downloader or private staging cleanup. No game lock is held during preparation.
       return db.connection().execute(async (workerConnection) => {
@@ -660,6 +660,7 @@ export function createMinecraftModpacksService(options: {
           }
           const timing = createOperationTiming(options.logger?.isEnabled('debug') ?? false);
           const queueAgeMs = Date.now() - claimed.updated_at.getTime();
+          let continueQueuedApply = false;
           const controller = new AbortController();
           let heartbeatBusy = false;
           const heartbeat = setInterval(() => {
@@ -1004,6 +1005,7 @@ export function createMinecraftModpacksService(options: {
           } finally {
             clearInterval(heartbeat);
             const row = await get(operationId);
+            continueQueuedApply = row.state === 'apply_queued';
             if (row.state === 'cancelled' && row.lease_token === token)
               await db
                 .updateTable('minecraft_modpack_operations')
@@ -1027,6 +1029,7 @@ export function createMinecraftModpacksService(options: {
               }
             }
           }
+          if (continueQueuedApply) return 'continue' as const;
         } finally {
           await sql`select pg_advisory_unlock(hashtextextended(current_schema() || ${`:nickhosting:modpack-worker:${operationId}`},0))`.execute(
             workerConnection,

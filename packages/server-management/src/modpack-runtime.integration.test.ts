@@ -507,6 +507,27 @@ describe('Modpacks exact supported runtime transition', () => {
     },
   );
 
+  it('reauthorizes the installation channel locally without repeated provider identity reads', async () => {
+    const f = await fixture();
+    vi.mocked(f.adapter.reinstallWithConfirmation).mockImplementation(
+      async (_id, _identifier, options) => {
+        const reads = vi.mocked(f.adapter.getApplicationServer).mock.calls.length;
+        for (let attempt = 0; attempt < 4; attempt++) expect(await options.authorize()).toBe(true);
+        vi.mocked(f.options.authorize).mockRejectedValueOnce(new Error('Session revoked'));
+        expect(await options.authorize()).toBe(false);
+        expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(reads);
+        await options.onConfirmed();
+        expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(reads + 1);
+        return { confirmed: true };
+      },
+    );
+    await configureModpackRuntime(f.options);
+    // The attestation helper owns its own before/after artifact checks. Outside
+    // that helper, only initial inspection and actual installer dispatch check.
+    expect(f.options.assertStopped).toHaveBeenCalledTimes(2);
+    expect(f.journal()?.state).toBe('verified');
+  });
+
   it('never repeats an installer when its dispatched outcome is ambiguous', async () => {
     const f = await fixture();
     vi.mocked(f.adapter.reinstallWithConfirmation).mockRejectedValue(new Error('Connection lost'));

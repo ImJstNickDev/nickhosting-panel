@@ -1,6 +1,9 @@
 import { type JobNotificationPool, listenForJobOutbox } from '@nickhosting/database';
 
-type Service = { pending(limit: number): Promise<string[]>; process(id: string): Promise<void> };
+type Service = {
+  pending(limit: number): Promise<string[]>;
+  process(id: string): Promise<'continue' | undefined>;
+};
 /** Durable rows are the queue. Notifications remove idle latency; the bounded
  * fallback also recovers missed notifications and expired worker leases. */
 export function startMinecraftModpackLoop(options: {
@@ -11,6 +14,7 @@ export function startMinecraftModpackLoop(options: {
 }) {
   let closed = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let scheduledAt = Number.POSITIVE_INFINITY;
   let listener: Awaited<ReturnType<typeof listenForJobOutbox>> | undefined;
   let listening: Promise<void> | undefined;
   let running: Promise<void> | undefined;
@@ -36,7 +40,10 @@ export function startMinecraftModpackLoop(options: {
   };
   const schedule = (delay: number) => {
     if (closed) return;
+    const due = Date.now() + delay;
+    if (timer && scheduledAt <= due) return;
     if (timer) clearTimeout(timer);
+    scheduledAt = due;
     timer = setTimeout(wake, delay);
     timer.unref?.();
   };
@@ -53,8 +60,12 @@ export function startMinecraftModpackLoop(options: {
         .slice(0, 2 - processing.size);
       for (const id of ids) {
         if (closed) break;
+        let continueQueuedApply = false;
         const work = Promise.resolve()
           .then(() => service.process(id))
+          .then((result) => {
+            continueQueuedApply = result === 'continue';
+          })
           .catch(() => {
             cooldown.set(id, Date.now() + (options.intervalMs ?? 5000));
             options.unavailable();
@@ -63,8 +74,13 @@ export function startMinecraftModpackLoop(options: {
             processing.delete(id);
             // Cleanup can retain a claim and return normally. Do not spin on
             // that same durable row when there has been no queue notification.
-            cooldown.set(id, Math.max(cooldown.get(id) ?? 0, Date.now() + 1000));
-            schedule(1000);
+            if (continueQueuedApply) {
+              cooldown.delete(id);
+              schedule(0);
+            } else {
+              cooldown.set(id, Math.max(cooldown.get(id) ?? 0, Date.now() + 1000));
+              schedule(1000);
+            }
           });
         processing.set(id, work);
       }
@@ -77,6 +93,7 @@ export function startMinecraftModpackLoop(options: {
     if (timer) {
       clearTimeout(timer);
       timer = undefined;
+      scheduledAt = Number.POSITIVE_INFINITY;
     }
     if (running) {
       again = true;

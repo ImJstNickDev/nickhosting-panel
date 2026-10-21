@@ -500,9 +500,6 @@ export function createModpackPublication(options: {
       await timing.measure('rollbackDirectory', () =>
         options.adapter.createDirectory(options.identifier, '', roots.rollbackRoot),
       );
-      const root = await inspect([roots.rollbackRoot]);
-      if (root.get(roots.rollbackRoot)?.kind !== 'directory')
-        throw new DomainError('operation_uncertain');
       for (const moves of chunks(retire, 1000)) {
         await timing.measure('authorize', () => options.authorize());
         journal = await save({
@@ -513,13 +510,16 @@ export function createModpackPublication(options: {
           options.adapter.renameFiles(options.identifier, '', moves),
         );
       }
-      const retired = await inspect([
-        ...retire.map((move) => move.from),
-        ...retiredEntries.map((entry) => entry.path),
-      ]);
+      // Prove each source was moved before a new subtree can occupy its path.
+      // Descendants move atomically with their directory; scan them once in the
+      // final receipt instead of walking the entire retired pack twice.
+      const retired = await inspect(retire.flatMap((move) => [move.from, move.to]));
+      const retiredRoots = new Set(retire.map((move) => move.to));
       if (
         retire.some((move) => retired.has(move.from)) ||
-        retiredEntries.some((entry) => !same(retired.get(entry.path), entry))
+        retiredEntries.some(
+          (entry) => retiredRoots.has(entry.path) && !same(retired.get(entry.path), entry),
+        )
       )
         throw new DomainError('operation_uncertain');
     }

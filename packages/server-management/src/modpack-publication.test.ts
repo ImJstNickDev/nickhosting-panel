@@ -365,6 +365,26 @@ describe('Modpack publication', () => {
     expect(await f.helper.verify(f.prepared, plan)).toBeNull();
   });
 
+  it('checks retired roots before publication and walks their descendants only in the final receipt', async () => {
+    const f = fixture();
+    f.add('mods/old/deep/keep.jar');
+    const plan = f.plan();
+    const { rollbackRoot } = f.helper.getRemoteStage(plan);
+    await f.helper.publish(f.prepared, plan);
+    expect(f.listCalls.flat()).toContain(rollbackRoot);
+    expect(f.listCalls.flat().some((path) => path.startsWith(`${rollbackRoot}/`))).toBe(false);
+    const retired = required(f.tree.get(`${rollbackRoot}/0/old/deep/keep.jar`));
+    retired.size++;
+    // Delaying this scan must never turn a corrupted rollback tree into a
+    // successful receipt or allow its cleanup.
+    expect(await f.helper.verify(f.prepared, plan)).toBeNull();
+    expect(f.listCalls.flat()).toContain(`${rollbackRoot}/0/old/deep`);
+    await expect(f.helper.cleanup(f.prepared, plan, { applied: true })).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+  });
+
   it('retains detailed stage inspection when recovering before the first rename', async () => {
     const f = fixture(true);
     const plan = f.plan();

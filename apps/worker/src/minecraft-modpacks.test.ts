@@ -5,8 +5,8 @@ import { startMinecraftModpackLoop } from './minecraft-modpacks.js';
 vi.mock('@nickhosting/database', () => ({ listenForJobOutbox: vi.fn() }));
 const deferred = () => {
   let resolve: () => void = () => {};
-  const promise = new Promise<void>((done) => {
-    resolve = done;
+  const promise = new Promise<undefined>((done) => {
+    resolve = () => done(undefined);
   });
   return { promise, resolve };
 };
@@ -14,7 +14,7 @@ function fixture() {
   const listener = { close: vi.fn() };
   vi.mocked(listenForJobOutbox).mockResolvedValue(listener);
   const pending = vi.fn(async (_limit: number) => [] as string[]);
-  const process = vi.fn(async (_id: string) => {});
+  const process = vi.fn(async (_id: string): Promise<'continue' | undefined> => undefined);
   const service = vi.fn(async () => ({ pending, process }));
   const unavailable = vi.fn();
   const loop = startMinecraftModpackLoop({
@@ -72,6 +72,29 @@ describe('Modpack durable worker loop', () => {
     expect(f.pending).toHaveBeenLastCalledWith(20);
     second.resolve();
     third.resolve();
+    await f.loop.close();
+  });
+  it('immediately claims a persisted apply transition without the cleanup cooldown', async () => {
+    const f = fixture();
+    const apply = deferred();
+    f.pending.mockResolvedValue(['install']);
+    f.process.mockResolvedValueOnce('continue').mockImplementationOnce(() => apply.promise);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.process.mock.calls).toEqual([['install'], ['install']]);
+    apply.resolve();
+    await f.loop.close();
+  });
+  it('does not let a simultaneous cleanup completion delay an apply transition', async () => {
+    const f = fixture();
+    const apply = deferred();
+    f.pending.mockResolvedValueOnce(['install', 'cleanup']).mockResolvedValue(['install']);
+    f.process
+      .mockResolvedValueOnce('continue')
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(() => apply.promise);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.process.mock.calls).toEqual([['install'], ['cleanup'], ['install']]);
+    apply.resolve();
     await f.loop.close();
   });
   it('waits for an in-flight effect on shutdown without beginning another operation', async () => {

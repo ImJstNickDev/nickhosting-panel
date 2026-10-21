@@ -84,13 +84,14 @@ export async function createModpackContext(options: {
   const nodeId = server.node_id;
   if (server.active_operation_id && server.active_operation_id !== pack.id)
     throw new DomainError('operation_busy');
-  await timing.measure('storagePolicy', () => assertStoragePolicyIdle(db));
   const resumingPublication = !options.recovery && hasResumableModpackPublicationJournal(pack);
-  if (!options.recovery && !resumingPublication)
-    await timing.measure('pendingUploads', () => assertNoPendingUpload(db, server.id));
-  const remote = await timing.measure('applicationRead', () =>
-    runtime.adapter.getApplicationServer(applicationId),
-  );
+  const [remote] = await Promise.all([
+    timing.measure('applicationRead', () => runtime.adapter.getApplicationServer(applicationId)),
+    timing.measure('storagePolicy', () => assertStoragePolicyIdle(db)),
+    !options.recovery && !resumingPublication
+      ? timing.measure('pendingUploads', () => assertNoPendingUpload(db, server.id))
+      : Promise.resolve(),
+  ]);
   await timing.measure('identity', () => verifyManagedIdentity(db, server, remote));
   if (!options.recovery && !resumingPublication) {
     await db.transaction().execute(async (tx) => {
@@ -188,11 +189,12 @@ export async function createModpackContext(options: {
     return current;
   };
   const assertStopped = async () => {
-    if (
-      !(await timing.measure('observerState', () => observer.stopped(uuid, 'server'))) ||
-      !(await timing.measure('observerState', () => observer.stopped(uuid, 'installer')))
-    )
-      throw new DomainError('conflict');
+    const states = await Promise.all(
+      (['server', 'installer'] as const).map((kind) =>
+        timing.measure('observerState', () => observer.stopped(uuid, kind)),
+      ),
+    );
+    if (!states.every(Boolean)) throw new DomainError('conflict');
   };
   const update: GameLifecycleContext['update'] = async (patch) => {
     const { plan, ...rest } = patch;
@@ -205,7 +207,12 @@ export async function createModpackContext(options: {
   };
   const stop = async () => {
     await authorize();
-    const stopped = await timing.measure('observerState', () => observer.stopped(uuid, 'server'));
+    const [stopped, installerStopped] = await Promise.all(
+      (['server', 'installer'] as const).map((kind) =>
+        timing.measure('observerState', () => observer.stopped(uuid, kind)),
+      ),
+    );
+    if (!installerStopped) throw new DomainError('conflict');
     await update({ plan: { ...operation.plan, wasRunning: !stopped } });
     if (!stopped) {
       const result = await timing.measure('stopWait', () =>
@@ -226,8 +233,8 @@ export async function createModpackContext(options: {
         }),
       );
       if (!result.confirmed) throw new DomainError('operation_uncertain');
+      await assertStopped();
     }
-    await assertStopped();
     await db.transaction().execute(async (tx) => {
       await lockResources(tx);
       await tx.deleteFrom('resource_reservations').where('server_id', '=', server.id).execute();

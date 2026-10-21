@@ -161,6 +161,84 @@ describe('modpack server data paths', () => {
 });
 
 describe('modpack staging', () => {
+  it.each(['required', 'optional'] as const)(
+    'trusts declared %s server files without reclassifying JAR metadata',
+    async (serverSide) => {
+      // A malformed classifier record proves this is not a second metadata pass.
+      // The provider digest still seals every byte of the downloaded artifact.
+      const mod = await zip({ 'fabric.mod.json': 'not classifier JSON' });
+      const f = await fixture({ 'mod.jar': mod });
+      const measured: string[] = [];
+      const result = await stageModpackRecipe(
+        {
+          ...identity,
+          kind: 'files',
+          target,
+          files: [{ path: 'mods/mod.jar', download: source('mod.jar', mod), serverSide }],
+          warnings: [],
+        },
+        {
+          ...f.options,
+          timing: {
+            async measure(name, work) {
+              measured.push(name);
+              return work();
+            },
+          },
+        },
+      );
+      expect(result.files).toEqual([
+        { path: 'mods/mod.jar', size: mod.length, sha256: digest(mod) },
+      ]);
+      expect(measured).not.toContain('jarEnvironment');
+    },
+  );
+
+  it('still inspects a Modrinth JAR when its manifest has no server declaration', async () => {
+    const mod = await zip({
+      'fabric.mod.json': JSON.stringify({ id: 'clientmod', environment: 'client' }),
+    });
+    const entry = mrFile('mods/client.jar', 'mod.jar', mod);
+    const { env: _env, ...withoutEnvironment } = entry;
+    const data = await zip({ 'modrinth.index.json': JSON.stringify(mr([withoutEnvironment])) });
+    const f = await fixture({ 'source.zip': data, 'mod.jar': mod });
+    const result = await stageModpackRecipe(archive('modrinth-index', data), f.options);
+    expect(result.files).toEqual([]);
+    expect(result.excludedFiles).toBe(1);
+  });
+
+  it('starts large known transfers first without changing the concurrency ceiling', async () => {
+    const f = await fixture({
+      'small.json': Buffer.alloc(1),
+      'large.json': Buffer.alloc(1000),
+      'middle.json': Buffer.alloc(100),
+    });
+    const result = await stageModpackRecipe(
+      {
+        ...identity,
+        kind: 'files',
+        target,
+        files: [
+          ['small', 1],
+          ['large', 1000],
+          ['middle', 100],
+        ].map(([name, size]) => ({
+          path: `config/${name}.json`,
+          download: source(`${name}.json`, Buffer.alloc(Number(size))),
+          serverSide: 'required' as const,
+        })),
+        warnings: [],
+      },
+      { ...f.options, concurrency: 1 },
+    );
+    expect(f.download.mock.calls.map(([file]) => file.filename)).toEqual([
+      'large.json',
+      'middle.json',
+      'small.json',
+    ]);
+    expect(result.files).toHaveLength(3);
+  });
+
   it('admits two unknown-size server downloads alongside archive configs without reserving each maximum', async () => {
     const first = await zip({ 'fabric.mod.json': JSON.stringify({ environment: 'server' }) });
     const second = await zip({ 'fabric.mod.json': JSON.stringify({ environment: '*' }) });

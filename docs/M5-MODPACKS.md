@@ -391,3 +391,33 @@ latency; its request/read/confirmation spans distinguish that from API dispatch.
 No paths, signed URLs, credentials or raw provider errors are logged. Repeating a
 pack swap can compare the same artifact set, but provider/local caches and a
 runtime change can materially change the result.
+
+### Installation work scheduling
+
+A worker that has durably queued application immediately yields it back to the
+bounded two-slot scheduler; only cleanup/no-progress retries retain a cooldown.
+Competing completions cannot postpone an earlier scheduled wake. Preparation and
+application remain separate durable claims, so restart recovery is unchanged.
+
+Publication verifies successful retirement at the moved roots before installing
+new files, then verifies descendants once when producing the final receipt.
+Uncertain recovery still checks the complete retained tree. Installer channel
+reauthorization uses current local authority; provider identity/startup is checked
+at dispatch and confirmation instead of at each channel authorization callback.
+Independent host/installer observations run concurrently. These changes do not
+start the installer before preparation and capacity admission have succeeded.
+
+### Local archive preparation
+
+ZIP/JAR inventories retain yauzl's ZIP/ZIP64 parser and entry/size/path checks, but
+read their local metadata through a bounded 256 KiB read-ahead window. This avoids
+two filesystem reads for every central-directory entry. Selected member streams
+have independent bounded buffers; cancelling a member does not close the shared
+archive descriptor. No whole-JAR buffer or persistent metadata cache is created.
+
+A provider's explicit required/optional server declaration is authoritative during
+pack staging. JAR side inspection remains for missing/unknown declarations and
+archive overrides. Provider digests and local file seals remain checked while
+streaming. Known-size downloads start largest-first within the existing concurrency
+and temporary-space budgets; unknown-size downloads retain serialized admission.
+The final transfer ZIP still uses the existing STORE writer and file-seal checks.

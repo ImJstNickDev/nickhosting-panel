@@ -320,8 +320,7 @@ export async function stageModpackRecipe(
                 sha512: file.hashes.sha512.toLowerCase(),
               },
             },
-            serverSide:
-              file.env?.server === 'optional' ? ('optional' as const) : ('required' as const),
+            serverSide: file.env?.server ?? ('unknown' as const),
           },
         ];
       });
@@ -429,7 +428,11 @@ export async function stageModpackRecipe(
   let cursor = 0;
   const abort = new AbortController();
   const signal = options.signal ? AbortSignal.any([options.signal, abort.signal]) : abort.signal;
-  const known = downloads.filter((file) => file.download.size !== undefined);
+  // Start the longest transfers first so small files fill remaining slots instead
+  // of leaving a large final download on the critical path.
+  const known = downloads
+    .filter((file) => file.download.size !== undefined)
+    .sort((a, b) => (b.download.size ?? 0) - (a.download.size ?? 0));
   const unknown = downloads.filter((file) => file.download.size === undefined);
   const results = await Promise.allSettled(
     Array.from({ length: Math.min(concurrency, known.length) }, async () => {
@@ -447,7 +450,9 @@ export async function stageModpackRecipe(
             file.download,
             limits.maxFileBytes,
           );
+          // Explicit provider server declarations need no second JAR classification.
           if (
+            file.serverSide === 'unknown' &&
             /\.jar$/i.test(file.path) &&
             (await trace('jarEnvironment', async () =>
               inspectJarEnvironment(destination, limits),
@@ -500,6 +505,7 @@ export async function stageModpackRecipe(
     );
     signal.throwIfAborted();
     if (
+      file.serverSide === 'unknown' &&
       /\.jar$/i.test(file.path) &&
       (await trace('jarEnvironment', async () => inspectJarEnvironment(destination, limits))) ===
         'client'

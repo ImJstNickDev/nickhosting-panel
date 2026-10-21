@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
-import { lstat } from 'node:fs/promises';
 import { pipeline, type Readable, Transform } from 'node:stream';
 import { crc32, createInflateRaw } from 'node:zlib';
-import { type Entry, fromBuffer, open, type ZipFile } from 'yauzl';
+import { type Entry, fromBuffer, type ZipFile } from 'yauzl';
+import { openBufferedArchive } from './archive-reader.js';
 import { type ContentLimits, contentLimits, fail, safeArchivePath } from './contracts.js';
 
 export interface ArchiveFile {
@@ -68,24 +68,22 @@ async function visitZip(
   metadataNames?: ReadonlySet<string>,
 ): Promise<void> {
   const limits = contentLimits(options);
-  if (typeof path === 'string') {
-    const stat = await lstat(path);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > limits.maxArchiveBytes)
-      fail('archive_size');
-  } else if (path.byteLength > limits.maxArchiveBytes) fail('archive_size');
-  const zip = await new Promise<ZipFile>((resolve, reject) => {
-    const config = {
-      lazyEntries: true,
-      autoClose: false,
-      validateEntrySizes: true,
-      strictFileNames: true,
-    };
-    const done = (error: Error | null, value: ZipFile | undefined) =>
-      error || !value ? reject(error ?? new Error('archive_open')) : resolve(value);
-    if (typeof path === 'string') open(path, config, done);
-    // Copy the bounded buffer so a caller cannot change entry bytes during validation.
-    else fromBuffer(Buffer.from(path), config, done);
-  });
+  if (typeof path !== 'string' && path.byteLength > limits.maxArchiveBytes) fail('archive_size');
+  const config = {
+    lazyEntries: true,
+    autoClose: false,
+    validateEntrySizes: true,
+    strictFileNames: true,
+  };
+  const zip =
+    typeof path === 'string'
+      ? await openBufferedArchive(path, limits.maxArchiveBytes, config)
+      : await new Promise<ZipFile>((resolve, reject) => {
+          // Copy the bounded buffer so a caller cannot change entry bytes during validation.
+          fromBuffer(Buffer.from(path), config, (error, value) =>
+            error || !value ? reject(error ?? new Error('archive_open')) : resolve(value),
+          );
+        });
   let total = 0;
   let count = 0;
   const maxEntries = metadataNames ? limits.maxJarEntries : limits.maxEntries;

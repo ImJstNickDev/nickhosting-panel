@@ -389,6 +389,25 @@ describe('Modpacks real lifecycle and Fileman context', () => {
       expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
     },
   );
+  it('reads both container states concurrently and does not reread an already stopped server', async () => {
+    const f = await fixture(false);
+    const context = await createModpackContext(f.options);
+    const observer = f.runtime.containerObserver;
+    if (!observer) throw new Error('Missing fixture observer');
+    const stopped = vi.mocked(observer.stopped);
+    await context.stop();
+    expect(stopped.mock.calls.map(([, kind]) => kind)).toEqual(['server', 'installer']);
+    expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+    stopped.mockClear();
+    const results: ((value: boolean) => void)[] = [];
+    stopped.mockImplementation(() => new Promise<boolean>((resolve) => results.push(resolve)));
+    const checking = context.assertStopped();
+    expect(results).toHaveLength(2);
+    results[0]?.(true);
+    results[1]?.(false);
+    await expect(checking).rejects.toMatchObject({ code: 'conflict' });
+  });
+
   it('creates one synthetic reinstall with the same operation id and no generic outbox delivery', async () => {
     const f = await fixture();
     const host = await withModpackServerLock(f.db, f.serverId, (db) =>

@@ -208,7 +208,7 @@ describe('Modpacks durable preparation and apply', () => {
     });
     if (!queued.operation) throw new Error('Expected operation');
     const id = queued.operation.id;
-    await f.service.process(id);
+    expect(await f.service.process(id)).toBe('continue');
     const prepared = await f.service.snapshot(f.context, f.serverId);
     expect(prepared.operation?.state).toBe('apply_queued');
     expect(f.calls).toEqual([]);
