@@ -9,6 +9,7 @@ import {
   resolveForgeCreationChoice,
 } from './minecraft-registry.js';
 import {
+  assertModpackRuntimeResumable,
   type ConfigureModpackRuntimeOptions,
   configureModpackRuntime,
   type ModpackRuntimeTransition,
@@ -217,7 +218,9 @@ async function fixture() {
           environment: value.environment,
         },
       };
-      return structuredClone(remote);
+      // Pterodactyl's PATCH representation omits optional allocation includes.
+      const { relationships: _relationships, ...changed } = structuredClone(remote);
+      return changed;
     }),
     reinstallWithConfirmation: vi.fn(async (_id, _identifier, options) => {
       if (!(await options.authorize())) throw new Error('Authority refused');
@@ -476,6 +479,106 @@ describe('Modpacks exact supported runtime transition', () => {
     });
     expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(1);
     expect(attestMinecraftRuntimeInstallation).not.toHaveBeenCalled();
+  });
+  it.each(['startup-dispatched', 'startup-confirmed'] as const)(
+    're-proves %s without mutation and resumes the exact runtime without another startup PATCH',
+    async (state) => {
+      const f = await fixture();
+      const save = f.options.saveTransition;
+      f.options.saveTransition = async (value) => {
+        if (state === 'startup-dispatched' && value.state === 'startup-confirmed')
+          throw new Error('Interrupted confirmation');
+        await save(value);
+      };
+      if (state === 'startup-confirmed') {
+        vi.mocked(f.options.assertStopped).mockImplementation(async () => {
+          const profile = await f.db
+            .selectFrom('minecraft_server_profiles')
+            .select('combination_id')
+            .where('server_id', '=', f.serverId)
+            .executeTakeFirstOrThrow();
+          if (profile.combination_id === f.binding.combinationId)
+            throw new Error('Interrupted before installer dispatch');
+        });
+      }
+      await expect(configureModpackRuntime(f.options)).rejects.toThrow('Interrupted');
+      expect(f.journal()?.state).toBe(state);
+      expect(f.adapter.updateStartup).toHaveBeenCalledTimes(1);
+      expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+      f.options.saveTransition = save;
+      vi.mocked(f.options.assertStopped).mockResolvedValue(undefined);
+      await assertModpackRuntimeResumable({
+        ...f.options,
+        sourceMappingId: f.source.id,
+        sourceCombinationId: f.sourceCombinationId,
+      });
+      expect(f.journal()?.state).toBe(state);
+      expect(f.adapter.updateStartup).toHaveBeenCalledTimes(1);
+      expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+      await configureModpackRuntime(f.options);
+      expect(f.journal()?.state).toBe('verified');
+      expect(f.adapter.updateStartup).toHaveBeenCalledTimes(1);
+      expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('refuses resumable proof if startup, provider identity or saved plan coordinates differ', async () => {
+    const f = await fixture();
+    const save = f.options.saveTransition;
+    f.options.saveTransition = async (value) => {
+      if (value.state === 'startup-confirmed') throw new Error('Interrupted');
+      await save(value);
+    };
+    await expect(configureModpackRuntime(f.options)).rejects.toThrow('Interrupted');
+    const options = {
+      ...f.options,
+      sourceMappingId: f.source.id,
+      sourceCombinationId: f.sourceCombinationId,
+    };
+    await expect(
+      assertModpackRuntimeResumable({ ...options, sourceCombinationId: randomUUID() }),
+    ).rejects.toMatchObject({ code: 'operation_uncertain' });
+    const remote = await f.adapter.getApplicationServer(1);
+    f.changeRemote({ container: { ...remote.container, startup_command: 'wrong command' } });
+    await expect(assertModpackRuntimeResumable(options)).rejects.toMatchObject({
+      code: 'provenance_mismatch',
+    });
+    f.changeRemote({ ...remote, user: remote.user + 1 });
+    await expect(assertModpackRuntimeResumable(options)).rejects.toMatchObject({
+      code: 'provenance_mismatch',
+    });
+    expect(f.adapter.updateStartup).toHaveBeenCalledTimes(1);
+    expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+  });
+  it('rejects a full GET without allocation proof even after startup PATCH succeeds', async () => {
+    const f = await fixture();
+    const update = vi.mocked(f.adapter.updateStartup).getMockImplementation();
+    if (!update) throw new Error('Missing fixture startup mutation');
+    vi.mocked(f.adapter.updateStartup).mockImplementationOnce(async (id, value) => {
+      // Call the original fixture mutation once, then make the proof GET incomplete.
+      const changed = await update(id, value);
+      f.changeRemote({ relationships: undefined });
+      return changed as ApplicationServer;
+    });
+    await expect(configureModpackRuntime(f.options)).rejects.toMatchObject({
+      code: 'provenance_mismatch',
+    });
+    expect(f.journal()?.state).toBe('startup-dispatched');
+    expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+  });
+  it('never admits an installer-dispatched transition for automatic resume', async () => {
+    const f = await fixture();
+    vi.mocked(f.adapter.reinstallWithConfirmation).mockRejectedValue(
+      new Error('Uncertain install'),
+    );
+    await expect(configureModpackRuntime(f.options)).rejects.toThrow('Uncertain install');
+    await expect(
+      assertModpackRuntimeResumable({
+        ...f.options,
+        sourceMappingId: f.source.id,
+        sourceCombinationId: f.sourceCombinationId,
+      }),
+    ).rejects.toMatchObject({ code: 'operation_uncertain' });
+    expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(1);
   });
   it('refreshes the existing Gateway generation/version while preserving Owner policy', async () => {
     const f = await fixture();

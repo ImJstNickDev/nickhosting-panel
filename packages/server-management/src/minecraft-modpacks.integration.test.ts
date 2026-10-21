@@ -97,6 +97,7 @@ describe('Modpacks durable preparation and apply', () => {
       configureRuntime: vi.fn(async () => {
         calls.push('runtime');
       }),
+      assertRuntimeResumable: vi.fn(async () => {}),
       publish: vi.fn(async () => {
         calls.push('publish');
       }),
@@ -305,6 +306,143 @@ describe('Modpacks durable preparation and apply', () => {
     expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('uncertain');
     expect(f.calls).toEqual([]);
   });
+  it.each([false, true])(
+    'resumes the same staged runtime operation without repeating stop or backup=%s',
+    async (backupBefore) => {
+      const f = await fixture();
+      const target = {
+        combinationId: randomUUID(),
+        mappingId: randomUUID(),
+        target: f.prepared.target,
+      };
+      f.hooks.resolveRuntime = vi.fn(async () => target);
+      const ready = await f.ready();
+      const request = {
+        operationId: ready.id,
+        planDigest: ready.planDigest,
+        confirm: true,
+        backupBefore,
+        expectedDeletePaths: ready.deletePaths,
+        idempotencyKey: randomUUID(),
+      };
+      await f.service.apply(f.context, f.serverId, request);
+      f.scope.configureRuntime.mockImplementationOnce(async () => {
+        f.calls.push('runtime');
+        await f.db
+          .updateTable('minecraft_modpack_operations')
+          .set({ runtime_transition: JSON.stringify({ state: 'startup-dispatched' }) })
+          .where('id', '=', ready.id)
+          .execute();
+        throw new Error('Interrupted startup confirmation');
+      });
+      await f.service.process(ready.id);
+      expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('uncertain');
+      await f.db
+        .deleteFrom('session')
+        .where('id', '=', f.context[authSessionId] as string)
+        .execute();
+      f.hooks.recover = vi.fn(async () => ({ state: 'resume-runtime' as const }));
+      const recovered = await f.service.recover(f.owner, f.serverId, ready.id);
+      expect(recovered.operation).toMatchObject({ id: ready.id, state: 'apply_queued' });
+      const row = await f.db
+        .selectFrom('minecraft_modpack_operations')
+        .selectAll()
+        .where('id', '=', ready.id)
+        .executeTakeFirstOrThrow();
+      expect(row.apply_actor_user_id).toBe(f.owner.actorUserId);
+      expect(row.apply_actor_session_id).toBe(f.owner[authSessionId]);
+      expect(row.apply_request).toEqual(request);
+      expect(row.prepared).toEqual(f.prepared);
+      expect(await f.service.pending()).toContain(ready.id);
+      f.scope.inspect.mockResolvedValue({
+        ...f.observation,
+        combinationId: target.combinationId,
+        mappingId: target.mappingId,
+      });
+      await f.service.process(ready.id);
+      expect((await f.service.snapshot(f.owner, f.serverId)).operation?.state).toBe('applied');
+      expect(f.calls).toEqual([
+        'stop',
+        ...(backupBefore ? ['backup'] : []),
+        'runtime',
+        'runtime',
+        'publish',
+        'verify',
+      ]);
+      expect(f.hooks.prepare).toHaveBeenCalledTimes(1);
+      expect(f.scope.assertRuntimeResumable).toHaveBeenCalledTimes(1);
+      expect(f.hooks.authorize).toHaveBeenLastCalledWith(
+        expect.objectContaining({ apply_actor_user_id: f.owner.actorUserId }),
+        true,
+      );
+      expect(f.scope.stop).toHaveBeenCalledTimes(1);
+      expect(f.scope.backup).toHaveBeenCalledTimes(backupBefore ? 1 : 0);
+      const final = await f.db
+        .selectFrom('minecraft_modpack_operations')
+        .select('journal')
+        .where('id', '=', ready.id)
+        .executeTakeFirstOrThrow();
+      expect(
+        (final.journal as { phase: string; state: string }[]).filter(
+          (entry) => entry.phase === 'runtime' && entry.state === 'dispatched',
+        ),
+      ).toHaveLength(1);
+    },
+  );
+  it.each(['installer', 'publication', 'backup', 'files', 'proof'] as const)(
+    'keeps recovery uncertain when %s makes continuation unsafe',
+    async (reason) => {
+      const f = await fixture();
+      f.hooks.resolveRuntime = vi.fn(async () => ({
+        combinationId: randomUUID(),
+        mappingId: f.mappingId,
+        target: f.prepared.target,
+      }));
+      const { operationId } = await f.apply();
+      f.scope.configureRuntime.mockImplementationOnce(async () => {
+        await f.db
+          .updateTable('minecraft_modpack_operations')
+          .set({
+            runtime_transition: JSON.stringify({ state: 'startup-dispatched' }),
+          })
+          .where('id', '=', operationId)
+          .execute();
+        throw new Error('Interrupted');
+      });
+      await f.service.process(operationId);
+      f.hooks.recover = vi.fn(async () => ({ state: 'resume-runtime' as const }));
+      if (['installer', 'publication', 'backup'].includes(reason)) {
+        await f.db
+          .updateTable('minecraft_modpack_operations')
+          .set(
+            reason === 'installer'
+              ? { runtime_transition: JSON.stringify({ state: 'installation-dispatched' }) }
+              : reason === 'publication'
+                ? { publication: JSON.stringify({ dispatched: true }) }
+                : { backup_id: null },
+          )
+          .where('id', '=', operationId)
+          .execute();
+        await expect(f.service.recover(f.context, f.serverId, operationId)).rejects.toMatchObject({
+          code: 'operation_uncertain',
+        });
+      } else {
+        await f.service.recover(f.context, f.serverId, operationId);
+        if (reason === 'files')
+          f.scope.inspect.mockResolvedValue({
+            ...f.observation,
+            entries: [{ path: 'mods/example.jar', kind: 'file' as never, size: 1 }],
+          } as never);
+        else f.scope.assertRuntimeResumable.mockRejectedValue(new Error('Provider changed'));
+        await f.service.process(operationId);
+      }
+      expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('uncertain');
+      expect(f.hooks.prepare).toHaveBeenCalledTimes(1);
+      expect(f.scope.configureRuntime).toHaveBeenCalledTimes(1);
+      expect(f.scope.publish).not.toHaveBeenCalled();
+      expect(f.scope.stop).toHaveBeenCalledTimes(1);
+    },
+  );
   it('rejects a stale inventory after confirmed stop before any publication', async () => {
     const f = await fixture();
     const { operationId } = await f.apply();

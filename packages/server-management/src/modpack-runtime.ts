@@ -286,16 +286,18 @@ export interface ConfigureModpackRuntimeOptions {
   contentOptions: Pick<MinecraftContentOptions, 'observedImageDigest' | 'env'>;
 }
 
-/** Explicit stopped transition. Durable dispatch markers prevent retries from
- * launching the installer twice; uncertain effects require read-only recovery. */
-export async function configureModpackRuntime(
-  options: ConfigureModpackRuntimeOptions,
-): Promise<void> {
+type RuntimeInspectionOptions = Omit<
+  ConfigureModpackRuntimeOptions,
+  'saveTransition' | 'contentOptions'
+>;
+
+/** Shared identity and immutable-choice checks for inspection and execution. */
+async function inspectRuntimeTransition(options: RuntimeInspectionOptions) {
   const { db, adapter, serverId, operationId, context, env = {} } = options;
   const binding = modpackRuntimeBindingSchema.parse(options.binding);
   await options.authorize();
   await options.assertStopped();
-  let server = await db
+  const server = await db
     .selectFrom('managed_servers')
     .selectAll()
     .where('id', '=', serverId)
@@ -356,7 +358,7 @@ export async function configureModpackRuntime(
     identity,
   });
   const saved = await options.readTransition();
-  let journal = saved
+  const journal = saved
     ? transitionSchema.parse(saved)
     : transitionSchema.parse({
         version: 1,
@@ -381,10 +383,6 @@ export async function configureModpackRuntime(
     ![journal.sourceCombinationId, binding.combinationId].includes(profile.combination_id)
   )
     throw new DomainError('provenance_mismatch');
-  const save = async (state: ModpackRuntimeTransition['state']) => {
-    journal = { ...journal, state };
-    await options.saveTransition(journal);
-  };
   const remote = async (): Promise<ApplicationServer> => {
     await options.authorize();
     const current = await adapter.getApplicationServer(server.pterodactyl_id as number);
@@ -398,6 +396,38 @@ export async function configureModpackRuntime(
     Object.entries(environment).every(
       ([key, value]) => String(current.container.environment?.[key]) === value,
     );
+  return { server, profile, choice, binding, startup, saved, journal, remote, matchesStartup };
+}
+
+/** Read-only proof that startup changed exactly as requested and no installer was
+ * dispatched. Repeating a possibly dispatched installation is never recovery. */
+export async function assertModpackRuntimeResumable(
+  options: RuntimeInspectionOptions & { sourceMappingId: string; sourceCombinationId: string },
+): Promise<void> {
+  const current = await inspectRuntimeTransition(options);
+  if (
+    !current.saved ||
+    !['startup-dispatched', 'startup-confirmed'].includes(current.journal.state) ||
+    current.journal.sourceMappingId !== options.sourceMappingId ||
+    current.journal.sourceCombinationId !== options.sourceCombinationId
+  )
+    throw new DomainError('operation_uncertain');
+  if (!current.matchesStartup(await current.remote())) throw new DomainError('provenance_mismatch');
+}
+
+/** Explicit stopped transition. Durable dispatch markers prevent retries from
+ * launching the installer twice; uncertain effects require read-only recovery. */
+export async function configureModpackRuntime(
+  options: ConfigureModpackRuntimeOptions,
+): Promise<void> {
+  const { db, adapter, serverId, operationId, env = {} } = options;
+  const { profile, choice, binding, startup, saved, remote, matchesStartup, ...mutable } =
+    await inspectRuntimeTransition(options);
+  let { server, journal } = mutable;
+  const save = async (state: ModpackRuntimeTransition['state']) => {
+    journal = { ...journal, state };
+    await options.saveTransition(journal);
+  };
   if (!saved) await save('planned');
   if (journal.state === 'verified') {
     await assertMinecraftRemoteLaunch(db, serverId, await remote(), env, adapter);
@@ -415,9 +445,10 @@ export async function configureModpackRuntime(
     await options.assertStopped();
     await save('startup-dispatched');
     await options.authorize();
-    const changed = await adapter.updateStartup(server.pterodactyl_id, startup);
-    assertManagedIdentity(server, changed, identity);
-    if (!matchesStartup(changed)) throw new DomainError('operation_uncertain');
+    await adapter.updateStartup(server.pterodactyl_id as number, startup);
+    // PATCH representations may omit allocation relationships. Only the full
+    // Application GET can prove all identity dimensions and the changed startup.
+    if (!matchesStartup(await remote())) throw new DomainError('operation_uncertain');
     await save('startup-confirmed');
   } else if (journal.state === 'startup-dispatched') {
     if (!matchesStartup(await remote())) throw new DomainError('operation_uncertain');
