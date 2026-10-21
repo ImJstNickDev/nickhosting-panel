@@ -57,7 +57,18 @@ export interface FilemanTransferReceipt {
   files: number;
   bytes: number;
 }
-export interface FilemanArchiveRecoveryInput extends FilemanTransferManifest {
+export interface FilemanArchiveSource {
+  sourceSha256: string;
+  contentLength: number;
+  open(): ReadableStream<Uint8Array>;
+  completion: Promise<{ files: { path: string; size: number; sha256: string }[]; bytes: number }>;
+  cancel?(reason?: unknown): void;
+}
+export interface FilemanArchiveRecoveryProof extends FilemanTransferManifest {
+  /** Trusted retained source, usable only after durable proof of no dispatch. */
+  archive?: FilemanArchiveSource;
+}
+export interface FilemanArchiveRecoveryInput extends FilemanArchiveRecoveryProof {
   beforePublish(manifest: FilemanTransferManifest): Promise<void>;
   beforeWrite?: () => Promise<void>;
 }
@@ -91,9 +102,10 @@ export interface FilemanJobServices {
     beforePublish(manifest: FilemanTransferManifest): Promise<void>;
     beforeWrite?: () => Promise<void>;
   }): Promise<FilemanTransferReceipt & { manifest: FilemanTransferManifest }>;
-  /** Read-only proof of the exact retained archive request and its capacity claim. */
-  assertArchiveResumable?(input: FilemanTransferManifest): Promise<void>;
-  /** Reconcile only the retained provider request. Never reopen or upload an archive. */
+  /** Read-only proof of the retained request or the exact never-dispatched source. */
+  assertArchiveResumable?(input: FilemanArchiveRecoveryProof): Promise<void>;
+  /** Reconcile the retained provider request without uploading again, or admit the
+   * exact retained source only when the host proves no upload was dispatched. */
   resumeArchive?(
     input: FilemanArchiveRecoveryInput,
   ): Promise<FilemanTransferReceipt & { manifest: FilemanTransferManifest }>;

@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { authSessionId } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { ApplicationServer, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
@@ -136,6 +139,127 @@ async function fixture(running = true) {
 }
 
 describe('Modpacks real lifecycle and Fileman context', () => {
+  it('preflights the sealed archive before effects and reuses it across runtime recovery', async () => {
+    const f = await fixture(false);
+    const directory = await mkdtemp(join(tmpdir(), 'modpack-capacity-'));
+    try {
+      const stagingKey = join(directory, 'prepared');
+      await mkdir(join(stagingKey, 'mods'), { recursive: true });
+      const contents = Buffer.from('sealed mod content');
+      await writeFile(join(stagingKey, 'mods', 'pack.jar'), contents);
+      const target = {
+        minecraftVersion: '1.21.1',
+        loader: 'fabric' as const,
+        loaderVersion: '0.16.10',
+      };
+      const prepared: PreparedMinecraftModpack = {
+        pack: {
+          project: {
+            provider: 'modrinth',
+            id: 'pack',
+            name: 'Pack',
+            summary: '',
+            authors: [],
+            websiteUrl: 'https://example.test/pack',
+          },
+          version: {
+            id: 'v1',
+            projectId: 'pack',
+            name: 'v1',
+            version: '1',
+            minecraftVersions: ['1.21.1'],
+            loaders: ['fabric'],
+            available: true,
+            channel: 'release',
+            source: 'modrinth-index',
+          },
+        },
+        target,
+        stagingKey,
+        blockers: [],
+        files: [
+          {
+            path: 'mods/pack.jar',
+            size: contents.length,
+            sha256: createHash('sha256').update(contents).digest('hex'),
+          },
+        ],
+      };
+      const combinationId = randomUUID();
+      const plan = planMinecraftModpack({
+        selection: minecraftModpackPrepareSchema.parse({
+          provider: 'modrinth',
+          projectId: 'pack',
+          versionId: 'v1',
+          mode: 'install',
+          idempotencyKey: 'preflight',
+        }),
+        prepared,
+        observation: {
+          combinationId,
+          mappingId: f.mappingId,
+          entries: [],
+          worldRoots: [],
+          protectedPaths: [],
+          replacePaths: [],
+        },
+        previous: null,
+        runtime: { combinationId, mappingId: f.mappingId, target },
+      });
+      const policy = {
+        providerMaxFileBytes: 22,
+        temporaryDiskPath: resolve('.'),
+        temporaryDiskBudgetBytes: 16 * 1024 ** 2,
+        temporaryDiskHeadroomBytes: 0,
+      };
+      await f.db
+        .updateTable('physical_hosts')
+        .set({
+          local_disk_path: resolve('.'),
+          disk_headroom_mib: '0',
+          upload_policy: JSON.stringify(policy),
+        })
+        .where('id', '=', f.hostId)
+        .execute();
+      const options = { ...f.options, env: { NH_OBSERVER_ID: 'isolated-observer' } };
+      const host = await createModpackContext(options);
+      await expect(host.preflightPublication(prepared, plan)).rejects.toMatchObject({
+        code: 'validation_failed',
+        status: 413,
+      });
+      expect(host.context.operation().effect_started_at).toBeNull();
+      expect(host.context.operation().plan.modpackArchive).toMatchObject({
+        sourceSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        contentLength: expect.any(Number),
+      });
+      const archive = await readFile(join(directory, 'publication.zip'));
+      expect(
+        await f.db
+          .selectFrom('upload_ingestion_claims')
+          .select('id')
+          .where('server_id', '=', f.serverId)
+          .execute(),
+      ).toEqual([]);
+      await f.db
+        .updateTable('physical_hosts')
+        .set({ upload_policy: JSON.stringify({ ...policy, providerMaxFileBytes: 1024 ** 2 }) })
+        .where('id', '=', f.hostId)
+        .execute();
+      await host.preflightPublication(prepared, plan);
+      const recovered = await createModpackContext(options);
+      await recovered.preflightPublication(prepared, plan);
+      expect(await readFile(join(directory, 'publication.zip'))).toEqual(archive);
+      await writeFile(join(directory, 'publication.zip'), Buffer.alloc(archive.length, 42));
+      const changed = await createModpackContext(options);
+      await expect(changed.preflightPublication(prepared, plan)).rejects.toMatchObject({
+        code: 'operation_uncertain',
+      });
+      expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it.each([false, true])(
     'recovers a missing synthetic job only without dispatch evidence=%s',
     async (dispatched) => {

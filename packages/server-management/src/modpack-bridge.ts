@@ -332,6 +332,7 @@ export function createMinecraftModpackBridge(options: {
                 receipt,
                 await binding(row.server_id),
               ),
+            preflightPublication: host.preflightPublication,
             stop: host.stop,
             backup: host.backup,
             assertRuntimeResumable: async (plan) => {

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { authSessionId } from '@nickhosting/core';
+import { authSessionId, DomainError } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -86,6 +86,7 @@ describe('Modpacks durable preparation and apply', () => {
     };
     const calls: string[] = [];
     const scope = {
+      preflightPublication: vi.fn(async () => {}),
       inspect: vi.fn(async () => observation),
       stop: vi.fn(async () => {
         calls.push('stop');
@@ -238,6 +239,26 @@ describe('Modpacks durable preparation and apply', () => {
       }),
     ).rejects.toMatchObject({ code: 'operation_busy' });
     expect(f.calls).toEqual([]);
+  });
+  it('rejects archive capacity before stopping, backup, or runtime installation', async () => {
+    const f = await fixture();
+    f.hooks.resolveRuntime = vi.fn(async () => ({
+      combinationId: randomUUID(),
+      mappingId: f.mappingId,
+      target: f.prepared.target,
+    }));
+    f.scope.preflightPublication.mockRejectedValue(new DomainError('validation_failed', 413));
+    const { operationId } = await f.apply();
+    await f.service.process(operationId);
+    expect(f.scope.preflightPublication).toHaveBeenCalledTimes(1);
+    expect(f.calls).toEqual([]);
+    const row = await f.db
+      .selectFrom('minecraft_modpack_operations')
+      .selectAll()
+      .where('id', '=', operationId)
+      .executeTakeFirstOrThrow();
+    expect(row).toMatchObject({ state: 'failed', error: 'validation_failed', journal: [] });
+    expect(f.hooks.cleanup).toHaveBeenCalled();
   });
   it('applies once in stop/backup/publication/verification order and persists observed receipt', async () => {
     const f = await fixture();

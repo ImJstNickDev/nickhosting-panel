@@ -49,6 +49,11 @@ export interface MinecraftModpackApplyScope {
     prepared: PreparedMinecraftModpack,
     receipt: MinecraftModpackReceipt | null,
   ): Promise<MinecraftModpackObservation>;
+  /** Check the exact archive and shared upload capacity before lifecycle effects. */
+  preflightPublication(
+    prepared: PreparedMinecraftModpack,
+    plan: MinecraftModpackPlan,
+  ): Promise<void>;
   /** Return only after independently confirming the physical process is stopped. */
   stop(): Promise<void>;
   /** Return only a completed, successful backup receipt; submission is insufficient. */
@@ -828,6 +833,7 @@ export function createMinecraftModpacksService(options: {
                   await update({ journal: JSON.stringify(journal), updated_at: new Date() });
                   return result;
                 }
+                if (!resumingPublication) await scope.preflightPublication(prepared, plan);
                 if (!resuming) await effect('stopping', () => scope.stop());
                 if (!resuming && request.backupBefore) {
                   const backupId = await effect('backup', () => scope.backup());

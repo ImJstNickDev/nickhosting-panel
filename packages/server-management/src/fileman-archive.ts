@@ -3,6 +3,7 @@ import { type AuthContext, DomainError } from '@nickhosting/core';
 import { recordAudit } from '@nickhosting/database';
 import type {
   FilemanArchiveRecoveryInput,
+  FilemanArchiveRecoveryProof,
   FilemanJobServices,
   FilemanTransferManifest,
 } from '@nickhosting/game-sdk';
@@ -57,7 +58,7 @@ type ArchiveStage =
 async function archiveRecovery(
   context: GameLifecycleContext,
   authorize: () => Promise<AuthContext>,
-  expected: FilemanTransferManifest,
+  expected: FilemanArchiveRecoveryProof,
 ) {
   await authorize();
   const manifest = filemanTransferManifestSchema.parse({
@@ -66,6 +67,70 @@ async function archiveRecovery(
     files: expected.files,
   });
   const journal = context.operation().plan.fileArchive as ArchiveJournal | undefined;
+  // A legacy admission rejection has only the effect phase. The claim and its
+  // journal always precede send(), so no claim/journal/receipt plus the exact
+  // archive binding proves that this upload never began. Remote absence alone
+  // is deliberately insufficient evidence.
+  if (!journal || (journal.retrySafe === true && !journal.claimId && !journal.request)) {
+    const archive = expected.archive;
+    const skeleton = {
+      ...manifest,
+      files: manifest.files.map((file) => ({ ...file, sha256: '0'.repeat(64) })),
+    };
+    if (
+      !archive ||
+      !Number.isSafeInteger(archive.contentLength) ||
+      archive.contentLength < 22 ||
+      !/^[a-f0-9]{64}$/.test(archive.sourceSha256) ||
+      manifest.destinationRoot.includes('/') ||
+      manifest.destinationRoot.startsWith('.nickhosting-import-')
+    )
+      throw new DomainError('operation_uncertain');
+    const binding = hash(
+      JSON.stringify({
+        skeleton,
+        source: archive.sourceSha256,
+        bytes: archive.contentLength,
+      }),
+    );
+    if (
+      context.operation().phase !== `fileman.archive.${binding}` ||
+      !context.operation().effect_started_at ||
+      (journal &&
+        (journal.binding !== binding ||
+          journal.manifest ||
+          journal.commitDispatched ||
+          journal.completed ||
+          journal.claimScopeHash ||
+          (journal.sourceSha256 !== undefined && journal.sourceSha256 !== archive.sourceSha256) ||
+          (journal.contentLength !== undefined && journal.contentLength !== archive.contentLength)))
+    )
+      throw new DomainError('operation_uncertain');
+    const [claim, receipt] = await Promise.all([
+      context.db
+        .selectFrom('upload_ingestion_claims')
+        .select('id')
+        .where('server_id', '=', context.server.id)
+        .executeTakeFirst(),
+      context.db
+        .selectFrom('job_steps')
+        .select('step')
+        .where('job_id', '=', context.operation().job_id)
+        .where('step', 'like', 'fileman.transfer.%')
+        .executeTakeFirst(),
+    ]);
+    if (claim || receipt || !context.server.pterodactyl_identifier)
+      throw new DomainError('operation_uncertain');
+    await providerFileIdentity(context.db, context.server);
+    const roots = new Set([
+      `.nickhosting-import-${context.operation().job_id}`.toLowerCase(),
+      manifest.destinationRoot.toLowerCase(),
+    ]);
+    const entries = await context.adapter.listFiles(context.server.pterodactyl_identifier, '');
+    if (entries.some((entry) => roots.has(entry.name.toLowerCase())))
+      throw new DomainError('operation_uncertain');
+    return { kind: 'not-dispatched' as const, manifest, archive };
+  }
   const stored = filemanTransferManifestSchema.safeParse(journal?.manifest);
   const request = journal?.request;
   const identity = await providerFileIdentity(context.db, context.server);
@@ -153,13 +218,21 @@ async function archiveRecovery(
     )
       throw new DomainError('operation_uncertain');
   }
-  return { journal, manifest, bytes, contentLength, sourceSha256, settled: !claim && !!recorded };
+  return {
+    kind: 'retained' as const,
+    journal,
+    manifest,
+    bytes,
+    contentLength,
+    sourceSha256,
+    settled: !claim && !!recorded,
+  };
 }
 
 export async function assertFilemanArchiveResumable(
   context: GameLifecycleContext,
   authorize: () => Promise<AuthContext>,
-  manifest: FilemanTransferManifest,
+  manifest: FilemanArchiveRecoveryProof,
 ) {
   await archiveRecovery(context, authorize, manifest);
 }
@@ -170,6 +243,22 @@ export async function resumeFilemanArchive(
   input: FilemanArchiveRecoveryInput,
 ) {
   const retained = await archiveRecovery(context, options.authorize, input);
+  if (retained.kind === 'not-dispatched') {
+    const source = retained.archive;
+    return performFilemanArchive(
+      context,
+      options,
+      {
+        ...input,
+        sourceSha256: source.sourceSha256,
+        contentLength: source.contentLength,
+        open: () => source.open(),
+        completion: source.completion,
+        cancel: (reason) => source.cancel?.(reason),
+      },
+      true,
+    );
+  }
   if (retained.settled) {
     await options.authorize();
     await input.beforeWrite?.();
@@ -209,12 +298,21 @@ export async function resumeFilemanArchive(
 }
 
 /** One sanitized ZIP stream and one node-side commit. The exact commit request is
- * durable before dispatch: recovery replays only the provider's operation receipt,
- * never an upload or an unjournaled extraction. Caller retains its server lock. */
+ * durable before dispatch. Recovery reconciles that request, or proves no upload
+ * began before admitting the same sealed source. Caller retains its server lock. */
 export async function uploadFilemanArchive(
   context: GameLifecycleContext,
   options: { env?: Environment; authorize: () => Promise<AuthContext> },
   input: Input,
+) {
+  return performFilemanArchive(context, options, input, false);
+}
+
+async function performFilemanArchive(
+  context: GameLifecycleContext,
+  options: { env?: Environment; authorize: () => Promise<AuthContext> },
+  input: Input,
+  provenNotDispatched: boolean,
 ) {
   // A grant/auth failure can occur before the producer starts or its caller awaits it.
   void input.completion.catch(() => {});
@@ -500,7 +598,8 @@ export async function uploadFilemanArchive(
   if (
     context.operation().phase === phase &&
     context.operation().effect_started_at &&
-    !previous?.retrySafe
+    !previous?.retrySafe &&
+    !provenNotDispatched
   )
     throw new DomainError('operation_uncertain');
   await authorize();
@@ -557,8 +656,16 @@ export async function uploadFilemanArchive(
   if (prepared.status !== 'fulfilled') throw new DomainError('operation_uncertain');
   const send = prepared.value;
   let result: ReturnType<typeof receipt> | undefined;
-  await context.effect(phase, async () => {
+  const perform = async () => {
     await authorize();
+    // Persist proof before admission can reject. Once a claim exists it is
+    // replaced before opening the producer; a crash with any claim stays closed.
+    await persist({
+      binding,
+      retrySafe: true,
+      sourceSha256: input.sourceSha256,
+      contentLength: input.contentLength,
+    });
     const claim = await timed('claim', () =>
       reserveUploadIngestion(
         context.db,
@@ -645,11 +752,14 @@ export async function uploadFilemanArchive(
         });
         if (verified.bytes !== bytes || sentBytes !== input.contentLength)
           throw new DomainError('conflict');
+        const archiveSha256 = archiveHash.digest('hex');
+        if (provenNotDispatched && archiveSha256 !== input.sourceSha256)
+          throw new DomainError('operation_uncertain');
         const request: FileArchiveCommit = {
           operationId: jobId,
           identity,
           destinationRoot: input.destinationRoot,
-          archiveSha256: archiveHash.digest('hex'),
+          archiveSha256,
           files: manifest.files.map(({ path, size }) => ({ path, size })),
         };
         return { manifest, request };
@@ -681,7 +791,12 @@ export async function uploadFilemanArchive(
         else if (isUploadNotPublished(uploadFailure)) await claim.rejectBeforePublication();
         else await claim.rejectBeforeDispatch();
         settled = true;
-        await persist({ binding, retrySafe: true });
+        await persist({
+          binding,
+          retrySafe: true,
+          sourceSha256: input.sourceSha256,
+          contentLength: input.contentLength,
+        });
         throw error;
       }
       throw new DomainError('operation_uncertain');
@@ -690,7 +805,13 @@ export async function uploadFilemanArchive(
       await drainAuthorizations();
       await claim.unlock();
     }
-  });
+  };
+  if (provenNotDispatched) {
+    // The exact uncertain effect was proved above. Keep it uncertain throughout
+    // the new admission and dispatch; never replay a different lifecycle effect.
+    await perform();
+    await context.update({ effect_state: 'confirmed' });
+  } else await context.effect(phase, perform);
   if (!result) throw new DomainError('operation_uncertain');
   return result;
 }

@@ -22,7 +22,7 @@ import {
 } from './fileman-archive.js';
 import { filemanTransferDigest, filemanTransferReceiptStep } from './fileman-transfers.js';
 import { type GameLifecycleContext, processServerOperation } from './lifecycle.js';
-import { managementFixture } from './test-fixtures.js';
+import { managementFixture, pendingUploadFixture } from './test-fixtures.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
 type ArchiveInput = Parameters<NonNullable<FilemanJobServices['uploadArchive']>>[0];
@@ -82,7 +82,7 @@ describe('Fileman archive durable transfer', () => {
     });
     const adapter = {
       getResources: vi.fn(async () => ({ resources: { disk_bytes: 0 } })),
-      listFiles: vi.fn(async () => []),
+      listFiles: vi.fn<PterodactylAdapter['listFiles']>(async () => []),
       prepareUpload: vi.fn(async () => send),
       commitFileArchive: vi.fn(
         async (
@@ -189,8 +189,214 @@ describe('Fileman archive durable transfer', () => {
       update,
       run,
       owner: f.owner,
+      hostId: f.hostId,
     };
   }
+
+  async function admissionRejectedArchive(f: Awaited<ReturnType<typeof fixture>>, legacy: boolean) {
+    const input = f.input();
+    input.sourceSha256 = sha256(Buffer.alloc(input.contentLength, 42));
+    await f.context.db
+      .updateTable('physical_hosts')
+      .set({ upload_policy: sql`jsonb_set(upload_policy, '{providerMaxFileBytes}', '127'::jsonb)` })
+      .where('id', '=', f.hostId)
+      .execute();
+    await expect(f.run(input)).rejects.toMatchObject({ code: 'validation_failed', status: 413 });
+    expect(f.context.operation().phase).toMatch(/^fileman\.archive\.[a-f0-9]{64}$/);
+    expect(f.context.operation().effect_started_at).toBeInstanceOf(Date);
+    expect(f.context.operation().plan.fileArchive).toMatchObject({
+      retrySafe: true,
+      sourceSha256: input.sourceSha256,
+      contentLength: input.contentLength,
+    });
+    expect(f.context.operation().plan.fileArchive).not.toHaveProperty('claimId');
+    expect(await f.claims()).toEqual([]);
+    expect(input.open).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
+    expect(f.adapter.commitFileArchive).not.toHaveBeenCalled();
+    if (legacy) {
+      const plan = { ...f.context.operation().plan };
+      delete plan.fileArchive;
+      await f.context.update({ plan });
+    }
+    await f.context.db
+      .updateTable('physical_hosts')
+      .set({
+        upload_policy: sql`jsonb_set(upload_policy, '{providerMaxFileBytes}', '1048576'::jsonb)`,
+      })
+      .where('id', '=', f.hostId)
+      .execute();
+    await f.reload();
+    return {
+      input,
+      manifest: { id: input.id, destinationRoot: input.destinationRoot, files: input.files },
+      archive: {
+        sourceSha256: input.sourceSha256,
+        contentLength: input.contentLength,
+        open: input.open,
+        completion: input.completion,
+        cancel: input.cancel,
+      },
+    };
+  }
+
+  it.each([false, true])(
+    'proves an admission rejection read-only and uploads its exact source once, legacy=%s',
+    async (legacy) => {
+      await database.db.connection().execute(async (db) => {
+        const f = await fixture(db);
+        const { input, manifest, archive } = await admissionRejectedArchive(f, legacy);
+        const operation = structuredClone(f.context.operation());
+        const updates = f.update.mock.calls.length;
+        const audits = await db.selectFrom('audit_events').selectAll().execute();
+        await db.transaction().execute(async (tx) => {
+          await sql`set transaction read only`.execute(tx);
+          await assertFilemanArchiveResumable({ ...f.context, db: tx }, f.options.authorize, {
+            ...manifest,
+            archive,
+          });
+        });
+        expect(f.context.operation()).toEqual(operation);
+        expect(f.update).toHaveBeenCalledTimes(updates);
+        expect(await db.selectFrom('audit_events').selectAll().execute()).toEqual(audits);
+        expect(await f.claims()).toEqual([]);
+        expect(archive.open).not.toHaveBeenCalled();
+        expect(f.send).not.toHaveBeenCalled();
+        expect(f.adapter.prepareUpload).toHaveBeenCalledOnce();
+        const recovery = {
+          ...manifest,
+          archive,
+          beforeWrite: input.beforeWrite,
+          beforePublish: input.beforePublish,
+        };
+        const receipt = await resumeFilemanArchive(f.context, f.options, recovery);
+        expect(receipt).toMatchObject({ manifest, files: 3, bytes: 6 });
+        expect(archive.open).toHaveBeenCalledOnce();
+        expect(f.send).toHaveBeenCalledOnce();
+        expect(f.adapter.commitFileArchive).toHaveBeenCalledOnce();
+        expect(f.context.effect).toHaveBeenCalledOnce();
+        expect(f.context.operation().effect_state).toBe('confirmed');
+        expect(await f.claims()).toEqual([]);
+        await f.reload();
+        expect(await resumeFilemanArchive(f.context, f.options, recovery)).toEqual(receipt);
+        expect(archive.open).toHaveBeenCalledOnce();
+        expect(f.send).toHaveBeenCalledOnce();
+        expect(f.adapter.commitFileArchive).toHaveBeenCalledOnce();
+      });
+    },
+  );
+
+  it.each([
+    'source',
+    'source-marker',
+    'length',
+    'phase',
+    'claim',
+    'receipt',
+    'scratch',
+    'destination',
+  ] as const)(
+    'refuses no-dispatch recovery with %s ambiguity without consuming the source',
+    async (changed) => {
+      await database.db.connection().execute(async (db) => {
+        const f = await fixture(db);
+        const { input, manifest, archive } = await admissionRejectedArchive(
+          f,
+          changed !== 'source-marker',
+        );
+        if (changed === 'source' || changed === 'source-marker')
+          archive.sourceSha256 = 'b'.repeat(64);
+        if (changed === 'length') archive.contentLength++;
+        if (changed === 'phase')
+          await f.context.update({ phase: `fileman.archive.${'0'.repeat(64)}` });
+        if (changed === 'claim') await pendingUploadFixture(db, f.context.server.id);
+        if (changed === 'receipt')
+          await db
+            .insertInto('job_steps')
+            .values({
+              job_id: f.context.operation().job_id,
+              step: filemanTransferReceiptStep('f'.repeat(64)),
+            })
+            .execute();
+        if (changed === 'scratch' || changed === 'destination')
+          f.adapter.listFiles.mockResolvedValue([
+            {
+              name: (changed === 'scratch'
+                ? `.nickhosting-import-${f.context.operation().job_id}`
+                : manifest.destinationRoot
+              ).toUpperCase(),
+              mode: 'drwxr-xr-x',
+              size: 0,
+              is_file: false,
+              is_symlink: false,
+              mimetype: 'inode/directory',
+              created_at: '2026-10-21T00:00:00Z',
+              modified_at: '2026-10-21T00:00:00Z',
+            },
+          ]);
+        const operation = structuredClone(f.context.operation());
+        const claims = await f.claims();
+        const updates = f.update.mock.calls.length;
+        const recovery = {
+          ...manifest,
+          archive,
+          beforeWrite: input.beforeWrite,
+          beforePublish: input.beforePublish,
+        };
+        await expect(
+          assertFilemanArchiveResumable(f.context, f.options.authorize, recovery),
+        ).rejects.toMatchObject({ code: 'operation_uncertain' });
+        await expect(resumeFilemanArchive(f.context, f.options, recovery)).rejects.toMatchObject({
+          code: 'operation_uncertain',
+        });
+        expect(f.context.operation()).toEqual(operation);
+        expect(f.update).toHaveBeenCalledTimes(updates);
+        expect(await f.claims()).toEqual(claims);
+        expect(archive.open).not.toHaveBeenCalled();
+        expect(f.send).not.toHaveBeenCalled();
+        expect(f.adapter.prepareUpload).toHaveBeenCalledOnce();
+        expect(f.adapter.commitFileArchive).not.toHaveBeenCalled();
+      });
+    },
+  );
+
+  it('retains a dispatched claim without committing if the proven source bytes change', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const { input, manifest, archive } = await admissionRejectedArchive(f, true);
+      const originalOpen = archive.open.getMockImplementation();
+      if (!originalOpen) throw new Error('Missing source producer');
+      archive.open.mockImplementation(() =>
+        originalOpen().pipeThrough(
+          new TransformStream<Uint8Array, Uint8Array>({
+            transform(chunk, output) {
+              output.enqueue(Uint8Array.from(chunk, (byte) => byte ^ 1));
+            },
+          }),
+        ),
+      );
+      const recovery = {
+        ...manifest,
+        archive,
+        beforeWrite: input.beforeWrite,
+        beforePublish: input.beforePublish,
+      };
+      await expect(resumeFilemanArchive(f.context, f.options, recovery)).rejects.toMatchObject({
+        code: 'operation_uncertain',
+      });
+      expect(archive.open).toHaveBeenCalledOnce();
+      expect(f.send).toHaveBeenCalledOnce();
+      expect(f.adapter.commitFileArchive).not.toHaveBeenCalled();
+      expect(await f.claims()).toHaveLength(1);
+      expect(f.context.operation().plan.fileArchive).not.toHaveProperty('request');
+      await f.reload();
+      await expect(resumeFilemanArchive(f.context, f.options, recovery)).rejects.toMatchObject({
+        code: 'operation_uncertain',
+      });
+      expect(archive.open).toHaveBeenCalledOnce();
+      expect(f.send).toHaveBeenCalledOnce();
+    });
+  });
 
   it.each([false, true])(
     'resumes an exact retained archive without upload as a replacement Owner, legacy=%s',
@@ -220,11 +426,19 @@ describe('Fileman archive durable transfer', () => {
           destinationRoot: input.destinationRoot,
           files: input.files,
         };
-        await assertFilemanArchiveResumable(f.context, f.options.authorize, expected);
+        const unusedSource = f.input();
+        unusedSource.open.mockImplementation(() => {
+          throw new Error('Retained commit recovery must not consume a source');
+        });
+        await assertFilemanArchiveResumable(f.context, f.options.authorize, {
+          ...expected,
+          archive: unusedSource,
+        });
         expect(f.adapter.commitFileArchive).toHaveBeenCalledTimes(1);
         expect(await f.claims()).toHaveLength(1);
         const receipt = await resumeFilemanArchive(f.context, f.options, {
           ...expected,
+          archive: unusedSource,
           beforePublish: input.beforePublish,
           beforeWrite: input.beforeWrite,
         });
@@ -233,6 +447,7 @@ describe('Fileman archive durable transfer', () => {
         expect(f.adapter.prepareUpload).toHaveBeenCalledTimes(1);
         expect(f.send).toHaveBeenCalledTimes(1);
         expect(input.open).toHaveBeenCalledTimes(1);
+        expect(unusedSource.open).not.toHaveBeenCalled();
         expect(await f.claims()).toEqual([]);
         expect(f.context.operation().plan.fileArchive).toMatchObject({ completed: true });
       });

@@ -1,5 +1,7 @@
-import { createReadStream } from 'node:fs';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { closeSync, constants, createReadStream, fstatSync, openSync, type Stats } from 'node:fs';
+import { open, realpath, stat } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type AuthContext, DomainError } from '@nickhosting/core';
@@ -14,11 +16,20 @@ import {
   hasResumableModpackPublicationJournal,
   type MinecraftModpackOperationRow,
 } from './minecraft-modpacks.js';
-import { modpackDigest, modpackPlanSchema } from './minecraft-modpacks-plan.js';
-import { createModpackPublication, modpackRemoteStage } from './modpack-publication.js';
+import {
+  type MinecraftModpackPlan,
+  modpackDigest,
+  modpackPlanSchema,
+  preparedModpackSchema,
+} from './minecraft-modpacks-plan.js';
+import {
+  createModpackPublication,
+  type ModpackPublicationArchive,
+  modpackRemoteStage,
+} from './modpack-publication.js';
 import { authorizeServer } from './registry.js';
 import type { ManagementRuntime } from './runtime.js';
-import { assertNoPendingUpload } from './upload-admission.js';
+import { assertNoPendingUpload, assertUploadIngestionCapacity } from './upload-admission.js';
 
 export async function withModpackServerLock<T>(
   db: Kysely<Database>,
@@ -302,6 +313,117 @@ export async function createModpackContext(options: {
     listDirectories: (paths) => runtime.fileDirectoryBatch(identifier, server, paths),
   });
   context.fileman = fileman;
+  const readScope = fileman.readScope;
+  if (!readScope) throw new DomainError('integration_unavailable');
+  type ArchiveArguments = Parameters<Parameters<typeof createModpackPublication>[0]['archive']>;
+  let cachedArchive: { binding: string; value: Promise<ModpackPublicationArchive> } | undefined;
+  const archive = (
+    ...[prepared, files, destinationRoot, retained]: [...ArchiveArguments, boolean]
+  ) => {
+    const binding = modpackDigest({ directory: prepared.stagingKey, files, destinationRoot });
+    if (cachedArchive) {
+      if (cachedArchive.binding !== binding) throw new DomainError('conflict');
+      return cachedArchive.value;
+    }
+    const value = (async (): Promise<ModpackPublicationArchive> => {
+      const archivePath = resolve(prepared.stagingKey, '..', 'publication.zip');
+      const saved = operation.plan.modpackArchive as
+        | { binding?: string; sourceSha256?: string; contentLength?: number }
+        | undefined;
+      let sourceSha256: string;
+      let contentLength: number;
+      let sealed: Stats;
+      const selected = files.map((file) => ({ ...file, path: `${destinationRoot}/${file.path}` }));
+      if (retained || saved) {
+        if (saved && saved.binding !== binding) throw new DomainError('operation_uncertain');
+        // The path belongs to this prepared attempt. Never follow a replacement
+        // symlink or rebuild an unknown existing file after an uncertain effect.
+        if (
+          (await realpath(dirname(archivePath))) !== dirname(archivePath) ||
+          (await realpath(prepared.stagingKey)) !== resolve(prepared.stagingKey)
+        )
+          throw new DomainError('operation_uncertain');
+        const handle = await open(archivePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          const before = await handle.stat();
+          if (!before.isFile() || !Number.isSafeInteger(before.size) || before.size < 22)
+            throw new DomainError('operation_uncertain');
+          const hash = createHash('sha256');
+          let bytes = 0;
+          for await (const chunk of handle.createReadStream({ autoClose: false })) {
+            bytes += chunk.length;
+            if (bytes > before.size) throw new DomainError('operation_uncertain');
+            hash.update(chunk);
+          }
+          const after = await handle.stat();
+          if (
+            bytes !== before.size ||
+            before.size !== after.size ||
+            before.mtimeMs !== after.mtimeMs
+          )
+            throw new DomainError('operation_uncertain');
+          sourceSha256 = hash.digest('hex');
+          contentLength = bytes;
+          sealed = after;
+        } finally {
+          await handle.close();
+        }
+        if (saved && (saved.sourceSha256 !== sourceSha256 || saved.contentLength !== contentLength))
+          throw new DomainError('operation_uncertain');
+      } else {
+        const built = await buildModpackTransferArchive({
+          directory: prepared.stagingKey,
+          files,
+          stagingRoot: destinationRoot,
+          destination: archivePath,
+        });
+        if (!built) throw new DomainError('conflict');
+        sourceSha256 = built.archiveSha256;
+        contentLength = built.archiveBytes;
+        sealed = await stat(archivePath);
+        await update({
+          plan: { ...operation.plan, modpackArchive: { binding, sourceSha256, contentLength } },
+        });
+      }
+      if (!sealed.isFile() || sealed.size !== contentLength)
+        throw new DomainError('operation_uncertain');
+      let stream: Readable | undefined;
+      return {
+        sourceSha256,
+        contentLength,
+        files: selected,
+        open: () => {
+          const fd = openSync(archivePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+          const current = fstatSync(fd);
+          if (
+            !current.isFile() ||
+            current.dev !== sealed.dev ||
+            current.ino !== sealed.ino ||
+            current.size !== sealed.size ||
+            current.mtimeMs !== sealed.mtimeMs
+          ) {
+            closeSync(fd);
+            throw new DomainError('operation_uncertain');
+          }
+          stream = createReadStream(archivePath, { fd, autoClose: true });
+          return Readable.toWeb(stream) as ReadableStream<Uint8Array>;
+        },
+        completion: Promise.resolve({
+          bytes: files.reduce((sum, file) => sum + file.size, 0),
+          files: selected,
+        }),
+        cancel: () => {
+          stream?.destroy();
+        },
+      };
+    })();
+    cachedArchive = { binding, value };
+    return value;
+  };
+  const recoverArchive = async (...args: ArchiveArguments) => {
+    const journal = operation.plan.fileArchive as { request?: unknown } | undefined;
+    return journal?.request ? undefined : archive(...args, true);
+  };
   if (resumingPublication) {
     const plan = modpackPlanSchema.parse(pack.plan);
     if (plan.write.length) {
@@ -310,45 +432,45 @@ export async function createModpackContext(options: {
       await fileman.assertArchiveResumable({
         id: `modpack.${pack.id}`,
         destinationRoot: stagingRoot,
-        files: plan.write.map((file) => ({
-          path: `${stagingRoot}/${file.path}`,
-          size: file.size,
-          sha256: file.sha256,
-        })),
+        files: plan.write.map((file) => ({ ...file, path: `${stagingRoot}/${file.path}` })),
+        archive: (operation.plan.fileArchive as { request?: unknown } | undefined)?.request
+          ? undefined
+          : await recoverArchive(
+              preparedModpackSchema.parse(pack.prepared),
+              plan.write,
+              stagingRoot,
+            ),
       });
     } else await assertNoPendingUpload(db, server.id);
   }
-  const readScope = fileman.readScope;
-  if (!readScope) throw new DomainError('integration_unavailable');
+  const preflightPublication = async (
+    prepared: ArchiveArguments[0],
+    plan: MinecraftModpackPlan,
+  ) => {
+    await authorize();
+    if (!plan.write.length) return;
+    const source = await archive(
+      prepared,
+      plan.write,
+      modpackRemoteStage(pack.id).stagingRoot,
+      false,
+    );
+    await assertUploadIngestionCapacity(
+      db,
+      server.id,
+      source.contentLength + plan.write.reduce((sum, file) => sum + file.size, 0),
+      env,
+      { providerLargestFileBytes: source.contentLength, multipartCount: 1 },
+    );
+  };
   const publication = createModpackPublication({
     operationId: pack.id,
     identifier: server.pterodactyl_identifier,
     fileman,
     adapter: runtime.adapter,
     authorize,
-    async archive(prepared, files, destinationRoot) {
-      const archive = await buildModpackTransferArchive({
-        directory: prepared.stagingKey,
-        files,
-        stagingRoot: destinationRoot,
-        destination: join(prepared.stagingKey, '..', 'publication.zip'),
-      });
-      if (!archive) throw new DomainError('conflict');
-      let stream: Readable | undefined;
-      return {
-        sourceSha256: archive.archiveSha256,
-        contentLength: archive.archiveBytes,
-        files: archive.files,
-        open: () => {
-          stream = createReadStream(archive.archivePath);
-          return Readable.toWeb(stream) as ReadableStream<Uint8Array>;
-        },
-        completion: Promise.resolve({ bytes: archive.expandedBytes, files: archive.files }),
-        cancel: () => {
-          stream?.destroy();
-        },
-      };
-    },
+    archive: (prepared, files, destinationRoot) => archive(prepared, files, destinationRoot, false),
+    recoverArchive,
     readJournal: async () =>
       (
         await db
@@ -365,7 +487,16 @@ export async function createModpackContext(options: {
         .execute();
     },
   });
-  return { context, publication, stop, backup, assertStopped, authorize, readScope };
+  return {
+    context,
+    publication,
+    preflightPublication,
+    stop,
+    backup,
+    assertStopped,
+    authorize,
+    readScope,
+  };
 }
 
 /** Release only after publication has been proved, retaining all private recovery journals. */

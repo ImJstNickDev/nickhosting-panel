@@ -116,6 +116,12 @@ export function createModpackPublication(options: {
     files: readonly MinecraftModpackFile[],
     destinationRoot: string,
   ): Promise<ModpackPublicationArchive>;
+  /** Return a retained local source only for a proved pre-upload rejection. */
+  recoverArchive?(
+    prepared: PreparedMinecraftModpack,
+    files: readonly MinecraftModpackFile[],
+    destinationRoot: string,
+  ): Promise<ModpackPublicationArchive | undefined>;
   readJournal(): Promise<unknown>;
   saveJournal(journal: ModpackPublicationJournal): Promise<void>;
 }) {
@@ -369,7 +375,10 @@ export function createModpackPublication(options: {
     if (plan.write.length) {
       if (!options.fileman.assertArchiveResumable || !options.fileman.resumeArchive)
         throw new DomainError('operation_uncertain');
-      await options.fileman.assertArchiveResumable(manifest(plan));
+      await options.fileman.assertArchiveResumable({
+        ...manifest(plan),
+        archive: await options.recoverArchive?.(prepared, plan.write, roots.stagingRoot),
+      });
     }
     return journal;
   };
@@ -438,7 +447,11 @@ export function createModpackPublication(options: {
         },
       };
       const receipt = resume
-        ? await options.fileman.resumeArchive?.({ ...manifest(plan), ...callbacks })
+        ? await options.fileman.resumeArchive?.({
+            ...manifest(plan),
+            ...callbacks,
+            archive: await options.recoverArchive?.(prepared, plan.write, roots.stagingRoot),
+          })
         : await options.fileman.uploadArchive?.({
             ...(await options.archive(prepared, plan.write, roots.stagingRoot)),
             ...callbacks,
