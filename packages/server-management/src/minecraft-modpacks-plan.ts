@@ -338,6 +338,15 @@ export function planMinecraftModpack(input: {
   });
 }
 
+/** Protection covers whole subtrees. Runtime attestation may add a descendant
+ * already covered by a protected root without changing that protection. Keep
+ * persisted plans untouched and reject unsafe paths before comparing coverage. */
+const protectedRoots = (paths: string[]) => {
+  const normalized = unique(paths.map((path) => minecraftModpackPathSchema.parse(path)));
+  const roots = new Set(normalized);
+  return normalized.filter((path) => !parents(path).some((parent) => roots.has(parent)));
+};
+
 /** Revalidation uses one new scoped inventory, never downloads or hashes provider artifacts again. */
 export function assertMinecraftModpackPlanCurrent(
   plan: MinecraftModpackPlan,
@@ -348,8 +357,8 @@ export function assertMinecraftModpackPlanCurrent(
     observation.mappingId !== plan.sourceMappingId ||
     modpackDigest(unique(observation.worldRoots)) !== modpackDigest(plan.worldRoots) ||
     modpackDigest(
-      unique([...protectedDefaults(plan.propertiesMerged), ...observation.protectedPaths]),
-    ) !== modpackDigest(plan.protectedPaths)
+      protectedRoots([...protectedDefaults(plan.propertiesMerged), ...observation.protectedPaths]),
+    ) !== modpackDigest(protectedRoots(plan.protectedPaths))
   )
     throw new DomainError('conflict');
   const entries = new Map(observation.entries.map((entry) => [entry.path, entry]));

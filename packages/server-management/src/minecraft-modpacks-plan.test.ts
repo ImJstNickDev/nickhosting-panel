@@ -248,6 +248,48 @@ describe('Modpack preparation policy', () => {
     f.observation.entries.push(observed(file('mods/new.jar', 'b')));
     expect(() => assertMinecraftModpackPlanCurrent(plan, f.observation)).toThrow('conflict');
   });
+  it('accepts redundant runtime descendants without changing the stored plan', () => {
+    const f = fixture();
+    f.observation.protectedPaths.push('libraries/old/args.txt');
+    const plan = planMinecraftModpack(f);
+    const digest = modpackDigest(plan);
+    f.observation.protectedPaths = [
+      'server.jar',
+      'libraries',
+      'libraries/net/minecraftforge/forge/1.20.1-47.4.20/unix_args.txt',
+    ];
+    expect(() => assertMinecraftModpackPlanCurrent(plan, f.observation)).not.toThrow();
+    expect(modpackDigest(plan)).toBe(digest);
+    f.observation.worldRoots.push('another-world');
+    expect(() => assertMinecraftModpackPlanCurrent(plan, f.observation)).toThrow('conflict');
+  });
+  it.each([
+    ['server.jar', 'libraries', 'mods'],
+    ['libraries'],
+    ['server.jar', 'libraries/net'],
+    ['server.jar', 'libraries', 'libraries-other/new.txt'],
+  ])('rejects changed protected root coverage: %j', (...protectedPaths) => {
+    const f = fixture();
+    const plan = planMinecraftModpack(f);
+    f.observation.protectedPaths = protectedPaths;
+    expect(() => assertMinecraftModpackPlanCurrent(plan, f.observation)).toThrow('conflict');
+  });
+  it('rejects broadening an independently protected descendant to its parent', () => {
+    const f = fixture();
+    f.observation.protectedPaths.push('addons/shared');
+    const plan = planMinecraftModpack(f);
+    f.observation.protectedPaths = ['server.jar', 'libraries', 'addons'];
+    expect(() => assertMinecraftModpackPlanCurrent(plan, f.observation)).toThrow('conflict');
+  });
+  it.each(['libraries/../mods', 'libraries//invalid', 'libraries/./args.txt'])(
+    'does not hide an unsafe protected descendant: %s',
+    (path) => {
+      const f = fixture();
+      const plan = planMinecraftModpack(f);
+      f.observation.protectedPaths.push(path);
+      expect(() => assertMinecraftModpackPlanCurrent(plan, f.observation)).toThrow();
+    },
+  );
   it('preserves digest identity across PostgreSQL JSON object ordering', () => {
     expect(modpackDigest({ a: { c: 1, b: 2 }, d: [1, 2] })).toBe(
       modpackDigest({ d: [1, 2], a: { b: 2, c: 1 } }),
