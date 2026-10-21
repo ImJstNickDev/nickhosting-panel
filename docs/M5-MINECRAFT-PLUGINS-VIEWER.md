@@ -110,9 +110,18 @@ Reviewed screenshots:
 - [Paper and Bukkit declarations](screenshots/m5/plugscope-multiple-en.png)
 - [Loading](screenshots/m5/plugscope-loading-en.png), [absent metadata](screenshots/m5/plugscope-empty-en.png), [transport error](screenshots/m5/plugscope-error-en.png)
 
-At this handoff the implementation is validated locally; the prepared Vite-only
-development image update awaits Owner approval. No live plugin files or
-production services were changed.
+The Owner-approved Vite-only development activation completed on 2026-10-21,
+from implementation commit `71bbbec`. Only Vite was recreated; all 11 dev
+services and Panel/Wings were healthy afterward, with the other 12 containers'
+IDs, images and start times unchanged. Mounts, network attachments and published
+ports were preserved. No migration or Blueprint update was needed.
+
+A read-only Firefox smoke test opened an existing WorldEdit plugin through the
+actual Fileman archive endpoints: metadata and viewer modules returned HTTP 200,
+HTTPS and WSS HMR worked, no JavaScript errors or mobile overflow occurred, and
+no mutating application requests were made. No game data was created, changed
+or removed. The prior Vite image and prior shared build tag remain available for
+the approved scoped rollback; private activation evidence is retained locally.
 
 ## Rollback
 
