@@ -309,6 +309,25 @@ export class MinecraftUiError extends Error {
     super(code);
   }
 }
+const forgeUiCatalogSchema = z.object({
+  versions: z
+    .array(
+      z.object({
+        minecraftVersion: z.string().min(1).max(96),
+        loaders: z
+          .array(
+            z.object({
+              version: z.string().min(1).max(80),
+              coordinate: z.string().min(1).max(160),
+              recommended: z.boolean(),
+              latest: z.boolean(),
+            }),
+          )
+          .max(20_000),
+      }),
+    )
+    .max(2_000),
+});
 /** Release chronology is independent of release kind; unknown dates stay last. */
 export function minecraftCatalogOptions(
   raw: unknown,
@@ -323,10 +342,30 @@ export function minecraftCatalogOptions(
           fabric: z
             .object({ loaders: z.array(z.object({ version: z.string(), stable: z.boolean() })) })
             .optional(),
+          forge: forgeUiCatalogSchema.optional(),
         })
         .parse(raw);
   const choices = z.array(minecraftChoiceSchema).max(10000).parse(catalog.choices);
   if (handler === 'loaders') {
+    if (values.runtime === 'forge') {
+      const selected = choices.find(
+        (choice) => choice.id === values.choiceId && choice.runtime === 'forge',
+      );
+      const loaders =
+        ('forge' in catalog ? catalog.forge?.versions : [])?.find(
+          (entry) => entry.minecraftVersion === selected?.version,
+        )?.loaders ?? [];
+      const recommended =
+        loaders.find((loader) => loader.recommended) ??
+        loaders.find((loader) => loader.latest) ??
+        loaders[0];
+      return loaders.map((loader) => ({
+        value: loader.version,
+        label: loader.version,
+        disabled: false,
+        recommended: loader.version === recommended?.version,
+      }));
+    }
     const loaders = 'fabric' in catalog ? (catalog.fabric?.loaders ?? []) : [];
     const recommended = loaders.find((loader) => loader.stable) ?? loaders[0];
     return loaders.map((loader) => ({
@@ -388,21 +427,29 @@ export function createMinecraftUiController(client: GameUiClient) {
       );
   const creationCatalog = async (signal?: AbortSignal) => {
     const available = await choices(signal);
-    if (!available.some((choice) => choice.runtime === 'fabric')) return { choices: available };
-    const path = '/v1/minecraft/fabric/catalog';
-    const fabric = z
-      .object({
-        loaders: z
-          .array(z.object({ version: z.string().min(1).max(80), stable: z.boolean() }))
-          .max(10000),
-        latestInstallerVersion: z.string().nullable(),
-      })
-      .parse(
-        await (client.catalogRequest
-          ? client.catalogRequest(path, signal)
-          : request(path, 'GET', undefined, signal)),
-      );
-    return { choices: available, fabric };
+    const load = (path: string) =>
+      client.catalogRequest
+        ? client.catalogRequest(path, signal)
+        : request(path, 'GET', undefined, signal);
+    // Both runtime catalogs are local snapshots; load independent snapshots together.
+    const [fabric, forge] = await Promise.all([
+      available.some((choice) => choice.runtime === 'fabric')
+        ? load('/v1/minecraft/fabric/catalog').then((raw) =>
+            z
+              .object({
+                loaders: z
+                  .array(z.object({ version: z.string().min(1).max(80), stable: z.boolean() }))
+                  .max(10000),
+                latestInstallerVersion: z.string().nullable(),
+              })
+              .parse(raw),
+          )
+        : undefined,
+      available.some((choice) => choice.runtime === 'forge')
+        ? load('/v1/minecraft/forge/catalog').then((raw) => forgeUiCatalogSchema.parse(raw))
+        : undefined,
+    ]);
+    return { choices: available, ...(fabric ? { fabric } : {}), ...(forge ? { forge } : {}) };
   };
   const operate = async (
     serverId: string,
@@ -433,8 +480,8 @@ export function createMinecraftUiController(client: GameUiClient) {
   return {
     choices,
     creationCatalog,
-    async loaderOptions(signal?: AbortSignal): Promise<UiOption[]> {
-      return minecraftCatalogOptions(await creationCatalog(signal), 'loaders', {});
+    async loaderOptions(signal?: AbortSignal, values: UiValues = {}): Promise<UiOption[]> {
+      return minecraftCatalogOptions(await creationCatalog(signal), 'loaders', values);
     },
     async runtimeOptions(signal?: AbortSignal): Promise<UiOption[]> {
       return minecraftCatalogOptions(await choices(signal), 'runtimes', {});
@@ -699,8 +746,11 @@ export function createMinecraftUiController(client: GameUiClient) {
       // Never forward caller-controlled mapping IDs or manufacture an eligible combination.
       const selected = (await choices(signal)).find((c) => c.id === input.minecraft.choiceId);
       if (!selected) throw new MinecraftUiError('integration_unavailable');
-      if (selected.id.startsWith('fabric:')) {
-        const loaders = minecraftCatalogOptions(await creationCatalog(signal), 'loaders', {});
+      if (selected.id.startsWith('fabric:') || selected.id.startsWith('forge:')) {
+        const loaders = minecraftCatalogOptions(await creationCatalog(signal), 'loaders', {
+          runtime: selected.runtime,
+          choiceId: selected.id,
+        });
         if (!loaders.some((loader) => loader.value === input.minecraft.loaderVersion))
           throw new MinecraftUiError('validation_failed');
       } else if (input.minecraft.loaderVersion !== undefined)

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import { forgeJavaMajor } from './forge-policy.js';
 import { paperJavaMajor } from './paper-policy.js';
 import { vanillaJavaMajor } from './vanilla-policy.js';
 
@@ -76,6 +77,8 @@ export interface ResolvedMinecraftRuntime {
   readonly installation: {
     readonly kind: 'server-jar' | 'fabric-installer' | 'forge-installer';
     readonly args: readonly string[];
+    /** Exact renamed universal JAR receipt for pre-1.13 Forge only. */
+    readonly serverJarSha1?: string;
   };
   readonly evidence: readonly RuntimeSourceEvidence[];
 }
@@ -237,9 +240,11 @@ export async function resolveMinecraftRuntime(
   let javaMajor =
     request.profile === 'vanilla' || request.profile === 'fabric'
       ? vanillaJavaMajor(request.release, entry.type, release.javaVersion?.majorVersion)
-      : request.profile === 'paper'
-        ? (release.javaVersion?.majorVersion ?? 8)
-        : (release.javaVersion?.majorVersion ?? fail('minecraft_java_unknown'));
+      : request.profile === 'forge'
+        ? forgeJavaMajor(request.release, release.javaVersion?.majorVersion)
+        : request.profile === 'paper'
+          ? (release.javaVersion?.majorVersion ?? 8)
+          : (release.javaVersion?.majorVersion ?? fail('minecraft_java_unknown'));
   let upstreamSupport: string | undefined;
   let upstreamChannel: string | undefined;
   let artifacts: RuntimeArtifact[] = [
@@ -379,7 +384,20 @@ export async function resolveMinecraftRuntime(
     const url = `https://maven.minecraftforge.net/net/minecraftforge/forge/${coordinate}/forge-${coordinate}-installer.jar`;
     const hash = parse(sha1, new TextDecoder().decode((await read(`${url}.sha1`)).bytes).trim());
     artifacts.push({ role: 'installer', url, sha1: hash.toLowerCase() });
-    installation = { kind: 'forge-installer', args: ['--installServer'] };
+    const serverJarSha1 =
+      Number(request.release.split('.')[1]) <= 12
+        ? parse(
+            sha1,
+            new TextDecoder()
+              .decode((await read(url.replace('-installer.jar', '-universal.jar.sha1'))).bytes)
+              .trim(),
+          ).toLowerCase()
+        : undefined;
+    installation = {
+      kind: 'forge-installer',
+      args: ['--installServer'],
+      ...(serverJarSha1 ? { serverJarSha1 } : {}),
+    };
   }
   return freeze({
     ...request,

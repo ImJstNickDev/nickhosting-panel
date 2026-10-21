@@ -12,6 +12,7 @@ import type { ApplicationServer, PterodactylAdapter } from '@nickhosting/pteroda
 import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources, reserveInstallation } from './admission.js';
+import { getForgeCatalog } from './forge-catalog.js';
 import { assertManagedIdentity, readManagedIdentity } from './managed-identity.js';
 import {
   attestMinecraftRuntimeInstallation,
@@ -23,12 +24,17 @@ import {
   modpackRuntimeBindingSchema,
   sameModpackTarget,
 } from './minecraft-modpacks-plan.js';
-import { requireMinecraftChoice, resolveFabricCreationChoice } from './minecraft-registry.js';
+import {
+  requireMinecraftChoice,
+  resolveFabricCreationChoice,
+  resolveForgeCreationChoice,
+} from './minecraft-registry.js';
 import {
   assertMinecraftEggEnvironment,
   assertMinecraftRemoteLaunch,
   minecraftProvisionEnvironment,
 } from './minecraft-runtime-evidence.js';
+import { minecraftProvisionStartup } from './minecraft-startup.js';
 import { authorizeServer } from './registry.js';
 
 type Server = Selectable<Database['managed_servers']>;
@@ -44,6 +50,21 @@ export function modpackRuntimeTarget(choice: Choice): ContentTarget {
       : {}),
   };
 }
+/** Official historical Forge coordinates repeat the Minecraft version as a
+ * branch suffix. Keep that exact coordinate in the runtime, while matching a
+ * pack's numeric Forge requirement. Other branch aliases are never guessed. */
+function matchesRuntimeTarget(target: ContentTarget, choice: Choice): boolean {
+  const actual = modpackRuntimeTarget(choice);
+  if (sameModpackTarget(target, actual)) return true;
+  return (
+    target.loader === 'forge' &&
+    actual.loader === 'forge' &&
+    target.minecraftVersion === actual.minecraftVersion &&
+    !!target.loaderVersion &&
+    actual.loaderVersion === `${target.loaderVersion}-${target.minecraftVersion}`
+  );
+}
+
 function declaredTarget(target: ContentTarget) {
   if (!minecraftRuntimeProfiles.some((profile) => profile === target.loader)) return false;
   return minecraftDeclaredCapabilities({
@@ -114,7 +135,11 @@ export async function resolveModpackRuntime(input: {
   const { db, adapter, context, serverId, env = {} } = input;
   const target = contentTargetSchema.parse(input.target);
   const server = await authorizeServer(db, context, serverId, 'server:manage');
-  if (!declaredTarget(target) || (target.loader === 'fabric' && !target.loaderVersion)) return null;
+  if (
+    !declaredTarget(target) ||
+    (['fabric', 'forge'].includes(target.loader) && !target.loaderVersion)
+  )
+    return null;
   const [source, allocations, mappings, owner] = await Promise.all([
     db
       .selectFrom('runtime_egg_mappings')
@@ -145,14 +170,14 @@ export async function resolveModpackRuntime(input: {
     if (
       !choice.capabilities.installation ||
       (server.connection_mode === 'gateway' && !choice.capabilities.gateway) ||
-      !sameModpackTarget(target, modpackRuntimeTarget(choice))
+      !matchesRuntimeTarget(target, choice)
     )
       return null;
     await requireMinecraftChoice(db, owner, choice.row.id, env);
     return {
       combinationId: choice.row.id,
       mappingId: choice.mapping.id,
-      target: modpackRuntimeTarget(choice),
+      target,
     };
   };
   for (const mapping of usable) {
@@ -164,8 +189,10 @@ export async function resolveModpackRuntime(input: {
       .where(sql<string>`combination->>'profile'`, '=', target.loader)
       .where(
         sql<string>`coalesce(combination->>'loaderVersion', '')`,
-        '=',
-        target.loaderVersion ?? '',
+        'in',
+        target.loader === 'forge' && target.loaderVersion
+          ? [target.loaderVersion, `${target.loaderVersion}-${target.minecraftVersion}`]
+          : [target.loaderVersion ?? ''],
       )
       .orderBy('created_at', 'desc')
       .limit(100)
@@ -178,16 +205,36 @@ export async function resolveModpackRuntime(input: {
         if (!eligibilityFailure(error)) throw error;
       }
     }
-    if (target.loader === 'fabric' && target.loaderVersion) {
+    if (['fabric', 'forge'].includes(target.loader) && target.loaderVersion) {
+      let loaderVersion = target.loaderVersion;
+      if (target.loader === 'forge') {
+        const catalog = await getForgeCatalog(db);
+        const loaders =
+          catalog.versions.find((v) => v.minecraftVersion === target.minecraftVersion)?.loaders ??
+          [];
+        if (!loaders.some((entry) => entry.version === loaderVersion)) {
+          const candidates = loaders.filter((entry) =>
+            entry.version.startsWith(`${loaderVersion}-`),
+          );
+          if (
+            candidates.length !== 1 ||
+            candidates[0]?.version !== `${loaderVersion}-${target.minecraftVersion}`
+          )
+            continue;
+          loaderVersion = candidates[0].version;
+        }
+      }
       try {
         const value = await accepted(
-          await resolveFabricCreationChoice(
+          await (target.loader === 'forge'
+            ? resolveForgeCreationChoice
+            : resolveFabricCreationChoice)(
             db,
             adapter,
             context,
             {
-              choiceId: `fabric:${mapping.id}:${target.minecraftVersion}`,
-              loaderVersion: target.loaderVersion,
+              choiceId: `${target.loader}:${mapping.id}:${target.minecraftVersion}`,
+              loaderVersion,
             },
             env,
           ),
@@ -268,7 +315,7 @@ export async function configureModpackRuntime(
     (server.connection_mode === 'gateway' && !choice.capabilities.gateway) ||
     !declaredTarget(binding.target) ||
     choice.mapping.id !== binding.mappingId ||
-    !sameModpackTarget(binding.target, modpackRuntimeTarget(choice))
+    !matchesRuntimeTarget(binding.target, choice)
   )
     throw new DomainError('integration_unavailable');
   const profile = await db
@@ -291,7 +338,7 @@ export async function configureModpackRuntime(
   await assertMinecraftEggEnvironment(adapter, choice, environment);
   const mapping = minecraftRuntimeMappingSchema.parse(choice.row.binding);
   const startup = {
-    startup: choice.mapping.startup,
+    startup: minecraftProvisionStartup(choice),
     environment,
     egg: choice.mapping.egg_id,
     image: mapping.image,

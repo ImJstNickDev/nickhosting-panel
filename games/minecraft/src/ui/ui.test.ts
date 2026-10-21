@@ -448,6 +448,102 @@ describe('Minecraft browser module and exact API contracts', () => {
     ).rejects.toThrow('validation_failed');
     expect(request.mock.calls.every(([path]) => !path.includes('/combinations'))).toBe(true);
   });
+  it('filters Forge loaders by the selected Minecraft release and preserves historical coordinate suffixes', async () => {
+    const oldId = `forge:${choiceId}:1.7.10`;
+    const modernId = `forge:${choiceId}:1.20.1`;
+    const request = vi.fn<GameUiClient['request']>(async (path) => {
+      if (path === '/v1/minecraft/choices')
+        return [
+          { id: oldId, version: '1.7.10', runtime: 'forge' },
+          { id: modernId, version: '1.20.1', runtime: 'forge' },
+        ];
+      if (path === '/v1/minecraft/forge/catalog')
+        return {
+          versions: [
+            {
+              minecraftVersion: '1.20.1',
+              loaders: [
+                {
+                  version: '47.4.10',
+                  coordinate: '1.20.1-47.4.10',
+                  recommended: false,
+                  latest: true,
+                },
+                {
+                  version: '47.4.0',
+                  coordinate: '1.20.1-47.4.0',
+                  recommended: true,
+                  latest: false,
+                },
+              ],
+            },
+            {
+              minecraftVersion: '1.7.10',
+              loaders: [
+                {
+                  version: '10.13.4.1614-1.7.10',
+                  coordinate: '1.7.10-10.13.4.1614-1.7.10',
+                  recommended: false,
+                  latest: true,
+                },
+              ],
+            },
+          ],
+        };
+      return { serverId, jobId };
+    });
+    const client = { request };
+    const catalog = await minecraftUiModule.creationCatalog?.load(client);
+    const options = (id: string) =>
+      minecraftUiModule.creationCatalog?.options(catalog, 'loaders', {
+        runtime: 'forge',
+        choiceId: id,
+      });
+    expect(options(modernId)).toEqual([
+      { value: '47.4.10', label: '47.4.10', disabled: false, recommended: false },
+      { value: '47.4.0', label: '47.4.0', disabled: false, recommended: true },
+    ]);
+    expect(options(oldId)).toEqual([
+      {
+        value: '10.13.4.1614-1.7.10',
+        label: '10.13.4.1614-1.7.10',
+        disabled: false,
+        recommended: true,
+      },
+    ]);
+    expect(options('missing')).toEqual([]);
+    const input = {
+      idempotencyKey: 'forge-create',
+      name: 'Forge server',
+      limits: { memory: 2048, cpu: 100 },
+      minecraft: {
+        choiceId: oldId,
+        loaderVersion: '10.13.4.1614-1.7.10',
+        configuration: { eula: true },
+      },
+    };
+    expect(await createMinecraftUiController(client).create(input)).toEqual({ serverId, jobId });
+    expect(request).toHaveBeenLastCalledWith(
+      '/v1/minecraft/servers',
+      expect.objectContaining({
+        body: expect.objectContaining({
+          minecraft: expect.objectContaining({
+            choiceId: oldId,
+            loaderVersion: '10.13.4.1614-1.7.10',
+          }),
+        }),
+      }),
+    );
+    for (const loaderVersion of ['47.4.0', undefined]) {
+      await expect(
+        createMinecraftUiController(client).create({
+          ...input,
+          minecraft: { ...input.minecraft, loaderVersion },
+        }),
+      ).rejects.toThrow('validation_failed');
+    }
+    expect(request.mock.calls.every(([path]) => !path.includes('fabric/catalog'))).toBe(true);
+  });
   it('preserves exact creation API, explicit EULA, no Owner mapping ID and accepted job semantics', async () => {
     const client = clientFixture(),
       controller = createMinecraftUiController(client);

@@ -57,6 +57,7 @@ import {
 import { assertNoModpackPublication } from './minecraft-modpack-schema.js';
 import { requireMinecraftChoice } from './minecraft-registry.js';
 import { bindMinecraftSource } from './minecraft-sources.js';
+import { minecraftProvisionStartup } from './minecraft-startup.js';
 import { backupSchemaAvailable } from './provider-backup-events.js';
 import { integrationImageCandidates, mappingProvisionImage } from './runtime-images.js';
 import { killRequestSchema, requestStopEscalation } from './stop-escalation.js';
@@ -661,7 +662,7 @@ export async function createManagedServer(
       userId: providerOwner.provider_id,
       eggId: mapping.egg_id,
       dockerImage: mappingProvisionImage(mapping, minecraft?.row.binding),
-      startup: mapping.startup,
+      startup: minecraft ? minecraftProvisionStartup(minecraft) : mapping.startup,
       environment,
       limits: value.limits,
       featureLimits: mapping.feature_limits,

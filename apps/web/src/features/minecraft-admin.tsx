@@ -7,6 +7,7 @@ import { useLocale, useT } from '../app/i18n.js';
 import { Tooltip } from '../components/tooltip.js';
 import { Dialog, Empty, ErrorNotice, Loading, Notice, Select, Time } from '../components/ui.js';
 import { FabricVersionCatalog } from './fabric-version-catalog.js';
+import { ForgeVersionCatalog } from './forge-version-catalog.js';
 import { MinecraftProtocolSettings } from './integration-game-settings.js';
 import { CombinationDetail } from './minecraft-admin-detail.js';
 import {
@@ -83,6 +84,21 @@ export function OwnerMinecraftPage() {
     runtimes.find((r) => r.id === params.get('runtime'))?.id ?? runtimes[0]?.id ?? 'vanilla';
   const fabricDiscovery = runtime === 'fabric';
   const paperDiscovery = runtime === 'paper';
+  const forgeDiscovery = runtime === 'forge';
+  const runtimeNavigation = useRef<HTMLFieldSetElement>(null);
+  useEffect(() => {
+    const navigation = runtimeNavigation.current;
+    const selected = navigation?.querySelector<HTMLElement>(
+      `[data-runtime="${CSS.escape(runtime)}"]`,
+    );
+    if (!navigation || !selected || navigation.scrollWidth <= navigation.clientWidth) return;
+    const position = selected.getBoundingClientRect();
+    const bounds = navigation.getBoundingClientRect();
+    navigation.scrollTo({
+      left:
+        navigation.scrollLeft + position.left - bounds.left - (bounds.width - position.width) / 2,
+    });
+  }, [runtime]);
   const fabricKind =
     params.get('fabricKind') === 'loaders'
       ? 'loaders'
@@ -124,7 +140,7 @@ export function OwnerMinecraftPage() {
   };
   const catalog = useQuery<WorkspaceResponse>({
     queryKey: ['owner-minecraft-compatibility', 'workspace', scope, query],
-    enabled: Boolean(mapping) && !fabricDiscovery && !paperDiscovery,
+    enabled: Boolean(mapping) && !fabricDiscovery && !paperDiscovery && !forgeDiscovery,
     staleTime: 60_000,
     placeholderData: (previous, previousQuery) =>
       previousQuery?.queryKey[2] === scope ? keepPreviousData(previous) : undefined,
@@ -259,7 +275,7 @@ export function OwnerMinecraftPage() {
         ))}
       </fieldset>
     ) : (
-      <h2>{t('versions.minecraftVersions')}</h2>
+      <h2>{t(forgeDiscovery ? 'forgeCatalog.title' : 'versions.minecraftVersions')}</h2>
     );
   const mappingContext = (
     <div className="minecraft-versions-context">
@@ -415,12 +431,17 @@ export function OwnerMinecraftPage() {
   );
   return (
     <div className="minecraft-versions-workspace">
-      <fieldset className="integration-runtime-selector" aria-label={t('ownerIntegration.runtime')}>
+      <fieldset
+        ref={runtimeNavigation}
+        className="integration-runtime-selector"
+        aria-label={t('ownerIntegration.runtime')}
+      >
         {runtimes.map((r) => (
           <button
             type="button"
             className="secondary"
             key={r.id}
+            data-runtime={r.id}
             disabled={bulkBusy}
             aria-pressed={runtime === r.id}
             onClick={() => update({ runtime: r.id, mapping: '' }, true)}
@@ -431,6 +452,8 @@ export function OwnerMinecraftPage() {
       </fieldset>
       {fabricDiscovery ? (
         <FabricVersionCatalog kind={fabricKind} navigation={catalogNavigation} />
+      ) : forgeDiscovery ? (
+        <ForgeVersionCatalog navigation={catalogNavigation} />
       ) : paperDiscovery ? (
         <PaperVersionCatalog navigation={catalogNavigation} />
       ) : (

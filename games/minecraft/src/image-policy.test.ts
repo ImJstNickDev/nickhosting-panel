@@ -48,6 +48,14 @@ describe('Minecraft integration-owned images', () => {
     for (const major of [18, 19, 20, 26])
       expect(() => resolveMinecraftImage(runtime(major, 'fixture', 'fabric'))).toThrow();
   });
+  it('uses Forge Enhanced Java 8/16/17/21 images without guessing unverified requirements', () => {
+    for (const major of [8, 16, 17, 21])
+      expect(resolveMinecraftImage(runtime(major, 'fixture', 'forge')).image).toBe(
+        `ghcr.io/ptero-eggs/yolks:java_${major}`,
+      );
+    for (const major of [11, 18, 20, 25, 26])
+      expect(() => resolveMinecraftImage(runtime(major, 'fixture', 'forge'))).toThrow();
+  });
   it('declares image policies for all profiles without advertising verified versions', () => {
     for (const profile of minecraftManifest.runtimes) {
       expect(profile.imagePolicy?.mode).toBe('rules');

@@ -9,7 +9,7 @@ export interface MinecraftMetadataTables {
     sha1: string;
   };
   minecraft_metadata_sync: {
-    id: 'mojang' | 'fabric' | 'paper';
+    id: 'mojang' | 'fabric' | 'paper' | 'forge';
     manifest_json: ColumnType<unknown, string | null, string | null>;
     manifest_hash: string | null;
     last_checked_at: Date | null;

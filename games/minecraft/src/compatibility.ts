@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import { forgeEnhancedSupportedRelease } from './forge-policy.js';
 import {
   minecraftLegacyGatewaySupported,
   minecraftLegacyStatusVariant,
@@ -187,10 +188,11 @@ export const minecraftGatewayDeclarations = {
   vanilla: minecraftCapabilityDeclaration,
   fabric: { id: 'minecraft/fabric', version: 1 },
   paper: { id: 'minecraft/paper', version: 1 },
+  forge: { id: 'minecraft/forge', version: 1 },
 } as const;
 
 export function minecraftGatewayDeclaration(profile: MinecraftCombination['profile']) {
-  return profile === 'vanilla' || profile === 'fabric' || profile === 'paper'
+  return profile === 'vanilla' || profile === 'fabric' || profile === 'paper' || profile === 'forge'
     ? minecraftGatewayDeclarations[profile]
     : undefined;
 }
@@ -203,6 +205,7 @@ export function minecraftGatewaySupported(
 ): boolean {
   return (
     minecraftGatewayDeclaration(combination.profile) !== undefined &&
+    (combination.profile !== 'forge' || forgeEnhancedSupportedRelease(combination.release)) &&
     combination.protocolId !== null &&
     (combination.family === 'netty' ||
       (combination.profile === 'vanilla' &&
@@ -219,7 +222,9 @@ export function minecraftDeclaredCapabilities(
     'profile' | 'release' | 'releaseType' | 'family' | 'protocolId'
   >,
 ) {
-  const installation = ['vanilla', 'fabric', 'paper'].includes(combination.profile);
+  const installation =
+    ['vanilla', 'fabric', 'paper'].includes(combination.profile) ||
+    (combination.profile === 'forge' && forgeEnhancedSupportedRelease(combination.release));
   const gateway = minecraftGatewaySupported(combination);
   const playerIdle =
     gateway &&

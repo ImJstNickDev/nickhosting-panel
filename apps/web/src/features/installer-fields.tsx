@@ -87,10 +87,11 @@ export function VersionList({
     if (options.data) onChoices(options.data);
   }, [options.data, onChoices]);
   useEffect(() => {
-    if (value !== undefined && value !== '') return;
+    if (!options.data || options.isPending || options.isPlaceholderData) return;
+    if (options.data.some((option) => option.value === value && !option.disabled)) return;
     const recommended = options.data?.find((option) => option.recommended && !option.disabled);
     if (recommended) onChange(recommended.value);
-  }, [options.data, value, onChange]);
+  }, [options.data, options.isPending, options.isPlaceholderData, value, onChange]);
   const visible =
     options.data?.filter(
       (o) => !versionFilter || all || !o.releaseType || o.releaseType === 'release',

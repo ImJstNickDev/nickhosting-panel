@@ -28,7 +28,7 @@ the original build. No build selector or eager combination registration is neede
 The compiled Paper declaration supports installation, player management and the
 shared modern Java Gateway, readiness and idle/sleep/wake contracts for known
 protocols. These are integration capabilities, not a claim that every Paper build
-has been tested with a real server/client. Folia, Forge and other undeclared
+has been tested with a real server/client. Folia and other undeclared
 runtimes retain their previous controls. No provider egg, node or mapping is
 created automatically.
 
@@ -248,3 +248,13 @@ force flow applies to individual mod-version compatibility, not authorization,
 provider distribution restrictions or unverified runtime activation.
 See [contracts and acceptance evidence](M5-MINECRAFT-MODS.md). This addition does
 not claim completion of unfinished plugin/modpack workflows or remove issue #18.
+
+## Owner Forge policy amendment — 2026-10-21
+
+Forge is now a declared Minecraft runtime for the supported Forge Enhanced egg
+range (1.7.2–1.21.x official entries), using exact cached Minecraft/build choices,
+Owner-enabled mappings and normal rollout. Installation and modern Gateway
+capabilities reuse the existing lifecycle; real-client gameplay certification is
+not claimed by metadata or fixture tests. Modpacks may resolve the same exact
+Forge runtime. NeoForge remains outside this change. See the Forge catalog section
+in [game integrations](GAME-INTEGRATIONS.md#forge-catalog-and-creation).

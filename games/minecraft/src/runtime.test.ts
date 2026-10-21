@@ -252,6 +252,36 @@ describe('Minecraft exact runtime metadata', () => {
       await expect(resolveMinecraftRuntime(request, unavailable.client)).rejects.toThrow();
     },
   );
+  it.each([
+    ['1.7.10', '10.13.4.1614-1.7.10', 8],
+    ['1.12.2', '14.23.5.2860', 8],
+    ['1.17.1', '37.1.1', 16],
+  ] as const)(
+    'resolves Forge %s legacy Java fallback and exact Maven suffix',
+    async (release, loaderVersion, javaMajor) => {
+      const coordinate = `${release}-${loaderVersion}`;
+      const installer = `https://maven.minecraftforge.net/net/minecraftforge/forge/${coordinate}/forge-${coordinate}-installer.jar`;
+      const { client } = fixture(
+        {
+          'https://files.minecraftforge.net/net/minecraftforge/forge/maven-metadata.json': {
+            [release]: [coordinate],
+          },
+          [`${installer}.sha1`]: 'd'.repeat(40),
+          [installer.replace('-installer.jar', '-universal.jar.sha1')]: 'e'.repeat(40),
+        },
+        { release, java: null },
+      );
+      const result = await resolveMinecraftRuntime(
+        { release, profile: 'forge', loaderVersion },
+        client,
+      );
+      expect(result).toMatchObject({ javaMajor, loaderVersion });
+      expect(result.artifacts[1]?.url).toBe(installer);
+      expect(resolveMinecraftImage(result).image).toBe(
+        `ghcr.io/ptero-eggs/yolks:java_${javaMajor}`,
+      );
+    },
+  );
   it('requires Forge exact release-coordinate membership and installer checksum', async () => {
     const installer =
       'https://maven.minecraftforge.net/net/minecraftforge/forge/1.21.4-54.1.16/forge-1.21.4-54.1.16-installer.jar';
@@ -261,6 +291,7 @@ describe('Minecraft exact runtime metadata', () => {
           '1.21.4': ['1.21.4-54.1.16'],
         },
         [`${installer}.sha1`]: 'd'.repeat(40),
+        [installer.replace('-installer.jar', '-universal.jar.sha1')]: 'e'.repeat(40),
       },
       { release: '1.21.4', java: 21 },
     );

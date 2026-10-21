@@ -1908,8 +1908,8 @@ the additive schema/catalog and any created Paper server records.
 
 The Minecraft Modpacks tab now has a provider catalog, preparation and reviewed
 installation workflow. See [M5-MODPACKS.md](M5-MODPACKS.md) for provider limits,
-preservation rules, APIs and recovery behavior. Forge/NeoForge runtime development
-is intentionally deferred; ATLauncher is browse-only pending CDN permission.
+preservation rules, APIs and recovery behavior. NeoForge runtime development
+is deferred; Forge support is described below. ATLauncher is browse-only pending CDN permission.
 
 Migration `050_minecraft_modpacks.sql` is additive. Activation needs the updated
 dependency image for API/worker/Vite and the explicit migrator with the current
@@ -1921,3 +1921,30 @@ passed HTTPS, WSS HMR and all six provider catalogs; no real pack was installed.
 Keep the database, applied migration and all operation receipts when rolling back
 application code. Exact private preimages and commands remain in the local
 activation record; [M5-MODPACKS.md](M5-MODPACKS.md) records the verification limits.
+
+### Forge runtime catalog
+
+Forge uses a durable local catalog containing exact Maven coordinates and the
+official recommended/latest promotions. The worker refreshes it every 15 minutes;
+Owner **Minecraft → Versions → Forge → Sync versions** requests the same background
+job. The wizard offers Minecraft version followed by Forge build, with the
+recommended build selected initially. Existing Minecraft settings, domain and
+resource steps remain shared. Modpacks can resolve the exact required Forge build
+through an enabled mapping on the same managed node.
+
+Configure **Forge Enhanced** with integration-defined images in the Minecraft
+runtime mappings. No mapping is automatically created. Supported versions and
+installation formats are documented in [Forge catalog and creation](GAME-INTEGRATIONS.md#forge-catalog-and-creation).
+No new dependency or Blueprint/Panel/Wings modification is required.
+
+Migration `051_forge_catalog.sql` extends the existing metadata ID constraint and
+inserts one Forge synchronization row. Apply it explicitly through the development
+migrator using the full private Compose env-file chain and an image containing the
+reviewed SQL. The source watchers load the API, worker and UI changes; the Gateway
+must reload the Forge capability declaration before use. Preserve the current
+image under a rollback tag and inspect health, local catalog and HTTPS/HMR afterward.
+
+Rollback retains the additive row, all existing users, mappings, runtime records,
+operation receipts and game data. If a Forge server or Modpack runtime transition
+has been created, keep a Forge-capable application until a scoped recovery is
+reviewed. Do not revert support underneath an installed Forge server.

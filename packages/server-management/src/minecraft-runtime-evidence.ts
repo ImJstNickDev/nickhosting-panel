@@ -1,6 +1,8 @@
 import { DomainError } from '@nickhosting/core';
 import {
+  getForgeInstalledTarget,
   isFabricUpdatedBinding,
+  isForgeEnhancedBinding,
   type MinecraftEvidence,
   minecraftDigest,
   minecraftRuntimeMappingSchema,
@@ -15,6 +17,7 @@ import {
   assertMinecraftDeclaredEnvironment,
   inspectMinecraftCombination,
 } from './minecraft-registry.js';
+import { minecraftProvisionStartup } from './minecraft-startup.js';
 
 type MinecraftChoice = Awaited<ReturnType<typeof inspectMinecraftCombination>>;
 
@@ -101,8 +104,8 @@ function launchEnvironmentKeys(environment: Record<string, unknown>): string[] {
   ];
 }
 
-/** Supported Fabric launch shape, not an arbitrary shell/JVM parser. The verified
- * launcher and its Mojang target must remain authoritative. Unsupported commands
+/** Supported Java launch shapes, not an arbitrary shell/JVM parser. The verified
+ * launcher or Forge arguments remain authoritative. Unsupported commands
  * require a new evidence-backed integration contract rather than a checkbox. */
 export function assertMinecraftJavaLaunch(
   startup: string,
@@ -158,8 +161,22 @@ export function assertMinecraftVerifiedLaunch(
   profile: string,
   launcher: string | undefined,
   report: MinecraftEvidence | null,
+  choice?: Pick<MinecraftChoice, 'row'>,
 ): void {
-  if (profile === 'forge') {
+  const binding = choice && minecraftRuntimeMappingSchema.parse(choice.row.binding);
+  if (choice && binding && isForgeEnhancedBinding(binding)) {
+    const target = getForgeInstalledTarget(
+      choice.row.resolved_runtime as ResolvedMinecraftRuntime,
+      binding,
+    );
+    assertMinecraftJavaLaunch(
+      startup,
+      environment,
+      target.kind === 'forge'
+        ? { kind: 'forge', paths: [target.path] }
+        : { kind: 'jar', path: target.path },
+    );
+  } else if (profile === 'forge') {
     const paths =
       report?.server?.installedFiles
         ?.map((file) => file.path)
@@ -191,6 +208,7 @@ export async function assertMinecraftRemoteLaunch(
   const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
   const binding = minecraftRuntimeMappingSchema.parse(choice.row.binding);
   const expected = await minecraftProvisionEnvironment(db, serverId, choice);
+  const startup = minecraftProvisionStartup(choice);
   const checks = await Promise.allSettled([
     remoteInput,
     // Installed power operations validate the actual launch below. The egg
@@ -208,7 +226,7 @@ export async function assertMinecraftRemoteLaunch(
     choice.mappingDigest !== choice.row.mapping_digest ||
     remote.egg !== choice.mapping.egg_id ||
     remote.container.image !== binding.image ||
-    remote.container.startup_command !== choice.mapping.startup ||
+    remote.container.startup_command !== startup ||
     !actual ||
     Object.entries(expected).some(
       ([key, value]) =>
@@ -216,7 +234,7 @@ export async function assertMinecraftRemoteLaunch(
     )
   )
     throw new DomainError('provenance_mismatch');
-  if (actual.STARTUP !== undefined && actual.STARTUP !== choice.mapping.startup)
+  if (actual.STARTUP !== undefined && actual.STARTUP !== startup)
     throw new DomainError('provenance_mismatch');
   // These variables affect Java even when absent from the startup template. A
   // provider-added injection must never inherit trust from an image digest.
@@ -264,18 +282,19 @@ export async function assertMinecraftRemoteLaunch(
     remote.feature_limits.allocations !== choice.mapping.feature_limits.allocations
   )
     throw new DomainError('provenance_mismatch');
-  for (const [, name] of choice.mapping.startup.matchAll(/\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}/g)) {
+  for (const [, name] of startup.matchAll(/\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}/g)) {
     if (name && !(name in launch)) throw new DomainError('configuration_invalid');
     if (name && actual[name] !== undefined && String(actual[name]) !== launch[name])
       throw new DomainError('provenance_mismatch');
   }
   const evidence = await requireMinecraftRuntimeImageEvidence(db, serverId, null, env);
   assertMinecraftVerifiedLaunch(
-    choice.mapping.startup,
+    startup,
     launch,
     binding.profile,
     binding.artifactPaths.server,
     evidence.report,
+    choice,
   );
 }
 
@@ -321,9 +340,11 @@ export async function requireMinecraftRuntimeImageEvidence(
     choice.supportAuthority === 'integration' &&
     choice.capabilities.installation &&
     (choice.combination.profile !== 'fabric' ||
-      isFabricUpdatedBinding(minecraftRuntimeMappingSchema.parse(choice.row.binding)))
+      isFabricUpdatedBinding(minecraftRuntimeMappingSchema.parse(choice.row.binding))) &&
+    (choice.combination.profile !== 'forge' ||
+      isForgeEnhancedBinding(minecraftRuntimeMappingSchema.parse(choice.row.binding)))
   ) {
-    // Compiled Vanilla support is not a per-instance test certificate. Image
+    // Compiled runtime support is not a per-instance test certificate. Image
     // identity is observed locally and pinned once, after actual installation;
     // future container replacement must preserve that identity.
     if (observed !== null && !/^sha256:[a-f0-9]{64}$/.test(observed))

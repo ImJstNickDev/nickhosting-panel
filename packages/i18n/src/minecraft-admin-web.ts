@@ -1,5 +1,16 @@
 export const minecraftAdminWebMessages: Record<string, readonly [string, string]> = {
   'versions.minecraftVersions': ['Minecraft versions', 'Versioni Minecraft'],
+  'forgeCatalog.title': ['Forge versions', 'Versioni Forge'],
+  'forgeCatalog.build': ['Forge build', 'Build Forge'],
+  'forgeCatalog.recommended': ['Recommended', 'Consigliata'],
+  'forgeCatalog.buildPolicy': [
+    'Recommended build by default, or the latest when no recommendation is available.',
+    'Build consigliata come predefinita, oppure la più recente se non è indicata una preferenza.',
+  ],
+  'forgeCatalog.notSynced': [
+    'The Forge catalog has not been synced yet.',
+    'Il catalogo Forge non è ancora stato sincronizzato.',
+  ],
   'paperCatalog.title': ['Paper versions', 'Versioni Paper'],
   'paperCatalog.latestBuild': ['Latest build', 'Ultima build'],
   'paperCatalog.buildPolicy': [

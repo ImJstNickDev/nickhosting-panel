@@ -43,6 +43,31 @@ const evidence: MinecraftEvidence = {
 };
 const now = new Date('2026-10-09T13:00:00Z');
 describe('Minecraft compatibility evidence', () => {
+  it('declares Forge installation and transparent Gateway support only for Enhanced supported families', () => {
+    for (const release of ['1.7.2', '1.12.2', '1.16.5', '1.17.1', '1.21.11']) {
+      const choice = { ...combination, profile: 'forge' as const, release };
+      expect(minecraftDeclaredCapabilities(choice)).toMatchObject({
+        installation: true,
+        gateway: true,
+        wake: true,
+        playerIdle: true,
+      });
+      expect(() =>
+        assertMinecraftChoice({
+          combination: choice,
+          enabled: true,
+          mappingDigest: 'a'.repeat(64),
+          choiceDigest: 'b'.repeat(64),
+          evidence: [],
+          privateTester: false,
+        }),
+      ).not.toThrow();
+    }
+    for (const release of ['1.6.4', '26.1'])
+      expect(
+        minecraftDeclaredCapabilities({ ...combination, profile: 'forge', release }),
+      ).toMatchObject({ installation: false, gateway: false });
+  });
   it.each(['fabric', 'paper'] as const)(
     'declares %s installation and Gateway sleep/wake for known modern protocols',
     (profile) => {

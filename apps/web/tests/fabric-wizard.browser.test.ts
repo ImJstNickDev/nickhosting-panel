@@ -198,7 +198,7 @@ describe('Fabric independent catalog wizard', () => {
   }
   it('defaults the stable Loader, keeps every Loader selectable and submits the exact selection without registration', async () => {
     await open();
-    await check(page.getByRole('heading', { name: 'Choose a Fabric Loader' })).toBeVisible();
+    await check(page.getByRole('heading', { name: 'Choose a loader' })).toBeVisible();
     await check(page.getByRole('radio', { name: '0.19.5 Recommended', exact: true })).toBeChecked();
     await check(page.getByRole('radio', { name: '0.20.0-preview', exact: true })).toBeVisible();
     await check(page.getByText('Show all versions', { exact: true })).toHaveCount(0);
@@ -337,7 +337,7 @@ describe('Fabric independent catalog wizard', () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.addInitScript(() => localStorage.setItem('nh.locale', 'it'));
     await open('it');
-    await check(page.getByRole('heading', { name: 'Scegli un Fabric Loader' })).toBeVisible();
+    await check(page.getByRole('heading', { name: 'Scegli un loader' })).toBeVisible();
     const recommended = page.getByRole('radio', { name: '0.19.5 Consigliato', exact: true });
     await check(recommended).toBeFocused();
     await recommended.press('ArrowDown');

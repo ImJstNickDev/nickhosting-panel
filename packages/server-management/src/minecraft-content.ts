@@ -24,7 +24,10 @@ import {
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
 import {
+  assertForgeServerArguments,
+  getForgeInstalledTarget,
   isFabricUpdatedBinding,
+  isForgeEnhancedBinding,
   minecraftCombinationSchema,
   minecraftDigest,
   minecraftManifest,
@@ -37,6 +40,10 @@ import {
   fabricInstalledLauncherMaxBytes,
   verifyFabricInstalledLauncher,
 } from '../../../games/minecraft/src/fabric-launcher.js';
+import {
+  forgeInstalledJarMaxBytes,
+  verifyForgeInstalledJar,
+} from '../../../games/minecraft/src/forge-launcher.js';
 import {
   canonicalMinecraftJarSha256,
   minecraftGeneratedLauncherMaxBytes,
@@ -805,9 +812,27 @@ async function verifyMinecraftInitialConfiguration(context: GameLifecycleContext
     .where('server_id', '=', context.server.id)
     .execute();
 }
+type InstalledRuntimeFile = { path: string; sha256: string; size: number };
+function forgeInstallationReceipt(
+  choice: Awaited<ReturnType<typeof inspectMinecraftCombination>>,
+  files: readonly InstalledRuntimeFile[],
+): string | null {
+  const binding = minecraftRuntimeMappingSchema.parse(choice.row.binding);
+  return isForgeEnhancedBinding(binding)
+    ? stepId(
+        'forge-installation',
+        minecraftDigest({
+          combinationId: choice.row.id,
+          mappingDigest: choice.mappingDigest,
+          files,
+        }),
+      )
+    : null;
+}
 async function verifyInstalledRuntime(
   context: MinecraftReadContext,
   options: Pick<MinecraftContentOptions, 'env' | 'observedImageDigest'>,
+  installationContext?: GameLifecycleContext,
 ) {
   const env = options.env ?? {};
   const profile = await context.db
@@ -900,6 +925,43 @@ async function verifyInstalledRuntime(
         size,
       })),
     );
+  } else if (runtime.profile === 'forge' && isForgeEnhancedBinding(binding)) {
+    // Forge Enhanced removes installer.jar. Verify its installed launch target,
+    // not the deleted input or root unix_args.txt symlink. These receipts are
+    // installation/restore work; ordinary starts never fetch runtime files.
+    const target = getForgeInstalledTarget(runtime, binding);
+    const prior = z
+      .array(
+        z
+          .object({
+            path: z.string(),
+            sha256: z.string().regex(/^[a-f0-9]{64}$/),
+            size: z.number().int().positive(),
+          })
+          .strict(),
+      )
+      .length(1)
+      .safeParse(profile.installed_manifest);
+    const receipt =
+      prior.success && prior.data[0]?.path === target.path
+        ? forgeInstallationReceipt(choice, prior.data)
+        : null;
+    if (installationContext && receipt && (await completed(installationContext, receipt))) {
+      verified.push(...(prior.success ? prior.data : []));
+      return { profile, choice, verified, imageEvidence };
+    }
+    const chunks: Buffer[] = [];
+    const actual = await hashMinecraftRemoteFile(context, target.path, {
+      maxBytes: target.kind === 'forge' ? 256 * 1024 : forgeInstalledJarMaxBytes,
+      onChunk: (chunk) => {
+        chunks.push(Buffer.from(chunk));
+      },
+    });
+    if (!actual) throw new DomainError('conflict');
+    const bytes = Buffer.concat(chunks);
+    if (target.kind === 'forge') assertForgeServerArguments(bytes.toString('utf8'), runtime);
+    else await verifyForgeInstalledJar(bytes, runtime);
+    verified.push({ path: target.path, sha256: actual.sha256, size: actual.size });
   } else {
     // Loader-generated outputs are not proven by downloading an installer. Only
     // the trusted runner's signed exact-combination manifest can establish them.
@@ -1227,7 +1289,7 @@ export async function configureMinecraftProvision(
   if (!profile || profile.installed) return true;
   await context.authorize();
   await context.assertStopped();
-  const verified = await verifyInstalledRuntime(context, options);
+  const verified = await verifyInstalledRuntime(context, options, context);
   if (
     context.operation().action === 'wipe' &&
     context.operation().plan.wipeComplete === true &&
@@ -1251,6 +1313,8 @@ export async function configureMinecraftProvision(
     .set({ installed_manifest: JSON.stringify(verified.verified), updated_at: new Date() })
     .where('server_id', '=', context.server.id)
     .execute();
+  const receipt = forgeInstallationReceipt(verified.choice, verified.verified);
+  if (receipt) await complete(context, receipt);
   const identities =
     options.identityProvider ?? createMinecraftIdentityProvider({ userAgent: options.userAgent });
   const configuration = await resolveMinecraftStoredPlayers(profile.configuration, identities);

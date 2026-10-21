@@ -39,12 +39,25 @@ export const minecraftPaperImagePolicy = runtimeImagePolicySchema.parse({
   })),
 });
 
+/** Forge Enhanced uses the ptero-eggs family. The policy deliberately keeps
+ * old Forge on Java 8 and 1.17 on Java 16. */
+export const minecraftForgeImagePolicy = runtimeImagePolicySchema.parse({
+  mode: 'rules',
+  rules: [8, 16, 17, 21].map((major) => ({
+    id: `java-${major}`,
+    requirements: { javaMajor: String(major) },
+    image: `ghcr.io/ptero-eggs/yolks:java_${major}`,
+  })),
+});
+
 export function minecraftRuntimeImagePolicy(profile: ResolvedMinecraftRuntime['profile']) {
-  return profile === 'fabric'
-    ? minecraftFabricImagePolicy
-    : profile === 'paper'
-      ? minecraftPaperImagePolicy
-      : minecraftImagePolicy;
+  return profile === 'forge'
+    ? minecraftForgeImagePolicy
+    : profile === 'fabric'
+      ? minecraftFabricImagePolicy
+      : profile === 'paper'
+        ? minecraftPaperImagePolicy
+        : minecraftImagePolicy;
 }
 
 /** Runtime resolution already validates the exact release/build/loader against

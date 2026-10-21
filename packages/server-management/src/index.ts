@@ -12,6 +12,7 @@ export * from './fabric-registration.js';
 export * from './file-upload-urls.js';
 export * from './fileman-read.js';
 export * from './fileman-transfers.js';
+export * from './forge-catalog.js';
 export * from './game-modules.js';
 export * from './gateway-messages.js';
 export * from './gateway-orchestration.js';

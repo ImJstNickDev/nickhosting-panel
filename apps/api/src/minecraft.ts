@@ -19,6 +19,7 @@ import {
   enqueueServerOperation,
   findManagedCreationRequest,
   getFabricCatalog,
+  getForgeCatalog,
   getPaperCatalog,
   importMinecraftEvidence,
   inspectMinecraftCombination,
@@ -36,9 +37,11 @@ import {
   registerFabricCatalogCombination,
   registerMinecraftCombination,
   requestFabricCatalogRefresh,
+  requestForgeCatalogRefresh,
   requestPaperCatalogRefresh,
   requireMinecraftChoice,
   resolveFabricCreationChoice,
+  resolveForgeCreationChoice,
   resolvePaperCreationChoice,
   setMinecraftAvailability,
   setMinecraftBulkAvailability,
@@ -124,6 +127,23 @@ export function registerMinecraftRoutes(
     parse(z.object({}).strict(), await body(c));
     c.header('Cache-Control', 'no-store');
     return c.json(await requestPaperCatalogRefresh(db), 202);
+  });
+  app.get('/v1/owner/minecraft/forge/catalog', async (c) => {
+    await owner(c);
+    c.header('Cache-Control', 'no-store');
+    return c.json(await getForgeCatalog(db));
+  });
+  app.post('/v1/owner/minecraft/forge/catalog', async (c) => {
+    await owner(c);
+    parse(z.object({}).strict(), await body(c));
+    c.header('Cache-Control', 'no-store');
+    return c.json(await requestForgeCatalogRefresh(db), 202);
+  });
+  app.get('/v1/minecraft/forge/catalog', async (c) => {
+    const games = await gameCatalog(db, await principal(c));
+    if (!games.some((game) => game.id === 'minecraft')) throw new DomainError('forbidden');
+    c.header('Cache-Control', 'no-store');
+    return c.json(await getForgeCatalog(db));
   });
   app.get('/v1/minecraft/fabric/catalog', async (c) => {
     const games = await gameCatalog(db, await principal(c));
@@ -432,8 +452,9 @@ export function registerMinecraftRoutes(
     const input = parse(minecraftCreateSchema, await body(c));
     const fabric = input.minecraft.choiceId.startsWith('fabric:');
     const paper = input.minecraft.choiceId.startsWith('paper:');
-    const catalogChoice = fabric || paper;
-    if (fabric !== (input.minecraft.loaderVersion !== undefined))
+    const forge = input.minecraft.choiceId.startsWith('forge:');
+    const catalogChoice = fabric || paper || forge;
+    if ((fabric || forge) !== (input.minecraft.loaderVersion !== undefined))
       throw new DomainError('validation_failed');
     if (catalogChoice) {
       const previous = await findManagedCreationRequest(
@@ -445,26 +466,27 @@ export function registerMinecraftRoutes(
       );
       if (previous) return c.json(previous, 202);
     }
-    const choice = fabric
-      ? await resolveFabricCreationChoice(
-          db,
-          (await management()).adapter,
-          context,
-          {
-            choiceId: input.minecraft.choiceId,
-            loaderVersion: input.minecraft.loaderVersion ?? '',
-          },
-          env,
-        )
-      : paper
-        ? await resolvePaperCreationChoice(
+    const choice =
+      fabric || forge
+        ? await (forge ? resolveForgeCreationChoice : resolveFabricCreationChoice)(
             db,
             (await management()).adapter,
             context,
-            { choiceId: input.minecraft.choiceId },
+            {
+              choiceId: input.minecraft.choiceId,
+              loaderVersion: input.minecraft.loaderVersion ?? '',
+            },
             env,
           )
-        : await requireMinecraftChoice(db, context, input.minecraft.choiceId, env);
+        : paper
+          ? await resolvePaperCreationChoice(
+              db,
+              (await management()).adapter,
+              context,
+              { choiceId: input.minecraft.choiceId },
+              env,
+            )
+          : await requireMinecraftChoice(db, context, input.minecraft.choiceId, env);
     const { service, options: content } = await contentOptions(context);
     const prepared = await prepareMinecraftCreationConfig(
       db,

@@ -21,6 +21,7 @@ import { createMinecraftModpackBridge } from '../../../packages/server-managemen
 import { startHostObservationLoop } from './host-observations.js';
 import {
   pollFabricMetadata,
+  pollForgeMetadata,
   pollMinecraftMetadata,
   pollPaperMetadata,
 } from './minecraft-metadata.js';
@@ -262,6 +263,16 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         }, 5000);
     };
     paperPoll = refreshPaper();
+    let forgeTimer: ReturnType<typeof setTimeout> | undefined;
+    let forgePoll: Promise<void> | undefined;
+    const refreshForge = async () => {
+      await pollForgeMetadata(db, env, logger);
+      if (!stopping)
+        forgeTimer = setTimeout(() => {
+          forgePoll = refreshForge();
+        }, 5000);
+    };
+    forgePoll = refreshForge();
     reconciliation = poll();
     logger.log('info', 'worker.started');
     let closed: Promise<void> | undefined;
@@ -272,12 +283,14 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         if (metadataTimer) clearTimeout(metadataTimer);
         if (fabricTimer) clearTimeout(fabricTimer);
         if (paperTimer) clearTimeout(paperTimer);
+        if (forgeTimer) clearTimeout(forgeTimer);
         if (scheduleTimer) clearTimeout(scheduleTimer);
         await Promise.all([
           reconciliation,
           metadataPoll,
           fabricPoll,
           paperPoll,
+          forgePoll,
           schedulePoll,
           observations.close(),
           providerFeeds.close(),

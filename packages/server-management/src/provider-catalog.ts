@@ -10,7 +10,7 @@ import type { Kysely, Selectable } from 'kysely';
 import { minecraftMetadataRefreshMs } from './minecraft-metadata.js';
 
 type DB = Kysely<Database>;
-type Provider = 'fabric' | 'paper';
+type Provider = 'fabric' | 'paper' | 'forge';
 type SyncRow = Selectable<Database['minecraft_metadata_sync']>;
 export interface ProviderCatalogRefreshOptions {
   client?: RuntimeMetadataClient;

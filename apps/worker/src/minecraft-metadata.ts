@@ -2,6 +2,7 @@ import type { createLogger } from '@nickhosting/core';
 import { type createDatabase, getSettings } from '@nickhosting/database';
 import {
   refreshFabricCatalog,
+  refreshForgeCatalog,
   refreshMinecraftMetadata,
   refreshPaperCatalog,
 } from '@nickhosting/server-management';
@@ -11,7 +12,7 @@ type Environment = Readonly<Record<string, string | undefined>>;
 type Logger = ReturnType<typeof createLogger>;
 /** Each provider has its own scheduling loop; one slow discovery cannot delay another. */
 async function pollMetadata(
-  name: 'minecraft' | 'fabric' | 'paper',
+  name: 'minecraft' | 'fabric' | 'paper' | 'forge',
   refresh: typeof refreshMinecraftMetadata,
   db: DB,
   env: Environment,
@@ -34,4 +35,8 @@ export function pollFabricMetadata(db: DB, env: Environment, logger: Logger) {
 }
 export function pollPaperMetadata(db: DB, env: Environment, logger: Logger) {
   return pollMetadata('paper', refreshPaperCatalog, db, env, logger);
+}
+
+export function pollForgeMetadata(db: DB, env: Environment, logger: Logger) {
+  return pollMetadata('forge', refreshForgeCatalog, db, env, logger);
 }

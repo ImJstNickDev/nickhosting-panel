@@ -103,8 +103,8 @@ const translated: Record<string, [string, string]> = {
   'runtimes.forge': ['Forge', 'Forge'],
   'installer.address': ['Choose an address', 'Scegli un indirizzo'],
   'installer.version': ['Choose a version', 'Scegli una versione'],
-  'installer.loader': ['Choose a Fabric Loader', 'Scegli un Fabric Loader'],
-  'fields.loaderVersion': ['Fabric Loader', 'Fabric Loader'],
+  'installer.loader': ['Choose a loader', 'Scegli un loader'],
+  'fields.loaderVersion': ['Loader', 'Loader'],
   'installer.operators': ['Who should be an operator?', 'Chi sarà operatore?'],
   'installer.whitelist': ['Do you want to turn whitelist on?', 'Vuoi attivare la whitelist?'],
   'installer.eula': [
@@ -403,8 +403,8 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
       field('loaderVersion', {
         type: 'choice',
         required: true,
-        when: [{ field: 'runtime', operator: 'equals', values: ['fabric'] }],
-        source: { handler: 'loaders', dependsOn: ['runtime'] },
+        when: [{ field: 'runtime', operator: 'one-of', values: ['fabric', 'forge'] }],
+        source: { handler: 'loaders', dependsOn: ['runtime', 'choiceId'] },
       }),
       field('operators', {
         type: 'multi-text',
@@ -618,7 +618,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
         summary: [
           { labelKey: k('fields.runtime'), value: choice.runtime },
           { labelKey: k('fields.choiceId'), value: choice.version },
-          ...(choice.runtime === 'fabric'
+          ...(['fabric', 'forge'].includes(choice.runtime)
             ? [
                 {
                   labelKey: k('fields.loaderVersion'),
@@ -661,7 +661,8 @@ export const minecraftUiModule = defineTrustedGameUiModule({
         .deletePaths,
     'upload-world': (client, context) => uploadArchive(client, context, 'world'),
     'upload-modpack': (client, context) => uploadArchive(client, context, 'modpack'),
-    loaders: (client, context) => createMinecraftUiController(client).loaderOptions(context.signal),
+    loaders: (client, context) =>
+      createMinecraftUiController(client).loaderOptions(context.signal, context.values),
     runtimes: (client, context) =>
       createMinecraftUiController(client).runtimeOptions(context.signal),
     choices: async (client, context) => {
@@ -697,7 +698,9 @@ export const minecraftUiModule = defineTrustedGameUiModule({
           connection: v.connection,
           minecraft: {
             choiceId,
-            ...(v.runtime === 'fabric' ? { loaderVersion: v.loaderVersion } : {}),
+            ...(['fabric', 'forge'].includes(String(v.runtime))
+              ? { loaderVersion: v.loaderVersion }
+              : {}),
             configuration: {
               eula: v.eula,
               properties:
@@ -928,3 +931,5 @@ export type {
   FabricCatalogSnapshot,
   FabricCatalogStatus,
 } from '../fabric-catalog.js';
+
+export type { ForgeCatalogResponse } from '../forge-catalog.js';

@@ -162,7 +162,7 @@ Top-level steps always `Choose a game → Configure → Resources → Create`; `
 
 Minecraft example:
 
-- Show Owner-enabled runtime/version choices supported by the compiled integration and locally validated against the selected egg. Vanilla installation/direct access does not require a signed test for each mapping. Gateway/sleep/wake are separate declared capabilities. Paper/Folia/Forge retain their existing evidence/private-testing controls; they are not promoted by Vanilla support.
+- Show Owner-enabled runtime/version choices supported by the compiled integration and locally validated against the selected egg. Vanilla installation/direct access does not require a signed test for each mapping. Gateway/sleep/wake are separate declared capabilities. Fabric, Paper and Forge use their separately documented declarations; Folia and undeclared runtimes retain their evidence/private-testing controls.
 - If user **selects a modpack**, detect loader and Minecraft version from modpack metadata and skip redundant runtime/version selection. Still ask operators/whitelist and relevant gameplay options.
 - Players/OP UI may use MCHeads renders via `https://api.mcheads.org/head/{player}/{size}` but must verify account UUID/identity separately and handle cache/errors.
 - Existing-server modpack install triggers explicit wipe warning and pre-wipe verified backup option, never a silent merge.
@@ -883,3 +883,50 @@ table. It changes no users, game servers, mappings or existing combinations. Wor
 skip Paper before that row exists. Rollback the application code while retaining
 the additive catalog row; do not drop any installed server profiles or runtime
 records. Previously created Paper servers require a Paper-capable application.
+
+### Forge catalog and creation
+
+Forge uses the same local discovery and lazy registration flow as Fabric/Paper.
+The worker refreshes the official Maven coordinate catalog and promotions JSON
+once every 15 minutes; Owner **Minecraft → Versions → Forge → Sync versions** queues
+the same background refresh. Browsing and wizard selection read the last-good
+local snapshot, with no per-version upstream calls or preregistered matrix.
+
+The wizard selects Minecraft and an exact Forge build for that Minecraft version.
+Recommended is the initial choice, falling back to latest. Historical suffixes are
+retained: `1.7.10-10.13.4.1614-1.7.10` is an exact coordinate, not reconstructed by
+assuming every build for a release uses the same suffix. Creation freezes metadata
+and selected artifact checksums; later sync does not change existing servers.
+
+Configure an enabled **Forge Enhanced** runtime mapping with integration-defined
+images. The binding supplies exact `MC_VERSION`, full-coordinate `FORGE_VERSION`,
+`SERVER_JARFILE` and the otherwise-unused `BUILD_TYPE`. Java selection is 8 through
+1.16.5, 16 for 1.17, 17 for 1.18–1.20.4 and 21 from 1.20.5 through 1.21.x. The selected
+image must be advertised by the egg. The installation container is separate from
+the runtime image and remains Owner/provider configuration.
+
+The supplied egg is supported from 1.7.2 through 1.21.x where an official build
+exists. Earlier installer output filenames and the egg's 26.x launcher branch need
+an egg update before those versions can be enabled. NickHosting does not patch
+that egg or enable NeoForge. Known old-script fallback defects are avoided by
+supplying exact nonempty variables, not by changing provider files.
+
+NickHosting resolves the egg's known JAR/args shell branch into a static launch
+command for the selected version. Legacy versions launch the configured JAR;
+1.17+ launches the exact library `unix_args.txt`, avoiding reliance on the root
+symlink. Installation records the relevant outputs once; ordinary starts reuse
+those receipts and the existing process/identity/admission pipeline. This is
+integration-declared support, not certification of every client/mod combination.
+For modern Forge the receipt identifies the selected launch arguments after the
+provider reports installation complete; it does not hash every library or shim.
+The existing modern Gateway declaration provides status, wake and idle handling.
+
+Modpacks can lazily resolve an exact required Forge build using an Owner-configured
+mapping on the same node. It cannot silently choose a newer loader or alter ports,
+allocations or feature limits. Bare historical pack versions may match their unique
+standard Minecraft-suffixed coordinate; ambiguous branches remain unavailable.
+
+References: [official Maven catalog](https://files.minecraftforge.net/net/minecraftforge/forge/maven-metadata.json),
+[promotions](https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json),
+[Forge 1.17 Java requirement](https://docs.minecraftforge.net/en/1.17.x/gettingstarted/),
+[Forge 1.20.1 Java requirement](https://docs.minecraftforge.net/en/1.20.1/gettingstarted/).

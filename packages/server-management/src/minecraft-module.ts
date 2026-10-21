@@ -51,6 +51,7 @@ import {
   minecraftProvisionEnvironment,
   requireMinecraftRuntimeImageEvidence,
 } from './minecraft-runtime-evidence.js';
+import { minecraftProvisionStartup } from './minecraft-startup.js';
 import { minecraftContentProviders } from './minecraft-world-catalog.js';
 
 async function authorizeOperation(input: GameOperationAuthorization) {
@@ -105,7 +106,7 @@ async function authorizeOperation(input: GameOperationAuthorization) {
         (mapping.image_mode === 'static' && binding.image !== mapping.docker_image) ||
         plan.dockerImage !== binding.image ||
         plan.eggId !== mapping.egg_id ||
-        plan.startup !== mapping.startup ||
+        plan.startup !== minecraftProvisionStartup(choice) ||
         !isDeepStrictEqual(plan.environment, variables)
       )
         throw new DomainError('configuration_invalid');
@@ -129,6 +130,7 @@ async function authorizeOperation(input: GameOperationAuthorization) {
           binding.profile,
           binding.artifactPaths.server,
           evidence.report,
+          choice,
         );
       }
     }

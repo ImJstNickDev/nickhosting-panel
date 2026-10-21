@@ -3,7 +3,11 @@ import { createTestDatabase } from '@nickhosting/database/testing';
 import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { attestMinecraftRuntimeInstallation } from './minecraft-content.js';
-import { requireMinecraftChoice, resolveFabricCreationChoice } from './minecraft-registry.js';
+import {
+  requireMinecraftChoice,
+  resolveFabricCreationChoice,
+  resolveForgeCreationChoice,
+} from './minecraft-registry.js';
 import {
   type ConfigureModpackRuntimeOptions,
   configureModpackRuntime,
@@ -17,6 +21,7 @@ vi.mock('./minecraft-registry.js', async (original) => ({
   ...(await original<typeof import('./minecraft-registry.js')>()),
   requireMinecraftChoice: vi.fn(),
   resolveFabricCreationChoice: vi.fn(),
+  resolveForgeCreationChoice: vi.fn(),
 }));
 vi.mock('./minecraft-runtime-evidence.js', async (original) => ({
   ...(await original<typeof import('./minecraft-runtime-evidence.js')>()),
@@ -272,13 +277,112 @@ describe('Modpacks exact supported runtime transition', () => {
     expect(resolveFabricCreationChoice).not.toHaveBeenCalled();
     expect(requireMinecraftChoice).toHaveBeenCalledTimes(2);
   });
-  it('blocks undeclared Forge/NeoForge without resolving any combination', async () => {
+  it('blocks unmapped Forge and undeclared NeoForge without resolving any combination', async () => {
     const f = await fixture();
     for (const loader of ['forge', 'neoforge'] as const)
       expect(
         await resolveModpackRuntime({ ...f.options, target: { ...f.binding.target, loader } }),
       ).toBeNull();
     expect(requireMinecraftChoice).not.toHaveBeenCalled();
+  });
+  it('resolves a historical Forge modpack numeric build to its exact installed coordinate', async () => {
+    const f = await fixture();
+    const target = {
+      minecraftVersion: '1.7.10',
+      loader: 'forge' as const,
+      loaderVersion: '10.13.4.1614',
+    };
+    const combination = {
+      ...f.choice.combination,
+      release: target.minecraftVersion,
+      profile: target.loader,
+      loaderVersion: `${target.loaderVersion}-1.7.10`,
+    };
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ runtime_id: 'forge' })
+      .where('id', '=', f.mapping.id)
+      .execute();
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({ combination: JSON.stringify(combination) })
+      .where('id', '=', f.choice.row.id)
+      .execute();
+    const choice = {
+      ...f.choice,
+      combination,
+      mapping: { ...f.choice.mapping, runtime_id: 'forge' },
+    };
+    vi.mocked(requireMinecraftChoice).mockResolvedValue(choice);
+    const result = await resolveModpackRuntime({ ...f.options, target });
+    expect(result).toEqual({ ...f.binding, target });
+    expect(resolveForgeCreationChoice).not.toHaveBeenCalled();
+    expect(resolveFabricCreationChoice).not.toHaveBeenCalled();
+    expect(
+      await resolveModpackRuntime({
+        ...f.options,
+        target: { ...target, loaderVersion: '10.13.4.1558' },
+      }),
+    ).toBeNull();
+  });
+  it('materializes only the exact Forge loader required by a pack from the accepted local catalog', async () => {
+    const f = await fixture();
+    const target = {
+      minecraftVersion: '1.12.2',
+      loader: 'forge' as const,
+      loaderVersion: '14.23.5.2860',
+    };
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ runtime_id: 'forge' })
+      .where('id', '=', f.mapping.id)
+      .execute();
+    // Existing Fabric row must not authorize or silently substitute a Forge loader.
+    const { fetchForgeCatalog } = await import('@nickhosting/minecraft');
+    const { createHash } = await import('node:crypto');
+    const metadata = {
+      read: async (url: string) => {
+        const doc = url.endsWith('promotions_slim.json')
+          ? { promos: { '1.12.2-latest': target.loaderVersion } }
+          : { '1.12.2': [`1.12.2-${target.loaderVersion}`] };
+        const bytes = Buffer.from(JSON.stringify(doc));
+        return {
+          bytes,
+          evidence: {
+            url,
+            sha256: createHash('sha256').update(bytes).digest('hex'),
+            retrievedAt: new Date().toISOString(),
+          },
+        };
+      },
+    };
+    const snapshot = await fetchForgeCatalog(metadata);
+    await f.db
+      .updateTable('minecraft_metadata_sync')
+      .set({ manifest_json: JSON.stringify(snapshot), last_success_at: new Date() })
+      .where('id', '=', 'forge')
+      .execute();
+    const choice = {
+      ...f.choice,
+      combination: {
+        ...f.choice.combination,
+        release: target.minecraftVersion,
+        profile: target.loader,
+        loaderVersion: target.loaderVersion,
+      },
+      mapping: { ...f.choice.mapping, runtime_id: 'forge' },
+    };
+    vi.mocked(resolveForgeCreationChoice).mockResolvedValue(choice);
+    vi.mocked(requireMinecraftChoice).mockResolvedValue(choice);
+    expect(await resolveModpackRuntime({ ...f.options, target })).toEqual({ ...f.binding, target });
+    expect(resolveForgeCreationChoice).toHaveBeenCalledWith(
+      f.db,
+      f.adapter,
+      f.context,
+      { choiceId: `forge:${f.mapping.id}:1.12.2`, loaderVersion: target.loaderVersion },
+      {},
+    );
+    expect(resolveFabricCreationChoice).not.toHaveBeenCalled();
   });
   it('rejects mappings that would change the node, port roles, protocols, or allocation limits', async () => {
     const f = await fixture();

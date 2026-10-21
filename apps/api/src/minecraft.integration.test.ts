@@ -1091,6 +1091,23 @@ describe('Minecraft backend API authorization and user projection', () => {
       ).status,
     ).toBe(409);
   });
+  it('restricts Forge discovery refresh to Owners and queues without contacting providers', async () => {
+    const endpoint = '/v1/owner/minecraft/forge/catalog';
+    expect((await app.request(endpoint)).status).toBe(403);
+    actor = fixture.owner;
+    expect((await app.request(endpoint)).status).toBe(200);
+    expect((await post(endpoint, {})).status).toBe(202);
+    expect(management).not.toHaveBeenCalled();
+    expect(
+      (
+        await fixture.db
+          .selectFrom('minecraft_metadata_sync')
+          .select('requested_at')
+          .where('id', '=', 'forge')
+          .executeTakeFirstOrThrow()
+      ).requested_at,
+    ).not.toBeNull();
+  });
   it('restricts Paper discovery refresh to Owners and queues without contacting providers', async () => {
     const endpoint = '/v1/owner/minecraft/paper/catalog';
     expect((await app.request(endpoint)).status).toBe(403);

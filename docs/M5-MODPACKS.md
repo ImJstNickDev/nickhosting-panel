@@ -32,9 +32,10 @@ VoidsWrath API. This implementation reads the official pages instead.
 
 Pack-required Minecraft and loader versions remain exact. Existing runtime
 mappings, rollout and integration capabilities decide eligibility. This change
-**does not implement or enable Forge, NeoForge or Quilt**. Their requirements can
-be discovered and displayed; installation becomes eligible only when the runtime
-is implemented and configured. Fabric uses the existing latest-installer policy
+**does not implement or enable NeoForge or Quilt**. Forge is supported by the
+subsequent Forge runtime addition when an Owner-enabled Forge Enhanced mapping
+and an exact compatible catalog entry are available. Unsupported runtime
+requirements remain visible blockers. Fabric uses the existing latest-installer policy
 and the pack's exact loader version.
 
 A runtime change retains server identity, node, allocations and public routes.
