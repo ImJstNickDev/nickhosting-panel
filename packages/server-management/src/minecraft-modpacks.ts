@@ -57,6 +57,12 @@ export interface MinecraftModpackApplyScope {
   configureRuntime(binding: MinecraftModpackRuntimeBinding): Promise<void>;
   /** Re-prove the exact stopped, pre-installer transition before a resumed worker acts. */
   assertRuntimeResumable?(plan: MinecraftModpackPlan): Promise<void>;
+  /** Re-prove completed runtime and the exact untouched publication stage. */
+  assertPublicationResumable?(
+    prepared: PreparedMinecraftModpack,
+    plan: MinecraftModpackPlan,
+  ): Promise<void>;
+  resumePublication?(prepared: PreparedMinecraftModpack, plan: MinecraftModpackPlan): Promise<void>;
   /** Reuse staged bytes and Fileman streams/bulk operations; do not refetch providers. */
   publish(prepared: PreparedMinecraftModpack, plan: MinecraftModpackPlan): Promise<void>;
   /** Return observed receipts for every written file, or null when proof is incomplete. */
@@ -104,8 +110,8 @@ export interface MinecraftModpackHooks {
    * Restore prior intent through ordinary lifecycle admission. True means no
    * further restart is needed; failures preserve the applied receipt. */
   restoreRunningState?(operation: MinecraftModpackOperationRow): Promise<boolean>;
-  /** Read-only reconciliation; resume-runtime only authorizes queueing a worker
-   * after exact pre-installer proof. Never mutate the game server from this hook. */
+  /** Read-only reconciliation. Resume results only authorize queueing the same
+   * worker after exact retained-effect proof; this hook never mutates game files. */
   recover(
     operation: MinecraftModpackOperationRow,
     prepared: PreparedMinecraftModpack,
@@ -113,7 +119,7 @@ export interface MinecraftModpackHooks {
     context: AuthContext,
   ): Promise<
     | { state: 'applied'; files: MinecraftModpackFile[]; restartRequired?: boolean }
-    | { state: 'unchanged' | 'partial' | 'unknown' | 'resume-runtime' }
+    | { state: 'unchanged' | 'partial' | 'unknown' | 'resume-runtime' | 'resume-publication' }
   >;
   /** Delete only operation-owned private staging, then return. Failed cleanup retains its reservation. */
   cleanup?(operation: MinecraftModpackOperationRow): Promise<void>;
@@ -155,6 +161,41 @@ export function hasResumableModpackRuntimeJournal(row: MinecraftModpackOperation
     'stopping:confirmed',
     ...(request.data.backupBefore ? ['backup:dispatched', 'backup:confirmed'] : []),
     'runtime:dispatched',
+  ];
+  return (
+    journal.data.length === expected.length &&
+    journal.data.every((entry, index) => `${entry.phase}:${entry.state}` === expected[index])
+  );
+}
+/** Publication recovery starts only after a fully confirmed runtime, before any
+ * retirement/publication rename. It never replays earlier lifecycle effects. */
+export function hasResumableModpackPublicationJournal(row: MinecraftModpackOperationRow): boolean {
+  const request = minecraftModpackApplySchema.safeParse(row.apply_request);
+  const journal = journalSchema.safeParse(row.journal);
+  const transition = z.object({ state: z.literal('verified') }).safeParse(row.runtime_transition);
+  const publication = z
+    .object({
+      state: z.enum(['staging', 'staged']),
+      batches: z.array(z.unknown()).length(0),
+      rollbackCreated: z.literal(false),
+    })
+    .safeParse(row.publication);
+  if (
+    !request.success ||
+    request.data.operationId !== row.id ||
+    !journal.success ||
+    !transition.success ||
+    !publication.success ||
+    (request.data.backupBefore && !row.backup_id)
+  )
+    return false;
+  const expected = [
+    'stopping:dispatched',
+    'stopping:confirmed',
+    ...(request.data.backupBefore ? ['backup:dispatched', 'backup:confirmed'] : []),
+    'runtime:dispatched',
+    'runtime:confirmed',
+    'publishing:dispatched',
   ];
   return (
     journal.data.length === expected.length &&
@@ -756,10 +797,20 @@ export function createMinecraftModpacksService(options: {
                 if ((previous?.operationId ?? null) !== plan.previousOperationId)
                   throw new DomainError('conflict');
                 const resuming = journalSchema.parse(claimed.journal).length > 0;
+                const resumingPublication = hasResumableModpackPublicationJournal(claimed);
                 if (resuming) {
-                  if (!hasResumableModpackRuntimeJournal(claimed) || !scope.assertRuntimeResumable)
-                    throw new DomainError('operation_uncertain');
-                  await scope.assertRuntimeResumable(plan);
+                  if (resumingPublication) {
+                    if (!scope.assertPublicationResumable || !scope.resumePublication)
+                      throw new DomainError('operation_uncertain');
+                    await scope.assertPublicationResumable(prepared, plan);
+                  } else {
+                    if (
+                      !hasResumableModpackRuntimeJournal(claimed) ||
+                      !scope.assertRuntimeResumable
+                    )
+                      throw new DomainError('operation_uncertain');
+                    await scope.assertRuntimeResumable(plan);
+                  }
                 }
                 async function effect<T>(
                   phase: MinecraftModpackPhase,
@@ -799,6 +850,7 @@ export function createMinecraftModpacksService(options: {
                     : observation,
                 );
                 if (
+                  !resumingPublication &&
                   plan.runtime &&
                   (plan.runtime.combinationId !== plan.sourceCombinationId ||
                     plan.runtime.mappingId !== plan.sourceMappingId)
@@ -809,7 +861,14 @@ export function createMinecraftModpacksService(options: {
                     resuming,
                   );
                 }
-                await effect('publishing', () => scope.publish(prepared, plan));
+                await effect(
+                  'publishing',
+                  () =>
+                    resumingPublication && scope.resumePublication
+                      ? scope.resumePublication(prepared, plan)
+                      : scope.publish(prepared, plan),
+                  resumingPublication,
+                );
                 await update({ phase: 'verifying', updated_at: new Date() });
                 await check();
                 const files = await scope.verify(prepared, plan);
@@ -933,11 +992,17 @@ export function createMinecraftModpacksService(options: {
           // Recovery observes existing effects under the current caller's authority.
           // Revoking the original actor must not prevent an Owner from reconciling.
           const recovered = await hooks.recover(row, prepared, plan, current);
-          if (recovered.state === 'resume-runtime') {
+          if (recovered.state === 'resume-runtime' || recovered.state === 'resume-publication') {
             const request = minecraftModpackApplySchema.parse(row.apply_request);
             if (request.operationId !== row.id || request.planDigest !== row.plan_digest)
               throw new DomainError('conflict');
-            if (!plan.runtime || plan.blockers.length || !hasResumableModpackRuntimeJournal(row))
+            if (
+              !plan.runtime ||
+              plan.blockers.length ||
+              !(recovered.state === 'resume-runtime'
+                ? hasResumableModpackRuntimeJournal(row)
+                : hasResumableModpackPublicationJournal(row))
+            )
               throw new DomainError('operation_uncertain');
             await db.transaction().execute(async (tx) => {
               await lockResources(tx);

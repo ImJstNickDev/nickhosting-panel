@@ -10,9 +10,12 @@ import { type Environment, lockResources } from './admission.js';
 import { createFilemanJobServices } from './fileman-transfers.js';
 import { reconcileGatewayState } from './gateway-orchestration.js';
 import { type GameLifecycleContext, verifyManagedIdentity } from './lifecycle.js';
-import type { MinecraftModpackOperationRow } from './minecraft-modpacks.js';
-import { modpackDigest } from './minecraft-modpacks-plan.js';
-import { createModpackPublication } from './modpack-publication.js';
+import {
+  hasResumableModpackPublicationJournal,
+  type MinecraftModpackOperationRow,
+} from './minecraft-modpacks.js';
+import { modpackDigest, modpackPlanSchema } from './minecraft-modpacks-plan.js';
+import { createModpackPublication, modpackRemoteStage } from './modpack-publication.js';
 import { authorizeServer } from './registry.js';
 import type { ManagementRuntime } from './runtime.js';
 import { assertNoPendingUpload } from './upload-admission.js';
@@ -66,10 +69,11 @@ export async function createModpackContext(options: {
   if (server.active_operation_id && server.active_operation_id !== pack.id)
     throw new DomainError('operation_busy');
   await assertStoragePolicyIdle(db);
-  if (!options.recovery) await assertNoPendingUpload(db, server.id);
+  const resumingPublication = !options.recovery && hasResumableModpackPublicationJournal(pack);
+  if (!options.recovery && !resumingPublication) await assertNoPendingUpload(db, server.id);
   const remote = await runtime.adapter.getApplicationServer(server.pterodactyl_id);
   await verifyManagedIdentity(db, server, remote);
-  if (!options.recovery) {
+  if (!options.recovery && !resumingPublication) {
     await db.transaction().execute(async (tx) => {
       await lockResources(tx);
       const latest = await authorizeServer(tx, actor, server.id, 'server:manage');
@@ -128,6 +132,8 @@ export async function createModpackContext(options: {
     .selectAll()
     .where('job_id', '=', pack.id)
     .executeTakeFirstOrThrow();
+  if (operation.server_id !== pack.server_id || operation.plan.modpackOperationId !== pack.id)
+    throw new DomainError('operation_uncertain');
   const authorize = async () => {
     const current = await options.currentAuth();
     if (!options.recovery) {
@@ -296,6 +302,22 @@ export async function createModpackContext(options: {
     listDirectories: (paths) => runtime.fileDirectoryBatch(identifier, server, paths),
   });
   context.fileman = fileman;
+  if (resumingPublication) {
+    const plan = modpackPlanSchema.parse(pack.plan);
+    if (plan.write.length) {
+      if (!fileman.assertArchiveResumable) throw new DomainError('operation_uncertain');
+      const { stagingRoot } = modpackRemoteStage(pack.id);
+      await fileman.assertArchiveResumable({
+        id: `modpack.${pack.id}`,
+        destinationRoot: stagingRoot,
+        files: plan.write.map((file) => ({
+          path: `${stagingRoot}/${file.path}`,
+          size: file.size,
+          sha256: file.sha256,
+        })),
+      });
+    } else await assertNoPendingUpload(db, server.id);
+  }
   const readScope = fileman.readScope;
   if (!readScope) throw new DomainError('integration_unavailable');
   const publication = createModpackPublication({

@@ -56,7 +56,7 @@ const publicationSchema = z.strictObject({
 export type ModpackPublicationJournal = z.infer<typeof publicationSchema>;
 export type ModpackPublicationRecovery =
   | { state: 'applied'; files: MinecraftModpackFile[] }
-  | { state: 'unchanged' | 'partial' | 'unknown' };
+  | { state: 'unchanged' | 'partial' | 'unknown' | 'resume-publication' };
 
 type Move = z.infer<typeof moveSchema>;
 type Fingerprint = z.infer<typeof fingerprintSchema>;
@@ -306,26 +306,85 @@ export function createModpackPublication(options: {
     return files;
   };
 
-  return {
-    getRemoteStage(plan: MinecraftModpackPlan) {
-      modpackPlanSchema.parse(plan);
-      return { ...roots };
-    },
-    async publish(prepared: PreparedMinecraftModpack, plan: MinecraftModpackPlan) {
-      const binding = validate(prepared, plan);
-      if (await load(binding)) throw new DomainError('operation_uncertain');
-      const { retire, retiredEntries } = retirement(plan);
-      const publish = publicationMoves(plan);
-      const initial = await inspect([
-        roots.stagingRoot,
-        roots.rollbackRoot,
-        ...(plan.write.length ? [] : plan.expected.map((entry) => entry.path)),
-      ]);
-      if (initial.has(roots.stagingRoot) || initial.has(roots.rollbackRoot))
-        throw new DomainError('conflict');
-      if (!plan.write.length && !originalUnchanged(plan, initial))
-        throw new DomainError('conflict');
-      let journal = await save({
+  const manifest = (plan: MinecraftModpackPlan): FilemanTransferManifest => ({
+    id: `modpack.${options.operationId}`,
+    destinationRoot: roots.stagingRoot,
+    files: plan.write.map((file) => ({
+      path: `${roots.stagingRoot}/${file.path}`,
+      size: file.size,
+      sha256: file.sha256,
+    })),
+  });
+  const assertResumable = async (
+    prepared: PreparedMinecraftModpack,
+    plan: MinecraftModpackPlan,
+  ) => {
+    const journal = await load(validate(prepared, plan));
+    if (
+      !journal ||
+      !['staging', 'staged'].includes(journal.state) ||
+      journal.batches.length ||
+      journal.rollbackCreated ||
+      modpackDigest(journal.retire) !== modpackDigest(retirement(plan).retire) ||
+      modpackDigest(journal.retiredEntries) !== modpackDigest(retirement(plan).retiredEntries) ||
+      modpackDigest(journal.publish) !== modpackDigest(publicationMoves(plan)) ||
+      (journal.state === 'staging' && journal.stageFiles.length)
+    )
+      throw new DomainError('operation_uncertain');
+    const entries = await inspect([
+      roots.rollbackRoot,
+      ...plan.expected.map((entry) => entry.path),
+      ...journal.stageFiles.map((file) => `${roots.stagingRoot}/${file.path}`),
+    ]);
+    if (entries.has(roots.rollbackRoot) || !originalUnchanged(plan, entries))
+      throw new DomainError('conflict');
+    if (
+      journal.state === 'staged' &&
+      (journal.stageFiles.length !== plan.write.length ||
+        journal.stageFiles.some((file, index) => {
+          const expected = plan.write[index];
+          return (
+            !expected ||
+            file.path !== expected.path ||
+            file.size !== expected.size ||
+            file.sha256 !== expected.sha256 ||
+            !same(entries.get(`${roots.stagingRoot}/${file.path}`), { ...file, kind: 'file' })
+          );
+        }))
+    )
+      throw new DomainError('operation_uncertain');
+    if (plan.write.length) {
+      if (!options.fileman.assertArchiveResumable || !options.fileman.resumeArchive)
+        throw new DomainError('operation_uncertain');
+      await options.fileman.assertArchiveResumable(manifest(plan));
+    }
+    return journal;
+  };
+  const publish = async (
+    prepared: PreparedMinecraftModpack,
+    plan: MinecraftModpackPlan,
+    resume = false,
+  ) => {
+    const binding = validate(prepared, plan);
+    let retained: ModpackPublicationJournal | null = null;
+    if (resume) retained = await assertResumable(prepared, plan);
+    else if (await load(binding)) throw new DomainError('operation_uncertain');
+    const { retire, retiredEntries } = retirement(plan);
+    const publish = publicationMoves(plan);
+    const initial = retained
+      ? null
+      : await inspect([
+          roots.stagingRoot,
+          roots.rollbackRoot,
+          ...(plan.write.length ? [] : plan.expected.map((entry) => entry.path)),
+        ]);
+    if (initial && (initial.has(roots.stagingRoot) || initial.has(roots.rollbackRoot)))
+      throw new DomainError('conflict');
+    if (initial && !plan.write.length && !originalUnchanged(plan, initial))
+      throw new DomainError('conflict');
+    let journal =
+      retained ??
+      (await save({
         version: 1,
         operationId: options.operationId,
         binding,
@@ -336,89 +395,112 @@ export function createModpackPublication(options: {
         publish,
         batches: [],
         rollbackCreated: false,
-      });
-      if (plan.write.length) {
-        if (!options.fileman.uploadArchive) throw new DomainError('integration_unavailable');
-        const archive = await options.archive(prepared, plan.write, roots.stagingRoot);
-        const expected = new Map(
-          plan.write.map((file) => [`${roots.stagingRoot}/${file.path}`, file]),
-        );
-        const validateManifest = (manifest: FilemanTransferManifest) => {
-          if (
-            manifest.destinationRoot !== roots.stagingRoot ||
-            manifest.files.length !== expected.size ||
-            new Set(manifest.files.map((file) => file.path)).size !== expected.size ||
-            manifest.files.some((file) => {
-              const source = expected.get(file.path);
-              return !source || source.size !== file.size || source.sha256 !== file.sha256;
-            })
-          )
-            throw new DomainError('conflict');
-        };
-        const receipt = await options.fileman.uploadArchive({
-          ...archive,
-          id: `modpack.${options.operationId}`,
-          destinationRoot: roots.stagingRoot,
-          beforeWrite: async () => {
-            await options.authorize();
-          },
-          beforePublish: async (manifest) => {
-            validateManifest(manifest);
-          },
-        });
-        validateManifest(receipt.manifest);
-        // Reuse the stage receipt inventory to guard the original paths after a
-        // potentially long transfer, immediately before any original is moved.
-        const staged = await inspect([
-          ...expected.keys(),
-          ...plan.expected.map((entry) => entry.path),
-        ]);
-        if (!originalUnchanged(plan, staged)) throw new DomainError('conflict');
-        const stageFiles = plan.write.map((file) => {
-          const entry = staged.get(`${roots.stagingRoot}/${file.path}`);
-          if (entry?.kind !== 'file' || entry.size !== file.size || !entry.modifiedAt)
-            throw new DomainError('operation_uncertain');
-          return { ...file, modifiedAt: entry.modifiedAt };
-        });
-        journal = await save({ ...journal, state: 'staged', stageFiles });
-      } else journal = await save({ ...journal, state: 'staged' });
-      if (retire.length) {
-        await options.authorize();
-        journal = await save({ ...journal, state: 'retiring', rollbackCreated: true });
-        await options.adapter.createDirectory(options.identifier, '', roots.rollbackRoot);
-        const root = await inspect([roots.rollbackRoot]);
-        if (root.get(roots.rollbackRoot)?.kind !== 'directory')
-          throw new DomainError('operation_uncertain');
-        for (const moves of chunks(retire, 1000)) {
-          await options.authorize();
-          journal = await save({
-            ...journal,
-            batches: [...journal.batches, { phase: 'retire', moves }],
-          });
-          await options.adapter.renameFiles(options.identifier, '', moves);
-        }
-        const retired = await inspect([
-          ...retire.map((move) => move.from),
-          ...retiredEntries.map((entry) => entry.path),
-        ]);
+      }));
+    if (plan.write.length) {
+      if ((!resume && !options.fileman.uploadArchive) || (resume && !options.fileman.resumeArchive))
+        throw new DomainError('integration_unavailable');
+      const expected = new Map(
+        plan.write.map((file) => [`${roots.stagingRoot}/${file.path}`, file]),
+      );
+      const validateManifest = (manifest: FilemanTransferManifest) => {
         if (
-          retire.some((move) => retired.has(move.from)) ||
-          retiredEntries.some((entry) => !same(retired.get(entry.path), entry))
+          manifest.destinationRoot !== roots.stagingRoot ||
+          manifest.files.length !== expected.size ||
+          new Set(manifest.files.map((file) => file.path)).size !== expected.size ||
+          manifest.files.some((file) => {
+            const source = expected.get(file.path);
+            return !source || source.size !== file.size || source.sha256 !== file.sha256;
+          })
         )
+          throw new DomainError('conflict');
+      };
+      const callbacks = {
+        id: `modpack.${options.operationId}`,
+        destinationRoot: roots.stagingRoot,
+        beforeWrite: async () => {
+          await options.authorize();
+        },
+        beforePublish: async (manifest: FilemanTransferManifest) => {
+          validateManifest(manifest);
+        },
+      };
+      const receipt = resume
+        ? await options.fileman.resumeArchive?.({ ...manifest(plan), ...callbacks })
+        : await options.fileman.uploadArchive?.({
+            ...(await options.archive(prepared, plan.write, roots.stagingRoot)),
+            ...callbacks,
+          });
+      if (!receipt) throw new DomainError('operation_uncertain');
+      validateManifest(receipt.manifest);
+      // Reuse the stage receipt inventory to guard the original paths after a
+      // potentially long transfer, immediately before any original is moved.
+      const staged = await inspect([
+        ...expected.keys(),
+        ...plan.expected.map((entry) => entry.path),
+      ]);
+      if (!originalUnchanged(plan, staged)) throw new DomainError('conflict');
+      const stagePaths = new Set([...expected.keys()].flatMap((path) => [...parents(path), path]));
+      if (
+        [...staged.keys()].some(
+          (path) => path.startsWith(`${roots.stagingRoot}/`) && !stagePaths.has(path),
+        )
+      )
+        throw new DomainError('operation_uncertain');
+      const stageFiles = plan.write.map((file) => {
+        const entry = staged.get(`${roots.stagingRoot}/${file.path}`);
+        if (entry?.kind !== 'file' || entry.size !== file.size || !entry.modifiedAt)
           throw new DomainError('operation_uncertain');
-      }
-      journal = await save({ ...journal, state: 'publishing' });
-      for (const moves of chunks(publish, 1000)) {
+        return { ...file, modifiedAt: entry.modifiedAt };
+      });
+      journal = await save({ ...journal, state: 'staged', stageFiles });
+    } else journal = await save({ ...journal, state: 'staged' });
+    if (retire.length) {
+      await options.authorize();
+      journal = await save({ ...journal, state: 'retiring', rollbackCreated: true });
+      await options.adapter.createDirectory(options.identifier, '', roots.rollbackRoot);
+      const root = await inspect([roots.rollbackRoot]);
+      if (root.get(roots.rollbackRoot)?.kind !== 'directory')
+        throw new DomainError('operation_uncertain');
+      for (const moves of chunks(retire, 1000)) {
         await options.authorize();
         journal = await save({
           ...journal,
-          batches: [...journal.batches, { phase: 'publish', moves }],
+          batches: [...journal.batches, { phase: 'retire', moves }],
         });
         await options.adapter.renameFiles(options.identifier, '', moves);
       }
-      // The caller invokes verify once after publication. A 204 is not a receipt:
-      // Wings can return it when one of the requested moves did not happen.
+      const retired = await inspect([
+        ...retire.map((move) => move.from),
+        ...retiredEntries.map((entry) => entry.path),
+      ]);
+      if (
+        retire.some((move) => retired.has(move.from)) ||
+        retiredEntries.some((entry) => !same(retired.get(entry.path), entry))
+      )
+        throw new DomainError('operation_uncertain');
+    }
+    journal = await save({ ...journal, state: 'publishing' });
+    for (const moves of chunks(publish, 1000)) {
+      await options.authorize();
+      journal = await save({
+        ...journal,
+        batches: [...journal.batches, { phase: 'publish', moves }],
+      });
+      await options.adapter.renameFiles(options.identifier, '', moves);
+    }
+    // The caller invokes verify once after publication. A 204 is not a receipt:
+    // Wings can return it when one of the requested moves did not happen.
+  };
+  return {
+    getRemoteStage(plan: MinecraftModpackPlan) {
+      modpackPlanSchema.parse(plan);
+      return { ...roots };
     },
+    publish: (prepared: PreparedMinecraftModpack, plan: MinecraftModpackPlan) =>
+      publish(prepared, plan),
+    resume: (prepared: PreparedMinecraftModpack, plan: MinecraftModpackPlan) =>
+      publish(prepared, plan, true),
+    assertResumable,
     verify,
     async recover(
       prepared: PreparedMinecraftModpack,
@@ -434,6 +516,14 @@ export function createModpackPublication(options: {
         if (['publishing', 'verified'].includes(journal.state)) {
           const files = finalFiles(journal, entries);
           if (files) return { state: 'applied', files };
+        }
+        if (
+          !journal.batches.length &&
+          ['staging', 'staged'].includes(journal.state) &&
+          options.fileman.assertArchiveResumable
+        ) {
+          await assertResumable(prepared, plan);
+          return { state: 'resume-publication' };
         }
         if (!journal.batches.length)
           return { state: originalUnchanged(plan, entries) ? 'unchanged' : 'unknown' };

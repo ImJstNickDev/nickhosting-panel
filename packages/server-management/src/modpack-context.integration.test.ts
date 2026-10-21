@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { authSessionId } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { ApplicationServer, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
@@ -306,6 +306,165 @@ describe('Modpacks real lifecycle and Fileman context', () => {
       ).toBeUndefined();
     },
   );
+  it.each(['exact', 'other-claim', 'changed-scope', 'expired-lease'] as const)(
+    'admits only the retained publication claim and preserves lifecycle history: %s',
+    async (reason) => {
+      const f = await fixture(false);
+      const first = await createModpackContext(f.options);
+      const server = first.context.server;
+      const destinationRoot = `.nickhosting-pack-${f.row.id}-stage`;
+      const file = { path: 'mods/pack.jar', size: 10, sha256: 'c'.repeat(64) };
+      const manifest = {
+        id: `modpack.${f.row.id}`,
+        destinationRoot,
+        files: [{ ...file, path: `${destinationRoot}/${file.path}` }],
+      };
+      const skeleton = {
+        ...manifest,
+        files: manifest.files.map((file) => ({
+          path: file.path,
+          size: file.size,
+          sha256: '0'.repeat(64),
+        })),
+      };
+      const claimId = randomUUID();
+      const scopeHash = 'b'.repeat(64);
+      const identity = {
+        providerId: server.pterodactyl_id,
+        providerUuid: server.pterodactyl_uuid,
+        identifier: server.pterodactyl_identifier,
+        externalId: server.external_id,
+        nodeId: f.providerNodeId,
+      };
+      const archive = {
+        binding: createHash('sha256')
+          .update(JSON.stringify({ skeleton, source: 'a'.repeat(64), bytes: 1000 }))
+          .digest('hex'),
+        claimId,
+        claimScopeHash: scopeHash,
+        manifest,
+        request: {
+          operationId: f.row.id,
+          identity,
+          destinationRoot,
+          archiveSha256: 'a'.repeat(64),
+          files: manifest.files.map(({ path, size }) => ({ path, size })),
+        },
+        commitDispatched: true,
+        completed: false,
+      };
+      await first.context.update({
+        plan: {
+          ...first.context.operation().plan,
+          fileArchive: archive,
+          wasRunning: true,
+          stopped: true,
+        },
+      });
+      const claim = {
+        id: claimId,
+        server_id: f.serverId,
+        physical_host_id: f.hostId,
+        actor_user_id: f.context.actorUserId,
+        declared_bytes: '1010',
+        reserved_bytes: '2020',
+        scope_hash: scopeHash,
+        scope: JSON.stringify({
+          nodeId: server.node_id,
+          pterodactylNodeId: f.providerNodeId,
+          pterodactylServerId: server.pterodactyl_id,
+          pterodactylServerUuid: server.pterodactyl_uuid,
+          externalId: server.external_id,
+        }),
+      };
+      await f.db.insertInto('upload_ingestion_claims').values(claim).execute();
+      if (reason === 'other-claim')
+        await f.db
+          .updateTable('upload_ingestion_claims')
+          .set({ id: randomUUID() })
+          .where('id', '=', claimId)
+          .execute();
+      if (reason === 'changed-scope')
+        await f.db
+          .updateTable('upload_ingestion_claims')
+          .set({ scope_hash: 'd'.repeat(64) })
+          .where('id', '=', claimId)
+          .execute();
+      const target = { minecraftVersion: '1.12.2', loader: 'forge', loaderVersion: '14.23.5.2860' };
+      const plan = {
+        sourceCombinationId: randomUUID(),
+        sourceMappingId: f.mappingId,
+        previousOperationId: null,
+        runtime: { combinationId: randomUUID(), mappingId: f.mappingId, target },
+        write: [file],
+        remove: [],
+        preserve: [],
+        retained: [],
+        expected: [
+          { path: 'mods', entry: null },
+          { path: file.path, entry: null },
+        ],
+        worldRoots: [],
+        protectedPaths: [],
+        blockers: [],
+      };
+      const operation = await f.db
+        .updateTable('minecraft_modpack_operations')
+        .set({
+          plan: JSON.stringify(plan),
+          apply_request: JSON.stringify({
+            operationId: f.row.id,
+            planDigest: 'e'.repeat(64),
+            confirm: true,
+            backupBefore: false,
+            expectedDeletePaths: [],
+            idempotencyKey: 'resume',
+          }),
+          runtime_transition: JSON.stringify({ state: 'verified' }),
+          publication: JSON.stringify({ state: 'staging', batches: [], rollbackCreated: false }),
+          journal: JSON.stringify(
+            [
+              'stopping:dispatched',
+              'stopping:confirmed',
+              'runtime:dispatched',
+              'runtime:confirmed',
+              'publishing:dispatched',
+            ].map((step) => {
+              const [phase, state] = step.split(':');
+              return { phase, state, at: new Date().toISOString() };
+            }),
+          ),
+          ...(reason === 'expired-lease' ? { lease_until: new Date(0) } : {}),
+        })
+        .where('id', '=', f.row.id)
+        .returningAll()
+        .executeTakeFirstOrThrow();
+      const resumed = createModpackContext({
+        ...f.options,
+        operation,
+        currentAuth: async () => f.owner,
+      });
+      if (reason === 'exact') {
+        const host = await resumed;
+        await host.authorize();
+        expect(host.context.operation().plan).toMatchObject({
+          wasRunning: true,
+          stopped: true,
+          fileArchive: archive,
+        });
+        expect(host.context.fileman?.resumeArchive).toBeDefined();
+      } else await expect(resumed).rejects.toMatchObject({ code: 'operation_uncertain' });
+      expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+      expect(
+        await f.db
+          .selectFrom('upload_ingestion_claims')
+          .select('id')
+          .where('server_id', '=', f.serverId)
+          .executeTakeFirst(),
+      ).toBeDefined();
+    },
+  );
+
   it('refuses publication authority after another operation owns the server', async () => {
     const f = await fixture();
     const host = await createModpackContext(f.options);

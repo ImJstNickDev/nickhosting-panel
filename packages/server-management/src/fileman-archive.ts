@@ -1,7 +1,11 @@
 import { createHash } from 'node:crypto';
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import { recordAudit } from '@nickhosting/database';
-import type { FilemanJobServices, FilemanTransferManifest } from '@nickhosting/game-sdk';
+import type {
+  FilemanArchiveRecoveryInput,
+  FilemanJobServices,
+  FilemanTransferManifest,
+} from '@nickhosting/game-sdk';
 import { filemanTransferManifestSchema } from '@nickhosting/game-sdk';
 import {
   type FileArchiveCommit,
@@ -28,6 +32,8 @@ interface ArchiveJournal {
   commitDispatched?: boolean;
   completed?: boolean;
   retrySafe?: boolean;
+  sourceSha256?: string;
+  contentLength?: number;
 }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 type ArchiveStage =
@@ -45,6 +51,162 @@ type ArchiveStage =
   | 'before_publish'
   | 'commit'
   | 'receipts';
+
+/** Read-only admission for a retained transfer, including claims owned by the
+ * original job actor when a newly authorized Owner performs recovery. */
+async function archiveRecovery(
+  context: GameLifecycleContext,
+  authorize: () => Promise<AuthContext>,
+  expected: FilemanTransferManifest,
+) {
+  await authorize();
+  const manifest = filemanTransferManifestSchema.parse({
+    id: expected.id,
+    destinationRoot: expected.destinationRoot,
+    files: expected.files,
+  });
+  const journal = context.operation().plan.fileArchive as ArchiveJournal | undefined;
+  const stored = filemanTransferManifestSchema.safeParse(journal?.manifest);
+  const request = journal?.request;
+  const identity = await providerFileIdentity(context.db, context.server);
+  if (
+    !journal ||
+    !/^[a-f0-9]{64}$/.test(journal.binding) ||
+    !stored.success ||
+    filemanTransferDigest(stored.data) !== filemanTransferDigest(manifest) ||
+    !request ||
+    request.operationId !== context.operation().job_id ||
+    request.destinationRoot !== manifest.destinationRoot ||
+    !/^[a-f0-9]{64}$/.test(request.archiveSha256) ||
+    !request.identity ||
+    Object.entries(identity).some(
+      ([key, value]) => request.identity[key as keyof typeof identity] !== value,
+    ) ||
+    !Array.isArray(request.files) ||
+    request.files.length !== manifest.files.length ||
+    request.files.some(
+      (file, index) =>
+        file.path !== manifest.files[index]?.path || file.size !== manifest.files[index]?.size,
+    ) ||
+    journal.commitDispatched !== true ||
+    !z.uuid().safeParse(journal.claimId).success ||
+    !/^[a-f0-9]{64}$/.test(journal.claimScopeHash ?? '')
+  )
+    throw new DomainError('operation_uncertain');
+  const [claims, job, recorded] = await Promise.all([
+    context.db
+      .selectFrom('upload_ingestion_claims')
+      .selectAll()
+      .where('server_id', '=', context.server.id)
+      .execute(),
+    context.db
+      .selectFrom('operation_jobs')
+      .select(['actor_id', 'resource_owner_id'])
+      .where('id', '=', context.operation().job_id)
+      .executeTakeFirstOrThrow(),
+    context.db
+      .selectFrom('job_steps')
+      .select('step')
+      .where('job_id', '=', context.operation().job_id)
+      .where('step', '=', filemanTransferReceiptStep(filemanTransferDigest(manifest)))
+      .executeTakeFirst(),
+  ]);
+  if (
+    job.resource_owner_id !== context.server.owner_id ||
+    claims.some((claim) => claim.id !== journal.claimId)
+  )
+    throw new DomainError('operation_uncertain');
+  const claim = claims[0];
+  const bytes = manifest.files.reduce((sum, file) => sum + file.size, 0);
+  if (claim) {
+    const scope = claim.scope;
+    if (
+      claim.actor_user_id !== job.actor_id ||
+      claim.scope_hash !== journal.claimScopeHash ||
+      scope.nodeId !== context.server.node_id ||
+      scope.pterodactylNodeId !== identity.nodeId ||
+      scope.pterodactylServerId !== identity.providerId ||
+      scope.pterodactylServerUuid !== identity.providerUuid ||
+      scope.externalId !== identity.externalId
+    )
+      throw new DomainError('operation_uncertain');
+  } else if (!recorded) throw new DomainError('operation_uncertain');
+  // Older journals retain the archive's byte length in their exact capacity claim.
+  // The request hash is the actual streamed archive seal, not a provider URL.
+  const contentLength =
+    journal.contentLength ??
+    (claim ? Number(BigInt(claim.declared_bytes) - BigInt(bytes)) : undefined);
+  const sourceSha256 = journal.sourceSha256 ?? request.archiveSha256;
+  if (claim || contentLength !== undefined) {
+    const skeleton = {
+      ...manifest,
+      files: manifest.files.map((file) => ({ ...file, sha256: '0'.repeat(64) })),
+    };
+    if (
+      contentLength === undefined ||
+      !Number.isSafeInteger(contentLength) ||
+      contentLength < 22 ||
+      !/^[a-f0-9]{64}$/.test(sourceSha256) ||
+      (claim && BigInt(claim.declared_bytes) !== BigInt(bytes) + BigInt(contentLength)) ||
+      journal.binding !==
+        hash(JSON.stringify({ skeleton, source: sourceSha256, bytes: contentLength }))
+    )
+      throw new DomainError('operation_uncertain');
+  }
+  return { journal, manifest, bytes, contentLength, sourceSha256, settled: !claim && !!recorded };
+}
+
+export async function assertFilemanArchiveResumable(
+  context: GameLifecycleContext,
+  authorize: () => Promise<AuthContext>,
+  manifest: FilemanTransferManifest,
+) {
+  await archiveRecovery(context, authorize, manifest);
+}
+
+export async function resumeFilemanArchive(
+  context: GameLifecycleContext,
+  options: { env?: Environment; authorize: () => Promise<AuthContext> },
+  input: FilemanArchiveRecoveryInput,
+) {
+  const retained = await archiveRecovery(context, options.authorize, input);
+  if (retained.settled) {
+    await options.authorize();
+    await input.beforeWrite?.();
+    await input.beforePublish(retained.manifest);
+    await context.update({
+      plan: {
+        ...context.operation().plan,
+        fileArchive: { ...retained.journal, completed: true },
+        fileTransfer: {
+          id: input.id,
+          digest: filemanTransferDigest(retained.manifest),
+          completedFiles: retained.manifest.files.length,
+          totalFiles: retained.manifest.files.length,
+          completedBytes: retained.bytes,
+          totalBytes: retained.bytes,
+        },
+      },
+    });
+    return {
+      id: input.id,
+      digest: filemanTransferDigest(retained.manifest),
+      files: retained.manifest.files.length,
+      bytes: retained.bytes,
+      manifest: retained.manifest,
+    };
+  }
+  if (retained.contentLength === undefined) throw new DomainError('operation_uncertain');
+  return uploadFilemanArchive(context, options, {
+    ...input,
+    contentLength: retained.contentLength,
+    sourceSha256: retained.sourceSha256,
+    completion: Promise.resolve({ files: retained.manifest.files, bytes: retained.bytes }),
+    open: () => {
+      throw new DomainError('operation_uncertain');
+    },
+  });
+}
 
 /** One sanitized ZIP stream and one node-side commit. The exact commit request is
  * durable before dispatch: recovery replays only the provider's operation receipt,
@@ -229,9 +391,15 @@ export async function uploadFilemanArchive(
         .executeTakeFirst();
       if (claim) {
         const scope = claim.scope;
+        const originalJob = await context.db
+          .selectFrom('operation_jobs')
+          .select(['actor_id', 'resource_owner_id'])
+          .where('id', '=', jobId)
+          .executeTakeFirstOrThrow();
         if (
           claim.server_id !== context.server.id ||
-          claim.actor_user_id !== actor.actorUserId ||
+          claim.actor_user_id !== originalJob.actor_id ||
+          originalJob.resource_owner_id !== context.server.owner_id ||
           claim.scope_hash !== journal.claimScopeHash ||
           BigInt(claim.declared_bytes) !== BigInt(bytes + input.contentLength) ||
           scope.nodeId !== context.server.node_id ||
@@ -425,6 +593,8 @@ export async function uploadFilemanArchive(
           .executeTakeFirstOrThrow();
         const value: ArchiveJournal = {
           binding,
+          sourceSha256: input.sourceSha256,
+          contentLength: input.contentLength,
           claimId: claim.id,
           claimScopeHash: stored.scope_hash,
         };

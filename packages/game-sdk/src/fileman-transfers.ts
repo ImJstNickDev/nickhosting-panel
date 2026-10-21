@@ -57,6 +57,10 @@ export interface FilemanTransferReceipt {
   files: number;
   bytes: number;
 }
+export interface FilemanArchiveRecoveryInput extends FilemanTransferManifest {
+  beforePublish(manifest: FilemanTransferManifest): Promise<void>;
+  beforeWrite?: () => Promise<void>;
+}
 /** Host-injected service for compiled game integrations. No browser-provided
  * local path, provider credential or synthetic interactive session is accepted.
  * Uploads create a new destination tree; the caller owns game-specific staging,
@@ -87,6 +91,12 @@ export interface FilemanJobServices {
     beforePublish(manifest: FilemanTransferManifest): Promise<void>;
     beforeWrite?: () => Promise<void>;
   }): Promise<FilemanTransferReceipt & { manifest: FilemanTransferManifest }>;
+  /** Read-only proof of the exact retained archive request and its capacity claim. */
+  assertArchiveResumable?(input: FilemanTransferManifest): Promise<void>;
+  /** Reconcile only the retained provider request. Never reopen or upload an archive. */
+  resumeArchive?(
+    input: FilemanArchiveRecoveryInput,
+  ): Promise<FilemanTransferReceipt & { manifest: FilemanTransferManifest }>;
   uploadStaged(
     input: FilemanTransferManifest & {
       open(path: string): Promise<ReadableStream<Uint8Array>>;

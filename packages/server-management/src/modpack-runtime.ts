@@ -415,6 +415,25 @@ export async function assertModpackRuntimeResumable(
   if (!current.matchesStartup(await current.remote())) throw new DomainError('provenance_mismatch');
 }
 
+/** A publication continuation may observe a completed installation, never invoke it. */
+export async function assertModpackRuntimeVerified(
+  options: RuntimeInspectionOptions & { sourceMappingId: string; sourceCombinationId: string },
+): Promise<void> {
+  const current = await inspectRuntimeTransition(options);
+  if (
+    !current.saved ||
+    current.journal.state !== 'verified' ||
+    current.journal.sourceMappingId !== options.sourceMappingId ||
+    current.journal.sourceCombinationId !== options.sourceCombinationId ||
+    current.server.mapping_id !== current.binding.mappingId ||
+    current.profile.combination_id !== current.binding.combinationId ||
+    !current.profile.installed ||
+    current.server.installation_state !== 'installed'
+  )
+    throw new DomainError('operation_uncertain');
+  if (!current.matchesStartup(await current.remote())) throw new DomainError('provenance_mismatch');
+}
+
 /** Explicit stopped transition. Durable dispatch markers prevent retries from
  * launching the installer twice; uncertain effects require read-only recovery. */
 export async function configureModpackRuntime(

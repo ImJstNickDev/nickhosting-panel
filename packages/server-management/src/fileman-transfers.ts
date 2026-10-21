@@ -14,7 +14,11 @@ import {
 } from '@nickhosting/pterodactyl-adapter';
 import type { Environment } from './admission.js';
 import { createUploadUrlCache } from './file-upload-urls.js';
-import { uploadFilemanArchive } from './fileman-archive.js';
+import {
+  assertFilemanArchiveResumable,
+  resumeFilemanArchive,
+  uploadFilemanArchive,
+} from './fileman-archive.js';
 import { removeFilemanDirectory } from './fileman-directory.js';
 import { createFilemanReadService } from './fileman-read.js';
 import type { GameLifecycleContext } from './lifecycle.js';
@@ -50,6 +54,9 @@ export function createFilemanJobServices(
     },
     removeDirectory: (input) => removeFilemanDirectory(context, input),
     uploadArchive: (input) => uploadFilemanArchive(context, options, input),
+    assertArchiveResumable: (manifest) =>
+      assertFilemanArchiveResumable(context, options.authorize, manifest),
+    resumeArchive: (input) => resumeFilemanArchive(context, options, input),
     async uploadStaged(input) {
       const manifest = filemanTransferManifestSchema.parse({
         id: input.id,

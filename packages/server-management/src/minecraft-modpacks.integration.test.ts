@@ -98,6 +98,10 @@ describe('Modpacks durable preparation and apply', () => {
         calls.push('runtime');
       }),
       assertRuntimeResumable: vi.fn(async () => {}),
+      assertPublicationResumable: vi.fn(async () => {}),
+      resumePublication: vi.fn(async () => {
+        calls.push('resume-publication');
+      }),
       publish: vi.fn(async () => {
         calls.push('publish');
       }),
@@ -389,6 +393,156 @@ describe('Modpacks durable preparation and apply', () => {
       ).toHaveLength(1);
     },
   );
+  it.each([false, true])(
+    'resumes publication without repeating completed runtime or prior effects, backup=%s',
+    async (backupBefore) => {
+      const f = await fixture();
+      const target = {
+        combinationId: randomUUID(),
+        mappingId: randomUUID(),
+        target: f.prepared.target,
+      };
+      f.hooks.resolveRuntime = vi.fn(async () => target);
+      const ready = await f.ready();
+      const request = {
+        operationId: ready.id,
+        planDigest: ready.planDigest,
+        confirm: true,
+        backupBefore,
+        expectedDeletePaths: ready.deletePaths,
+        idempotencyKey: randomUUID(),
+      };
+      await f.service.apply(f.context, f.serverId, request);
+      f.scope.configureRuntime.mockImplementationOnce(async () => {
+        f.calls.push('runtime');
+        await f.db
+          .updateTable('minecraft_modpack_operations')
+          .set({ runtime_transition: JSON.stringify({ state: 'verified' }) })
+          .where('id', '=', ready.id)
+          .execute();
+      });
+      f.scope.publish.mockImplementationOnce(async () => {
+        f.calls.push('publish');
+        await f.db
+          .updateTable('minecraft_modpack_operations')
+          .set({
+            publication: JSON.stringify({ state: 'staging', batches: [], rollbackCreated: false }),
+          })
+          .where('id', '=', ready.id)
+          .execute();
+        throw new Error('Archive receipt uncertain');
+      });
+      await f.service.process(ready.id);
+      expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('uncertain');
+      await f.db
+        .deleteFrom('session')
+        .where('id', '=', f.context[authSessionId] as string)
+        .execute();
+      f.hooks.recover = vi.fn(async () => ({ state: 'resume-publication' as const }));
+      const recovered = await f.service.recover(f.owner, f.serverId, ready.id);
+      expect(recovered.operation).toMatchObject({ id: ready.id, state: 'apply_queued' });
+      expect(f.scope.resumePublication).not.toHaveBeenCalled();
+      f.scope.inspect.mockResolvedValue({
+        ...f.observation,
+        combinationId: target.combinationId,
+        mappingId: target.mappingId,
+      });
+      await f.service.process(ready.id);
+      expect((await f.service.snapshot(f.owner, f.serverId)).operation?.state).toBe('applied');
+      expect(f.calls).toEqual([
+        'stop',
+        ...(backupBefore ? ['backup'] : []),
+        'runtime',
+        'publish',
+        'resume-publication',
+        'verify',
+      ]);
+      expect(f.hooks.prepare).toHaveBeenCalledTimes(1);
+      expect(f.scope.configureRuntime).toHaveBeenCalledTimes(1);
+      expect(f.scope.assertPublicationResumable).toHaveBeenCalledTimes(1);
+      expect(f.scope.stop).toHaveBeenCalledTimes(1);
+      const row = await f.db
+        .selectFrom('minecraft_modpack_operations')
+        .selectAll()
+        .where('id', '=', ready.id)
+        .executeTakeFirstOrThrow();
+      expect(row.apply_request).toEqual(request);
+      expect(row.apply_actor_user_id).toBe(f.owner.actorUserId);
+      expect(
+        (row.journal as { phase: string; state: string }[]).filter(
+          (entry) => entry.phase === 'publishing' && entry.state === 'dispatched',
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it.each(['installer', 'batch', 'rollback', 'prefix', 'files', 'proof'] as const)(
+    'keeps publication recovery uncertain after %s changes',
+    async (reason) => {
+      const f = await fixture();
+      f.hooks.resolveRuntime = vi.fn(async () => ({
+        combinationId: randomUUID(),
+        mappingId: randomUUID(),
+        target: f.prepared.target,
+      }));
+      const { operationId } = await f.apply();
+      f.scope.configureRuntime.mockImplementationOnce(async () => {
+        await f.db
+          .updateTable('minecraft_modpack_operations')
+          .set({ runtime_transition: JSON.stringify({ state: 'verified' }) })
+          .where('id', '=', operationId)
+          .execute();
+      });
+      f.scope.publish.mockImplementationOnce(async () => {
+        await f.db
+          .updateTable('minecraft_modpack_operations')
+          .set({
+            publication: JSON.stringify({ state: 'staging', batches: [], rollbackCreated: false }),
+          })
+          .where('id', '=', operationId)
+          .execute();
+        throw new Error('Interrupted publication');
+      });
+      await f.service.process(operationId);
+      f.hooks.recover = vi.fn(async () => ({ state: 'resume-publication' as const }));
+      if (['installer', 'batch', 'rollback', 'prefix'].includes(reason)) {
+        await f.db
+          .updateTable('minecraft_modpack_operations')
+          .set(
+            reason === 'installer'
+              ? { runtime_transition: JSON.stringify({ state: 'installation-dispatched' }) }
+              : reason === 'prefix'
+                ? { journal: '[]' }
+                : {
+                    publication: JSON.stringify({
+                      state: 'staging',
+                      batches: reason === 'batch' ? [{}] : [],
+                      rollbackCreated: reason === 'rollback',
+                    }),
+                  },
+          )
+          .where('id', '=', operationId)
+          .execute();
+        await expect(f.service.recover(f.context, f.serverId, operationId)).rejects.toMatchObject({
+          code: 'operation_uncertain',
+        });
+      } else {
+        await f.service.recover(f.context, f.serverId, operationId);
+        if (reason === 'proof')
+          f.scope.assertPublicationResumable.mockRejectedValueOnce(new Error('Proof changed'));
+        else
+          f.scope.inspect.mockResolvedValue({
+            ...f.observation,
+            entries: [{ path: 'mods/example.jar', kind: 'file', size: 1 }],
+          } as never);
+        await f.service.process(operationId);
+      }
+      expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('uncertain');
+      expect(f.scope.resumePublication).not.toHaveBeenCalled();
+      expect(f.scope.configureRuntime).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it.each(['installer', 'publication', 'backup', 'files', 'proof'] as const)(
     'keeps recovery uncertain when %s makes continuation unsafe',
     async (reason) => {

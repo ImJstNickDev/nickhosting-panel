@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { createLogger, DomainError, type LogRecord } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
@@ -15,7 +15,11 @@ import {
   uploadCancelled,
   uploadNotDispatched,
 } from '../../pterodactyl-adapter/src/upload-dispatch.js';
-import { uploadFilemanArchive } from './fileman-archive.js';
+import {
+  assertFilemanArchiveResumable,
+  resumeFilemanArchive,
+  uploadFilemanArchive,
+} from './fileman-archive.js';
 import { filemanTransferDigest, filemanTransferReceiptStep } from './fileman-transfers.js';
 import { type GameLifecycleContext, processServerOperation } from './lifecycle.js';
 import { managementFixture } from './test-fixtures.js';
@@ -173,8 +177,153 @@ describe('Fileman archive durable transfer', () => {
         .executeTakeFirstOrThrow();
     };
     const run = (value: ArchiveInput) => uploadFilemanArchive(context, options, value);
-    return { context, options, adapter, send, uploaded, input, claims, reload, update, run };
+    return {
+      context,
+      options,
+      adapter,
+      send,
+      uploaded,
+      input,
+      claims,
+      reload,
+      update,
+      run,
+      owner: f.owner,
+    };
   }
+
+  it.each([false, true])(
+    'resumes an exact retained archive without upload as a replacement Owner, legacy=%s',
+    async (legacy) => {
+      await database.db.connection().execute(async (db) => {
+        const f = await fixture(db);
+        const input = f.input();
+        input.sourceSha256 = sha256(Buffer.alloc(128, 42));
+        f.adapter.commitFileArchive.mockImplementationOnce(async (_id, request) => ({
+          ...request,
+          state: 'uncertain',
+        }));
+        await expect(f.run(input)).rejects.toMatchObject({ code: 'operation_uncertain' });
+        const original = f.adapter.commitFileArchive.mock.calls[0]?.[1];
+        if (legacy) {
+          const journal = {
+            ...(f.context.operation().plan.fileArchive as Record<string, unknown>),
+          };
+          delete journal.sourceSha256;
+          delete journal.contentLength;
+          await f.context.update({ plan: { ...f.context.operation().plan, fileArchive: journal } });
+        }
+        await f.reload();
+        f.options.authorize.mockResolvedValue(f.owner);
+        const expected = {
+          id: input.id,
+          destinationRoot: input.destinationRoot,
+          files: input.files,
+        };
+        await assertFilemanArchiveResumable(f.context, f.options.authorize, expected);
+        expect(f.adapter.commitFileArchive).toHaveBeenCalledTimes(1);
+        expect(await f.claims()).toHaveLength(1);
+        const receipt = await resumeFilemanArchive(f.context, f.options, {
+          ...expected,
+          beforePublish: input.beforePublish,
+          beforeWrite: input.beforeWrite,
+        });
+        expect(receipt.manifest).toEqual(expected);
+        expect(f.adapter.commitFileArchive.mock.calls[1]?.[1]).toEqual(original);
+        expect(f.adapter.prepareUpload).toHaveBeenCalledTimes(1);
+        expect(f.send).toHaveBeenCalledTimes(1);
+        expect(input.open).toHaveBeenCalledTimes(1);
+        expect(await f.claims()).toEqual([]);
+        expect(f.context.operation().plan.fileArchive).toMatchObject({ completed: true });
+      });
+    },
+  );
+
+  it.each(['manifest', 'claim', 'other-claim', 'authorization', 'guard', 'uncertain'] as const)(
+    'keeps archive recovery fenced for %s',
+    async (changed) => {
+      await database.db.connection().execute(async (db) => {
+        const f = await fixture(db);
+        const input = f.input();
+        f.adapter.commitFileArchive.mockImplementationOnce(async (_id, request) => ({
+          ...request,
+          state: 'uncertain',
+        }));
+        await expect(f.run(input)).rejects.toMatchObject({ code: 'operation_uncertain' });
+        await f.reload();
+        const expected = {
+          id: input.id,
+          destinationRoot: input.destinationRoot,
+          files: input.files.map((file) => ({ ...file })),
+          beforePublish: input.beforePublish,
+        };
+        if (changed === 'manifest')
+          expected.files = expected.files.map((file) => ({ ...file, sha256: 'b'.repeat(64) }));
+        if (changed === 'claim')
+          await db
+            .updateTable('upload_ingestion_claims')
+            .set({ scope_hash: 'f'.repeat(64) })
+            .execute();
+        if (changed === 'other-claim') {
+          const claim = (await f.claims())[0];
+          if (!claim) throw new Error('Missing claim');
+          await db
+            .updateTable('upload_ingestion_claims')
+            .set({ id: randomUUID() })
+            .where('id', '=', claim.id)
+            .execute();
+        }
+        if (changed === 'authorization')
+          f.options.authorize.mockRejectedValueOnce(new DomainError('forbidden'));
+        if (changed === 'guard')
+          expected.beforePublish.mockRejectedValueOnce(new DomainError('conflict'));
+        if (changed === 'uncertain')
+          f.adapter.commitFileArchive.mockImplementationOnce(async (_id, request) => ({
+            ...request,
+            state: 'uncertain',
+          }));
+        await expect(resumeFilemanArchive(f.context, f.options, expected)).rejects.toBeInstanceOf(
+          DomainError,
+        );
+        expect(f.adapter.commitFileArchive).toHaveBeenCalledTimes(changed === 'uncertain' ? 2 : 1);
+        expect(f.send).toHaveBeenCalledTimes(1);
+        expect((await f.claims()).length).toBeGreaterThan(0);
+      });
+    },
+  );
+
+  it('recovers a legacy crash after receipt settlement without a new upload or provider call', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const input = f.input();
+      const originalUpdate = f.context.update;
+      f.context.update = async (patch) => {
+        if ((patch.plan?.fileArchive as { completed?: boolean })?.completed)
+          throw new Error('Crashed after receipt settlement');
+        await originalUpdate(patch);
+      };
+      await expect(f.run(input)).rejects.toMatchObject({ code: 'operation_uncertain' });
+      f.context.update = originalUpdate;
+      await f.reload();
+      const journal = { ...(f.context.operation().plan.fileArchive as Record<string, unknown>) };
+      delete journal.contentLength;
+      delete journal.sourceSha256;
+      await f.context.update({ plan: { ...f.context.operation().plan, fileArchive: journal } });
+      const result = await resumeFilemanArchive(f.context, f.options, {
+        id: input.id,
+        destinationRoot: input.destinationRoot,
+        files: input.files,
+        beforePublish: input.beforePublish,
+      });
+      expect(result.files).toBe(3);
+      expect(f.adapter.commitFileArchive).toHaveBeenCalledTimes(1);
+      expect(f.send).toHaveBeenCalledTimes(1);
+      expect(f.context.operation().plan.fileTransfer).toMatchObject({
+        completedFiles: 3,
+        completedBytes: 6,
+      });
+    });
+  });
 
   it('streams 101 members through one upload, commits their digest, atomically settles, and returns its receipt without replay', async () => {
     await database.db.connection().execute(async (db) => {

@@ -24,7 +24,7 @@ function required<T>(value: T | undefined): T {
   if (value === undefined) throw new Error('Missing test fixture');
   return value;
 }
-function fixture() {
+function fixture(recovery = false) {
   const operationId = randomUUID();
   const target = {
     minecraftVersion: '1.21.1',
@@ -192,10 +192,31 @@ function fixture() {
       };
     },
   );
+  const assertArchiveResumable = vi.fn(async () => {});
+  const resumeArchive = vi.fn(
+    async (input: Parameters<NonNullable<FilemanJobServices['resumeArchive']>>[0]) => {
+      await input.beforeWrite?.();
+      const manifest = { id: input.id, destinationRoot: input.destinationRoot, files: input.files };
+      await input.beforePublish(manifest);
+      for (const entry of input.files) add(entry.path, 'file', newTime, entry.size);
+      return {
+        id: input.id,
+        digest: 'b'.repeat(64),
+        files: input.files.length,
+        bytes: input.files.reduce((sum, file) => sum + file.size, 0),
+        manifest,
+      };
+    },
+  );
   const options = {
     operationId,
     identifier: 'test',
-    fileman: { readScope, uploadArchive, uploadStaged: vi.fn() },
+    fileman: {
+      readScope,
+      uploadArchive,
+      uploadStaged: vi.fn(),
+      ...(recovery ? { assertArchiveResumable, resumeArchive } : {}),
+    },
     adapter,
     authorize,
     archive,
@@ -211,6 +232,8 @@ function fixture() {
     readScope,
     listCalls,
     uploadArchive,
+    assertArchiveResumable,
+    resumeArchive,
     helper: createModpackPublication(options),
     journal: () => journal,
     resetHelper: () => createModpackPublication(options),
@@ -218,6 +241,67 @@ function fixture() {
 }
 
 describe('Modpack publication', () => {
+  it('resumes only the exact retained transfer and publishes without rebuilding or uploading', async () => {
+    const f = fixture(true);
+    const plan = f.plan();
+    f.uploadArchive.mockRejectedValueOnce(new DomainError('operation_uncertain'));
+    await expect(f.helper.publish(f.prepared, plan)).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    expect(f.journal()).toMatchObject({
+      state: 'staging',
+      stageFiles: [],
+      batches: [],
+      rollbackCreated: false,
+    });
+    expect(await f.resetHelper().recover(f.prepared, plan)).toEqual({
+      state: 'resume-publication',
+    });
+    expect(f.resumeArchive).not.toHaveBeenCalled();
+    expect(f.adapter.renameFiles).not.toHaveBeenCalled();
+    await f.resetHelper().resume(f.prepared, plan);
+    expect(await f.helper.verify(f.prepared, plan)).toEqual([
+      { ...file('mods/new.jar'), modifiedAt: newTime },
+    ]);
+    expect(f.archive).toHaveBeenCalledTimes(1);
+    expect(f.uploadArchive).toHaveBeenCalledTimes(1);
+    expect(f.resumeArchive).toHaveBeenCalledTimes(1);
+    expect(f.tree.has('world/level.dat')).toBe(true);
+  });
+
+  it.each([
+    'claim',
+    'original',
+    'rename',
+    'rollback',
+    'binding',
+    'provider',
+    'extra-stage',
+  ] as const)('refuses unsafe publication continuation for %s', async (reason) => {
+    const f = fixture(true);
+    const plan = f.plan();
+    f.uploadArchive.mockRejectedValueOnce(new DomainError('operation_uncertain'));
+    await expect(f.helper.publish(f.prepared, plan)).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    const journal = f.journal();
+    if (!journal) throw new Error('Missing journal');
+    if (reason === 'claim')
+      f.assertArchiveResumable.mockRejectedValue(new DomainError('operation_uncertain'));
+    if (reason === 'original') required(f.tree.get('mods/old.jar')).modifiedAt = newTime;
+    if (reason === 'rename')
+      await f.saveJournal({ ...journal, batches: [{ phase: 'publish', moves: journal.publish }] });
+    if (reason === 'rollback') await f.saveJournal({ ...journal, rollbackCreated: true });
+    if (reason === 'binding') await f.saveJournal({ ...journal, binding: 'e'.repeat(64) });
+    if (reason === 'provider')
+      f.resumeArchive.mockRejectedValue(new DomainError('operation_uncertain'));
+    if (reason === 'extra-stage') f.add(`${f.helper.getRemoteStage(plan).stagingRoot}/extra.txt`);
+    await expect(f.resetHelper().resume(f.prepared, plan)).rejects.toBeInstanceOf(DomainError);
+    expect(f.adapter.renameFiles).not.toHaveBeenCalled();
+    expect(f.archive).toHaveBeenCalledTimes(1);
+    expect(f.uploadArchive).toHaveBeenCalledTimes(1);
+  });
+
   it('stages once, retires replaced data, publishes a whole subtree, retains worlds and configs', async () => {
     const f = fixture();
     const plan = f.plan();

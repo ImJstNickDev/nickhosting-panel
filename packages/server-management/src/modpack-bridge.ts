@@ -23,6 +23,7 @@ import { assertContentAdmission, contentStorageRoot } from './content-admission.
 import { currentInteractiveContext } from './interactive-context.js';
 import {
   createMinecraftModpacksService,
+  hasResumableModpackPublicationJournal,
   hasResumableModpackRuntimeJournal,
   MinecraftModpackBlockedError,
   type MinecraftModpackOperationRow,
@@ -44,6 +45,7 @@ import { inspectModpackFiles } from './modpack-inventory.js';
 import { type ModpackPropertiesStage, prepareModpackProperties } from './modpack-properties.js';
 import {
   assertModpackRuntimeResumable,
+  assertModpackRuntimeVerified,
   configureModpackRuntime,
   resolveModpackRuntime,
 } from './modpack-runtime.js';
@@ -350,6 +352,26 @@ export function createMinecraftModpackBridge(options: {
                 readTransition: async () => (await operation(row.id)).runtime_transition,
               });
             },
+            assertPublicationResumable: async (prepared, plan) => {
+              if (!plan.runtime || !hasResumableModpackPublicationJournal(await operation(row.id)))
+                throw new DomainError('operation_uncertain');
+              await assertModpackRuntimeVerified({
+                db: connection,
+                adapter: runtime.adapter,
+                context: await currentAuth(),
+                serverId: row.server_id,
+                operationId: row.id,
+                binding: plan.runtime,
+                sourceMappingId: plan.sourceMappingId,
+                sourceCombinationId: plan.sourceCombinationId,
+                env,
+                authorize: host.context.authorize,
+                assertStopped: host.assertStopped,
+                readTransition: async () => (await operation(row.id)).runtime_transition,
+              });
+              await host.publication.assertResumable(prepared, plan);
+            },
+            resumePublication: host.publication.resume,
             configureRuntime: async (target) =>
               configureModpackRuntime({
                 db: connection,
@@ -492,6 +514,42 @@ export function createMinecraftModpackBridge(options: {
             return { state: 'resume-runtime' as const };
           }
           const result = await host.publication.recover(prepared, plan);
+          if (result.state === 'resume-publication') {
+            if (!plan.runtime || !hasResumableModpackPublicationJournal(row))
+              return { state: 'unknown' as const };
+            await assertModpackRuntimeVerified({
+              db: connection,
+              adapter: runtime.adapter,
+              context: actor,
+              serverId: row.server_id,
+              operationId: row.id,
+              binding: plan.runtime,
+              sourceMappingId: plan.sourceMappingId,
+              sourceCombinationId: plan.sourceCombinationId,
+              env,
+              authorize: host.context.authorize,
+              assertStopped: host.assertStopped,
+              readTransition: async () => row.runtime_transition,
+            });
+            const previous = await connection
+              .selectFrom('minecraft_modpack_receipts')
+              .select(['operation_id', 'receipt'])
+              .where('server_id', '=', row.server_id)
+              .executeTakeFirst();
+            if ((previous?.operation_id ?? null) !== plan.previousOperationId)
+              throw new DomainError('conflict');
+            const observed = await inspectModpackFiles(
+              host.readScope(),
+              prepared,
+              previous ? modpackReceiptSchema.parse(previous.receipt) : null,
+              await binding(row.server_id),
+            );
+            assertMinecraftModpackPlanCurrent(plan, {
+              ...observed,
+              combinationId: plan.sourceCombinationId,
+              mappingId: plan.sourceMappingId,
+            });
+          }
           if (result.state === 'applied') await completeModpackJob(connection, row);
           return result;
         }),

@@ -10,6 +10,7 @@ import {
 } from './minecraft-registry.js';
 import {
   assertModpackRuntimeResumable,
+  assertModpackRuntimeVerified,
   type ConfigureModpackRuntimeOptions,
   configureModpackRuntime,
   type ModpackRuntimeTransition,
@@ -469,6 +470,43 @@ describe('Modpacks exact supported runtime transition', () => {
     expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(1);
     expect(attestMinecraftRuntimeInstallation).toHaveBeenCalledTimes(1);
   });
+  it.each(['none', 'identity', 'startup', 'profile', 'transition'] as const)(
+    'proves the completed runtime read-only for publication recovery, drift=%s',
+    async (drift) => {
+      const f = await fixture();
+      await configureModpackRuntime(f.options);
+      const previousStates = [...f.states];
+      if (drift === 'identity') f.changeRemote({ node: 999999 });
+      if (drift === 'startup') {
+        const remote = await f.adapter.getApplicationServer(1);
+        f.changeRemote({ container: { ...remote.container, startup_command: 'changed' } });
+      }
+      if (drift === 'profile')
+        await f.db
+          .updateTable('minecraft_server_profiles')
+          .set({ installed: false })
+          .where('server_id', '=', f.serverId)
+          .execute();
+      const proof = assertModpackRuntimeVerified({
+        ...f.options,
+        sourceMappingId: f.source.id,
+        sourceCombinationId: f.sourceCombinationId,
+        ...(drift === 'transition'
+          ? { readTransition: async () => ({ ...f.journal(), state: 'installation-dispatched' }) }
+          : {}),
+      });
+      if (drift === 'none') await expect(proof).resolves.toBeUndefined();
+      else
+        await expect(proof).rejects.toMatchObject({
+          code: expect.stringMatching(/operation_uncertain|provenance_mismatch/),
+        });
+      expect(f.states).toEqual(previousStates);
+      expect(f.adapter.updateStartup).toHaveBeenCalledTimes(1);
+      expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(1);
+      expect(attestMinecraftRuntimeInstallation).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('never repeats an installer when its dispatched outcome is ambiguous', async () => {
     const f = await fixture();
     vi.mocked(f.adapter.reinstallWithConfirmation).mockRejectedValue(new Error('Connection lost'));
