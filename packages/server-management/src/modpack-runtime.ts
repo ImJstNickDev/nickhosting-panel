@@ -35,6 +35,7 @@ import {
   minecraftProvisionEnvironment,
 } from './minecraft-runtime-evidence.js';
 import { minecraftProvisionStartup } from './minecraft-startup.js';
+import { createOperationTiming, type OperationTiming } from './operation-timing.js';
 import { authorizeServer } from './registry.js';
 
 type Server = Selectable<Database['managed_servers']>;
@@ -271,6 +272,7 @@ const transitionSchema = z
   .strict();
 export type ModpackRuntimeTransition = z.infer<typeof transitionSchema>;
 export interface ConfigureModpackRuntimeOptions {
+  timing?: OperationTiming;
   db: Kysely<Database>;
   adapter: PterodactylAdapter;
   serverId: string;
@@ -293,10 +295,11 @@ type RuntimeInspectionOptions = Omit<
 
 /** Shared identity and immutable-choice checks for inspection and execution. */
 async function inspectRuntimeTransition(options: RuntimeInspectionOptions) {
+  const timing = options.timing ?? createOperationTiming(false);
   const { db, adapter, serverId, operationId, context, env = {} } = options;
   const binding = modpackRuntimeBindingSchema.parse(options.binding);
-  await options.authorize();
-  await options.assertStopped();
+  await timing.measure('authorize', () => options.authorize());
+  await timing.measure('stopped', () => options.assertStopped());
   const server = await db
     .selectFrom('managed_servers')
     .selectAll()
@@ -305,12 +308,16 @@ async function inspectRuntimeTransition(options: RuntimeInspectionOptions) {
     .executeTakeFirstOrThrow();
   if (!server.pterodactyl_id || !server.pterodactyl_identifier || !server.pterodactyl_uuid)
     throw new DomainError('provenance_mismatch');
-  const choice = await requireMinecraftChoice(db, context, binding.combinationId, env);
-  await requireMinecraftChoice(
-    db,
-    await resourceOwner(db, server.owner_id),
-    binding.combinationId,
-    env,
+  const choice = await timing.measure('choice', async () =>
+    requireMinecraftChoice(db, context, binding.combinationId, env),
+  );
+  await timing.measure('choice', async () =>
+    requireMinecraftChoice(
+      db,
+      await timing.measure('owner', () => resourceOwner(db, server.owner_id)),
+      binding.combinationId,
+      env,
+    ),
   );
   if (
     !choice.capabilities.installation ||
@@ -336,8 +343,10 @@ async function inspectRuntimeTransition(options: RuntimeInspectionOptions) {
   ]);
   if (!modpackMappingCompatible(server, source, choice.mapping, allocations))
     throw new DomainError('conflict');
-  const environment = await minecraftProvisionEnvironment(db, serverId, choice);
-  await assertMinecraftEggEnvironment(adapter, choice, environment);
+  const environment = await timing.measure('environment', () =>
+    minecraftProvisionEnvironment(db, serverId, choice),
+  );
+  await timing.measure('egg', () => assertMinecraftEggEnvironment(adapter, choice, environment));
   const mapping = minecraftRuntimeMappingSchema.parse(choice.row.binding);
   const startup = {
     startup: minecraftProvisionStartup(choice),
@@ -357,7 +366,7 @@ async function inspectRuntimeTransition(options: RuntimeInspectionOptions) {
     providerUserId: server.provider_user_id,
     identity,
   });
-  const saved = await options.readTransition();
+  const saved = await timing.measure('journalRead', () => options.readTransition());
   const journal = saved
     ? transitionSchema.parse(saved)
     : transitionSchema.parse({
@@ -384,9 +393,15 @@ async function inspectRuntimeTransition(options: RuntimeInspectionOptions) {
   )
     throw new DomainError('provenance_mismatch');
   const remote = async (): Promise<ApplicationServer> => {
-    await options.authorize();
-    const current = await adapter.getApplicationServer(server.pterodactyl_id as number);
-    assertManagedIdentity(server, current, await readManagedIdentity(db, server));
+    await timing.measure('authorize', () => options.authorize());
+    const current = await timing.measure('applicationRead', () =>
+      adapter.getApplicationServer(server.pterodactyl_id as number),
+    );
+    assertManagedIdentity(
+      server,
+      current,
+      await timing.measure('identityRead', () => readManagedIdentity(db, server)),
+    );
     return current;
   };
   const matchesStartup = (current: ApplicationServer) =>
@@ -439,17 +454,20 @@ export async function assertModpackRuntimeVerified(
 export async function configureModpackRuntime(
   options: ConfigureModpackRuntimeOptions,
 ): Promise<void> {
+  const timing = options.timing ?? createOperationTiming(false);
   const { db, adapter, serverId, operationId, env = {} } = options;
   const { profile, choice, binding, startup, saved, remote, matchesStartup, ...mutable } =
     await inspectRuntimeTransition(options);
   let { server, journal } = mutable;
   const save = async (state: ModpackRuntimeTransition['state']) => {
     journal = { ...journal, state };
-    await options.saveTransition(journal);
+    await timing.measure('journalWrite', () => options.saveTransition(journal));
   };
   if (!saved) await save('planned');
   if (journal.state === 'verified') {
-    await assertMinecraftRemoteLaunch(db, serverId, await remote(), env, adapter);
+    await timing.measure('launchVerify', async () =>
+      assertMinecraftRemoteLaunch(db, serverId, await remote(), env, adapter),
+    );
     if (
       server.mapping_id !== binding.mappingId ||
       profile.combination_id !== binding.combinationId ||
@@ -459,12 +477,14 @@ export async function configureModpackRuntime(
     return;
   }
   if (journal.state === 'planned') {
-    await reserveInstallation(db, serverId, operationId, env);
+    await timing.measure('admission', () => reserveInstallation(db, serverId, operationId, env));
     await remote();
-    await options.assertStopped();
+    await timing.measure('stopped', () => options.assertStopped());
     await save('startup-dispatched');
-    await options.authorize();
-    await adapter.updateStartup(server.pterodactyl_id as number, startup);
+    await timing.measure('authorize', () => options.authorize());
+    await timing.measure('startupWrite', () =>
+      adapter.updateStartup(server.pterodactyl_id as number, startup),
+    );
     // PATCH representations may omit allocation relationships. Only the full
     // Application GET can prove all identity dimensions and the changed startup.
     if (!matchesStartup(await remote())) throw new DomainError('operation_uncertain');
@@ -474,9 +494,9 @@ export async function configureModpackRuntime(
     await save('startup-confirmed');
   }
   if (journal.state === 'startup-confirmed') {
-    await reserveInstallation(db, serverId, operationId, env);
-    await options.assertStopped();
-    await options.authorize();
+    await timing.measure('admission', () => reserveInstallation(db, serverId, operationId, env));
+    await timing.measure('stopped', () => options.assertStopped());
+    await timing.measure('authorize', () => options.authorize());
     await db.transaction().execute(async (tx) => {
       const current = await tx
         .selectFrom('managed_servers')
@@ -522,34 +542,37 @@ export async function configureModpackRuntime(
         .execute();
     });
     server = { ...server, mapping_id: binding.mappingId };
-    await options.assertStopped();
+    await timing.measure('stopped', () => options.assertStopped());
     const proof = await remote();
     if (!matchesStartup(proof)) throw new DomainError('provenance_mismatch');
     await save('installation-dispatched');
-    const outcome = await adapter.reinstallWithConfirmation(
-      server.pterodactyl_id as number,
-      server.pterodactyl_identifier as string,
-      {
-        verifiedServer: proof,
-        serverUUID: server.pterodactyl_uuid as string,
-        authorize: async () => {
-          try {
+    const outcome = await timing.measure('installerWait', () =>
+      adapter.reinstallWithConfirmation(
+        server.pterodactyl_id as number,
+        server.pterodactyl_identifier as string,
+        {
+          timing: timing.child('installer'),
+          verifiedServer: proof,
+          serverUUID: server.pterodactyl_uuid as string,
+          authorize: async () => {
+            try {
+              await remote();
+              return true;
+            } catch {
+              return false;
+            }
+          },
+          onConfirmed: async () => {
             await remote();
-            return true;
-          } catch {
-            return false;
-          }
+            await save('installation-confirmed');
+            await db
+              .deleteFrom('installation_reservations')
+              .where('server_id', '=', serverId)
+              .where('operation_id', '=', operationId)
+              .execute();
+          },
         },
-        onConfirmed: async () => {
-          await remote();
-          await save('installation-confirmed');
-          await db
-            .deleteFrom('installation_reservations')
-            .where('server_id', '=', serverId)
-            .where('operation_id', '=', operationId)
-            .execute();
-        },
-      },
+      ),
     );
     if (
       !outcome.confirmed ||
@@ -559,12 +582,14 @@ export async function configureModpackRuntime(
   } else if (journal.state === 'installation-dispatched')
     throw new DomainError('operation_uncertain');
   if (journal.state !== 'installation-confirmed') throw new DomainError('operation_uncertain');
-  await options.assertStopped();
-  await attestMinecraftRuntimeInstallation(
-    { db, adapter, server, authorize: options.authorize, assertStopped: options.assertStopped },
-    { ...options.contentOptions, env },
+  await timing.measure('stopped', () => options.assertStopped());
+  await timing.measure('attestation', () =>
+    attestMinecraftRuntimeInstallation(
+      { db, adapter, server, authorize: options.authorize, assertStopped: options.assertStopped },
+      { ...options.contentOptions, env },
+    ),
   );
-  await options.authorize();
+  await timing.measure('authorize', () => options.authorize());
   await db.transaction().execute(async (tx) => {
     await lockResources(tx);
     const current = await tx

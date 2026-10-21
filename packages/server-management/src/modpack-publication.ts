@@ -17,6 +17,8 @@ import {
   preparedModpackSchema,
 } from './minecraft-modpacks-plan.js';
 
+import { createOperationTiming, type OperationTiming } from './operation-timing.js';
+
 type ArchiveInput = Parameters<NonNullable<FilemanJobServices['uploadArchive']>>[0];
 export type ModpackPublicationArchive = Omit<
   ArchiveInput,
@@ -106,6 +108,7 @@ export function modpackRemoteStage(operationId: string) {
 }
 
 export function createModpackPublication(options: {
+  timing?: OperationTiming;
   operationId: string;
   identifier: string;
   fileman: FilemanJobServices;
@@ -125,6 +128,7 @@ export function createModpackPublication(options: {
   readJournal(): Promise<unknown>;
   saveJournal(journal: ModpackPublicationJournal): Promise<void>;
 }) {
+  const timing = options.timing ?? createOperationTiming(false);
   const roots = modpackRemoteStage(options.operationId);
   const validate = (prepared: PreparedMinecraftModpack, plan: MinecraftModpackPlan) => {
     preparedModpackSchema.parse(prepared);
@@ -151,7 +155,7 @@ export function createModpackPublication(options: {
     return modpackDigest({ operationId: options.operationId, plan, prepared });
   };
   const load = async (binding: string) => {
-    const raw = await options.readJournal();
+    const raw = await timing.measure('journalRead', () => options.readJournal());
     if (raw == null) return null;
     const journal = publicationSchema.parse(raw);
     if (journal.operationId !== options.operationId || journal.binding !== binding)
@@ -160,7 +164,7 @@ export function createModpackPublication(options: {
   };
   const save = async (journal: ModpackPublicationJournal) => {
     const validated = publicationSchema.parse(journal);
-    await options.saveJournal(validated);
+    await timing.measure('journalWrite', () => options.saveJournal(validated));
     return validated;
   };
 
@@ -184,7 +188,7 @@ export function createModpackPublication(options: {
     while (pending.length) {
       const next: string[] = [];
       for (const batch of chunks(pending, 100)) {
-        const results = await scope.listMany(batch);
+        const results = await timing.measure('directoryBatch', () => scope.listMany(batch));
         const returned = new Set<string>();
         for (const result of results) {
           if (!batch.includes(result.directory) || returned.has(result.directory))
@@ -440,22 +444,28 @@ export function createModpackPublication(options: {
         id: `modpack.${options.operationId}`,
         destinationRoot: roots.stagingRoot,
         beforeWrite: async () => {
-          await options.authorize();
+          await timing.measure('authorize', () => options.authorize());
         },
         beforePublish: async (manifest: FilemanTransferManifest) => {
           validateManifest(manifest);
         },
       };
       const receipt = resume
-        ? await options.fileman.resumeArchive?.({
-            ...manifest(plan),
-            ...callbacks,
-            archive: await options.recoverArchive?.(prepared, plan.write, roots.stagingRoot),
-          })
-        : await options.fileman.uploadArchive?.({
-            ...(await options.archive(prepared, plan.write, roots.stagingRoot)),
-            ...callbacks,
-          });
+        ? await timing.measure('resumeExtract', async () =>
+            options.fileman.resumeArchive?.({
+              ...manifest(plan),
+              ...callbacks,
+              archive: await options.recoverArchive?.(prepared, plan.write, roots.stagingRoot),
+            }),
+          )
+        : await timing.measure('uploadExtract', async () =>
+            options.fileman.uploadArchive?.({
+              ...(await timing.measure('archive', () =>
+                options.archive(prepared, plan.write, roots.stagingRoot),
+              )),
+              ...callbacks,
+            }),
+          );
       if (!receipt) throw new DomainError('operation_uncertain');
       validateManifest(receipt.manifest);
       // A confirmed extraction receipt supplies the sealed selection. Only the
@@ -485,19 +495,23 @@ export function createModpackPublication(options: {
       journal = await save({ ...journal, state: 'staged', stageFiles });
     } else journal = await save({ ...journal, state: 'staged' });
     if (retire.length) {
-      await options.authorize();
+      await timing.measure('authorize', () => options.authorize());
       journal = await save({ ...journal, state: 'retiring', rollbackCreated: true });
-      await options.adapter.createDirectory(options.identifier, '', roots.rollbackRoot);
+      await timing.measure('rollbackDirectory', () =>
+        options.adapter.createDirectory(options.identifier, '', roots.rollbackRoot),
+      );
       const root = await inspect([roots.rollbackRoot]);
       if (root.get(roots.rollbackRoot)?.kind !== 'directory')
         throw new DomainError('operation_uncertain');
       for (const moves of chunks(retire, 1000)) {
-        await options.authorize();
+        await timing.measure('authorize', () => options.authorize());
         journal = await save({
           ...journal,
           batches: [...journal.batches, { phase: 'retire', moves }],
         });
-        await options.adapter.renameFiles(options.identifier, '', moves);
+        await timing.measure('retireRename', () =>
+          options.adapter.renameFiles(options.identifier, '', moves),
+        );
       }
       const retired = await inspect([
         ...retire.map((move) => move.from),
@@ -511,12 +525,14 @@ export function createModpackPublication(options: {
     }
     journal = await save({ ...journal, state: 'publishing' });
     for (const moves of chunks(publish, 1000)) {
-      await options.authorize();
+      await timing.measure('authorize', () => options.authorize());
       journal = await save({
         ...journal,
         batches: [...journal.batches, { phase: 'publish', moves }],
       });
-      await options.adapter.renameFiles(options.identifier, '', moves);
+      await timing.measure('publishRename', () =>
+        options.adapter.renameFiles(options.identifier, '', moves),
+      );
     }
     // The caller invokes verify once after publication. A 204 is not a receipt:
     // Wings can return it when one of the requested moves did not happen.
@@ -582,9 +598,11 @@ export function createModpackPublication(options: {
         const entries = await inspect(owned);
         if (owned.some((path) => entries.has(path) && entries.get(path)?.kind !== 'directory'))
           throw new DomainError('operation_uncertain');
-        await options.authorize();
+        await timing.measure('authorize', () => options.authorize());
         journal = await save({ ...journal, state: 'cleaning' });
-        await options.adapter.deleteFiles(options.identifier, '', owned);
+        await timing.measure('cleanupDelete', () =>
+          options.adapter.deleteFiles(options.identifier, '', owned),
+        );
         const after = await inspect(owned);
         if (owned.some((path) => after.has(path))) throw new DomainError('operation_uncertain');
       }

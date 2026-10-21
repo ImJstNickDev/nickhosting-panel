@@ -46,6 +46,8 @@ export interface ModpackStagingOptions {
   ): Promise<ModpackRecipeFile[]>;
   limits?: Partial<ContentLimits>;
   concurrency?: number;
+  /** Optional bounded diagnostics; labels are fixed and never contain file paths. */
+  timing?: { measure<T>(name: string, work: () => Promise<T>): Promise<T> };
   signal?: AbortSignal;
   /** Total on-disk budget, including archives. Called before each allocation phase. */
   reserve(bytes: number): Promise<void>;
@@ -202,6 +204,8 @@ export async function stageModpackRecipe(
   recipe: ModpackRecipe,
   options: ModpackStagingOptions,
 ): Promise<ModpackStaged> {
+  const trace = <T>(name: string, work: () => Promise<T>) =>
+    options.timing ? options.timing.measure(name, work) : work();
   options.signal?.throwIfAborted();
   if (recipe.kind === 'unavailable') fail(`modpack_${recipe.reason}`);
   const limits = contentLimits(options.limits);
@@ -221,7 +225,7 @@ export async function stageModpackRecipe(
       return;
     }
     target = value;
-    await options.checkTarget?.(value);
+    await trace('runtime', async () => options.checkTarget?.(value));
   };
   if (recipe.target) await acceptTarget(recipe.target);
   let downloads: ModpackRecipeFile[] = recipe.files ?? [];
@@ -235,9 +239,9 @@ export async function stageModpackRecipe(
     const maximum = download.size ?? limits.maxArchiveBytes;
     if (!Number.isSafeInteger(maximum) || maximum < 0 || maximum > limits.maxArchiveBytes)
       fail('archive_size');
-    await options.reserve(archiveBytes + maximum);
+    await trace('reservation', async () => options.reserve(archiveBytes + maximum));
     const acquired = checkedDownload(
-      await options.download(download, path, options.signal),
+      await trace('download', async () => options.download(download, path, options.signal)),
       download,
       limits.maxArchiveBytes,
     );
@@ -248,16 +252,18 @@ export async function stageModpackRecipe(
       const path = join(options.directory, 'target.zip');
       await acquireArchive(recipe.targetManifest.download, path);
       let raw: unknown;
-      await visitArchive(
-        path,
-        async (file) => {
-          options.signal?.throwIfAborted();
-          if (file.path === 'manifest.json')
-            raw = JSON.parse(
-              (await readArchiveFile(file, limits.maxMetadataBytes)).toString('utf8'),
-            );
-        },
-        limits,
+      await trace('archiveInventory', async () =>
+        visitArchive(
+          path,
+          async (file) => {
+            options.signal?.throwIfAborted();
+            if (file.path === 'manifest.json')
+              raw = JSON.parse(
+                (await readArchiveFile(file, limits.maxMetadataBytes)).toString('utf8'),
+              );
+          },
+          limits,
+        ),
       );
       await acceptTarget(curseTarget(cursepack.parse(raw)));
     }
@@ -269,26 +275,28 @@ export async function stageModpackRecipe(
       const bytes = manifests.get(path);
       return bytes === undefined ? undefined : JSON.parse(bytes.toString('utf8'));
     };
-    await visitArchive(
-      archivePath,
-      async (file) => {
-        options.signal?.throwIfAborted();
-        members.push({ path: file.path, size: file.size });
-        const parts = file.path.split('/');
-        // Only root or a single wrapper is meaningful; never scan arbitrary nested manifests.
-        if (
-          (parts.length === 1 ||
-            (recipe.format === 'server-archive' &&
-              parts.length === 2 &&
-              serverRoot([file]) !== '')) &&
-          ['modrinth.index.json', 'manifest.json'].includes(parts.at(-1) ?? '')
-        ) {
-          metadataBytes += file.size;
-          if (metadataBytes > limits.maxMetadataBytes) fail('metadata_size');
-          manifests.set(file.path, await readArchiveFile(file, limits.maxMetadataBytes));
-        }
-      },
-      limits,
+    await trace('archiveInventory', async () =>
+      visitArchive(
+        archivePath,
+        async (file) => {
+          options.signal?.throwIfAborted();
+          members.push({ path: file.path, size: file.size });
+          const parts = file.path.split('/');
+          // Only root or a single wrapper is meaningful; never scan arbitrary nested manifests.
+          if (
+            (parts.length === 1 ||
+              (recipe.format === 'server-archive' &&
+                parts.length === 2 &&
+                serverRoot([file]) !== '')) &&
+            ['modrinth.index.json', 'manifest.json'].includes(parts.at(-1) ?? '')
+          ) {
+            metadataBytes += file.size;
+            if (metadataBytes > limits.maxMetadataBytes) fail('metadata_size');
+            manifests.set(file.path, await readArchiveFile(file, limits.maxMetadataBytes));
+          }
+        },
+        limits,
+      ),
     );
     let roots: string[];
     if (recipe.format === 'modrinth-index') {
@@ -321,12 +329,15 @@ export async function stageModpackRecipe(
     } else if (recipe.format === 'curseforge-manifest') {
       const manifest = cursepack.parse(manifestAt('manifest.json'));
       await acceptTarget(curseTarget(manifest));
-      if (!options.resolveCurseForgeFiles) fail('curseforge_credentials');
+      const resolveFiles = options.resolveCurseForgeFiles;
+      if (!resolveFiles) fail('curseforge_credentials');
       const pins = manifest.files
         .filter((file) => file.required)
         .map((file) => ({ projectId: file.projectID, fileId: file.fileID }));
       excludedFiles += manifest.files.length - pins.length;
-      downloads = await options.resolveCurseForgeFiles(pins, options.signal);
+      downloads = await trace('resolveDependencies', async () =>
+        resolveFiles(pins, options.signal),
+      );
       roots = [`${manifest.overrides}/`];
     } else {
       const root = recipe.preserveRoot ? '' : serverRoot(members);
@@ -395,7 +406,7 @@ export async function stageModpackRecipe(
     )
   )
     fail('stage_budget');
-  await options.reserve(archiveBytes + totalBytes);
+  await trace('reservation', async () => options.reserve(archiveBytes + totalBytes));
   const staged: ModpackStagedFile[] = [];
   let completedBytes = 0,
     completedFiles = 0;
@@ -409,7 +420,9 @@ export async function stageModpackRecipe(
       bytes: completedBytes,
       totalBytes: unresolvedSizes ? null : totalBytes,
     };
-    progressTail = progressTail.then(() => options.progress?.(snapshot));
+    progressTail = progressTail.then(() =>
+      trace('progressPersist', async () => options.progress?.(snapshot)),
+    );
     return progressTail;
   };
   await progress();
@@ -428,13 +441,17 @@ export async function stageModpackRecipe(
           const destination = join(filesRoot, file.path);
           await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
           const saved = checkedDownload(
-            await options.download(file.download, destination, signal),
+            await trace('download', async () =>
+              options.download(file.download, destination, signal),
+            ),
             file.download,
             limits.maxFileBytes,
           );
           if (
             /\.jar$/i.test(file.path) &&
-            (await inspectJarEnvironment(destination, limits)) === 'client'
+            (await trace('jarEnvironment', async () =>
+              inspectJarEnvironment(destination, limits),
+            )) === 'client'
           ) {
             await rm(destination);
             totalBytes -= saved.size;
@@ -465,22 +482,27 @@ export async function stageModpackRecipe(
     await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
     let admitted: number | undefined;
     const saved = checkedDownload(
-      await options.download(file.download, destination, signal, {
-        maxBytes: maximum,
-        onSize: async (bytes) => {
-          signal.throwIfAborted();
-          if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > maximum) fail('stage_budget');
-          await options.reserve(archiveBytes + totalBytes + bytes);
-          admitted = bytes;
-        },
-      }),
+      await trace('download', async () =>
+        options.download(file.download, destination, signal, {
+          maxBytes: maximum,
+          onSize: async (bytes) => {
+            signal.throwIfAborted();
+            if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > maximum) fail('stage_budget');
+            await trace('reservation', async () =>
+              options.reserve(archiveBytes + totalBytes + bytes),
+            );
+            admitted = bytes;
+          },
+        }),
+      ),
       file.download,
       admitted ?? -1,
     );
     signal.throwIfAborted();
     if (
       /\.jar$/i.test(file.path) &&
-      (await inspectJarEnvironment(destination, limits)) === 'client'
+      (await trace('jarEnvironment', async () => inspectJarEnvironment(destination, limits))) ===
+        'client'
     ) {
       await rm(destination);
       excludedFiles++;
@@ -490,35 +512,40 @@ export async function stageModpackRecipe(
       totalBytes += saved.size;
     }
     // Release an absent-header allowance (or excluded client file) before the next GET.
-    if (totalBytes - previousBytes !== admitted) await options.reserve(archiveBytes + totalBytes);
+    if (totalBytes - previousBytes !== admitted)
+      await trace('reservation', async () => options.reserve(archiveBytes + totalBytes));
     unresolvedSizes--;
     completedFiles++;
     await progress();
   }
   if (overrides.size) {
     const selected = new Map([...overrides.values()].map((file) => [file.source, file]));
-    await visitArchive(
-      archivePath,
-      async (file) => {
-        signal.throwIfAborted();
-        const item = selected.get(file.path);
-        if (!item) return;
-        const destination = join(filesRoot, item.path);
-        const saved = await extract(file, destination, signal);
-        if (
-          /\.jar$/i.test(item.path) &&
-          (await inspectJarEnvironment(destination, limits)) === 'client'
-        ) {
-          await rm(destination);
-          excludedFiles++;
-        } else {
-          staged.push({ path: item.path, ...saved });
-          completedBytes += saved.size;
-        }
-        completedFiles++;
-        await progress();
-      },
-      limits,
+    await trace('archiveExtract', async () =>
+      visitArchive(
+        archivePath,
+        async (file) => {
+          signal.throwIfAborted();
+          const item = selected.get(file.path);
+          if (!item) return;
+          const destination = join(filesRoot, item.path);
+          const saved = await trace('extractHash', async () => extract(file, destination, signal));
+          if (
+            /\.jar$/i.test(item.path) &&
+            (await trace('jarEnvironment', async () =>
+              inspectJarEnvironment(destination, limits),
+            )) === 'client'
+          ) {
+            await rm(destination);
+            excludedFiles++;
+          } else {
+            staged.push({ path: item.path, ...saved });
+            completedBytes += saved.size;
+          }
+          completedFiles++;
+          await progress();
+        },
+        limits,
+      ),
     );
   }
   signal.throwIfAborted();

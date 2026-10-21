@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { type AuthContext, authSessionId, DomainError } from '@nickhosting/core';
+import { type AuthContext, authSessionId, type createLogger, DomainError } from '@nickhosting/core';
 import { type Database, notifyJobOutbox, recordAudit } from '@nickhosting/database';
 import { type Kysely, type Selectable, sql, type Updateable } from 'kysely';
 import { z } from 'zod';
@@ -32,6 +32,7 @@ import {
   planMinecraftModpack,
   preparedModpackSchema,
 } from './minecraft-modpacks-plan.js';
+import { createOperationTiming } from './operation-timing.js';
 import { authorizeServer, parse } from './registry.js';
 
 export type MinecraftModpackOperationRow = Selectable<Database['minecraft_modpack_operations']>;
@@ -227,6 +228,7 @@ function verifiedFiles(plan: MinecraftModpackPlan, verified: MinecraftModpackFil
 export function createMinecraftModpacksService(options: {
   db: Kysely<Database>;
   hooks: MinecraftModpackHooks;
+  logger?: ReturnType<typeof createLogger>;
   env?: Environment;
 }) {
   const { db, hooks, env = {} } = options;
@@ -656,6 +658,8 @@ export function createMinecraftModpacksService(options: {
               .execute();
             return;
           }
+          const timing = createOperationTiming(options.logger?.isEnabled('debug') ?? false);
+          const queueAgeMs = Date.now() - claimed.updated_at.getTime();
           const controller = new AbortController();
           let heartbeatBusy = false;
           const heartbeat = setInterval(() => {
@@ -690,7 +694,9 @@ export function createMinecraftModpacksService(options: {
               row.lease_until <= new Date()
             )
               throw new DomainError('conflict');
-            await hooks.authorize(row, claimed.state === 'applying');
+            await timing.measure('authorize', () =>
+              hooks.authorize(row, claimed.state === 'applying'),
+            );
             return row;
           };
           const update = async (
@@ -764,16 +770,22 @@ export function createMinecraftModpacksService(options: {
               await check();
               const previous = await receipt(claimed.server_id);
               const [observation, runtime] = await Promise.all([
-                hooks.inspect(claimed.server_id, prepared, previous?.receipt ?? null),
-                hooks.resolveRuntime(claimed.server_id, prepared),
+                timing.measure('inventory', () =>
+                  hooks.inspect(claimed.server_id, prepared, previous?.receipt ?? null),
+                ),
+                timing.measure('resolveRuntime', () =>
+                  hooks.resolveRuntime(claimed.server_id, prepared),
+                ),
               ]);
-              const plan = planMinecraftModpack({
-                selection,
-                prepared,
-                observation,
-                previous,
-                runtime,
-              });
+              const plan = timing.measureSync('plan', () =>
+                planMinecraftModpack({
+                  selection,
+                  prepared,
+                  observation,
+                  previous,
+                  runtime,
+                }),
+              );
               await check();
               const planDigest = modpackDigest({ prepared, plan });
               const install = selection.install && !plan.blockers.length && plan.runtime;
@@ -999,7 +1011,21 @@ export function createMinecraftModpacksService(options: {
                 .where('id', '=', operationId)
                 .where('lease_token', '=', token)
                 .execute();
-            await cleanup(await get(operationId));
+            await timing.measure('cleanup', async () => cleanup(await get(operationId)));
+            if (options.logger?.isEnabled('debug')) {
+              try {
+                options.logger.log('debug', 'servers.modpack_worker_timing', {
+                  operationId,
+                  serverId: claimed.server_id,
+                  attemptId: token,
+                  mode: claimed.state,
+                  queueAgeMs,
+                  ...timing.report(),
+                });
+              } catch {
+                /* Diagnostics must not change the operation outcome. */
+              }
+            }
           }
         } finally {
           await sql`select pg_advisory_unlock(hashtextextended(current_schema() || ${`:nickhosting:modpack-worker:${operationId}`},0))`.execute(

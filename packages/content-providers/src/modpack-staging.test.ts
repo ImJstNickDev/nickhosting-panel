@@ -710,3 +710,36 @@ describe('modpack staging', () => {
     ).rejects.toThrow();
   });
 });
+
+describe('optional modpack staging diagnostics', () => {
+  it('separates bounded stage labels without exposing paths or changing staged bytes', async () => {
+    const data = await zip({ 'config/private-name.txt': 'fixture' });
+    const { options } = await fixture({ 'source.zip': data });
+    const labels: string[] = [];
+    const result = await stageModpackRecipe(archive('server-archive', data, { target }), {
+      ...options,
+      timing: {
+        async measure(_name, work) {
+          labels.push(_name);
+          return work();
+        },
+      },
+    });
+    expect(result.files).toEqual([
+      { path: 'config/private-name.txt', size: 7, sha256: digest(Buffer.from('fixture')) },
+    ]);
+    expect(labels).toEqual(
+      expect.arrayContaining([
+        'download',
+        'archiveInventory',
+        'archiveExtract',
+        'extractHash',
+        'runtime',
+        'reservation',
+        'progressPersist',
+      ]),
+    );
+    expect(labels.every((label) => /^[a-zA-Z]+$/.test(label))).toBe(true);
+    expect(labels.join(' ')).not.toContain('private-name');
+  });
+});

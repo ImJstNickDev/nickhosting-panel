@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { authSessionId, DomainError } from '@nickhosting/core';
+import { authSessionId, createLogger, DomainError, type LogRecord } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -19,7 +19,7 @@ describe('Modpacks durable preparation and apply', () => {
     await database?.destroy();
   });
 
-  async function fixture() {
+  async function fixture(logger?: ReturnType<typeof createLogger>) {
     const f = await managementFixture(database.db, { interactive: true });
     const serverId = await f.server();
     const combinationId = randomUUID();
@@ -121,7 +121,7 @@ describe('Modpacks durable preparation and apply', () => {
       recover: vi.fn(async () => ({ state: 'unknown' as const })),
       cleanup: vi.fn(async () => {}),
     };
-    const service = createMinecraftModpacksService({ db: database.db, hooks });
+    const service = createMinecraftModpacksService({ db: database.db, hooks, logger });
     const selection = {
       provider: 'modrinth',
       projectId: 'pack',
@@ -167,6 +167,38 @@ describe('Modpacks durable preparation and apply', () => {
       apply,
     };
   }
+
+  it('emits bounded debug worker phases without private selection data', async () => {
+    const records: LogRecord[] = [];
+    const f = await fixture(createLogger((record) => records.push(record), { level: 'debug' }));
+    const operation = await f.ready();
+    expect(operation.state).toBe('ready');
+    const record = records.find((entry) => entry.event === 'servers.modpack_worker_timing');
+    expect(record?.data).toMatchObject({
+      operationId: operation.id,
+      serverId: f.serverId,
+      mode: 'preparing',
+      stages: {
+        authorize: { count: expect.any(Number) },
+        inventory: { count: 1 },
+        resolveRuntime: { count: 1 },
+        plan: { count: 1 },
+      },
+    });
+    expect(JSON.stringify(records)).not.toContain('example.test');
+  });
+
+  it('does not let a failing debug sink change preparation', async () => {
+    const f = await fixture(
+      createLogger(
+        () => {
+          throw new Error('sink failed');
+        },
+        { level: 'debug' },
+      ),
+    );
+    expect((await f.ready()).state).toBe('ready');
+  });
 
   it('durably installs without a browser apply request and defaults to no backup', async () => {
     const f = await fixture();

@@ -27,6 +27,7 @@ import {
   type ModpackPublicationArchive,
   modpackRemoteStage,
 } from './modpack-publication.js';
+import { createOperationTiming, type OperationTiming } from './operation-timing.js';
 import { authorizeServer } from './registry.js';
 import type { ManagementRuntime } from './runtime.js';
 import { assertNoPendingUpload, assertUploadIngestionCapacity } from './upload-admission.js';
@@ -60,11 +61,15 @@ export async function createModpackContext(options: {
   operation: MinecraftModpackOperationRow;
   env: Environment;
   currentAuth(): Promise<AuthContext>;
+  timing?: OperationTiming;
   recovery?: boolean;
 }) {
   const { db, runtime, env, operation: pack } = options;
-  const actor = await options.currentAuth();
-  let server = await authorizeServer(db, actor, pack.server_id, 'server:manage');
+  const timing = options.timing ?? createOperationTiming(false);
+  const actor = await timing.measure('authSession', () => options.currentAuth());
+  let server = await timing.measure('authorize', () =>
+    authorizeServer(db, actor, pack.server_id, 'server:manage'),
+  );
   if (
     !server.pterodactyl_id ||
     !server.pterodactyl_identifier ||
@@ -79,15 +84,20 @@ export async function createModpackContext(options: {
   const nodeId = server.node_id;
   if (server.active_operation_id && server.active_operation_id !== pack.id)
     throw new DomainError('operation_busy');
-  await assertStoragePolicyIdle(db);
+  await timing.measure('storagePolicy', () => assertStoragePolicyIdle(db));
   const resumingPublication = !options.recovery && hasResumableModpackPublicationJournal(pack);
-  if (!options.recovery && !resumingPublication) await assertNoPendingUpload(db, server.id);
-  const remote = await runtime.adapter.getApplicationServer(server.pterodactyl_id);
-  await verifyManagedIdentity(db, server, remote);
+  if (!options.recovery && !resumingPublication)
+    await timing.measure('pendingUploads', () => assertNoPendingUpload(db, server.id));
+  const remote = await timing.measure('applicationRead', () =>
+    runtime.adapter.getApplicationServer(applicationId),
+  );
+  await timing.measure('identity', () => verifyManagedIdentity(db, server, remote));
   if (!options.recovery && !resumingPublication) {
     await db.transaction().execute(async (tx) => {
       await lockResources(tx);
-      const latest = await authorizeServer(tx, actor, server.id, 'server:manage');
+      const latest = await timing.measure('authorize', () =>
+        authorizeServer(tx, actor, server.id, 'server:manage'),
+      );
       if (latest.active_operation_id && latest.active_operation_id !== pack.id)
         throw new DomainError('operation_busy');
       await tx
@@ -146,7 +156,7 @@ export async function createModpackContext(options: {
   if (operation.server_id !== pack.server_id || operation.plan.modpackOperationId !== pack.id)
     throw new DomainError('operation_uncertain');
   const authorize = async () => {
-    const current = await options.currentAuth();
+    const current = await timing.measure('authSession', () => options.currentAuth());
     if (!options.recovery) {
       const currentOperation = await db
         .selectFrom('minecraft_modpack_operations')
@@ -162,7 +172,9 @@ export async function createModpackContext(options: {
       )
         throw new DomainError('operation_uncertain');
     }
-    const latest = await authorizeServer(db, current, server.id, 'server:manage');
+    const latest = await timing.measure('authorize', () =>
+      authorizeServer(db, current, server.id, 'server:manage'),
+    );
     if (
       latest.owner_id !== pack.resource_owner_id ||
       latest.active_operation_id !== pack.id ||
@@ -176,7 +188,10 @@ export async function createModpackContext(options: {
     return current;
   };
   const assertStopped = async () => {
-    if (!(await observer.stopped(uuid, 'server')) || !(await observer.stopped(uuid, 'installer')))
+    if (
+      !(await timing.measure('observerState', () => observer.stopped(uuid, 'server'))) ||
+      !(await timing.measure('observerState', () => observer.stopped(uuid, 'installer')))
+    )
       throw new DomainError('conflict');
   };
   const update: GameLifecycleContext['update'] = async (patch) => {
@@ -190,24 +205,26 @@ export async function createModpackContext(options: {
   };
   const stop = async () => {
     await authorize();
-    const stopped = await observer.stopped(uuid, 'server');
+    const stopped = await timing.measure('observerState', () => observer.stopped(uuid, 'server'));
     await update({ plan: { ...operation.plan, wasRunning: !stopped } });
     if (!stopped) {
-      const result = await runtime.adapter.stopWithConfirmation(applicationId, identifier, {
-        verifiedServer: remote,
-        authorize: async () => {
-          try {
+      const result = await timing.measure('stopWait', () =>
+        runtime.adapter.stopWithConfirmation(applicationId, identifier, {
+          verifiedServer: remote,
+          authorize: async () => {
+            try {
+              await authorize();
+              return true;
+            } catch {
+              return false;
+            }
+          },
+          beforePower: async () => {
             await authorize();
-            return true;
-          } catch {
-            return false;
-          }
-        },
-        beforePower: async () => {
-          await authorize();
-        },
-        onConfirmed: () => update({ plan: { ...operation.plan, stopped: true } }),
-      });
+          },
+          onConfirmed: () => update({ plan: { ...operation.plan, stopped: true } }),
+        }),
+      );
       if (!result.confirmed) throw new DomainError('operation_uncertain');
     }
     await assertStopped();
@@ -236,28 +253,34 @@ export async function createModpackContext(options: {
     if (operation.plan.backupDispatched) throw new DomainError('operation_uncertain');
     const since = new Date();
     await update({ plan: { ...operation.plan, backupDispatched: since.toISOString() } });
-    const created = await runtime.adapter.createBackup(identifier, {
-      name: `nickhosting-modpack-${pack.id}`,
-    });
+    const created = await timing.measure('backupCreate', () =>
+      runtime.adapter.createBackup(identifier, {
+        name: `nickhosting-modpack-${pack.id}`,
+      }),
+    );
     await update({ plan: { ...operation.plan, backupId: created.uuid } });
     let nextSnapshot =
       Date.now() + ((await runtime.lifecycle.backupEventsEnabled(db, server.id)) ? 60000 : 0);
     const deadline = Date.now() + 30 * 60_000;
     while (Date.now() < deadline) {
       await authorize();
-      const event = await runtime.lifecycle.readBackupCompletion(
-        db,
-        server.id,
-        created.uuid,
-        'backup.completed',
-        since,
+      const event = await timing.measure('backupEventRead', () =>
+        runtime.lifecycle.readBackupCompletion(
+          db,
+          server.id,
+          created.uuid,
+          'backup.completed',
+          since,
+        ),
       );
       if (event) {
         if (!event.backup.isSuccessful) throw new DomainError('integration_unavailable');
         return created.uuid;
       }
       if (Date.now() >= nextSnapshot) {
-        const value = await runtime.adapter.getBackup(identifier, created.uuid);
+        const value = await timing.measure('backupRead', () =>
+          runtime.adapter.getBackup(identifier, created.uuid),
+        );
         if (value.completed_at) {
           if (!value.is_successful) throw new DomainError('integration_unavailable');
           return created.uuid;
@@ -269,6 +292,8 @@ export async function createModpackContext(options: {
     throw new DomainError('operation_uncertain');
   };
   const context: GameLifecycleContext = {
+    timing: timing.child('fileman'),
+    logger: runtime.lifecycle.logger,
     db,
     get server() {
       return server;
@@ -323,7 +348,8 @@ export async function createModpackContext(options: {
     const binding = modpackDigest({ directory: prepared.stagingKey, files, destinationRoot });
     if (cachedArchive) {
       if (cachedArchive.binding !== binding) throw new DomainError('conflict');
-      return cachedArchive.value;
+      const cached = cachedArchive.value;
+      return timing.measure('archiveCache', () => cached);
     }
     const value = (async (): Promise<ModpackPublicationArchive> => {
       const archivePath = resolve(prepared.stagingKey, '..', 'publication.zip');
@@ -349,38 +375,45 @@ export async function createModpackContext(options: {
           throw new DomainError('operation_uncertain');
         const handle = await open(archivePath, constants.O_RDONLY | constants.O_NOFOLLOW);
         try {
-          const before = await handle.stat();
-          if (!before.isFile() || !Number.isSafeInteger(before.size) || before.size < 22)
-            throw new DomainError('operation_uncertain');
-          const hash = createHash('sha256');
-          let bytes = 0;
-          for await (const chunk of handle.createReadStream({ autoClose: false })) {
-            bytes += chunk.length;
-            if (bytes > before.size) throw new DomainError('operation_uncertain');
-            hash.update(chunk);
+          const finishHash = timing.start('archiveRetainedHash');
+          try {
+            const before = await handle.stat();
+            if (!before.isFile() || !Number.isSafeInteger(before.size) || before.size < 22)
+              throw new DomainError('operation_uncertain');
+            const hash = createHash('sha256');
+            let bytes = 0;
+            for await (const chunk of handle.createReadStream({ autoClose: false })) {
+              bytes += chunk.length;
+              if (bytes > before.size) throw new DomainError('operation_uncertain');
+              hash.update(chunk);
+            }
+            const after = await handle.stat();
+            if (
+              bytes !== before.size ||
+              before.size !== after.size ||
+              before.mtimeMs !== after.mtimeMs
+            )
+              throw new DomainError('operation_uncertain');
+            sourceSha256 = hash.digest('hex');
+            contentLength = bytes;
+            sealed = after;
+          } finally {
+            finishHash();
           }
-          const after = await handle.stat();
-          if (
-            bytes !== before.size ||
-            before.size !== after.size ||
-            before.mtimeMs !== after.mtimeMs
-          )
-            throw new DomainError('operation_uncertain');
-          sourceSha256 = hash.digest('hex');
-          contentLength = bytes;
-          sealed = after;
         } finally {
           await handle.close();
         }
         if (saved && (saved.sourceSha256 !== sourceSha256 || saved.contentLength !== contentLength))
           throw new DomainError('operation_uncertain');
       } else {
-        const built = await buildModpackTransferArchive({
-          directory: prepared.stagingKey,
-          files,
-          stagingRoot: destinationRoot,
-          destination: archivePath,
-        });
+        const built = await timing.measure('archiveBuild', () =>
+          buildModpackTransferArchive({
+            directory: prepared.stagingKey,
+            files,
+            stagingRoot: destinationRoot,
+            destination: archivePath,
+          }),
+        );
         if (!built) throw new DomainError('conflict');
         sourceSha256 = built.archiveSha256;
         contentLength = built.archiveBytes;
@@ -449,7 +482,7 @@ export async function createModpackContext(options: {
               stagingRoot,
             ),
       });
-    } else await assertNoPendingUpload(db, server.id);
+    } else await timing.measure('pendingUploads', () => assertNoPendingUpload(db, server.id));
   }
   const preflightPublication = async (
     prepared: ArchiveArguments[0],
@@ -463,15 +496,18 @@ export async function createModpackContext(options: {
       modpackRemoteStage(pack.id).stagingRoot,
       false,
     );
-    await assertUploadIngestionCapacity(
-      db,
-      server.id,
-      source.contentLength + plan.write.reduce((sum, file) => sum + file.size, 0),
-      env,
-      { providerLargestFileBytes: source.contentLength, multipartCount: 1 },
+    await timing.measure('uploadAdmission', () =>
+      assertUploadIngestionCapacity(
+        db,
+        server.id,
+        source.contentLength + plan.write.reduce((sum, file) => sum + file.size, 0),
+        env,
+        { providerLargestFileBytes: source.contentLength, multipartCount: 1 },
+      ),
     );
   };
   const publication = createModpackPublication({
+    timing: timing.child('publication'),
     operationId: pack.id,
     identifier: server.pterodactyl_identifier,
     fileman,

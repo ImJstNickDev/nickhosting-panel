@@ -13,6 +13,7 @@ import {
   type ModpackPublicationJournal,
   modpackRemoteStage,
 } from './modpack-publication.js';
+import { createOperationTiming } from './operation-timing.js';
 
 const oldTime = '2026-01-01T00:00:00Z';
 const newTime = '2026-02-01T00:00:00Z';
@@ -241,6 +242,30 @@ function fixture(recovery = false) {
 }
 
 describe('Modpack publication', () => {
+  it('reports publication phases with fixed labels and no paths', async () => {
+    const f = fixture();
+    let tick = 0;
+    const timing = createOperationTiming(true, () => ++tick);
+    const helper = createModpackPublication({ ...f, timing, readJournal: async () => f.journal() });
+    const plan = f.plan();
+    await helper.publish(f.prepared, plan);
+    expect(await helper.verify(f.prepared, plan)).not.toBeNull();
+    await helper.cleanup(f.prepared, plan, { applied: true });
+    const report = timing.report();
+    expect(Object.keys(report.stages)).toEqual(
+      expect.arrayContaining([
+        'archive',
+        'uploadExtract',
+        'directoryBatch',
+        'retireRename',
+        'publishRename',
+        'cleanupDelete',
+      ]),
+    );
+    expect(JSON.stringify(report)).not.toContain('mods/');
+    expect(f.uploadArchive).toHaveBeenCalledTimes(1);
+    expect(report.droppedSpans).toBe(0);
+  });
   it('resumes only the exact retained transfer and publishes without rebuilding or uploading', async () => {
     const f = fixture(true);
     const plan = f.plan();

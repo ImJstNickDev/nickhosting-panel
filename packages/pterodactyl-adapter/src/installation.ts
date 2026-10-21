@@ -1,3 +1,4 @@
+import type { FileReadTiming } from './adapter.js';
 import type { ConsoleRelay, ConsoleRelayOptions } from './console.js';
 import type { ContainerObserver } from './container-observer.js';
 import type { StopConfirmationOptions } from './power.js';
@@ -13,7 +14,10 @@ interface Boundary {
   ): Promise<ConsoleRelay>;
   reinstall(identifier: string): Promise<void>;
 }
-export type InstallationConfirmationOptions = StopConfirmationOptions & { serverUUID?: string };
+export type InstallationConfirmationOptions = StopConfirmationOptions & {
+  serverUUID?: string;
+  timing?: FileReadTiming;
+};
 /** Panel clears installing on daemon reset too; status alone cannot prove completion. */
 export async function confirmInstallation(
   adapter: Boundary,
@@ -24,8 +28,10 @@ export async function confirmInstallation(
   timeoutMs = 300000,
   observer?: ContainerObserver,
 ): Promise<{ confirmed: boolean }> {
+  const measure = <T>(name: string, work: () => Promise<T>): Promise<T> =>
+    options.timing ? options.timing.measure(name, work) : work();
   if (!observer) throw new PterodactylError('invalid_request', 'application', 'rejected');
-  await observer.preflight();
+  await measure('observerPreflight', () => observer.preflight());
   let connected = true,
     armed = !reinstall,
     handled = false;
@@ -54,18 +60,22 @@ export async function confirmInstallation(
       handled = true;
       void (async () => {
         try {
-          const server = await adapter.getApplicationServer(applicationId);
+          const server = await measure('applicationRead', () =>
+            adapter.getApplicationServer(applicationId),
+          );
           if (
             !connected ||
             server.identifier !== identifier ||
             server.status ||
             ![true, 1].includes(server.container.installed) ||
-            !(await observer.stopped(server.uuid, 'installer')) ||
-            !(await options.authorize()) ||
+            !(await measure('installerStopped', () =>
+              observer.stopped(server.uuid, 'installer'),
+            )) ||
+            !(await measure('authorize', () => options.authorize())) ||
             !connected
           )
             return;
-          proof = options.onConfirmed();
+          proof = measure('confirmationCommit', () => options.onConfirmed());
           await proof;
         } catch {
           /* No status, interrupted stream or callback failure is a success proof. */
@@ -79,7 +89,8 @@ export async function confirmInstallation(
   if (adapter.relayInstallation) {
     const server = options.serverUUID
       ? undefined
-      : (options.verifiedServer ?? (await adapter.getApplicationServer(applicationId)));
+      : (options.verifiedServer ??
+        (await measure('applicationRead', () => adapter.getApplicationServer(applicationId))));
     if (
       server &&
       (server.identifier !== identifier || (options.verifiedServer && server.id !== applicationId))
@@ -87,34 +98,40 @@ export async function confirmInstallation(
       throw new PterodactylError('invalid_response', 'application', 'rejected');
     const serverUUID = options.serverUUID ?? server?.uuid;
     if (!serverUUID) throw new PterodactylError('invalid_request', 'application', 'rejected');
+    const relayInstallation = adapter.relayInstallation;
     try {
-      relay = await adapter.relayInstallation(identifier, {
-        ...relayOptions,
-        serverUUID,
-      });
+      relay = await measure('installationChannel', () =>
+        relayInstallation.call(adapter, identifier, {
+          ...relayOptions,
+          serverUUID,
+        }),
+      );
     } catch (error) {
       // A stock Panel remains supported; never fall back on authorization or state errors.
       if (!(error instanceof PterodactylError) || error.reason !== 'not_found') throw error;
-      relay = await adapter.relayConsole(identifier, relayOptions);
+      relay = await measure('consoleChannel', () => adapter.relayConsole(identifier, relayOptions));
     }
-  } else relay = await adapter.relayConsole(identifier, relayOptions);
+  } else
+    relay = await measure('consoleChannel', () => adapter.relayConsole(identifier, relayOptions));
   const timer = setTimeout(() => {
     connected = false;
     finish();
   }, timeoutMs);
   try {
-    if (!connected || !(await options.authorize()))
+    if (!connected || !(await measure('authorize', () => options.authorize())))
       throw new PterodactylError('permission_denied', 'client', 'rejected');
     if (reinstall) {
       armed = true;
       try {
-        await adapter.reinstall(identifier);
+        await measure('reinstallRequest', () => adapter.reinstall(identifier));
       } catch (error) {
         if (error instanceof PterodactylError && error.outcome === 'rejected') throw error;
         // An unknown response may still produce a verifiable completion event.
       }
     }
-    await done;
+    // The terminal wait includes the provider completion readback and callback.
+    // Its nested spans distinguish those costs from waiting for the installer.
+    await measure('terminalWait', () => done);
     if (proof) {
       await proof;
       return { confirmed: true };

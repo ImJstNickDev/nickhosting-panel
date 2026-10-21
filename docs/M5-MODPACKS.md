@@ -373,3 +373,21 @@ delete set with apply_queued only when unblocked, then reauthorizes the original
 actor before effects. Navigation/reload does not cancel it; retries retain the
 intent. Console projects preparation directly before a synthetic provider job
 exists, including blocked/failure states. No migration or new dependency is needed.
+
+### Debug timing
+
+With the existing log level set to `debug`, modpack attempts emit bounded
+`servers.modpack_preparation_timing`, `servers.modpack_application_timing` and
+`servers.modpack_worker_timing` summaries. Correlate by `operationId`; preparation
+attempts also carry their lease attempt ID. These are diagnostics, not persisted
+user activity or additional provider checks. At normal log levels they are disabled.
+
+Reports contain monotonic elapsed time, per-stage count/total/maximum and bounded
+span offsets so concurrent downloads and nested stages can be distinguished.
+Do not add inclusive stage totals to obtain wall time: the archive extraction span includes
+extraction/hash work, and download time includes transport, local writing and
+hashing. Installer confirmation includes the upstream installer and observation
+latency; its request/read/confirmation spans distinguish that from API dispatch.
+No paths, signed URLs, credentials or raw provider errors are logged. Repeating a
+pack swap can compare the same artifact set, but provider/local caches and a
+runtime change can materially change the result.

@@ -49,6 +49,7 @@ import {
   configureModpackRuntime,
   resolveModpackRuntime,
 } from './modpack-runtime.js';
+import { createOperationTiming } from './operation-timing.js';
 import { authorizeServer, enqueueServerOperation } from './registry.js';
 import type { ManagementRuntime } from './runtime.js';
 
@@ -178,6 +179,7 @@ export function createMinecraftModpackBridge(options: {
       env,
     });
   return createMinecraftModpacksService({
+    logger: runtime.lifecycle.logger,
     db,
     env,
     hooks: {
@@ -185,218 +187,272 @@ export function createMinecraftModpackBridge(options: {
         await modpackActor(db, row, applying, env);
       },
       async prepare(input) {
-        const { http, curseforge } = options;
-        if (!http?.downloadModpack) throw new DomainError('integration_unavailable');
-        const download = http.downloadModpack.bind(http);
-        const { values } = await getSettings(db, env);
-        const policy = contentPolicyValues(values, 'minecraft');
-        const root = join(contentStorageRoot(values.contentWorkRoot, env), 'modpacks');
-        await contentStageDirectory(root);
-        const directory = join(
-          root,
-          z.uuid().parse(input.operation.id),
-          z.uuid().parse(input.attemptId),
-        );
-        const host = await db
-          .selectFrom('managed_servers as server')
-          .innerJoin('managed_nodes as node', 'node.id', 'server.node_id')
-          .select('node.physical_host_id')
-          .where('server.id', '=', input.operation.server_id)
-          .executeTakeFirstOrThrow();
-        let lastStageBytes = 0;
-        let overheadBytes = 1024 * 1024;
-        const reserve = async (bytes: number) => {
-          // Also charge the one STORE ZIP needed for bulk publication; no unaccounted duplicate of a large pack.
-          const held = bytes * 2 + overheadBytes;
-          if (!Number.isSafeInteger(held)) throw new DomainError('validation_failed');
-          lastStageBytes = bytes;
-          await db.transaction().execute(async (tx) => {
-            await lockResources(tx);
-            const row = await operation(input.operation.id);
-            const extra = BigInt(held) - BigInt(row.held_bytes);
-            await assertContentAdmission(tx, values, {
-              gameId: 'minecraft',
-              ownerId: row.resource_owner_id,
-              bytes: extra > 0n ? extra : 0n,
-              active: BigInt(row.held_bytes) > 0n ? 0 : 1,
-              root,
+        const logger = runtime.lifecycle.logger;
+        const timing = createOperationTiming(logger?.isEnabled('debug') === true);
+        let outcome = 'failed';
+        try {
+          const { http, curseforge } = options;
+          if (!http?.downloadModpack) throw new DomainError('integration_unavailable');
+          const download = http.downloadModpack.bind(http);
+          const { values } = await timing.measure('settings', () => getSettings(db, env));
+          const policy = contentPolicyValues(values, 'minecraft');
+          const root = join(contentStorageRoot(values.contentWorkRoot, env), 'modpacks');
+          await contentStageDirectory(root);
+          const directory = join(
+            root,
+            z.uuid().parse(input.operation.id),
+            z.uuid().parse(input.attemptId),
+          );
+          const host = await db
+            .selectFrom('managed_servers as server')
+            .innerJoin('managed_nodes as node', 'node.id', 'server.node_id')
+            .select('node.physical_host_id')
+            .where('server.id', '=', input.operation.server_id)
+            .executeTakeFirstOrThrow();
+          let lastStageBytes = 0;
+          let overheadBytes = 1024 * 1024;
+          const reserve = async (bytes: number) => {
+            // Also charge the one STORE ZIP needed for bulk publication; no unaccounted duplicate of a large pack.
+            const held = bytes * 2 + overheadBytes;
+            if (!Number.isSafeInteger(held)) throw new DomainError('validation_failed');
+            lastStageBytes = bytes;
+            await db.transaction().execute(async (tx) => {
+              await lockResources(tx);
+              const row = await operation(input.operation.id);
+              const extra = BigInt(held) - BigInt(row.held_bytes);
+              await assertContentAdmission(tx, values, {
+                gameId: 'minecraft',
+                ownerId: row.resource_owner_id,
+                bytes: extra > 0n ? extra : 0n,
+                active: BigInt(row.held_bytes) > 0n ? 0 : 1,
+                root,
+              });
+              await input.reservation({
+                physicalHostId: host.physical_host_id,
+                bytes: held,
+                stagingRoot: directory,
+              });
             });
-            await input.reservation({
-              physicalHostId: host.physical_host_id,
-              bytes: held,
-              stagingRoot: directory,
-            });
-          });
-        };
-        await input.progress('resolving', null);
-        const recipe = await createModpackCatalog(input.selection.provider, {
-          http,
-          curseforge,
-        }).resolve(input.selection.projectId, input.selection.versionId, input.signal);
-        if (recipe.kind === 'unavailable')
-          throw new MinecraftModpackBlockedError([{ reason: recipe.reason }]);
-        await reserve(0);
-        const stagingBudget = Math.floor(
-          (Math.min(policy.sourceGlobalBytes, policy.sourceUserBytes) - 1024 * 1024) / 2,
-        );
-        const staged = await stageModpackRecipe(recipe, {
-          directory,
-          signal: input.signal,
-          reserve,
-          limits: {
-            maxArchiveBytes: stagingBudget,
-            maxExpandedBytes: stagingBudget,
-            maxFileBytes: stagingBudget,
-          },
-          download: (artifact, destination, signal, options) =>
-            download(artifact, destination, { ...options, signal }),
-          ...(curseforge
-            ? {
-                resolveCurseForgeFiles: (
-                  files: { projectId: number; fileId: number }[],
-                  signal?: AbortSignal,
-                ) => resolvePinnedCurseForgeFiles(curseforge, files, signal),
-              }
-            : {}),
-          checkTarget: async (target) => {
-            if (!(await getRuntime(input.operation, target)))
-              throw new MinecraftModpackBlockedError([{ reason: 'runtime' }]);
-          },
-          progress: (value) =>
-            input.progress('downloading', {
-              completedFiles: value.files,
-              totalFiles: value.totalFiles,
-              completedBytes: value.bytes,
-              totalBytes: value.totalBytes,
+          };
+          await input.progress('resolving', null);
+          const recipe = await timing.measure('resolve', () =>
+            createModpackCatalog(input.selection.provider, {
+              http,
+              curseforge,
+            }).resolve(input.selection.projectId, input.selection.versionId, input.signal),
+          );
+          if (recipe.kind === 'unavailable')
+            throw new MinecraftModpackBlockedError([{ reason: recipe.reason }]);
+          await reserve(0);
+          const stagingBudget = Math.floor(
+            (Math.min(policy.sourceGlobalBytes, policy.sourceUserBytes) - 1024 * 1024) / 2,
+          );
+          const staged = await timing.measure('staging', () =>
+            stageModpackRecipe(recipe, {
+              timing: timing.child('stage'),
+              directory,
+              signal: input.signal,
+              reserve,
+              limits: {
+                maxArchiveBytes: stagingBudget,
+                maxExpandedBytes: stagingBudget,
+                maxFileBytes: stagingBudget,
+              },
+              download: (artifact, destination, signal, options) =>
+                download(artifact, destination, { ...options, signal }),
+              ...(curseforge
+                ? {
+                    resolveCurseForgeFiles: (
+                      files: { projectId: number; fileId: number }[],
+                      signal?: AbortSignal,
+                    ) => resolvePinnedCurseForgeFiles(curseforge, files, signal),
+                  }
+                : {}),
+              checkTarget: async (target) => {
+                if (!(await getRuntime(input.operation, target)))
+                  throw new MinecraftModpackBlockedError([{ reason: 'runtime' }]);
+              },
+              progress: (value) =>
+                input.progress('downloading', {
+                  completedFiles: value.files,
+                  totalFiles: value.totalFiles,
+                  completedBytes: value.bytes,
+                  totalBytes: value.totalBytes,
+                }),
+            }).catch((error: unknown) => {
+              if (
+                error instanceof DomainError &&
+                error.details?.contentReason === 'modpack_target_unresolved'
+              )
+                throw new MinecraftModpackBlockedError([{ reason: 'unresolved' }]);
+              throw error;
             }),
-        }).catch((error: unknown) => {
-          if (
-            error instanceof DomainError &&
-            error.details?.contentReason === 'modpack_target_unresolved'
+          );
+          // ZIP headers are byte-sized metadata, including the generated remote prefix twice.
+          overheadBytes =
+            1024 * 1024 +
+            staged.files.reduce((sum, file) => sum + 320 + 2 * Buffer.byteLength(file.path), 0) +
+            (staged.files.some((file) => file.path === 'server.properties') ? 2 * 1024 * 1024 : 0);
+          await reserve(lastStageBytes);
+          const sanitized: ModpackPropertiesStage = staged.files.some(
+            (file) => file.path === 'server.properties',
           )
-            throw new MinecraftModpackBlockedError([{ reason: 'unresolved' }]);
-          throw error;
-        });
-        // ZIP headers are byte-sized metadata, including the generated remote prefix twice.
-        overheadBytes =
-          1024 * 1024 +
-          staged.files.reduce((sum, file) => sum + 320 + 2 * Buffer.byteLength(file.path), 0) +
-          (staged.files.some((file) => file.path === 'server.properties') ? 2 * 1024 * 1024 : 0);
-        await reserve(lastStageBytes);
-        const sanitized: ModpackPropertiesStage = staged.files.some(
-          (file) => file.path === 'server.properties',
-        )
-          ? await runtime.fileReadScope(
-              await modpackActor(db, input.operation, false, env),
-              input.operation.server_id,
-              (files) => prepareModpackProperties(staged, files),
-            )
-          : staged;
-        const {
-          description: _description,
-          descriptionFormat: _format,
-          ...project
-        } = recipe.project;
-        return {
-          pack: { project, version: recipe.version },
-          target: staged.target,
-          stagingKey: sanitized.directory,
-          files: sanitized.files,
-          ...('propertiesMerged' in sanitized
-            ? {
-                propertiesMerged: sanitized.propertiesMerged,
-                propertiesSource: sanitized.propertiesSource,
-              }
-            : {}),
-          blockers: [],
-        };
+            ? await timing.measure('properties', async () =>
+                runtime.fileReadScope(
+                  await modpackActor(db, input.operation, false, env),
+                  input.operation.server_id,
+                  (files) => prepareModpackProperties(staged, files),
+                ),
+              )
+            : staged;
+          const {
+            description: _description,
+            descriptionFormat: _format,
+            ...project
+          } = recipe.project;
+          outcome = 'prepared';
+          return {
+            pack: { project, version: recipe.version },
+            target: staged.target,
+            stagingKey: sanitized.directory,
+            files: sanitized.files,
+            ...('propertiesMerged' in sanitized
+              ? {
+                  propertiesMerged: sanitized.propertiesMerged,
+                  propertiesSource: sanitized.propertiesSource,
+                }
+              : {}),
+            blockers: [],
+          };
+        } finally {
+          if (logger?.isEnabled('debug')) {
+            try {
+              logger.log('debug', 'servers.modpack_preparation_timing', {
+                operationId: input.operation.id,
+                serverId: input.operation.server_id,
+                attemptId: input.attemptId,
+                outcome,
+                ...timing.report(),
+              });
+            } catch {
+              // Diagnostics must not replace an operation result or failure.
+            }
+          }
+        }
       },
       inspect,
       resolveRuntime: async (serverId, prepared) =>
         getRuntime(await active(serverId), prepared.target),
       withServerLock: (row, work) =>
         withModpackServerLock(db, row.server_id, async (connection) => {
-          const currentAuth = () => modpackActor(connection, row, true, env);
-          const host = await createModpackContext({
-            db: connection,
-            runtime,
-            operation: row,
-            env,
-            currentAuth,
-          });
-          return work({
-            inspect: async (prepared, receipt) =>
-              inspectModpackFiles(
-                host.readScope(),
-                prepared,
-                receipt,
-                await binding(row.server_id),
-              ),
-            preflightPublication: host.preflightPublication,
-            stop: host.stop,
-            backup: host.backup,
-            assertRuntimeResumable: async (plan) => {
-              if (!plan.runtime || !hasResumableModpackRuntimeJournal(await operation(row.id)))
-                throw new DomainError('operation_uncertain');
-              await assertModpackRuntimeResumable({
+          const logger = runtime.lifecycle.logger;
+          const timing = createOperationTiming(logger?.isEnabled('debug') === true);
+          let outcome = 'failed';
+          try {
+            const currentAuth = () => modpackActor(connection, row, true, env);
+            const host = await timing.measure('initialize', () =>
+              createModpackContext({
                 db: connection,
-                adapter: runtime.adapter,
-                context: await currentAuth(),
-                serverId: row.server_id,
-                operationId: row.id,
-                binding: plan.runtime,
-                sourceMappingId: plan.sourceMappingId,
-                sourceCombinationId: plan.sourceCombinationId,
+                runtime,
+                operation: row,
                 env,
-                authorize: host.context.authorize,
-                assertStopped: host.assertStopped,
-                readTransition: async () => (await operation(row.id)).runtime_transition,
-              });
-            },
-            assertPublicationResumable: async (prepared, plan) => {
-              if (!plan.runtime || !hasResumableModpackPublicationJournal(await operation(row.id)))
-                throw new DomainError('operation_uncertain');
-              await assertModpackRuntimeVerified({
-                db: connection,
-                adapter: runtime.adapter,
-                context: await currentAuth(),
-                serverId: row.server_id,
-                operationId: row.id,
-                binding: plan.runtime,
-                sourceMappingId: plan.sourceMappingId,
-                sourceCombinationId: plan.sourceCombinationId,
-                env,
-                authorize: host.context.authorize,
-                assertStopped: host.assertStopped,
-                readTransition: async () => (await operation(row.id)).runtime_transition,
-              });
-              await host.publication.assertResumable(prepared, plan);
-            },
-            resumePublication: host.publication.resume,
-            configureRuntime: async (target) =>
-              configureModpackRuntime({
-                db: connection,
-                adapter: runtime.adapter,
-                context: await currentAuth(),
-                serverId: row.server_id,
-                operationId: row.id,
-                binding: target,
-                env,
-                authorize: host.context.authorize,
-                assertStopped: host.assertStopped,
-                contentOptions: await runtime.minecraftOptions(),
-                readTransition: async () => (await operation(row.id)).runtime_transition,
-                saveTransition: async (value) => {
-                  await db
-                    .updateTable('minecraft_modpack_operations')
-                    .set({ runtime_transition: JSON.stringify(value) })
-                    .where('id', '=', row.id)
-                    .execute();
-                },
+                currentAuth,
+                timing,
               }),
-            publish: host.publication.publish,
-            verify: host.publication.verify,
-          });
+            );
+            const result = await work({
+              inspect: async (prepared, receipt) =>
+                inspectModpackFiles(
+                  host.readScope(),
+                  prepared,
+                  receipt,
+                  await binding(row.server_id),
+                ),
+              preflightPublication: host.preflightPublication,
+              stop: host.stop,
+              backup: host.backup,
+              assertRuntimeResumable: async (plan) => {
+                if (!plan.runtime || !hasResumableModpackRuntimeJournal(await operation(row.id)))
+                  throw new DomainError('operation_uncertain');
+                await assertModpackRuntimeResumable({
+                  db: connection,
+                  adapter: runtime.adapter,
+                  context: await currentAuth(),
+                  serverId: row.server_id,
+                  operationId: row.id,
+                  binding: plan.runtime,
+                  sourceMappingId: plan.sourceMappingId,
+                  sourceCombinationId: plan.sourceCombinationId,
+                  env,
+                  authorize: host.context.authorize,
+                  assertStopped: host.assertStopped,
+                  readTransition: async () => (await operation(row.id)).runtime_transition,
+                });
+              },
+              assertPublicationResumable: async (prepared, plan) => {
+                if (
+                  !plan.runtime ||
+                  !hasResumableModpackPublicationJournal(await operation(row.id))
+                )
+                  throw new DomainError('operation_uncertain');
+                await assertModpackRuntimeVerified({
+                  db: connection,
+                  adapter: runtime.adapter,
+                  context: await currentAuth(),
+                  serverId: row.server_id,
+                  operationId: row.id,
+                  binding: plan.runtime,
+                  sourceMappingId: plan.sourceMappingId,
+                  sourceCombinationId: plan.sourceCombinationId,
+                  env,
+                  authorize: host.context.authorize,
+                  assertStopped: host.assertStopped,
+                  readTransition: async () => (await operation(row.id)).runtime_transition,
+                });
+                await host.publication.assertResumable(prepared, plan);
+              },
+              resumePublication: host.publication.resume,
+              configureRuntime: async (target) =>
+                configureModpackRuntime({
+                  timing: timing.child('runtime'),
+                  db: connection,
+                  adapter: runtime.adapter,
+                  context: await currentAuth(),
+                  serverId: row.server_id,
+                  operationId: row.id,
+                  binding: target,
+                  env,
+                  authorize: host.context.authorize,
+                  assertStopped: host.assertStopped,
+                  contentOptions: await runtime.minecraftOptions(),
+                  readTransition: async () => (await operation(row.id)).runtime_transition,
+                  saveTransition: async (value) => {
+                    await db
+                      .updateTable('minecraft_modpack_operations')
+                      .set({ runtime_transition: JSON.stringify(value) })
+                      .where('id', '=', row.id)
+                      .execute();
+                  },
+                }),
+              publish: host.publication.publish,
+              verify: host.publication.verify,
+            });
+            outcome = 'completed';
+            return result;
+          } finally {
+            if (logger?.isEnabled('debug')) {
+              try {
+                logger.log('debug', 'servers.modpack_application_timing', {
+                  operationId: row.id,
+                  serverId: row.server_id,
+                  outcome,
+                  ...timing.report(),
+                });
+              } catch {
+                // Diagnostics must not change completion or original errors.
+              }
+            }
+          }
         }),
       async restoreRunningState(row) {
         const op = await db
