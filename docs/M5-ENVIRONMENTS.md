@@ -1947,6 +1947,13 @@ dependency, Blueprint update or provider configuration change is needed for this
 source-only correction. Keep operation journals and staging during recovery;
 never clear a running/uncertain operation with manual database edits.
 
+Authenticated dev checks confirm the interrupted installation opens its existing
+Modpacks review with **Verify and resume** enabled, including while that exact
+uncertain operation owns the server. Other actions remain locked. Source reload
+required no container restart/recreation or migration. HTTPS, secure HMR and all
+eleven development services are healthy; Panel/Wings and container configuration
+are unchanged. The read-only check did not resume or reinstall a game server.
+
 ### Forge runtime catalog
 
 Forge uses a durable local catalog containing exact Maven coordinates and the

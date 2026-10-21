@@ -234,9 +234,23 @@ unchanged/partially advanced registry bindings, replacement Owner recovery after
 session revocation, ambiguous installer/publication rejection, and preserved
 stop/backup/staging. Isolated runtime/service/context/publication checks passed
 52 cases; route registry/context checks passed58 cases (the context suite overlaps).
-Seven API cases, 25 Firefox cases, focused projection units, root/web typechecks,
+Seven API cases, 34 Firefox cases, focused projection units, root/web typechecks,
 EN/IT catalogs, frontend build and independent code/visual review passed. Existing
 large-chunk and private Minecraft-asset warnings remain in isolated builds.
+
+The real game-section wrapper allows recovery while the server is busy only for
+its exact active, uncertain operation, with current manage permission and successful
+reads. Other actions stay disabled. Nine wrapper regressions cover this exception,
+permission loss, mismatched/running jobs, failed refreshes and duplicate submissions.
+
+Development source reload and authenticated read-only Firefox checks passed:
+Console shows the uncertain operation, its review link opens the existing prepared
+pack, and **Verify and resume** is enabled on desktop and mobile. HTTPS and secure
+HMR work, with no page errors, overflow or mutation requests. All eleven dev
+services and the observed Panel/Wings containers are healthy; scoped container
+identities, images, start times, mounts, networks and ports are unchanged. No
+migration, manual restart or real recovery was executed. The existing installation
+awaits the Owner's explicit recovery action.
 
 Reviewed uncertainty states:
 [desktop English](screenshots/m5/modpack-runtime-uncertain-en-desktop.png) and
