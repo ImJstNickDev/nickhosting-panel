@@ -1,3 +1,4 @@
+import { DomainError } from '@nickhosting/core';
 import { describe, expect, it, vi } from 'vitest';
 import type { ContentHttp } from './contracts.js';
 import { AtLauncherModpackCatalog } from './modpack-catalog-atlauncher.js';
@@ -227,5 +228,107 @@ describe('ATLauncher exact server manifests', () => {
     const { catalog, json } = fixture();
     await expect(catalog.resolve('Fixture', 'unknown')).rejects.toThrow();
     expect(json).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ATLauncher version page validation isolation', () => {
+  function pageFixture(manifests: Record<string, Record<string, unknown> | Error>) {
+    const versions = Object.keys(manifests);
+    const json = vi.fn(async (url: string) => {
+      if (url === 'https://api.atlauncher.com/v1/packs/full/public')
+        return {
+          error: false,
+          data: [
+            {
+              id: 1,
+              safeName: 'Fixture',
+              name: 'Fixture Pack',
+              versions: versions.map((version, index) => ({
+                version,
+                minecraft: '1.20.1',
+                published: 2000 - index,
+              })),
+            },
+          ],
+        };
+      const apiPrefix = 'https://api.atlauncher.com/v1/pack/Fixture/';
+      if (url.startsWith(apiPrefix))
+        return {
+          error: false,
+          data: { version: url.slice(apiPrefix.length), minecraftVersion: '1.20.1' },
+        };
+      const manifestPrefix = `${cdn}/packs/Fixture/versions/`;
+      if (url.startsWith(manifestPrefix)) {
+        const version = url.slice(manifestPrefix.length).split('/')[0] ?? '';
+        const override = manifests[version];
+        if (!override) throw new Error(`Unknown version: ${version}`);
+        if (override instanceof Error) throw override;
+        return { ...baseManifest, version, ...override };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    return { catalog: new AtLauncherModpackCatalog({ json, download: vi.fn() }), json };
+  }
+
+  it('keeps a default twenty-version page usable when older manifests duplicate paths', async () => {
+    const manifests = Object.fromEntries(
+      Array.from({ length: 21 }, (_, index) => [
+        `v${21 - index}`,
+        index >= 15 ? { mods: [mod, mod] } : {},
+      ]),
+    );
+    const { catalog, json } = pageFixture(manifests);
+    const page = await catalog.versions('Fixture');
+    expect(page).toMatchObject({ offset: 0, limit: 20, total: 21 });
+    expect(page.items).toHaveLength(20);
+    expect(page.items.slice(0, 15).every((version) => version.available)).toBe(true);
+    expect(
+      page.items.slice(15).map((version) => ({
+        id: version.id,
+        available: version.available,
+        reason: version.unavailableReason,
+      })),
+    ).toEqual(
+      ['v6', 'v5', 'v4', 'v3', 'v2'].map((id) => ({ id, available: false, reason: 'unresolved' })),
+    );
+    expect(JSON.stringify(page)).not.toContain(cdn);
+    expect(json.mock.calls.some(([url]) => url.includes('/v1/Configs.json'))).toBe(false);
+    await expect(catalog.resolve('Fixture', 'v6')).rejects.toThrow('modpack_path_conflict');
+  });
+
+  it.each([
+    { mods: [{ ...mod, filesize: -1 }] },
+    { mods: [{ ...mod, file: '../escape.jar' }] },
+    { mods: [{ ...mod, md5: 'invalid' }] },
+    { mods: [{ ...mod, url: 'packs/%INVALID/file.jar' }] },
+  ])('reports an invalid recipe as unavailable beside a usable version', async (invalid) => {
+    const { catalog } = pageFixture({ latest: {}, older: invalid });
+    expect(await catalog.versions('Fixture')).toMatchObject({
+      items: [
+        { id: 'latest', available: true },
+        { id: 'older', available: false, unavailableReason: 'unresolved' },
+      ],
+    });
+    await expect(catalog.resolve('Fixture', 'older')).rejects.toThrow();
+  });
+
+  it('preserves manifest identity failures instead of treating them as unsupported recipes', async () => {
+    const { catalog } = pageFixture({ latest: {}, older: { version: 'different-version' } });
+    await expect(catalog.versions('Fixture')).rejects.toMatchObject({
+      code: 'validation_failed',
+      details: { contentReason: 'modpack_identity' },
+    });
+  });
+
+  it.each([
+    new Error('network timeout'),
+    new DomainError('integration_unavailable', 503, {
+      reason: 'content_http_refused',
+      providerStatus: 429,
+    }),
+    new DOMException('request aborted', 'AbortError'),
+  ])('preserves transport and cancellation errors', async (error) => {
+    const { catalog } = pageFixture({ latest: {}, older: error });
+    await expect(catalog.versions('Fixture')).rejects.toBe(error);
   });
 });

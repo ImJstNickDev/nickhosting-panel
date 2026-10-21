@@ -1,3 +1,4 @@
+import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 import { type ContentHttp, type ContentTarget, fail, safeArchivePath } from './contracts.js';
 import {
@@ -96,6 +97,42 @@ const manifestSchema = z.object({
 type Project = z.infer<typeof projectSchema>;
 type Version = z.infer<typeof versionSchema>;
 type Manifest = z.infer<typeof manifestSchema>;
+
+function versionItem(
+  p: Project,
+  listed: Version,
+  metadata: Version = listed,
+): ModpackCatalogVersion {
+  const minecraft = listed.minecraft ?? listed.minecraftVersion ?? metadata.minecraftVersion;
+  return {
+    id: listed.version,
+    projectId: p.safeName,
+    name: listed.version,
+    version: listed.version,
+    minecraftVersions: minecraft ? [minecraft] : [],
+    loaders: [],
+    channel: metadata.recommended ? 'release' : 'unknown',
+    publishedAt: published(metadata.published ?? listed.published),
+    available: true,
+    source: metadata.serverZipURL ? 'server-archive' : 'atlauncher-recipe',
+  };
+}
+function invalidRecipeMetadata(error: unknown): boolean {
+  if (error instanceof z.ZodError || error instanceof URIError) return true;
+  if (error instanceof Error && error.message === 'modpack_path_conflict') return true;
+  return (
+    error instanceof DomainError &&
+    error.code === 'validation_failed' &&
+    typeof error.details?.contentReason === 'string' &&
+    [
+      'archive_path',
+      'modpack_filename',
+      'modpack_size',
+      'modpack_download_url',
+      'modpack_hash',
+    ].includes(error.details.contentReason)
+  );
+}
 
 function targetOf(manifest: Manifest): ContentTarget | undefined {
   const loader = manifest.loader;
@@ -278,18 +315,7 @@ export class AtLauncherModpackCatalog implements ModpackCatalog {
     )
       fail('modpack_identity');
     const project = this.detailsOf(p);
-    const version: ModpackCatalogVersion = {
-      id: listed.version,
-      projectId: p.safeName,
-      name: listed.version,
-      version: listed.version,
-      minecraftVersions: minecraft ? [minecraft] : [],
-      loaders: [],
-      channel: metadata.recommended ? 'release' : 'unknown',
-      publishedAt: published(metadata.published ?? listed.published),
-      available: true,
-      source: metadata.serverZipURL ? 'server-archive' : 'atlauncher-recipe',
-    };
+    const version = versionItem(p, listed, metadata);
     const unavailable = (reason: ModpackUnavailableReason): ModpackRecipe => ({
       provider: this.provider,
       project,
@@ -368,9 +394,22 @@ export class AtLauncherModpackCatalog implements ModpackCatalog {
       signal?.throwIfAborted();
       items.push(
         ...(await Promise.all(
-          page.items
-            .slice(index, index + 4)
-            .map(async (v) => (await this.recipe(p, v, signal)).version),
+          page.items.slice(index, index + 4).map(async (v) => {
+            try {
+              return (await this.recipe(p, v, signal)).version;
+            } catch (error) {
+              signal?.throwIfAborted();
+              // An invalid historical manifest must not hide usable versions on the
+              // same page. Network failures, provenance mismatches and unexpected
+              // errors still propagate; direct resolution retains strict validation.
+              if (!invalidRecipeMetadata(error)) throw error;
+              return {
+                ...versionItem(p, v),
+                available: false,
+                unavailableReason: 'unresolved' as const,
+              };
+            }
+          }),
         )),
       );
     }
