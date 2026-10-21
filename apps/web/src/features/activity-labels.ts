@@ -59,10 +59,25 @@ export function activityLabelKey(item: Item) {
 export function activityStatus(
   item: Pick<Item, 'phase' | 'effectState' | 'state' | 'outcome' | 'provisioning'>,
 ) {
-  if (item.phase !== 'owner_resolved_failed' && item.provisioning?.state === 'active')
-    return { value: 'running', labelKey: `provisioning.${item.provisioning.stage}` };
-  if (item.provisioning?.state === 'start-denied')
-    return { value: 'pending', labelKey: 'provisioning.startDenied' };
+  if (item.phase !== 'owner_resolved_failed' && item.provisioning) {
+    if (item.provisioning.state === 'active')
+      return {
+        value: 'running',
+        labelKey:
+          item.provisioning.workflow?.statusKey ?? `provisioning.${item.provisioning.stage}`,
+      };
+    if (item.provisioning.state === 'start-denied')
+      return { value: 'pending', labelKey: 'provisioning.startDenied' };
+    const value =
+      item.provisioning.state === 'uncertain'
+        ? 'uncertain'
+        : item.provisioning.state === 'completed'
+          ? 'succeeded'
+          : item.provisioning.state === 'failed'
+            ? 'failed'
+            : undefined;
+    if (value) return { value, labelKey: `activity.state.${value}` };
+  }
   const value =
     item.phase === 'owner_resolved_failed'
       ? 'failed'

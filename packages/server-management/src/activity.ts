@@ -2,6 +2,7 @@ import { type AuthContext, assertAuthContext, DomainError } from '@nickhosting/c
 import { sql } from 'kysely';
 import { z } from 'zod';
 import type { DB } from './admission.js';
+import { loadModpackProvisioning } from './modpack-provisioning.js';
 import { provisioningPresentation } from './provisioning.js';
 import { parse } from './registry.js';
 
@@ -122,7 +123,11 @@ export interface PlatformActivity {
   errorCode: string | null;
   phase: string | null;
   effectState: string | null;
-  provisioning?: { stage: string; state: string };
+  provisioning?: {
+    stage: string;
+    state: string;
+    workflow?: ReturnType<typeof provisioningPresentation>['workflow'];
+  };
   createdAt: Date;
   updatedAt: Date;
   completedAt: Date | null;
@@ -304,14 +309,21 @@ export async function listUnifiedActivity(db: DB, context: AuthContext, input: u
         order by audit.created_at, ${terminalOrder}, audit.id limit 1
       ) first
     ), combined as (
-      select job.id::text as id, 'job'::text as kind, job.id::text as "jobId", job.state,
+      select job.id::text as id, 'job'::text as kind, job.id::text as "jobId",
+        case when operation.plan->>'modpackOperationId' = job.id::text then
+          case when modpack.state is null or modpack.state = 'uncertain' then 'uncertain'
+            when modpack.state in ('failed','blocked','cancelled') then 'failed'
+            when modpack.state = 'applied' and modpack.phase <> 'restoring' then 'succeeded'
+            when modpack.state = 'apply_queued' then 'queued' else 'running' end
+          else job.state end as state,
         case when operation.action in ('backup','restore') then 'backups' when operation.action in ('configure','minecraft-content') then 'settings' else 'lifecycle' end as category,
         case when operation.plan ? 'scheduleAutomation' or job.idempotency_key like 'schedule_%' then 'schedule' when operation.plan ? 'gatewayAutomation' or job.idempotency_key like 'gateway_wake_%' or job.idempotency_key like 'gateway_sleep_%' then 'system' else 'manual' end as source,
         operation.action, job.actor_id as "actorId", job.subject_id as "subjectId", actor.name as "actorName", actor.username as "actorUsername", subject.name as "subjectName", subject.username as "subjectUsername",
         job.resource_owner_id as "resourceOwnerId", operation.server_id as "serverId", server.name as "serverName",
         job.attempts, job.max_attempts as "maxAttempts", job.error_code as "errorCode", operation.phase, operation.effect_state as "effectState",
-        job.created_at as "createdAt", job.updated_at as "updatedAt", job.completed_at as "completedAt", '{}'::jsonb as metadata, coalesce(server.can_manage, false) as "canManage", case when operation.action in ('provision','reinstall') then jsonb_build_object('provisioning',operation.plan->'provisioning','installConfirmed',operation.plan->'installConfirmed','initialStartDenied',operation.plan->'initialStartDenied','waitReason',operation.plan->'waitReason','autoStart',operation.plan->'autoStart') else null end as "installationPlan"
+        job.created_at as "createdAt", job.updated_at as "updatedAt", job.completed_at as "completedAt", '{}'::jsonb as metadata, coalesce(server.can_manage, false) as "canManage", case when operation.action in ('provision','reinstall') then jsonb_build_object('provisioning',operation.plan->'provisioning','installConfirmed',operation.plan->'installConfirmed','initialStartDenied',operation.plan->'initialStartDenied','waitReason',operation.plan->'waitReason','autoStart',operation.plan->'autoStart','modpackOperationId',operation.plan->'modpackOperationId') else null end as "installationPlan"
       from operation_jobs job left join server_operations operation on operation.job_id = job.id
+      left join minecraft_modpack_operations modpack on modpack.id = job.id and modpack.server_id = operation.server_id and operation.plan->>'modpackOperationId' = job.id::text
       left join visible_servers server on server.id = operation.server_id left join "user" actor on actor.id = job.actor_id left join "user" subject on subject.id = job.subject_id
       where server.id is not null or (operation.server_id is null and (${allServers} or job.resource_owner_id = ${context.subjectUserId}))
       union all
@@ -332,6 +344,14 @@ export async function listUnifiedActivity(db: DB, context: AuthContext, input: u
     order by date_trunc('milliseconds', "createdAt") desc, id desc limit ${value.limit + 1}
   `.execute(db)
   ).rows;
+  const modpacks = await loadModpackProvisioning(
+    db,
+    rows.slice(0, value.limit).map((row) => ({
+      jobId: row.jobId,
+      serverId: row.serverId,
+      plan: row.installationPlan,
+    })),
+  );
   const items: PlatformActivity[] = rows
     .slice(0, value.limit)
     .map(
@@ -348,19 +368,27 @@ export async function listUnifiedActivity(db: DB, context: AuthContext, input: u
         ...(installationPlan
           ? {
               provisioning: (() => {
-                const progress = provisioningPresentation({
-                  job_id: row.jobId ?? '',
-                  action: row.action ?? '',
-                  phase: row.phase ?? '',
-                  plan: installationPlan,
-                  effect_state: row.effectState ?? '',
-                  state: row.state,
-                  error_code: row.errorCode,
-                  created_at: row.createdAt,
-                  updated_at: row.updatedAt,
-                  completed_at: row.completedAt,
-                });
-                return { stage: progress.stage, state: progress.state };
+                const progress = provisioningPresentation(
+                  {
+                    job_id: row.jobId ?? '',
+                    action: row.action ?? '',
+                    phase: row.phase ?? '',
+                    plan: installationPlan,
+                    effect_state: row.effectState ?? '',
+                    state: row.state,
+                    error_code: row.errorCode,
+                    created_at: row.createdAt,
+                    updated_at: row.updatedAt,
+                    completed_at: row.completedAt,
+                  },
+                  undefined,
+                  modpacks.get(row.jobId ?? ''),
+                );
+                return {
+                  stage: progress.stage,
+                  state: progress.state,
+                  workflow: progress.workflow,
+                };
               })(),
             }
           : {}),

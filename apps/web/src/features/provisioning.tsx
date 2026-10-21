@@ -287,7 +287,7 @@ export function ProvisioningPanel({
   const [now, setNow] = useState(Date.now);
   const [reinstall, setReinstall] = useState(false);
   const request = useRequestOperation(serverId);
-  const active = provisioningInProgress(value);
+  const active = value?.state === 'active';
   useEffect(() => {
     if (!active) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -297,7 +297,11 @@ export function ProvisioningPanel({
     ? Math.max(
         0,
         Math.floor(
-          ((value.completedAt ? Date.parse(value.completedAt) : now) -
+          ((value.completedAt
+            ? Date.parse(value.completedAt)
+            : active
+              ? now
+              : Date.parse(value.updatedAt)) -
             Date.parse(value.startedAt)) /
             1000,
         ),
@@ -346,16 +350,19 @@ export function ProvisioningPanel({
       </div>
       <div className="provisioning-current">
         <span className="provisioning-eyebrow">
-          {t(value?.action === 'reinstall' ? 'provisioning.reinstall' : 'provisioning.title')}
+          {t(
+            value?.workflow?.titleKey ??
+              (value?.action === 'reinstall' ? 'provisioning.reinstall' : 'provisioning.title'),
+          )}
         </span>
-        <h2 aria-live="polite" aria-atomic="true" key={title}>
+        <h2 aria-live="polite" aria-atomic="true" key={value?.workflow?.statusKey ?? title}>
           {title === 'loading' ? (
             <>
               <span className="provisioning-skeleton" aria-hidden="true" />
               <span className="visually-hidden">{t('provisioning.loading')}</span>
             </>
           ) : (
-            t(`provisioning.${title}`)
+            t(value?.workflow?.statusKey ?? `provisioning.${title}`)
           )}
         </h2>
         {value && (
@@ -368,7 +375,7 @@ export function ProvisioningPanel({
           </span>
         )}
       </div>
-      {value && (
+      {value && value.stages.length > 0 && (
         <ol className="provisioning-stages" aria-label={t('provisioning.steps')}>
           {value.stages.map((stage) => (
             <li
@@ -386,7 +393,12 @@ export function ProvisioningPanel({
         </ol>
       )}
       {value?.state === 'uncertain' && (
-        <p className="provisioning-context">{t('provisioning.uncertainHint')}</p>
+        <p className="provisioning-context">
+          {value.workflow && (
+            <>{t('provisioning.lastPhase', { phase: t(value.workflow.phaseKey) })} </>
+          )}
+          {t(value.workflow ? 'provisioning.reviewUncertainHint' : 'provisioning.uncertainHint')}
+        </p>
       )}
       {value?.state === 'start-denied' && (
         <p className="provisioning-context">{t('provisioning.startDeniedHint')}</p>
@@ -411,6 +423,13 @@ export function ProvisioningPanel({
         </div>
       )}
       <div className="provisioning-links">
+        {value?.workflow && (
+          <Link
+            to={`/servers/${serverId}/game/${value.workflow.review.sectionId}?operation=${value.jobId}`}
+          >
+            {t(value.workflow.review.labelKey)} <span aria-hidden="true">↗</span>
+          </Link>
+        )}
         {value?.canReinstall && value.state === 'failed' && (
           <button type="button" onClick={() => setReinstall(true)}>
             {t('platform.reinstall')}

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { ModpackProvisioning } from './modpack-provisioning.js';
 import { provisioningPresentation } from './provisioning.js';
 
 const row = {
@@ -17,6 +18,71 @@ const row = {
   completed_at: null as Date | null,
 };
 describe('durable installation presentation', () => {
+  it('projects runtime uncertainty from the modpack row instead of its synthetic running job', () => {
+    const source: ModpackProvisioning = {
+      id: row.job_id,
+      server_id: 'server',
+      state: 'uncertain',
+      phase: 'runtime',
+      error: 'operation_uncertain',
+      updated_at: new Date('2026-01-01T10:02:00Z'),
+    };
+    const synthetic = {
+      ...row,
+      state: 'running',
+      phase: 'queued',
+      effect_state: 'none',
+      plan: { modpackOperationId: row.job_id },
+    };
+    expect(provisioningPresentation(synthetic, undefined, source)).toMatchObject({
+      state: 'uncertain',
+      stage: 'installing',
+      errorCode: 'operation_uncertain',
+      updatedAt: source.updated_at.toISOString(),
+      completedAt: null,
+      stages: [],
+      workflow: {
+        statusKey: 'games.minecraft.modpacks.uncertain',
+        phaseKey: 'games.minecraft.modpacks.changingRuntime',
+        review: { sectionId: 'modpacks' },
+      },
+    });
+    expect(
+      provisioningPresentation(synthetic, undefined, { ...source, state: 'applying' }),
+    ).toMatchObject({
+      state: 'active',
+      errorCode: null,
+      workflow: { statusKey: 'games.minecraft.modpacks.changingRuntime' },
+    });
+    expect(
+      provisioningPresentation(synthetic, undefined, {
+        ...source,
+        state: 'applied',
+        phase: 'complete',
+      }),
+    ).toMatchObject({
+      state: 'completed',
+      stage: 'ready',
+      completedAt: source.updated_at.toISOString(),
+    });
+    expect(
+      provisioningPresentation(synthetic, undefined, {
+        ...source,
+        state: 'applied',
+        phase: 'restoring',
+      }),
+    ).toMatchObject({
+      state: 'active',
+      stage: 'starting',
+      completedAt: null,
+    });
+    expect(provisioningPresentation(synthetic)).toMatchObject({ state: 'uncertain', stages: [] });
+    expect(provisioningPresentation(row, undefined, source)).toMatchObject({
+      state: 'active',
+      stage: 'installing',
+      workflow: undefined,
+    });
+  });
   it('shows installing while the delivery queue waits, without an invented error or percentage', () => {
     expect(provisioningPresentation(row)).toMatchObject({
       stage: 'installing',

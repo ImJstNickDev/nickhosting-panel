@@ -533,9 +533,14 @@ describe('Minecraft Modpacks full-page experience', () => {
     await open();
     await details();
     await page.getByRole('button', { name: 'Prepare this version' }).click();
-    await check(page.getByRole('button', { name: 'Check outcome', exact: true })).toBeVisible();
+    await page.goto(`${origin}modpacks-fixture?operation=${op}`);
+    await check(page.getByRole('button', { name: 'Verify and resume', exact: true })).toBeVisible();
+    expect(writes).toHaveLength(1);
+    await check(
+      page.getByText('Verify the last step and resume this installation when possible.'),
+    ).toBeVisible();
     await check(page.getByRole('button', { name: 'Discard preparation' })).toBeDisabled();
-    await page.getByRole('button', { name: 'Check outcome', exact: true }).click();
+    await page.getByRole('button', { name: 'Verify and resume', exact: true }).click();
     expect(writes.at(-1)?.path).toBe(`POST ${base}/operations/${op}/recover`);
     await page.screenshot({
       path: '.codex/local/m5-browser/screenshots/modpacks-uncertain-desktop-en.png',

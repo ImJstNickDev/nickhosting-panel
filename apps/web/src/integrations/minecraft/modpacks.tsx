@@ -1,5 +1,6 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router';
 import {
   createMinecraftModpacksController,
   type MinecraftModpackOperation,
@@ -48,6 +49,8 @@ export function MinecraftModpacksSection(props: GameSectionViewProps) {
 }
 function Modpacks(props: GameSectionViewProps) {
   const t = useT();
+  const [searchParams] = useSearchParams();
+  const requestedOperation = searchParams.get('operation');
   const initial = props.data.metadata?.modpacks as MinecraftModpacksSnapshot | undefined;
   const snapshot = useQuery({
     queryKey: q(props.serverId),
@@ -62,7 +65,11 @@ function Modpacks(props: GameSectionViewProps) {
         : false,
   });
   const [view, setView] = useState<'installed' | 'discover' | 'review'>(
-    initial?.installed ? 'installed' : 'discover',
+    initial?.operation?.id === requestedOperation && active(initial?.operation)
+      ? 'review'
+      : initial?.installed
+        ? 'installed'
+        : 'discover',
   );
   const [project, setProject] = useState<ModpackCatalogProject>();
   const [selectedPack, setSelectedPack] = useState<{
@@ -113,9 +120,10 @@ function Modpacks(props: GameSectionViewProps) {
   useEffect(() => {
     if (!firstSnapshot.current && data) {
       firstSnapshot.current = true;
-      if (data.installed) setView('installed');
+      if (data.operation?.id === requestedOperation && active(data.operation)) setView('review');
+      else if (data.installed) setView('installed');
     }
-  }, [data]);
+  }, [data, requestedOperation]);
   function requestKey(key: string) {
     const value = intent.current.get(key) ?? idempotencyKey();
     intent.current.set(key, value);

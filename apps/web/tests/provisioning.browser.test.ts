@@ -376,6 +376,59 @@ describe('post-create installation journey', () => {
     expect(writes).toHaveLength(1);
     expect(writes[0]?.body).toMatchObject({ action: 'reinstall', confirm: true });
   });
+  it('shows a modpack runtime uncertainty without active animation and links to its recovery review', async () => {
+    advance('installing', 'uncertain');
+    installState = 'installed';
+    operationId = id;
+    snapshot = {
+      ...snapshot,
+      action: 'reinstall',
+      errorCode: 'operation_uncertain',
+      stages: [],
+      workflow: {
+        titleKey: 'games.minecraft.sections.modpacks',
+        statusKey: 'games.minecraft.modpacks.uncertain',
+        phaseKey: 'games.minecraft.modpacks.changingRuntime',
+        review: { sectionId: 'modpacks', labelKey: 'games.minecraft.modpacks.review' },
+      },
+    };
+    await page.goto(`${origin}provisioning-fixture`);
+    await check(
+      page.getByRole('heading', { name: 'Check the installation outcome', exact: true }),
+    ).toBeVisible();
+    await check(page.getByText('Last step: Preparing runtime.', { exact: false })).toBeVisible();
+    await check(
+      page.getByRole('heading', { name: 'Preparing your server', exact: true }),
+    ).toHaveCount(0);
+    const panel = page.locator('.provisioning-panel');
+    await check(panel).toHaveAttribute('data-state', 'uncertain');
+    expect(
+      await panel
+        .locator('.provisioning-mark-unit i')
+        .first()
+        .evaluate((element) => getComputedStyle(element).animationName),
+    ).toBe('none');
+    const elapsed = await panel.getByRole('timer').textContent();
+    await page.clock.install();
+    await page.clock.fastForward(3000);
+    await check(panel.getByRole('timer')).toHaveText(elapsed ?? '');
+    await check(page.getByRole('button', { name: 'Reinstall', exact: true })).toHaveCount(0);
+    await screenshot('modpack-runtime-uncertain-en-desktop');
+    const review = page.getByRole('link', { name: 'Review installation', exact: false });
+    await check(review).toHaveAttribute('href', `/servers/${id}/game/modpacks?operation=${id}`);
+    await review.focus();
+    await page.keyboard.press('Enter');
+    await check(page).toHaveURL(`${origin}servers/${id}/game/modpacks?operation=${id}`);
+    expect(writes).toEqual([]);
+    await page.evaluate(() => localStorage.setItem('nh.locale', 'it'));
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.goto(`${origin}provisioning-fixture`);
+    await check(
+      page.getByRole('heading', { name: 'Verifica l’esito dell’installazione', exact: true }),
+    ).toBeVisible();
+    await screenshot('modpack-runtime-uncertain-it-mobile');
+  });
   it('recovers a failed progress read without opening the runtime console prematurely', async () => {
     unavailable = true;
     await page.goto(`${origin}provisioning-fixture`);

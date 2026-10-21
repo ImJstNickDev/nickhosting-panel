@@ -48,7 +48,9 @@ export function JobPage({ jobId: explicitId }: { jobId?: string } = {}) {
     queryKey: ['job', jobId],
     queryFn: () => api<Job>(`/v1/platform/jobs/${encodeURIComponent(jobId)}`),
     refetchInterval: (query) =>
-      query.state.data && ['queued', 'running'].includes(query.state.data.state) ? 3000 : false,
+      query.state.data && ['queued', 'running', 'uncertain'].includes(query.state.data.state)
+        ? 3000
+        : false,
   });
   if (job.isPending) return <Loading />;
   if (job.error) return <ErrorNotice error={job.error} retry={() => void job.refetch()} />;
@@ -64,7 +66,7 @@ export function JobPage({ jobId: explicitId }: { jobId?: string } = {}) {
       title={t('platform.jobDetails')}
       actions={<Link to="/activity">{t('web.activity')}</Link>}
     >
-      <Section title={t(actionKey(data.action))}>
+      <Section title={t(data.provisioning?.workflow?.titleKey ?? actionKey(data.action))}>
         {data.serverId && (
           <p>
             <Link to={`/servers/${data.serverId}`}>{data.serverName}</Link>
@@ -107,7 +109,24 @@ export function JobPage({ jobId: explicitId }: { jobId?: string } = {}) {
           </Notice>
         )}
         {acknowledged && <Notice>{t('platform.failureAcknowledged')}</Notice>}
-        {uncertain && !acknowledged && <Notice>{t('platform.uncertainHelp')}</Notice>}
+        {uncertain && !acknowledged && (
+          <Notice>
+            {t(
+              data.provisioning?.workflow
+                ? 'provisioning.reviewUncertainHint'
+                : 'platform.uncertainHelp',
+            )}
+          </Notice>
+        )}
+        {data.serverId && data.provisioning?.workflow && (
+          <p>
+            <Link
+              to={`/servers/${data.serverId}/game/${data.provisioning.workflow.review.sectionId}?operation=${data.id}`}
+            >
+              {t(data.provisioning.workflow.review.labelKey)}
+            </Link>
+          </p>
+        )}
         {data.ownerRecovery && (
           <div className="stack">
             {!data.ownerRecovery.available && (

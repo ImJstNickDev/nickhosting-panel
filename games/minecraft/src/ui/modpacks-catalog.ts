@@ -118,7 +118,11 @@ export const minecraftModpacksMessages: Record<string, [string, string]> = {
   'modpacks.cancelled': ['Cancelled', 'Annullato'],
   'modpacks.cancel': ['Discard preparation', 'Scarta preparazione'],
   'modpacks.retry': ['Try again', 'Riprova'],
-  'modpacks.recover': ['Check outcome', 'Verifica esito'],
+  'modpacks.recover': ['Verify and resume', 'Verifica e riprendi'],
+  'modpacks.recoverHint': [
+    'Verify the last step and resume this installation when possible.',
+    'Verifica l’ultimo passaggio e riprendi questa installazione quando possibile.',
+  ],
   'modpacks.install': ['Install pack', 'Installa modpack'],
   'modpacks.update': ['Update pack', 'Aggiorna modpack'],
   'modpacks.replace': ['Replace pack', 'Sostituisci modpack'],

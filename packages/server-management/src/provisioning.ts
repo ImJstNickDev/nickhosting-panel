@@ -2,6 +2,11 @@ import { type AuthContext, DomainError } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
 import type { PrivateTransferCache } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
+import {
+  loadModpackProvisioning,
+  type ModpackProvisioning,
+  modpackProvisioningPresentation,
+} from './modpack-provisioning.js';
 import { authorizeServer } from './registry.js';
 
 export const provisioningStages = [
@@ -55,7 +60,27 @@ export function provisioningPresentation(
     completed_at: Date | null;
   },
   transcript: InstallationTranscript = { logs: [], available: false },
+  modpack?: ModpackProvisioning,
 ) {
+  if (row.plan.modpackOperationId === row.job_id) {
+    const source = modpack?.id === row.job_id ? modpack : undefined;
+    const presentation = modpackProvisioningPresentation(source);
+    const updatedAt = source?.updated_at ?? row.updated_at;
+    return {
+      ...presentation,
+      jobId: row.job_id,
+      action: 'reinstall' as const,
+      startedAt: row.created_at.toISOString(),
+      updatedAt: updatedAt.toISOString(),
+      completedAt: ['completed', 'failed'].includes(presentation.state)
+        ? updatedAt.toISOString()
+        : null,
+      // Modpack phases are not the ordinary installer's prepare/install/configure sequence.
+      stages: [],
+      logs: transcript.logs,
+      logsAvailable: transcript.available,
+    };
+  }
   const saved = row.plan.provisioning as
     | { stage?: ProvisioningStage; timestamps?: Partial<Record<ProvisioningStage, string>> }
     | undefined;
@@ -128,6 +153,7 @@ export function provisioningPresentation(
       }),
     logs: transcript.logs,
     logsAvailable: transcript.available,
+    workflow: undefined,
   };
 }
 
@@ -198,5 +224,11 @@ export async function getServerProvisioning(
       if (!(error instanceof DomainError)) throw error;
     }
   }
-  return { ...provisioningPresentation(row, transcript), canReinstall };
+  const modpacks = await loadModpackProvisioning(db, [
+    { jobId: row.job_id, serverId, plan: row.plan },
+  ]);
+  return {
+    ...provisioningPresentation(row, transcript, modpacks.get(row.job_id)),
+    canReinstall: row.plan.modpackOperationId ? false : canReinstall,
+  };
 }

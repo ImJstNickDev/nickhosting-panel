@@ -17,4 +17,10 @@ export interface ProvisioningSnapshot {
   }>;
   logs: Array<{ id: string; at: string; text: string }>;
   logsAvailable: boolean;
+  workflow?: {
+    titleKey: string;
+    statusKey: string;
+    phaseKey: string;
+    review: { sectionId: string; labelKey: string };
+  };
 }

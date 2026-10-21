@@ -19,6 +19,7 @@ import {
   getGatewayState,
 } from './gateway-orchestration.js';
 import { currentInteractiveContext } from './interactive-context.js';
+import { loadModpackProvisioning, modpackJobState } from './modpack-provisioning.js';
 import { backupSchemaAvailable, providerBackupEventsEnabled } from './provider-backup-events.js';
 import { provisioningPresentation, successfulStartAfter } from './provisioning.js';
 import {
@@ -927,26 +928,38 @@ export async function getPlatformJob(db: DB, context: AuthContext, jobId: string
         .where('job_id', '=', jobId)
         .executeTakeFirst()
     : undefined;
+  const modpacks = await loadModpackProvisioning(db, [
+    { jobId, serverId: job.serverId, plan: operation?.plan ?? null },
+  ]);
   const provisioning =
     operation && ['provision', 'reinstall'].includes(job.action ?? '')
-      ? provisioningPresentation({
-          job_id: jobId,
-          action: job.action ?? '',
-          phase: job.phase ?? '',
-          plan: operation.plan,
-          effect_state: job.effectState ?? '',
-          state: job.state,
-          error_code: job.errorCode,
-          created_at: job.createdAt,
-          updated_at: job.updatedAt,
-          completed_at: job.completedAt,
-        })
+      ? provisioningPresentation(
+          {
+            job_id: jobId,
+            action: job.action ?? '',
+            phase: job.phase ?? '',
+            plan: operation.plan,
+            effect_state: job.effectState ?? '',
+            state: job.state,
+            error_code: job.errorCode,
+            created_at: job.createdAt,
+            updated_at: job.updatedAt,
+            completed_at: job.completedAt,
+          },
+          undefined,
+          modpacks.get(jobId),
+        )
       : undefined;
   const backupPlan = ['backup', 'restore'].includes(job.action ?? '') ? operation?.plan : undefined;
   // Only confirmed counters are public; staging identities, source paths and
   // integrity digests stay in the protected operation plan.
   const fileTransfer = publicFileTransferSchema.safeParse(operation?.plan.fileTransfer);
-  if (owner(context) && job.serverId && ['queued', 'running'].includes(job.state)) {
+  if (
+    owner(context) &&
+    job.serverId &&
+    !provisioning?.workflow &&
+    ['queued', 'running'].includes(job.state)
+  ) {
     const recovery = await db
       .selectFrom('server_operations as operation')
       .innerJoin('managed_servers as server', 'server.id', 'operation.server_id')
@@ -972,8 +985,15 @@ export async function getPlatformJob(db: DB, context: AuthContext, jobId: string
   }
   return {
     ...job,
+    ...(provisioning?.workflow ? { state: modpackJobState(modpacks.get(jobId)) } : {}),
     ...(provisioning
-      ? { provisioning: { stage: provisioning.stage, state: provisioning.state } }
+      ? {
+          provisioning: {
+            stage: provisioning.stage,
+            state: provisioning.state,
+            workflow: provisioning.workflow,
+          },
+        }
       : {}),
     ...(fileTransfer.success ? { fileTransfer: fileTransfer.data } : {}),
     backupResult: backupPlan

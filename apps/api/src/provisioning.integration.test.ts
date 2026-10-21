@@ -16,6 +16,7 @@ import {
   getServerProvisioning,
   installationLogKey,
   linkProviderFeedServer,
+  listPlatformActivity,
 } from '@nickhosting/server-management';
 import { Hono } from 'hono';
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
@@ -87,6 +88,138 @@ async function installing() {
     .execute();
   return { serverId, jobId: operation.job_id };
 }
+
+it('projects the linked modpack workflow in Console, Activity details and filtered lists without changing jobs', async () => {
+  const target = await installing();
+  await database.db
+    .updateTable('operation_jobs')
+    .set({ state: 'running', error_code: null })
+    .where('id', '=', target.jobId)
+    .execute();
+  await database.db
+    .updateTable('server_operations')
+    .set({
+      action: 'reinstall',
+      phase: 'queued',
+      effect_state: 'none',
+      plan: JSON.stringify({ modpackOperationId: target.jobId }),
+    })
+    .where('job_id', '=', target.jobId)
+    .execute();
+  await database.db
+    .insertInto('minecraft_modpack_operations')
+    .values({
+      id: target.jobId,
+      server_id: target.serverId,
+      actor_user_id: fixture.context.actorUserId,
+      actor_session_id: randomUUID(),
+      subject_user_id: fixture.context.subjectUserId,
+      support_session_id: null,
+      resource_owner_id: fixture.context.subjectUserId,
+      physical_host_id: null,
+      held_bytes: '0',
+      staging_root: null,
+      idempotency_key: randomUUID(),
+      selection: '{}',
+      state: 'uncertain',
+      phase: 'runtime',
+      progress: 'null',
+      prepared: 'null',
+      plan: 'null',
+      plan_digest: null,
+      blockers: '[]',
+      apply_request: 'null',
+      apply_actor_user_id: null,
+      apply_actor_session_id: null,
+      apply_subject_user_id: null,
+      apply_support_session_id: null,
+      apply_idempotency_key: null,
+      journal: '[]',
+      backup_id: null,
+      restart_required: false,
+      error: 'operation_uncertain',
+      lease_token: null,
+      lease_until: null,
+    })
+    .execute();
+  expect(await getServerProvisioning(database.db, fixture.context, target.serverId)).toMatchObject({
+    jobId: target.jobId,
+    state: 'uncertain',
+    stage: 'installing',
+    canReinstall: false,
+    stages: [],
+    errorCode: 'operation_uncertain',
+    workflow: {
+      phaseKey: 'games.minecraft.modpacks.changingRuntime',
+      review: { sectionId: 'modpacks' },
+    },
+  });
+  expect(await getPlatformJob(database.db, fixture.context, target.jobId)).toMatchObject({
+    state: 'uncertain',
+    ownerRecovery: null,
+    provisioning: { state: 'uncertain', stage: 'installing' },
+  });
+  expect(
+    (
+      await listPlatformActivity(database.db, fixture.context, {
+        serverId: target.serverId,
+        state: 'uncertain',
+      })
+    ).items.map((item) => item.jobId),
+  ).toContain(target.jobId);
+  expect(
+    (
+      await listPlatformActivity(database.db, fixture.context, {
+        serverId: target.serverId,
+        state: 'running',
+      })
+    ).items.map((item) => item.jobId),
+  ).not.toContain(target.jobId);
+  for (const [state, phase, publicState, presentation] of [
+    ['apply_queued', 'runtime', 'queued', 'active'],
+    ['applying', 'runtime', 'running', 'active'],
+    ['applied', 'complete', 'succeeded', 'completed'],
+  ] as const) {
+    await database.db
+      .updateTable('minecraft_modpack_operations')
+      .set({ state, phase, error: null, updated_at: new Date() })
+      .where('id', '=', target.jobId)
+      .execute();
+    expect(
+      await getServerProvisioning(database.db, fixture.context, target.serverId),
+    ).toMatchObject({ state: presentation });
+    expect(await getPlatformJob(database.db, fixture.context, target.jobId)).toMatchObject({
+      state: publicState,
+      provisioning: { state: presentation },
+    });
+    expect(
+      (
+        await listPlatformActivity(database.db, fixture.context, {
+          serverId: target.serverId,
+          state: publicState,
+        })
+      ).items.map((item) => item.jobId),
+    ).toContain(target.jobId);
+  }
+  expect(
+    await database.db
+      .selectFrom('operation_jobs')
+      .select(['state', 'error_code'])
+      .where('id', '=', target.jobId)
+      .executeTakeFirstOrThrow(),
+  ).toEqual({ state: 'running', error_code: null });
+  // A mismatched operation marker must never attach another workflow's state.
+  await database.db
+    .updateTable('server_operations')
+    .set({ plan: JSON.stringify({ modpackOperationId: randomUUID() }) })
+    .where('job_id', '=', target.jobId)
+    .execute();
+  expect(await getServerProvisioning(database.db, fixture.context, target.serverId)).toMatchObject({
+    state: 'active',
+    stage: 'preparing',
+    workflow: undefined,
+  });
+});
 
 it('serves authorized durable progress and bounded transcript without any provider request', async () => {
   const target = await installing(),

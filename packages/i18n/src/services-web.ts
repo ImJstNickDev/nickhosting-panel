@@ -32,6 +32,11 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
     'The last step is not confirmed yet. Check Activity before retrying.',
     'L’ultimo passaggio non è ancora confermato. Controlla Attività prima di riprovare.',
   ],
+  'provisioning.lastPhase': ['Last step: {phase}.', 'Ultimo passaggio: {phase}.'],
+  'provisioning.reviewUncertainHint': [
+    'Review the installation to verify its outcome and resume when possible.',
+    'Rivedi l’installazione per verificarne l’esito e riprenderla quando possibile.',
+  ],
   'provisioning.elapsed': ['Elapsed: {time}', 'Tempo trascorso: {time}'],
   'provisioning.steps': ['Setup progress', 'Avanzamento preparazione'],
   'provisioning.step.preparing': ['Prepare', 'Prepara'],
