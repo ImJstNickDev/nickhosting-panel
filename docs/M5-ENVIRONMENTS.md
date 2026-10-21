@@ -1997,7 +1997,9 @@ as part of activation; the Owner configures the mapping and performs gameplay te
 Migration `052_modpack_runtime_preparation.sql` adds a nullable operation checkpoint.
 Explicit Install requests fence NickHosting starts and file mutations from admission.
 Once the pack manifest identifies its runtime, runtime preparation overlaps pack
-downloads and hidden staging; final publication waits for both branches. A matching,
+downloads and local extraction; remote file reads, hidden staging and publication
+wait for installer completion because native Pterodactyl file routes are unavailable
+to non-admin clients during installation. A matching,
 already installed runtime does not run its installer again. Preview-only preparation
 retains its existing behavior without modifying the server.
 
@@ -2026,3 +2028,23 @@ dev services are healthy and HTTPS returns 200. Existing accounts, managed serve
 and sessions are unchanged. Panel/Wings image IDs and start times are unchanged.
 No real modpack installation or game-server command was performed for validation.
 Debug timing remains enabled for the Owner's next comparable pack replacement.
+
+
+The subsequent Owner pack-swap tests exposed the native installer/file-access
+barrier. Corrected orchestration keeps downloads/local extraction parallel but
+awaits the ready runtime before properties, inventory or hidden staging. Initial
+archive downloads now report downloading immediately. Content HTTP separates
+120-second metadata/header/inactivity timeouts from a bounded 30-minute download
+body deadline; a healthy slow transfer no longer restarts at two minutes.
+
+This correction needs no migration, image rebuild or provider/Blueprint update.
+Only existing dev API and worker were restarted; all eleven dev services passed
+health checks. The interrupted pack operation remains recoverable with its runtime
+checkpoint retained, rather than being silently discarded or restarted. No new
+real pack installation or game-server command was issued. Focused validation:
+48 service cases (full prior 45-case run plus new cases and final affected-case
+reruns), 61 HTTP cases, 2 bridge integration cases, TypeScript and scoped Biome.
+The initial failed/Verify timings are not clean installation benchmarks; see
+[M5 modpacks](M5-MODPACKS.md#native-installerfile-access-barrier-and-download-deadlines).
+Rollback is a source revert and the same scoped API/worker restart after active
+operations settle; retain migration052, journals, staging and game data.

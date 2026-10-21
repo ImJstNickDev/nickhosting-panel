@@ -79,7 +79,10 @@ export interface SafeContentHttpOptions {
   userAgent: string;
   maxJsonBytes?: number;
   maxDownloadBytes?: number;
+  /** DNS, response headers, metadata completion and socket inactivity deadline. */
   timeoutMs?: number;
+  /** Absolute body deadline for accepted downloads; active large packs may take longer than metadata. */
+  downloadTimeoutMs?: number;
   attempts?: number;
 }
 /** DNS is validated and pinned into every TLS connection. Metadata never follows
@@ -91,6 +94,7 @@ export class SafeContentHttp implements ContentHttp {
       maxJsonBytes: 8 * 1024 ** 2,
       maxDownloadBytes: 8 * 1024 ** 3,
       timeoutMs: 120000,
+      downloadTimeoutMs: 30 * 60 * 1000,
       attempts: 3,
       ...options,
     };
@@ -100,9 +104,15 @@ export class SafeContentHttp implements ContentHttp {
       !Number.isInteger(this.options.attempts) ||
       this.options.attempts < 1 ||
       this.options.attempts > 5 ||
-      [this.options.maxJsonBytes, this.options.maxDownloadBytes, this.options.timeoutMs].some(
-        (v) => !Number.isSafeInteger(v) || v < 1,
-      )
+      [
+        this.options.maxJsonBytes,
+        this.options.maxDownloadBytes,
+        this.options.timeoutMs,
+        this.options.downloadTimeoutMs,
+      ].some((v) => !Number.isSafeInteger(v) || v < 1) ||
+      // Node clamps larger timers to 1 ms rather than honoring their deadline.
+      this.options.timeoutMs > 2 ** 31 - 1 ||
+      this.options.downloadTimeoutMs > 2 ** 31 - 1
     )
       fail('http_configuration');
     for (const origin of options.allowedOrigins)
@@ -140,6 +150,12 @@ export class SafeContentHttp implements ContentHttp {
     const address = addresses[0];
     if (!address) fail('download_address');
     return new Promise((resolve, reject) => {
+      let deadline: ReturnType<typeof setTimeout>;
+      const armDeadline = (milliseconds: number) => {
+        clearTimeout(deadline);
+        deadline = setTimeout(() => req.destroy(new Error('content_timeout')), milliseconds);
+        deadline.unref();
+      };
       const req = request(
         url,
         {
@@ -187,16 +203,16 @@ export class SafeContentHttp implements ContentHttp {
             );
             return;
           }
+          // Only an accepted download gets the longer transfer budget. DNS,
+          // headers, redirects and metadata retain the short deadline, as does
+          // socket inactivity even while downloading a large archive.
+          if (downloadRedirects) armDeadline(this.options.downloadTimeoutMs);
           resolve(res);
         },
       );
       req.setTimeout(this.options.timeoutMs, () => req.destroy(new Error('content_timeout')));
       // Absolute deadline also covers peers that keep sending one byte per timeout interval.
-      const deadline = setTimeout(
-        () => req.destroy(new Error('content_timeout')),
-        this.options.timeoutMs,
-      );
-      deadline.unref();
+      armDeadline(this.options.timeoutMs);
       req.on('close', () => clearTimeout(deadline));
       req.on('error', reject);
       req.end(jsonBody);

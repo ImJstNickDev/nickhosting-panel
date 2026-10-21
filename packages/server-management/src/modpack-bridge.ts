@@ -247,6 +247,9 @@ export function createMinecraftModpackBridge(options: {
           const stagingBudget = Math.floor(
             (Math.min(policy.sourceGlobalBytes, policy.sourceUserBytes) - 1024 * 1024) / 2,
           );
+          // The index/archive itself is a download, before its contents reveal
+          // the runtime and per-file progress totals.
+          await input.progress('downloading', null);
           const staged = await timing.measure('staging', () =>
             stageModpackRecipe(recipe, {
               timing: timing.child('stage'),

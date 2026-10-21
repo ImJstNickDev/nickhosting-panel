@@ -375,9 +375,10 @@ pack downloads. Review-only preparation still has no server effects.
 
 Migration 052 adds the private `runtime_preparation` checkpoint. The same worker
 lease and server scope continue from preparation into application; the exact
-manifest, plan and delete set are persisted before publication. Hidden staging
-can overlap the installer after stop/backup completes; visible publication waits
-for both. No external Pterodactyl starts during this installation are an Owner
+manifest, plan and delete set are persisted before publication. Pack downloads
+and local extraction overlap the installer. Remote properties/inventory reads and
+hidden staging wait for installer completion: native Pterodactyl file routes reject
+non-admin clients while installation is active. Visible publication waits for both. No external Pterodactyl starts during this installation are an Owner
 operational guarantee. The retained scope reuses its stopped-process proof;
 a restarted/recovered worker must establish fresh proof.
 
@@ -444,3 +445,27 @@ archive overrides. Provider digests and local file seals remain checked while
 streaming. Known-size downloads start largest-first within the existing concurrency
 and temporary-space budgets; unknown-size downloads retain serialized admission.
 The final transfer ZIP still uses the existing STORE writer and file-seal checks.
+
+### Native installer/file-access barrier and download deadlines
+
+Pack downloads and local extraction run concurrently with runtime preparation,
+but the first live file read waits for the installer to finish. This includes
+properties merging, inventory and hidden archive staging: the native Client API
+rejects file access while installing, including Blueprint routes that use its
+middleware. No Panel, Wings or Blueprint changes are needed. The waiting phase
+is reported as runtime preparation, and fetching the initial pack archive is
+reported as downloading rather than reading metadata.
+
+`SafeContentHttp` keeps the existing 120-second DNS/header/metadata and socket
+inactivity timeout. A successful archive response gets a separate bounded
+30-minute body deadline (`downloadTimeoutMs`); redirects do not. A healthy slow
+transfer no longer restarts every two minutes. Size, origin and streamed digest
+checks remain unchanged, as do cancellation and the bounded retry count.
+
+The first Owner tests of parallel installation are regression evidence, not clean
+performance benchmarks: the first pack repeated preparation after a file-access
+failure; the second failed inventory during installation and then spent 360.8 s
+on a new attempt whose initial archive download exhausted three deadlines.
+Completed stage timings remain usable individually; total installation time
+includes manual recovery and repeated work and must not be compared as a normal
+successful installation.

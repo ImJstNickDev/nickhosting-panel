@@ -228,50 +228,182 @@ describe('Modpacks durable preparation and apply', () => {
     expect(f.calls).toHaveLength(count);
   });
 
-  it('overlaps runtime with downloads and hidden staging, with one stop and backup before runtime', async () => {
+  it.each([true, false])(
+    'overlaps downloads but defers provider file access until installation ends (preparation reads: %s)',
+    async (readsProperties) => {
+      const f = await fixture();
+      const runtimeStarted = Promise.withResolvers<void>();
+      const releaseRuntime = Promise.withResolvers<void>();
+      const downloaded = Promise.withResolvers<void>();
+      let installing = false;
+      const providerFileAccess = (phase: string) => {
+        // AuthenticateServerAccess rejects file APIs even for an otherwise authorized
+        // caller while Pterodactyl still marks the server as installing.
+        if (installing) throw new DomainError('integration_unavailable');
+        f.calls.push(phase);
+      };
+      f.scope.configureRuntime.mockImplementation(async () => {
+        f.calls.push('runtime');
+        installing = true;
+        runtimeStarted.resolve();
+        await releaseRuntime.promise;
+        installing = false;
+      });
+      const stagePublication = vi.fn(async () => providerFileAccess('stage'));
+      f.hooks.withServerLock = async (_row, work) => work({ ...f.scope, stagePublication });
+      vi.mocked(f.hooks.inspect).mockImplementation(async () => {
+        providerFileAccess('inventory');
+        return f.observation;
+      });
+      vi.mocked(f.hooks.prepare).mockImplementation(async (input) => {
+        await input.runtimeReady?.({
+          combinationId: f.combinationId,
+          mappingId: f.mappingId,
+          target: f.prepared.target,
+        });
+        await runtimeStarted.promise;
+        await input.progress('downloading', null);
+        f.calls.push('download-complete');
+        downloaded.resolve();
+        if (readsProperties) {
+          await input.beforeInventory?.();
+          providerFileAccess('properties');
+        }
+        return f.prepared;
+      });
+      const queued = await f.service.prepare(f.context, f.serverId, {
+        ...f.selection,
+        install: { backupBefore: true },
+      });
+      if (!queued.operation) throw new Error('Expected operation');
+      const id = queued.operation.id;
+      const processing = f.service.process(id);
+      try {
+        await downloaded.promise;
+        await vi.waitFor(async () => {
+          expect((await f.service.snapshot(f.context, f.serverId)).operation?.phase).toBe(
+            'runtime',
+          );
+        });
+        expect((await f.service.snapshot(f.context, f.serverId)).operation?.canCancel).toBe(false);
+        await expect(f.service.cancel(f.context, f.serverId, id)).rejects.toMatchObject({
+          code: 'operation_busy',
+        });
+        expect(f.calls).toEqual(['stop', 'backup', 'runtime', 'download-complete']);
+        expect(f.hooks.inspect).not.toHaveBeenCalled();
+        expect(stagePublication).not.toHaveBeenCalled();
+        expect(f.scope.publish).not.toHaveBeenCalled();
+      } finally {
+        releaseRuntime.resolve();
+        await processing;
+      }
+      expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('applied');
+      expect(f.calls).toEqual([
+        'stop',
+        'backup',
+        'runtime',
+        'download-complete',
+        ...(readsProperties ? ['properties'] : []),
+        'inventory',
+        'stage',
+        'publish',
+        'verify',
+      ]);
+      expect(f.scope.stop).toHaveBeenCalledTimes(1);
+      expect(f.scope.configureRuntime).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['stopping', 'backup'] as const)(
+    'reports the pending %s phase when downloads finish before runtime installation',
+    async (phase) => {
+      const f = await fixture();
+      const phaseStarted = Promise.withResolvers<void>();
+      const releasePhase = Promise.withResolvers<void>();
+      const downloaded = Promise.withResolvers<void>();
+      const wait = async () => {
+        phaseStarted.resolve();
+        await releasePhase.promise;
+      };
+      if (phase === 'stopping') f.scope.stop.mockImplementation(wait);
+      else
+        f.scope.backup.mockImplementation(async () => {
+          await wait();
+          return 'verified-backup';
+        });
+      vi.mocked(f.hooks.prepare).mockImplementation(async (input) => {
+        await input.runtimeReady?.({
+          combinationId: f.combinationId,
+          mappingId: f.mappingId,
+          target: f.prepared.target,
+        });
+        await phaseStarted.promise;
+        await input.progress('downloading', null);
+        downloaded.resolve();
+        await input.beforeInventory?.();
+        return f.prepared;
+      });
+      const queued = await f.service.prepare(f.context, f.serverId, {
+        ...f.selection,
+        install: { backupBefore: true },
+      });
+      if (!queued.operation) throw new Error('Expected operation');
+      const processing = f.service.process(queued.operation.id);
+      try {
+        await downloaded.promise;
+        await vi.waitFor(async () => {
+          expect((await f.service.snapshot(f.context, f.serverId)).operation?.phase).toBe(phase);
+        });
+        expect(f.scope.configureRuntime).not.toHaveBeenCalled();
+      } finally {
+        releasePhase.resolve();
+        await processing;
+      }
+      expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('applied');
+    },
+  );
+
+  it('releases the lock and preserves uncertainty if the installer fails at the file access barrier', async () => {
     const f = await fixture();
-    const runtimeStarted = Promise.withResolvers<void>();
-    const releaseRuntime = Promise.withResolvers<void>();
-    const stageStarted = Promise.withResolvers<void>();
+    const waitingForFiles = Promise.withResolvers<void>();
+    const failInstaller = Promise.withResolvers<void>();
+    let locked = false;
     f.scope.configureRuntime.mockImplementation(async () => {
-      f.calls.push('runtime');
-      runtimeStarted.resolve();
-      await releaseRuntime.promise;
+      await failInstaller.promise;
+      throw new DomainError('integration_unavailable');
     });
-    const stagePublication = vi.fn(async () => {
-      f.calls.push('stage');
-      stageStarted.resolve();
-    });
-    f.hooks.withServerLock = async (_row, work) => work({ ...f.scope, stagePublication });
+    const stagePublication = vi.fn(async () => {});
+    f.hooks.withServerLock = async (_row, work) => {
+      locked = true;
+      try {
+        return await work({ ...f.scope, stagePublication });
+      } finally {
+        locked = false;
+      }
+    };
     vi.mocked(f.hooks.prepare).mockImplementation(async (input) => {
       await input.runtimeReady?.({
         combinationId: f.combinationId,
         mappingId: f.mappingId,
         target: f.prepared.target,
       });
-      await runtimeStarted.promise;
-      f.calls.push('download-complete');
+      waitingForFiles.resolve();
+      await input.beforeInventory?.();
       return f.prepared;
     });
-    const queued = await f.service.prepare(f.context, f.serverId, {
-      ...f.selection,
-      install: { backupBefore: true },
-    });
+    const queued = await f.service.prepare(f.context, f.serverId, { ...f.selection, install: {} });
     if (!queued.operation) throw new Error('Expected operation');
-    const id = queued.operation.id;
-    const processing = f.service.process(id);
-    await stageStarted.promise;
-    expect(f.calls).toEqual(['stop', 'backup', 'runtime', 'download-complete', 'stage']);
-    expect(f.scope.publish).not.toHaveBeenCalled();
-    expect((await f.service.snapshot(f.context, f.serverId)).operation?.canCancel).toBe(false);
-    await expect(f.service.cancel(f.context, f.serverId, id)).rejects.toMatchObject({
-      code: 'operation_busy',
-    });
-    releaseRuntime.resolve();
+    const processing = f.service.process(queued.operation.id);
+    await waitingForFiles.promise;
+    expect(locked).toBe(true);
+    failInstaller.resolve();
     await processing;
-    expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('applied');
-    expect(f.scope.stop).toHaveBeenCalledTimes(1);
-    expect(f.scope.configureRuntime).toHaveBeenCalledTimes(1);
+    expect(locked).toBe(false);
+    expect((await f.service.snapshot(f.context, f.serverId)).operation?.state).toBe('uncertain');
+    expect(f.hooks.inspect).not.toHaveBeenCalled();
+    expect(stagePublication).not.toHaveBeenCalled();
+    expect(f.scope.publish).not.toHaveBeenCalled();
+    expect(f.hooks.cleanup).not.toHaveBeenCalled();
   });
 
   it('retains early runtime on a download failure and resumes without reinstalling or repeating backup', async () => {

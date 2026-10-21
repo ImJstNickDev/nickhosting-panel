@@ -97,6 +97,7 @@ export interface MinecraftModpackHooks {
     signal: AbortSignal;
     /** Start the authorized install branch once the immutable manifest target is resolved. */
     runtimeReady?(binding: MinecraftModpackRuntimeBinding): Promise<void>;
+    /** Await before live file reads: native provider file APIs reject an active installer. */
     beforeInventory?(): Promise<void>;
     progress(
       phase: 'resolving' | 'downloading' | 'inspecting',
@@ -810,17 +811,29 @@ export function createMinecraftModpacksService(options: {
           let earlyScope: MinecraftModpackApplyScope | undefined;
           let preparedObservation: MinecraftModpackObservation | undefined;
           let earlyRuntime: Promise<void> | undefined;
-          let earlyPrerequisites: Promise<void> | undefined;
+          let earlyRuntimeReady = false;
+          let earlyLifecyclePhase: MinecraftModpackPhase = 'runtime';
           let earlyLock: Promise<void> | undefined;
           let releaseEarlyLock: (() => void) | undefined;
           const earlyReleased = new Promise<void>((resolve) => {
             releaseEarlyLock = resolve;
           });
+          const awaitRuntime = async () => {
+            if (!earlyRuntime) return;
+            if (!earlyRuntimeReady)
+              await update({
+                phase: earlyLifecyclePhase,
+                progress: 'null',
+                updated_at: new Date(),
+              });
+            await earlyRuntime;
+          };
           async function effect<T>(
             phase: MinecraftModpackPhase,
             work: () => Promise<T>,
             alreadyDispatched = false,
           ) {
+            if (earlyScope && !earlyRuntimeReady) earlyLifecyclePhase = phase;
             const current = await check();
             const journal = journalSchema.parse(current.journal);
             if (!alreadyDispatched)
@@ -852,7 +865,9 @@ export function createMinecraftModpacksService(options: {
                   selection,
                   signal: controller.signal,
                   beforeInventory: async () => {
-                    if (earlyPrerequisites) await earlyPrerequisites;
+                    // Pterodactyl rejects Client API file access while its installer is active.
+                    // Download and local extraction still overlap the runtime branch.
+                    await awaitRuntime();
                   },
                   ...(selection.install
                     ? {
@@ -904,9 +919,6 @@ export function createMinecraftModpacksService(options: {
                             await get(operationId),
                             async (scope) => {
                               earlyScope = scope;
-                              const prerequisites = Promise.withResolvers<void>();
-                              earlyPrerequisites = prerequisites.promise;
-                              void earlyPrerequisites.catch(() => {});
                               earlyRuntime = (async () => {
                                 const journal = journalSchema.parse(
                                   (await get(operationId)).journal,
@@ -928,7 +940,6 @@ export function createMinecraftModpacksService(options: {
                                   if (!backupId) throw new DomainError('operation_uncertain');
                                   await update({ backup_id: backupId });
                                 }
-                                prerequisites.resolve();
                                 if (confirmed('runtime') && checkpoint) {
                                   if (!scope.assertPreparedRuntime)
                                     throw new DomainError('operation_uncertain');
@@ -949,10 +960,10 @@ export function createMinecraftModpacksService(options: {
                                     state: 'ready',
                                   }),
                                 });
+                                earlyRuntimeReady = true;
                               })();
                               // Attach immediately: a failing runtime may finish before downloads do.
-                              void earlyRuntime.catch((error) => {
-                                prerequisites.reject(error);
+                              void earlyRuntime.catch(() => {
                                 controller.abort();
                               });
                               ready();
@@ -1002,7 +1013,7 @@ export function createMinecraftModpacksService(options: {
               )
                 throw new DomainError('provenance_mismatch');
               await check();
-              if (earlyPrerequisites) await earlyPrerequisites;
+              await awaitRuntime();
               const previous = await receipt(claimed.server_id);
               const [observation, runtime] = await Promise.all([
                 timing.measure('inventory', () =>
@@ -1038,7 +1049,7 @@ export function createMinecraftModpacksService(options: {
               );
               await check();
               if (earlyScope && plan.blockers.length) {
-                if (earlyRuntime) await earlyRuntime;
+                await awaitRuntime();
                 await update({
                   prepared: JSON.stringify(prepared),
                   plan: JSON.stringify(plan),
@@ -1128,18 +1139,17 @@ export function createMinecraftModpacksService(options: {
                     await scope.assertRuntimeResumable(plan);
                   }
                 }
-                if (earlyPrerequisites) await earlyPrerequisites;
+                await awaitRuntime();
                 if (!resumingPublication) await scope.preflightPublication(prepared, plan);
                 if (earlyScope && scope.stagePublication)
                   await scope.stagePublication(prepared, plan);
-                if (earlyRuntime) await earlyRuntime;
                 if (!earlyPrepared && !resuming) await effect('stopping', () => scope.stop());
                 if (!earlyPrepared && !resuming && request.backupBefore) {
                   const backupId = await effect('backup', () => scope.backup());
                   if (!backupId) throw new DomainError('operation_uncertain');
                   await update({ backup_id: backupId });
                 }
-                // The uninterrupted Install scope already inventoried after stop/backup.
+                // The uninterrupted Install scope already inventoried after runtime installation.
                 // Recovered and review-first operations need a fresh observation.
                 const observation =
                   preparedObservation ?? (await scope.inspect(prepared, previous?.receipt ?? null));

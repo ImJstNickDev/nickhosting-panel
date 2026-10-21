@@ -19,6 +19,7 @@ beforeEach(() => {
   mocks.lookup.mockResolvedValue([{ address: '1.1.1.1', family: 4 }]);
 });
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(paths.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 function response(
@@ -61,6 +62,40 @@ async function destination() {
   paths.push(root);
   return join(root, 'download');
 }
+/** A live response whose body/headers can arrive independently of request creation. */
+function pendingResponse(statusCode = 200, headers: Record<string, string> = {}) {
+  const stream = Object.assign(new PassThrough(), { statusCode, headers });
+  let respond: () => void = () => {
+    throw new Error('Request has not started');
+  };
+  let idle: () => void = () => {
+    throw new Error('Idle timeout has not been installed');
+  };
+  const destroy = vi.fn();
+  mocks.request.mockImplementationOnce((_url, options, callback) => {
+    const req = Object.assign(new EventEmitter(), {
+      setTimeout: vi.fn((_milliseconds: number, onTimeout: () => void) => {
+        idle = onTimeout;
+      }),
+      destroy,
+      end: vi.fn(),
+    });
+    destroy.mockImplementation((error?: Error) => {
+      stream.destroy(error);
+      if (error) req.emit('error', error);
+      req.emit('close');
+    });
+    // Also handle failures before the caller starts consuming the response.
+    stream.on('error', () => {});
+    stream.on('close', () => req.emit('close'));
+    const abort = () => req.destroy(options.signal.reason);
+    options.signal?.addEventListener('abort', abort, { once: true });
+    req.on('close', () => options.signal?.removeEventListener('abort', abort));
+    respond = () => callback(stream);
+    return req;
+  });
+  return { stream, destroy, respond: () => respond(), idle: () => idle() };
+}
 const body = Buffer.from('fixture content');
 const artifact = {
   path: 'config/a.txt',
@@ -70,6 +105,128 @@ const artifact = {
   kind: 'override' as const,
   serverSide: 'required' as const,
 };
+it('allows an active download to outlive the metadata deadline without restarting it', async () => {
+  const path = await destination();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const peer = pendingResponse();
+  const result = client({ timeoutMs: 100, downloadTimeoutMs: 500, attempts: 1 }).download(
+    artifact,
+    path,
+  );
+  await vi.advanceTimersByTimeAsync(90);
+  peer.respond();
+  await vi.advanceTimersByTimeAsync(0);
+  for (const byte of body) {
+    peer.stream.write(Buffer.from([byte]));
+    await vi.advanceTimersByTimeAsync(20);
+  }
+  peer.stream.end();
+  await expect(result).resolves.toMatchObject({ size: body.length });
+  expect(peer.destroy).not.toHaveBeenCalled();
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  expect(await readFile(path)).toEqual(body);
+  expect(vi.getTimerCount()).toBe(0);
+});
+it('keeps the short deadline when a download never receives response headers', async () => {
+  const path = await destination();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const peer = pendingResponse();
+  const result = client({ timeoutMs: 100, downloadTimeoutMs: 500, attempts: 1 }).download(
+    artifact,
+    path,
+  );
+  const rejected = expect(result).rejects.toMatchObject({ code: 'integration_unavailable' });
+  await vi.advanceTimersByTimeAsync(100);
+  await rejected;
+  expect(peer.destroy).toHaveBeenCalledExactlyOnceWith(new Error('content_timeout'));
+  await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+it('does not grant the long transfer budget to a pending redirect target', async () => {
+  const path = await destination();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const redirect = pendingResponse(302, { location: '/target' });
+  const target = pendingResponse();
+  const result = client({ timeoutMs: 100, downloadTimeoutMs: 500, attempts: 1 }).download(
+    artifact,
+    path,
+  );
+  const rejected = expect(result).rejects.toMatchObject({ code: 'integration_unavailable' });
+  await vi.advanceTimersByTimeAsync(90);
+  redirect.respond();
+  await vi.advanceTimersByTimeAsync(100);
+  await rejected;
+  expect(redirect.stream.destroyed).toBe(true);
+  expect(target.destroy).toHaveBeenCalledExactlyOnceWith(new Error('content_timeout'));
+  expect(mocks.request).toHaveBeenCalledTimes(2);
+  await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(vi.getTimerCount()).toBe(0);
+});
+it('retains the absolute metadata deadline even while response bytes keep arriving', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const peer = pendingResponse();
+  const result = client({ timeoutMs: 100, downloadTimeoutMs: 500, attempts: 1 }).text(
+    artifact.urls[0] as string,
+  );
+  const rejected = expect(result).rejects.toMatchObject({ code: 'integration_unavailable' });
+  await vi.advanceTimersByTimeAsync(0);
+  peer.respond();
+  await vi.advanceTimersByTimeAsync(0);
+  for (let chunk = 0; chunk < 5; chunk++) {
+    peer.stream.write('a');
+    await vi.advanceTimersByTimeAsync(20);
+  }
+  await rejected;
+  expect(peer.destroy).toHaveBeenCalledExactlyOnceWith(new Error('content_timeout'));
+});
+it('caps even active download bodies at the independent transfer deadline', async () => {
+  const path = await destination();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const peer = pendingResponse();
+  const result = client({ timeoutMs: 100, downloadTimeoutMs: 250, attempts: 1 }).download(
+    artifact,
+    path,
+  );
+  const rejected = expect(result).rejects.toMatchObject({ code: 'integration_unavailable' });
+  await vi.advanceTimersByTimeAsync(0);
+  peer.respond();
+  await vi.advanceTimersByTimeAsync(0);
+  for (let chunk = 0; chunk < 5; chunk++) {
+    peer.stream.write('a');
+    await vi.advanceTimersByTimeAsync(50);
+  }
+  await rejected;
+  expect(peer.destroy).toHaveBeenCalledExactlyOnceWith(new Error('content_timeout'));
+  await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(vi.getTimerCount()).toBe(0);
+});
+it.each(['idle', 'abort'] as const)(
+  'interrupts a download on %s without waiting for its longer transfer deadline',
+  async (cause) => {
+    const path = await destination();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const peer = pendingResponse();
+    const controller = new AbortController();
+    const result = client({ timeoutMs: 100, downloadTimeoutMs: 500, attempts: 1 }).download(
+      artifact,
+      path,
+      { signal: controller.signal },
+    );
+    const rejected = expect(result).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    peer.respond();
+    await vi.advanceTimersByTimeAsync(0);
+    peer.stream.write('a');
+    if (cause === 'idle') peer.idle();
+    else controller.abort(new Error('cancelled'));
+    await rejected;
+    expect(peer.destroy).toHaveBeenCalledTimes(1);
+    await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(vi.getTimerCount()).toBe(0);
+  },
+);
+it.each([0, -1, Number.NaN, 1.5, 2 ** 31])('rejects an invalid download timeout %s', (value) => {
+  expect(() => client({ downloadTimeoutMs: value })).toThrow();
+});
 it('uses bounded authenticated JSON POST for read-only bulk metadata', async () => {
   response(200, Buffer.from('{"data":[]}'));
   await expect(
