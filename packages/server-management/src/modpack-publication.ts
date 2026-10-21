@@ -37,7 +37,9 @@ const publicationSchema = z.strictObject({
   operationId: z.uuid(),
   binding: z.string().regex(/^[a-f0-9]{64}$/),
   state: z.enum(['staging', 'staged', 'retiring', 'publishing', 'verified', 'cleaning', 'cleaned']),
-  stageFiles: z.array(modpackFileSchema.extend({ modifiedAt: z.string().min(1) })).max(10000),
+  stageFiles: z
+    .array(modpackFileSchema.extend({ modifiedAt: z.string().min(1).optional() }))
+    .max(10000),
   retire: z.array(moveSchema).max(20000),
   publish: z.array(moveSchema).max(10000),
   retiredEntries: z.array(fingerprintSchema).max(40000),
@@ -84,6 +86,13 @@ const same = (current: FilemanEntry | undefined, expected: Omit<Fingerprint, 'pa
       current.kind === expected.kind &&
       (expected.kind === 'directory' || current.size === expected.size) &&
       current.modifiedAt === expected.modifiedAt,
+  );
+const sealedFile = (current: FilemanEntry | undefined, expected: MinecraftModpackFile) =>
+  Boolean(
+    current?.kind === 'file' &&
+      current.size === expected.size &&
+      current.modifiedAt &&
+      (expected.modifiedAt === undefined || current.modifiedAt === expected.modifiedAt),
   );
 
 /** Only generated top-level directories belong to this publication. Never infer
@@ -269,13 +278,11 @@ export function createModpackPublication(options: {
       journal.stageFiles.flatMap((file) => [...parents(file.path), file.path]),
     );
     const publishedIndex = pathIndex(journal.publish.map((move) => move.to));
+    if (journal.publish.some((move) => entries.has(move.from))) return null;
     for (const file of journal.stageFiles) {
-      if (
-        entries.has(`${roots.stagingRoot}/${file.path}`) ||
-        !same(entries.get(file.path), { ...file, kind: 'file' })
-      )
-        return null;
-      files.push({ ...file });
+      const current = entries.get(file.path);
+      if (!sealedFile(current, file)) return null;
+      files.push({ ...file, modifiedAt: current?.modifiedAt });
     }
     for (const entry of journal.retiredEntries)
       if (!same(entries.get(entry.path), entry)) return null;
@@ -291,7 +298,8 @@ export function createModpackPublication(options: {
     return files;
   };
   const observationPaths = (journal: ModpackPublicationJournal) => [
-    ...journal.stageFiles.flatMap((file) => [file.path, `${roots.stagingRoot}/${file.path}`]),
+    ...journal.stageFiles.map((file) => file.path),
+    ...journal.publish.map((move) => move.from),
     ...journal.retire.flatMap((move) => [move.from, move.to]),
     ...journal.retiredEntries.map((entry) => entry.path),
     roots.stagingRoot,
@@ -302,7 +310,8 @@ export function createModpackPublication(options: {
     if (!journal || !['publishing', 'verified'].includes(journal.state)) return null;
     const entries = await inspect(observationPaths(journal));
     const files = finalFiles(journal, entries);
-    if (files && journal.state !== 'verified') await save({ ...journal, state: 'verified' });
+    if (files && journal.state !== 'verified')
+      await save({ ...journal, state: 'verified', stageFiles: files });
     return files;
   };
 
@@ -348,7 +357,7 @@ export function createModpackPublication(options: {
             file.path !== expected.path ||
             file.size !== expected.size ||
             file.sha256 !== expected.sha256 ||
-            !same(entries.get(`${roots.stagingRoot}/${file.path}`), { ...file, kind: 'file' })
+            !sealedFile(entries.get(`${roots.stagingRoot}/${file.path}`), file)
           );
         }))
     )
@@ -432,21 +441,25 @@ export function createModpackPublication(options: {
           });
       if (!receipt) throw new DomainError('operation_uncertain');
       validateManifest(receipt.manifest);
-      // Reuse the stage receipt inventory to guard the original paths after a
-      // potentially long transfer, immediately before any original is moved.
+      // A confirmed extraction receipt supplies the sealed selection. Only the
+      // original targets need a fresh check before retirement. Uncertain recovery
+      // still observes the staged tree; normal publication captures mtimes in its
+      // final rename readback, without inventing a provider timestamp.
       const staged = await inspect([
-        ...expected.keys(),
+        ...(resume ? expected.keys() : []),
         ...plan.expected.map((entry) => entry.path),
       ]);
       if (!originalUnchanged(plan, staged)) throw new DomainError('conflict');
       const stagePaths = new Set([...expected.keys()].flatMap((path) => [...parents(path), path]));
       if (
+        resume &&
         [...staged.keys()].some(
           (path) => path.startsWith(`${roots.stagingRoot}/`) && !stagePaths.has(path),
         )
       )
         throw new DomainError('operation_uncertain');
       const stageFiles = plan.write.map((file) => {
+        if (!resume) return { path: file.path, size: file.size, sha256: file.sha256 };
         const entry = staged.get(`${roots.stagingRoot}/${file.path}`);
         if (entry?.kind !== 'file' || entry.size !== file.size || !entry.modifiedAt)
           throw new DomainError('operation_uncertain');

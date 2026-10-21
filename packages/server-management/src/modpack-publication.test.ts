@@ -323,6 +323,76 @@ describe('Modpack publication', () => {
     expect(f.journal()?.state).toBe('verified');
   });
 
+  it('trusts confirmed extraction, checks original targets, and records real mtimes only at final readback', async () => {
+    const f = fixture();
+    f.prepared.files = [file('mods/deep/a.jar'), file('mods/deep/b.jar')];
+    const plan = f.plan();
+    const root = f.helper.getRemoteStage(plan).stagingRoot;
+    await f.helper.publish(f.prepared, plan);
+    expect(f.journal()?.stageFiles.every((file) => file.modifiedAt === undefined)).toBe(true);
+    expect(f.listCalls.flat().some((directory) => directory.startsWith(`${root}/`))).toBe(false);
+    expect(f.listCalls.flat()).toContain('mods');
+    const result = await f.helper.verify(f.prepared, plan);
+    expect(result).toEqual(f.prepared.files.map((file) => ({ ...file, modifiedAt: newTime })));
+    expect(f.journal()?.stageFiles).toEqual(result);
+    expect(f.listCalls.flat().some((directory) => directory.startsWith(`${root}/`))).toBe(false);
+    required(f.tree.get('mods/deep/a.jar')).modifiedAt = oldTime;
+    expect(await f.helper.verify(f.prepared, plan)).toBeNull();
+  });
+
+  it('retains detailed stage inspection when recovering before the first rename', async () => {
+    const f = fixture(true);
+    const plan = f.plan();
+    const root = f.helper.getRemoteStage(plan).stagingRoot;
+    const save = required(f.saveJournal.getMockImplementation());
+    f.saveJournal.mockImplementation(async (journal) => {
+      await save(journal);
+      if (journal.state === 'staged') throw new Error('Worker interrupted before retirement');
+    });
+    await expect(f.helper.publish(f.prepared, plan)).rejects.toThrow('Worker interrupted');
+    expect(f.journal()?.stageFiles.every((file) => file.modifiedAt === undefined)).toBe(true);
+    f.saveJournal.mockImplementation(save);
+    expect(await f.helper.recover(f.prepared, plan)).toEqual({ state: 'resume-publication' });
+    expect(f.listCalls.flat()).toContain(`${root}/mods`);
+    await f.helper.resume(f.prepared, plan);
+    expect(await f.helper.verify(f.prepared, plan)).toEqual([
+      { ...file('mods/new.jar'), modifiedAt: newTime },
+    ]);
+    expect(f.uploadArchive).toHaveBeenCalledTimes(1);
+    expect(f.archive).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains rollback originals when a successful extraction receipt omitted a selected file', async () => {
+    const f = fixture();
+    const plan = f.plan();
+    const roots = f.helper.getRemoteStage(plan);
+    const upload = required(f.uploadArchive.getMockImplementation());
+    f.uploadArchive.mockImplementation(async (input) => {
+      const receipt = await upload(input);
+      f.tree.delete(`${roots.stagingRoot}/mods/new.jar`);
+      return receipt;
+    });
+    await f.helper.publish(f.prepared, plan);
+    expect(await f.helper.verify(f.prepared, plan)).toBeNull();
+    expect(await f.helper.recover(f.prepared, plan)).toEqual({ state: 'partial' });
+    expect(f.tree.has(`${roots.rollbackRoot}/0/old.jar`)).toBe(true);
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+  });
+
+  it.each(['missing', 'size', 'kind'] as const)(
+    'keeps incomplete final publication uncertain for %s',
+    async (change) => {
+      const f = fixture();
+      const plan = f.plan();
+      await f.helper.publish(f.prepared, plan);
+      if (change === 'missing') f.tree.delete('mods/new.jar');
+      if (change === 'size') required(f.tree.get('mods/new.jar')).size += 1;
+      if (change === 'kind') required(f.tree.get('mods/new.jar')).kind = 'symlink';
+      expect(await f.helper.verify(f.prepared, plan)).toBeNull();
+      expect(await f.helper.recover(f.prepared, plan)).toEqual({ state: 'partial' });
+    },
+  );
+
   it('uses one directory move for a new deep tree, no directory creation loops', async () => {
     const f = fixture();
     f.prepared.files = Array.from({ length: 250 }, (_, index) => file(`kubejs/a/b/${index}.js`));
@@ -403,7 +473,7 @@ describe('Modpack publication', () => {
     expect(f.adapter.renameFiles).not.toHaveBeenCalled();
   });
 
-  it('refuses missing or changed stage metadata, permissions failures and stale source evidence', async () => {
+  it('refuses missing final file metadata and inaccessible recovery observations', async () => {
     const f = fixture();
     const upload = required(f.uploadArchive.getMockImplementation());
     f.uploadArchive.mockImplementation(async (input) => {
@@ -413,10 +483,8 @@ describe('Modpack publication', () => {
       return result;
     });
     const plan = f.plan();
-    await expect(f.helper.publish(f.prepared, plan)).rejects.toMatchObject({
-      code: 'operation_uncertain',
-    });
-    expect(f.adapter.renameFiles).not.toHaveBeenCalled();
+    await f.helper.publish(f.prepared, plan);
+    expect(await f.helper.verify(f.prepared, plan)).toBeNull();
     f.readScope.mockImplementation(
       () =>
         ({
