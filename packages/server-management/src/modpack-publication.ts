@@ -158,56 +158,60 @@ export function createModpackPublication(options: {
     return validated;
   };
 
-  /** One fresh Fileman metadata scope per mutation phase; directories are batched,
-   * and shared parents are listed only once. No file download or per-file hash pass. */
+  /** One fresh Fileman metadata scope per mutation phase. Read parents before
+   * their existing children, batching each depth and listing shared parents once. */
   const inspect = async (paths: readonly string[]): Promise<Entries> => {
     const scope = options.fileman.readScope?.();
     if (!scope) throw new DomainError('integration_unavailable');
     const requested = [...new Set(paths.flatMap((path) => [...parents(path), path]))];
-    const directories = [...new Set(requested.map(dirname))];
+    const directories = new Set(requested.map(dirname));
+    const children = new Map<string, string[]>();
+    for (const directory of directories) {
+      if (!directory) continue;
+      const parent = dirname(directory);
+      const siblings = children.get(parent) ?? [];
+      siblings.push(directory);
+      children.set(parent, siblings);
+    }
     const entries = new Map<string, FilemanEntry>();
-    const missing = new Set<string>();
-    for (const batch of chunks(directories, 100)) {
-      const results = await scope.listMany(batch);
-      const returned = new Set<string>();
-      for (const result of results) {
-        if (!batch.includes(result.directory) || returned.has(result.directory))
-          throw new DomainError('operation_uncertain');
-        returned.add(result.directory);
-        if ('error' in result) {
-          if (result.error !== 'not_found') throw new DomainError('operation_uncertain');
-          missing.add(result.directory);
-          continue;
-        }
-        const names = new Set<string>();
-        for (const entry of result.files) {
-          if (
-            !entry.name ||
-            entry.name.includes('/') ||
-            entry.name.includes('\\') ||
-            entry.name === '.' ||
-            entry.name === '..' ||
-            names.has(entry.name.toLowerCase())
-          )
+    let pending = directories.has('') ? [''] : [];
+    while (pending.length) {
+      const next: string[] = [];
+      for (const batch of chunks(pending, 100)) {
+        const results = await scope.listMany(batch);
+        const returned = new Set<string>();
+        for (const result of results) {
+          if (!batch.includes(result.directory) || returned.has(result.directory))
             throw new DomainError('operation_uncertain');
-          names.add(entry.name.toLowerCase());
-          entries.set([result.directory, entry.name].filter(Boolean).join('/'), entry);
+          returned.add(result.directory);
+          // Every requested child was present in its parent's listing. Even a 404
+          // is now a race or inconsistent observation, rather than proof of absence.
+          if ('error' in result) throw new DomainError('operation_uncertain');
+          const names = new Set<string>();
+          for (const entry of result.files) {
+            if (
+              !entry.name ||
+              entry.name.includes('/') ||
+              entry.name.includes('\\') ||
+              entry.name === '.' ||
+              entry.name === '..' ||
+              names.has(entry.name.toLowerCase())
+            )
+              throw new DomainError('operation_uncertain');
+            names.add(entry.name.toLowerCase());
+            entries.set([result.directory, entry.name].filter(Boolean).join('/'), entry);
+          }
+          for (const child of children.get(result.directory) ?? []) {
+            const entry = entries.get(child);
+            if (!entry) continue;
+            if (entry.kind !== 'directory') throw new DomainError('operation_uncertain');
+            next.push(child);
+          }
         }
+        if (returned.size !== batch.length) throw new DomainError('operation_uncertain');
       }
-      if (returned.size !== batch.length) throw new DomainError('operation_uncertain');
+      pending = next;
     }
-    for (const path of requested) {
-      if (
-        parents(path).some((parent) => {
-          const entry = entries.get(parent);
-          return entry && entry.kind !== 'directory';
-        })
-      )
-        throw new DomainError('operation_uncertain');
-    }
-    // A provider 404 cannot hide a directory which its parent's listing says exists.
-    for (const directory of missing)
-      if (!directory || entries.has(directory)) throw new DomainError('operation_uncertain');
     return entries;
   };
   const retirement = (plan: MinecraftModpackPlan) => {

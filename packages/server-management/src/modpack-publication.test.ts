@@ -112,7 +112,7 @@ function fixture(recovery = false) {
           listCalls.push([...directories]);
           return directories.map((directory) => {
             if (directory && !tree.has(directory))
-              return { directory, error: 'not_found' as const };
+              return { directory, error: 'unavailable' as const };
             if (directory && tree.get(directory)?.kind !== 'directory')
               return { directory, error: 'forbidden' as const };
             return {
@@ -404,6 +404,75 @@ describe('Modpack publication', () => {
       { from: `${modpackRemoteStage(f.operationId).stagingRoot}/kubejs`, to: 'kubejs' },
     ]);
   });
+
+  it('recovers and publishes new trees without listing missing directories', async () => {
+    const f = fixture(true);
+    f.prepared.files = [
+      file('kubejs/a/b/startup.js'),
+      ...Array.from({ length: 105 }, (_, index) => file(`config/new-${index}/deep/settings.toml`)),
+    ];
+    const plan = f.plan();
+    f.uploadArchive.mockRejectedValueOnce(new DomainError('operation_uncertain'));
+    await expect(f.helper.publish(f.prepared, plan)).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    await f.helper.assertResumable(f.prepared, plan);
+    expect(f.listCalls.flat()).toContain('config');
+    expect(f.listCalls.flat()).not.toContain('kubejs');
+    expect(f.listCalls.flat().some((directory) => directory.startsWith('config/new-'))).toBe(false);
+    await f.helper.resume(f.prepared, plan);
+    expect(await f.helper.verify(f.prepared, plan)).toHaveLength(106);
+    expect(f.listCalls.some((batch) => batch.length === 100)).toBe(true);
+    for (const result of f.readScope.mock.results) {
+      const calls = vi.mocked(result.value.listMany).mock.calls as [readonly string[]][];
+      const listed = calls.flatMap(([directories]) => [...directories]);
+      expect(listed[0]).toBe('');
+      expect(new Set(listed).size).toBe(listed.length);
+      for (const [index, directory] of listed.entries()) {
+        if (directory) expect(listed.indexOf(dirname(directory))).toBeLessThan(index);
+      }
+    }
+    expect(f.archive).toHaveBeenCalledTimes(1);
+    expect(f.uploadArchive).toHaveBeenCalledTimes(1);
+    expect(f.resumeArchive).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['not_found', 'unavailable'] as const)(
+    'rejects %s from a directory already confirmed by its parent',
+    async (error) => {
+      const f = fixture();
+      const plan = f.plan();
+      const read = required(f.readScope.getMockImplementation());
+      f.readScope.mockImplementation(() => {
+        const scope = read();
+        const list = scope.listMany.bind(scope);
+        scope.listMany = async (directories) =>
+          (await list(directories)).map((result) =>
+            result.directory === 'mods' ? { directory: result.directory, error } : result,
+          );
+        return scope;
+      });
+      await expect(f.helper.publish(f.prepared, plan)).rejects.toMatchObject({
+        code: 'operation_uncertain',
+      });
+      expect(f.adapter.renameFiles).not.toHaveBeenCalled();
+      expect(f.tree.has('mods/old.jar')).toBe(true);
+    },
+  );
+
+  it.each(['file', 'symlink'] as const)(
+    'rejects a required directory changed to a %s without listing it',
+    async (kind) => {
+      const f = fixture();
+      const plan = f.plan();
+      f.add('mods', kind);
+      await expect(f.helper.publish(f.prepared, plan)).rejects.toMatchObject({
+        code: 'operation_uncertain',
+      });
+      expect(f.listCalls.flat()).not.toContain('mods');
+      expect(f.adapter.renameFiles).not.toHaveBeenCalled();
+    },
+  );
 
   it('batches a thousand independent destinations without per-file HTTP', async () => {
     const f = fixture();
