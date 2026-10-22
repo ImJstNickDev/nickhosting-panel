@@ -19,8 +19,8 @@ export function minecraftItemIcon(id: string): string | undefined {
   return atlas && fragment ? `${atlas}#${fragment}` : undefined;
 }
 
-// Eight small HUD resources retain their intrinsic aspect ratio (XP bars are
-// rectangular); item sprites share the square atlas above.
+// HUD and bitmap XP digits retain their intrinsic aspect ratio; item sprites
+// share the square atlas above. Resources remain optional and local.
 const hud = import.meta.glob<string>(
   '../../../../../games/minecraft/src/ui/assets/local-26.1/player-hud/*.png',
   { eager: true, query: '?url&no-inline', import: 'default' },

@@ -32,3 +32,21 @@ trusted module's MCHeads skin URLs and send the player's UUID to that
 service. They are decorative, never identity proof. Animation uses skinview3d
 3.4.2 (MIT), loaded for visible previews and reused for hover/focus waves; its Three.js and skinview-utils runtime
 dependencies are also MIT. No remote player skin is stored in this repository.
+
+Optional player HUD resources are prepared offline by
+`scripts/prepare-minecraft-player-assets.py` from the same verified, entitled
+Minecraft 26.1 client jar as the optional item artwork. Eight original HUD
+sprites retain their native dimensions and pixels. The ten experience-level
+digits use the client's `font/include/default.json` character mapping and
+`textures/font/ascii.png` 5×7 bitmap glyphs. Each is tinted XP green (`#80ff20`)
+and given a one-pixel black outline in the four cardinal directions, producing
+a transparent 7×9 PNG. The UI scales these with nearest-neighbor sampling;
+adjacent outlined digits can overlap their outline column to retain the native
+six-pixel glyph advance. These are derivative local resources, not authored or
+redistribution-cleared repository artwork.
+
+Generated PNGs and source/output hashes remain in the gitignored `local-26.1/`
+tree. `--update-provenance` permits additive digit metadata and source/output
+hashes while rejecting changes to any existing artwork or metadata. No game
+font, texture, client jar or prepared digit PNG is committed to this repository;
+the optional preparation step grants no redistribution permission.

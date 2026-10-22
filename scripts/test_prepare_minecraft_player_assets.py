@@ -30,7 +30,58 @@ def generated_entries():
     }
 
 
+def font_entries():
+    # Deliberately place digits outside their ASCII-code cells to exercise the
+    # provider mapping. Sparse, authored shapes are not copied game artwork.
+    rows = ["\0" * 16 for _ in range(16)]
+    rows[5] = "9876543210" + "\0" * 6
+    atlas = Image.new("RGBA", (128, 128))
+    for column in range(10):
+        for x, y in ((0, 0), (4, 6), (2, 3)):
+            atlas.putpixel((column * 8 + x, 40 + y), (255, 255, 255, 255))
+        # Encode the source column in four otherwise unused glyph pixels.
+        for bit in range(4):
+            if column & (1 << bit):
+                atlas.putpixel((column * 8 + bit, 41), (255, 255, 255, 255))
+    return {
+        "assets/minecraft/font/include/default.json": {"providers": [{"type": "bitmap", "file": "minecraft:font/ascii.png", "ascent": 7, "chars": rows}]},
+        "assets/minecraft/textures/font/ascii.png": assets.png(atlas),
+    }
+
+
 class PlayerAssetsTests(unittest.TestCase):
+    def test_xp_digits_follow_provider_map_and_keep_pixel_outline(self):
+        with archive(font_entries()) as jar:
+            outputs = assets.experience_digits(assets.Resources(jar))
+        self.assertEqual(len(outputs), 10)
+        for digit in range(10):
+            with Image.open(io.BytesIO(outputs[f"player-hud/experience_digit_{digit}.png"])) as image:
+                self.assertEqual(image.size, (7, 9))
+                self.assertEqual(image.getpixel((1, 1)), (128, 255, 32, 255))
+                self.assertEqual(image.getpixel((3, 4)), (128, 255, 32, 255))
+                self.assertEqual(image.getpixel((5, 7)), (128, 255, 32, 255))
+                for bit in range(4):
+                    self.assertEqual(
+                        image.getpixel((bit + 1, 2)) == (128, 255, 32, 255),
+                        bool((9 - digit) & (1 << bit)),
+                        f"Digit {digit} must use its mapped source cell, bit {bit}",
+                    )
+                for position in ((0, 1), (2, 1), (1, 0), (1, 2)):
+                    if position != (1, 2) or not ((9 - digit) & 1):
+                        self.assertEqual(image.getpixel(position), (0, 0, 0, 255))
+                self.assertEqual(image.getpixel((0, 0))[3], 0)
+                self.assertEqual(image.getpixel((6, 8))[3], 0)
+
+    def test_xp_digits_reject_missing_glyphs_and_changed_pixel_geometry(self):
+        entries = font_entries()
+        entries["assets/minecraft/font/include/default.json"]["providers"][0]["chars"][5] = "\0" * 16
+        with archive(entries) as jar, self.assertRaisesRegex(assets.Unsupported, "missing"):
+            assets.experience_digits(assets.Resources(jar))
+        entries = font_entries()
+        entries["assets/minecraft/textures/font/ascii.png"] = assets.png(Image.new("RGBA", (128, 128), "white"))
+        with archive(entries) as jar, self.assertRaisesRegex(assets.Unsupported, "bounds"):
+            assets.experience_digits(assets.Resources(jar))
+
     def test_inherited_flat_model_and_texture_references_use_original_pixels(self):
         with archive(generated_entries()) as jar:
             image, kind = assets.item_icon(assets.Resources(jar), {"model": {"type": "minecraft:model", "model": "item/tool"}})
@@ -69,7 +120,7 @@ class PlayerAssetsTests(unittest.TestCase):
         self.assertEqual(image.getpixel((0, 0))[3], 0)
 
     def test_manifest_is_deterministic_and_records_source_output_and_omission(self):
-        entries = generated_entries()
+        entries = {**generated_entries(), **font_entries()}
         entries["assets/minecraft/items/tool.json"] = {"model": {"type": "minecraft:model", "model": "item/tool"}}
         entries["assets/minecraft/items/unsupported.json"] = {"model": {"type": "minecraft:special"}}
         for source in assets.HUD.values():

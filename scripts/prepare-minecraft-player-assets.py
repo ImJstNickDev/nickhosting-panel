@@ -13,6 +13,7 @@ with fixed isometric projection and lighting, not a complete Minecraft renderer.
 Animated textures use their first frame. Source/output hashes and omissions are
 recorded separately in players-provenance.json. A single square SVG atlas plus
 identifier index serves item icons; eight HUD PNGs retain their native aspect.
+Ten XP digit PNGs use the client bitmap font, green fill and cardinal black outline.
 Existing differing artwork and symlink paths are rejected before any write.
 --update-provenance permits only a verified additive metadata upgrade.
 """
@@ -108,6 +109,42 @@ def png(image):
     return output.getvalue()
 
 
+def experience_digits(resources):
+    """Extract the native 5x7 digits with the HUD's one-pixel cardinal outline."""
+    definition = resources.json("assets/minecraft/font/include/default.json")
+    provider = next((entry for entry in definition["providers"]
+                     if entry.get("type") == "bitmap" and entry.get("file") == "minecraft:font/ascii.png"), None)
+    if provider is None or provider.get("ascent") != 7:
+        raise Unsupported("unsupported XP bitmap font provider")
+    rows = provider["chars"]
+    if len(rows) != 16 or any(len(row) != 16 for row in rows):
+        raise Unsupported("unsupported XP bitmap font grid")
+    with Image.open(io.BytesIO(resources.read("assets/minecraft/textures/font/ascii.png"))) as source:
+        atlas = source.convert("RGBA")
+    if atlas.size != (128, 128):
+        raise Unsupported("unsupported XP bitmap font dimensions")
+    outputs = {}
+    for digit in "0123456789":
+        positions = [(column, row) for row, text in enumerate(rows) for column, character in enumerate(text) if character == digit]
+        if len(positions) != 1:
+            raise Unsupported("missing or ambiguous XP digit")
+        column, row = positions[0]
+        cell = atlas.crop((column * 8, row * 8, column * 8 + 8, row * 8 + 8))
+        if cell.getchannel("A").getbbox() != (0, 0, 5, 7):
+            raise Unsupported("unsupported XP digit bounds")
+        mask = cell.crop((0, 0, 5, 7)).getchannel("A")
+        glyph = Image.new("RGBA", (5, 7), "black")
+        glyph.putalpha(mask)
+        result = Image.new("RGBA", (7, 9))
+        for offset in ((0, 1), (2, 1), (1, 0), (1, 2)):
+            result.alpha_composite(glyph, offset)
+        glyph = Image.new("RGBA", (5, 7), "#80ff20")
+        glyph.putalpha(mask)
+        result.alpha_composite(glyph, (1, 1))
+        outputs[f"player-hud/experience_digit_{digit}.png"] = png(result)
+    return outputs
+
+
 def cube_icon(top, left, right):
     """Project source texels onto three parallelograms, with fixed face lighting."""
     result = Image.new("RGBA", (32, 32))
@@ -201,6 +238,7 @@ def prepare(archive):
         counts[kind] += 1
     for name, source in HUD.items():
         outputs[f"player-hud/{name}.png"] = resources.read(f"assets/minecraft/textures/gui/sprites/hud/{source}.png")
+    outputs.update(experience_digits(resources))
     outputs.update(make_atlas(outputs))
     manifest = {
         "version": "26.1", "clientSha1": CLIENT_SHA1,
@@ -210,6 +248,7 @@ def prepare(archive):
         "notice": "Local optional resources; no redistribution permission granted.",
         "rendering": "Single-layer items; first texture frame; fixed three-face isometric full cubes, not the client renderer.",
         "coverage": {**counts, "omitted": len(omitted), "hud": len(HUD)},
+        "experienceDigits": {"count": 10, "size": [7, 9], "fill": "#80ff20", "outline": "one-pixel cardinal black"},
         "omitted": omitted,
         "sources": {name: hashlib.sha256(data).hexdigest() for name, data in sorted(resources.sources.items())},
         "outputs": {name: hashlib.sha256(data).hexdigest() for name, data in sorted(outputs.items())},

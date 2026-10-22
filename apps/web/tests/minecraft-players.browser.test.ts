@@ -774,6 +774,29 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     for (const surface of await user.locator('.minecraft-inventory-surface').all()) {
       expect((await surface.boundingBox())?.width).toBeLessThanOrEqual(360);
     }
+    const hudGeometry = await user.locator('.minecraft-player-hud').evaluate((hud) => {
+      const row = hud.querySelector('.minecraft-player-hud-row')?.getBoundingClientRect();
+      const bar = hud.querySelector('.minecraft-player-xp-track')?.getBoundingClientRect();
+      const fill = hud.querySelector('.minecraft-player-xp-track > span')?.getBoundingClientRect();
+      const level = hud.querySelector('.minecraft-player-level')?.getBoundingClientRect();
+      if (!row || !bar || !fill || !level) throw new Error('Missing HUD');
+      return {
+        gap: bar.top - row.bottom,
+        ratio: bar.width / bar.height,
+        levelBottom: level.bottom - bar.top,
+        fillWidth: fill.width,
+        width: bar.width,
+      };
+    });
+    expect(hudGeometry.gap).toBeGreaterThanOrEqual(0);
+    expect(hudGeometry.gap).toBeLessThanOrEqual(4);
+    expect(hudGeometry.ratio).toBeCloseTo(182 / 5, 0);
+    expect(hudGeometry.levelBottom).toBeGreaterThanOrEqual(4);
+    expect(hudGeometry.levelBottom).toBeLessThanOrEqual(6);
+    expect(hudGeometry.fillWidth).toBeCloseTo(hudGeometry.width, 0);
+    await user.locator('.minecraft-player-hud').screenshot({
+      path: resolve('.codex/local/m5-browser/screenshots/minecraft-player-hud-desktop-en.png'),
+    });
     await screenshot(user, 'minecraft-player-detail-desktop-en');
     await accessible();
     await user.setViewportSize({ width: 320, height: 844 });

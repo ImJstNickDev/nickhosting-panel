@@ -382,22 +382,23 @@
 .minecraft-player-hud-row {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
+  align-items: end;
+  line-height: 0;
 }
 .minecraft-player-hud-row > span {
   min-width: 0;
-  max-width: 50%;
+  width: 44%;
 }
 .minecraft-player-hud-icons {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(10, minmax(0, 1fr));
   gap: 0;
 }
 .minecraft-player-hud-icons > span {
   position: relative;
   display: inline-block;
-  width: 14px;
-  height: 14px;
+  width: 100%;
+  aspect-ratio: 1;
 }
 .minecraft-player-hud-icons > span > img {
   position: absolute;
@@ -434,22 +435,39 @@
 }
 .minecraft-player-xp {
   position: relative;
-  padding-top: 12px;
-  margin-top: 1px;
+  aspect-ratio: 182 / 5;
+  margin-top: 3px;
 }
 .minecraft-player-level {
   position: absolute;
-  top: -3px;
+  bottom: calc(100% - 5px);
   left: 50%;
   transform: translateX(-50%);
-  color: #397400;
+  display: flex;
+  justify-content: center;
+  white-space: nowrap;
+  z-index: 1;
+  color: #80ff20;
   font-size: 1rem;
   font-weight: 700;
   line-height: 1;
-  text-shadow: 1px 1px #18360c;
+  text-shadow:
+    1px 1px #000,
+    -1px -1px #000,
+    -1px 1px #000,
+    1px -1px #000;
+}
+.minecraft-player-level-digit {
+  width: 14px;
+  height: 18px;
+  image-rendering: pixelated;
+}
+.minecraft-player-level-digit + .minecraft-player-level-digit {
+  margin-left: -2px;
 }
 .minecraft-player-xp-track {
-  height: 7px;
+  position: absolute;
+  inset: 0;
   background-color: #1e3122;
   background-size: 100% 100%;
   image-rendering: pixelated;
@@ -458,7 +476,7 @@
   display: block;
   height: 100%;
   background-color: #61aa20;
-  background-size: 360px 100%;
+  background-size: 100% 100%;
   image-rendering: pixelated;
 }
 .minecraft-player-xp-total {
@@ -536,12 +554,12 @@ button.minecraft-player-destructive:hover {
   .minecraft-item-count {
     font-size: 0.65rem;
   }
-  .minecraft-player-hud-icons > span {
-    width: 11px;
-    height: 11px;
+  .minecraft-player-level-digit {
+    width: 10.5px;
+    height: 13.5px;
   }
-  .minecraft-player-hud-row {
-    gap: 6px;
+  .minecraft-player-level-digit + .minecraft-player-level-digit {
+    margin-left: -1.5px;
   }
 }
 

@@ -217,6 +217,12 @@ function PlayerVitalsHud({ vitals }: { vitals: MinecraftPlayerDetail['vitals'] }
       )}
     </span>
   );
+  const levelDigits = String(vitals.experienceLevel ?? '')
+    .split('')
+    .map((digit, index) => ({
+      key: `${index}-${digit}`,
+      image: minecraftPlayerHudAsset(`experience_digit_${digit}`),
+    }));
   const xpBackground = minecraftPlayerHudAsset('experience_bar_background');
   const xpProgress = minecraftPlayerHudAsset('experience_bar_progress');
   return (
@@ -244,7 +250,16 @@ function PlayerVitalsHud({ vitals }: { vitals: MinecraftPlayerDetail['vitals'] }
               role="img"
               aria-label={`${t(key('experienceLevel'))}: ${vitals.experienceLevel}`}
             >
-              {vitals.experienceLevel}
+              {levelDigits.every((digit) => digit.image)
+                ? levelDigits.map((digit) => (
+                    <img
+                      className="minecraft-player-level-digit"
+                      key={digit.key}
+                      src={digit.image}
+                      alt=""
+                    />
+                  ))
+                : vitals.experienceLevel}
             </span>
           )}
           {vitals.experienceProgress !== null && (
@@ -259,12 +274,18 @@ function PlayerVitalsHud({ vitals }: { vitals: MinecraftPlayerDetail['vitals'] }
               <div
                 aria-hidden="true"
                 className="minecraft-player-xp-track"
-                style={xpBackground ? { backgroundImage: `url(${xpBackground})` } : undefined}
+                style={
+                  xpBackground
+                    ? { backgroundImage: `url(${xpBackground})`, backgroundColor: 'transparent' }
+                    : undefined
+                }
               >
                 <span
                   style={{
-                    width: `${Math.max(0, Math.min(1, vitals.experienceProgress)) * 100}%`,
-                    ...(xpProgress ? { backgroundImage: `url(${xpProgress})` } : {}),
+                    clipPath: `inset(0 ${100 - Math.max(0, Math.min(1, vitals.experienceProgress)) * 100}% 0 0)`,
+                    ...(xpProgress
+                      ? { backgroundImage: `url(${xpProgress})`, backgroundColor: 'transparent' }
+                      : {}),
                   }}
                 />
               </div>

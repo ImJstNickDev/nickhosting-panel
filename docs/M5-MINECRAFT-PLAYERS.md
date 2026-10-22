@@ -50,7 +50,11 @@ hotbar and a separate Ender Chest. The crafting illustration explicitly marks
 its unavailable saved state. Health/food/XP sit above the inventory; actions and
 position share the middle column. Statistics show four key figures and at most
 two leading rows per mined/used/killed/distance category, with available local
-Minecraft icons. Missing values remain unknown.
+Minecraft icons. Missing values remain unknown. The HUD keeps health/food close
+to the XP bar, preserves its native 182:5 proportions and clips the full-width
+progress texture without stretching its segments. The centered level uses local
+bitmap digits with the game's green fill and dark outline; ordinary text remains
+the fallback when those optional resources have not been prepared.
 
 NBT decoding uses the same bounded structural preflight as world inspection,
 with a smaller compressed-player-file limit. Both legacy item tags and modern
@@ -66,7 +70,8 @@ release hash, performs no downloads and writes only to the ignored
 `games/minecraft/src/ui/assets/local-26.1/` tree. Its separate
 `players-provenance.json` records source/output hashes and omitted model reasons.
 The verified release produces 997 icons (637 flat items, 360 cube previews) and
-8 HUD sprites; 509 complex, conditional or tinted models retain text fallbacks.
+8 HUD sprites and 10 outlined XP-level digits from the official bitmap font;
+509 complex, conditional or tinted models retain text fallbacks.
 Cube previews use a fixed projection, not the complete game renderer. Existing
 differing files and symlink output paths are rejected. Preparation grants no
 asset redistribution rights and is not an automatic build hook.
@@ -130,7 +135,7 @@ Validation on 2026-10-22:
   provider fixtures, including EN/IT desktop, 390px and 320px screenshots,
   accessibility, pending/error/missing data, typed actions and scope-specific reset.
 - Body renderer: 5 Chromium cases; atlas crops/cache: 2 cases across Chromium and
-  Firefox; offline asset preparer: 10 Python cases.
+  Firefox; offline asset preparer: 12 Python cases (including bitmap digit mapping).
 - Full unit run with four workers: 3,944 passed, 1 skipped and 1 existing HTTP
   transfer RSS assertion failed at 131.7 MiB against 128 MiB. The unchanged transfer
   file passed all 51 tests when rerun alone. Earlier timing-sensitive world,
@@ -156,6 +161,14 @@ and inherited fieldset gap; the browser suite checks equipment alignment.
 A read-only Firefox check on dev returned Players API 200 with no script errors,
 page overflow or mutating requests. No game assets were created or cleaned.
 
+HUD follow-up validation: all 16 Players browser cases passed, followed by the two
+desktop/Italian-mobile visual cases after the final level-baseline adjustment.
+The 12 offline preparation tests include independently mapped digit glyphs.
+Typecheck, lint, production build and independent screenshot review passed.
+Read-only dev Firefox confirmed that the local bitmap digits load without a
+container restart. New derived font images remain gitignored; no font download,
+dependency, API/configuration or persistent game-state change is required.
+
 Rollback reverts the source and restores the previous frontend image if needed.
 There is no migration to reverse. Preserve any user-created reset recovery files
 and audit receipts; reverting UI code does not restore player data automatically.
@@ -165,6 +178,7 @@ Reviewed fixture screenshots:
 - [Compact player cards](screenshots/m5/minecraft-players-cards-desktop-en.png)
 - [Grouped action menu](screenshots/m5/minecraft-players-actions-desktop-en.png)
 - [Saved player detail](screenshots/m5/minecraft-player-detail-desktop-en.png)
+- [Health, hunger and XP HUD](screenshots/m5/minecraft-player-hud-desktop-en.png)
 - [Italian desktop](screenshots/m5/minecraft-player-detail-desktop-it.png)
 - [Italian 320px detail](screenshots/m5/minecraft-player-detail-320-mobile-it.png)
 - [Reset confirmation](screenshots/m5/minecraft-player-reset-confirm-desktop-en.png)
