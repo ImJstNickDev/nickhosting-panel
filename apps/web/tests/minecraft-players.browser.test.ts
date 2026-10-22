@@ -6,6 +6,7 @@ import type { ConsoleRelayOptions } from '@nickhosting/pterodactyl-adapter';
 import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { minecraftPlayerDataFixture } from '../../../games/minecraft/src/player-data-fixture.js';
+import { playerSkinFixture } from './fixtures/player-skin.js';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
@@ -35,6 +36,18 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     fixture = await browserHarness();
     identities = await prepareJourneyIdentities(fixture);
     user = identities.user;
+    const skin = await playerSkinFixture(user);
+    for (const page of [user, identities.peer]) {
+      await page.route('https://api.mcheads.org/**', (route) =>
+        route.request().url().includes('/skin/')
+          ? route.fulfill({
+              contentType: 'image/png',
+              body: skin,
+              headers: { 'Access-Control-Allow-Origin': '*' },
+            })
+          : route.fulfill({ status: 404 }),
+      );
+    }
     for (const page of [user, identities.peer])
       page.on('pageerror', (error) => pageErrors.push(error.message));
     vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
@@ -687,15 +700,42 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     );
     return files;
   }
-  it('opens full body cards and the saved player detail with inventory, statistics and return focus', async () => {
+  it('opens compact bust cards, grouped anchored actions and the saved player detail', async () => {
     await running(false);
     await savedPlayer();
     await user.goto(route());
     await user.getByRole('searchbox', { name: 'Search players', exact: true }).fill('Browser');
     const card = user.getByRole('link', { name: `View player: ${player.name}`, exact: true });
-    await browserExpect(card.locator('.minecraft-player-body')).toBeVisible();
+    await browserExpect(card.locator('.minecraft-player-body')).toHaveAttribute(
+      'data-ready',
+      'true',
+    );
+    const cardBox = await card.boundingBox();
+    expect(cardBox?.height).toBeLessThanOrEqual(120);
+    await browserExpect(card.locator('.minecraft-player-body--bust')).toHaveCount(1);
     await openActions();
-    await browserExpect(user.getByRole('link', { name: 'View player', exact: true })).toBeVisible();
+    const popup = user.locator('.minecraft-player-menu-popover:popover-open');
+    const sections = popup.locator('.minecraft-player-menu-section');
+    await browserExpect(sections).toHaveCount(3);
+    await browserExpect(
+      sections.nth(0).getByRole('link', { name: 'View player', exact: true }),
+    ).toBeVisible();
+    await browserExpect(sections.nth(1)).not.toContainText('Heal');
+    await browserExpect(
+      sections.nth(2).getByRole('button', { name: 'Heal', exact: true }),
+    ).toBeVisible();
+    await browserExpect(
+      sections.nth(2).getByRole('button', { name: 'Feed', exact: true }),
+    ).toBeVisible();
+    const triggerBox = await user
+      .getByRole('button', { name: `Actions for ${player.name}`, exact: true })
+      .boundingBox();
+    const popupBox = await popup.boundingBox();
+    expect(popupBox?.x).toBeCloseTo(triggerBox?.x ?? -1, 0);
+    await user.screenshot({
+      path: resolve('.codex/local/m5-browser/screenshots/minecraft-players-actions-desktop-en.png'),
+      fullPage: true,
+    });
     await screenshot(user, 'minecraft-players-cards-desktop-en');
     await card.click();
     await browserExpect(user).toHaveURL(`${route()}/${uuid}`);
@@ -711,7 +751,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     await browserExpect(
       user.getByRole('img', { name: 'Slot 0: Diamond × 12', exact: true }),
     ).toBeVisible();
-    await browserExpect(user.locator('.minecraft-statistics-summary')).toContainText('1h 0m 0s');
+    await browserExpect(user.locator('.minecraft-statistics-summary')).toContainText('1h 0m');
     await browserExpect(user.locator('.minecraft-statistics-summary')).toContainText('2.5');
     await browserExpect(
       user.getByText(
@@ -719,12 +759,21 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
         { exact: true },
       ),
     ).toBeVisible();
-    await user.getByLabel('Category', { exact: true }).selectOption('distance');
-    await browserExpect(user.locator('.minecraft-statistics-list')).toContainText('1,250.5 blocks');
-    await user.getByLabel('Category', { exact: true }).selectOption('all');
     await browserExpect(
-      user.locator('.minecraft-statistics-list').getByText('12.3', { exact: true }),
-    ).toBeVisible();
+      user.locator('.minecraft-statistics-group').filter({ hasText: 'Distance' }),
+    ).toContainText('1,250.5 blocks');
+    await browserExpect(user.getByLabel('Category', { exact: true })).toHaveCount(0);
+    for (const group of await user.locator('.minecraft-statistics-list').all()) {
+      expect(await group.locator('dd').count()).toBeLessThanOrEqual(2);
+    }
+    const armor = user.locator('.minecraft-equipment-grid .minecraft-item-slot');
+    const lastArmorBox = await armor.last().boundingBox();
+    const previewBox = await user.locator('.minecraft-equipment-preview').boundingBox();
+    if (!lastArmorBox || !previewBox) throw new Error('Missing equipment preview');
+    expect(lastArmorBox.y + lastArmorBox.height).toBeCloseTo(previewBox.y + previewBox.height, 0);
+    for (const surface of await user.locator('.minecraft-inventory-surface').all()) {
+      expect((await surface.boundingBox())?.width).toBeLessThanOrEqual(360);
+    }
     await screenshot(user, 'minecraft-player-detail-desktop-en');
     await accessible();
     await user.setViewportSize({ width: 320, height: 844 });
@@ -826,7 +875,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
         exact: true,
       }),
     ).toBeVisible();
-    await browserExpect(user.locator('.minecraft-player-values').first()).toContainText('13');
+    await browserExpect(user.getByRole('img', { name: 'Health: 13', exact: true })).toBeVisible();
     await user.getByRole('button', { name: 'Teleport', exact: true }).click();
     dialog = user.getByRole('dialog', { name: 'Teleport', exact: true });
     await browserExpect(

@@ -18,11 +18,30 @@ const controller = createMinecraftUiController(gameUiClient);
 const key = (name: string) => `games.minecraft.players.${name}`;
 type Item = NonNullable<MinecraftPlayerDetail['inventory']>[number];
 
-function ItemSlot({ slot, item, selected }: { slot: number; item?: Item; selected?: boolean }) {
+const equipmentPaths: Record<number, string> = {
+  103: 'M4 13V4h8v9H9V9H7v4Z',
+  102: 'M5 3H3L1 7l3 2v5h8V9l3-2-2-4h-2v3H5Z',
+  101: 'M4 2h8v12H9V7H7v7H4Z',
+  100: 'M3 3h4v11H1v-4h2Zm6 0h4v7h2v4H9Z',
+  150: 'M3 2h10v8l-5 4-5-4Z',
+};
+function ItemSlot({
+  slot,
+  item,
+  selected,
+  equipment,
+}: {
+  slot: number;
+  item?: Item;
+  selected?: boolean;
+  equipment?: boolean;
+}) {
   const t = useT();
   const description = item
     ? `${item.name ?? readableMinecraftId(item.id)} × ${item.count}`
-    : t(key('slotEmpty'), { slot });
+    : equipment
+      ? t(key(`equipment.${slot === 150 ? -106 : slot}`))
+      : t(key('slotEmpty'), { slot });
   const icon = item ? minecraftItemIcon(item.id) : undefined;
   const tooltip = [
     description,
@@ -41,16 +60,27 @@ function ItemSlot({ slot, item, selected }: { slot: number; item?: Item; selecte
         role="img"
         tabIndex={item ? 0 : undefined}
         className={`minecraft-item-slot${selected ? ' minecraft-item-slot--selected' : ''}${item ? ' minecraft-item-slot--filled' : ''}`}
-        aria-label={t(key(item ? 'slotItem' : 'slotEmpty'), { slot, item: description })}
+        aria-label={
+          equipment
+            ? `${t(key(`equipment.${slot === 150 ? -106 : slot}`))}: ${item ? description : t(key('slotEmpty'), { slot })}`
+            : t(key(item ? 'slotItem' : 'slotEmpty'), { slot, item: description })
+        }
       >
+        {!item && equipment && (
+          <svg className="minecraft-equipment-placeholder" viewBox="0 0 16 16" aria-hidden="true">
+            <path d={equipmentPaths[slot]} />
+          </svg>
+        )}
         {item && (
           <>
             <span className="minecraft-item-id" aria-hidden="true">
               {icon ? <img src={icon} alt="" /> : readableMinecraftId(item.id)}
             </span>
-            <span className="minecraft-item-count" aria-hidden="true">
-              {item.count}
-            </span>
+            {item.count > 1 && (
+              <span className="minecraft-item-count" aria-hidden="true">
+                {item.count}
+              </span>
+            )}
           </>
         )}
       </span>
@@ -80,25 +110,22 @@ function Inventory({
   const bySlot = new Map(items.map((item) => [item.slot, item]));
   const extra = items.filter((item) => !slots.includes(item.slot));
   return (
-    <>
+    <div
+      className={`minecraft-inventory-surface${ender ? ' minecraft-inventory-surface--ender' : ''}`}
+    >
+      {ender && <h4 className="minecraft-inventory-title">{t(key('enderChest'))}</h4>}
       {!ender && (
-        <>
-          <h4>{t(key('equipment'))}</h4>
-          <div
-            className="minecraft-equipment-stage"
-            onPointerEnter={() => setActive(true)}
-            onPointerLeave={() => setActive(false)}
-          >
-            <div className="minecraft-equipment-grid">
-              {[103, 102, 101, 100, 150].map((slot) => (
-                <div key={slot}>
-                  <span className="minecraft-equipment-label">
-                    {t(key(`equipment.${slot === 150 ? -106 : slot}`))}
-                  </span>
-                  <ItemSlot slot={slot} item={bySlot.get(slot)} />
-                </div>
-              ))}
-            </div>
+        <div
+          className="minecraft-equipment-stage"
+          onPointerEnter={() => setActive(true)}
+          onPointerLeave={() => setActive(false)}
+        >
+          <fieldset className="minecraft-equipment-grid" aria-label={t(key('equipment'))}>
+            {[103, 102, 101, 100].map((slot) => (
+              <ItemSlot key={slot} slot={slot} item={bySlot.get(slot)} equipment />
+            ))}
+          </fieldset>
+          <div className="minecraft-equipment-preview">
             {player && (
               <MinecraftPlayerBody
                 name={player.name}
@@ -108,7 +135,27 @@ function Inventory({
               />
             )}
           </div>
-        </>
+          <div className="minecraft-equipment-offhand">
+            <ItemSlot slot={150} item={bySlot.get(150)} equipment />
+          </div>
+          <div
+            className="minecraft-crafting-preview"
+            role="img"
+            aria-label={t(key('craftingNotSaved'))}
+          >
+            <span className="minecraft-crafting-title">{t(key('crafting'))}</span>
+            <div className="minecraft-crafting-slots" aria-hidden="true">
+              <div className="minecraft-crafting-inputs">
+                {[0, 1, 2, 3].map((slot) => (
+                  <span key={slot}>—</span>
+                ))}
+              </div>
+              <span className="minecraft-crafting-arrow">→</span>
+              <span className="minecraft-crafting-output">—</span>
+            </div>
+            <span className="minecraft-crafting-note">{t(key('notSaved'))}</span>
+          </div>
+        </div>
       )}
       <fieldset
         className="minecraft-inventory-grid"
@@ -123,19 +170,24 @@ function Inventory({
           </div>
         ))}
       </fieldset>
-      {extra
-        .filter((item) => ender || ![103, 102, 101, 100, 150].includes(item.slot))
-        .map((item) => (
-          <ItemSlot key={item.slot} slot={item.slot} item={item} />
-        ))}
-    </>
+      {extra.filter((item) => ender || ![103, 102, 101, 100, 150].includes(item.slot)).length >
+        0 && (
+        <div className="minecraft-inventory-extra">
+          {extra
+            .filter((item) => ender || ![103, 102, 101, 100, 150].includes(item.slot))
+            .map((item) => (
+              <ItemSlot key={item.slot} slot={item.slot} item={item} />
+            ))}
+        </div>
+      )}
+    </div>
   );
 }
 function PlayerVitalsHud({ vitals }: { vitals: MinecraftPlayerDetail['vitals'] }) {
   const t = useT();
   if (!vitals) return null;
   const icons = (kind: 'heart' | 'food', value: number, maximum: number) => (
-    <div className="minecraft-player-hud-icons" aria-hidden="true">
+    <span className="minecraft-player-hud-icons" aria-hidden="true">
       {Array.from({ length: Math.min(20, Math.ceil(maximum / 2)) }, (_, index) => index * 2).map(
         (threshold) => {
           const filled = Math.max(0, Math.min(2, value - threshold));
@@ -163,20 +215,67 @@ function PlayerVitalsHud({ vitals }: { vitals: MinecraftPlayerDetail['vitals'] }
           );
         },
       )}
-    </div>
+    </span>
   );
+  const xpBackground = minecraftPlayerHudAsset('experience_bar_background');
+  const xpProgress = minecraftPlayerHudAsset('experience_bar_progress');
   return (
     <div className="minecraft-player-hud">
-      {vitals.health !== null && icons('heart', vitals.health, vitals.maxHealth ?? vitals.health)}
-      {vitals.food !== null && icons('food', vitals.food, 20)}
-      {vitals.experienceProgress !== null && (
-        <label className="minecraft-player-xp">
-          <span>{t(key('experienceProgress'))}</span>
-          <meter min={0} max={1} value={Math.max(0, Math.min(1, vitals.experienceProgress))}>
-            {Math.round(vitals.experienceProgress * 100)}%
-          </meter>
-          <small>{Math.round(vitals.experienceProgress * 100)}%</small>
-        </label>
+      <div className="minecraft-player-hud-row">
+        {vitals.health !== null && (
+          <span
+            role="img"
+            aria-label={`${t(key('health'))}: ${vitals.health}${vitals.maxHealth === null ? '' : ` / ${vitals.maxHealth}`}`}
+          >
+            {icons('heart', vitals.health, vitals.maxHealth ?? Math.max(20, vitals.health))}
+          </span>
+        )}
+        {vitals.food !== null && (
+          <span role="img" aria-label={`${t(key('food'))}: ${vitals.food} / 20`}>
+            {icons('food', vitals.food, 20)}
+          </span>
+        )}
+      </div>
+      {(vitals.experienceLevel !== null || vitals.experienceProgress !== null) && (
+        <div className="minecraft-player-xp">
+          {vitals.experienceLevel !== null && (
+            <span
+              className="minecraft-player-level"
+              role="img"
+              aria-label={`${t(key('experienceLevel'))}: ${vitals.experienceLevel}`}
+            >
+              {vitals.experienceLevel}
+            </span>
+          )}
+          {vitals.experienceProgress !== null && (
+            <>
+              <meter
+                className="sr-only"
+                aria-label={t(key('experienceProgress'))}
+                min={0}
+                max={1}
+                value={Math.max(0, Math.min(1, vitals.experienceProgress))}
+              />
+              <div
+                aria-hidden="true"
+                className="minecraft-player-xp-track"
+                style={xpBackground ? { backgroundImage: `url(${xpBackground})` } : undefined}
+              >
+                <span
+                  style={{
+                    width: `${Math.max(0, Math.min(1, vitals.experienceProgress)) * 100}%`,
+                    ...(xpProgress ? { backgroundImage: `url(${xpProgress})` } : {}),
+                  }}
+                />
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      {vitals.experienceTotal !== null && (
+        <p className="minecraft-player-xp-total">
+          {t(key('experienceTotalShort'), { value: vitals.experienceTotal })}
+        </p>
       )}
     </div>
   );
@@ -264,6 +363,18 @@ export function MinecraftPlayerDetailView({
     if (!permissionKeys.includes(`game.minecraft.players.${action}`)) return null;
     const capability = data.capabilities.find((value) => value.action === action);
     const reason = capability?.reason ? t(key(`blocked.${capability.reason}`)) : undefined;
+    const icon =
+      action === 'heal'
+        ? minecraftPlayerHudAsset('heart_full')
+        : action === 'feed'
+          ? minecraftPlayerHudAsset('food_full')
+          : action === 'starve'
+            ? minecraftPlayerHudAsset('food_empty')
+            : action === 'kill'
+              ? minecraftItemIcon('minecraft:skeleton_skull')
+              : action === 'teleport'
+                ? minecraftItemIcon('minecraft:ender_pearl')
+                : undefined;
     return (
       <Tooltip key={action} content={reason ?? t(key(action))}>
         <button
@@ -271,13 +382,16 @@ export function MinecraftPlayerDetailView({
           className={
             ['kill', 'starve', 'reset'].includes(action)
               ? 'secondary minecraft-player-destructive'
-              : 'secondary'
+              : action === 'gamemode'
+                ? 'secondary minecraft-player-gamemode-action'
+                : 'secondary'
           }
           aria-disabled={pending || !capability?.available}
           onClick={() => {
             if (!pending && capability?.available) onAction(action);
           }}
         >
+          {icon && <img className="minecraft-player-action-icon" src={icon} alt="" />}
           {t(key(action))}
         </button>
       </Tooltip>
@@ -317,88 +431,82 @@ export function MinecraftPlayerDetailView({
       </div>
       <div className="minecraft-player-detail-columns">
         <div className="minecraft-player-detail-main">
-          <section className="minecraft-player-panel">
+          <section className="minecraft-player-panel minecraft-player-inventory-panel">
             <h3>{t(key('inventory'))}</h3>
+            <PlayerVitalsHud vitals={data.vitals} />
             <Inventory
               items={data.inventory}
               selected={data.selectedSlot}
               player={{ name, uuid }}
             />
-          </section>
-          <section className="minecraft-player-panel">
-            <h3>{t(key('enderChest'))}</h3>
-            <Inventory items={data.enderChest} ender selected={null} />
+            <div className="minecraft-player-ender-section">
+              {data.enderChest === null && <h4>{t(key('enderChest'))}</h4>}
+              <Inventory items={data.enderChest} ender selected={null} />
+            </div>
+            {permissionKeys.includes('game.minecraft.players.reset') && (
+              <div className="minecraft-player-reset-section">
+                <p className="muted">{t(key('resetHelp'))}</p>
+                {actionButton('reset')}
+              </div>
+            )}
           </section>
         </div>
         <aside className="minecraft-player-detail-aside">
           <section className="minecraft-player-panel">
-            <h3>{t(key('savedStatus'))}</h3>
-            <PlayerVitalsHud vitals={data.vitals} />
-            <dl className="minecraft-player-values">
-              {(['health', 'food', 'experienceLevel', 'experienceTotal'] as const).map((field) => (
-                <div key={field}>
-                  <dt>{t(key(field))}</dt>
+            <h3>{t(key('playerActions'))}</h3>
+            <div className="minecraft-player-action-group">
+              <dl className="minecraft-player-values">
+                <div>
+                  <dt>{t(key('gamemode'))}</dt>
                   <dd>
-                    {data.vitals?.[field] == null ? '—' : format.number(data.vitals[field] ?? 0, 2)}
-                    {field === 'health' && data.vitals?.maxHealth != null
-                      ? ` / ${format.number(data.vitals.maxHealth)}`
-                      : field === 'food' && data.vitals?.food != null
-                        ? ' / 20'
-                        : ''}
+                    {data.vitals?.gameMode == null
+                      ? '—'
+                      : t(
+                          key(
+                            `mode.${['survival', 'creative', 'adventure', 'spectator'][data.vitals.gameMode] ?? 'unknown'}`,
+                          ),
+                        )}
                   </dd>
                 </div>
-              ))}
-              <div>
-                <dt>{t(key('gamemode'))}</dt>
-                <dd>
-                  {data.vitals?.gameMode == null
-                    ? '—'
-                    : t(
-                        key(
-                          `mode.${['survival', 'creative', 'adventure', 'spectator'][data.vitals.gameMode] ?? 'unknown'}`,
-                        ),
-                      )}
-                </dd>
+              </dl>
+              <div className="minecraft-player-detail-actions minecraft-player-gameplay-actions">
+                {(['gamemode', 'heal', 'feed', 'starve', 'kill'] as const).map(actionButton)}
               </div>
-            </dl>
-            <div className="minecraft-player-detail-actions">
-              {(['gamemode', 'heal', 'feed', 'starve', 'kill'] as const).map(actionButton)}
             </div>
-          </section>
-          <section className="minecraft-player-panel">
-            <h3>{t(key('position'))}</h3>
-            {data.position ? (
-              <>
-                <dl className="minecraft-player-values">
-                  {(['x', 'y', 'z'] as const).map((axis) => (
-                    <div key={axis}>
-                      <dt>{axis.toUpperCase()}</dt>
-                      <dd>{data.position ? format.number(data.position[axis], 2) : '—'}</dd>
-                    </div>
-                  ))}
-                </dl>
-                <p className="minecraft-player-dimension">
-                  {String(data.position.dimension ?? '—')}
-                </p>
-              </>
-            ) : (
-              <p className="muted">{t(key('positionUnavailable'))}</p>
+            <div className="minecraft-player-action-group">
+              <h4>{t(key('position'))}</h4>
+              {data.position ? (
+                <>
+                  <p className="minecraft-player-dimension">
+                    {typeof data.position.dimension === 'string'
+                      ? readableMinecraftId(data.position.dimension)
+                      : String(data.position.dimension ?? '—')}
+                  </p>
+                  <dl className="minecraft-player-coordinates">
+                    {(['x', 'y', 'z'] as const).map((axis) => (
+                      <div key={axis}>
+                        <dt>{axis.toUpperCase()}</dt>
+                        <dd>{data.position ? format.number(data.position[axis], 2) : '—'}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </>
+              ) : (
+                <p className="muted">{t(key('positionUnavailable'))}</p>
+              )}
+              <div className="minecraft-player-detail-actions minecraft-player-full-actions">
+                {actionButton('teleport')}
+              </div>
+            </div>
+            {moderationActions.length > 0 && (
+              <div className="minecraft-player-action-group">
+                <h4>{t(key('accessActions'))}</h4>
+                <div className="minecraft-player-detail-actions minecraft-player-full-actions">
+                  {moderationActions}
+                </div>
+              </div>
             )}
-            {actionButton('teleport')}
           </section>
-          {moderationActions.length > 0 && (
-            <section className="minecraft-player-panel">
-              <h3>{t(key('accessActions'))}</h3>
-              <div className="minecraft-player-detail-actions">{moderationActions}</div>
-            </section>
-          )}
-          {permissionKeys.includes('game.minecraft.players.reset') && (
-            <section className="minecraft-player-panel">
-              <h3>{t(key('reset'))}</h3>
-              <p className="muted">{t(key('resetHelp'))}</p>
-              {actionButton('reset')}
-            </section>
-          )}
         </aside>
         <div className="minecraft-player-detail-statistics">
           <section className="minecraft-player-panel">

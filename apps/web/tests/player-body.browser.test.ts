@@ -8,6 +8,7 @@ import {
 } from '@playwright/test';
 import { createServer, type ViteDevServer } from 'vite';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { playerSkinFixture } from './fixtures/player-skin.js';
 
 describe('Minecraft full-body previews', () => {
   let vite: ViteDevServer, browser: Browser, page: Page, origin: string;
@@ -48,34 +49,7 @@ describe('Minecraft full-body previews', () => {
       },
     });
     const generator = await browser.newPage();
-    // Authored solid-color test texture only. No remote/player skin is committed.
-    skin = Buffer.from(
-      await generator.evaluate(() => {
-        const canvas = document.createElement('canvas');
-        canvas.width = canvas.height = 64;
-        const context = canvas.getContext('2d');
-        if (!context) throw new Error('Missing canvas context');
-        context.fillStyle = '#ba8f69';
-        context.fillRect(0, 0, 64, 64);
-        context.fillStyle = '#4e7772';
-        context.fillRect(16, 16, 24, 16);
-        context.fillStyle = '#303948';
-        context.fillRect(0, 16, 16, 16);
-        context.fillRect(16, 48, 16, 16);
-        context.fillStyle = '#43372e';
-        context.fillRect(8, 8, 8, 3);
-        context.fillStyle = '#ffffff';
-        context.fillRect(9, 12, 2, 1);
-        context.fillRect(13, 12, 2, 1);
-        // Clear outer layers and slim-arm detection unused regions: classic model.
-        context.clearRect(32, 0, 32, 16);
-        context.clearRect(0, 32, 64, 16);
-        context.clearRect(0, 48, 16, 16);
-        context.clearRect(48, 48, 16, 16);
-        return canvas.toDataURL('image/png').split(',')[1] ?? '';
-      }),
-      'base64',
-    );
+    skin = await playerSkinFixture(generator);
     await generator.close();
   });
   afterAll(async () => {
@@ -102,12 +76,54 @@ describe('Minecraft full-body previews', () => {
     await browserExpect(page.getByRole('button', { name: 'first', exact: true })).toBeVisible();
   });
 
-  it('uses a body fallback at rest, waves on hover and releases the GPU on leave/unmount', async () => {
+  it('renders a three-quarter still at rest, waves at the same scale and releases the GPU on leave/unmount', async () => {
     const first = page.getByRole('button', { name: 'first', exact: true });
-    await browserExpect(first.locator('img')).toHaveAttribute('src', /data:image\/svg\+xml/);
-    expect(skinRequests).toBe(0);
+    await browserExpect(first.locator('.minecraft-player-body')).toHaveAttribute(
+      'data-ready',
+      'true',
+    );
+    await browserExpect(first.locator('img')).toHaveAttribute('src', /data:image\/png/);
+    expect(skinRequests).toBeGreaterThan(0);
+    await browserExpect(page.locator('canvas')).toHaveCount(0);
+    const stage = await first.locator('.minecraft-player-body').boundingBox();
+    expect(stage?.height).toBe(112);
+    expect(stage?.width).toBe(96);
+    if (!stage) throw new Error('Missing body frame');
+    const headClip = { x: stage.x + 29, y: stage.y + 20, width: 34, height: 32 };
+    const restingHead = await page.screenshot({
+      clip: headClip,
+      path: '/tmp/player-head-rest.png',
+    });
+    const skinPixels = await page.evaluate(async (encoded) => {
+      const image = new Image();
+      image.src = `data:image/png;base64,${encoded}`;
+      await image.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Missing pixel inspection context');
+      context.drawImage(image, 0, 0);
+      const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
+      let pixels = 0;
+      for (let index = 0; index < data.length; index += 4) {
+        const red = data[index] ?? 0,
+          green = data[index + 1] ?? 0;
+        if (red > 100 && green < 170 && red > green * 1.1) pixels++;
+      }
+      return pixels;
+    }, restingHead.toString('base64'));
+    expect(skinPixels).toBeGreaterThan(100); // Compare a real head, never empty background.
+    await first.screenshot({ path: '/tmp/player-body-rest.png' });
     await first.hover();
     await browserExpect(first.locator('canvas')).toBeVisible();
+    await page.waitForTimeout(500);
+    await first.screenshot({ path: '/tmp/player-body-hover.png' });
+    expect(
+      (await page.screenshot({ clip: headClip, path: '/tmp/player-head-hover.png' })).equals(
+        restingHead,
+      ),
+    ).toBe(true);
     const initial = await first.screenshot();
     await expect.poll(async () => (await first.screenshot()).equals(initial)).toBe(false);
     await page.waitForTimeout(500);
@@ -121,27 +137,37 @@ describe('Minecraft full-body previews', () => {
     expect(errors).toEqual([]);
   });
 
-  it('keeps a local body visible while the remote full-body image is pending', async () => {
+  it('keeps the local fallback while the raw skin is pending, then captures the same projection', async () => {
     let held: Route | undefined;
-    await page.route('https://api.mcheads.org/player/111*/**', (route) => {
+    await page.route('https://api.mcheads.org/skin/111*', (route) => {
       held = route;
     });
     await page.reload();
     await expect.poll(() => !!held).toBe(true);
     const first = page.getByRole('button', { name: 'first', exact: true });
-    await browserExpect(first.locator('img').first()).toBeVisible();
-    await browserExpect(first.locator('img').last()).toHaveCSS('opacity', '0');
-    await held?.fulfill({ contentType: 'image/png', body: skin });
-    await browserExpect(first.locator('img').last()).toHaveCSS('opacity', '1');
-    await browserExpect(first.locator('img').first()).toBeHidden();
-    expect(skinRequests).toBe(0);
+    await browserExpect(first.locator('img')).toHaveAttribute('src', /data:image\/svg\+xml/);
+    await browserExpect(first.locator('img')).toBeVisible();
+    await held?.fulfill({
+      contentType: 'image/png',
+      body: skin,
+      headers: { 'Access-Control-Allow-Origin': '*' },
+    });
+    await browserExpect(first.locator('.minecraft-player-body')).toHaveAttribute(
+      'data-ready',
+      'true',
+    );
+    await browserExpect(first.locator('img')).toHaveAttribute('src', /data:image\/png/);
+    await browserExpect(page.locator('canvas')).toHaveCount(0);
   });
 
   it('honors reduced motion including a live preference change and offscreen previews', async () => {
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await page.getByRole('button', { name: 'first', exact: true }).hover();
     await page.waitForTimeout(100);
-    expect(skinRequests).toBe(0);
+    await browserExpect(page.locator('[data-player="first"]')).toHaveAttribute(
+      'data-ready',
+      'true',
+    );
     await browserExpect(page.locator('canvas')).toHaveCount(0);
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await browserExpect(page.locator('canvas')).toHaveCount(1);
@@ -178,6 +204,7 @@ describe('Minecraft full-body previews', () => {
     await page.route('https://api.mcheads.org/skin/**', (route) =>
       route.fulfill({ status: 503, headers: { 'Access-Control-Allow-Origin': '*' } }),
     );
+    await page.reload();
     await page.getByRole('button', { name: 'first', exact: true }).hover();
     await page.waitForTimeout(150);
     await browserExpect(page.locator('canvas')).toHaveCount(0);
@@ -195,7 +222,7 @@ describe('Minecraft full-body previews', () => {
         })
         .catch(() => {});
     });
-    await page.mouse.move(600, 400);
+    await page.reload();
     await page.getByRole('button', { name: 'first', exact: true }).hover();
     await expect.poll(() => held).toBe(true);
     await page.getByRole('button', { name: 'Change player', exact: true }).click();

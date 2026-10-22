@@ -1,9 +1,23 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createPlayerBodyLease, playerWavePose } from './player-body-motion.js';
+import { createPlayerBodyRendererQueue, playerWavePose } from './player-body-motion.js';
 
 describe('decorative player preview resource boundaries', () => {
+  it('defers and cancels static captures while a live preview owns the GPU', async () => {
+    const queue = createPlayerBodyRendererQueue();
+    const release = queue.acquire(vi.fn());
+    const capture = vi.fn(),
+      cancelled = vi.fn();
+    queue.snapshot(capture);
+    queue.snapshot(cancelled)();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(capture).not.toHaveBeenCalled();
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(capture).toHaveBeenCalledOnce();
+    expect(cancelled).not.toHaveBeenCalled();
+  });
   it('revokes the previous preview and ignores a stale release', () => {
-    const acquire = createPlayerBodyLease();
+    const acquire = createPlayerBodyRendererQueue().acquire;
     const first = vi.fn(),
       second = vi.fn(),
       third = vi.fn();
@@ -17,7 +31,7 @@ describe('decorative player preview resource boundaries', () => {
     expect(third).not.toHaveBeenCalled();
   });
   it('does not revoke a preview after its lease has been released', () => {
-    const acquire = createPlayerBodyLease();
+    const acquire = createPlayerBodyRendererQueue().acquire;
     const cancel = vi.fn();
     acquire(cancel)();
     acquire(vi.fn());

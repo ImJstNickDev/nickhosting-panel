@@ -14,14 +14,20 @@ replaced with a similarly named Mojang account. File modification time describes
 the saved snapshot, not the player's last login. Live presence retains the
 existing bounded console observation and its explicit unavailable state.
 
-Cards use full-body previews from the existing MCHeads appearance provider.
-Hover or keyboard focus lazily loads an unmodified MIT skin renderer and an
-original arm-wave animation. Only one visible preview owns a WebGL renderer at a
-time. Leaving the card, changing identity, hiding the document, scrolling it out
-of view or enabling reduced motion releases the renderer. A static body remains
-available without animation; network/WebGL failures fall back to the original
-local illustration. No skin texture or reference-site implementation is copied
-into the repository.
+Cards use compact three-quarter bust previews from the existing MCHeads skin
+provider. A visible preview lazily loads the unmodified MIT renderer, takes one
+still and releases its WebGL context. Stills and hover/focus waves share the same
+camera, angle and frame, so the head and torso do not resize on interaction.
+Snapshot rendering is serialized, the session still cache is bounded to 64 entries,
+and only one preview animates at a time. Leaving the card, changing identity,
+hiding the document, scrolling out of view or enabling reduced motion releases
+the animation. Reduced motion retains the angled still. Network/WebGL failures
+fall back to the original local illustration. No skin texture or reference-site
+implementation is copied into the repository.
+
+The ellipsis popover starts at the trigger's left edge and adjusts to stay within
+the viewport. It separates View player, moderation, and Heal/Feed with dividers;
+unauthorized empty groups are omitted. Cards remain horizontal on narrow screens.
 
 ## Saved player data
 
@@ -38,7 +44,13 @@ These are observations of saved files, including while the server is running;
 they do not claim to be the player's current live inventory. Missing, malformed,
 ambiguous and unsupported data remain distinct from an empty inventory or zero
 statistics. Unknown item IDs/components are preserved as descriptive metadata.
-Inventory editing and crafting are not offered.
+Inventory editing and crafting are not offered. The gray beveled inventory is
+capped at 360px, with armor, full-body preview, offhand, three inventory rows,
+hotbar and a separate Ender Chest. The crafting illustration explicitly marks
+its unavailable saved state. Health/food/XP sit above the inventory; actions and
+position share the middle column. Statistics show four key figures and at most
+two leading rows per mined/used/killed/distance category, with available local
+Minecraft icons. Missing values remain unknown.
 
 NBT decoding uses the same bounded structural preflight as world inspection,
 with a smaller compressed-player-file limit. Both legacy item tags and modern
@@ -134,13 +146,24 @@ real player bodies and saved details, with no script errors, page overflow or
 mutating requests. Live screenshots remain private; review evidence below uses
 isolated fixture identities. No game test assets were created or cleaned.
 
+The subsequent Players visual corrections use source/HMR only, with no container
+restart or new dependency. Validation repeats the 16 Players browser cases,
+5 renderer browser cases (including actual head-pixel equality before/during
+hover), 4 renderer resource/animation unit cases, typecheck, lint, catalog parity
+and production build. Reviewed EN/IT desktop/mobile screenshots cover the compact
+inventory and menu. Independent review caught and corrected the full-body crop
+and inherited fieldset gap; the browser suite checks equipment alignment.
+A read-only Firefox check on dev returned Players API 200 with no script errors,
+page overflow or mutating requests. No game assets were created or cleaned.
+
 Rollback reverts the source and restores the previous frontend image if needed.
 There is no migration to reverse. Preserve any user-created reset recovery files
 and audit receipts; reverting UI code does not restore player data automatically.
 
 Reviewed fixture screenshots:
 
-- [Player cards and action menu](screenshots/m5/minecraft-players-cards-desktop-en.png)
+- [Compact player cards](screenshots/m5/minecraft-players-cards-desktop-en.png)
+- [Grouped action menu](screenshots/m5/minecraft-players-actions-desktop-en.png)
 - [Saved player detail](screenshots/m5/minecraft-player-detail-desktop-en.png)
 - [Italian desktop](screenshots/m5/minecraft-player-detail-desktop-it.png)
 - [Italian 320px detail](screenshots/m5/minecraft-player-detail-320-mobile-it.png)

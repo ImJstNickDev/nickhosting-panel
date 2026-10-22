@@ -28,18 +28,18 @@ fallbacks and accessibility.
 
 ## Minecraft player bodies
 
-`skinview3d` 3.4.2 is pinned and dynamically imported only for an active body
-preview. Its renderer dependencies (`three` and `skinview-utils`) are MIT;
+`skinview3d` 3.4.2 is pinned and dynamically imported when a body preview becomes
+visible. A one-shot render creates its cached still; interaction activates the wave. Its renderer dependencies (`three` and `skinview-utils`) are MIT;
 upstream code is unmodified. Preserve their notices in the generated bundle
 license report. The arm-wave motion is original application code; no animation
 or markup was copied from the reference site. See the
 [upstream renderer](https://github.com/bs-community/skinview3d).
 
-The existing MCHeads provider supplies UUID-addressed body PNGs and raw skin
+The existing MCHeads provider supplies UUID-addressed raw skin
 PNGs ([API documentation](https://mcheads.org/docs)). Requests omit credentials
 and referrers. This is an external appearance request, not a source of player
-identity or permission authority. Static previews and the authored SVG fallback
-work without WebGL; reduced motion disables the animated renderer. User skins
+identity or permission authority. The authored SVG fallback works without WebGL. Reduced motion retains the
+one-shot angled preview and disables continuous animation. User skins
 and locally prepared Minecraft item textures are not repository-licensed assets
 and are not committed to source control.
 

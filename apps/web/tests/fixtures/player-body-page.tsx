@@ -33,6 +33,7 @@ function Fixture() {
                 name={name}
                 uuid={index ? '22222222-2222-4222-8222-222222222222' : uuid}
                 active={active.includes(name)}
+                variant={index === 0 ? 'bust' : 'full'}
               />
             </button>
           ))}

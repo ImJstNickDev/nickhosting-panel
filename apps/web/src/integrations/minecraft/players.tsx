@@ -635,29 +635,25 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
                     can('whitelist-add') ||
                     (running && (can('ban') || (row.online && can('kick')))))
                 }
-                actions={
-                  <>
-                    {playerActions(row)}
-                    {row.uuid &&
-                      (['heal', 'feed'] as const).map(
-                        (action) =>
-                          props.permissionKeys.includes(`game.minecraft.players.${action}`) && (
-                            <button
-                              type="button"
-                              className="secondary"
-                              key={action}
-                              disabled={
-                                disabled || !running || !row.online || row.nameKnown === false
-                              }
-                              onClick={() => {
-                                if (row.uuid) setGameplaySelection({ uuid: row.uuid, action });
-                              }}
-                            >
-                              {t(key(action))}
-                            </button>
-                          ),
-                      )}
-                  </>
+                actions={playerActions(row)}
+                quickActions={
+                  row.uuid &&
+                  (['heal', 'feed'] as const).map(
+                    (action) =>
+                      props.permissionKeys.includes(`game.minecraft.players.${action}`) && (
+                        <button
+                          type="button"
+                          className="secondary"
+                          key={action}
+                          disabled={disabled || !running || !row.online || row.nameKnown === false}
+                          onClick={() => {
+                            if (row.uuid) setGameplaySelection({ uuid: row.uuid, action });
+                          }}
+                        >
+                          {t(key(action))}
+                        </button>
+                      ),
+                  )
                 }
               />
             ))}

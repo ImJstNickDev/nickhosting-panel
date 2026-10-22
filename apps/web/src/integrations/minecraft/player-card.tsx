@@ -1,4 +1,4 @@
-import { type ReactNode, useId, useRef, useState } from 'react';
+import { Children, type ReactNode, useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { useT } from '../../app/i18n.js';
 import { MinecraftPlayerBody } from './player-body.js';
@@ -17,7 +17,7 @@ export function PlayerRoles({ row }: { row: MinecraftPlayerRow }) {
       )}
       {row.operator && (
         <span
-          className="minecraft-player-role"
+          className="minecraft-player-role minecraft-player-role--operator"
           title={t('games.minecraft.players.operatorDetails', { level: row.operator.level })}
         >
           {k('operator')}
@@ -42,6 +42,25 @@ export function PlayerActionMenu({ name, children }: { name: string; children: R
   const trigger = useRef<HTMLButtonElement>(null);
   const popup = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
+  const position = useCallback(() => {
+    if (!trigger.current || !popup.current) return;
+    const anchor = trigger.current.getBoundingClientRect();
+    const menu = popup.current.getBoundingClientRect();
+    const width = menu.width || Math.min(240, window.innerWidth - 16);
+    const height = menu.height || 350;
+    popup.current.style.left = `${Math.max(8, Math.min(anchor.left, window.innerWidth - width - 8))}px`;
+    popup.current.style.top = `${Math.max(8, Math.min(anchor.bottom + 6, window.innerHeight - height - 8))}px`;
+  }, []);
+  useEffect(() => {
+    if (!open) return;
+    position();
+    window.addEventListener('resize', position);
+    window.addEventListener('scroll', position, true);
+    return () => {
+      window.removeEventListener('resize', position);
+      window.removeEventListener('scroll', position, true);
+    };
+  }, [open, position]);
   return (
     <div className="minecraft-player-menu">
       <button
@@ -50,6 +69,7 @@ export function PlayerActionMenu({ name, children }: { name: string; children: R
         ref={trigger}
         aria-label={t('games.minecraft.players.actionsFor', { name })}
         aria-expanded={open}
+        aria-haspopup="dialog"
         aria-controls={id}
         popoverTarget={id}
         onKeyDown={(event) => {
@@ -75,10 +95,7 @@ export function PlayerActionMenu({ name, children }: { name: string; children: R
         aria-label={t('games.minecraft.players.actionsFor', { name })}
         onToggle={(event) => setOpen(event.newState === 'open')}
         onBeforeToggle={(event) => {
-          if (event.newState !== 'open' || !trigger.current || !popup.current) return;
-          const rect = trigger.current.getBoundingClientRect();
-          popup.current.style.left = `${Math.max(8, Math.min(window.innerWidth - 250, rect.right - 240))}px`;
-          popup.current.style.top = `${Math.max(8, Math.min(window.innerHeight - 360, rect.bottom + 6))}px`;
+          if (event.newState === 'open') position();
         }}
         onKeyDown={(event) => {
           if (event.key === 'Escape') {
@@ -105,25 +122,29 @@ export function PlayerCard({
   row,
   to,
   actions,
+  quickActions,
   hasActions,
 }: {
   row: MinecraftPlayerRow;
   to?: string;
   actions: ReactNode;
+  quickActions?: ReactNode;
   hasActions: boolean;
 }) {
   const t = useT();
-  const [active, setActive] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
   const identity = (
     <>
       <MinecraftPlayerBody
         name={row.name}
         uuid={row.uuid}
-        active={active}
+        active={hovered || focused}
+        variant="bust"
         className="minecraft-player-card-body"
       />
       <div className="minecraft-player-identity">
-        <strong>{row.name}</strong>
+        <strong title={row.name}>{row.name}</strong>
         <PlayerRoles row={row} />
       </div>
     </>
@@ -131,11 +152,11 @@ export function PlayerCard({
   return (
     <li
       className="minecraft-player"
-      onPointerEnter={() => setActive(true)}
-      onPointerLeave={() => setActive(false)}
-      onFocus={() => setActive(true)}
+      onPointerEnter={() => setHovered(true)}
+      onPointerLeave={() => setHovered(false)}
+      onFocus={() => setFocused(true)}
       onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) setActive(false);
+        if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false);
       }}
     >
       {to ? (
@@ -152,8 +173,17 @@ export function PlayerCard({
       )}
       {(to || hasActions) && (
         <PlayerActionMenu name={row.name}>
-          {to && <Link to={to}>{t('games.minecraft.players.view')}</Link>}
-          {actions}
+          {to && (
+            <div className="minecraft-player-menu-section">
+              <Link to={to}>{t('games.minecraft.players.view')}</Link>
+            </div>
+          )}
+          {Children.toArray(actions).length > 0 && (
+            <div className="minecraft-player-menu-section">{actions}</div>
+          )}
+          {Children.toArray(quickActions).length > 0 && (
+            <div className="minecraft-player-menu-section">{quickActions}</div>
+          )}
         </PlayerActionMenu>
       )}
     </li>

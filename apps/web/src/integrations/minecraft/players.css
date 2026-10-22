@@ -97,7 +97,7 @@
 }
 .minecraft-players-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
   gap: 14px;
   list-style: none;
   padding: 0;
@@ -106,7 +106,7 @@
 .minecraft-player {
   position: relative;
   display: block;
-  min-height: 160px;
+  min-height: 112px;
   border: 1px solid var(--line);
   border-radius: 9px;
   background: var(--surface);
@@ -116,8 +116,8 @@
   align-items: center;
   justify-content: flex-start;
   gap: 12px;
-  min-height: 160px;
-  padding: 16px 14px;
+  min-height: 112px;
+  padding: 14px 42px 14px 108px;
   color: inherit;
   border-radius: 8px;
   text-decoration: none;
@@ -131,8 +131,12 @@
   outline-offset: 3px;
 }
 .minecraft-player-card-body {
-  width: 70px;
+  position: absolute;
+  left: 6px;
+  bottom: 0;
+  width: 96px;
   height: 112px;
+  border-bottom-left-radius: 8px;
 }
 .minecraft-player-identity {
   min-width: 0;
@@ -140,7 +144,9 @@
 }
 .minecraft-player-identity > strong {
   display: block;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 0.88rem;
   font-weight: 600;
 }
@@ -156,6 +162,21 @@
   font-size: 0.72rem;
   color: var(--muted);
 }
+.minecraft-player-role--banned {
+  color: var(--danger, #a13226);
+}
+.minecraft-player-card-link .minecraft-player-role {
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: #f0f3f5;
+  font-size: 0.64rem;
+  font-weight: 600;
+}
+.minecraft-player-card-link .minecraft-player-role--operator,
+.minecraft-player-card-link .minecraft-player-role--banned {
+  background: #fce7e7;
+  color: #9f3030;
+}
 .minecraft-player-role--online {
   color: #28714a;
 }
@@ -164,9 +185,6 @@
   height: 6px;
   border-radius: 50%;
   background: currentColor;
-}
-.minecraft-player-role--banned {
-  color: var(--danger, #a13226);
 }
 .minecraft-player-avatar {
   flex: 0 0 36px;
@@ -212,8 +230,18 @@
   display: grid;
   gap: 2px;
 }
-.minecraft-player-menu-popover > a,
-.minecraft-player-menu-popover > button {
+.minecraft-player-menu-section {
+  display: grid;
+  gap: 2px;
+  padding: 3px 0;
+}
+.minecraft-player-menu-section + .minecraft-player-menu-section {
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+  margin-top: 3px;
+}
+.minecraft-player-menu-section > a,
+.minecraft-player-menu-section > button {
   display: flex;
   align-items: center;
   justify-content: flex-start;
@@ -228,9 +256,10 @@
   text-decoration: none;
   box-shadow: none;
   text-align: left;
+  font-weight: 500;
 }
-.minecraft-player-menu-popover > a:hover,
-.minecraft-player-menu-popover > button:hover {
+.minecraft-player-menu-section > a:hover,
+.minecraft-player-menu-section > button:hover {
   background: #f0f3f6;
 }
 .minecraft-players-empty {
@@ -330,23 +359,8 @@
 }
 @container (max-width: 480px) {
   .minecraft-players-list {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: 10px;
-  }
-  .minecraft-player-card-link {
-    flex-direction: column;
-    gap: 10px;
-    min-height: 195px;
-    padding: 34px 8px 12px;
-  }
-  .minecraft-player-identity {
-    text-align: center;
-  }
-  .minecraft-player-identity > strong {
-    font-size: 0.8rem;
-  }
-  .minecraft-player-card-link .minecraft-player-roles {
-    justify-content: center;
   }
 }
 @container (max-width: 430px) {

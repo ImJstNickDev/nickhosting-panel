@@ -1,45 +1,104 @@
 import { minecraftUiModule } from '@nickhosting/minecraft/ui';
 import { useEffect, useRef, useState } from 'react';
 import type { SkinViewer } from 'skinview3d';
-import { acquirePlayerBody, playerWavePose } from './player-body-motion.js';
+import { playerBodyRenderers, playerWavePose } from './player-body-motion.js';
 import './player-body.css';
+
+type Renderer = typeof import('skinview3d');
+type Variant = 'bust' | 'full';
+const frames = { bust: { width: 144, height: 240 }, full: { width: 120, height: 180 } };
+// Data URLs contain only a small rendered preview; bound the session cache.
+const stills = new Map<string, string>();
+function remember(key: string, image: string) {
+  stills.delete(key);
+  stills.set(key, image);
+  if (stills.size > 64) stills.delete(stills.keys().next().value as string);
+}
+function dispose(viewer: SkinViewer) {
+  viewer.scene.traverse((object) => {
+    const mesh = object as typeof object & {
+      geometry?: { dispose(): void };
+      material?: { dispose(): void } | { dispose(): void }[];
+    };
+    mesh.geometry?.dispose();
+    if (Array.isArray(mesh.material))
+      mesh.material.forEach((material) => {
+        material.dispose();
+      });
+    else mesh.material?.dispose();
+  });
+  viewer.composer.dispose();
+  viewer.fxaaPass.material.dispose();
+  viewer.dispose();
+  viewer.renderer.forceContextLoss();
+}
+function createViewer(library: Renderer, texture: HTMLImageElement, variant: Variant) {
+  const canvas = document.createElement('canvas');
+  const viewer = new library.SkinViewer({
+    canvas,
+    ...frames[variant],
+    pixelRatio: 2,
+    zoom: 0.95,
+    enableControls: false,
+    renderPaused: true,
+  });
+  viewer.loadSkin(texture);
+  // Let the CSS frame fit narrow inventory slots without changing the camera.
+  canvas.style.removeProperty('width');
+  canvas.style.removeProperty('height');
+  // The same three-quarter camera and model pose are used for stills and animation.
+  // Keep the viewing angle outside the animated player: assigning an animation
+  // resets playerObject.rotation in skinview3d.
+  viewer.playerWrapper.rotation.y = 0.48;
+  viewer.camera.position.y = 3;
+  viewer.camera.lookAt(0, 0, 0);
+  return viewer;
+}
 
 /** Decorative: the surrounding card/link supplies the accessible player name. */
 export function MinecraftPlayerBody({
   name,
   uuid,
   active = false,
+  variant = 'full',
   className = '',
 }: {
   name: string;
   uuid?: string;
   active?: boolean;
+  variant?: Variant;
   className?: string;
 }) {
   const stage = useRef<HTMLSpanElement>(null);
-  const [eligible, setEligible] = useState(false);
+  const [visible, setVisible] = useState(false);
+  const [motionAllowed, setMotionAllowed] = useState(false);
+  const [prepared, setPrepared] = useState<{
+    skin: string;
+    texture: HTMLImageElement;
+    library: Renderer;
+  }>();
+  const [still, setStill] = useState<{ key: string; image: string }>();
   const appearance = minecraftUiModule.playerAppearance;
   const identity =
     uuid && /^[\da-f]{8}-?[\da-f]{4}-?[\da-f]{4}-?[\da-f]{4}-?[\da-f]{12}$/i.test(uuid)
       ? uuid
       : undefined;
   const fallback = appearance?.bodyFallback ?? appearance?.fallback;
-  const body = identity ? (appearance?.bodyUrl?.(identity) ?? fallback) : fallback;
   const skin = identity ? appearance?.skinUrl?.(identity) : undefined;
-  const [failedBody, setFailedBody] = useState<string>();
-  const [loadedBody, setLoadedBody] = useState<string>();
+  const cacheKey = `${skin}:${variant}`;
+  const image = still?.key === cacheKey ? still.image : stills.get(cacheKey);
 
   useEffect(() => {
     const element = stage.current;
-    if (!element || !active || !skin) {
-      setEligible(false);
-      return;
-    }
+    if (!element) return;
     const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
-    let visible = false;
-    const update = () => setEligible(visible && !document.hidden && !motion.matches);
+    let intersecting = false;
+    const update = () => {
+      setVisible(intersecting && !document.hidden);
+      setMotionAllowed(!motion.matches);
+    };
     const observer = new IntersectionObserver(([entry]) => {
-      visible = !!entry?.isIntersecting;
+      intersecting = !!entry?.isIntersecting;
       update();
     });
     observer.observe(element);
@@ -50,132 +109,112 @@ export function MinecraftPlayerBody({
       motion.removeEventListener('change', update);
       document.removeEventListener('visibilitychange', update);
     };
-  }, [active, skin]);
+  }, []);
 
   useEffect(() => {
-    const element = stage.current;
-    if (!active || !eligible || !skin || !element) return;
-    let stopped = false;
-    let viewer: SkinViewer | undefined;
-    let canvas: HTMLCanvasElement | undefined;
-    let resize: ResizeObserver | undefined;
-    let objectUrl: string | undefined;
+    if (!visible || !skin) return;
     const abort = new AbortController();
-    const stop = () => {
-      if (stopped) return;
-      stopped = true;
-      abort.abort();
-      resize?.disconnect();
-      if (viewer) {
-        // Upstream dispose stops RAF/textures/controls, but not model geometry or
-        // composer targets. Explicitly free those and return the GPU context.
-        viewer.scene.traverse((object) => {
-          const mesh = object as typeof object & {
-            geometry?: { dispose(): void };
-            material?: { dispose(): void } | { dispose(): void }[];
-          };
-          mesh.geometry?.dispose();
-          if (Array.isArray(mesh.material))
-            mesh.material.forEach((material) => {
-              material.dispose();
-            });
-          else mesh.material?.dispose();
-        });
-        viewer.composer.dispose();
-        viewer.fxaaPass.material.dispose();
-        viewer.dispose();
-        viewer.renderer.forceContextLoss();
-      }
-      canvas?.removeEventListener('webglcontextlost', stop);
-      canvas?.remove();
-      delete element.dataset.animated;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-    const release = acquirePlayerBody(stop);
+    let objectUrl: string | undefined;
     void (async () => {
       try {
         const [library, response] = await Promise.all([
           import('skinview3d'),
           fetch(skin, { signal: abort.signal, credentials: 'omit', referrerPolicy: 'no-referrer' }),
         ]);
-        if (stopped) return;
+        if (abort.signal.aborted) return;
         if (!response.ok) throw new Error('Skin unavailable');
         const blob = await response.blob();
-        if (stopped) return;
+        if (abort.signal.aborted) return;
         objectUrl = URL.createObjectURL(blob);
         const texture = new Image();
         texture.src = objectUrl;
         await texture.decode();
-        if (stopped) return;
+        if (abort.signal.aborted) return;
         if (texture.width !== 64 || ![32, 64].includes(texture.height))
           throw new Error('Unsupported skin dimensions');
-        canvas = document.createElement('canvas');
-        viewer = new library.SkinViewer({
-          canvas,
-          width: element.clientWidth,
-          height: element.clientHeight,
-          pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
-          zoom: 0.8,
-          enableControls: false,
-          renderPaused: true,
-        });
-        // Pass a decoded image: no late image promise can mutate a disposed viewer.
-        viewer.loadSkin(texture);
-        viewer.playerObject.rotation.y = 0.2;
-        viewer.animation = new library.FunctionAnimation((player, seconds) => {
-          const pose = playerWavePose(seconds);
-          player.skin.rightArm.rotation.x = pose.x;
-          player.skin.rightArm.rotation.z = pose.z;
-        });
-        canvas.addEventListener('webglcontextlost', stop);
-        resize = new ResizeObserver(() => {
-          if (viewer && !stopped) viewer.setSize(element.clientWidth, element.clientHeight);
-        });
-        resize.observe(element);
-        element.append(canvas);
-        element.dataset.animated = 'true';
-        viewer.renderPaused = false;
-        URL.revokeObjectURL(objectUrl);
-        objectUrl = undefined;
+        setPrepared({ skin, texture, library });
       } catch {
-        // Decorative previews can fail (network, CORS, disabled WebGL): retain
-        // the static body and never interrupt the player's management actions.
-        stop();
+        // Retain the authored fallback when the skin or rendering cannot load.
+      } finally {
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        objectUrl = undefined;
       }
     })();
     return () => {
-      stop();
+      abort.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [visible, skin]);
+
+  useEffect(() => {
+    if (!visible || !skin || prepared?.skin !== skin || image) return;
+    return playerBodyRenderers.snapshot(() => {
+      let viewer: SkinViewer | undefined;
+      try {
+        viewer = createViewer(prepared.library, prepared.texture, variant);
+        viewer.render();
+        const capture = viewer.canvas.toDataURL('image/png');
+        remember(cacheKey, capture);
+        setStill({ key: cacheKey, image: capture });
+      } catch {
+        // WebGL may be unavailable; the local body remains visible.
+      } finally {
+        if (viewer) dispose(viewer);
+      }
+    });
+  }, [visible, skin, prepared, image, variant, cacheKey]);
+
+  useEffect(() => {
+    const element = stage.current;
+    if (!active || !visible || !motionAllowed || !skin || prepared?.skin !== skin || !element)
+      return;
+    let stopped = false;
+    let viewer: SkinViewer | undefined;
+    let release = () => {};
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      if (viewer) {
+        viewer.canvas.removeEventListener('webglcontextlost', stop);
+        viewer.canvas.remove();
+        dispose(viewer);
+      }
+      delete element.dataset.animated;
       release();
     };
-  }, [active, eligible, skin]);
+    release = playerBodyRenderers.acquire(stop);
+    try {
+      viewer = createViewer(prepared.library, prepared.texture, variant);
+      // Capture before the first wave frame, so exiting hover always restores
+      // exactly the same projection instead of switching to a provider's render.
+      viewer.render();
+      const capture = viewer.canvas.toDataURL('image/png');
+      remember(cacheKey, capture);
+      setStill({ key: cacheKey, image: capture });
+      viewer.animation = new prepared.library.FunctionAnimation((player, seconds) => {
+        const pose = playerWavePose(seconds);
+        player.skin.rightArm.rotation.x = pose.x;
+        player.skin.rightArm.rotation.z = pose.z;
+      });
+      viewer.canvas.addEventListener('webglcontextlost', stop);
+      element.append(viewer.canvas);
+      element.dataset.animated = 'true';
+      viewer.renderPaused = false;
+    } catch {
+      stop();
+    }
+    return stop;
+  }, [active, visible, motionAllowed, skin, prepared, variant, cacheKey]);
 
   return (
     <span
       ref={stage}
-      className={`minecraft-player-body ${className}`}
+      className={`minecraft-player-body minecraft-player-body--${variant} ${className}`}
       aria-hidden="true"
       data-player={name}
+      data-ready={!!image}
     >
-      <img
-        src={fallback}
-        alt=""
-        style={{
-          visibility:
-            body !== fallback && loadedBody === body && failedBody !== body ? 'hidden' : undefined,
-        }}
-      />
-      {body && body !== fallback && failedBody !== body && (
-        <img
-          key={body}
-          src={body}
-          alt=""
-          loading="lazy"
-          referrerPolicy="no-referrer"
-          style={{ opacity: loadedBody === body ? 1 : 0 }}
-          onLoad={() => setLoadedBody(body)}
-          onError={() => setFailedBody(body)}
-        />
-      )}
+      <img src={image ?? fallback} alt="" />
     </span>
   );
 }

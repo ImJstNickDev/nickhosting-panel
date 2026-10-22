@@ -74,10 +74,10 @@ change themselves or edit users with broader effective access. See
 
 ### Minecraft Players
 
-Players uses full-body identity cards with a separate ellipsis menu and a nested
-detail route. Hover/focus waves are optional decorative motion and respect reduced
-motion. The detail groups saved inventory/Ender Chest, player actions and actual
-statistics, retaining the shared workspace surfaces, dialogs and permission
+Players uses compact angled bust cards with a separate three-section ellipsis
+menu and a nested detail route. Static and animated previews retain the same framing. Hover/focus waves are optional decorative motion and respect reduced
+motion. The detail groups compact Minecraft inventory/Ender Chest, player actions and a
+bounded overview of important saved statistics, retaining the shared workspace surfaces, dialogs and permission
 rules. Saved state and live presence are distinguished; unknown values are not
 displayed as zero. See [Players workspace](M5-MINECRAFT-PLAYERS.md).
 

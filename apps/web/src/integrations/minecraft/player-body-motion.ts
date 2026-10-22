@@ -1,16 +1,43 @@
-/** One lease across cards and detail previews: no background fleet of WebGL renderers. */
-export function createPlayerBodyLease() {
+/** Static captures run synchronously, only while no interactive preview owns the GPU. */
+export function createPlayerBodyRendererQueue() {
   let current: (() => void) | undefined;
-  return (cancel: () => void) => {
-    current?.();
-    current = cancel;
-    return () => {
-      if (current === cancel) current = undefined;
-    };
+  const pending = new Set<() => void>();
+  let scheduled = false;
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    setTimeout(drain, 0);
+  };
+  const drain = () => {
+    scheduled = false;
+    if (current) return;
+    const next = pending.values().next().value;
+    if (!next) return;
+    pending.delete(next);
+    next();
+    schedule();
+  };
+  return {
+    acquire(cancel: () => void) {
+      current?.();
+      current = cancel;
+      return () => {
+        if (current !== cancel) return;
+        current = undefined;
+        schedule();
+      };
+    },
+    snapshot(capture: () => void) {
+      pending.add(capture);
+      schedule();
+      return () => {
+        pending.delete(capture);
+      };
+    },
   };
 }
 
-export const acquirePlayerBody = createPlayerBodyLease();
+export const playerBodyRenderers = createPlayerBodyRendererQueue();
 
 /** Radians, eased shoulder lift; deliberately independent of upstream WaveAnimation. */
 export function playerWavePose(seconds: number) {
