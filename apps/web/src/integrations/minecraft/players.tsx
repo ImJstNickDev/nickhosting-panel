@@ -314,36 +314,51 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
       setBusy(false);
     }
   }
-  const rowAction = (row: MinecraftPlayerRow, action: Action, labelKey: string = action) =>
-    can(action) && row.nameKnown !== false ? (
+  const rowAction = (row: MinecraftPlayerRow, action: Action, detail = false) => {
+    if (!can(action) || row.nameKnown === false) return null;
+    const unavailable =
+      ['kick', 'ban', 'pardon'].includes(action) &&
+      (!running || (action === 'kick' && !row.online));
+    const labelKey = detail
+      ? ((
+          { op: 'detailOp', kick: 'detailKick', ban: 'detailBan' } as Partial<
+            Record<Action, string>
+          >
+        )[action] ?? action)
+      : action;
+    const icon = action.startsWith('whitelist-')
+      ? 'whitelist'
+      : action === 'edit-operator'
+        ? 'edit'
+        : ['op', 'deop'].includes(action)
+          ? 'op'
+          : action === 'kick'
+            ? 'kick'
+            : 'ban';
+    return (
       <button
         type="button"
-        className="secondary"
+        className={`secondary${detail ? ' minecraft-player-access-action' : ''}${detail && ['kick', 'ban', 'pardon'].includes(action) ? ' minecraft-player-access-action--danger' : ''}`}
         key={action}
         aria-label={t(key('actionFor'), { action: t(key(labelKey)), name: row.name })}
-        disabled={disabled}
-        onClick={() => choose(action, row)}
+        disabled={disabled || unavailable}
+        onClick={() => {
+          if (!unavailable) choose(action, row);
+        }}
       >
+        {detail && <Icon name={icon} />}
         {t(key(labelKey))}
       </button>
-    ) : null;
+    );
+  };
   const playerActions = (row: MinecraftPlayerRow, detail = false) =>
     props.canManage
       ? [
-          rowAction(row, row.whitelisted ? 'whitelist-remove' : 'whitelist-add'),
-          rowAction(
-            row,
-            row.operator ? 'deop' : 'op',
-            detail && !row.operator ? 'detailOp' : row.operator ? 'deop' : 'op',
-          ),
-          offline && row.operator && rowAction(row, 'edit-operator'),
-          running && row.online && rowAction(row, 'kick', detail ? 'detailKick' : 'kick'),
-          running &&
-            rowAction(
-              row,
-              row.banned ? 'pardon' : 'ban',
-              detail && !row.banned ? 'detailBan' : row.banned ? 'pardon' : 'ban',
-            ),
+          rowAction(row, row.whitelisted ? 'whitelist-remove' : 'whitelist-add', detail),
+          rowAction(row, row.operator ? 'deop' : 'op', detail),
+          offline && row.operator && rowAction(row, 'edit-operator', detail),
+          (detail || (running && row.online)) && rowAction(row, 'kick', detail),
+          (detail || running) && rowAction(row, row.banned ? 'pardon' : 'ban', detail),
         ].filter(Boolean)
       : [];
   const candidate = verified

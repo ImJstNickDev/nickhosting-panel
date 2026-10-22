@@ -69,6 +69,10 @@ export const minecraftPlayersMessages: Record<string, [string, string]> = {
     'Comando di espulsione inviato. Il giocatore può riconnettersi.',
   ],
   'players.refresh': ['Refresh players', 'Aggiorna giocatori'],
+  'players.onlineActionsNotice': [
+    'The player needs to be online to use some actions.',
+    'Il giocatore deve essere online per usare alcune azioni.',
+  ],
   'players.detailOp': ['Add operator', 'Aggiungi operatore'],
   'players.detailKick': ['Kick from server', 'Espelli dal server'],
   'players.detailBan': ['Ban from server', 'Banna dal server'],

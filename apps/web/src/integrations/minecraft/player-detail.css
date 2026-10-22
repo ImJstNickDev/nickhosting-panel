@@ -720,3 +720,30 @@ button.minecraft-player-destructive:hover {
     height: 48px;
   }
 }
+
+.minecraft-player-online-notice {
+  margin: 0 0 18px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--muted) 6%, var(--surface));
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.minecraft-player-action-group select:disabled {
+  background: color-mix(in srgb, var(--muted) 16%, var(--surface));
+  color: var(--muted);
+  opacity: 1;
+  cursor: not-allowed;
+}
+.minecraft-player-full-actions > .minecraft-player-access-action {
+  justify-content: flex-start;
+  text-align: left;
+  gap: 10px;
+}
+.minecraft-player-access-action svg {
+  flex-shrink: 0;
+}
+.minecraft-player-access-action--danger svg {
+  color: #c93642;
+}

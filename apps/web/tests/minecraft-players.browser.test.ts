@@ -757,6 +757,22 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     await browserExpect(
       user.getByRole('combobox', { name: 'Game mode', exact: true }),
     ).toBeDisabled();
+    await browserExpect(
+      user.getByText('The player needs to be online to use some actions.', { exact: true }),
+    ).toBeVisible();
+    const access = user.locator('.minecraft-player-access-action');
+    await browserExpect(access.filter({ hasText: 'Kick from server' })).toBeDisabled();
+    await browserExpect(access.filter({ hasText: 'Ban from server' })).toBeDisabled();
+    for (const button of await access.all()) {
+      await browserExpect(button.locator('svg')).toHaveCount(1);
+      expect(await button.evaluate((element) => getComputedStyle(element).justifyContent)).toBe(
+        'flex-start',
+      );
+    }
+    const disabledMode = user.getByRole('combobox', { name: 'Game mode', exact: true });
+    expect(
+      await disabledMode.evaluate((element) => getComputedStyle(element).backgroundColor),
+    ).not.toBe('rgb(255, 255, 255)');
     await browserExpect(user.locator('.minecraft-statistics-summary')).toContainText('1h 0m');
     await browserExpect(user.locator('.minecraft-statistics-summary')).toContainText('2.5');
     await browserExpect(

@@ -473,6 +473,9 @@ export function MinecraftPlayerDetailView({
           <section className="minecraft-player-panel">
             <h3>{t(key('playerActions'))}</h3>
             <div className="minecraft-player-action-group">
+              {data.online !== 'online' && (
+                <p className="minecraft-player-online-notice">{t(key('onlineActionsNotice'))}</p>
+              )}
               <Select
                 label={t(key('gamemode'))}
                 value={
