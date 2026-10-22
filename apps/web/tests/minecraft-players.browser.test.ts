@@ -758,7 +758,20 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
         'These values come from saved server files. They may differ from the player’s current state.',
         { exact: true },
       ),
-    ).toBeVisible();
+    ).toHaveCount(0);
+    await browserExpect(user.locator('.minecraft-players')).not.toHaveClass(/workspace-surface/);
+    await user.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+    await user.getByRole('button', { name: 'Copy UUID', exact: true }).click();
+    expect(await user.evaluate(() => navigator.clipboard.readText())).toBe(uuid);
+    await browserExpect(
+      user.getByRole('button', { name: 'Copy UUID', exact: true }).locator('path'),
+    ).toHaveAttribute('d', 'M9 8h11v13H9z M5 16H3V3h11v2');
+    await browserExpect(user.locator('.minecraft-statistics-summary')).toContainText('Playtime');
+    await browserExpect(user.locator('.minecraft-statistics-summary')).toContainText(
+      'Kill/Death ratio',
+    );
+    await user.mouse.move(0, 0);
+    await user.getByRole('heading', { name: player.name, exact: true }).focus();
     await browserExpect(
       user.locator('.minecraft-statistics-group').filter({ hasText: 'Distance' }),
     ).toContainText('1,250.5 blocks');
@@ -838,7 +851,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
         },
       }),
     );
-    await user.getByRole('button', { name: 'Refresh saved data', exact: true }).click();
+    await user.getByRole('button', { name: 'Refresh', exact: true }).click();
     await browserExpect(user.getByRole('alert')).toBeVisible();
     await screenshot(user, 'minecraft-player-detail-error-desktop-en');
     await user.unroute(url);

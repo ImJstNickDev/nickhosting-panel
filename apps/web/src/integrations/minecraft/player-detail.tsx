@@ -9,8 +9,10 @@ import { gameUiClient } from '../../features/integrations.js';
 import { MinecraftPlayerBody } from './player-body.js';
 import { PlayerRoles } from './player-card.js';
 import type { PlayerGameplayAction } from './player-detail-actions.js';
+import { PlayerIcon } from './player-icons.js';
 import { minecraftItemIcon, minecraftPlayerHudAsset } from './player-item-assets.js';
 import { PlayerStatistics, readableMinecraftId } from './player-statistics.js';
+import { PlayerUuid } from './player-uuid.js';
 import type { MinecraftPlayerRow } from './players-model.js';
 import './player-detail.css';
 
@@ -420,36 +422,43 @@ export function MinecraftPlayerDetailView({
   };
   return (
     <div className="minecraft-player-detail">
-      {back}
-      <header className="minecraft-player-detail-header">
-        <div className="minecraft-player-detail-identity">
-          <h2 tabIndex={-1} ref={heading}>
-            {name}
-          </h2>
-          <code>{uuid}</code>
-          {row && <PlayerRoles row={{ ...row, online: false }} />}
-          <p className="muted">{t(key(`presence.${data.online}`))}</p>
-        </div>
+      <div className="minecraft-player-detail-toolbar">
+        {back}
         <button
           type="button"
-          className="secondary"
+          className="secondary minecraft-player-refresh"
           disabled={detail.isFetching || pending}
+          aria-busy={detail.isFetching}
           onClick={() => void detail.refetch()}
         >
+          <PlayerIcon name="refresh" />
           {t(key('refreshDetail'))}
         </button>
-      </header>
-      <div className="minecraft-player-snapshot-note">
-        <p>{t(key('savedSnapshot'))}</p>
-        <span>
-          {data.snapshot.savedAt
-            ? t(key('savedAt'), { date: format.date(data.snapshot.savedAt) })
-            : t(key('saveTimeUnknown'))}
-        </span>
-        {data.snapshot.state !== 'available' && (
-          <p role="status">{t(key(`snapshot.${data.snapshot.state}`))}</p>
-        )}
       </div>
+      <header className="minecraft-player-detail-header">
+        <div className="minecraft-player-detail-identity">
+          <div className="minecraft-player-identity-line">
+            <h2 tabIndex={-1} ref={heading}>
+              {name}
+            </h2>
+            <PlayerUuid uuid={uuid} />
+          </div>
+          <div className="minecraft-player-detail-meta">
+            <span className="minecraft-player-presence">{t(key(`presence.${data.online}`))}</span>
+            {row && <PlayerRoles row={{ ...row, online: false }} />}
+            <span className="minecraft-player-saved-time">
+              {data.snapshot.savedAt
+                ? t(key('savedAt'), { date: format.date(data.snapshot.savedAt) })
+                : t(key('saveTimeUnknown'))}
+            </span>
+          </div>
+          {data.snapshot.state !== 'available' && (
+            <p className="minecraft-player-snapshot-state" role="status">
+              {t(key(`snapshot.${data.snapshot.state}`))}
+            </p>
+          )}
+        </div>
+      </header>
       <div className="minecraft-player-detail-columns">
         <div className="minecraft-player-detail-main">
           <section className="minecraft-player-panel minecraft-player-inventory-panel">

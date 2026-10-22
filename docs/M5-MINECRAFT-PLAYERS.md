@@ -29,6 +29,14 @@ The ellipsis popover starts at the trigger's left edge and adjusts to stay withi
 the viewport. It separates View player, moderation, and Heal/Feed with dividers;
 unauthorized empty groups are omitted. Cards remain horizontal on narrow screens.
 
+The player detail has no enclosing workspace card: its toolbar, identity header
+and Inventory / Player actions / Statistics cards sit directly on the page.
+Each card has a separated title row. Refresh is a compact labeled icon button;
+the UUID's copy icon reports success accessibly and surfaces clipboard failures.
+The saved timestamp and exceptional snapshot states remain available without
+the former generic saved-files disclaimer. Statistics use “Playtime” and
+“Kill/Death ratio” in English.
+
 ## Saved player data
 
 The reader derives the world from validated `server.properties` and considers
@@ -168,6 +176,14 @@ Typecheck, lint, production build and independent screenshot review passed.
 Read-only dev Firefox confirmed that the local bitmap digits load without a
 container restart. New derived font images remain gitignored; no font download,
 dependency, API/configuration or persistent game-state change is required.
+
+Standalone-card follow-up: 16 Players browser cases pass, including an actual
+clipboard write/read, absence of the enclosing workspace surface, shorter refresh
+label and revised statistic labels. The two desktop/Italian-mobile cases are
+repeated after the narrow UUID layout adjustment. Typecheck, lint, catalog parity,
+production build and independent code/visual review pass. Read-only dev Firefox
+also confirms the standalone layout, copy control and Refresh label with no
+script errors, overflow or writes. Changes use existing source watchers only.
 
 Rollback reverts the source and restores the previous frontend image if needed.
 There is no migration to reverse. Preserve any user-created reset recovery files
