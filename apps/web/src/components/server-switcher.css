@@ -1,10 +1,10 @@
 .server-switcher-trigger {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 16px;
-  gap: 7px 10px;
+  gap: 3px 10px;
   width: 100%;
-  min-height: 74px;
-  padding: 12px;
+  min-height: 56px;
+  padding: 8px 12px;
   border: 1px solid #cbd4d8;
   border-radius: 9px;
   background: var(--surface, #fff);
@@ -20,11 +20,12 @@
 }
 .server-switcher-label {
   grid-column: 1;
-  font-size: 0.6875rem;
-  font-weight: 650;
-  letter-spacing: 0.07em;
+  font-size: 0.625rem;
+  line-height: 1.2;
+  font-weight: 400;
+  letter-spacing: 0.03em;
   text-transform: uppercase;
-  color: #52616c;
+  color: #64717a;
 }
 .server-switcher-name {
   grid-column: 1;
@@ -32,6 +33,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 0.94rem;
+  line-height: 1.3;
   font-weight: 650;
 }
 .server-switcher-chevron {

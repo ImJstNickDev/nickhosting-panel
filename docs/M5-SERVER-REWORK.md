@@ -259,3 +259,10 @@ No API, schema, environment or infrastructure change was required. All new serve
 operations used the disposable browser fixture database and mock providers,
 cleaned with the harness; no live test assets were created. This UI follow-up can
 be reverted independently while retaining the prior migration and permissions.
+
+The Owner's density refinement reduces the selector's expanded minimum height
+from 74 to 56 px, vertical padding from 12 to 8 px and row gap from 7 to 3 px.
+The label is now 10 px, regular weight and a quieter gray; the server name keeps
+its emphasis. Three existing browser journeys passed after this CSS-only change,
+including EN/IT desktop/mobile screenshots and accessibility checks; scoped Biome
+passed. No runtime behavior, infrastructure or live test assets changed.
