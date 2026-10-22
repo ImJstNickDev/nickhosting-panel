@@ -207,3 +207,5 @@ Reviewed fixture screenshots:
 - [Italian 320px detail](screenshots/m5/minecraft-player-detail-320-mobile-it.png)
 - [Reset confirmation](screenshots/m5/minecraft-player-reset-confirm-desktop-en.png)
 - [Wave renderer fixture](screenshots/m5/minecraft-player-wave-renderer.png)
+
+XP alignment refinement: the centered bar uses an odd native-column count, matching the odd-width digit runs. The level begins exactly seven native rows above the bar, avoiding half-column centering and fractional wrapper-height offsets. Desktop and mobile browser assertions verify the shared pixel origin as well as scale.

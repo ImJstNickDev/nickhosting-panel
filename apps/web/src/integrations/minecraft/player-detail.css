@@ -522,8 +522,8 @@
 }
 .minecraft-player-level {
   position: absolute;
-  /* One native XP-bar pixel is 1/5 of its rendered height. */
-  bottom: calc(120% - 5px);
+  /* Share the bar origin: seven native rows above, two rows overlapping. */
+  top: calc(-7 * var(--minecraft-xp-pixel));
   left: 50%;
   transform: translateX(-50%);
   display: flex;

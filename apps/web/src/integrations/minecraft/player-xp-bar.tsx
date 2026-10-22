@@ -64,7 +64,10 @@ export function PlayerXpBar({
         getComputedStyle(canvas).getPropertyValue('--minecraft-xp-pixel'),
       );
       const unit = Number.isFinite(configuredUnit) && configuredUnit > 0 ? configuredUnit : 2;
-      const width = Math.max(1, Math.floor(parent.getBoundingClientRect().width / unit));
+      // Digit runs are always an odd number of native pixels (6n + 1).
+      // An odd bar width keeps both centered origins on the same pixel grid.
+      const available = Math.max(1, Math.floor(parent.getBoundingClientRect().width / unit));
+      const width = available % 2 === 0 ? available - 1 : available;
       canvas.width = width;
       canvas.height = 5;
       canvas.style.width = `${width * unit}px`;

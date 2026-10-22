@@ -800,6 +800,8 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
         pixelY: bar.height / canvas.height,
         digitPixel: digit ? digit.width / 7 : null,
         levelBottom: level.bottom - bar.top,
+        originX: (level.left - bar.left) / (bar.width / canvas.width),
+        originY: (level.top - bar.top) / (bar.height / canvas.height),
         width: bar.width,
       };
     });
@@ -807,6 +809,8 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     expect(hudGeometry.gap).toBeLessThanOrEqual(4);
     expect(hudGeometry.pixelX).toBe(hudGeometry.pixelY);
     if (hudGeometry.digitPixel !== null) expect(hudGeometry.pixelX).toBe(hudGeometry.digitPixel);
+    expect(hudGeometry.originX).toBeCloseTo(Math.round(hudGeometry.originX), 5);
+    expect(hudGeometry.originY).toBeCloseTo(-7, 5);
     expect(hudGeometry.levelBottom).toBeGreaterThanOrEqual(2);
     expect(hudGeometry.levelBottom).toBeLessThanOrEqual(4);
     await user.locator('.minecraft-player-hud').screenshot({
@@ -815,6 +819,20 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     await screenshot(user, 'minecraft-player-detail-desktop-en');
     await accessible();
     await user.setViewportSize({ width: 320, height: 844 });
+    await expect
+      .poll(async () =>
+        user.locator('.minecraft-player-hud').evaluate((hud) => {
+          const canvas = hud.querySelector<HTMLCanvasElement>('.minecraft-player-xp-track');
+          const level = hud.querySelector('.minecraft-player-level')?.getBoundingClientRect();
+          if (!canvas || !level) return false;
+          const bar = canvas.getBoundingClientRect();
+          const unit = bar.height / canvas.height;
+          const x = (level.left - bar.left) / unit;
+          const y = (level.top - bar.top) / unit;
+          return Math.abs(x - Math.round(x)) < 0.001 && Math.abs(y + 7) < 0.001;
+        }),
+      )
+      .toBe(true);
     await screenshot(user, 'minecraft-player-detail-small-mobile-en');
     await accessible();
     await user.setViewportSize({ width: 1440, height: 1000 });
