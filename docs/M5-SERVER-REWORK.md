@@ -227,3 +227,35 @@ publication or runtime transition. If a build rollback is needed, rebuild the
 reviewed source with the retained migration history and restart only the affected
 dev services using the existing complete Compose chain. Keep mounts, networking,
 provider data and all game files unchanged.
+
+## Server selector follow-up (2026-10-22)
+
+The Owner's visual concept replaces the separate All servers link, server title
+and game/runtime subtitle with one bordered Currently managing card: muted label,
+server name and chevron. It follows the application's existing color tokens.
+The compact rail retains an accessible trigger, and the mobile drawer uses the
+same selector. The topbar and server destinations keep their current behavior.
+
+Opening the selector loads the existing permission-filtered server list on demand.
+Its bounded initial list explicitly indicates additional results and links to
+All servers; loading and retryable failures do not remove that exit. Ordinary
+router links retain unsaved-change protection. The native popover supports
+outside dismissal and Escape without closing the containing mobile drawer.
+
+Validation: all 8 contextual-navigation browser cases passed, including real
+isolated server switching, draft cancel/discard, lazy loading, failure/retry,
+outside dismissal, Escape focus, compact/mobile layouts and zero axe findings.
+The first run had one incorrect test selector (Retry instead of the existing
+Try again label); the corrected complete run passed. TypeScript, scoped Biome,
+production build and i18n checks passed (3,098 EN/IT keys plus pseudolocale).
+The existing large-chunk build warning remains. Independent review found no
+must-fix issue. Reviewed [desktop menu](screenshots/m5/server-switcher-open-desktop-en.png),
+[compact rail](screenshots/m5/server-switcher-compact-en.png),
+[mobile card](screenshots/m5/server-switcher-mobile-it.png) and
+[mobile menu](screenshots/m5/server-switcher-open-mobile-it.png); existing
+Console/Status desktop/mobile EN/IT screenshots were refreshed.
+
+No API, schema, environment or infrastructure change was required. All new server
+operations used the disposable browser fixture database and mock providers,
+cleaned with the harness; no live test assets were created. This UI follow-up can
+be reverted independently while retaining the prior migration and permissions.

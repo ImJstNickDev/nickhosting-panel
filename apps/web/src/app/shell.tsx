@@ -16,7 +16,6 @@ import { Tooltip } from '../components/tooltip.js';
 import { ErrorNotice, Loading, Time } from '../components/ui.js';
 import { fileSaveScope } from '../features/file-background-save.js';
 import { FileSaveNotices } from '../features/file-save-notices.js';
-import { gameUiRegistry } from '../features/integrations.js';
 import { platformPath, type ServerInfo } from '../features/service-contracts.js';
 import { useLocale, useT } from './i18n.js';
 import { serverNavigation } from './server-navigation.js';
@@ -159,10 +158,8 @@ export function Shell() {
           serverIdentity={
             serverId
               ? {
+                  id: serverId,
                   name: server.data?.name ?? t('web.loading'),
-                  detail: server.data
-                    ? `${t(gameUiRegistry.get(server.data.gameId)?.descriptor.nameKey ?? 'web.server')} · ${server.data.runtimeId}`
-                    : '',
                 }
               : undefined
           }

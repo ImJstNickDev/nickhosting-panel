@@ -45,7 +45,8 @@ pending final consolidated review has passed.
 
 ### Server workspace (2026-10-22)
 
-Inside a server, the left sidebar shows server identity, an All servers exit and
+Inside a server, the left sidebar shows a Currently managing selector with the
+server name. Its menu lists accessible servers and an All servers exit. Below are
 three groups: Your server (Console, Files, Activity), Tools (integration-declared
 Players, Worlds, Mods, Plugins, Datapacks, Modpacks, Backups and Schedules), and
 Config (Network, Settings, Subusers). Capabilities, runtime and effective granular

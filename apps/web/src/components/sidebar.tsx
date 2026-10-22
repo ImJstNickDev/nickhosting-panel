@@ -12,6 +12,7 @@ import {
 import { Link, useLocation } from 'react-router';
 import { useT } from '../app/i18n.js';
 import { focusWorkspace } from '../app/workspace-focus.js';
+import { ServerSwitcher } from './server-switcher.js';
 import { Tooltip } from './tooltip.js';
 import './sidebar.css';
 
@@ -311,7 +312,7 @@ export function Sidebar({
     group?: string;
     active?: boolean;
   }[];
-  serverIdentity?: { name: string; detail: string };
+  serverIdentity?: { id: string; name: string };
 }) {
   const t = useT();
   const location = useLocation();
@@ -339,6 +340,7 @@ export function Sidebar({
       data-collapsed={collapsed || undefined}
       onFocusCapture={(event) => {
         const target = event.target;
+        if (target.closest('.server-switcher-popover')) return;
         const scrollport = desktop ? event.currentTarget : target.closest<HTMLElement>('.nav');
         if (!scrollport) return;
         const bounds = target.getBoundingClientRect();
@@ -409,30 +411,13 @@ export function Sidebar({
       </div>
       {serverIdentity && (
         <div className="sidebar-server">
-          <Tooltip content={compact ? t('serverNav.allServers') : ''}>
-            <Link
-              className="sidebar-link"
-              to="/servers"
-              onClick={closeAfterNavigation}
-              aria-label={t('serverNav.allServers')}
-            >
-              <svg
-                className="sidebar-icon"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.6"
-                aria-hidden="true"
-              >
-                <path d="m10 5-7 7 7 7M3 12h18" />
-              </svg>
-              <span className="sidebar-label">{t('serverNav.allServers')}</span>
-            </Link>
-          </Tooltip>
-          <div className="sidebar-server-identity" aria-hidden={compact || undefined}>
-            <strong title={serverIdentity.name}>{serverIdentity.name}</strong>
-            <small>{serverIdentity.detail}</small>
-          </div>
+          <ServerSwitcher
+            key={serverIdentity.id}
+            server={serverIdentity}
+            compact={compact}
+            active={desktop || open}
+            onNavigate={closeAfterNavigation}
+          />
         </div>
       )}
       <nav className="nav" aria-label={t('web.navigation')}>

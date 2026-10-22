@@ -1,5 +1,13 @@
 export const serverNavigationWebMessages: Record<string, readonly [string, string]> = {
   'web.pagination': ['Pagination', 'Paginazione'],
+  'serverNav.managing': ['Currently managing', 'Gestione attuale'],
+  'serverNav.managingName': ['Currently managing: {name}', 'Gestione attuale: {name}'],
+  'serverNav.switch': ['Switch server', 'Cambia server'],
+  'serverNav.empty': ['No servers available.', 'Nessun server disponibile.'],
+  'serverNav.moreServers': [
+    'More servers are available in All servers.',
+    'Altri server sono disponibili in Tutti i server.',
+  ],
   'serverNav.allServers': ['All servers', 'Tutti i server'],
   'serverNav.server': ['Your server', 'Il tuo server'],
   'serverNav.tools': ['Tools', 'Strumenti'],

@@ -326,20 +326,6 @@ dialog.mobile-navigation::backdrop {
 .sidebar .sidebar-server {
   min-width: 0;
 }
-.sidebar .sidebar-server-identity {
-  padding: 10px 11px 0;
-  display: grid;
-  gap: 3px;
-}
-.sidebar .sidebar-server-identity strong,
-.sidebar .sidebar-server-identity small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sidebar .sidebar-server-identity small {
-  color: #52616c;
-}
 .sidebar:has(.sidebar-server) {
   gap: 16px;
 }
@@ -356,9 +342,6 @@ dialog.mobile-navigation::backdrop {
     padding: 0;
     border-top: 1px solid #cdd6d9;
     margin: 8px 10px 0;
-  }
-  .sidebar[data-collapsed] .sidebar-server-identity {
-    display: none;
   }
 }
 

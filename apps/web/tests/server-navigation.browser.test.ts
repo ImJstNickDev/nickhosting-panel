@@ -1,7 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { AxeBuilder } from '@axe-core/playwright';
 import { minecraftManifest } from '@nickhosting/minecraft';
-import { expect as browserExpect, type Page } from '@playwright/test';
+import { expect as browserExpect, type Page, type Route } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
@@ -207,6 +208,123 @@ describe('M5 contextual server sidebar and informational Status navigation', () 
       await user.unroute(descriptorPath);
     }
     await provider.processPending();
+  });
+
+  it('loads the server switcher on demand, keeps the exit available on failure and restores keyboard focus', async () => {
+    const path = '**/v1/platform/servers?*';
+    let held: Route | undefined;
+    let requests = 0;
+    await user.route(path, (route) => {
+      requests++;
+      held = route;
+    });
+    try {
+      await user.goto(`${base}/console`);
+      const trigger = user.locator('.server-switcher-trigger');
+      await browserExpect(trigger).toHaveAccessibleName('Currently managing: Survival');
+      await browserExpect(trigger).toContainText('Currently managing');
+      await browserExpect(user.locator('.sidebar-server-identity')).toHaveCount(0);
+      expect(requests).toBe(0);
+      await trigger.focus();
+      await trigger.press('Enter');
+      const popup = user.getByRole('dialog', { name: 'Switch server', exact: true });
+      await browserExpect(popup).toBeVisible();
+      await expect.poll(() => held !== undefined).toBe(true);
+      await browserExpect(
+        popup.getByRole('link', { name: 'All servers', exact: true }),
+      ).toBeVisible();
+      await held?.fulfill({
+        status: 503,
+        json: { code: 'integration_unavailable', messageKey: 'errors.integration_unavailable' },
+      });
+      await browserExpect(popup.getByRole('alert')).toBeVisible();
+      await user.unroute(path);
+      await popup.getByRole('button', { name: 'Try again', exact: true }).click();
+      await browserExpect(popup.getByRole('link', { name: 'Survival', exact: true })).toBeVisible();
+      await accessible();
+      await user.screenshot({
+        path: resolve('docs/screenshots/m5/server-switcher-open-desktop-en.png'),
+        fullPage: true,
+      });
+      await user.keyboard.press('Escape');
+      await browserExpect(popup).not.toBeVisible();
+      await browserExpect(trigger).toBeFocused();
+      await trigger.click();
+      await browserExpect(popup).toBeVisible();
+      await user.locator('.topbar-context').click();
+      await browserExpect(popup).not.toBeVisible();
+    } finally {
+      await user.unroute(path);
+    }
+  });
+
+  it('switches real isolated servers with draft protection and keeps the chooser usable in compact and mobile navigation', async () => {
+    const created = await journeyRequest<{ serverId: string }>(fixture, user, '/v1/servers', {
+      idempotencyKey: randomUUID(),
+      mappingId: provider.ids.mappingId,
+      name: 'Creative',
+      limits: { memory: 128, cpu: 10, disk: 64, swap: 0, io: 500 },
+      autoStart: false,
+      minecraft: { choiceId: provider.ids.choiceId, configuration: { eula: true } },
+    });
+    await provider.processPending();
+    await user.goto(`${base}/settings`);
+    await user.getByLabel('Name', { exact: true }).fill('Unsaved server name');
+    const trigger = user.locator('.server-switcher-trigger');
+    const popup = user.getByRole('dialog', { name: 'Switch server', exact: true });
+    await trigger.click();
+    await popup.getByRole('link', { name: 'Creative', exact: true }).click();
+    const discard = user.getByRole('dialog', { name: 'Unsaved changes', exact: true });
+    await browserExpect(discard).toBeVisible();
+    await discard.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await browserExpect(user.getByLabel('Name', { exact: true })).toHaveValue(
+      'Unsaved server name',
+    );
+    await browserExpect(trigger).toHaveAccessibleName('Currently managing: Survival');
+    await trigger.click();
+    await popup.getByRole('link', { name: 'Creative', exact: true }).click();
+    await discard.getByRole('button', { name: 'Discard changes', exact: true }).click();
+    await browserExpect(user).toHaveURL(`${fixture.origin}/servers/${created.serverId}/console`);
+    await browserExpect(trigger).toHaveAccessibleName('Currently managing: Creative');
+    await user.getByRole('button', { name: 'Collapse navigation', exact: true }).click();
+    await trigger.click();
+    await browserExpect(popup).toBeInViewport({ ratio: 1 });
+    await accessible();
+    await user.screenshot({
+      path: resolve('docs/screenshots/m5/server-switcher-compact-en.png'),
+      fullPage: true,
+    });
+    await popup.getByRole('link', { name: 'Survival', exact: true }).click();
+    await browserExpect(user).toHaveURL(`${base}/console`);
+    await user.getByRole('button', { name: 'Expand navigation', exact: true }).click();
+    await journeyRequest(fixture, user, '/api/auth/update-user', { locale: 'it' });
+    await user.setViewportSize({ width: 390, height: 844 });
+    await user.reload();
+    await user.getByRole('button', { name: 'Menu', exact: true }).click();
+    const drawer = user.getByRole('dialog', { name: 'Navigazione', exact: true });
+    await browserExpect(trigger).toHaveAccessibleName('Gestione attuale: Survival');
+    await user.screenshot({
+      path: resolve('docs/screenshots/m5/server-switcher-mobile-it.png'),
+      fullPage: false,
+    });
+    await trigger.click();
+    const mobilePopup = user.getByRole('dialog', { name: 'Cambia server', exact: true });
+    await browserExpect(mobilePopup).toBeInViewport({ ratio: 1 });
+    await accessible();
+    await user.screenshot({
+      path: resolve('docs/screenshots/m5/server-switcher-open-mobile-it.png'),
+      fullPage: false,
+    });
+    await user.keyboard.press('Escape');
+    await browserExpect(mobilePopup).not.toBeVisible();
+    await browserExpect(drawer).toBeVisible();
+    await browserExpect(trigger).toBeFocused();
+    await trigger.click();
+    await mobilePopup.getByRole('link', { name: 'Tutti i server', exact: true }).click();
+    await browserExpect(user).toHaveURL(`${fixture.origin}/servers`);
+    await browserExpect(drawer).not.toBeVisible();
+    await journeyRequest(fixture, user, '/api/auth/update-user', { locale: 'en' });
+    await user.setViewportSize({ width: 1440, height: 1000 });
   });
 
   it('renders Console and Status in English and Italian at desktop and mobile sizes', async () => {
