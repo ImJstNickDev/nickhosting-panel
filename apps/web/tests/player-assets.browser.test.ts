@@ -4,7 +4,7 @@ import { createServer } from 'vite';
 import { expect, it } from 'vitest';
 
 it.each(['chromium', 'firefox'] as const)(
-  'crops named SVG atlas views and caches one resource in %s',
+  'preserves atlas crops and the XP native pixel grid in %s',
   async (engine) => {
     let requests = 0;
     let atlas = '';
@@ -20,6 +20,11 @@ it.each(['chromium', 'firefox'] as const)(
               if (req.url === '/atlas-fixture') {
                 res.setHeader('Content-Type', 'text/html');
                 res.end('<!doctype html><html><body></body></html>');
+              } else if (req.url === '/xp-fixture') {
+                res.setHeader('Content-Type', 'text/html');
+                res.end(
+                  '<!doctype html><html><body><div id="root"></div><script type="module" src="/tests/fixtures/player-xp-page.tsx"></script></body></html>',
+                );
               } else if (req.url === '/sprite.svg') {
                 requests++;
                 res.setHeader('Content-Type', 'image/svg+xml');
@@ -86,6 +91,43 @@ it.each(['chromium', 'firefox'] as const)(
       return ['__proto__', 'constructor', 'mod:unavailable', '../dirt'].map(id => minecraftItemIcon(id) ?? null);
     })()`);
       expect(unknown).toEqual([null, null, null, null]);
+      await page.goto(`${origin}xp-fixture`);
+      const pixels = () =>
+        page.locator('canvas').evaluate((canvas: HTMLCanvasElement) => {
+          const context = canvas.getContext('2d');
+          if (!context) throw new Error('Missing XP context');
+          const color = (x: number) => Array.from(context.getImageData(x, 2, 1, 1).data);
+          const box = canvas.getBoundingClientRect();
+          return {
+            width: canvas.width,
+            unitX: box.width / canvas.width,
+            unitY: box.height / 5,
+            left: color(0),
+            right: color(canvas.width - 1),
+            before: color(Math.floor(canvas.width / 2) - 1),
+            after: color(Math.floor(canvas.width / 2)),
+          };
+        });
+      await expect.poll(async () => (await pixels()).left).toEqual([255, 0, 0, 255]);
+      expect(await pixels()).toMatchObject({
+        width: 175,
+        unitX: 2,
+        unitY: 2,
+        right: [0, 0, 255, 255],
+      });
+      await page.getByRole('button', { name: 'Half', exact: true }).click();
+      await expect.poll(async () => (await pixels()).before).toEqual([0, 255, 0, 255]);
+      expect((await pixels()).after).toEqual([51, 51, 51, 255]);
+      await page.getByRole('button', { name: 'Full', exact: true }).click();
+      await expect.poll(async () => (await pixels()).right).toEqual([0, 255, 255, 255]);
+      await page.getByRole('button', { name: 'Narrow', exact: true }).click();
+      await expect.poll(async () => (await pixels()).width).toBe(233);
+      expect(await pixels()).toMatchObject({
+        unitX: 1.5,
+        unitY: 1.5,
+        left: [255, 255, 0, 255],
+        right: [0, 255, 255, 255],
+      });
     } finally {
       await browser.close();
       await vite.close();

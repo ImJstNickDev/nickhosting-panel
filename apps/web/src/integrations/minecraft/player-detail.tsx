@@ -13,6 +13,7 @@ import { PlayerIcon } from './player-icons.js';
 import { minecraftItemIcon, minecraftPlayerHudAsset } from './player-item-assets.js';
 import { PlayerStatistics, readableMinecraftId } from './player-statistics.js';
 import { PlayerUuid } from './player-uuid.js';
+import { PlayerXpBar } from './player-xp-bar.js';
 import type { MinecraftPlayerRow } from './players-model.js';
 import './player-detail.css';
 
@@ -273,24 +274,11 @@ function PlayerVitalsHud({ vitals }: { vitals: MinecraftPlayerDetail['vitals'] }
                 max={1}
                 value={Math.max(0, Math.min(1, vitals.experienceProgress))}
               />
-              <div
-                aria-hidden="true"
-                className="minecraft-player-xp-track"
-                style={
-                  xpBackground
-                    ? { backgroundImage: `url(${xpBackground})`, backgroundColor: 'transparent' }
-                    : undefined
-                }
-              >
-                <span
-                  style={{
-                    clipPath: `inset(0 ${100 - Math.max(0, Math.min(1, vitals.experienceProgress)) * 100}% 0 0)`,
-                    ...(xpProgress
-                      ? { backgroundImage: `url(${xpProgress})`, backgroundColor: 'transparent' }
-                      : {}),
-                  }}
-                />
-              </div>
+              <PlayerXpBar
+                progress={vitals.experienceProgress}
+                background={xpBackground}
+                foreground={xpProgress}
+              />
             </>
           )}
         </div>

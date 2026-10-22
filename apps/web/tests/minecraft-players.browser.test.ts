@@ -790,23 +790,25 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     const hudGeometry = await user.locator('.minecraft-player-hud').evaluate((hud) => {
       const row = hud.querySelector('.minecraft-player-hud-row')?.getBoundingClientRect();
       const bar = hud.querySelector('.minecraft-player-xp-track')?.getBoundingClientRect();
-      const fill = hud.querySelector('.minecraft-player-xp-track > span')?.getBoundingClientRect();
+      const canvas = hud.querySelector<HTMLCanvasElement>('.minecraft-player-xp-track');
+      const digit = hud.querySelector('.minecraft-player-level-digit')?.getBoundingClientRect();
       const level = hud.querySelector('.minecraft-player-level')?.getBoundingClientRect();
-      if (!row || !bar || !fill || !level) throw new Error('Missing HUD');
+      if (!row || !bar || !canvas || !level) throw new Error('Missing HUD');
       return {
         gap: bar.top - row.bottom,
-        ratio: bar.width / bar.height,
+        pixelX: bar.width / canvas.width,
+        pixelY: bar.height / canvas.height,
+        digitPixel: digit ? digit.width / 7 : null,
         levelBottom: level.bottom - bar.top,
-        fillWidth: fill.width,
         width: bar.width,
       };
     });
     expect(hudGeometry.gap).toBeGreaterThanOrEqual(0);
     expect(hudGeometry.gap).toBeLessThanOrEqual(4);
-    expect(hudGeometry.ratio).toBeCloseTo(182 / 5, 0);
+    expect(hudGeometry.pixelX).toBe(hudGeometry.pixelY);
+    if (hudGeometry.digitPixel !== null) expect(hudGeometry.pixelX).toBe(hudGeometry.digitPixel);
     expect(hudGeometry.levelBottom).toBeGreaterThanOrEqual(2);
     expect(hudGeometry.levelBottom).toBeLessThanOrEqual(4);
-    expect(hudGeometry.fillWidth).toBeCloseTo(hudGeometry.width, 0);
     await user.locator('.minecraft-player-hud').screenshot({
       path: resolve('.codex/local/m5-browser/screenshots/minecraft-player-hud-desktop-en.png'),
     });

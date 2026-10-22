@@ -59,8 +59,12 @@ its unavailable saved state. Health/food/XP sit above the inventory; actions and
 position share the middle column. Statistics show four key figures and at most
 two leading rows per mined/used/killed/distance category, with available local
 Minecraft icons. Missing values remain unknown. The HUD keeps health/food close
-to the XP bar, preserves its native 182:5 proportions and clips the full-width
-progress texture without stretching its segments. The centered level uses local
+to the XP bar, draws on a five-row native pixel grid at the same logical scale as the level
+digits. The original 182-column texture is resampled with nearest-neighbor
+onto an integer number of columns, preserving its one-column endcaps; progress
+is clipped to complete native columns. A small decorative 2D canvas redraws
+only for texture/progress/size changes, with no animation loop. The wrapper
+and approved level position are unchanged. The centered level uses local
 bitmap digits with the game's green fill and dark outline. Its final vertical
 alignment is raised by one native XP-bar texel (one fifth of the rendered bar
 height), so the adjustment scales with the inventory width; ordinary text remains
@@ -174,6 +178,8 @@ page overflow or mutating requests. No game assets were created or cleaned.
 HUD follow-up validation: all 16 Players browser cases passed, followed by the two
 desktop/Italian-mobile visual cases after the final level-baseline adjustment.
 The 12 offline preparation tests include independently mapped digit glyphs.
+Cross-browser atlas/XP tests also cover zero, half and full progress, native
+endcaps and scale changes while the HUD width remains constant.
 Typecheck, lint, production build and independent screenshot review passed.
 Read-only dev Firefox confirmed that the local bitmap digits load without a
 container restart. New derived font images remain gitignored; no font download,

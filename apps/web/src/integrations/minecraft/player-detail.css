@@ -456,6 +456,7 @@
   white-space: nowrap;
 }
 .minecraft-player-hud {
+  --minecraft-xp-pixel: 2px;
   width: 100%;
   max-width: 360px;
   margin: 0 auto 18px;
@@ -540,25 +541,19 @@
     1px -1px #000;
 }
 .minecraft-player-level-digit {
-  width: 14px;
-  height: 18px;
+  width: calc(7 * var(--minecraft-xp-pixel));
+  height: calc(9 * var(--minecraft-xp-pixel));
   image-rendering: pixelated;
 }
 .minecraft-player-level-digit + .minecraft-player-level-digit {
-  margin-left: -2px;
+  margin-left: calc(-1 * var(--minecraft-xp-pixel));
 }
 .minecraft-player-xp-track {
   position: absolute;
-  inset: 0;
-  background-color: #1e3122;
-  background-size: 100% 100%;
-  image-rendering: pixelated;
-}
-.minecraft-player-xp-track > span {
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
   display: block;
-  height: 100%;
-  background-color: #61aa20;
-  background-size: 100% 100%;
   image-rendering: pixelated;
 }
 .minecraft-player-xp-total {
@@ -639,12 +634,8 @@ button.minecraft-player-destructive:hover {
   .minecraft-item-count {
     font-size: 0.65rem;
   }
-  .minecraft-player-level-digit {
-    width: 10.5px;
-    height: 13.5px;
-  }
-  .minecraft-player-level-digit + .minecraft-player-level-digit {
-    margin-left: -1.5px;
+  .minecraft-player-hud {
+    --minecraft-xp-pixel: 1.5px;
   }
 }
 
