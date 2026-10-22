@@ -4,11 +4,12 @@ import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { useFormat, useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
-import { ErrorNotice, Loading } from '../../components/ui.js';
+import { ErrorNotice, Loading, Select } from '../../components/ui.js';
 import { gameUiClient } from '../../features/integrations.js';
+import { MinecraftPlayerAvatar } from './player-avatar.js';
 import { MinecraftPlayerBody } from './player-body.js';
 import { PlayerRoles } from './player-card.js';
-import type { PlayerGameplayAction } from './player-detail-actions.js';
+import type { PlayerGameMode, PlayerGameplayAction } from './player-detail-actions.js';
 import { PlayerIcon } from './player-icons.js';
 import { minecraftItemIcon, minecraftPlayerHudAsset } from './player-item-assets.js';
 import { PlayerStatistics, readableMinecraftId } from './player-statistics.js';
@@ -307,7 +308,7 @@ export function MinecraftPlayerDetailView({
   pending: boolean;
   permissionKeys: readonly string[];
   legacyActions: (row: MinecraftPlayerRow) => ReactNode[];
-  onAction(action: PlayerGameplayAction): void;
+  onAction(action: PlayerGameplayAction, mode?: PlayerGameMode): void;
   onBack(): void;
 }) {
   const t = useT();
@@ -393,9 +394,7 @@ export function MinecraftPlayerDetailView({
           className={
             ['kill', 'starve', 'reset'].includes(action)
               ? 'secondary minecraft-player-destructive'
-              : action === 'gamemode'
-                ? 'secondary minecraft-player-gamemode-action'
-                : 'secondary'
+              : 'secondary'
           }
           aria-disabled={pending || !capability?.available}
           onClick={() => {
@@ -424,6 +423,7 @@ export function MinecraftPlayerDetailView({
         </button>
       </div>
       <header className="minecraft-player-detail-header">
+        <MinecraftPlayerAvatar name={name} uuid={uuid} />
         <div className="minecraft-player-detail-identity">
           <div className="minecraft-player-identity-line">
             <h2 tabIndex={-1} ref={heading}>
@@ -473,22 +473,30 @@ export function MinecraftPlayerDetailView({
           <section className="minecraft-player-panel">
             <h3>{t(key('playerActions'))}</h3>
             <div className="minecraft-player-action-group">
-              <dl className="minecraft-player-values">
-                <div>
-                  <dt>{t(key('gamemode'))}</dt>
-                  <dd>
-                    {data.vitals?.gameMode == null
-                      ? '—'
-                      : t(
-                          key(
-                            `mode.${['survival', 'creative', 'adventure', 'spectator'][data.vitals.gameMode] ?? 'unknown'}`,
-                          ),
-                        )}
-                  </dd>
-                </div>
-              </dl>
+              <Select
+                label={t(key('gamemode'))}
+                value={
+                  ['survival', 'creative', 'adventure', 'spectator'][data.vitals?.gameMode ?? -1] ??
+                  ''
+                }
+                disabled={
+                  pending ||
+                  !permissionKeys.includes('game.minecraft.players.gamemode') ||
+                  !data.capabilities.some((value) => value.action === 'gamemode' && value.available)
+                }
+                onChange={(event) => onAction('gamemode', event.target.value as PlayerGameMode)}
+              >
+                <option value="" disabled>
+                  —
+                </option>
+                {(['survival', 'creative', 'adventure', 'spectator'] as const).map((mode) => (
+                  <option key={mode} value={mode}>
+                    {t(key(`mode.${mode}`))}
+                  </option>
+                ))}
+              </Select>
               <div className="minecraft-player-detail-actions minecraft-player-gameplay-actions">
-                {(['gamemode', 'heal', 'feed', 'starve', 'kill'] as const).map(actionButton)}
+                {(['heal', 'feed', 'starve', 'kill'] as const).map(actionButton)}
               </div>
             </div>
             <div className="minecraft-player-action-group">

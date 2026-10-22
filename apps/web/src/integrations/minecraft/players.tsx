@@ -1,4 +1,4 @@
-import { createMinecraftUiController, minecraftUiModule } from '@nickhosting/minecraft/ui';
+import { createMinecraftUiController } from '@nickhosting/minecraft/ui';
 import { useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router';
@@ -14,6 +14,7 @@ import {
 } from '../../components/workspace-controls.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { gameUiClient } from '../../features/integrations.js';
+import { MinecraftPlayerAvatar } from './player-avatar.js';
 import { PlayerCard } from './player-card.js';
 import { MinecraftPlayerDetailView } from './player-detail.js';
 import { type PlayerActionSelection, PlayerGameplayActionDialog } from './player-detail-actions.js';
@@ -39,27 +40,6 @@ type Action =
 type DispatchReceipt = { action: Action; name?: string; uuid?: string };
 type Filter = 'all' | 'online' | 'operators' | 'whitelist' | 'banned';
 const filters: Filter[] = ['all', 'online', 'operators', 'whitelist', 'banned'];
-
-function Avatar({ name, uuid, avatar }: { name: string; uuid?: string; avatar?: string }) {
-  const appearance = minecraftUiModule.playerAppearance;
-  const source = avatar ?? (uuid ? appearance?.avatarUrl(uuid) : undefined) ?? appearance?.fallback;
-  return (
-    <img
-      className="minecraft-player-avatar"
-      src={source}
-      alt=""
-      width="36"
-      height="36"
-      loading="lazy"
-      referrerPolicy="no-referrer"
-      onError={(event) => {
-        if (appearance?.fallback && event.currentTarget.src !== appearance.fallback)
-          event.currentTarget.src = appearance.fallback;
-      }}
-      data-player={name}
-    />
-  );
-}
 
 export function MinecraftPlayersSection(props: GameSectionViewProps) {
   const t = useT();
@@ -334,29 +314,36 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
       setBusy(false);
     }
   }
-  const actionLabel = (action: Action, name: string) =>
-    t(key('actionFor'), { action: t(key(action)), name });
-  const rowAction = (row: MinecraftPlayerRow, action: Action) =>
+  const rowAction = (row: MinecraftPlayerRow, action: Action, labelKey: string = action) =>
     can(action) && row.nameKnown !== false ? (
       <button
         type="button"
         className="secondary"
         key={action}
-        aria-label={actionLabel(action, row.name)}
+        aria-label={t(key('actionFor'), { action: t(key(labelKey)), name: row.name })}
         disabled={disabled}
         onClick={() => choose(action, row)}
       >
-        {t(key(action))}
+        {t(key(labelKey))}
       </button>
     ) : null;
-  const playerActions = (row: MinecraftPlayerRow) =>
+  const playerActions = (row: MinecraftPlayerRow, detail = false) =>
     props.canManage
       ? [
-          rowAction(row, row.operator ? 'deop' : 'op'),
-          offline && row.operator && rowAction(row, 'edit-operator'),
           rowAction(row, row.whitelisted ? 'whitelist-remove' : 'whitelist-add'),
-          running && rowAction(row, row.banned ? 'pardon' : 'ban'),
-          running && row.online && rowAction(row, 'kick'),
+          rowAction(
+            row,
+            row.operator ? 'deop' : 'op',
+            detail && !row.operator ? 'detailOp' : row.operator ? 'deop' : 'op',
+          ),
+          offline && row.operator && rowAction(row, 'edit-operator'),
+          running && row.online && rowAction(row, 'kick', detail ? 'detailKick' : 'kick'),
+          running &&
+            rowAction(
+              row,
+              row.banned ? 'pardon' : 'ban',
+              detail && !row.banned ? 'detailBan' : row.banned ? 'pardon' : 'ban',
+            ),
         ].filter(Boolean)
       : [];
   const candidate = verified
@@ -389,8 +376,10 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
           row={rows.find((row) => row.uuid === detailUuid)}
           pending={disabled}
           permissionKeys={props.permissionKeys}
-          legacyActions={playerActions}
-          onAction={(action) => setGameplaySelection({ uuid: detailUuid, action })}
+          legacyActions={(row) => playerActions(row, true)}
+          onAction={(action, mode) =>
+            setGameplaySelection({ uuid: detailUuid, action, ...(mode ? { mode } : {}) })
+          }
           onBack={() => {
             returnFocus.current = detailUuid;
           }}
@@ -496,7 +485,11 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
               {Boolean(lookupError) && <ErrorNotice error={lookupError} />}
               {verified && candidate && (
                 <div className="minecraft-players-preview">
-                  <Avatar name={verified.name} avatar={verified.avatar} uuid={verified.uuid} />
+                  <MinecraftPlayerAvatar
+                    name={verified.name}
+                    avatar={verified.avatar}
+                    uuid={verified.uuid}
+                  />
                   <div className="minecraft-players-preview-name">
                     <strong>{verified.name}</strong>
                     <small>{t(key('verified'))}</small>

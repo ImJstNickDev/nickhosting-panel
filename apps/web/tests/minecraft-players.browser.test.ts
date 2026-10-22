@@ -751,6 +751,12 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     await browserExpect(
       user.getByRole('img', { name: 'Slot 0: Diamond × 12', exact: true }),
     ).toBeVisible();
+    await browserExpect(
+      user.locator('.minecraft-player-detail-header .minecraft-player-avatar'),
+    ).toBeVisible();
+    await browserExpect(
+      user.getByRole('combobox', { name: 'Game mode', exact: true }),
+    ).toBeDisabled();
     await browserExpect(user.locator('.minecraft-statistics-summary')).toContainText('1h 0m');
     await browserExpect(user.locator('.minecraft-statistics-summary')).toContainText('2.5');
     await browserExpect(
@@ -915,6 +921,37 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
   it('dispatches authorized gameplay actions without presenting saved vitals as confirmation', async () => {
     await running(true);
     await user.goto(`${route()}/${uuid}`);
+    const modeSelect = user.getByRole('combobox', { name: 'Game mode', exact: true });
+    await browserExpect(modeSelect).toBeEnabled();
+    const commandsBeforeCancel = commands.length;
+    await modeSelect.selectOption('creative');
+    const modeDialog = user.getByRole('dialog', { name: 'Game mode', exact: true });
+    await browserExpect(modeDialog.getByText('Creative', { exact: true })).toBeVisible();
+    await modeDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    expect(commands).toHaveLength(commandsBeforeCancel);
+    const accessActions = await user
+      .locator('.minecraft-player-full-actions')
+      .last()
+      .locator('button')
+      .allTextContents();
+    expect(accessActions).toEqual([
+      expect.stringMatching(/whitelist/),
+      expect.stringMatching(/operator/),
+      'Kick from server',
+      'Ban from server',
+    ]);
+    await modeSelect.selectOption('adventure');
+    const modeResponse = user.waitForResponse(
+      (result) =>
+        result.request().method() === 'POST' &&
+        result.url().endsWith(`${api()}/players/${uuid}/actions`),
+    );
+    await user
+      .getByRole('dialog', { name: 'Game mode', exact: true })
+      .getByRole('button', { name: 'Game mode', exact: true })
+      .click();
+    expect((await modeResponse).status()).toBe(202);
+    expect(commands.at(-1)).toContain('gamemode adventure');
     const heal = user.getByRole('button', { name: 'Heal', exact: true });
     await browserExpect(heal).toBeEnabled();
     await heal.click();

@@ -209,3 +209,5 @@ Reviewed fixture screenshots:
 - [Wave renderer fixture](screenshots/m5/minecraft-player-wave-renderer.png)
 
 XP alignment refinement: the centered bar uses an odd native-column count, matching the odd-width digit runs. The level begins exactly seven native rows above the bar, avoiding half-column centering and fractional wrapper-height offsets. Desktop and mobile browser assertions verify the shared pixel origin as well as scale.
+
+Player actions refinement: game mode is selected directly in the actions card, then passed to the existing guarded confirmation flow. Cancelling sends no command; the card continues to show saved state until refreshed. Access actions are ordered whitelist, operator (including existing permission editing), kick, then ban. The identity header reuses the shared player-head image with its existing privacy/fallback behavior. English and Italian detail action labels and desktop/mobile screenshot evidence are included. No backend or permission contracts change.

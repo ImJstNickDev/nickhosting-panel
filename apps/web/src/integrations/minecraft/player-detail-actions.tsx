@@ -13,7 +13,12 @@ import { gameUiClient } from '../../features/integrations.js';
 
 const controller = createMinecraftUiController(gameUiClient);
 export type PlayerGameplayAction = MinecraftPlayerDetailAction['action'];
-export type PlayerActionSelection = { uuid: string; action: PlayerGameplayAction };
+export type PlayerGameMode = Extract<MinecraftPlayerDetailAction, { action: 'gamemode' }>['mode'];
+export type PlayerActionSelection = {
+  uuid: string;
+  action: PlayerGameplayAction;
+  mode?: PlayerGameMode;
+};
 export function PlayerGameplayActionDialog({
   serverId,
   selection,
@@ -63,7 +68,7 @@ export function PlayerGameplayActionDialog({
     if (!selection) return;
     setScopes([]);
     setCoordinates({ x: '', y: '', z: '' });
-    setMode('survival');
+    setMode(selection.mode ?? 'survival');
   }, [selection]);
   const capability = detail.data?.capabilities.find((value) => value.action === selection?.action);
   const allowed = Boolean(
@@ -172,7 +177,10 @@ export function PlayerGameplayActionDialog({
             {!allowed && capability?.reason && (
               <p className="muted">{t(k(`blocked.${capability.reason}`))}</p>
             )}
-            {selection.action === 'gamemode' && (
+            {selection.action === 'gamemode' && selection.mode && (
+              <p>{t(k(`mode.${selection.mode}`))}</p>
+            )}
+            {selection.action === 'gamemode' && !selection.mode && (
               <Select
                 label={t(k('gamemode'))}
                 value={mode}

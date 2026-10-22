@@ -24,6 +24,7 @@
 }
 .minecraft-player-detail-header {
   display: flex;
+  gap: 20px;
   align-items: center;
   padding: 22px;
   margin-bottom: 24px;
@@ -345,9 +346,6 @@
 }
 .minecraft-player-gameplay-actions {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-.minecraft-player-gameplay-actions > .minecraft-player-gamemode-action {
-  grid-column: 1 / -1;
 }
 .minecraft-player-action-group + .minecraft-player-action-group {
   border-top: 1px solid var(--line);
@@ -700,5 +698,25 @@ button.minecraft-player-destructive:hover {
   }
   .minecraft-crafting-arrow {
     font-size: 0.75rem;
+  }
+}
+
+.minecraft-player-detail-header .minecraft-player-avatar {
+  width: 64px;
+  height: 64px;
+  flex-shrink: 0;
+  image-rendering: pixelated;
+  border-radius: 5px;
+}
+.minecraft-player-action-group > .field {
+  margin-bottom: 16px;
+}
+@container (max-width: 480px) {
+  .minecraft-player-detail-header {
+    gap: 12px;
+  }
+  .minecraft-player-detail-header .minecraft-player-avatar {
+    width: 48px;
+    height: 48px;
   }
 }
