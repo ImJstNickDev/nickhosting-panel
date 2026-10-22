@@ -50,6 +50,11 @@ export function SftpPassword({
     [copied, setCopied] = useState(false),
     [copyFailed, setCopyFailed] = useState(false),
     [error, setError] = useState<unknown>();
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(timer);
+  }, [copied]);
   async function retrieve(copy: boolean) {
     setError(undefined);
     setCopyFailed(false);

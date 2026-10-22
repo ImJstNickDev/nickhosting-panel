@@ -179,7 +179,12 @@ describe('Automation browser journeys', () => {
     await browserExpect(page.getByRole('alert')).toHaveCount(0);
   });
   it('disables wake independently and restores inheritance through actual handlers', async () => {
-    await page.goto(`${fixture.origin}${base()}/sleep`);
+    // The preceding manual backup is a real queued operation in the isolated fixture.
+    // Finish it through the worker before granting automatic-start consent.
+    const completed = await provider.processPending();
+    const finalStates = new Map(completed.map((operation) => [operation.jobId, operation.state]));
+    expect([...finalStates.values()]).toEqual(['succeeded']);
+    await page.goto(`${fixture.origin}${base().replace('/automation', '/settings')}/sleep`);
     const consent = page.getByRole('switch', { name: 'Allow automatic starts', exact: true });
     await browserExpect(consent).toHaveAttribute('aria-checked', 'false');
     async function expectKnob(checked: boolean) {
@@ -188,7 +193,8 @@ describe('Automation browser journeys', () => {
       if (!track || !knob) throw new Error('Switch must be visible');
       expect(knob.x).toBeGreaterThanOrEqual(track.x);
       expect(knob.x + knob.width).toBeLessThanOrEqual(track.x + track.width);
-      expect(Math.abs(knob.x - track.x - (checked ? 15 : 2))).toBeLessThan(0.5);
+      const inset = checked ? track.x + track.width - knob.x - knob.width : knob.x - track.x;
+      expect(Math.abs(inset - 2)).toBeLessThan(0.5);
     }
     await expectKnob(false);
     await browserExpect(page.locator('.sleep-wake-consent-copy p')).toContainText(
@@ -266,7 +272,7 @@ describe('Automation browser journeys', () => {
     await browserExpect(wake.getByRole('alert')).toHaveCount(0);
   });
   it('steps idle timeout by whole minutes without losing fractional durations or allowing zero', async () => {
-    await page.goto(`${fixture.origin}${base()}/sleep`);
+    await page.goto(`${fixture.origin}${base().replace('/automation', '/settings')}/sleep`);
     const sleep = page.locator('section').filter({
       has: page.getByRole('heading', { name: 'Sleep when idle', exact: true }),
     });
@@ -317,7 +323,7 @@ describe('Automation browser journeys', () => {
     await choosePolicy(page, sleep, 'Inherit', '/gateway');
   });
   it('edits sleep with retained drafts on failure and renders compact Owner and Italian mobile controls', async () => {
-    await page.goto(`${fixture.origin}${base()}/sleep`);
+    await page.goto(`${fixture.origin}${base().replace('/automation', '/settings')}/sleep`);
     const sleep = page.locator('section').filter({
       has: page.getByRole('heading', { name: 'Sleep when idle', exact: true }),
     });
@@ -402,7 +408,7 @@ describe('Automation browser journeys', () => {
       ).violations,
     ).toEqual([]);
     const owner = identities.owner;
-    await owner.goto(`${fixture.origin}${base()}/sleep`);
+    await owner.goto(`${fixture.origin}${base().replace('/automation', '/settings')}/sleep`);
     await browserExpect(
       owner.getByRole('heading', { name: 'Sleep when idle', exact: true }),
     ).toBeVisible();
@@ -470,7 +476,7 @@ describe('Automation browser journeys', () => {
     await fixture.screenshot(owner, 'automation-sleep-owner-en');
     await journeyRequest(fixture, page, '/api/auth/update-user', { locale: 'it' });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(`${fixture.origin}${base()}/sleep`);
+    await page.goto(`${fixture.origin}${base().replace('/automation', '/settings')}/sleep`);
     await browserExpect(
       page.getByRole('heading', { name: 'Sospensione per inattività', exact: true }),
     ).toBeVisible();
@@ -492,7 +498,7 @@ describe('Automation browser journeys', () => {
       .set({ owner_idle_timeout_user_access: 'shorten-only' })
       .where('server_id', '=', provider.ids.serverId)
       .execute();
-    await page.goto(`${fixture.origin}${base()}/sleep`);
+    await page.goto(`${fixture.origin}${base().replace('/automation', '/settings')}/sleep`);
     await browserExpect(
       sleep.getByRole('button', { name: 'Disabled', exact: true }),
     ).toBeDisabled();
@@ -548,7 +554,7 @@ describe('Automation browser journeys', () => {
     await runtime.locator('summary').click();
     await owner.mouse.move(0, 0);
     await fixture.screenshot(owner, 'automation-owner-runtime-en');
-    await page.goto(`${fixture.origin}${base()}/sleep`);
+    await page.goto(`${fixture.origin}${base().replace('/automation', '/settings')}/sleep`);
     const wake = page
       .locator('section')
       .filter({ has: page.getByRole('heading', { name: 'Wake on join', exact: true }) });
@@ -580,7 +586,7 @@ describe('Automation browser journeys', () => {
     await page.setViewportSize({ width: 1440, height: 1000 });
   });
   it('saves Gateway messages through actual handlers and renders accessible Italian mobile layout', async () => {
-    await page.goto(`${fixture.origin}${base()}/sleep`);
+    await page.goto(`${fixture.origin}${base().replace('/automation', '/settings')}/sleep`);
     await page.getByRole('link', { name: 'Gateway messages', exact: true }).click();
     await browserExpect(page.locator('.mc-panorama')).toHaveCount(2);
     // Original game assets are optional local resources, not committed fixtures.
@@ -712,7 +718,7 @@ describe('Automation browser journeys', () => {
     ).toEqual([]);
     await journeyRequest(fixture, page, '/api/auth/update-user', { locale: 'it' });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(`${fixture.origin}${base()}/messages`);
+    await page.goto(`${fixture.origin}${base().replace('/automation', '/settings')}/messages`);
     await browserExpect(
       page.getByRole('textbox', { name: 'Messaggio nella lista server', exact: true }),
     ).toBeVisible();
@@ -735,7 +741,7 @@ describe('Automation browser journeys', () => {
   it('edits Minecraft preview text, preserves tokens and selection, and supports keyboard history', async () => {
     await journeyRequest(fixture, page, '/api/auth/update-user', { locale: 'en' });
     await page.setViewportSize({ width: 1280, height: 1000 });
-    await page.goto(`${fixture.origin}${base()}/messages`);
+    await page.goto(`${fixture.origin}${base().replace('/automation', '/settings')}/messages`);
     const section = page.getByRole('region', { name: 'Server list message', exact: true });
     const editor = section.getByRole('textbox', { name: 'Server list message', exact: true });
     await editor.fill('Hello world');
@@ -852,7 +858,7 @@ describe('Automation browser journeys', () => {
       });
     });
     try {
-      await page.goto(`${fixture.origin}${base()}/messages`);
+      await page.goto(`${fixture.origin}${base().replace('/automation', '/settings')}/messages`);
       await browserExpect(page.getByLabel('Announcement', { exact: true })).toHaveAttribute(
         'maxlength',
         '64',

@@ -280,7 +280,7 @@ export async function setGatewayPolicy(
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
     const current = await currentInteractiveContext(tx, context, options.env ?? {});
-    const server = await authorizeServer(tx, current, serverId, 'server:manage');
+    const server = await authorizeServer(tx, current, serverId, 'settings.write');
     if (server.connection_mode === 'direct') throw new DomainError('integration_unavailable');
     const previous = await tx
       .selectFrom('gateway_server_states')

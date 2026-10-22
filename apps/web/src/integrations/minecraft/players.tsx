@@ -5,6 +5,12 @@ import { ApiError, idempotencyKey } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
 import { Check, ConfirmDialog, ErrorNotice, Input, Select } from '../../components/ui.js';
+import {
+  IconAction,
+  Pagination,
+  SearchField,
+  Switch,
+} from '../../components/workspace-controls.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { gameUiClient } from '../../features/integrations.js';
 import { type MinecraftPlayerRow, mergeMinecraftPlayers } from './players-model.js';
@@ -136,6 +142,10 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
   const lookupRequest = useRef<AbortController | undefined>(undefined);
   const lookupInput = useRef<HTMLInputElement>(null);
   const mutationLock = useRef(false);
+  const can = (action: Action) =>
+    props.permissionKeys.includes(
+      `game.minecraft.players.${action.startsWith('whitelist-') ? 'whitelist' : ['op', 'deop', 'edit-operator'].includes(action) ? 'op' : ['ban', 'pardon'].includes(action) ? 'ban' : 'kick'}`,
+    );
   const disabled =
     !props.canManage ||
     !supported ||
@@ -242,7 +252,7 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
     }
   }
   function choose(action: Action, player?: MinecraftPlayerRow) {
-    if (disabled) return;
+    if (disabled || !can(action)) return;
     setReason('');
     setLevel(player?.operator?.level ?? 4);
     setBypass(player?.operator?.bypassesPlayerLimit ?? false);
@@ -290,6 +300,7 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
   async function apply() {
     if (
       !selection ||
+      !can(selection.action) ||
       disabled ||
       mutationLock.current ||
       selection.runtime !== props.runtimeState ||
@@ -361,19 +372,19 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
     row: MinecraftPlayerRow,
     action: Action,
     icon: Parameters<typeof Icon>[0]['name'],
-  ) => (
-    <Tooltip key={action} content={actionLabel(action, row.name)}>
-      <button
-        type="button"
-        className={`minecraft-player-action${action === 'ban' || action === 'kick' ? ' minecraft-player-action--danger' : ''}`}
-        aria-label={actionLabel(action, row.name)}
+  ) =>
+    can(action) ? (
+      <IconAction
+        key={action}
+        tooltip={actionLabel(action, row.name)}
+        destructive={action === 'ban' || action === 'kick'}
+        label={actionLabel(action, row.name)}
         disabled={disabled}
         onClick={() => choose(action, row)}
       >
         <Icon name={icon} />
-      </button>
-    </Tooltip>
-  );
+      </IconAction>
+    ) : null;
   const candidate = verified
     ? (rows.find(
         (row) =>
@@ -393,56 +404,41 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
   if (!snapshot.installed) return <p className="muted">{t(key('notInstalled'))}</p>;
 
   return (
-    <div className="minecraft-players" aria-busy={props.pending || busy}>
+    <div className="workspace-surface minecraft-players" aria-busy={props.pending || busy}>
       <div className="minecraft-players-toolbar">
-        <div className="minecraft-players-search">
-          <Icon name="search" />
-          <input
-            type="search"
-            aria-label={t(key('search'))}
-            placeholder={t(key('search'))}
-            value={search}
-            onChange={(event) => {
-              setSearch(event.target.value);
-              setPage(0);
-            }}
-            autoComplete="off"
-            data-1p-ignore
-            data-lpignore="true"
-          />
-        </div>
+        <SearchField
+          label={t(key('search'))}
+          placeholder={t(key('search'))}
+          value={search}
+          onChange={(event) => {
+            setSearch(event.target.value);
+            setPage(0);
+          }}
+          autoComplete="off"
+          data-1p-ignore
+          data-lpignore="true"
+        />
         <div className="minecraft-players-controls">
-          <div className="minecraft-players-whitelist">
-            <Tooltip content={t(key('whitelistHelp'))}>
-              <span id={`${id}-whitelist-label`}>{t(key('whitelistEnabled'))}</span>
-            </Tooltip>
-            <button
-              type="button"
-              role="switch"
-              aria-labelledby={`${id}-whitelist-label`}
-              aria-checked={snapshot.whitelistEnabled}
-              className="minecraft-players-switch"
-              disabled={disabled}
-              onClick={() => choose(snapshot.whitelistEnabled ? 'whitelist-off' : 'whitelist-on')}
-            >
-              <span className="minecraft-players-switch-thumb" />
-            </button>
-            <span className="minecraft-players-switch-state">
-              {t(key(snapshot.whitelistEnabled ? 'on' : 'off'))}
+          <Tooltip content={t(key('whitelistHelp'))}>
+            <span>
+              <Switch
+                label={t(key('whitelistEnabled'))}
+                checked={snapshot.whitelistEnabled}
+                disabled={disabled || !can('whitelist-on')}
+                onChange={(checked) => choose(checked ? 'whitelist-on' : 'whitelist-off')}
+                stateLabel={t(key(snapshot.whitelistEnabled ? 'on' : 'off'))}
+              />
             </span>
-          </div>
-          <Tooltip content={t(key('refresh'))}>
-            <button
-              type="button"
-              className="minecraft-player-action"
-              aria-label={t(key('refresh'))}
-              disabled={busy || online.isFetching}
-              onClick={() => void refresh()}
-            >
-              <Icon name="refresh" />
-            </button>
           </Tooltip>
-          {props.canManage && (
+          <IconAction
+            tooltip={t(key('refresh'))}
+            label={t(key('refresh'))}
+            disabled={busy || online.isFetching}
+            onClick={() => void refresh()}
+          >
+            <Icon name="refresh" />
+          </IconAction>
+          {(can('whitelist-add') || can('op') || can('ban')) && (
             <button
               type="button"
               className="secondary minecraft-players-add"
@@ -514,7 +510,7 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
                 <small>{t(key('verified'))}</small>
               </div>
               <div className="minecraft-players-preview-actions">
-                {!candidate.whitelisted && (
+                {!candidate.whitelisted && can('whitelist-add') && (
                   <button
                     type="button"
                     className="secondary"
@@ -524,7 +520,7 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
                     {t(key('whitelist-add'))}
                   </button>
                 )}
-                {!candidate.operator && (
+                {!candidate.operator && can('op') && (
                   <button
                     type="button"
                     className="secondary"
@@ -534,7 +530,7 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
                     {t(key('op'))}
                   </button>
                 )}
-                {running && !candidate.banned && (
+                {running && !candidate.banned && can('ban') && (
                   <button
                     type="button"
                     className="secondary"
@@ -665,25 +661,16 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
         )}
       </ul>
       {lastPage > 0 && (
-        <nav className="minecraft-players-pagination" aria-label={t(key('pagination'))}>
-          <button
-            type="button"
-            className="secondary"
-            disabled={currentPage === 0}
-            onClick={() => setPage(currentPage - 1)}
-          >
-            {t(key('previous'))}
-          </button>
-          <span>{t(key('page'), { page: currentPage + 1, total: lastPage + 1 })}</span>
-          <button
-            type="button"
-            className="secondary"
-            disabled={currentPage === lastPage}
-            onClick={() => setPage(currentPage + 1)}
-          >
-            {t(key('next'))}
-          </button>
-        </nav>
+        <Pagination
+          label={t(key('pagination'))}
+          previousLabel={t(key('previous'))}
+          nextLabel={t(key('next'))}
+          summary={t(key('page'), { page: currentPage + 1, total: lastPage + 1 })}
+          canPrevious={currentPage > 0}
+          canNext={currentPage < lastPage}
+          onPrevious={() => setPage(currentPage - 1)}
+          onNext={() => setPage(currentPage + 1)}
+        />
       )}
       <ConfirmDialog
         open={Boolean(selection)}
@@ -693,7 +680,13 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
           selection &&
             ['ban', 'kick', 'deop', 'whitelist-remove', 'whitelist-off'].includes(selection.action),
         )}
-        busy={props.pending || busy || !props.canManage || (!running && !offline)}
+        busy={
+          props.pending ||
+          busy ||
+          !props.canManage ||
+          Boolean(selection && !can(selection.action)) ||
+          (!running && !offline)
+        }
         onClose={() => {
           if (!mutationLock.current) setSelection(undefined);
         }}

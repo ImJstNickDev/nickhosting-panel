@@ -9,8 +9,9 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react';
-import { Link, NavLink, useLocation } from 'react-router';
+import { Link, useLocation } from 'react-router';
 import { useT } from '../app/i18n.js';
+import { focusWorkspace } from '../app/workspace-focus.js';
 import { Tooltip } from './tooltip.js';
 import './sidebar.css';
 
@@ -24,9 +25,54 @@ export type SidebarIconName =
   | 'infrastructure'
   | 'integrations'
   | 'operations'
-  | 'audit';
+  | 'audit'
+  | 'console'
+  | 'files'
+  | 'world'
+  | 'package'
+  | 'backups'
+  | 'schedules'
+  | 'network';
 
 const icons: Record<SidebarIconName, ReactNode> = {
+  console: (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="m7 9 3 3-3 3m6 0h4" />
+    </>
+  ),
+  files: <path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11H3Z" />,
+  world: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <ellipse cx="12" cy="12" rx="4" ry="9" />
+      <path d="M3 12h18" />
+    </>
+  ),
+  package: (
+    <>
+      <path d="m12 3 9 5v9l-9 5-9-5V8Zm0 10v9M3 8l9 5 9-5M8 5l9 5" />
+    </>
+  ),
+  backups: (
+    <>
+      <path d="M4 7h16v14H4ZM3 3h18v4H3Zm6 8h6" />
+    </>
+  ),
+  schedules: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </>
+  ),
+  network: (
+    <>
+      <circle cx="12" cy="5" r="2" />
+      <circle cx="5" cy="19" r="2" />
+      <circle cx="19" cy="19" r="2" />
+      <path d="M12 7v5H5v5m7-5h7v5" />
+    </>
+  ),
   home: <path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z" />,
   servers: (
     <>
@@ -155,8 +201,7 @@ function MobileNavigation({
     dialog.current?.close();
     restoreScroll.current?.();
     restoreScroll.current = null;
-    if (location.pathname !== openedPath.current)
-      document.querySelector<HTMLElement>('h1')?.focus();
+    if (location.pathname !== openedPath.current) focusWorkspace();
   });
 
   useLayoutEffect(() => {
@@ -250,6 +295,7 @@ export function Sidebar({
   name,
   showHome,
   navigation,
+  serverIdentity,
 }: {
   open: boolean;
   collapsed: boolean;
@@ -258,9 +304,17 @@ export function Sidebar({
   instanceName: string;
   name: string;
   showHome: boolean;
-  navigation: readonly { to: string; label: string; icon: SidebarIconName }[];
+  navigation: readonly {
+    to: string;
+    label: string;
+    icon: SidebarIconName;
+    group?: string;
+    active?: boolean;
+  }[];
+  serverIdentity?: { name: string; detail: string };
 }) {
   const t = useT();
+  const location = useLocation();
   const desktop = useSyncExternalStore(subscribeDesktop, isDesktop, serverIsDesktop);
   const compact = desktop && collapsed;
   const toggleLabel = t(collapsed ? 'web.expandNavigation' : 'web.collapseNavigation');
@@ -353,20 +407,62 @@ export function Sidebar({
           </button>
         </Tooltip>
       </div>
-      <nav className="nav" aria-label={t('web.navigation')}>
-        {navigation.map(({ to, label, icon }) => (
-          <Tooltip key={to} content={compact ? label : ''}>
-            <NavLink
+      {serverIdentity && (
+        <div className="sidebar-server">
+          <Tooltip content={compact ? t('serverNav.allServers') : ''}>
+            <Link
               className="sidebar-link"
+              to="/servers"
               onClick={closeAfterNavigation}
-              to={to}
-              end={to === '/' || to === '/owner'}
-              aria-label={label}
+              aria-label={t('serverNav.allServers')}
             >
-              <SidebarIcon name={icon} />
-              <span className="sidebar-label">{label}</span>
-            </NavLink>
+              <svg
+                className="sidebar-icon"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                aria-hidden="true"
+              >
+                <path d="m10 5-7 7 7 7M3 12h18" />
+              </svg>
+              <span className="sidebar-label">{t('serverNav.allServers')}</span>
+            </Link>
           </Tooltip>
+          <div className="sidebar-server-identity" aria-hidden={compact || undefined}>
+            <strong title={serverIdentity.name}>{serverIdentity.name}</strong>
+            <small>{serverIdentity.detail}</small>
+          </div>
+        </div>
+      )}
+      <nav className="nav" aria-label={t('web.navigation')}>
+        {navigation.map(({ to, label, icon, group, active }, index) => (
+          <div className="sidebar-entry" key={to}>
+            {group && navigation[index - 1]?.group !== group && (
+              <div className="sidebar-group" aria-hidden={compact || undefined}>
+                {group}
+              </div>
+            )}
+            <Tooltip content={compact ? label : ''}>
+              <Link
+                className="sidebar-link"
+                aria-current={
+                  (active ??
+                  (location.pathname === to ||
+                    (to !== '/' && to !== '/owner' && location.pathname.startsWith(`${to}/`))))
+                    ? 'page'
+                    : undefined
+                }
+                data-section-active={active || undefined}
+                onClick={closeAfterNavigation}
+                to={to}
+                aria-label={label}
+              >
+                <SidebarIcon name={icon} />
+                <span className="sidebar-label">{label}</span>
+              </Link>
+            </Tooltip>
+          </div>
         ))}
       </nav>
       <div className="sidebar-bottom">

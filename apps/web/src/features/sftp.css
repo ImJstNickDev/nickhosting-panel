@@ -143,31 +143,6 @@
   color: var(--ink);
   background: #edf1f5;
 }
-.sftp-switch-track {
-  display: inline-flex;
-  align-items: center;
-  width: 26px;
-  height: 16px;
-  padding: 2px;
-  border: 1px solid #7b8794;
-  border-radius: 10px;
-  background: #e5e9ed;
-}
-.sftp-switch-track::after {
-  content: "";
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: #647284;
-}
-.sftp-revoked-toggle[aria-checked="true"] .sftp-switch-track {
-  background: var(--blue);
-  border-color: var(--blue);
-  justify-content: flex-end;
-}
-.sftp-revoked-toggle[aria-checked="true"] .sftp-switch-track::after {
-  background: #fff;
-}
 .sftp-credentials {
   min-width: 0;
   padding: 0 18px;
@@ -375,4 +350,18 @@
     outline: 2px solid Highlight;
     outline-offset: 2px;
   }
+}
+
+.sftp-dialog {
+  width: min(52rem, calc(100vw - 2rem));
+}
+.sftp-dialog .sftp-page {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+}
+
+.sftp-recoverable .sftp-value > span > span[aria-hidden] {
+  white-space: nowrap;
+  overflow: hidden;
 }

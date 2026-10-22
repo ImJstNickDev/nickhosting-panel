@@ -1,8 +1,9 @@
 import type { GatewayMessageDefinition } from '@nickhosting/game-sdk';
 import { useQuery } from '@tanstack/react-query';
-import { Suspense, useRef, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import { api } from '../api/client.js';
 import { useLocale, useT } from '../app/i18n.js';
+import { useUnsavedChanges } from '../components/navigation-guard.js';
 import { Tooltip } from '../components/tooltip.js';
 import { ActionForm, ErrorNotice, Notice, Select } from '../components/ui.js';
 import { messageChannels, messagePreview } from './gateway-message-preview.js';
@@ -24,7 +25,8 @@ export function GatewayMessageEditor({ serverId, gameId }: { serverId: string; g
     queryKey: ['gateway-messages', serverId],
     queryFn: () => api<MessagePolicy>(`${serverPath(serverId)}/gateway-messages`),
   });
-  if (result.error && !result.data) return <ErrorNotice error={result.error} />;
+  if (result.error && !result.data)
+    return <ErrorNotice error={result.error} retry={() => void result.refetch()} />;
   if (!result.data)
     return (
       <div
@@ -38,19 +40,21 @@ export function GatewayMessageEditor({ serverId, gameId }: { serverId: string; g
     return <Notice>{t('automation.messagesUnavailable')}</Notice>;
   return (
     <>
-      {result.error && <ErrorNotice error={result.error} />}
+      {result.error && <ErrorNotice error={result.error} retry={() => void result.refetch()} />}
       <MessageForm
-        key={result.data.revision}
+        key={serverId}
         policy={result.data}
         gameId={gameId}
         definition={result.data.definition}
         locale={locale === 'it' ? 'it' : 'en'}
-        onSave={async (overrides) => {
+        onSave={async (overrides, revision) => {
           await api(`${serverPath(serverId)}/gateway-messages`, {
             method: 'PUT',
-            body: { revision: result.data?.revision, overrides },
+            body: { revision, overrides },
           });
-          await result.refetch();
+          const refreshed = await result.refetch();
+          if (!refreshed.data || refreshed.error) throw refreshed.error;
+          return refreshed.data;
         }}
       />
     </>
@@ -67,13 +71,22 @@ function MessageForm({
   policy: MessagePolicy;
   definition: GatewayMessageDefinition;
   locale: 'en' | 'it';
-  onSave: (overrides: MessageOverrides) => Promise<void>;
+  onSave: (overrides: MessageOverrides, revision: string) => Promise<MessagePolicy>;
 }) {
   const t = useT();
   const [selected, setSelected] = useState(definition.states[0]?.id ?? '');
   const [draft, setDraft] = useState(policy.overrides);
+  const [baseline, setBaseline] = useState(policy);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(baseline.overrides);
   const [saving, setSaving] = useState(false);
   const [focusedChannel, setFocusedChannel] = useState('');
+  useUnsavedChanges(dirty, saving);
+  useEffect(() => {
+    if (!dirty && !saving && policy.revision !== baseline.revision) {
+      setBaseline(policy);
+      setDraft(policy.overrides);
+    }
+  }, [policy, baseline.revision, dirty, saving]);
   const fields = useRef<Record<string, HTMLTextAreaElement | HTMLInputElement | null>>({});
   const state = definition.states.find((item) => item.id === selected);
   if (!state) return <Notice>{t('automation.messagesUnavailable')}</Notice>;
@@ -107,7 +120,7 @@ function MessageForm({
         onSubmit={async () => {
           setSaving(true);
           try {
-            await onSave(
+            const saved = await onSave(
               Object.fromEntries(
                 Object.entries(draft)
                   .map(([id, value]): [string, Record<string, string>] => [
@@ -116,7 +129,10 @@ function MessageForm({
                   ])
                   .filter(([, value]) => Object.keys(value).length),
               ),
+              baseline.revision,
             );
+            setBaseline(saved);
+            setDraft(saved.overrides);
           } finally {
             setSaving(false);
           }

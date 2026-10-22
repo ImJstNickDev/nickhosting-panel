@@ -131,7 +131,11 @@ export const uiActionSchema = z
     labelKey: key,
     handler: id,
     requiredPermissions: z
-      .array(z.enum(['server:read', 'server:operate', 'server:manage', 'platform:manage']))
+      .array(
+        z
+          .string()
+          .regex(/^(?:server:(?:read|operate|manage)|platform:manage|[a-z][a-z0-9.-]{0,126})$/),
+      )
       .min(1)
       .max(4),
     requiredCapabilities: z.array(id).max(16),
@@ -146,6 +150,8 @@ export const uiFormSchema = z
   .object({
     id,
     titleKey: key,
+    /** Domain-owned explanation when the runtime exposes none of this form's fields. */
+    emptyMessageKey: key.optional(),
     fields: z.array(uiFieldSchema).max(64),
     /** Optional presentation key resolved against bundled first-party views only. */
     renderer: id.optional(),
@@ -257,6 +263,27 @@ export const gameUiDescriptorSchema = z
             id,
             titleKey: key,
             loader: id,
+            /** Integration-owned placement in the contextual server navigation. */
+            navigation: z
+              .object({
+                group: z.enum(['server', 'tools', 'config']),
+                order: z.number().int().min(0).max(1000),
+                icon: z.enum([
+                  'console',
+                  'files',
+                  'activity',
+                  'settings',
+                  'users',
+                  'world',
+                  'package',
+                  'backups',
+                  'schedules',
+                  'network',
+                ]),
+                placement: z.enum(['sidebar', 'settings']).default('sidebar'),
+              })
+              .strict()
+              .optional(),
             /** Optional runtime allowlist; omitted sections apply to every runtime. */
             runtimeIds: z.array(id).min(1).max(32).optional(),
             /** Previous route identifiers, redirected to this canonical section. */
@@ -264,7 +291,13 @@ export const gameUiDescriptorSchema = z
             /** Bundled first-party section view; never executable code from metadata. */
             renderer: id.optional(),
             requiredPermissions: z
-              .array(z.enum(['server:read', 'server:operate', 'server:manage', 'platform:manage']))
+              .array(
+                z
+                  .string()
+                  .regex(
+                    /^(?:server:(?:read|operate|manage)|platform:manage|[a-z][a-z0-9.-]{0,126})$/,
+                  ),
+              )
               .min(1)
               .max(4),
             requiredCapabilities: z.array(id).max(16),

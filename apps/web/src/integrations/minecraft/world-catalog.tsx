@@ -9,6 +9,7 @@ import { idempotencyKey } from '../../api/client.js';
 import { useFormat, useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
 import { Dialog, ErrorNotice } from '../../components/ui.js';
+import { Pagination } from '../../components/workspace-controls.js';
 import { gameUiClient } from '../../features/integrations.js';
 import './world-catalog.css';
 
@@ -294,36 +295,20 @@ export function MinecraftWorldCatalog({
         </div>
       )}
       {available && result.data && result.data.total > result.data.limit && (
-        <nav
-          className="minecraft-worlds-pagination"
-          aria-label={t('games.minecraft.worlds.pagination')}
-        >
-          <button
-            type="button"
-            className="secondary"
-            disabled={resultOffset === 0 || Boolean(downloading)}
-            onClick={() => changePage(Math.max(0, resultOffset - (result.data?.limit ?? 20)))}
-          >
-            {t('games.minecraft.worlds.previous')}
-          </button>
-          <span>
-            {t('games.minecraft.worlds.page', {
-              page: String(Math.floor(resultOffset / result.data.limit) + 1),
-              total: String(Math.ceil(Math.min(result.data.total, 10000) / result.data.limit)),
-            })}
-          </span>
-          <button
-            type="button"
-            className="secondary"
-            disabled={
-              resultOffset + result.data.limit >= Math.min(result.data.total, 10000) ||
-              Boolean(downloading)
-            }
-            onClick={() => changePage(resultOffset + (result.data?.limit ?? 20))}
-          >
-            {t('games.minecraft.worlds.next')}
-          </button>
-        </nav>
+        <Pagination
+          label={t('games.minecraft.worlds.pagination')}
+          previousLabel={t('games.minecraft.worlds.previous')}
+          nextLabel={t('games.minecraft.worlds.next')}
+          summary={t('games.minecraft.worlds.page', {
+            page: Math.floor(resultOffset / result.data.limit) + 1,
+            total: Math.ceil(Math.min(result.data.total, 10000) / result.data.limit),
+          })}
+          canPrevious={resultOffset > 0}
+          canNext={resultOffset + result.data.limit < Math.min(result.data.total, 10000)}
+          disabled={Boolean(downloading)}
+          onPrevious={() => changePage(Math.max(0, resultOffset - (result.data?.limit ?? 20)))}
+          onNext={() => changePage(resultOffset + (result.data?.limit ?? 20))}
+        />
       )}
       <div className="world-catalog-external">
         <Tooltip content={t(key('external'))}>

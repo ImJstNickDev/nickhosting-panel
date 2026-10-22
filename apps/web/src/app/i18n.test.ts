@@ -14,6 +14,15 @@ it('ships matching complete catalogs and labels for every configurable setting',
     defaultIdleTimeoutSeconds: 'sleepTiming.timeout',
     idleTimeoutUserAccess: 'sleepTiming.userAccess',
     gameIdleTimeouts: 'sleepTiming.game',
+    dnsDomains: 'connection.domains',
+    dnsDefaultDomainId: 'connection.defaultDomain',
+    dnsGamePolicies: 'connection.domainPolicy',
+    dnsBlockedTerms: 'connection.term',
+    dnsNameReuseDelaySeconds: 'connection.reuseDelay',
+    gameContentPolicies: 'integrationConfig.modAlternatives',
+    gameAutoWakePolicies: 'automation.autoWake',
+    defaultAutoWakeEnabled: 'automation.autoWake',
+    autoWakeUserAccess: 'automation.wakeAccess',
   };
   for (const key of Object.keys(platformConfigSchema.shape))
     expect(keys.has(dedicatedLabels[key] ?? `owner.config.${key}`), key).toBe(true);

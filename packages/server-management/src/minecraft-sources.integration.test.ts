@@ -24,11 +24,11 @@ import {
   reserveMinecraftStaging,
 } from './minecraft-sources.js';
 import { enqueueServerOperation } from './registry.js';
-import { managementFixture } from './test-fixtures.js';
+import { minecraftManagementFixture } from './test-fixtures.js';
 import { reserveUploadIngestion } from './upload-admission.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
-let f: Awaited<ReturnType<typeof managementFixture>>;
+let f: Awaited<ReturnType<typeof minecraftManagementFixture>>;
 let root: string;
 let env: Record<string, string>;
 const digest = (value: Uint8Array) => createHash('sha256').update(value).digest('hex');
@@ -63,7 +63,7 @@ beforeEach(async () => {
   await database.db.deleteFrom('minecraft_staging_claims').execute();
   await database.db.deleteFrom('minecraft_source_bindings').execute();
   await database.db.deleteFrom('minecraft_sources').execute();
-  f = await managementFixture(database.db, { interactive: true });
+  f = await minecraftManagementFixture(database.db, { interactive: true });
   root = `./mountdata/test-assets/m4-sources-${randomUUID()}`;
   env = {
     NH_MINECRAFT_SOURCE_ROOT: root,
@@ -128,7 +128,7 @@ describe('durable Minecraft archive source admission', () => {
     await expect(store().worldArchiveResolver(source.id, await f.server())).rejects.toThrow(
       'forbidden',
     );
-    const other = await managementFixture(f.db, { interactive: true });
+    const other = await minecraftManagementFixture(f.db, { interactive: true });
     await expect(
       createMinecraftSourceStore(f.db, other.context, env).inspect(source.id),
     ).rejects.toThrow('forbidden');
@@ -349,7 +349,7 @@ describe('durable Minecraft archive source admission', () => {
     await expect(service.resolveForServer(source.id, await f.server())).rejects.toThrow(
       'forbidden',
     );
-    const other = await managementFixture(f.db, { interactive: true });
+    const other = await minecraftManagementFixture(f.db, { interactive: true });
     await expect(
       createMinecraftSourceStore(f.db, other.context, env).resolveForServer(source.id, serverId),
     ).rejects.toThrow('forbidden');

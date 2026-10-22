@@ -1,12 +1,10 @@
 .minecraft-players {
   width: 100%;
-  max-width: 1080px;
   margin-inline: auto;
   container-type: inline-size;
 }
 .minecraft-players-toolbar,
 .minecraft-players-controls,
-.minecraft-players-whitelist,
 .minecraft-players-preview,
 .minecraft-players-preview-actions,
 .minecraft-player,
@@ -18,82 +16,10 @@
 .minecraft-players-toolbar {
   justify-content: space-between;
   gap: 18px;
-  margin-bottom: 20px;
+  margin-bottom: 12px;
 }
 .minecraft-players-controls {
   gap: 10px;
-}
-.minecraft-players-search {
-  position: relative;
-  flex: 1 1 260px;
-  max-width: 340px;
-  min-width: 160px;
-}
-.minecraft-players-search > svg {
-  position: absolute;
-  left: 12px;
-  top: 50%;
-  transform: translateY(-50%);
-  color: var(--muted);
-  pointer-events: none;
-}
-.minecraft-players-search input {
-  width: 100%;
-  padding-left: 38px;
-  min-height: 40px;
-  background: var(--surface);
-}
-.minecraft-players-whitelist {
-  gap: 8px;
-  white-space: nowrap;
-  font-size: 0.82rem;
-}
-.minecraft-players-whitelist > span:first-child {
-  font-weight: 550;
-}
-.minecraft-players-switch-state {
-  min-width: 24px;
-  color: var(--muted);
-  font-size: 0.75rem;
-}
-.minecraft-players-switch {
-  position: relative;
-  width: 36px;
-  flex: 0 0 36px;
-  height: 34px;
-  min-height: 34px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  box-shadow: none;
-}
-.minecraft-players-switch::before {
-  content: "";
-  position: absolute;
-  inset: 7px 0;
-  border-radius: 20px;
-  background: #a8b3bd;
-}
-.minecraft-players-switch-thumb {
-  position: absolute;
-  left: 2px;
-  top: 9px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: white;
-  transition: transform 140ms ease;
-}
-.minecraft-players-switch[aria-checked="true"]::before {
-  background: var(--blue);
-}
-.minecraft-players-switch[aria-checked="true"] .minecraft-players-switch-thumb {
-  transform: translateX(16px);
-}
-.minecraft-players-switch:disabled {
-  opacity: 0.55;
-  cursor: default;
 }
 .minecraft-players-add {
   display: inline-flex;
@@ -233,32 +159,7 @@
   gap: 3px;
   flex: 0 0 auto;
 }
-.minecraft-player-action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  min-height: 36px;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  box-shadow: none;
-  color: var(--muted);
-}
-.minecraft-player-action:hover:not(:disabled) {
-  color: var(--blue);
-  background: #f1f3f5;
-  border-color: var(--line);
-}
-.minecraft-player-action--danger:hover:not(:disabled) {
-  color: var(--danger, #a13226);
-}
-.minecraft-player-action:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
+
 .minecraft-players-empty {
   padding: 36px 20px;
   text-align: center;
@@ -267,7 +168,7 @@
 }
 .minecraft-players-add-panel {
   padding: 18px 20px;
-  margin-bottom: 18px;
+  margin-bottom: 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--surface);
@@ -336,17 +237,10 @@
     flex-wrap: wrap;
     gap: 12px;
   }
-  .minecraft-players-search {
-    max-width: none;
-    flex-basis: 100%;
-  }
   .minecraft-players-controls {
     flex-wrap: wrap;
     width: 100%;
     justify-content: flex-end;
-  }
-  .minecraft-players-whitelist {
-    margin-right: auto;
   }
   .minecraft-players-filters label > span {
     padding-inline: 5px;
@@ -360,10 +254,7 @@
   .minecraft-player-actions {
     gap: 1px;
   }
-  .minecraft-player-action {
-    width: 32px;
-    min-height: 36px;
-  }
+
   .minecraft-players-preview-actions {
     flex-basis: 100%;
     padding-top: 4px;
@@ -388,18 +279,7 @@
     padding: 14px;
   }
 }
-@media (prefers-reduced-motion: reduce) {
-  .minecraft-players-switch-thumb {
-    transition: none;
-  }
-}
 @media (forced-colors: active) {
-  .minecraft-players-switch::before {
-    border: 1px solid ButtonText;
-  }
-  .minecraft-players-switch-thumb {
-    background: ButtonText;
-  }
   .minecraft-players-filters input:checked + span {
     border-color: Highlight;
   }
@@ -413,13 +293,4 @@ button.minecraft-player-role {
   border-radius: 3px;
   box-shadow: none;
   font-weight: 400;
-}
-.minecraft-players-pagination {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
-  margin-top: 14px;
-  font-size: 0.8rem;
-  color: var(--muted);
 }

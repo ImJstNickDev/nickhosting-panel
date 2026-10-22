@@ -66,7 +66,7 @@ export function registerMinecraftDatapackRoutes(
   );
   const catalog = async (c: C) => {
     const context = await principal(c);
-    await authorizeServer(db, context, c.req.param('id') ?? '');
+    await authorizeServer(db, context, c.req.param('id') ?? '', 'game.minecraft.datapacks.read');
     const runtime = await management();
     const content: { http?: ContentHttp; curseforge?: CurseForgeProvider } = options.codec
       ? ((await minecraftContentProviders(db, options.codec, env, options.contentHttp)).providers ??
@@ -117,7 +117,7 @@ export function registerMinecraftDatapackRoutes(
     const value = parse(planRequest, await body(c));
     const { content, context, runtime, modrinth } = await catalog(c);
     const serverId = c.req.param('id');
-    await authorizeServer(db, context, serverId, 'server:manage');
+    await authorizeServer(db, context, serverId, 'game.minecraft.datapacks.write');
     const provider = value.provider === 'modrinth' ? modrinth : content.curseforge;
     if (!provider) throw new DomainError('integration_unavailable');
     return c.json(
@@ -143,7 +143,7 @@ export function registerMinecraftDatapackRoutes(
     );
     const { content, context, runtime, modrinth } = await catalog(c);
     const serverId = c.req.param('id');
-    await authorizeServer(db, context, serverId, 'server:manage');
+    await authorizeServer(db, context, serverId, 'game.minecraft.datapacks.write');
     const service = createMinecraftDatapackCatalogService({ db, env, runtime, ...content });
     let planId = value.planId;
     if (!planId) {

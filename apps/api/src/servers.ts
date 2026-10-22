@@ -28,6 +28,7 @@ import {
   getGameConnectionAvailability,
   getGameConnectionOptions,
   getServerConnectionOptions,
+  getServerPermissionKeys,
   listServerDns,
   listServers,
   listSftpCredentials,
@@ -37,6 +38,7 @@ import {
   parse,
   previewServerDns,
   publicServer,
+  reconcileServerUserSftpCredentials,
   recoverUploadIngestion,
   reserveGameConnection,
   reserveUploadIngestion,
@@ -249,7 +251,22 @@ export function registerServerRoutes(
     c.json(await createProject(db, await principal(c), await body(c)), 201),
   );
   app.put('/v1/projects/:id/members', async (c) => {
-    await setProjectMember(db, await principal(c), c.req.param('id'), await body(c));
+    const affected = await setProjectMember(
+      db,
+      await principal(c),
+      c.req.param('id'),
+      await body(c),
+    );
+    if (affected.length) {
+      const service = await management();
+      for (const subject of affected)
+        await reconcileServerUserSftpCredentials(
+          db,
+          subject.serverId,
+          subject.userId,
+          service.externalOptions,
+        );
+    }
     return c.body(null, 204);
   });
   app.get('/v1/servers', async (c) => c.json(await listServers(db, await principal(c))));
@@ -289,7 +306,20 @@ export function registerServerRoutes(
       const input = parse(operationSchema, await body(c));
       action = input.action;
       await stage('accessCheckMs', () =>
-        authorizeServer(db, context, c.req.param('id'), 'server:operate'),
+        authorizeServer(
+          db,
+          context,
+          c.req.param('id'),
+          ['start', 'stop', 'restart', 'kill'].includes(input.action)
+            ? 'console.power'
+            : input.action === 'backup'
+              ? 'backups.create'
+              : input.action === 'restore'
+                ? 'backups.restore'
+                : input.action === 'minecraft-content'
+                  ? 'server:read'
+                  : 'server:manage',
+        ),
       );
       if (input.action !== 'kill' && input.action !== 'stop')
         await stage('hostSamplingMs', async () => {
@@ -332,7 +362,12 @@ export function registerServerRoutes(
     );
   });
   app.get('/v1/servers/:id/operations', async (c) => {
-    const server = await authorizeServer(db, await principal(c), c.req.param('id'));
+    const server = await authorizeServer(
+      db,
+      await principal(c),
+      c.req.param('id'),
+      'activity.read',
+    );
     const rows = await db
       .selectFrom('server_operations as s')
       .innerJoin('operation_jobs as j', 'j.id', 's.job_id')
@@ -355,7 +390,12 @@ export function registerServerRoutes(
     return c.json(rows.map((row) => ({ ...row, messageKey: `jobs.${row.state}` })));
   });
   app.get('/v1/servers/:id/events', async (c) => {
-    const server = await authorizeServer(db, await principal(c), c.req.param('id'));
+    const server = await authorizeServer(
+      db,
+      await principal(c),
+      c.req.param('id'),
+      'activity.read',
+    );
     const after = parse(z.string().regex(/^\d{1,18}$/), c.req.query('after') ?? '0');
     return c.json(
       await db
@@ -427,9 +467,17 @@ export function registerServerRoutes(
             .execute();
           for (const event of events) {
             // Authority is not carried over a slow client write or a batch.
-            await authorizeServer(db, await principal(c), server.id);
+            const current = await principal(c);
+            const currentServer = await authorizeServer(db, current, server.id);
+            const canReadActivity = (
+              await getServerPermissionKeys(db, current, currentServer)
+            ).includes('activity.read');
             if (stream.aborted || lost) return;
-            await stream.writeSSE({ id: event.id, event: 'activity', data: JSON.stringify(event) });
+            await stream.writeSSE({
+              id: event.id,
+              event: 'activity',
+              data: JSON.stringify(canReadActivity ? event : { serverId: server.id }),
+            });
             after = event.id;
           }
           if (events.length === 100) continue;
@@ -454,7 +502,7 @@ export function registerServerRoutes(
     });
   });
   app.get('/v1/servers/:id/metrics', async (c) => {
-    const server = await authorizeServer(db, await principal(c), c.req.param('id'));
+    const server = await authorizeServer(db, await principal(c), c.req.param('id'), 'console.read');
     return c.json(
       await db
         .selectFrom('server_metrics')
@@ -469,8 +517,13 @@ export function registerServerRoutes(
     const context = await principal(c),
       service = await management();
     return c.json(
-      await service.access(context, c.req.param('id'), false, (id) =>
-        service.adapter.getResources(id),
+      await service.access(
+        context,
+        c.req.param('id'),
+        false,
+        (id) => service.adapter.getResources(id),
+        undefined,
+        'console.read',
       ),
     );
   });
@@ -616,7 +669,7 @@ export function registerServerRoutes(
               providerIdentifier: id,
               listFiles,
             });
-            const server = await authorizeServer(connection, current, serverId, 'server:manage');
+            const server = await authorizeServer(connection, current, serverId, 'files.write');
             const maxBytes = serverStorageLimitBytes(server.limits.disk);
             if (maxBytes !== null && contentLength > maxBytes)
               throw new DomainError('validation_failed', 413);
@@ -770,6 +823,8 @@ export function registerServerRoutes(
           context,
           c.req.param('id'),
           async (id, connection, current, server) => {
+            if (input.action === 'rename')
+              await authorizeServer(connection, current, c.req.param('id'), 'files.delete');
             const paths: string[] = [];
             if (input.action === 'write') {
               relativePath(input.path);
@@ -871,6 +926,7 @@ export function registerServerRoutes(
                     }),
                 );
               else if (directories) {
+                await authorizeServer(connection, current, c.req.param('id'), 'files.delete');
                 await timing.measure('files.movePlan', () =>
                   validateFileMoves(
                     { listFiles: (_identifier, path = '') => directories.list(path) },
@@ -884,15 +940,16 @@ export function registerServerRoutes(
                 await applyFileChunks(
                   input.files,
                   () =>
-                    timing.measure('files.authorize', () =>
-                      service.authorizeTransfer(
+                    timing.measure('files.authorize', async () => {
+                      await authorizeServer(connection, current, c.req.param('id'), 'files.delete');
+                      return service.authorizeTransfer(
                         current,
                         c.req.param('id'),
                         true,
                         connection,
                         trace.enabled ? timing : undefined,
-                      ),
-                    ),
+                      );
+                    }),
                   (files) =>
                     timing.measure('files.rename', async () => {
                       dispatched = true;
@@ -927,7 +984,7 @@ export function registerServerRoutes(
     }
   });
   app.get('/v1/servers/:id/backups/events', async (c) => {
-    const server = await authorizeServer(db, await principal(c), c.req.param('id'));
+    const server = await authorizeServer(db, await principal(c), c.req.param('id'), 'backups.read');
     if (!backupEvents) throw new DomainError('integration_unavailable');
     return streamSSE(c, async (stream) => {
       let dirty = true;
@@ -949,7 +1006,7 @@ export function registerServerRoutes(
         const end = Date.now() + 900_000;
         while (!stream.aborted && !lost && Date.now() < end) {
           // Authorization precedes every event/heartbeat, never held across remote work.
-          await authorizeServer(db, await principal(c), server.id);
+          await authorizeServer(db, await principal(c), server.id, 'backups.read');
           if (dirty) {
             dirty = false;
             await stream.writeSSE({
@@ -977,23 +1034,30 @@ export function registerServerRoutes(
     const context = await principal(c),
       service = await management();
     return c.json(
-      await service.access(context, c.req.param('id'), false, async (id) => {
-        const [backups, labels] = await Promise.all([
-          service.adapter.listBackups(id),
-          (await backupSchemaAvailable(db))
-            ? db
-                .selectFrom('backup_labels')
-                .select(['backup_id', 'name'])
-                .where('server_id', '=', c.req.param('id'))
-                .execute()
-            : [],
-        ]);
-        const names = new Map(labels.map((entry) => [entry.backup_id, entry.name]));
-        return backups.map((backup) => ({
-          ...backup,
-          name: names.get(backup.uuid) ?? backup.name,
-        }));
-      }),
+      await service.access(
+        context,
+        c.req.param('id'),
+        false,
+        async (id) => {
+          const [backups, labels] = await Promise.all([
+            service.adapter.listBackups(id),
+            (await backupSchemaAvailable(db))
+              ? db
+                  .selectFrom('backup_labels')
+                  .select(['backup_id', 'name'])
+                  .where('server_id', '=', c.req.param('id'))
+                  .execute()
+              : [],
+          ]);
+          const names = new Map(labels.map((entry) => [entry.backup_id, entry.name]));
+          return backups.map((backup) => ({
+            ...backup,
+            name: names.get(backup.uuid) ?? backup.name,
+          }));
+        },
+        undefined,
+        'backups.read',
+      ),
     );
   });
   app.patch('/v1/servers/:id/backups/:backupId', async (c) => {
@@ -1033,6 +1097,8 @@ export function registerServerRoutes(
           ...input,
         });
       },
+      undefined,
+      'server:manage',
     );
     return c.body(null, 204);
   });
@@ -1040,42 +1106,65 @@ export function registerServerRoutes(
     const context = await principal(c),
       service = await management();
     parse(z.object({ confirm: z.literal(true) }).strict(), await body(c));
-    await service.cleanupAccess(context, c.req.param('id'), async (id, connection, current) => {
-      const metadata = {
-        serverId: c.req.param('id'),
-        backupId: c.req.param('backupId'),
-        operationId: randomUUID(),
-        source: 'panel',
-        action: 'backup_delete',
-      };
-      await recordAudit(connection, current, 'server.backup.delete_requested', {
-        ...metadata,
-        outcome: 'requested',
-      });
-      try {
-        await service.adapter.deleteBackup(id, c.req.param('backupId'));
-        await recordAudit(connection, current, 'server.backup.deleted', {
+    await service.cleanupAccess(
+      context,
+      c.req.param('id'),
+      async (id, connection, current) => {
+        const metadata = {
+          serverId: c.req.param('id'),
+          backupId: c.req.param('backupId'),
+          operationId: randomUUID(),
+          source: 'panel',
+          action: 'backup_delete',
+        };
+        await recordAudit(connection, current, 'server.backup.delete_requested', {
           ...metadata,
-          outcome: 'succeeded',
+          outcome: 'requested',
         });
-      } catch (error) {
-        await recordAudit(connection, current, 'server.backup.delete_incomplete', {
-          ...metadata,
-          outcome: 'uncertain',
-        });
-        throw error;
-      }
-    });
+        try {
+          await service.adapter.deleteBackup(id, c.req.param('backupId'));
+          await recordAudit(connection, current, 'server.backup.deleted', {
+            ...metadata,
+            outcome: 'succeeded',
+          });
+        } catch (error) {
+          await recordAudit(connection, current, 'server.backup.delete_incomplete', {
+            ...metadata,
+            outcome: 'uncertain',
+          });
+          throw error;
+        }
+      },
+      undefined,
+      'backups.delete',
+    );
     return c.body(null, 204);
   });
   app.get('/v1/servers/:id/backups/:backupId/download', async (c) => {
     const context = await principal(c),
       service = await management();
     const serverId = c.req.param('id');
-    const id = await service.access(context, serverId, false, async (identifier) => identifier);
+    const id = await service.access(
+      context,
+      serverId,
+      false,
+      async (identifier) => identifier,
+      undefined,
+      'backups.download',
+    );
     const download = await service.adapter.downloadBackup(id, c.req.param('backupId'), {
       signal: c.req.raw.signal,
-      authorize: () => service.authorizeTransfer(context, serverId, false),
+      authorize: () =>
+        service.authorizeTransfer(
+          context,
+          serverId,
+          false,
+          db,
+          undefined,
+          undefined,
+          false,
+          'backups.download',
+        ),
     });
     return new Response(download.body, {
       headers: {
@@ -1138,6 +1227,8 @@ export function registerServerRoutes(
           throw error;
         }
       },
+      undefined,
+      'console.command',
     );
     return c.body(null, 204);
   });
@@ -1158,10 +1249,12 @@ export function registerServerRoutes(
           server.external_id,
         ]),
       }),
+      undefined,
+      'console.read',
     );
     let canSendCommands = false;
     try {
-      await authorizeServer(db, context, c.req.param('id'), 'server:manage');
+      await authorizeServer(db, context, c.req.param('id'), 'console.command');
       canSendCommands = true;
     } catch (error) {
       if (!(error instanceof DomainError) || error.code !== 'forbidden') throw error;
@@ -1197,7 +1290,7 @@ export function registerServerRoutes(
           canSendCommands,
           authorizeCommand: async () => {
             try {
-              await authorizeServer(db, await principal(c), c.req.param('id'), 'server:manage');
+              await authorizeServer(db, await principal(c), c.req.param('id'), 'console.command');
               return providerBinding === (await service.consoleBindingForServer(c.req.param('id')));
             } catch {
               return false;
@@ -1206,7 +1299,7 @@ export function registerServerRoutes(
           signal: controller.signal,
           authorize: async () => {
             try {
-              await authorizeServer(db, await principal(c), c.req.param('id'));
+              await authorizeServer(db, await principal(c), c.req.param('id'), 'console.read');
               return providerBinding === (await service.consoleBindingForServer(c.req.param('id')));
             } catch {
               authorizationDenied = true;

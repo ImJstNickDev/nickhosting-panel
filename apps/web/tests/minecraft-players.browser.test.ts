@@ -624,6 +624,39 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     }
   });
 
+  it('offers only the delegated player action without broad manager access', async () => {
+    const delegated = await identities.invite('Player moderator', 'moderator@journey.example.test');
+    await journeyRequest(
+      fixture,
+      user,
+      `/v1/platform/servers/${provider.ids.serverId}/subusers/${delegated.id}`,
+      { permissionKeys: ['game.minecraft.players.read', 'game.minecraft.players.kick'] },
+      'PUT',
+    );
+    await running(true);
+    await delegated.page.goto(route());
+    await browserExpect(
+      delegated.page.getByRole('button', { name: `Kick player: ${player.name}`, exact: true }),
+    ).toBeVisible();
+    await browserExpect(
+      delegated.page.getByRole('button', { name: 'Add player', exact: true }),
+    ).toHaveCount(0);
+    await browserExpect(delegated.page.getByRole('switch')).toBeDisabled();
+    for (const action of [
+      'Give operator',
+      'Remove operator',
+      'Ban',
+      'Add to whitelist',
+      'Remove from whitelist',
+    ]) {
+      await browserExpect(
+        delegated.page.getByRole('button', { name: `${action}: ${player.name}`, exact: true }),
+      ).toHaveCount(0);
+    }
+    await accessible(delegated.page);
+    await running(false);
+  });
+
   it('renders localized mobile player controls without overflow', async () => {
     await journeyRequest(fixture, user, '/api/auth/update-user', { locale: 'it' });
     await user.evaluate(() => localStorage.setItem('nh.locale', 'it'));
@@ -636,7 +669,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     await screenshot(user, 'minecraft-players-mobile-it');
     for (const width of [390, 320]) {
       await user.setViewportSize({ width, height: 844 });
-      for (const selector of ['.minecraft-players-whitelist', '.minecraft-players-add']) {
+      for (const selector of ['.workspace-switch-field', '.minecraft-players-add']) {
         const bounds = await user.locator(selector).boundingBox();
         expect(bounds).not.toBeNull();
         expect(bounds?.x).toBeGreaterThanOrEqual(0);

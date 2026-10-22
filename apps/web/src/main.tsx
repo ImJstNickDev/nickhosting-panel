@@ -14,12 +14,13 @@ import { queryClient } from './api/client.js';
 import { LocaleProvider, useT } from './app/i18n.js';
 import { ServerGameSection, ServerIndex, ServerShell } from './app/server-shell.js';
 import { AuthCallback, Shell } from './app/shell.js';
+import { NavigationGuardProvider } from './components/navigation-guard.js';
 import { Page } from './components/ui.js';
 import { AccountPage, AccountProfile, AccountSecurity } from './features/account.js';
 import { ActivityPage, JobPage } from './features/activity.js';
 import { Invite, Login, Recovery, Setup } from './features/auth.js';
 import { AutomationPage } from './features/automation.js';
-import { BackupsPage, SftpPage } from './features/backups-sftp.js';
+import { BackupsPage } from './features/backups-sftp.js';
 import { ConsolePage } from './features/console.js';
 import { CreateServerPage } from './features/create-server.js';
 import { FilesPage } from './features/files.js';
@@ -37,6 +38,7 @@ import {
 import { ProjectPage, ProjectsPage } from './features/projects.js';
 import { ServerSettings } from './features/server-settings.js';
 import { HomePage, ServerOverview, ServersPage } from './features/servers.js';
+import { ServerSubusers } from './features/subusers.js';
 import './app/style.css';
 
 function ServerPage({ component: Component }: { component: ComponentType<{ serverId: string }> }) {
@@ -64,7 +66,13 @@ const router = createBrowserRouter(
       <Route path="/verify" element={<Recovery mode="verify" />} />
       <Route path="/account/link-email" element={<Recovery mode="link" />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
-      <Route element={<Shell />}>
+      <Route
+        element={
+          <NavigationGuardProvider>
+            <Shell />
+          </NavigationGuardProvider>
+        }
+      >
         <Route index element={<HomePage />} />
         <Route path="/servers" element={<ServersPage />} />
         <Route path="/servers/new" element={<CreateServerPage />} />
@@ -81,13 +89,21 @@ const router = createBrowserRouter(
           <Route path="status" element={<ServerPage component={ServerOverview} />} />
           <Route path="console" element={<ServerPage component={ConsolePage} />} />
           <Route path="files" element={<ServerPage component={FilesPage} />} />
-          <Route path="sftp" element={<ServerPage component={SftpPage} />} />
+          <Route path="sftp" element={<Navigate to="../files?sftp=open" replace />} />
           <Route path="backups" element={<ServerPage component={BackupsPage} />} />
           <Route path="network" element={<ServerPage component={NetworkPage} />} />
           <Route path="schedules" element={<Navigate to="../automation" replace />} />
-          <Route path="automation/*" element={<ServerPage component={AutomationPage} />} />
+          <Route path="automation" element={<ServerPage component={AutomationPage} />} />
+          <Route path="automation/sleep" element={<Navigate to="../settings/sleep" replace />} />
+          <Route
+            path="automation/messages"
+            element={<Navigate to="../settings/messages" replace />}
+          />
           <Route path="activity" element={<ServerPage component={ActivityPage} />} />
           <Route path="settings" element={<ServerPage component={ServerSettings} />} />
+          <Route path="settings/sleep" element={<ServerPage component={AutomationPage} />} />
+          <Route path="settings/messages" element={<ServerPage component={AutomationPage} />} />
+          <Route path="subusers" element={<ServerPage component={ServerSubusers} />} />
           <Route path="game" element={<ServerGameSection />} />
           <Route path="game/:sectionId" element={<ServerGameSection />} />
         </Route>

@@ -1,13 +1,14 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { api, idempotencyKey } from '../api/client.js';
 import { useLocale, useT } from '../app/i18n.js';
-import { Tooltip } from '../components/tooltip.js';
+import { useUnsavedChanges } from '../components/navigation-guard.js';
 import {
   ActionForm,
   Badge,
   Check,
+  ConfirmDialog,
   Dialog,
   Empty,
   ErrorNotice,
@@ -18,6 +19,7 @@ import {
   Time,
   text,
 } from '../components/ui.js';
+import { IconAction } from '../components/workspace-controls.js';
 import { AutomationSwitch } from './automation-controls.js';
 import {
   type Outcomes,
@@ -73,17 +75,9 @@ function IconButton({
   disabled?: boolean;
 }) {
   return (
-    <Tooltip content={label}>
-      <button
-        type="button"
-        aria-label={label}
-        className={`automation-icon ${name === 'delete' ? 'automation-danger' : ''}`}
-        disabled={disabled}
-        onClick={onClick}
-      >
-        <Icon name={name} />
-      </button>
-    </Tooltip>
+    <IconAction label={label} destructive={false} onClick={onClick} disabled={disabled}>
+      <Icon name={name} />
+    </IconAction>
   );
 }
 function scheduleBody(schedule: Schedule) {
@@ -104,6 +98,11 @@ export function SchedulesSection({ serverId, editable }: { serverId: string; edi
   const t = useT(),
     [search, setSearch] = useSearchParams();
   const filter = search.get('action');
+  const server = useServer(serverId);
+  const can = (key: string) => server.data?.permissionKeys.includes(key) === true;
+  const canEffect = (schedule: Schedule) =>
+    can(schedule.action === 'backup' ? 'backups.create' : 'console.power') &&
+    (!schedule.retention?.enabled || can('backups.delete'));
   const result = useQuery({
     queryKey: ['schedules', serverId],
     queryFn: () => api<Schedules>(`${serverPath(serverId)}/schedules`),
@@ -114,6 +113,15 @@ export function SchedulesSection({ serverId, editable }: { serverId: string; edi
     [deleting, setDeleting] = useState<Schedule>(),
     [running, setRunning] = useState<{ schedule: Schedule; key: string }>(),
     [runResult, setRunResult] = useState<{ jobId: string | null; reason: string | null }>();
+  const [editingBusy, setEditingBusy] = useState(false);
+  const [editingDirty, setEditingDirty] = useState(false);
+  const [discardEditing, setDiscardEditing] = useState(false);
+  useUnsavedChanges(!!editing && editingDirty, !!editing && editingBusy);
+  const closeEditing = () => {
+    if (editingBusy) return;
+    if (editingDirty) setDiscardEditing(true);
+    else setEditing(undefined);
+  };
   const reload = async () => {
     await result.refetch();
   };
@@ -183,7 +191,9 @@ export function SchedulesSection({ serverId, editable }: { serverId: string; edi
                             <AutomationSwitch
                               checked={schedule.enabled && schedule.status !== 'completed'}
                               label={t('automation.toggle', { name: schedule.name })}
-                              disabled={!editable || schedule.status === 'completed'}
+                              disabled={
+                                !editable || !canEffect(schedule) || schedule.status === 'completed'
+                              }
                               onChange={async (enabled) => {
                                 await api(`${serverPath(serverId)}/schedules/${schedule.id}`, {
                                   method: 'PUT',
@@ -234,13 +244,15 @@ export function SchedulesSection({ serverId, editable }: { serverId: string; edi
                                 setExpanded(expanded === schedule.id ? undefined : schedule.id)
                               }
                             />
-                            {editable && (
+                            {can('schedules.run') && canEffect(schedule) && (
+                              <IconButton
+                                name="play"
+                                label={t('automation.runNow')}
+                                onClick={() => setRunning({ schedule, key: idempotencyKey() })}
+                              />
+                            )}
+                            {editable && canEffect(schedule) && (
                               <>
-                                <IconButton
-                                  name="play"
-                                  label={t('automation.runNow')}
-                                  onClick={() => setRunning({ schedule, key: idempotencyKey() })}
-                                />
                                 <IconButton
                                   name="edit"
                                   label={t('web.edit')}
@@ -258,12 +270,14 @@ export function SchedulesSection({ serverId, editable }: { serverId: string; edi
                                     })
                                   }
                                 />
-                                <IconButton
-                                  name="delete"
-                                  label={t('web.delete')}
-                                  onClick={() => setDeleting(schedule)}
-                                />
                               </>
+                            )}
+                            {can('schedules.delete') && (
+                              <IconButton
+                                name="delete"
+                                label={t('web.delete')}
+                                onClick={() => setDeleting(schedule)}
+                              />
                             )}
                           </div>
                         </td>
@@ -286,7 +300,8 @@ export function SchedulesSection({ serverId, editable }: { serverId: string; edi
         open={!!editing}
         closeIcon
         title={t(editing === 'new' || !editing?.id ? 'service.addSchedule' : 'web.edit')}
-        onClose={() => setEditing(undefined)}
+        onClose={closeEditing}
+        closeDisabled={editingBusy}
         className="automation-dialog"
       >
         {editing && (
@@ -294,81 +309,83 @@ export function SchedulesSection({ serverId, editable }: { serverId: string; edi
             key={editing === 'new' ? 'new' : (editing.id ?? 'copy')}
             serverId={serverId}
             schedule={editing === 'new' ? undefined : editing}
+            onBusyChange={setEditingBusy}
+            onDirtyChange={setEditingDirty}
             onSaved={async () => {
+              setEditingDirty(false);
               setEditing(undefined);
               await reload();
             }}
           />
         )}
       </Dialog>
-      <Dialog
-        open={!!deleting}
-        closeIcon
-        title={t('automation.deleteTitle')}
-        onClose={() => setDeleting(undefined)}
-        className="automation-dialog automation-confirm"
-        initialFocusSelector="[data-form-cancel]"
+      <ConfirmDialog
+        open={discardEditing}
+        title={t('web.unsavedChanges')}
+        confirmLabel={t('web.discardChanges')}
+        destructive
+        onClose={() => setDiscardEditing(false)}
+        onConfirm={async () => {
+          setDiscardEditing(false);
+          setEditingDirty(false);
+          setEditing(undefined);
+        }}
       >
-        {deleting && (
-          <ActionForm
-            success={false}
-            destructive
-            arrowActionNavigation
-            onCancel={() => setDeleting(undefined)}
-            submitLabel={t('web.delete')}
-            onSubmit={async () => {
-              await api(`${serverPath(serverId)}/schedules/${deleting.id}`, {
-                method: 'DELETE',
-                body: { revision: deleting.revision },
-              });
-              setDeleting(undefined);
-              await reload();
-            }}
-          >
-            <p>
-              <strong>{deleting.name}</strong>
-            </p>
-            <p>{t('automation.deleteHint')}</p>
-          </ActionForm>
-        )}
-      </Dialog>
-      <Dialog
+        <p>{t('web.leaveUnsaved')}</p>
+      </ConfirmDialog>
+      <ConfirmDialog
+        open={!!deleting}
+        title={t('automation.deleteTitle')}
+        confirmLabel={t('web.delete')}
+        destructive
+        onClose={() => setDeleting(undefined)}
+        onConfirm={async () => {
+          if (!deleting) return;
+          await api(`${serverPath(serverId)}/schedules/${deleting.id}`, {
+            method: 'DELETE',
+            body: { revision: deleting.revision },
+          });
+          setDeleting(undefined);
+          await reload();
+        }}
+      >
+        <p>
+          <strong>{deleting?.name}</strong>
+        </p>
+        <p>{t('automation.deleteHint')}</p>
+      </ConfirmDialog>
+      <ConfirmDialog
         open={!!running}
-        closeIcon
         title={t('automation.runNow')}
+        confirmLabel={running ? t(`service.action.${running.schedule.action}`) : undefined}
         onClose={() => setRunning(undefined)}
-        className="automation-dialog automation-confirm"
-        initialFocusSelector="[data-form-cancel]"
+        onConfirm={async () => {
+          if (!running) return;
+          const response = await api<{ jobId: string | null; reason: string | null }>(
+            `${serverPath(serverId)}/schedules/${running.schedule.id}/run`,
+            {
+              method: 'POST',
+              body: { revision: running.schedule.revision, idempotencyKey: running.key },
+            },
+          );
+          await queryClient.invalidateQueries({
+            queryKey: ['schedule-outcomes', serverId, running.schedule.id],
+          });
+          setRunResult(response);
+          setRunning(undefined);
+          setExpanded(running.schedule.id);
+          await reload();
+        }}
       >
         {running && (
-          <ActionForm
-            success={false}
-            onCancel={() => setRunning(undefined)}
-            submitLabel={t(`service.action.${running.schedule.action}`)}
-            onSubmit={async () => {
-              const response = await api<{ jobId: string | null; reason: string | null }>(
-                `${serverPath(serverId)}/schedules/${running.schedule.id}/run`,
-                {
-                  method: 'POST',
-                  body: { revision: running.schedule.revision, idempotencyKey: running.key },
-                },
-              );
-              await queryClient.invalidateQueries({
-                queryKey: ['schedule-outcomes', serverId, running.schedule.id],
-              });
-              setRunResult(response);
-              setRunning(undefined);
-              setExpanded(running.schedule.id);
-              await reload();
-            }}
-          >
+          <>
             <p>
               <strong>{running.schedule.name}</strong>
             </p>
             <p>{t(`automation.runHint.${running.schedule.action}`)}</p>
-          </ActionForm>
+          </>
         )}
-      </Dialog>
+      </ConfirmDialog>
     </section>
   );
 }
@@ -409,10 +426,14 @@ function ScheduleForm({
   serverId,
   schedule,
   onSaved,
+  onBusyChange,
+  onDirtyChange,
 }: {
   serverId: string;
   schedule?: FormSchedule;
   onSaved: () => Promise<void>;
+  onBusyChange(busy: boolean): void;
+  onDirtyChange(dirty: boolean): void;
 }) {
   const t = useT(),
     { locale } = useLocale();
@@ -420,7 +441,10 @@ function ScheduleForm({
     transfers = useTransfers(serverId);
   const [kind, setKind] = useState(schedule?.timing.kind ?? 'daily'),
     [action, setAction] = useState(
-      schedule?.action ?? (server.data?.capabilities?.backups ? 'backup' : 'start'),
+      schedule?.action ??
+        (server.data?.capabilities?.backups && server.data.permissionKeys.includes('backups.create')
+          ? 'backup'
+          : 'start'),
     ),
     [retention, setRetention] = useState(schedule?.retention?.enabled ?? false),
     [zone, setZone] = useState(
@@ -458,6 +482,11 @@ function ScheduleForm({
           ? { kind, at: instant }
           : { kind, firstAt: instant, everySeconds: minutes * 60 };
   const serialized = JSON.stringify({ timing, timeZone: zone });
+  const draftSignature = JSON.stringify({ timing, timeZone: zone, action, retention });
+  const initialDraft = useRef(draftSignature);
+  useEffect(() => {
+    if (draftSignature !== initialDraft.current) onDirtyChange(true);
+  }, [draftSignature, onDirtyChange]);
   const [previewInput, setPreviewInput] = useState(serialized);
   useEffect(() => {
     const id = setTimeout(() => setPreviewInput(serialized), 400);
@@ -478,10 +507,15 @@ function ScheduleForm({
     'stop',
     'restart',
     ...(server.data?.capabilities?.backups || schedule?.action === 'backup' ? ['backup'] : []),
-  ];
+  ].filter((value) =>
+    server.data?.permissionKeys.includes(value === 'backup' ? 'backups.create' : 'console.power'),
+  );
   return (
     <ActionForm
       success={false}
+      onBusyChange={onBusyChange}
+      onChange={() => onDirtyChange(true)}
+      submitDisabled={!capabilityActions.includes(action)}
       onSubmit={async (data) => {
         await api(`${serverPath(serverId)}/schedules${schedule?.id ? `/${schedule.id}` : ''}`, {
           method: schedule?.id ? 'PUT' : 'POST',
@@ -679,7 +713,9 @@ function ScheduleForm({
             <Check
               label={t('backup.retention')}
               checked={retention}
-              disabled={max < 1 && !retention}
+              disabled={
+                !server.data?.permissionKeys.includes('backups.delete') || (max < 1 && !retention)
+              }
               onChange={(event) => setRetention(event.target.checked)}
             />
             {retention && (

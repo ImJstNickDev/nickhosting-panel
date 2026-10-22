@@ -136,7 +136,7 @@ export async function setGatewayRoute(
     assertPermission(current, 'settings:write');
     if (current.sessionType !== 'regular') throw new DomainError('forbidden');
     const config = await gatewayConfiguration(tx, env);
-    const server = await authorizeServer(tx, current, value.serverId, 'server:manage');
+    const server = await authorizeServer(tx, current, value.serverId, 'settings.write');
     if (server.connection_mode === 'direct') throw new DomainError('integration_unavailable');
     if (
       !server.pterodactyl_uuid ||

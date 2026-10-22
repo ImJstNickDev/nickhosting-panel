@@ -17,6 +17,7 @@ import { z } from 'zod';
 import { ApiError, api, idempotencyKey, queryClient } from '../api/client.js';
 import { hashFile } from '../api/hash.js';
 import { useT } from '../app/i18n.js';
+import { useUnsavedChanges } from '../components/navigation-guard.js';
 import { Tooltip } from '../components/tooltip.js';
 import {
   Check,
@@ -463,8 +464,23 @@ export function GameSections({
     server = useServer(serverId),
     module = gameUiRegistry.get(gameId),
     section = module?.descriptor.sections.find((s) => s.id === sectionId);
-  const permissions = Object.entries(server.data?.permissions ?? {}).flatMap(([name, allowed]) =>
-    allowed ? [`server:${name}`] : [],
+  const permissions = [
+    ...Object.entries(server.data?.permissions ?? {}).flatMap(([name, allowed]) =>
+      allowed ? [`server:${name}`] : [],
+    ),
+    ...(server.data?.permissionKeys ?? []),
+  ];
+  const canManageSection = Boolean(
+    section?.requiredPermissions.some(
+      (read) =>
+        read.endsWith('.read') &&
+        permissions.some(
+          (permission) =>
+            permission.startsWith(read.slice(0, -4)) &&
+            permission !== read &&
+            !permission.endsWith('.download'),
+        ),
+    ),
   );
   const hasSectionPermission = Boolean(
     section?.requiredPermissions.every((permission) => permissions.includes(permission)),
@@ -590,11 +606,12 @@ export function GameSections({
       try {
         const value = JSON.parse(event.data) as Record<string, unknown>;
         if (
-          value.server_id === serverId &&
-          value.job_id === operationId &&
-          ['servers.operation.succeeded', 'servers.operation.failed'].includes(
-            String(value.message_key),
-          )
+          value.serverId === serverId ||
+          (value.server_id === serverId &&
+            value.job_id === operationId &&
+            ['servers.operation.succeeded', 'servers.operation.failed'].includes(
+              String(value.message_key),
+            ))
         )
           refresh();
       } catch {
@@ -697,8 +714,8 @@ export function GameSections({
   const SectionView = getGameSectionView(section.renderer);
   const refreshError = server.error ?? loaded.error;
   const recoverableOperationId =
-    server.data?.permissions.manage === true &&
-    server.data.activeOperationId === operationId &&
+    canManageSection &&
+    server.data?.activeOperationId === operationId &&
     operationState === 'uncertain' &&
     !operation.error &&
     !refreshError
@@ -718,8 +735,7 @@ export function GameSections({
   // background read fails. Stale data is visible, but mutations remain blocked.
   if (
     refreshError &&
-    (!SectionView ||
-      !server.data ||
+    (!server.data ||
       !loaded.data ||
       (refreshError instanceof ApiError && [401, 403, 404].includes(refreshError.status)))
   )
@@ -755,7 +771,8 @@ export function GameSections({
             serverId={serverId}
             serverName={server.data.name}
             runtimeState={server.data.runtimeState}
-            canManage={server.data.permissions.manage === true}
+            canManage={canManageSection}
+            permissionKeys={server.data.permissionKeys}
             pending={pendingOperation || serverOperationPending || Boolean(refreshError)}
             recoverableOperationId={recoverableOperationId}
             operation={
@@ -831,7 +848,9 @@ export function GameSections({
                 form.action?.requiredPermissions.every((p) => permissions.includes(p)) ?? false
               }
               state={server.data.runtimeState}
-              activeOperation={pendingOperation || Boolean(server.data.activeOperationId)}
+              activeOperation={
+                pendingOperation || Boolean(server.data.activeOperationId) || Boolean(refreshError)
+              }
               unresolvedOperation={
                 effectState === 'uncertain' ||
                 (operationState === 'failed' && effectState === 'prepared')
@@ -911,6 +930,7 @@ function GameActionForm({
     (field) => !Object.is(values[field.id], data.values[field.id]),
   );
   const hasChanges = changedFields.length > 0;
+  useUnsavedChanges(hasChanges || busy, busy);
   const blocked =
     !canManage || activeOperation || (form.action?.requiresStopped && state !== 'offline');
   const context: GameUiContext = {
@@ -1006,7 +1026,9 @@ function GameActionForm({
                   </div>
                 )}
                 {failure !== undefined && <ErrorNotice error={failure} />}
-                {fields.length === 0 && <Empty text={t('gameUi.noFields')} />}
+                {fields.length === 0 && (
+                  <Empty text={t(form.emptyMessageKey ?? 'gameUi.noFields')} />
+                )}
               </>
             }
             actions={
@@ -1051,7 +1073,7 @@ function GameActionForm({
   return (
     <Section title={t(form.titleKey)}>
       {fields.length === 0 && form.fields.length > 0 ? (
-        <Empty text={t('gameUi.noFields')} />
+        <Empty text={t(form.emptyMessageKey ?? 'gameUi.noFields')} />
       ) : (
         <form className="form" onSubmit={(event) => void submit(event)} aria-busy={busy}>
           {!canManage ? (

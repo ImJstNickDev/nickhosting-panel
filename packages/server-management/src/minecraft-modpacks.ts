@@ -301,7 +301,7 @@ export function createMinecraftModpacksService(options: {
       connection,
       current,
       serverId,
-      write ? 'server:manage' : 'server:read',
+      write ? 'game.minecraft.modpacks.write' : 'game.minecraft.modpacks.read',
     );
     const profile = await connection
       .selectFrom('minecraft_server_profiles')
@@ -492,6 +492,10 @@ export function createMinecraftModpacksService(options: {
         if (selection.install) await lockResources(tx);
         await lock(tx, serverId);
         const { current, server } = await authorized(context, serverId, true, tx);
+        if (selection.worldPolicy === 'reset')
+          await authorizeServer(tx, current, serverId, 'game.minecraft.worlds.delete');
+        if (selection.install?.backupBefore)
+          await authorizeServer(tx, current, serverId, 'backups.create');
         if (selection.install && server.active_operation_id)
           throw new DomainError('operation_busy');
         const prior = await tx
@@ -622,8 +626,11 @@ export function createMinecraftModpacksService(options: {
         await lockResources(tx);
         await lock(tx, serverId);
         const { current, server } = await authorized(context, serverId, true, tx);
+        if (request.backupBefore) await authorizeServer(tx, current, serverId, 'backups.create');
         const row = await get(request.operationId, tx);
         if (row.server_id !== serverId) throw new DomainError('not_found');
+        if (minecraftModpackPrepareSchema.parse(row.selection).worldPolicy === 'reset')
+          await authorizeServer(tx, current, serverId, 'game.minecraft.worlds.delete');
         if (row.apply_idempotency_key) {
           if (
             row.apply_actor_user_id !== current.actorUserId ||
@@ -1326,6 +1333,8 @@ export function createMinecraftModpacksService(options: {
         try {
           const row = await get(operationId);
           if (row.server_id !== serverId) throw new DomainError('not_found');
+          if (minecraftModpackPrepareSchema.parse(row.selection).worldPolicy === 'reset')
+            await authorizeServer(connection, current, serverId, 'game.minecraft.worlds.delete');
           if (row.state !== 'uncertain') throw new DomainError('conflict');
           if (row.runtime_preparation !== null && row.publication === null) {
             runtimePreparationSchema.parse(row.runtime_preparation);

@@ -3,6 +3,7 @@ import type { createDatabase } from '@nickhosting/database';
 import {
   authorizeServer,
   createFilemanReadService,
+  getServerPermissionKeys,
   inspectMinecraftCombination,
   inspectMinecraftWorlds,
   type ManagementRuntime,
@@ -15,6 +16,7 @@ import { registerMinecraftRoutes } from './minecraft.js';
 vi.mock('@nickhosting/server-management', async (original) => ({
   ...(await original<typeof import('@nickhosting/server-management')>()),
   authorizeServer: vi.fn(),
+  getServerPermissionKeys: vi.fn(),
   inspectMinecraftWorlds: vi.fn(),
   inspectMinecraftCombination: vi.fn(),
 }));
@@ -70,6 +72,7 @@ function fixture(connection = db) {
   return {
     app,
     access,
+    service,
     management,
     authorizeTransfer,
     readFileForEditor,
@@ -82,6 +85,9 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue({} as Awaited<ReturnType<typeof authorizeServer>>);
   vi.mocked(inspectMinecraftWorlds).mockReset().mockResolvedValue(snapshot);
+  vi.mocked(getServerPermissionKeys)
+    .mockReset()
+    .mockResolvedValue(['game.minecraft.properties.read']);
 });
 describe('world snapshot HTTP access contract', () => {
   it('allows inventory readers through managed identity access and returns an uncached snapshot', async () => {
@@ -90,12 +96,18 @@ describe('world snapshot HTTP access contract', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(await response.json()).toEqual(snapshot);
-    expect(authorizeServer).toHaveBeenCalledExactlyOnceWith(db, actor, 'server');
+    expect(authorizeServer).toHaveBeenCalledExactlyOnceWith(
+      db,
+      actor,
+      'server',
+      'game.minecraft.worlds.read',
+    );
     expect(f.access).toHaveBeenCalledExactlyOnceWith(
       actor,
       'server',
       expect.any(Function),
       expect.any(AbortSignal),
+      'game.minecraft.worlds.read',
     );
     const authorize = vi.mocked(inspectMinecraftWorlds).mock.calls[0]?.[3];
     await authorize?.();
@@ -117,7 +129,17 @@ describe('world snapshot HTTP access contract', () => {
     expect((await response).status).toBe(200);
   });
   it('opens Settings through Fileman identity access and one direct signed read', async () => {
-    const profile = { combination_id: 'choice', configuration: {}, installed: true };
+    const profile = {
+      combination_id: 'choice',
+      configuration: {
+        eula: true,
+        properties: {},
+        operators: ['HiddenOperator'],
+        whitelist: ['HiddenMember'],
+        modpack: { sourceId: 'private-source' },
+      },
+      installed: true,
+    };
     const query = {
       selectAll: () => query,
       select: () => query,
@@ -137,14 +159,19 @@ describe('world snapshot HTTP access contract', () => {
     grants.resolve();
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
+    const result = await response.json();
+    expect(result).toMatchObject({
       effectiveProperties: { motd: 'Fixture', 'max-players': '20' },
+      configuration: { operators: [], whitelist: [] },
+      content: [],
     });
+    expect(JSON.stringify(result)).not.toMatch(/HiddenOperator|HiddenMember|private-source/);
     expect(f.access).toHaveBeenCalledExactlyOnceWith(
       actor,
       'server',
       expect.any(Function),
       expect.any(AbortSignal),
+      'game.minecraft.properties.read',
     );
     expect(f.readFileForEditor).toHaveBeenCalledExactlyOnceWith(
       'provider',
@@ -166,5 +193,79 @@ describe('world snapshot HTTP access contract', () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({ code: 'provenance_mismatch' });
     expect(inspectMinecraftWorlds).not.toHaveBeenCalled();
+  });
+});
+
+describe('dedicated world archive scope', () => {
+  function archiveFixture() {
+    const f = fixture();
+    const entry = (name: string, is_file: boolean) => ({
+      name,
+      is_file,
+      is_symlink: false,
+      size: is_file ? 3 : 0,
+      modified_at: '2026-01-01T00:00:00Z',
+      created_at: '2026-01-01T00:00:00Z',
+      mode: '0644',
+      mimetype: 'application/octet-stream',
+    });
+    const listFiles = vi.fn(async (_id: string, directory: string) =>
+      directory === '' || directory === '/'
+        ? [entry('world', false), entry('private', false)]
+        : directory === 'world' || directory === '/world'
+          ? [entry('level.dat', true)]
+          : [entry('secret.txt', true)],
+    );
+    const downloadFile = vi.fn(async (_id, _path, options) => {
+      await options.authorize();
+      const body = new Response('nbt').body;
+      if (!body) throw new Error('Missing fixture stream');
+      return { body };
+    });
+    Object.assign(f.service.adapter, { listFiles, downloadFile });
+    Object.assign(f.service, {
+      access: vi.fn(async (_context, _serverId, _write, work, _timing, permission) => {
+        expect(permission).toBe('game.minecraft.worlds.download');
+        return work('provider', db, actor, {
+          id: 'server',
+          name: 'Fixture',
+          runtime_state: 'offline',
+          active_operation_id: null,
+        });
+      }),
+      fileReadPhase: vi.fn(() => ({})),
+    });
+    vi.mocked(inspectMinecraftWorlds).mockResolvedValue({
+      ...snapshot,
+      worlds: [{ name: 'world', status: 'verified' }],
+    } as never);
+    return { ...f, listFiles, downloadFile };
+  }
+  it('downloads only the discovered world and rechecks the domain permission throughout streaming', async () => {
+    const f = archiveFixture();
+    const response = await f.app.request('/v1/servers/server/minecraft/worlds/world/archive');
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('application/zip');
+    await response.arrayBuffer();
+    expect(f.downloadFile).toHaveBeenCalledOnce();
+    expect(f.downloadFile.mock.calls[0]?.[1]).toBe('world/level.dat');
+    expect(authorizeServer).toHaveBeenCalledWith(
+      db,
+      actor,
+      'server',
+      'game.minecraft.worlds.download',
+    );
+    expect(f.authorizeTransfer.mock.calls.length).toBeGreaterThan(1);
+    expect(
+      f.authorizeTransfer.mock.calls.every((args) => args[7] === 'game.minecraft.worlds.download'),
+    ).toBe(true);
+  });
+  it('rejects arbitrary folders, protected roots and traversal before downloading bytes', async () => {
+    const f = archiveFixture();
+    for (const world of ['private', 'mods', 'world%2F..%2Fprivate']) {
+      const response = await f.app.request(`/v1/servers/server/minecraft/worlds/${world}/archive`);
+      expect([400, 404]).toContain(response.status);
+    }
+    expect(f.downloadFile).not.toHaveBeenCalled();
   });
 });

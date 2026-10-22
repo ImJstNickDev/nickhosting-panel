@@ -357,7 +357,7 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
       await dialog.getByRole('button', { name: 'Select world', exact: true }).click();
       expect((await accepted).status()).toBe(202);
       await user
-        .getByRole('navigation', { name: 'Minecraft', exact: true })
+        .locator('.sidebar .nav')
         .getByRole('link', { name: 'Players', exact: true })
         .click();
       await browserExpect(
@@ -507,19 +507,13 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     ).toBeEnabled();
     await screenshot(user, 'minecraft-worlds-desktop-en');
     await accessible();
-    const requested = user
-      .context()
-      .waitForEvent('request', (request) => request.url().endsWith('/files/archive'));
     const downloaded = user.waitForEvent('download');
     await user.getByRole('button', { name: 'Download ZIP: imported', exact: true }).click();
-    const request = await requested;
-    const url = new URL(request.url());
-    const fields = new URLSearchParams(request.postData() ?? '');
-    expect(request.method()).toBe('POST');
-    expect(url.pathname).toBe(`/v1/servers/${provider.ids.serverId}/files/archive`);
-    expect(fields.get('root')).toBe('');
-    expect(JSON.parse(fields.get('files') ?? 'null')).toEqual(['imported']);
-    expect(await (await downloaded).failure()).toBeNull();
+    const artifact = await downloaded;
+    expect(new URL(artifact.url()).pathname).toBe(
+      `/v1/servers/${provider.ids.serverId}/minecraft/worlds/imported/archive`,
+    );
+    expect(await artifact.failure()).toBeNull();
     dialog = await choose('Select world', 'world');
     await operation(() =>
       dialog.getByRole('button', { name: 'Select world', exact: true }).click(),
@@ -803,8 +797,8 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     const denied = await identities.peer.request.post(`${fixture.origin}${api()}/operations`, {
       headers: { Origin: fixture.origin },
       data: {
-        kind: 'world-select',
-        world: 'replacement',
+        action: 'minecraft-content',
+        command: { kind: 'world-select', world: 'replacement' },
         idempotencyKey: 'viewer-world-selection',
       },
     });

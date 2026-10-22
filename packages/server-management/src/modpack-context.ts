@@ -75,7 +75,7 @@ export async function createModpackContext(options: {
     throw new DomainError('validation_failed');
   const actor = await timing.measure('authSession', () => options.currentAuth());
   let server = await timing.measure('authorize', () =>
-    authorizeServer(db, actor, pack.server_id, 'server:manage'),
+    authorizeServer(db, actor, pack.server_id, 'game.minecraft.modpacks.write'),
   );
   if (
     !server.pterodactyl_id ||
@@ -104,7 +104,7 @@ export async function createModpackContext(options: {
     await db.transaction().execute(async (tx) => {
       await lockResources(tx);
       const latest = await timing.measure('authorize', () =>
-        authorizeServer(tx, actor, server.id, 'server:manage'),
+        authorizeServer(tx, actor, server.id, 'game.minecraft.modpacks.write'),
       );
       if (latest.active_operation_id && latest.active_operation_id !== pack.id)
         throw new DomainError('operation_busy');
@@ -184,7 +184,7 @@ export async function createModpackContext(options: {
         throw new DomainError('operation_uncertain');
     }
     const latest = await timing.measure('authorize', () =>
-      authorizeServer(db, current, server.id, 'server:manage'),
+      authorizeServer(db, current, server.id, 'game.minecraft.modpacks.write'),
     );
     if (
       latest.owner_id !== pack.resource_owner_id ||
@@ -281,7 +281,7 @@ export async function createModpackContext(options: {
       await reconcileGatewayState(db, server.id, { env });
   };
   const backup = async (): Promise<string> => {
-    await authorize();
+    await authorizeServer(db, await authorize(), server.id, 'backups.create');
     await assertStopped();
     if (operation.plan.backupDispatched) throw new DomainError('operation_uncertain');
     const since = new Date();

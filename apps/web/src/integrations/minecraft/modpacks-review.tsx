@@ -6,6 +6,7 @@ import type {
   ModpackCatalogVersion,
 } from '../../../../../games/minecraft/src/ui/modpacks-controller.js';
 import { useFormat, useT } from '../../app/i18n.js';
+import { Pagination, Switch } from '../../components/workspace-controls.js';
 import {
   modpackKey as k,
   modpackProviders,
@@ -81,23 +82,14 @@ function Choice({
   disabled: boolean;
 }) {
   return (
-    <button
-      type="button"
+    <Switch
       className="modpacks-choice"
-      role="switch"
-      aria-checked={checked}
-      aria-label={title}
+      label={title}
+      help={hint}
+      checked={checked}
       disabled={disabled}
-      onClick={() => onChange(!checked)}
-    >
-      <span>
-        <strong>{title}</strong>
-        <small>{hint}</small>
-      </span>
-      <span className="modpacks-switch" aria-hidden="true">
-        <i />
-      </span>
-    </button>
+      onChange={onChange}
+    />
   );
 }
 export function ModpackReview(props: {
@@ -106,6 +98,8 @@ export function ModpackReview(props: {
   version?: ModpackCatalogVersion;
   installed?: MinecraftModpacksSnapshot['installed'];
   canManage: boolean;
+  canBackup: boolean;
+  canDeleteWorlds: boolean;
   busy: boolean;
   canRecover: boolean;
   onBack: () => void;
@@ -135,6 +129,9 @@ export function ModpackReview(props: {
     !props.canManage ||
     operation.canCancel === false ||
     ['apply_queued', 'applying', 'uncertain'].includes(operation.state);
+  const canContinue =
+    (operation.selection.worldPolicy !== 'reset' || props.canDeleteWorlds) &&
+    (!operation.selection.install?.backupBefore || props.canBackup);
   const ready =
     operation.state === 'ready' &&
     operation.runtimeSupported &&
@@ -261,7 +258,7 @@ export function ModpackReview(props: {
                           <div className="modpacks-file-decision">
                             <button
                               type="button"
-                              disabled={choicesLocked}
+                              disabled={choicesLocked || !canContinue}
                               onClick={() =>
                                 props.onFileDecision?.(blocker.path ?? '', 'keep-local')
                               }
@@ -270,7 +267,7 @@ export function ModpackReview(props: {
                             </button>
                             <button
                               type="button"
-                              disabled={choicesLocked}
+                              disabled={choicesLocked || !canContinue}
                               onClick={() => props.onFileDecision?.(blocker.path ?? '', 'use-pack')}
                             >
                               {t(k('usePack'))}
@@ -290,7 +287,7 @@ export function ModpackReview(props: {
           {operation.state === 'failed' && (
             <div className="modpacks-recovery">
               <p>{t(k('failed'))}</p>
-              <button type="button" disabled={locked} onClick={props.onRetry}>
+              <button type="button" disabled={locked || !canContinue} onClick={props.onRetry}>
                 {t(k('retry'))}
               </button>
             </div>
@@ -329,9 +326,12 @@ export function ModpackReview(props: {
           {operation.selection.mode === 'replace' ? (
             <Choice
               title={t(k('preserveWorlds'))}
-              hint={t(k('preserveWorldsHint'))}
+              hint={t(k(props.canDeleteWorlds ? 'preserveWorldsHint' : 'worldsPermission'))}
               checked={operation.selection.worldPolicy === 'preserve'}
-              disabled={choicesLocked}
+              disabled={
+                choicesLocked ||
+                (!props.canDeleteWorlds && operation.selection.worldPolicy === 'preserve')
+              }
               onChange={(value) => props.onWorldPolicy(value ? 'preserve' : 'reset')}
             />
           ) : (
@@ -351,7 +351,7 @@ export function ModpackReview(props: {
             title={t(k('backup'))}
             hint={t(k('backupHint'))}
             checked={backup}
-            disabled={locked}
+            disabled={locked || !props.canBackup}
             onChange={setBackup}
           />
           <p className="modpacks-preserved">
@@ -362,7 +362,12 @@ export function ModpackReview(props: {
           <button
             type="button"
             className="mods-primary modpacks-apply"
-            disabled={!ready || locked}
+            disabled={
+              !ready ||
+              locked ||
+              (backup && !props.canBackup) ||
+              (operation.selection.worldPolicy === 'reset' && !props.canDeleteWorlds)
+            }
             onClick={() => props.onApply(backup)}
           >
             <ModsIcon name="download" />
@@ -388,20 +393,15 @@ function ReviewPagination({
   const pages = Math.ceil(total / 100);
   if (pages < 2) return null;
   return (
-    <div className="mods-pagination">
-      <ModsAction
-        icon="back"
-        label={t(k('previous'))}
-        disabled={page === 0}
-        onClick={() => onChange(page - 1)}
-      />
-      <span>{t(k('page'), { page: page + 1, pages })}</span>
-      <ModsAction
-        icon="next"
-        label={t(k('next'))}
-        disabled={page + 1 >= pages}
-        onClick={() => onChange(page + 1)}
-      />
-    </div>
+    <Pagination
+      label={t('web.pagination')}
+      previousLabel={t(k('previous'))}
+      nextLabel={t(k('next'))}
+      summary={t(k('page'), { page: page + 1, pages: Math.max(1, Math.ceil(total / 100)) })}
+      canPrevious={page > 0}
+      canNext={page + 1 < Math.ceil(total / 100)}
+      onPrevious={() => onChange(page - 1)}
+      onNext={() => onChange(page + 1)}
+    />
   );
 }

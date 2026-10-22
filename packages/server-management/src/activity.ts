@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { DB } from './admission.js';
 import { loadModpackProvisioning } from './modpack-provisioning.js';
 import { provisioningPresentation } from './provisioning.js';
-import { parse } from './registry.js';
+import { authorizeServer, parse, serverSubusersAvailable } from './registry.js';
 
 export const activityCategories = [
   'lifecycle',
@@ -78,6 +78,7 @@ const auditCategories: Record<string, (typeof activityCategories)[number]> = {
   'server.backup.delete_incomplete': 'backups',
   'server.sftp.issued': 'access',
   'server.member.updated': 'access',
+  'server.subuser.updated': 'access',
   'server.sftp.rotated': 'access',
   'server.sftp.revoked': 'access',
   'server.sftp.access_revoked': 'access',
@@ -195,11 +196,18 @@ export async function listUnifiedActivity(db: DB, context: AuthContext, input: u
     }
   }
   const allServers = context.role === 'owner' && context.sessionType === 'regular';
-  const scope = sql`(${allServers} or server.owner_id = ${context.subjectUserId} or exists (
+  const direct = (await serverSubusersAvailable(db))
+    ? sql`exists (select 1 from server_subusers member where member.server_id = server.id and member.user_id = ${context.subjectUserId} and member.permission_keys @> '["activity.read"]'::jsonb)`
+    : sql`false`;
+  const directCommand = (await serverSubusersAvailable(db))
+    ? sql`exists (select 1 from server_subusers member where member.server_id = server.id and member.user_id = ${context.subjectUserId} and member.permission_keys @> '["console.read","console.command"]'::jsonb)`
+    : sql`false`;
+  const scope = sql`(${allServers} or server.owner_id = ${context.subjectUserId} or ${direct} or exists (
     select 1 from project_members member where member.project_id = server.project_id and member.user_id = ${context.subjectUserId}
   ))`;
   // Match the existing list/detail boundary (including support subject scoping).
   if (value.serverId) {
+    await authorizeServer(db, context, value.serverId, 'activity.read');
     const visible =
       await sql`select server.id from managed_servers server where server.id = ${value.serverId} and server.deleted_at is null and ${scope}`.execute(
         db,
@@ -271,7 +279,7 @@ export async function listUnifiedActivity(db: DB, context: AuthContext, input: u
   const rows = (
     await sql<Row>`
     with visible_servers as (
-      select server.*, (${context.role === 'owner'} or server.owner_id = ${context.subjectUserId} or exists (
+      select server.*, (${context.role === 'owner'} or server.owner_id = ${context.subjectUserId} or ${directCommand} or exists (
         select 1 from project_members member where member.project_id = server.project_id and member.user_id = ${context.subjectUserId} and member.role in ('owner', 'manager')
       )) as can_manage from managed_servers server where ${scope} ${value.serverId ? sql`and server.id = ${value.serverId}` : sql``}
     ), audit_scoped as (

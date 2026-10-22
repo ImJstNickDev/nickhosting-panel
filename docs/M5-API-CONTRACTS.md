@@ -59,9 +59,9 @@ text; server/project/job identities are UUIDs. Invalid cursors are domain errors
 
 | Method/path | Filters/body and contract |
 | --- | --- |
-| `GET /v1/platform/servers` | `limit`, `cursor` or 1-based `page` (mutually exclusive), `q`, `state`, `gameId`, `runtimeId`, `version`, legacy `ownerId` or repeated `ownerIds=id&ownerIds=id` (mutually exclusive, 1–100 nonempty IDs up to 128 characters each, deduplicated; OR between owners and AND with other filters), `projectId` (UUID or `none`), optional `scope=mine|others`. Default preserves owner/project visibility; `mine` restricts to subject-owned servers; `others` excludes subject-owned servers and requires a regular Owner. Adds `total`, `page`, `totalPages` (minimum 1; excessive pages clamp to last) and `filterOptions={games:[{id,nameKey}],runtimes:string[],versions:string[],projects:[{id,name}],owners:[{id,name}]}`. Facets use the scoped inventory independently of text/status filters; runtime choices narrow by game, versions by game/runtime. Owner choices appear only in Owner `others` scope, without emails. Version is installed Minecraft profile combination release with matching mapping; integrations without persisted installed releases expose no version choices. Legacy cursor order and `nextCursor` remain supported; totals precede cursor filtering. |
-| `GET /v1/platform/servers/:id` | Existing public server fields plus `gameId`, `runtimeId`, `gameNameKey`, `capabilities`, `permissions`, `availableActions`, `sleepState`, `wakeEnabled`, `firstStart`. `wakeEnabled` is a configuration hint: effective global Gateway enabled with ID/host, per-server policy enabled, Gateway connection, supported wake capability (including manual base manifests whose enabled policy validates the installed protocol), and neither manual-stop nor maintenance intent. It does not certify routes, process readiness, provider health or live admission; temporary blocked states remain separate in `sleepState`. |
-| `PATCH /v1/platform/servers/:id` | Strict `{name?,projectId?}`. Manage permission for rename; resource owner or regular Owner for regrouping. Destination project belongs to the same resource owner. Runtime mapping, provider identity and allocation claims are immutable here. |
+| `GET /v1/platform/servers` | `limit`, `cursor` or 1-based `page` (mutually exclusive), `q`, `state`, `gameId`, `runtimeId`, `version`, legacy `ownerId` or repeated `ownerIds=id&ownerIds=id` (mutually exclusive, 1–100 nonempty IDs up to 128 characters each, deduplicated; OR between owners and AND with other filters), `projectId` (UUID or `none`), optional `scope=mine|others`. Default preserves owner/project/direct-Subuser visibility; `mine` restricts to subject-owned servers; `others` excludes subject-owned servers and requires a regular Owner. Adds `total`, `page`, `totalPages` (minimum 1; excessive pages clamp to last) and `filterOptions={games:[{id,nameKey}],runtimes:string[],versions:string[],projects:[{id,name}],owners:[{id,name}]}`. Facets use the scoped inventory independently of text/status filters; runtime choices narrow by game, versions by game/runtime. Owner choices appear only in Owner `others` scope, without emails. Version is installed Minecraft profile combination release with matching mapping; integrations without persisted installed releases expose no version choices. Legacy cursor order and `nextCursor` remain supported; totals precede cursor filtering. |
+| `GET /v1/platform/servers/:id` | Existing public server fields plus `gameId`, `runtimeId`, `gameNameKey`, `capabilities`, legacy `permissions`, authoritative `permissionKeys`, `availableActions`, `sleepState`, `wakeEnabled`, `firstStart`. `wakeEnabled` is a configuration hint: effective global Gateway enabled with ID/host, per-server policy enabled, Gateway connection, supported wake capability (including manual base manifests whose enabled policy validates the installed protocol), and neither manual-stop nor maintenance intent. It does not certify routes, process readiness, provider health or live admission; temporary blocked states remain separate in `sleepState`. |
+| `PATCH /v1/platform/servers/:id` | Strict `{name?,projectId?}`. `settings.write` for rename; resource owner or regular Owner for regrouping. Destination project belongs to the same resource owner. Runtime mapping, provider identity and allocation claims are immutable here. |
 | `GET /v1/platform/projects` | Paginated `q` search; current membership and effective management role. |
 | `GET /v1/platform/projects/:id` | Project metadata, safe owner and member profiles/roles. |
 | `PATCH /v1/platform/projects/:id` | `{name}`; project owner or regular platform Owner, under the resource lock. |
@@ -80,7 +80,37 @@ Project creation and membership mutation reuse `POST /v1/projects` and
 `PUT /v1/projects/:id/members` with `{userId,role}`; `role:null` revokes access.
 Revocation applies on subsequent requests and existing live-authority checks.
 
-Server `permissions` separates `read`, `operate`, `manage` and `sharing`.
+Server `permissionKeys` contains effective native and compiled integration grants.
+The legacy `permissions` summary preserves role-based compatibility; it must not
+be used to infer all direct grants or delegate lifecycle/resource ownership.
+The catalog and additive inheritance contract is documented in
+[server rework](M5-SERVER-REWORK.md). Projects remain optional grouping/sharing.
+
+| Subusers method/path | Contract |
+| --- | --- |
+| `GET /v1/platform/servers/:id/subusers` | `subusers.read`; items include safe identity, direct/inherited/effective keys, project provenance and protected/edit/delete flags, plus permission definitions and grantable keys. |
+| `POST /v1/platform/servers/:id/subusers/lookup` | `subusers.write`; exact verified email `{identifier}` returns `{user: safeProfile|null}`. |
+| `PUT /v1/platform/servers/:id/subusers/:userId` | `subusers.write`; replace nonempty direct `{permissionKeys}`. Every action requires its resource Read; unknown and duplicate keys are rejected. |
+| `DELETE /v1/platform/servers/:id/subusers/:userId` | `subusers.delete`; idempotently remove direct grants, preserving inherited access. |
+
+Membership edits re-resolve authority under the resource lock, reject self-elevation
+and protected targets, and immediately reconcile affected SFTP credentials. Legacy
+project managers retain their previous authority but do not gain Subusers delegation.
+Read, Write and Additional are presentation groups, not bundled permission levels.
+Native APIs, streams, signed-download proxies, queued jobs and scheduled effects
+check the specific operation again. Schedule run/write also needs its underlying
+power/backup grant; retention additionally needs backup deletion. Existing SFTP
+transport revocation limits (issue #18) remain a separate production-release gate.
+The Worlds archive route `GET /v1/servers/:id/minecraft/worlds/:world/archive`
+uses `game.minecraft.worlds.download`, validates an installed world and scopes the
+stream to that directory; it does not grant arbitrary Files access.
+Modpacks world reset additionally requires `game.minecraft.worlds.delete`, checked
+at preparation, apply, recovery and worker execution. Its optional backup requires
+`backups.create`. Legacy generic Modpacks replacement can wipe other content and
+configuration too, so retains `server:manage` alongside `game.minecraft.modpacks.write`;
+legacy generic install/remove also retain management authority. Scoped content APIs
+use their independent integration grants.
+
 `availableActions` additionally considers installation, process state, pending
 operation/upload, provider identity and resource reservations. It is advisory:
 lifecycle handlers recheck permissions, configuration, declared capabilities, immutable runtime identity and admission; undeclared runtime profiles retain their evidence gates.
@@ -309,7 +339,7 @@ intent and occurrence history.
 | Method/path under `/v1/servers/:id` | Contract |
 | --- | --- |
 | `GET /automation-consent` | `allowed`, `expectedIntent`, Gateway configured/enabled flags and nullable `grantBlockedReason`. |
-| `PUT /automation-consent` | Strict `{allowed,expectedIntent,expectedAllowed}` with current regular manage authority. The expected fields must match the latest GET. Pausing changes only automatic-start permission, preserving running readiness and idle sleep. Does not implicitly start a server or deploy/enable a Gateway. |
+| `PUT /automation-consent` | Strict `{allowed,expectedIntent,expectedAllowed}` with current regular `settings.write` authority. The expected fields must match the latest GET. Pausing changes only automatic-start permission, preserving running readiness and idle sleep. Does not implicitly start a server or deploy/enable a Gateway. |
 | `GET /schedules` | Current schedules with revision, timing, zone, action, next run and timestamps. |
 | `POST /schedules` | `{name,action,timing,timeZone,enabled}`; 201 on durable creation. |
 | `PUT /schedules/:scheduleId` | Same fields plus current `revision`; stale updates conflict. |
@@ -331,7 +361,7 @@ late is recorded as skipped. No capacity waiting queue or retrospective burst.
 Occurrence claim, admission, operation and outbox are one PostgreSQL transaction.
 Duplicate workers cannot dispatch the same occurrence twice. Before each **new**
 provider effect, the lifecycle authorizer rechecks current authorizer identity/verification,
-current manage permission, schedule revision/enabled/deleted state, occurrence/job
+current schedule and underlying effect permissions, schedule revision/enabled/deleted state, occurrence/job
 identity, regular actor=subject authority and manual-stop/Gateway generation.
 Unknown prepared effects continue conservative reconciliation, not blind replay.
 

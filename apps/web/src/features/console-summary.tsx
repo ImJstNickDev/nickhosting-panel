@@ -5,7 +5,7 @@ import { api } from '../api/client.js';
 import { useFormat, useLocale, useT } from '../app/i18n.js';
 import { Tooltip } from '../components/tooltip.js';
 import type { DisplayResources } from './console-resources.js';
-import { type Connections, platformPath } from './service-contracts.js';
+import { type Connections, platformPath, useServer } from './service-contracts.js';
 import './console-summary.css';
 
 const iconPaths = {
@@ -145,7 +145,10 @@ export function ConsoleSummary({
   const t = useT(),
     format = useFormat(),
     { locale } = useLocale();
+  const server = useServer(serverId);
+  const canReadNetwork = server.data?.permissionKeys.includes('network.read') === true;
   const connections = useQuery({
+    enabled: canReadNetwork,
     queryKey: ['connections', serverId],
     queryFn: () => api<Connections>(`${platformPath(serverId)}/connections`),
     refetchInterval: 15000,
@@ -179,53 +182,55 @@ export function ConsoleSummary({
 
   return (
     <dl className="console-summary" aria-label={t('service.summary.title')}>
-      <SummaryCard
-        icon="address"
-        label={t('service.address')}
-        action={
-          <Tooltip content={t('connection.openSettings')}>
-            <Link
-              className="console-summary-address-edit"
-              to={`/servers/${serverId}/network`}
-              aria-label={t('connection.openSettings')}
-            >
-              <svg
-                aria-hidden="true"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.7"
+      {canReadNetwork && (
+        <SummaryCard
+          icon="address"
+          label={t('service.address')}
+          action={
+            <Tooltip content={t('connection.openSettings')}>
+              <Link
+                className="console-summary-address-edit"
+                to={`/servers/${serverId}/network`}
+                aria-label={t('connection.openSettings')}
               >
-                <path
-                  d="m16 3 5 5-12 12-6 1 1-6Z M14 5l5 5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </Link>
-          </Tooltip>
-        }
-      >
-        {connections.isPending ? (
-          t('web.loading')
-        ) : connections.error ? (
-          <>
-            <span>{t('web.unavailable')}</span>
-            <button
-              type="button"
-              className="console-summary-retry secondary"
-              disabled={connections.isFetching}
-              onClick={() => void connections.refetch()}
-            >
-              {t('web.retry')}
-            </button>
-          </>
-        ) : address ? (
-          <AddressCopy key={`${serverId}:${address}`} address={address} />
-        ) : (
-          t(missingAddress)
-        )}
-      </SummaryCard>
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.7"
+                >
+                  <path
+                    d="m16 3 5 5-12 12-6 1 1-6Z M14 5l5 5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </Link>
+            </Tooltip>
+          }
+        >
+          {connections.isPending ? (
+            t('web.loading')
+          ) : connections.error ? (
+            <>
+              <span>{t('web.unavailable')}</span>
+              <button
+                type="button"
+                className="console-summary-retry secondary"
+                disabled={connections.isFetching}
+                onClick={() => void connections.refetch()}
+              >
+                {t('web.retry')}
+              </button>
+            </>
+          ) : address ? (
+            <AddressCopy key={`${serverId}:${address}`} address={address} />
+          ) : (
+            t(missingAddress)
+          )}
+        </SummaryCard>
+      )}
       <SummaryCard icon="uptime" label={t('service.summary.uptime')} offline={offline}>
         {duration}
       </SummaryCard>

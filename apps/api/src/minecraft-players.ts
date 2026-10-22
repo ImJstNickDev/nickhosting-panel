@@ -3,7 +3,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import { type createDatabase, getSettings, recordAudit } from '@nickhosting/database';
 import type { FilemanReadService } from '@nickhosting/game-sdk';
-import { createMinecraftIdentityProvider, verifyMinecraftPlayer } from '@nickhosting/minecraft';
+import {
+  createMinecraftIdentityProvider,
+  minecraftPlayerPermission,
+  verifyMinecraftPlayer,
+} from '@nickhosting/minecraft';
 import type { ConsoleRelay } from '@nickhosting/pterodactyl-adapter';
 import {
   createFilemanReadService,
@@ -25,6 +29,7 @@ import {
   parseMinecraftWhitelistProperties,
 } from '../../../games/minecraft/src/player-management.js';
 import { minecraftStoredConfigurationSchema } from '../../../packages/server-management/src/minecraft-content-contracts.js';
+import { permissionRuntime } from '../../../packages/server-management/src/permission-runtime.js';
 import type { Variables } from './app.js';
 
 type C = Context<{ Variables: Variables }>;
@@ -171,7 +176,7 @@ export function registerMinecraftPlayerRoutes(
   }
   app.get('/v1/servers/:id/minecraft/players', async (c) => {
     const context = await principal(c),
-      service = await management();
+      service = permissionRuntime(await management(), 'game.minecraft.players');
     const result = await service.fileReadScope(
       context,
       c.req.param('id'),
@@ -207,7 +212,7 @@ export function registerMinecraftPlayerRoutes(
   });
   app.get('/v1/servers/:id/minecraft/players/online', async (c) => {
     const context = await principal(c),
-      service = await management(),
+      service = permissionRuntime(await management(), 'game.minecraft.players'),
       serverId = c.req.param('id');
     // Release the access connection before resolving provider credentials or opening
     // a relay. Those operations borrow their own pool connections.
@@ -263,9 +268,13 @@ export function registerMinecraftPlayerRoutes(
   });
   app.post('/v1/servers/:id/minecraft/players/actions', async (c) => {
     const context = await principal(c),
-      service = await management(),
       serverId = c.req.param('id');
     const input = parse(minecraftPlayerActionSchema, await body(c));
+    const service = permissionRuntime(
+      await management(),
+      'game.minecraft.players',
+      minecraftPlayerPermission(input.action).split('.').at(-1),
+    );
     const identityProvider =
       'expectedUuid' in input && input.expectedUuid
         ? createMinecraftIdentityProvider({

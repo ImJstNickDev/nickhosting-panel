@@ -3,12 +3,14 @@ import { minecraftProfiles } from './compatibility.js';
 import { minecraftContentCapabilities } from './content-capabilities.js';
 import { minecraftGatewayMessages } from './gateway-messages.js';
 import { minecraftRuntimeImagePolicy } from './image-policy.js';
+import { minecraftServerPermissions } from './server-permissions.js';
 
 /** Public capabilities are implemented backend contracts, not a release support matrix. */
 export const minecraftManifest = gameManifestSchema.parse({
   id: 'minecraft',
   version: '1.0.0',
   nameKey: 'games.minecraft.name',
+  serverPermissions: minecraftServerPermissions,
   // Live save-command receipts need runtime/version-specific evidence before exposure.
   backupPolicy: { offline: 'required' },
   gatewayMessages: minecraftGatewayMessages,

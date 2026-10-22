@@ -1,6 +1,5 @@
 .minecraft-worlds {
   width: 100%;
-  max-width: 1080px;
   margin-inline: auto;
   container-type: inline-size;
 }
@@ -15,33 +14,13 @@
 .minecraft-worlds-toolbar {
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 20px;
+  margin-bottom: 12px;
 }
 .minecraft-worlds-controls {
   gap: 10px;
   flex-wrap: wrap;
   justify-content: flex-end;
   max-width: 100%;
-}
-.minecraft-worlds-search {
-  position: relative;
-  flex: 1 1 260px;
-  max-width: 340px;
-  min-width: 140px;
-}
-.minecraft-worlds-search > svg {
-  position: absolute;
-  top: 50%;
-  left: 12px;
-  transform: translateY(-50%);
-  color: var(--muted);
-  pointer-events: none;
-}
-.minecraft-worlds-search input {
-  width: 100%;
-  min-height: 40px;
-  padding-left: 38px;
-  background: var(--surface);
 }
 .minecraft-worlds-import {
   display: inline-flex;
@@ -149,32 +128,7 @@
   gap: 3px;
   flex: 0 0 auto;
 }
-.minecraft-world-action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  min-height: 36px;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  box-shadow: none;
-  color: var(--muted);
-}
-.minecraft-world-action:hover:not(:disabled) {
-  color: var(--blue);
-  background: #f1f3f5;
-  border-color: var(--line);
-}
-.minecraft-world-action--danger:hover:not(:disabled) {
-  color: var(--danger, #a13226);
-}
-.minecraft-world-action:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
+
 .minecraft-worlds-empty {
   padding: 38px 20px;
   border: 1px solid var(--line);
@@ -189,15 +143,6 @@
 }
 .minecraft-worlds-empty > p {
   margin: 10px 0 0;
-}
-.minecraft-worlds-pagination {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
-  margin-top: 14px;
-  color: var(--muted);
-  font-size: 0.8rem;
 }
 .minecraft-worlds-import-dialog {
   width: min(520px, calc(100vw - 32px));
@@ -240,7 +185,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
-  margin-bottom: 18px;
+  margin-bottom: 12px;
   font-size: 0.8rem;
 }
 .minecraft-worlds-progress > label {
@@ -265,10 +210,6 @@
   .minecraft-worlds-toolbar {
     flex-wrap: wrap;
     gap: 12px;
-  }
-  .minecraft-worlds-search {
-    max-width: none;
-    flex-basis: 100%;
   }
   .minecraft-worlds-controls {
     margin-left: auto;

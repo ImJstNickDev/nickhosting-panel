@@ -5,6 +5,7 @@ import type { listPlatformProjects } from '../../../../packages/server-managemen
 import { api, queryClient } from '../api/client.js';
 import type { Result } from '../api/contracts.js';
 import { useT } from '../app/i18n.js';
+import { useUnsavedChanges } from '../components/navigation-guard.js';
 import { Tooltip } from '../components/tooltip.js';
 import {
   ActionForm,
@@ -17,6 +18,7 @@ import {
   Select,
   text,
 } from '../components/ui.js';
+import { Switch } from '../components/workspace-controls.js';
 import { useRequestOperation } from './servers.js';
 import { platformPath, type ServerInfo, useServer } from './service-contracts.js';
 import './server-settings.css';
@@ -116,10 +118,14 @@ function NameSettings({ server }: { server: ServerInfo }) {
   const [draft, setDraft] = useState<string | null>(null);
   const value = draft ?? server.name;
   const dirty = value.trim() !== server.name;
+  const [saving, setSaving] = useState(false);
+  useUnsavedChanges(dirty, saving);
   return (
     <ActionForm
       className={`server-settings-form server-settings-row ${dirty ? 'is-dirty' : ''}`}
       success={false}
+      disabled={!server.permissionKeys.includes('settings.write')}
+      onBusyChange={setSaving}
       submitDisabled={!dirty}
       footerStart={<Reset onClick={() => setDraft(null)} />}
       onSubmit={async (form) => {
@@ -157,6 +163,8 @@ function ProjectSettings({ server }: { server: ServerInfo }) {
   }, [search]);
   const selected = draft ?? server.projectId ?? '';
   const dirty = selected !== (server.projectId ?? '');
+  const [saving, setSaving] = useState(false);
+  useUnsavedChanges(dirty, saving);
   const projects = useInfiniteQuery({
     queryKey: ['projects', 'assignment', query],
     initialPageParam: '',
@@ -175,6 +183,7 @@ function ProjectSettings({ server }: { server: ServerInfo }) {
       <ActionForm
         className={`server-settings-form ${dirty ? 'is-dirty' : ''}`}
         success={false}
+        onBusyChange={setSaving}
         submitDisabled={!dirty}
         footerStart={<Reset onClick={() => setDraft(null)} />}
         onSubmit={async () => {
@@ -293,11 +302,14 @@ function ResourceSettings({
   const dirty = fields.some(
     ({ name }) => draft[name] !== undefined && Number(draft[name]) !== limits[name],
   );
+  const [saving, setSaving] = useState(false);
+  useUnsavedChanges(dirty, saving);
   return (
     <ActionForm
       className={`server-settings-resources server-settings-row ${dirty ? 'is-dirty' : ''}`}
       success={false}
       disabled={!server.availableActions.configure}
+      onBusyChange={setSaving}
       submitDisabled={!dirty}
       footerStart={<Reset onClick={() => setDraft({})} />}
       onSubmit={async (form) => {
@@ -345,10 +357,12 @@ export function ServerSettings({ serverId }: { serverId: string }) {
   const [action, setAction] = useState<DestructiveAction | null>(null);
   const [backupBefore, setBackupBefore] = useState(false);
   if (server.isPending) return <Loading />;
-  if (server.error) return <ErrorNotice error={server.error} />;
+  if (server.error && !server.data)
+    return <ErrorNotice error={server.error} retry={() => void server.refetch()} />;
   const data = server.data;
   if (!data) return null;
-  if (!data.permissions.manage) return <Notice>{t('errors.forbidden')}</Notice>;
+  if (!data.permissionKeys.includes('settings.read'))
+    return <Notice>{t('errors.forbidden')}</Notice>;
   const label = (value: DestructiveAction) =>
     t(value === 'delete' ? 'platform.deleteServer' : `platform.${value}`);
   return (
@@ -360,48 +374,48 @@ export function ServerSettings({ serverId }: { serverId: string }) {
         <NameSettings server={data} />
         {data.permissions.sharing && <ProjectSettings server={data} />}
       </SettingsSection>
-      <SettingsSection
-        title={t('platform.resources')}
-        status={<Availability server={data} available={data.availableActions.configure} />}
-      >
-        <ResourceSettings
-          key={`${data.id}:${JSON.stringify(data.limits)}`}
-          server={data}
-          request={request}
-        />
-      </SettingsSection>
-      <SettingsSection
-        title={t('serverSettings.maintenance')}
-        status={<Availability server={data} available={data.availableActions.delete} />}
-      >
-        {(['reinstall', 'wipe', 'delete'] as const).map((value) => (
-          <div
-            className={`server-settings-maintenance server-settings-row ${value === 'delete' ? 'server-settings-delete' : ''}`}
-            key={value}
-          >
-            <div className="server-settings-action-name">
-              <span className="server-settings-action-icon">
-                <Icon name={value} />
-              </span>
-              <div>
-                <h3>{label(value)}</h3>
-                <p>{t(`serverSettings.${value}Hint`)}</p>
-              </div>
-            </div>
-            <button
-              type="button"
-              className={value === 'delete' ? 'server-settings-destructive' : 'secondary'}
-              disabled={!data.availableActions.delete}
-              onClick={() => {
-                setBackupBefore(false);
-                setAction(value);
-              }}
+      {data.permissions.manage && (
+        <SettingsSection
+          title={t('platform.resources')}
+          status={<Availability server={data} available={data.availableActions.configure} />}
+        >
+          <ResourceSettings key={data.id} server={data} request={request} />
+        </SettingsSection>
+      )}
+      {data.permissions.manage && (
+        <SettingsSection
+          title={t('serverSettings.maintenance')}
+          status={<Availability server={data} available={data.availableActions.delete} />}
+        >
+          {(['reinstall', 'wipe', 'delete'] as const).map((value) => (
+            <div
+              className={`server-settings-maintenance server-settings-row ${value === 'delete' ? 'server-settings-delete' : ''}`}
+              key={value}
             >
-              {label(value)}
-            </button>
-          </div>
-        ))}
-      </SettingsSection>
+              <div className="server-settings-action-name">
+                <span className="server-settings-action-icon">
+                  <Icon name={value} />
+                </span>
+                <div>
+                  <h3>{label(value)}</h3>
+                  <p>{t(`serverSettings.${value}Hint`)}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                className={value === 'delete' ? 'server-settings-destructive' : 'secondary'}
+                disabled={!data.availableActions.delete}
+                onClick={() => {
+                  setBackupBefore(false);
+                  setAction(value);
+                }}
+              >
+                {label(value)}
+              </button>
+            </div>
+          ))}
+        </SettingsSection>
+      )}
       <ConfirmDialog
         open={action !== null}
         title={label(action ?? 'reinstall')}
@@ -423,16 +437,12 @@ export function ServerSettings({ serverId }: { serverId: string }) {
           )}
         </p>
         {data.availableActions.backup && (
-          <label className="server-settings-backup">
-            <input
-              type="checkbox"
-              role="switch"
-              aria-checked={backupBefore}
-              checked={backupBefore}
-              onChange={(event) => setBackupBefore(event.target.checked)}
-            />
-            <span>{t('platform.backupBefore')}</span>
-          </label>
+          <Switch
+            className="server-settings-backup"
+            label={t('platform.backupBefore')}
+            checked={backupBefore}
+            onChange={setBackupBefore}
+          />
         )}
       </ConfirmDialog>
     </div>

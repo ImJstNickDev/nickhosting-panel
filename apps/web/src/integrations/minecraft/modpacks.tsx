@@ -12,6 +12,7 @@ import {
 import { idempotencyKey, queryClient } from '../../api/client.js';
 import { useFormat, useT } from '../../app/i18n.js';
 import { ConfirmDialog, ErrorNotice } from '../../components/ui.js';
+import { Pagination, SearchField } from '../../components/workspace-controls.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { gameUiClient } from '../../features/integrations.js';
 import { ViewerSelect } from '../../features/viewer-engine/viewer-select.js';
@@ -25,7 +26,6 @@ import {
 } from './modpacks-model.js';
 import { ModpackReview } from './modpacks-review.js';
 import {
-  ModsAction,
   ModsArtwork,
   ModsChannel,
   ModsCheckbox,
@@ -121,14 +121,20 @@ function Modpacks(props: GameSectionViewProps) {
     selectedPack.project.provider === selection?.provider
       ? selectedPack.version
       : undefined);
+  const canDeleteWorlds = props.permissionKeys.includes('game.minecraft.worlds.delete');
+  const canBackup = props.permissionKeys.includes('backups.create');
   const locked =
-    !props.canManage ||
+    !props.permissionKeys.includes('game.minecraft.modpacks.write') ||
     props.pending ||
     busy ||
     operation?.canCancel === false ||
     Boolean(operation && applying.has(operation.state));
+  const canContinueOperation =
+    (operation?.selection.worldPolicy !== 'reset' || canDeleteWorlds) &&
+    (!operation?.selection.install?.backupBefore || canBackup);
   const canRecover =
-    props.canManage &&
+    canContinueOperation &&
+    props.permissionKeys.includes('game.minecraft.modpacks.write') &&
     !busy &&
     !snapshot.error &&
     operation?.state === 'uncertain' &&
@@ -166,6 +172,7 @@ function Modpacks(props: GameSectionViewProps) {
     version: ModpackCatalogVersion,
     options: { keepWorlds: boolean; backupBefore: boolean },
   ) {
+    if ((options.backupBefore && !canBackup) || (!options.keepWorlds && !canDeleteWorlds)) return;
     setProject(selected);
     setSelectedPack({ project: selected, version });
     const same =
@@ -192,7 +199,12 @@ function Modpacks(props: GameSectionViewProps) {
     });
   }
   function apply(backupBefore: boolean) {
-    if (!operation?.planDigest) return;
+    if (
+      !operation?.planDigest ||
+      (backupBefore && !canBackup) ||
+      (operation.selection.worldPolicy === 'reset' && !canDeleteWorlds)
+    )
+      return;
     void mutate(async () => {
       const result = await controller.apply(props.serverId, {
         operationId: operation.id,
@@ -276,7 +288,7 @@ function Modpacks(props: GameSectionViewProps) {
   }
   const installed = data?.installed;
   return (
-    <section className="minecraft-mods minecraft-modpacks">
+    <section className="workspace-surface minecraft-mods minecraft-modpacks">
       <header className="mods-header">
         <nav className="mods-tabs" aria-label={t('games.minecraft.sections.modpacks')}>
           <button
@@ -335,6 +347,8 @@ function Modpacks(props: GameSectionViewProps) {
               detailRevision={detailRevision}
               onProject={setProject}
               disabled={locked}
+              canBackup={canBackup}
+              canDeleteWorlds={canDeleteWorlds}
               onChoose={choose}
               operation={operation}
               operationProject={operationProject}
@@ -421,19 +435,25 @@ function Modpacks(props: GameSectionViewProps) {
                 operation={operation}
                 project={operationProject}
                 version={operationVersion}
-                canManage={props.canManage}
+                canManage={props.permissionKeys.includes('game.minecraft.modpacks.write')}
+                canBackup={canBackup}
+                canDeleteWorlds={canDeleteWorlds}
                 busy={busy || (props.pending && props.recoverableOperationId !== operation.id)}
                 canRecover={canRecover}
                 onBack={() => setView('discover')}
                 onApply={apply}
                 onDiscard={() => confirmRuntimeChange(discard)}
-                onWorldPolicy={(worldPolicy) => reprepare({ worldPolicy })}
+                onWorldPolicy={(worldPolicy) => {
+                  if (worldPolicy === 'preserve' || canDeleteWorlds) reprepare({ worldPolicy });
+                }}
                 onFileDecision={(path, decision) => {
+                  if (!canContinueOperation) return;
                   reprepare({
                     fileDecisions: { ...operation.selection.fileDecisions, [path]: decision },
                   });
                 }}
                 onRetry={() => {
+                  if (!canContinueOperation) return;
                   void mutate(() =>
                     controller.retry(
                       props.serverId,
@@ -491,6 +511,8 @@ function ModpackDiscover(props: {
   detailRevision: number;
   onProject: (project?: ModpackCatalogProject) => void;
   disabled: boolean;
+  canBackup: boolean;
+  canDeleteWorlds: boolean;
   onChoose: (
     project: ModpackCatalogProject,
     version: ModpackCatalogVersion,
@@ -577,18 +599,14 @@ function ModpackDiscover(props: {
   return (
     <div className="mods-discover">
       <div className="mods-search-toolbar" hidden={Boolean(project)}>
-        <label className="mods-search">
-          <ModsIcon name="search" />
-          <input
-            ref={input}
-            type="search"
-            maxLength={200}
-            aria-label={t(k('search'))}
-            placeholder={t(k('search'))}
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
-        </label>
+        <SearchField
+          ref={input}
+          maxLength={200}
+          label={t(k('search'))}
+          placeholder={t(k('search'))}
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+        />
         <ViewerSelect
           label={t(k('provider'))}
           value={provider}
@@ -759,6 +777,8 @@ function ModpackDiscover(props: {
               serverId={props.serverId}
               project={project}
               disabled={props.disabled}
+              canBackup={props.canBackup}
+              canDeleteWorlds={props.canDeleteWorlds}
               operation={props.operation}
               onChoose={props.onChoose}
             />
@@ -806,6 +826,8 @@ function PackVersions(props: {
   serverId: string;
   project: ModpackCatalogProject;
   disabled: boolean;
+  canBackup: boolean;
+  canDeleteWorlds: boolean;
   operation?: MinecraftModpackOperation;
   onChoose: (
     project: ModpackCatalogProject,
@@ -818,7 +840,7 @@ function PackVersions(props: {
   const id = useId();
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<ModpackCatalogVersion>();
-  const [keepWorlds, setKeepWorlds] = useState(false);
+  const [keepWorlds, setKeepWorlds] = useState(!props.canDeleteWorlds);
   const [backupBefore, setBackupBefore] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLFieldSetElement>(null);
@@ -939,9 +961,15 @@ function PackVersions(props: {
             <button
               type="button"
               className="mods-primary"
-              disabled={props.disabled || !chosen?.available || same}
+              disabled={
+                props.disabled || !chosen?.available || same || (backupBefore && !props.canBackup)
+              }
               onClick={() =>
-                chosen && props.onChoose(props.project, chosen, { keepWorlds, backupBefore })
+                chosen &&
+                props.onChoose(props.project, chosen, {
+                  keepWorlds: keepWorlds || !props.canDeleteWorlds,
+                  backupBefore,
+                })
               }
             >
               <ModsIcon name="download" />
@@ -959,18 +987,22 @@ function PackVersions(props: {
           <div className="modpacks-install-options">
             <ModsCheckbox
               label={t(k('preserveWorlds'))}
-              checked={keepWorlds}
-              disabled={props.disabled}
+              checked={keepWorlds || !props.canDeleteWorlds}
+              disabled={props.disabled || !props.canDeleteWorlds}
               onChange={setKeepWorlds}
             />
             <ModsCheckbox
               label={t(k('backup'))}
               checked={backupBefore}
-              disabled={props.disabled}
+              disabled={props.disabled || !props.canBackup}
               onChange={setBackupBefore}
             />
           </div>
-          {!keepWorlds && <p className="modpacks-muted">{t(k('worldsReset'))}</p>}
+          {!props.canDeleteWorlds ? (
+            <p className="modpacks-muted">{t(k('worldsPermission'))}</p>
+          ) : (
+            !keepWorlds && <p className="modpacks-muted">{t(k('worldsReset'))}</p>
+          )}
         </>
       )}
     </div>
@@ -989,22 +1021,18 @@ export function PackPagination({
 }) {
   const t = useT();
   return (
-    <div className="mods-pagination">
-      <ModsAction
-        icon="back"
-        label={t(k('previous'))}
-        disabled={offset === 0}
-        onClick={() => onChange(Math.max(0, offset - limit))}
-      />
-      <span>
-        {t(k('page'), { page: Math.floor(offset / limit) + 1, pages: Math.ceil(total / limit) })}
-      </span>
-      <ModsAction
-        icon="next"
-        label={t(k('next'))}
-        disabled={offset + limit >= total}
-        onClick={() => onChange(offset + limit)}
-      />
-    </div>
+    <Pagination
+      label={t('web.pagination')}
+      previousLabel={t(k('previous'))}
+      nextLabel={t(k('next'))}
+      summary={t(k('page'), {
+        page: Math.floor(offset / limit) + 1,
+        pages: Math.max(1, Math.ceil(total / limit)),
+      })}
+      canPrevious={Math.floor(offset / limit) > 0}
+      canNext={Math.floor(offset / limit) + 1 < Math.ceil(total / limit)}
+      onPrevious={() => onChange(Math.max(0, offset - limit))}
+      onNext={() => onChange(offset + limit)}
+    />
   );
 }

@@ -89,7 +89,7 @@ export async function getServerConnectionOptions(
   serverId: string,
   env: ExternalServiceOptions['env'] = {},
 ) {
-  await authorizeServer(db, context, serverId, 'server:read');
+  await authorizeServer(db, context, serverId, 'network.read');
   const [game, settings] = await Promise.all([integration(db, serverId), getSettings(db, env)]);
   const options = resolveDnsOptions(settings.values, game.manifest.connection, game.gameId);
   const ready =
@@ -497,7 +497,7 @@ export async function previewServerDns(
   input: unknown,
   options: ExternalServiceOptions,
 ) {
-  await authorizeServer(db, context, serverId, 'server:manage');
+  await authorizeServer(db, context, serverId, 'network.write');
   const planned = await connectionPlan(db, serverId, input, options);
   return {
     ...planned.connection,
@@ -525,7 +525,7 @@ function publicDns(row: DnsRow) {
   };
 }
 export async function listServerDns(db: Kysely<Database>, context: AuthContext, serverId: string) {
-  await authorizeServer(db, context, serverId, 'server:read');
+  await authorizeServer(db, context, serverId, 'network.read');
   return (
     await db
       .selectFrom('dns_assignments')
@@ -561,7 +561,7 @@ async function authorizeIntent(db: Kysely<Database>, row: DnsRow, intent: DnsInt
       db,
       { ...intent.context, role: user.role },
       row.server_id,
-      'server:manage',
+      'network.write',
     );
   }
 }
@@ -900,7 +900,7 @@ export async function assignServerDns(
   return locked(db, serverId, (connection) =>
     dnsLocked(connection, async () => {
       const verified = await currentInteractiveContext(connection, context, options.env ?? {});
-      const server = await authorizeServer(connection, verified, serverId, 'server:manage');
+      const server = await authorizeServer(connection, verified, serverId, 'network.write');
       if (server.active_operation_id || !server.pterodactyl_uuid) throw new DomainError('conflict');
       const preference = await connection
         .selectFrom('server_dns_preferences')
@@ -971,7 +971,7 @@ export async function updateServerDns(
   return locked(db, serverId, (connection) =>
     dnsLocked(connection, async () => {
       const verified = await currentInteractiveContext(connection, context, options.env ?? {});
-      const server = await authorizeServer(connection, verified, serverId, 'server:manage');
+      const server = await authorizeServer(connection, verified, serverId, 'network.write');
       if (server.active_operation_id) throw new DomainError('conflict');
       const row = await connection
         .selectFrom('dns_assignments')
@@ -1072,7 +1072,7 @@ export async function deleteServerDns(
   return locked(db, serverId, (connection) =>
     dnsLocked(connection, async () => {
       const verified = await currentInteractiveContext(connection, context, options.env ?? {});
-      await authorizeServer(connection, verified, serverId, 'server:manage');
+      await authorizeServer(connection, verified, serverId, 'network.write');
       const row = await connection
         .selectFrom('dns_assignments')
         .selectAll()

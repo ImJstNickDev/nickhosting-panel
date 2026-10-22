@@ -57,7 +57,9 @@ describe('Minecraft browser module and exact API contracts', () => {
     const sections = (runtimeId: string) =>
       availableGameUiSections(minecraftUiModule, {
         runtimeId,
-        permissions: ['server:read'],
+        permissions: minecraftUiModule.descriptor.sections.flatMap(
+          (section) => section.requiredPermissions,
+        ),
         capabilities: { files: true, players: true, worlds: true, mods: true },
       }).map((section) => section.id);
     expect(sections('vanilla')).toEqual([
@@ -908,7 +910,7 @@ describe('Minecraft Worlds UI contracts', () => {
       minecraftUiModule.descriptor.sections.find((section) => section.id === 'worlds'),
     ).toMatchObject({
       renderer: 'minecraft-worlds',
-      requiredPermissions: ['server:read'],
+      requiredPermissions: ['game.minecraft.worlds.read'],
       columns: [],
       forms: [],
     });

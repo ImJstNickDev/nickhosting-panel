@@ -138,6 +138,19 @@ export const gameManifestSchema = z
     id: identifier,
     version: z.string().regex(/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/),
     nameKey: translationKey,
+    serverPermissions: z
+      .array(
+        z.strictObject({
+          key: z.string().regex(/^game\.[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/),
+          resource: z.string().regex(/^game\.[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/),
+          kind: z.enum(['read', 'write', 'additional']),
+          legacy: z.enum(['read', 'operate', 'manage']),
+          labelKey: translationKey.optional(),
+          resourceLabelKey: translationKey.optional(),
+        }),
+      )
+      .max(128)
+      .default([]),
     capabilities: capabilitySchema,
     backupPolicy: gameBackupPolicySchema.optional(),
     gatewayMessages: gatewayMessageDefinitionSchema.optional(),
@@ -192,6 +205,32 @@ export const gameManifestSchema = z
   })
   .strict()
   .superRefine((manifest, context) => {
+    const permissionKeys = new Set(manifest.serverPermissions.map(({ key }) => key));
+    for (const definition of manifest.serverPermissions) {
+      if (
+        !definition.resource.startsWith(`game.${manifest.id}.`) ||
+        !definition.key.startsWith(`${definition.resource}.`) ||
+        !permissionKeys.has(`${definition.resource}.read`) ||
+        (definition.kind === 'read' && definition.key !== `${definition.resource}.read`) ||
+        (definition.kind === 'write' && definition.key !== `${definition.resource}.write`) ||
+        (definition.resourceLabelKey &&
+          !definition.resourceLabelKey.startsWith(`games.${manifest.id}.`)) ||
+        (definition.kind === 'additional' &&
+          ['read', 'write'].includes(definition.key.split('.').at(-1) ?? '')) ||
+        (definition.labelKey && !definition.labelKey.startsWith(`games.${manifest.id}.`))
+      )
+        context.addIssue({
+          code: 'custom',
+          path: ['serverPermissions'],
+          message: 'invalid_permission_namespace',
+        });
+    }
+    if (permissionKeys.size !== manifest.serverPermissions.length)
+      context.addIssue({
+        code: 'custom',
+        path: ['serverPermissions'],
+        message: 'duplicate_permission',
+      });
     const unique = (values: string[], path: string) => {
       if (new Set(values).size !== values.length)
         context.addIssue({ code: 'custom', path: [path], message: 'duplicate_identifier' });

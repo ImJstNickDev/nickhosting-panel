@@ -46,6 +46,7 @@ export * from './sleep-policy.js';
 export * from './storage-capacity.js';
 export * from './storage-observations.js';
 export * from './storage-policy.js';
+export * from './subusers.js';
 export * from './upload-admission.js';
 export * from './upload-batches.js';
 export * from './upload-policy.js';

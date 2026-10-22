@@ -94,7 +94,7 @@ export async function getServerAutoWakePolicy(
   env: Environment = {},
 ) {
   const current = await currentInteractiveContext(db, context, env);
-  const server = await authorizeServer(db, current, serverId);
+  const server = await authorizeServer(db, current, serverId, 'settings.read');
   if (server.connection_mode === 'direct') return null;
   const state = await db
     .selectFrom('gateway_server_states')
@@ -122,7 +122,7 @@ export async function setServerAutoWakePolicy(
     await lockResources(tx);
     const current = await currentInteractiveContext(tx, context, env);
     if (current.sessionType !== 'regular') throw new DomainError('forbidden');
-    const server = await authorizeServer(tx, current, serverId, 'server:manage');
+    const server = await authorizeServer(tx, current, serverId, 'settings.write');
     if (server.connection_mode === 'direct') throw new DomainError('integration_unavailable');
     const state = await tx
       .selectFrom('gateway_server_states')

@@ -4,25 +4,7 @@
   min-width: 0;
   container: automation / inline-size;
 }
-.automation-tabs {
-  display: flex;
-  gap: 22px;
-  border-bottom: 1px solid var(--line);
-  overflow: auto;
-}
-.automation-tabs a {
-  padding: 12px 0;
-  color: var(--muted);
-  white-space: nowrap;
-  text-decoration: none;
-  font-size: 0.9rem;
-  border-bottom: 2px solid transparent;
-}
-.automation-tabs a[aria-current="page"] {
-  color: var(--text);
-  border-color: var(--blue);
-  font-weight: 600;
-}
+
 .automation-heading,
 .automation-tools,
 .automation-row,
@@ -119,47 +101,7 @@
 .automation-frequency {
   white-space: nowrap;
 }
-.automation-page .automation-switch {
-  border: 0;
-  border-radius: 20px;
-  width: 32px;
-  height: 26px;
-  min-height: 26px;
-  position: relative;
-  padding: 2px;
-  background: transparent;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  box-shadow: none;
-  flex-shrink: 0;
-}
-.automation-page .automation-switch::before {
-  content: "";
-  position: absolute;
-  inset: 3.5px 0;
-  background: #b5bec9;
-  border-radius: 20px;
-}
-.automation-page .automation-switch[aria-checked="true"]::before {
-  background: var(--blue);
-}
-.automation-switch > span {
-  display: block;
-  width: 15px;
-  height: 15px;
-  position: absolute;
-  left: 2px;
-  top: 5.5px;
-  border-radius: 50%;
-  background: white;
-  transition: transform 140ms ease;
-}
 
-.automation-switch:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
 .automation-switch-wrap {
   display: inline-flex;
   align-items: center;
@@ -415,18 +357,13 @@
   .automation-skeleton {
     animation: none;
   }
-  .automation-switch > span {
-    transition: none;
-  }
 }
 @container automation (max-width: 650px) {
   .automation-policy-grid,
   .gateway-message-fields {
     grid-template-columns: 1fr;
   }
-  .automation-tabs {
-    gap: 16px;
-  }
+
   .automation-table table {
     min-width: 820px;
   }
@@ -452,13 +389,6 @@
   border-bottom: 0;
 }
 
-.automation-switch[aria-checked="true"] > span {
-  transform: translateX(13px);
-}
-
-.automation-tabs {
-  position: relative;
-}
 .field:has(> .automation-label-hidden) > label {
   position: absolute;
   width: 1px;

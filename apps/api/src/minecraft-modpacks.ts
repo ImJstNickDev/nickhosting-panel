@@ -97,7 +97,7 @@ export function registerMinecraftModpackRoutes(
   });
   const catalog = async (c: C) => {
     const actor = await principal(c);
-    await authorizeServer(db, actor, c.req.param('id') ?? '');
+    await authorizeServer(db, actor, c.req.param('id') ?? '', 'game.minecraft.modpacks.read');
     await ready();
     const profile = await db
       .selectFrom('minecraft_server_profiles')

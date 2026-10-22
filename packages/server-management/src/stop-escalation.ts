@@ -58,7 +58,7 @@ export async function requestStopEscalation(
     db,
     await currentInteractiveContext(db, context, env),
     serverId,
-    'server:operate',
+    'console.power',
   );
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
@@ -70,7 +70,7 @@ export async function requestStopEscalation(
       .executeTakeFirst();
     if (!job) throw new DomainError('conflict');
     const actor = await currentInteractiveContext(tx, context, env);
-    const server = await authorizeServer(tx, actor, serverId, 'server:operate');
+    const server = await authorizeServer(tx, actor, serverId, 'console.power');
     const operation = await tx
       .selectFrom('server_operations')
       .selectAll()
@@ -170,23 +170,23 @@ export async function consumeStopEscalation(
   };
   let dispatched = false;
   try {
-    await authorizeServer(db, await caller(db, receipt, env), serverId, 'server:operate');
+    await authorizeServer(db, await caller(db, receipt, env), serverId, 'console.power');
     if (!(await hooks.verify())) {
       await save('rejected');
       return;
     }
     const actor = await caller(db, receipt, env);
-    const server = await authorizeServer(db, actor, serverId, 'server:operate');
+    const server = await authorizeServer(db, actor, serverId, 'console.power');
     if (server.active_operation_id !== jobId) throw new DomainError('conflict');
     await save('prepared');
-    await authorizeServer(db, await caller(db, receipt, env), serverId, 'server:operate');
+    await authorizeServer(db, await caller(db, receipt, env), serverId, 'console.power');
     // Consent writes and session checks may wait. Revalidate immediately at handoff.
     if (!(await hooks.verify())) {
       await save('rejected');
       return;
     }
     const finalActor = await caller(db, receipt, env);
-    const finalServer = await authorizeServer(db, finalActor, serverId, 'server:operate');
+    const finalServer = await authorizeServer(db, finalActor, serverId, 'console.power');
     if (finalServer.active_operation_id !== jobId) throw new DomainError('conflict');
     dispatched = true;
     await hooks.power();

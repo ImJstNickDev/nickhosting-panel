@@ -1075,11 +1075,15 @@ dialog.fm-move-confirm {
     display: block;
   }
 }
-@media (max-width: 380px) {
-  .fm-editor-toolbar .fm-tool,
-  .fm-editor-toolbar .fm-viewer-open-with {
-    width: 24px;
-    min-width: 24px;
+@media (max-width: 480px) {
+  .fm-toolbar-editing:not(:has(.fm-search)) {
+    flex-wrap: wrap;
+  }
+  .fm-toolbar-editing:not(:has(.fm-search)) :is(.fm-breadcrumb, .fm-path-form) {
+    flex-basis: 100%;
+  }
+  .fm-toolbar-editing:not(:has(.fm-search)) .fm-editor-toolbar {
+    margin-left: auto;
   }
 }
 

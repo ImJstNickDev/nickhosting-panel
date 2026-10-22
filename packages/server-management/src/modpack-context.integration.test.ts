@@ -21,7 +21,7 @@ import {
   withModpackServerLock,
 } from './modpack-context.js';
 import type { ManagementRuntime } from './runtime.js';
-import { managementFixture } from './test-fixtures.js';
+import { minecraftManagementFixture } from './test-fixtures.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
 beforeAll(async () => {
@@ -32,7 +32,7 @@ afterAll(async () => {
 });
 
 async function fixture(running = true) {
-  const f = await managementFixture(database.db, { interactive: true });
+  const f = await minecraftManagementFixture(database.db, { interactive: true });
   const serverId = await f.server();
   await f.db
     .updateTable('managed_servers')

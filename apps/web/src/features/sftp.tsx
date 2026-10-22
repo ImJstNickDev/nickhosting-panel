@@ -5,6 +5,7 @@ import { useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
 import { Badge, ConfirmDialog, ErrorNotice, Input, Time } from '../components/ui.js';
+import { IconAction, Switch } from '../components/workspace-controls.js';
 import {
   type Credentials,
   type IssuedCredential,
@@ -56,17 +57,9 @@ function IconButton({
   disabled?: boolean;
 }) {
   return (
-    <Tooltip content={label}>
-      <button
-        type="button"
-        className={`sftp-icon${danger ? ' sftp-danger' : ''}`}
-        aria-label={label}
-        onClick={onClick}
-        disabled={disabled}
-      >
-        <Icon name={icon} />
-      </button>
-    </Tooltip>
+    <IconAction label={label} destructive={danger} onClick={onClick} disabled={disabled}>
+      <Icon name={icon} />
+    </IconAction>
   );
 }
 function CopyValue({
@@ -84,6 +77,11 @@ function CopyValue({
   const [copied, setCopied] = useState(false),
     [failed, setFailed] = useState(false),
     [shown, setShown] = useState(initiallyShown);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(timer);
+  }, [copied]);
   return (
     <div className="sftp-value-wrap">
       <div className="sftp-value">
@@ -113,6 +111,8 @@ function CopyValue({
           label={copied ? t('web.copied') : label}
           icon="copy"
           onClick={() => {
+            setCopied(false);
+            setFailed(false);
             void Promise.resolve()
               .then(() => navigator.clipboard.writeText(value))
               .then(
@@ -138,7 +138,15 @@ function CopyValue({
     </div>
   );
 }
-export function SftpPage({ serverId }: { serverId: string }) {
+export function SftpPage({
+  serverId,
+  embedded = false,
+  onBusyChange,
+}: {
+  serverId: string;
+  embedded?: boolean;
+  onBusyChange?: (busy: boolean) => void;
+}) {
   const session = useSession();
   const context = session.data?.context;
   // Identity changes discard revealed secrets and pending requests, including support mode.
@@ -150,9 +158,24 @@ export function SftpPage({ serverId }: { serverId: string }) {
         context?.sessionType,
         context?.support?.id,
       ].join(':');
-  return <SftpContent key={`${serverId}:${identity}`} serverId={serverId} />;
+  return (
+    <SftpContent
+      key={`${serverId}:${identity}`}
+      serverId={serverId}
+      embedded={embedded}
+      onBusyChange={onBusyChange}
+    />
+  );
 }
-function SftpContent({ serverId }: { serverId: string }) {
+function SftpContent({
+  serverId,
+  embedded,
+  onBusyChange,
+}: {
+  serverId: string;
+  embedded: boolean;
+  onBusyChange?: (busy: boolean) => void;
+}) {
   const t = useT(),
     transfers = useTransfers(serverId);
   const credentials = useQuery({
@@ -184,6 +207,9 @@ function SftpContent({ serverId }: { serverId: string }) {
     pending = useRef(false),
     createButton = useRef<HTMLButtonElement>(null);
   const passwordRequest = useSftpPassword(serverId);
+  useEffect(() => {
+    onBusyChange?.(busy);
+  }, [busy, onBusyChange]);
   const endpoint = transfers.data?.sftp.endpoint;
   const canIssue = transfers.data?.sftp.configured && transfers.data.sftp.canIssue;
   const primary = credentials.data?.find((c) => c.kind === 'primary' && c.state !== 'revoked');
@@ -246,10 +272,12 @@ function SftpContent({ serverId }: { serverId: string }) {
   const rotate = (credential: Credentials[number]) =>
     setAction({ kind: 'rotate', credential, rotationId: idempotencyKey() });
   return (
-    <section className="sftp-page" aria-labelledby="sftp-title">
-      <header className="sftp-heading">
-        <h2 id="sftp-title">SFTP</h2>
-      </header>
+    <section className="sftp-page" aria-label={t('web.sftp')}>
+      {!embedded && (
+        <header className="sftp-heading">
+          <h2 id="sftp-title">SFTP</h2>
+        </header>
+      )}
       {error !== undefined && <ErrorNotice error={error} />}
       {transfers.error && (
         <ErrorNotice error={transfers.error} retry={() => void transfers.refetch()} />
@@ -411,16 +439,11 @@ function SftpContent({ serverId }: { serverId: string }) {
                 </span>
               </div>
               <div className="sftp-tools">
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={showRevoked}
-                  className="sftp-revoked-toggle"
-                  onClick={() => setShowRevoked(!showRevoked)}
-                >
-                  <span className="sftp-switch-track" aria-hidden="true" />
-                  {t('sftp.showRevoked')}
-                </button>
+                <Switch
+                  label={t('sftp.showRevoked')}
+                  checked={showRevoked}
+                  onChange={setShowRevoked}
+                />
                 {canIssue && (
                   <IconButton
                     label={t('sftp.addAccess')}

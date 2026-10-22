@@ -21,6 +21,7 @@ import { minecraftModpacksMessages } from './modpacks-catalog.js';
 import { createMinecraftModpacksController } from './modpacks-controller.js';
 import { minecraftModsMessages } from './mods-catalog.js';
 import { createMinecraftModsController } from './mods-controller.js';
+import { minecraftPermissionMessages } from './permissions-catalog.js';
 import { minecraftPlayersMessages } from './players-catalog.js';
 import { minecraftPluginsMessages } from './plugins-catalog.js';
 import { minecraftWorldsMessages } from './worlds-catalog.js';
@@ -35,6 +36,7 @@ const k = (name: string) => `${namespace}.${name}`;
 const translated: Record<string, [string, string]> = {
   ...minecraftViewerMessages,
   ...minecraftPlayersMessages,
+  ...minecraftPermissionMessages,
   ...minecraftDatapacksMessages,
   ...minecraftModsMessages,
   ...minecraftModpacksMessages,
@@ -129,7 +131,7 @@ const translated: Record<string, [string, string]> = {
     'Read the Minecraft EULA before accepting.',
     'Leggi l’EULA di Minecraft prima di accettare.',
   ],
-  'sections.properties': ['Settings', 'Impostazioni'],
+  'sections.properties': ['Minecraft properties', 'Proprietà Minecraft'],
   'sections.players': ['Players', 'Giocatori'],
   'sections.worlds': ['Worlds', 'Mondi'],
   'sections.mods': ['Mods', 'Mod'],
@@ -137,6 +139,10 @@ const translated: Record<string, [string, string]> = {
   'sections.datapacks': ['Datapacks', 'Datapack'],
   'sections.modpacks': ['Modpacks', 'Modpack'],
   'forms.properties': ['Server properties', 'Proprietà del server'],
+  'properties.empty': [
+    'No editable properties were found in server.properties.',
+    'Nessuna proprietà modificabile trovata in server.properties.',
+  ],
   'forms.player': ['Player access', 'Accesso giocatori'],
   'forms.selectWorld': ['Select world', 'Seleziona mondo'],
   'forms.removeWorld': ['Delete world', 'Elimina mondo'],
@@ -228,8 +234,8 @@ const translated: Record<string, [string, string]> = {
   'settings.performance': ['Performance', 'Prestazioni'],
   'settings.other': ['Other settings', 'Altre impostazioni'],
   'settings.motdHelp': [
-    'Shown in the server list while Minecraft is running. Gateway messages are in Automation.',
-    'Visibile nella lista server quando Minecraft è in esecuzione. I messaggi Gateway sono in Automazione.',
+    'Shown in the server list while Minecraft is running. Gateway messages are in Settings → Gateway messages.',
+    'Visibile nella lista server quando Minecraft è in esecuzione. I messaggi Gateway sono in Impostazioni → Messaggi Gateway.',
   ],
   'settings.flightHelp': [
     'Allows flying clients to stay connected; does not grant flight.',
@@ -244,8 +250,8 @@ const translated: Record<string, [string, string]> = {
     'Si applica al terreno generato da questo momento.',
   ],
   'settings.idleHelp': [
-    'Disconnects inactive players. 0 disables it; server sleep is configured in Automation.',
-    'Disconnette i giocatori inattivi. 0 lo disattiva; la sospensione del server si configura in Automazione.',
+    'Disconnects inactive players. 0 disables it; server sleep is configured in Settings → Sleep / wake.',
+    'Disconnette i giocatori inattivi. 0 lo disattiva; la sospensione del server si configura in Impostazioni → Sospensione / risveglio.',
   ],
   'options.peaceful': ['Peaceful', 'Pacifica'],
   'options.easy': ['Easy', 'Facile'],
@@ -272,7 +278,7 @@ const action = (id: string, capability: string, extra: Record<string, unknown> =
   id,
   handler: id,
   labelKey: k(`actions.${id}`),
-  requiredPermissions: ['server:manage'],
+  requiredPermissions: ['game.minecraft.properties.write'],
   requiredCapabilities: [capability],
   requiresStopped: true,
   ...extra,
@@ -434,14 +440,16 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
   sections: [
     {
       id: 'properties',
+      navigation: { group: 'config', order: 10, icon: 'settings', placement: 'settings' },
       titleKey: k('sections.properties'),
       loader: 'properties',
-      requiredPermissions: ['server:read'],
+      requiredPermissions: ['game.minecraft.properties.read'],
       requiredCapabilities: ['files'],
       forms: [
         {
           id: 'properties',
           titleKey: k('forms.properties'),
+          emptyMessageKey: k('properties.empty'),
           renderer: 'minecraft-properties',
           submitChangedOnly: true,
           fields: propertyFields,
@@ -451,52 +459,57 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
     },
     {
       id: 'players',
+      navigation: { group: 'tools', order: 10, icon: 'users', placement: 'sidebar' },
       titleKey: k('sections.players'),
       loader: 'players',
       renderer: 'minecraft-players',
-      requiredPermissions: ['server:read'],
+      requiredPermissions: ['game.minecraft.players.read'],
       requiredCapabilities: ['players'],
       columns: [],
       forms: [],
     },
     {
       id: 'worlds',
+      navigation: { group: 'tools', order: 20, icon: 'world', placement: 'sidebar' },
       titleKey: k('sections.worlds'),
       loader: 'worlds',
       renderer: 'minecraft-worlds',
-      requiredPermissions: ['server:read'],
+      requiredPermissions: ['game.minecraft.worlds.read'],
       requiredCapabilities: ['worlds'],
       columns: [],
       forms: [],
     },
     {
       id: 'mods',
+      navigation: { group: 'tools', order: 30, icon: 'package', placement: 'sidebar' },
       titleKey: k('sections.mods'),
       loader: 'mods',
       renderer: 'minecraft-mods',
       runtimeIds: [...minecraftContentRuntimes.mods],
-      requiredPermissions: ['server:read'],
+      requiredPermissions: ['game.minecraft.mods.read'],
       requiredCapabilities: ['files'],
       columns: [],
       forms: [],
     },
     {
       id: 'plugins',
+      navigation: { group: 'tools', order: 40, icon: 'package', placement: 'sidebar' },
       titleKey: k('sections.plugins'),
       loader: 'plugins',
       renderer: 'minecraft-plugins',
       runtimeIds: [...minecraftContentRuntimes.plugins],
-      requiredPermissions: ['server:read'],
+      requiredPermissions: ['game.minecraft.plugins.read'],
       requiredCapabilities: ['files'],
       columns: [],
       forms: [],
     },
     {
       id: 'datapacks',
+      navigation: { group: 'tools', order: 50, icon: 'package', placement: 'sidebar' },
       titleKey: k('sections.datapacks'),
       renderer: 'minecraft-datapacks',
       loader: 'datapacks',
-      requiredPermissions: ['server:read'],
+      requiredPermissions: ['game.minecraft.datapacks.read'],
       requiredCapabilities: ['files'],
       columns: [
         { id: 'path', labelKey: k('fields.path') },
@@ -506,11 +519,12 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
     },
     {
       id: 'modpacks',
+      navigation: { group: 'tools', order: 60, icon: 'package', placement: 'sidebar' },
       aliases: ['content'],
       titleKey: k('sections.modpacks'),
       loader: 'modpacks',
       renderer: 'minecraft-modpacks',
-      requiredPermissions: ['server:read'],
+      requiredPermissions: ['game.minecraft.modpacks.read'],
       requiredCapabilities: ['files'],
       columns: [],
       forms: [],

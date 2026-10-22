@@ -1,8 +1,8 @@
 .mc-modscope {
   color: inherit;
-  padding: clamp(20px, 3vw, 40px);
+  padding: 16px;
   min-height: 460px;
-  max-width: 1200px;
+  max-width: none;
   margin-inline: auto;
   overflow-wrap: anywhere;
 }
@@ -13,15 +13,15 @@
 }
 .mc-modscope-header {
   display: flex;
-  gap: 24px;
+  gap: 14px;
   align-items: center;
-  padding-bottom: 30px;
+  padding-bottom: 18px;
 }
 .mc-modscope-art {
-  width: 92px;
-  height: 92px;
+  width: 56px;
+  height: 56px;
   flex: 0 0 auto;
-  border-radius: 18px;
+  border-radius: 8px;
   display: grid;
   place-items: center;
   background: var(--surface-alt, #f0f2f5);
@@ -29,8 +29,8 @@
   overflow: hidden;
 }
 .mc-modscope-art > svg {
-  width: 44px;
-  height: 44px;
+  width: 28px;
+  height: 28px;
 }
 .mc-modscope-art img {
   width: 100%;
@@ -42,7 +42,7 @@
   flex: 1;
 }
 .mc-modscope h2 {
-  font-size: clamp(23px, 3vw, 32px);
+  font-size: 1.25rem;
   line-height: 1.2;
   margin: 6px 0;
   letter-spacing: -0.025em;
@@ -84,14 +84,14 @@
 .mc-modscope-columns {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 240px;
-  gap: 40px;
+  gap: 24px;
 }
 .mc-modscope-main,
 .mc-modscope-facts {
   min-width: 0;
 }
 .mc-modscope-description {
-  margin: 0 0 30px;
+  margin: 0 0 18px;
   font-size: 14px;
   line-height: 1.75;
   white-space: pre-wrap;
@@ -246,8 +246,8 @@
   gap: 12px;
 }
 .mc-modscope-empty > svg {
-  width: 44px;
-  height: 44px;
+  width: 28px;
+  height: 28px;
   color: var(--muted);
   margin-bottom: 8px;
 }
@@ -282,9 +282,9 @@
   margin-bottom: 28px;
 }
 .mc-modscope-skeleton-head > i {
-  height: 92px;
-  width: 92px;
-  border-radius: 18px;
+  height: 56px;
+  width: 56px;
+  border-radius: 8px;
 }
 .mc-modscope-skeleton-head > div {
   flex: 1;

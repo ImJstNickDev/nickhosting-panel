@@ -508,6 +508,7 @@ try {
     );
     const gameId = 'm2-fixture';
     const manifest: GameManifest = {
+      serverPermissions: [],
       id: gameId,
       version: '1.0.0',
       nameKey: 'games.m2-fixture.name',

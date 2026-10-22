@@ -70,7 +70,7 @@ export const automationConsentSchema = z.strictObject({
 });
 
 async function consentState(db: Kysely<Database>, context: AuthContext, serverId: string) {
-  const server = await authorizeServer(db, context, serverId);
+  const server = await authorizeServer(db, context, serverId, 'settings.read');
   const [policy, operation, upload, installation, reservation] = await Promise.all([
     db
       .selectFrom('gateway_server_states')
@@ -154,7 +154,7 @@ export async function setAutomationConsent(
   const value = parse(automationConsentSchema, input);
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
-    const context = await manager(tx, previous, serverId, env);
+    const context = await manager(tx, previous, serverId, env, 'settings.write');
     const { server, policy, grantBlockedReason } = await consentState(tx, context, serverId);
     if (
       server.intent !== value.expectedIntent ||
@@ -300,15 +300,16 @@ async function manager(
   previous: AuthContext,
   serverId: string,
   env: Environment,
+  permission = 'schedules.write',
 ) {
   if (previous.sessionType !== 'regular') throw new DomainError('forbidden');
   const context = await currentInteractiveContext(db, previous, env);
-  await authorizeServer(db, context, serverId, 'server:manage');
+  await authorizeServer(db, context, serverId, permission);
   return context;
 }
 
 export async function listSchedules(db: Kysely<Database>, context: AuthContext, serverId: string) {
-  await authorizeServer(db, context, serverId);
+  await authorizeServer(db, context, serverId, 'schedules.read');
   const rows = await db
     .selectFrom('server_schedules as schedule')
     .innerJoin('user as authorizer', 'authorizer.id', 'schedule.authorizer_id')
@@ -355,6 +356,24 @@ export async function listSchedules(db: Kysely<Database>, context: AuthContext, 
   }));
 }
 
+async function authorizeScheduleAction(
+  db: Kysely<Database>,
+  context: AuthContext,
+  serverId: string,
+  action: Schedule['action'],
+  retention: unknown,
+) {
+  const server = await authorizeServer(
+    db,
+    context,
+    serverId,
+    action === 'backup' ? 'backups.create' : 'console.power',
+  );
+  if (action === 'backup' && backupRetentionSchema.parse(retention ?? {}).enabled)
+    await authorizeServer(db, context, serverId, 'backups.delete');
+  return server;
+}
+
 export async function createSchedule(
   db: Kysely<Database>,
   previous: AuthContext,
@@ -366,6 +385,7 @@ export async function createSchedule(
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
     const context = await manager(tx, previous, serverId, env);
+    await authorizeScheduleAction(tx, context, serverId, value.action, value.retention);
     if (value.action === 'backup') await assertRetentionCapacity(tx, serverId, value.retention);
     const count = await tx
       .selectFrom('server_schedules')
@@ -423,6 +443,7 @@ export async function updateSchedule(
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
     const context = await manager(tx, previous, serverId, env);
+    await authorizeScheduleAction(tx, context, serverId, value.action, value.retention);
     if (value.action === 'backup') await assertRetentionCapacity(tx, serverId, value.retention);
     const old = await tx
       .selectFrom('server_schedules')
@@ -496,7 +517,7 @@ export async function deleteSchedule(
   const value = parse(scheduleDeleteSchema, input);
   await db.transaction().execute(async (tx) => {
     await lockResources(tx);
-    const context = await manager(tx, previous, serverId, env);
+    const context = await manager(tx, previous, serverId, env, 'schedules.delete');
     const row = await tx
       .updateTable('server_schedules')
       .set({
@@ -523,7 +544,7 @@ export async function listScheduleOutcomes(
   scheduleId: string,
   input: unknown = {},
 ) {
-  await authorizeServer(db, context, serverId);
+  await authorizeServer(db, context, serverId, 'schedules.read');
   parse(id, scheduleId);
   const query = parse(
     z.strictObject({
@@ -686,7 +707,14 @@ export async function authorizeScheduledEffect(
   )
     throw new DomainError('forbidden');
   const context = await creatorContext(db, job.actor_id);
-  const server = await authorizeServer(db, context, serverId, 'server:manage');
+  await authorizeServer(db, context, serverId, marker.manual ? 'schedules.run' : 'schedules.write');
+  const server = await authorizeScheduleAction(
+    db,
+    context,
+    serverId,
+    schedule.action,
+    schedule.backup_options.retention,
+  );
   if (['start', 'restart'].includes(operation.action)) {
     if (!automaticStartsAllowed(server)) throw new DomainError('forbidden');
     const policy =
@@ -761,7 +789,9 @@ async function dispatchSchedule(
       .where('id', '=', scheduleId)
       .forUpdate()
       .executeTakeFirst();
-    const interactive = request ? await manager(tx, request.context, request.serverId, env) : null;
+    const interactive = request
+      ? await manager(tx, request.context, request.serverId, env, 'schedules.run')
+      : null;
     if (request && (!schedule || schedule.server_id !== request.serverId || schedule.deleted_at))
       throw new DomainError('not_found');
     if (request) {
@@ -802,7 +832,19 @@ async function dispatchSchedule(
     try {
       if (!reason) {
         const context = interactive ?? (await creatorContext(tx, schedule.authorizer_id));
-        const server = await authorizeServer(tx, context, schedule.server_id, 'server:manage');
+        await authorizeServer(
+          tx,
+          context,
+          schedule.server_id,
+          request ? 'schedules.run' : 'schedules.write',
+        );
+        const server = await authorizeScheduleAction(
+          tx,
+          context,
+          schedule.server_id,
+          schedule.action,
+          schedule.backup_options.retention,
+        );
         if (schedule.action === 'backup')
           await assertRetentionCapacity(tx, server.id, schedule.backup_options.retention);
         if (['start', 'restart'].includes(schedule.action) && !automaticStartsAllowed(server))
@@ -981,7 +1023,7 @@ export async function previewSchedule(
   serverId: string,
   input: unknown,
 ) {
-  await authorizeServer(db, context, serverId);
+  await authorizeServer(db, context, serverId, 'schedules.read');
   const value = parse(scheduleSchema.pick({ timing: true, timeZone: true }), input);
   return { nextRuns: previewScheduleRuns(value.timing, value.timeZone) };
 }

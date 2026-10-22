@@ -13,6 +13,7 @@ import { ownerIntegrationWebMessages } from '../packages/i18n/src/owner-integrat
 import { ownerWebMessages } from '../packages/i18n/src/owner-web.js';
 import { platformWebMessages } from '../packages/i18n/src/platform-web.js';
 import { quillWebMessages } from '../packages/i18n/src/quill-web.js';
+import { serverNavigationWebMessages } from '../packages/i18n/src/server-navigation-web.js';
 import { serviceWebMessages } from '../packages/i18n/src/services-web.js';
 import { sftpWebMessages } from '../packages/i18n/src/sftp-web.js';
 import { usernameWebMessages } from '../packages/i18n/src/username-web.js';
@@ -34,6 +35,7 @@ for (const [key, pair] of Object.entries({
   ...viewerWebMessages,
   ...quillWebMessages,
   ...sftpWebMessages,
+  ...serverNavigationWebMessages,
   ...backupsWebMessages,
   ...activityWebMessages,
   ...automationWebMessages,

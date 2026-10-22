@@ -43,6 +43,39 @@ async function audit(
 }
 
 describe('unified activity', () => {
+  it('does not expose command text to a direct Activity reader and includes Subusers changes', async () => {
+    const serverId = await f.server();
+    const peer = await managementFixture(f.db);
+    await f.db
+      .insertInto('server_subusers')
+      .values({
+        server_id: serverId,
+        user_id: peer.context.actorUserId,
+        created_by: f.context.actorUserId,
+        permission_keys: JSON.stringify(['activity.read']),
+      })
+      .execute();
+    await audit(serverId, 'server.console.command', { command: 'say private-command' });
+    await audit(serverId, 'server.subuser.updated', { memberName: 'Collaborator' });
+    const result = await listUnifiedActivity(f.db, peer.context, { serverId });
+    expect(result.items.some((item) => item.action === 'server.subuser.updated')).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('private-command');
+    expect(
+      (await listUnifiedActivity(f.db, peer.context, { serverId, q: 'private-command' })).items,
+    ).toEqual([]);
+    await f.db
+      .updateTable('server_subusers')
+      .set({
+        permission_keys: JSON.stringify(['activity.read', 'console.read', 'console.command']),
+      })
+      .where('server_id', '=', serverId)
+      .where('user_id', '=', peer.context.actorUserId)
+      .execute();
+    expect(JSON.stringify(await listUnifiedActivity(f.db, peer.context, { serverId }))).toContain(
+      'private-command',
+    );
+  });
+
   it('shows plugin publication and recovery only in the authorized server activity', async () => {
     const serverId = await f.server();
     const stranger = await managementFixture(f.db, { interactive: true });

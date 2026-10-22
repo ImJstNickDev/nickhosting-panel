@@ -152,6 +152,13 @@ describe('post-create installation journey', () => {
                         : null,
                   capabilities: { console: true },
                   permissions: { manage: true, operate: true },
+                  permissionKeys: [
+                    'console.read',
+                    'console.power',
+                    'console.command',
+                    'files.read',
+                    'settings.read',
+                  ],
                   availableActions: {
                     console: installState === 'installed',
                     start: true,

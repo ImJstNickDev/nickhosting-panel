@@ -97,6 +97,36 @@ function sftpFixture() {
 }
 
 describe('SFTPGo credentials', () => {
+  it('retains a read-only or write-without-delete scope through recovery, rotation and quota changes', async () => {
+    for (const permissions of [
+      ['list', 'download'] as const,
+      ['list', 'download', 'upload', 'overwrite', 'create_dirs'] as const,
+    ]) {
+      const f = sftpFixture();
+      const request = { ...f.request(), permissions: [...permissions] };
+      const ref = await f.adapter.ensureCredential(request);
+      expect(f.users.get(ref.username)?.permissions).toEqual({ '/': [...permissions] });
+      expect(await f.adapter.inspectCredential(request)).toEqual(ref);
+      await f.adapter.rotateCredential(ref, {
+        password: generateSftpPassword(),
+        expiresAt: request.expiresAt,
+      });
+      await f.adapter.updateQuota(ref, 0);
+      expect(f.users.get(ref.username)?.permissions).toEqual({ '/': [...permissions] });
+      await f.adapter.revokeCredential(ref);
+      expect(f.users.has(ref.username)).toBe(false);
+    }
+  });
+  it('refuses to reuse an existing account with broader permissions than requested', async () => {
+    const f = sftpFixture();
+    const request = f.request();
+    await f.adapter.ensureCredential(request);
+    await expect(
+      f.adapter.ensureCredential({ ...request, permissions: ['list', 'download'] }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    expect(f.calls.some((call) => call.method === 'PUT')).toBe(false);
+  });
+
   it('keeps a named persistent primary identity through rotation, quota updates and revocation', async () => {
     const f = sftpFixture();
     const request = { ...f.request(), username: 'imjstnick-a3f92c18', expiresAt: 0 };

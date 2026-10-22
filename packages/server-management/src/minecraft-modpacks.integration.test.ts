@@ -7,8 +7,9 @@ import {
   type MinecraftModpackHooks,
 } from './minecraft-modpacks.js';
 import { modpackDigest, type PreparedMinecraftModpack } from './minecraft-modpacks-plan.js';
+import { modpackActor } from './modpack-bridge.js';
 import { enqueueServerOperation } from './registry.js';
-import { managementFixture } from './test-fixtures.js';
+import { minecraftManagementFixture } from './test-fixtures.js';
 
 describe('Modpacks durable preparation and apply', () => {
   let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -20,7 +21,7 @@ describe('Modpacks durable preparation and apply', () => {
   });
 
   async function fixture(logger?: ReturnType<typeof createLogger>) {
-    const f = await managementFixture(database.db, { interactive: true });
+    const f = await minecraftManagementFixture(database.db, { interactive: true });
     const serverId = await f.server();
     const combinationId = randomUUID();
     await f.db
@@ -168,6 +169,73 @@ describe('Modpacks durable preparation and apply', () => {
       apply,
     };
   }
+
+  it('requires Worlds delete for Modpacks reset and rechecks it at apply, recovery and worker authorization', async () => {
+    const f = await fixture();
+    const peer = await minecraftManagementFixture(f.db, { interactive: true });
+    const keys = ['game.minecraft.modpacks.read', 'game.minecraft.modpacks.write'];
+    const grant = async (reset: boolean) =>
+      f.db
+        .insertInto('server_subusers')
+        .values({
+          server_id: f.serverId,
+          user_id: peer.context.subjectUserId,
+          created_by: f.context.actorUserId,
+          permission_keys: JSON.stringify(
+            reset ? [...keys, 'game.minecraft.worlds.read', 'game.minecraft.worlds.delete'] : keys,
+          ),
+        })
+        .onConflict((c) =>
+          c.columns(['server_id', 'user_id']).doUpdateSet({
+            permission_keys: JSON.stringify(
+              reset
+                ? [...keys, 'game.minecraft.worlds.read', 'game.minecraft.worlds.delete']
+                : keys,
+            ),
+          }),
+        )
+        .execute();
+    const selection = { ...f.selection, mode: 'replace', worldPolicy: 'reset' };
+    await grant(false);
+    await expect(f.service.prepare(peer.context, f.serverId, selection)).rejects.toMatchObject({
+      code: 'forbidden',
+    });
+    await grant(true);
+    const queued = await f.service.prepare(peer.context, f.serverId, selection);
+    const id = queued.operation?.id;
+    if (!id) throw new Error('Missing reset operation');
+    await f.service.process(id);
+    const snapshot = await f.service.snapshot(peer.context, f.serverId);
+    const operation = snapshot.operation;
+    if (!operation) throw new Error('Missing prepared operation');
+    const row = await f.db
+      .selectFrom('minecraft_modpack_operations')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirstOrThrow();
+    await modpackActor(f.db, row, false, {});
+    await grant(false);
+    await expect(modpackActor(f.db, row, false, {})).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(
+      f.service.apply(peer.context, f.serverId, {
+        operationId: id,
+        planDigest: operation.planDigest,
+        confirm: true,
+        backupBefore: false,
+        expectedDeletePaths: operation.deletePaths,
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    await f.db
+      .updateTable('minecraft_modpack_operations')
+      .set({ state: 'uncertain' })
+      .where('id', '=', id)
+      .execute();
+    await expect(f.service.recover(peer.context, f.serverId, id)).rejects.toMatchObject({
+      code: 'forbidden',
+    });
+    expect(f.calls).toEqual([]);
+  });
 
   it('emits bounded debug worker phases without private selection data', async () => {
     const records: LogRecord[] = [];

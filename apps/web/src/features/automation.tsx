@@ -1,6 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { useEffect, useRef } from 'react';
-import { Link, useLocation } from 'react-router';
+import { useLocation } from 'react-router';
 import { api } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
@@ -19,53 +18,28 @@ import { readSleepAccess, readSleepTimeout } from './sleep-timeout.js';
 import './automation.css';
 
 export function AutomationPage({ serverId }: { serverId: string }) {
-  const t = useT(),
-    session = useSession(),
+  const session = useSession(),
     server = useServer(serverId),
     location = useLocation();
   const editable =
-    !!server.data?.permissions.manage && session.data?.context.sessionType === 'regular';
+    !!server.data?.permissionKeys.includes('settings.write') &&
+    session.data?.context.sessionType === 'regular';
   const owner = session.data?.context.role === 'owner';
   const section = location.pathname.endsWith('/sleep')
     ? 'sleep'
     : location.pathname.endsWith('/messages')
       ? 'messages'
       : 'schedules';
-  const base = `/servers/${encodeURIComponent(serverId)}/automation`;
-  const tabs = useRef<HTMLElement>(null);
-  useEffect(() => {
-    const nav = tabs.current;
-    const active = nav?.querySelector<HTMLElement>(`[data-section="${section}"]`);
-    if (nav && active) {
-      const bounds = nav.getBoundingClientRect(),
-        item = active.getBoundingClientRect();
-      if (item.right > bounds.right) nav.scrollLeft += item.right - bounds.right;
-      else if (item.left < bounds.left) nav.scrollLeft -= bounds.left - item.left;
-    }
-  }, [section]);
   return (
     <div className="automation-page">
-      <nav ref={tabs} className="automation-tabs" aria-label={t('web.automation')}>
-        {(['schedules', 'sleep', 'messages'] as const)
-          .filter(
-            (tab) =>
-              tab !== 'messages' ||
-              (server.data?.connectionMode === 'gateway' &&
-                server.data.capabilities?.gatewayMessages),
-          )
-          .map((tab) => (
-            <Link
-              key={tab}
-              data-section={tab}
-              to={tab === 'schedules' ? base : `${base}/${tab}`}
-              aria-current={section === tab ? 'page' : undefined}
-            >
-              {t(`automation.tab.${tab}`)}
-            </Link>
-          ))}
-      </nav>
       {section === 'schedules' ? (
-        <SchedulesSection serverId={serverId} editable={editable} />
+        <SchedulesSection
+          serverId={serverId}
+          editable={
+            !!server.data?.permissionKeys.includes('schedules.write') &&
+            session.data?.context.sessionType === 'regular'
+          }
+        />
       ) : section === 'messages' ? (
         <GatewayMessageEditor serverId={serverId} gameId={server.data?.gameId} />
       ) : (

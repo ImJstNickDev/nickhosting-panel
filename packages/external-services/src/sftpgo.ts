@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { ProviderHttp } from './http.js';
 
 const uuid = z.uuid();
-const permissionList = [
+export const sftpPermissionList = [
   'list',
   'download',
   'upload',
@@ -13,7 +13,12 @@ const permissionList = [
   'delete',
   'rename',
   'create_dirs',
-];
+] as const;
+const permissionList = sftpPermissionList;
+const permissionsSchema = z
+  .array(z.enum(sftpPermissionList))
+  .min(1)
+  .refine((values) => new Set(values).size === values.length);
 const deniedProtocols = ['FTP', 'DAV', 'HTTP'];
 const requestSchema = z
   .object({
@@ -27,6 +32,7 @@ const requestSchema = z
     password: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
     expiresAt: z.number().int().nonnegative(),
     quotaBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    permissions: permissionsSchema.optional(),
   })
   .strict();
 export type SftpCredentialRequest = z.infer<typeof requestSchema>;
@@ -39,6 +45,7 @@ export interface SftpCredentialRef {
   externalUserId: number;
   expiresAt: number;
   quotaBytes: number;
+  permissions?: Array<(typeof sftpPermissionList)[number]>;
 }
 const userSchema = z
   .object({
@@ -158,7 +165,7 @@ export class SftpGoAdapter {
       home_dir: sftpServerDirectory(this.#dataRoot, input.externalServerUuid),
       expiration_date: input.expiresAt,
       additional_info: this.#marker(input),
-      permissions: { '/': permissionList },
+      permissions: { '/': input.permissions ?? permissionList },
       public_keys: [],
       virtual_folders: [],
       groups: [],
@@ -196,7 +203,7 @@ export class SftpGoAdapter {
     )
       throw new DomainError('conflict');
   }
-  #assertIsolation(user: RemoteUser): void {
+  #assertIsolation(user: RemoteUser, permissions: readonly string[] = permissionList): void {
     if (
       user.filesystem.provider !== 0 ||
       user.virtual_folders?.length ||
@@ -204,7 +211,7 @@ export class SftpGoAdapter {
       user.filters.allow_api_key_auth ||
       Object.keys(user.permissions).length !== 1 ||
       JSON.stringify([...(user.permissions['/'] ?? [])].sort()) !==
-        JSON.stringify([...permissionList].sort()) ||
+        JSON.stringify([...permissions].sort()) ||
       !deniedProtocols.every((protocol) => user.filters.denied_protocols?.includes(protocol))
     )
       throw new DomainError('conflict');
@@ -243,7 +250,7 @@ export class SftpGoAdapter {
     }
     if (!user) throw new DomainError('integration_unavailable');
     this.#assertOwned(user, input);
-    this.#assertIsolation(user);
+    this.#assertIsolation(user, input.permissions);
     if (
       user.status !== 1 ||
       user.expiration_date !== input.expiresAt ||
@@ -259,6 +266,7 @@ export class SftpGoAdapter {
       externalUserId: user.id,
       expiresAt: input.expiresAt,
       quotaBytes: input.quotaBytes,
+      ...(input.permissions ? { permissions: input.permissions } : {}),
     };
   }
 
@@ -284,6 +292,10 @@ export class SftpGoAdapter {
       externalUserId: user.id,
       expiresAt: user.expiration_date,
       quotaBytes: user.quota_size,
+      ...(JSON.stringify([...(user.permissions['/'] ?? [])].sort()) ===
+      JSON.stringify([...permissionList].sort())
+        ? {}
+        : { permissions: validate(permissionsSchema, user.permissions['/']) }),
     };
   }
 
@@ -300,7 +312,7 @@ export class SftpGoAdapter {
     const user = await this.#read(ref.username);
     if (!user) throw new DomainError('not_found');
     this.#assertOwned(user, ref);
-    this.#assertIsolation(user);
+    this.#assertIsolation(user, ref.permissions);
     const assertUsage = (observed: RemoteUser) => {
       // SFTPGo tracking mode 2 does not count unlimited uploads. Game writes
       // also bypass its counters: any finite target requires fresh Wings usage.
@@ -329,7 +341,7 @@ export class SftpGoAdapter {
     const confirmed = await this.#read(ref.username);
     if (!confirmed) throw new DomainError('not_found');
     this.#assertOwned(confirmed, ref);
-    this.#assertIsolation(confirmed);
+    this.#assertIsolation(confirmed, ref.permissions);
     assertUsage(confirmed);
     if (
       confirmed.quota_size !== quotaBytes ||
@@ -351,6 +363,7 @@ export class SftpGoAdapter {
       credentialId: ref.credentialId,
       username: ref.username,
       quotaBytes: ref.quotaBytes,
+      permissions: ref.permissions,
       ...update,
     });
     this.#checkExpiry(input.expiresAt);

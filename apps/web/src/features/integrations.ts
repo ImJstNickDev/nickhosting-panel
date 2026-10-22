@@ -16,9 +16,12 @@ export function availableGameSections(
   return module
     ? availableGameUiSections(module, {
         runtimeId: server.runtimeId,
-        permissions: Object.entries(server.permissions).flatMap(([name, allowed]) =>
-          allowed ? [`server:${name}`] : [],
-        ),
+        permissions: [
+          ...Object.entries(server.permissions).flatMap(([name, allowed]) =>
+            allowed ? [`server:${name}`] : [],
+          ),
+          ...((server as ServerInfo & { permissionKeys?: string[] }).permissionKeys ?? []),
+        ],
         capabilities: server.capabilities,
       })
     : [];

@@ -2,11 +2,16 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import {
   type AuthContext,
+  assertAuthContext,
   assertPermission,
   authSessionId,
   DomainError,
+  hasPermission,
+  legacyServerPermissionKeys,
   type Permission,
   resolveDnsOptions,
+  type ServerPermissionDefinition,
+  serverPermissionDefinitions,
   validateDnsLabel,
 } from '@nickhosting/core';
 import {
@@ -18,6 +23,7 @@ import {
 } from '@nickhosting/database';
 import { evaluateGameAccess, gameManifestSchema } from '@nickhosting/game-sdk';
 import {
+  minecraftContentPermissionKeys,
   minecraftRuntimeMappingSchema,
   type ResolvedMinecraftRuntime,
   validateMinecraftRuntimeMapping,
@@ -146,7 +152,7 @@ export async function authorizeServer(
   db: DB,
   context: AuthContext,
   serverId: string,
-  permission: Permission = 'server:read',
+  permission: Permission | string = 'server:read',
 ) {
   parse(id, serverId);
   const row = await db
@@ -156,6 +162,7 @@ export async function authorizeServer(
     .where('deleted_at', 'is', null)
     .executeTakeFirst();
   if (!row) throw new DomainError('not_found');
+  assertAuthContext(context);
   const member = row.project_id
     ? await db
         .selectFrom('project_members')
@@ -164,17 +171,174 @@ export async function authorizeServer(
         .where('user_id', '=', context.subjectUserId)
         .executeTakeFirst()
     : undefined;
-  assertPermission(context, permission, { ownerUserId: row.owner_id, memberRole: member?.role });
+  const scope = { ownerUserId: row.owner_id, memberRole: member?.role };
+  if (permission.includes(':')) {
+    if (!hasPermission(context, permission as Permission, scope)) {
+      if (
+        !['server:read', 'jobs:read'].includes(permission) ||
+        !(await getServerPermissionKeys(db, context, row)).length
+      )
+        throw new DomainError('forbidden');
+    }
+  } else if (!(await getServerPermissionKeys(db, context, row)).includes(permission)) {
+    throw new DomainError('forbidden');
+  }
   return row;
+}
+
+/** Fail closed for direct grants while an additive deployment awaits its migration. */
+export async function serverSubusersAvailable(db: DB): Promise<boolean> {
+  const result = await sql<{
+    present: boolean;
+  }>`select to_regclass(current_schema() || '.server_subusers') is not null as present`.execute(db);
+  return result.rows[0]?.present === true;
+}
+
+export async function getServerPermissionDefinitions(
+  db: DB,
+  server: { mapping_id: string },
+): Promise<ServerPermissionDefinition[]> {
+  const mapping = await db
+    .selectFrom('runtime_egg_mappings')
+    .select('game_id')
+    .where('id', '=', server.mapping_id)
+    .executeTakeFirst();
+  const manifest = mapping ? trustedGameModules.get(mapping.game_id)?.manifest : undefined;
+  const extension =
+    (manifest as { serverPermissions?: ServerPermissionDefinition[] } | undefined)
+      ?.serverPermissions ?? [];
+  return [...serverPermissionDefinitions, ...extension];
+}
+
+export async function getServerPermissionKeys(
+  db: DB,
+  context: AuthContext,
+  server: { id: string; owner_id: string; project_id: string | null; mapping_id: string },
+): Promise<string[]> {
+  assertAuthContext(context);
+  const definitions = await getServerPermissionDefinitions(db, server);
+  if (context.role === 'owner' || server.owner_id === context.subjectUserId)
+    return definitions.map(({ key }) => key);
+  const member = server.project_id
+    ? await db
+        .selectFrom('project_members')
+        .select('role')
+        .where('project_id', '=', server.project_id)
+        .where('user_id', '=', context.subjectUserId)
+        .executeTakeFirst()
+    : undefined;
+  const direct = (await serverSubusersAvailable(db))
+    ? await db
+        .selectFrom('server_subusers')
+        .select('permission_keys')
+        .where('server_id', '=', server.id)
+        .where('user_id', '=', context.subjectUserId)
+        .executeTakeFirst()
+    : undefined;
+  const known = new Set(definitions.map(({ key }) => key));
+  return [
+    ...new Set([
+      ...legacyServerPermissionKeys(member?.role, definitions),
+      ...(direct?.permission_keys ?? []).filter((key) => known.has(key)),
+    ]),
+  ];
+}
+
+/** Capture only issued transports, inside the same resource transaction as access changes. */
+export async function snapshotServerCredentialPermissions(
+  db: DB,
+  serverIds: string[],
+  userId?: string,
+) {
+  if (!serverIds.length) return [];
+  let query = db
+    .selectFrom('external_sftp_credentials as credential')
+    .innerJoin('managed_servers as server', 'server.id', 'credential.server_id')
+    .innerJoin('user as actor', 'actor.id', 'credential.actor_id')
+    .selectAll('server')
+    .select(['actor.id as credential_user_id', 'actor.role as credential_role'])
+    .where('server.id', 'in', serverIds)
+    .where('credential.state', '!=', 'revoked');
+  if (userId) query = query.where('credential.actor_id', '=', userId);
+  const rows = await query.distinct().execute();
+  return Promise.all(
+    rows.map(async (row) => ({
+      serverId: row.id,
+      userId: row.credential_user_id,
+      permissionKeys: await getServerPermissionKeys(
+        db,
+        {
+          actorUserId: row.credential_user_id,
+          subjectUserId: row.credential_user_id,
+          role: row.credential_role,
+          sessionType: 'regular',
+          ownerElevation: false,
+        },
+        row,
+      ),
+    })),
+  );
+}
+export async function revokeReducedServerCredentialPermissions(
+  db: DB,
+  snapshots: Awaited<ReturnType<typeof snapshotServerCredentialPermissions>>,
+) {
+  for (const snapshot of snapshots) {
+    const server = await db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', snapshot.serverId)
+      .where('deleted_at', 'is', null)
+      .executeTakeFirst();
+    const user = await db
+      .selectFrom('user')
+      .select('role')
+      .where('id', '=', snapshot.userId)
+      .executeTakeFirst();
+    const keys =
+      server && user
+        ? await getServerPermissionKeys(
+            db,
+            {
+              actorUserId: snapshot.userId,
+              subjectUserId: snapshot.userId,
+              role: user.role,
+              sessionType: 'regular',
+              ownerElevation: false,
+            },
+            server,
+          )
+        : [];
+    if (snapshot.permissionKeys.some((key) => key.startsWith('files.') && !keys.includes(key)))
+      await db
+        .updateTable('external_sftp_credentials')
+        .set({ state: 'revoking' })
+        .where('server_id', '=', snapshot.serverId)
+        .where('actor_id', '=', snapshot.userId)
+        .where('state', 'in', ['pending', 'active', 'uncertain'])
+        .execute();
+  }
 }
 
 export async function listServers(db: DB, context: AuthContext) {
   assertPermission(context, 'server:read', { ownerUserId: context.subjectUserId });
+  const directAvailable = await serverSubusersAvailable(db);
   let query = db.selectFrom('managed_servers').selectAll().where('deleted_at', 'is', null);
   if (context.role !== 'owner' || context.sessionType !== 'regular') {
     query = query.where((expression) =>
       expression.or([
         expression('owner_id', '=', context.subjectUserId),
+        ...(directAvailable
+          ? [
+              expression.exists(
+                expression
+                  .selectFrom('server_subusers')
+                  .select('server_id')
+                  .whereRef('server_subusers.server_id', '=', 'managed_servers.id')
+                  .where('server_subusers.user_id', '=', context.subjectUserId),
+              ),
+            ]
+          : []),
         expression.exists(
           expression
             .selectFrom('project_members')
@@ -805,10 +969,23 @@ export async function enqueueLockedServerOperation(
     tx,
     context,
     serverId,
-    ['start', 'stop', 'restart', 'backup'].includes(value.action)
-      ? 'server:operate'
-      : 'server:manage',
+    ['start', 'stop', 'restart'].includes(value.action)
+      ? 'console.power'
+      : value.action === 'backup'
+        ? 'backups.create'
+        : value.action === 'restore'
+          ? 'backups.restore'
+          : value.action === 'minecraft-content'
+            ? 'server:read'
+            : 'server:manage',
   );
+  if (value.action === 'minecraft-content') {
+    if (!options.minecraftPlan) throw new DomainError('forbidden');
+    for (const permission of minecraftContentPermissionKeys(options.minecraftPlan.command))
+      await authorizeServer(tx, context, serverId, permission);
+  }
+  if (('backupBefore' in value && value.backupBefore) || options.minecraftPlan?.backupBefore)
+    await authorizeServer(tx, context, serverId, 'backups.create');
   if (server.active_operation_id) throw new DomainError('conflict');
   await assertNoModpackPublication(tx, serverId);
   if (value.action === 'start' || value.action === 'restart') {
@@ -1068,7 +1245,7 @@ export async function enqueueServerOperation(
         policy || context[authSessionId]
           ? await currentInteractiveContext(tx, context, env)
           : context;
-      await authorizeServer(tx, actor, serverId, 'server:operate');
+      await authorizeServer(tx, actor, serverId, 'console.power');
       await tx
         .updateTable('managed_servers')
         .set({ intent: 'manually_stopped' })
@@ -1185,6 +1362,8 @@ export async function setProjectMember(
     input,
   );
   return db.transaction().execute(async (tx) => {
+    await lockResources(tx);
+    if (context[authSessionId]) context = await currentInteractiveContext(tx, context, {});
     const project = await tx
       .selectFrom('projects')
       .selectAll()
@@ -1199,6 +1378,17 @@ export async function setProjectMember(
       .where('id', '=', value.userId)
       .executeTakeFirst();
     if (!member) throw new DomainError('not_found');
+    const affectedServers = await tx
+      .selectFrom('managed_servers')
+      .select('id')
+      .where('project_id', '=', projectId)
+      .where('deleted_at', 'is', null)
+      .execute();
+    const credentialPermissions = await snapshotServerCredentialPermissions(
+      tx,
+      affectedServers.map((server) => server.id),
+      value.userId,
+    );
     if (value.role)
       await tx
         .insertInto('project_members')
@@ -1213,6 +1403,7 @@ export async function setProjectMember(
         .where('project_id', '=', projectId)
         .where('user_id', '=', value.userId)
         .execute();
+    await revokeReducedServerCredentialPermissions(tx, credentialPermissions);
     await recordAudit(tx, context, 'project.member.updated', { projectId, ...value });
     // Snapshot the servers affected now: moving a server to another project later
     // must neither import unrelated history nor lose this access change.
@@ -1225,6 +1416,7 @@ export async function setProjectMember(
       from managed_servers server where server.project_id = ${projectId} and server.deleted_at is null`.execute(
       tx,
     );
+    return credentialPermissions.map(({ serverId, userId }) => ({ serverId, userId }));
   });
 }
 

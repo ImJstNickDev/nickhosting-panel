@@ -25,6 +25,7 @@ import { createMinecraftDatapackService } from './minecraft-datapacks.js';
 import { minecraftModContentReceipts } from './minecraft-mod-receipts.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
+import { permissionRuntime } from './permission-runtime.js';
 import type { ManagementRuntime } from './runtime.js';
 
 type Provider = ModrinthProvider | CurseForgeProvider;
@@ -84,7 +85,8 @@ export function createMinecraftDatapackCatalogService(options: {
   http?: ContentHttp;
   curseforge?: CurseForgeProvider;
 }) {
-  const { db, runtime, env } = options;
+  const { db, env } = options;
+  const runtime = permissionRuntime(options.runtime, 'game.minecraft.datapacks');
   async function observe(
     context: AuthContext,
     serverId: string,

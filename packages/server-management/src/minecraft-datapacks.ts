@@ -35,7 +35,8 @@ import {
 import { minecraftModContentReceipts } from './minecraft-mod-receipts.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
-import { parse } from './registry.js';
+import { permissionRuntime } from './permission-runtime.js';
+import { authorizeServer, parse } from './registry.js';
 import type { ManagementRuntime } from './runtime.js';
 import { assertServerStorageCapacity, serverStorageLimitBytes } from './storage-capacity.js';
 import { reserveUploadIngestion } from './upload-admission.js';
@@ -104,7 +105,8 @@ export function createMinecraftDatapackService(options: {
   runtime: ManagementRuntime;
   env?: Environment;
 }) {
-  const { db, runtime, env = {} } = options;
+  const { db, env = {} } = options;
+  const runtime = permissionRuntime(options.runtime, 'game.minecraft.datapacks');
   async function profile(connection: Kysely<Database>, serverId: string) {
     const value = await connection
       .selectFrom('minecraft_server_profiles')
@@ -271,6 +273,7 @@ export function createMinecraftDatapackService(options: {
   }
   const cleanupTasks = new Set<Promise<void>>();
   function queueCleanup(context: AuthContext, serverId: string, applyId: string) {
+    const runtime = permissionRuntime(options.runtime, 'game.minecraft.datapacks', 'delete');
     const task = (async () => {
       // Leave the publication lock before reclaiming known, retired paths. A
       // normal UI operation always wins over this optional cleanup acquisition.
@@ -324,7 +327,16 @@ export function createMinecraftDatapackService(options: {
             if (apply.cleanup.some((path) => !allowed.has(path)))
               throw new DomainError('provenance_mismatch');
             const cleanup = apply.cleanup.filter((path) => owned.has(path));
-            if (cleanup.length) await runtime.adapter.deleteFiles(identifier, '', cleanup);
+            if (cleanup.length) {
+              await runtime.authorizeTransfer(current, serverId, true, connection);
+              await authorizeServer(
+                connection,
+                current,
+                serverId,
+                'game.minecraft.datapacks.delete',
+              );
+              await runtime.adapter.deleteFiles(identifier, '', cleanup);
+            }
             await connection
               .updateTable('minecraft_datapack_applies')
               .set({ cleanup_state: 'complete', updated_at: new Date() })
@@ -480,6 +492,12 @@ export function createMinecraftDatapackService(options: {
     },
     async recover(context: AuthContext, serverId: string, input: unknown) {
       const { world } = parse(z.strictObject({ world: minecraftDatapackWorldSchema }), input);
+      const pending = await changeRows(db, serverId, world);
+      const runtime = permissionRuntime(
+        options.runtime,
+        'game.minecraft.datapacks',
+        pending.length && pending.every((row) => row.action === 'delete') ? 'delete' : 'write',
+      );
       return runtime.fileMutationAccess(
         context,
         serverId,
@@ -645,6 +663,11 @@ export function createMinecraftDatapackService(options: {
     ) {
       const value = parse(minecraftDatapackChangeSchema, input);
       // Resolve and inspect source before taking the short exclusive provider lock.
+      const runtime = permissionRuntime(
+        options.runtime,
+        'game.minecraft.datapacks',
+        value.action === 'delete' ? 'delete' : 'write',
+      );
       let archive:
         | Awaited<
             ReturnType<ReturnType<typeof createMinecraftSourceStore>['datapackArchiveResolver']>
@@ -909,6 +932,17 @@ export function createMinecraftDatapackService(options: {
     },
     async cancel(context: AuthContext, serverId: string, changeId: string) {
       parse(z.uuid(), changeId);
+      const candidate = await db
+        .selectFrom('minecraft_datapack_changes')
+        .select('action')
+        .where('id', '=', changeId)
+        .where('server_id', '=', serverId)
+        .executeTakeFirst();
+      const runtime = permissionRuntime(
+        options.runtime,
+        'game.minecraft.datapacks',
+        candidate?.action === 'delete' ? 'delete' : 'write',
+      );
       await runtime.uploadBatchAccess(
         context,
         serverId,
@@ -960,6 +994,10 @@ export function createMinecraftDatapackService(options: {
     },
     async apply(context: AuthContext, serverId: string, input: unknown) {
       const value = parse(minecraftDatapackApplySchema, input);
+      const pending = await changeRows(db, serverId, value.world);
+      const action =
+        pending.length && pending.every((row) => row.action === 'delete') ? 'delete' : 'write';
+      const runtime = permissionRuntime(options.runtime, 'game.minecraft.datapacks', action);
       return runtime.fileMutationAccess(
         context,
         serverId,
@@ -979,6 +1017,10 @@ export function createMinecraftDatapackService(options: {
           const changes = allChanges.filter((change) =>
             activeStates.includes(change.state as (typeof activeStates)[number]),
           );
+          if (changes.some((change) => change.action !== 'delete'))
+            await authorizeServer(connection, current, serverId, 'game.minecraft.datapacks.write');
+          if (changes.some((change) => change.action === 'delete'))
+            await authorizeServer(connection, current, serverId, 'game.minecraft.datapacks.delete');
           if (changes.some((change) => change.state !== 'ready') || changes.length > 1000)
             throw new DomainError('conflict');
           if (!changes.length) {
@@ -1090,6 +1132,8 @@ export function createMinecraftDatapackService(options: {
               throw new DomainError('conflict');
           }
           await runtime.authorizeTransfer(current, serverId, true, connection, undefined, server);
+          if (retirements.length || publications.some((move) => move.action === 'delete'))
+            await authorizeServer(connection, current, serverId, 'game.minecraft.datapacks.delete');
           const discarded = [
             ...retirements,
             ...publications.filter((move) => move.action === 'delete'),
@@ -1123,6 +1167,14 @@ export function createMinecraftDatapackService(options: {
                 .execute();
           });
           try {
+            await runtime.authorizeTransfer(current, serverId, true, connection, undefined, server);
+            if (retirements.length || publications.some((move) => move.action === 'delete'))
+              await authorizeServer(
+                connection,
+                current,
+                serverId,
+                'game.minecraft.datapacks.delete',
+              );
             // Replacement retirement must finish before publication: Wings executes
             // a rename array concurrently, so dependent moves cannot share a batch.
             if (retirements.length)

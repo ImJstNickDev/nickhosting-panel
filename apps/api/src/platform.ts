@@ -1,6 +1,7 @@
 import { DomainError } from '@nickhosting/core';
 import {
   deletePlatformProject,
+  deleteServerSubuser,
   getGameAutoWakePolicy,
   getGameContentPolicy,
   getGameDomainPolicy,
@@ -21,13 +22,17 @@ import {
   listPlatformProjects,
   listPlatformServers,
   listPlatformUsers,
+  listServerSubusers,
   lookupProjectCollaborator,
+  lookupServerCollaborator,
+  reconcileServerUserSftpCredentials,
   retryPlatformJob,
   setGameAutoWakePolicy,
   setGameContentPolicy,
   setGameDomainPolicy,
   setGameSleepPolicy,
   setServerAutoWakePolicy,
+  setServerSubuser,
   updatePlatformProject,
   updatePlatformServer,
 } from '@nickhosting/server-management';
@@ -159,11 +164,79 @@ export function registerPlatformRoutes(
   app.get('/v1/platform/servers/:id', async (c) =>
     c.json(await getPlatformServer(db, await principal(c), c.req.param('id'), env)),
   );
-  app.patch('/v1/platform/servers/:id', async (c) =>
+  async function reconcileCredentials(serverIds: string[]) {
+    if (!serverIds.length) return;
+    const subjects = await db
+      .selectFrom('external_sftp_credentials')
+      .select(['server_id', 'actor_id'])
+      .where('server_id', 'in', serverIds)
+      .where('state', '!=', 'revoked')
+      .distinct()
+      .execute();
+    if (!subjects.length) return;
+    const service = await management();
+    for (const subject of subjects)
+      await reconcileServerUserSftpCredentials(
+        db,
+        subject.server_id,
+        subject.actor_id,
+        service.externalOptions,
+      );
+  }
+  app.patch('/v1/platform/servers/:id', async (c) => {
+    const input = await body(c);
+    const result = await updatePlatformServer(
+      db,
+      await principal(c),
+      c.req.param('id'),
+      input,
+      env,
+    );
+    if (input && typeof input === 'object' && 'projectId' in input)
+      await reconcileCredentials([c.req.param('id')]);
+    return c.json(result);
+  });
+  app.get('/v1/platform/servers/:id/subusers', async (c) =>
+    c.json(await listServerSubusers(db, await principal(c), c.req.param('id'))),
+  );
+  app.post('/v1/platform/servers/:id/subusers/lookup', async (c) =>
     c.json(
-      await updatePlatformServer(db, await principal(c), c.req.param('id'), await body(c), env),
+      await lookupServerCollaborator(db, await principal(c), c.req.param('id'), await body(c)),
     ),
   );
+  app.put('/v1/platform/servers/:id/subusers/:userId', async (c) => {
+    const result = await setServerSubuser(
+      db,
+      await principal(c),
+      c.req.param('id'),
+      c.req.param('userId'),
+      await body(c),
+      env,
+    );
+    await reconcileServerUserSftpCredentials(
+      db,
+      c.req.param('id'),
+      c.req.param('userId'),
+      (await management()).externalOptions,
+    );
+    return c.json(result);
+  });
+  app.delete('/v1/platform/servers/:id/subusers/:userId', async (c) => {
+    const result = await deleteServerSubuser(
+      db,
+      await principal(c),
+      c.req.param('id'),
+      c.req.param('userId'),
+      env,
+    );
+    await reconcileServerUserSftpCredentials(
+      db,
+      c.req.param('id'),
+      c.req.param('userId'),
+      (await management()).externalOptions,
+    );
+    return c.json(result);
+  });
   app.get('/v1/platform/servers/:id/connections', async (c) =>
     c.json(await getPlatformConnections(db, await principal(c), c.req.param('id'), env)),
   );
@@ -187,11 +260,17 @@ export function registerPlatformRoutes(
       await updatePlatformProject(db, await principal(c), c.req.param('id'), await body(c), env),
     ),
   );
-  app.delete('/v1/platform/projects/:id', async (c) =>
-    c.json(
-      await deletePlatformProject(db, await principal(c), c.req.param('id'), await body(c), env),
-    ),
-  );
+  app.delete('/v1/platform/projects/:id', async (c) => {
+    const result = await deletePlatformProject(
+      db,
+      await principal(c),
+      c.req.param('id'),
+      await body(c),
+      env,
+      reconcileCredentials,
+    );
+    return c.json(result);
+  });
   app.post('/v1/platform/projects/:id/collaborator', async (c) =>
     c.json(
       await lookupProjectCollaborator(db, await principal(c), c.req.param('id'), await body(c)),

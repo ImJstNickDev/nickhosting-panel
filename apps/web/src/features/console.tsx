@@ -1,10 +1,19 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Link } from 'react-router';
 import { ApiError, api, apiError, consumeEvents, queryClient } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
-import { Dialog, Empty, ErrorNotice, Loading, Notice, Section, Time } from '../components/ui.js';
+import {
+  ConfirmDialog,
+  Empty,
+  ErrorNotice,
+  Loading,
+  Notice,
+  Section,
+  Time,
+} from '../components/ui.js';
 import {
   type DisplayResources,
   parseConsoleResources,
@@ -190,14 +199,17 @@ export function ConsolePage({ serverId }: { serverId: string }) {
   const [state, setState] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const session = useSession();
   const consoleAvailable = Boolean(
-    server.data?.capabilities?.console && server.data.availableActions.console && !installing,
+    server.data?.capabilities?.console &&
+      server.data.permissionKeys.includes('console.read') &&
+      server.data.availableActions.console &&
+      !installing,
   );
   const request = useRequestOperation(serverId);
   const [powerError, setPowerError] = useState<unknown>();
   const [powerBusy, setPowerBusy] = useState(false);
   const [restart, setRestart] = useState(false);
   const [killTarget, setKillTarget] = useState<string>();
-  async function power(action: 'start' | 'stop' | 'restart' | 'kill') {
+  async function power(action: 'start' | 'stop' | 'restart' | 'kill', confirmation = false) {
     if (powerBusy) return;
     setPowerBusy(true);
     setPowerError(undefined);
@@ -208,6 +220,7 @@ export function ConsolePage({ serverId }: { serverId: string }) {
       setRestart(false);
       setKillTarget(undefined);
     } catch (failure) {
+      if (confirmation) throw failure;
       setPowerError(failure);
     } finally {
       setPowerBusy(false);
@@ -453,10 +466,13 @@ export function ConsolePage({ serverId }: { serverId: string }) {
           <h1 ref={heading} tabIndex={-1}>
             {server.data?.name}
           </h1>
+          <Link className="console-details" to={`/servers/${serverId}/status`}>
+            {t('web.details')}
+          </Link>
         </div>
         <div className="console-actions">
           {(!showSetup || setup?.state === 'start-denied') &&
-            server.data?.permissions.operate &&
+            server.data?.permissionKeys.includes('console.power') &&
             (['start', 'restart', powerState === 'stopping' ? 'kill' : 'stop'] as const).map(
               (action) => (
                 <button
@@ -527,9 +543,9 @@ export function ConsolePage({ serverId }: { serverId: string }) {
                     element.scrollHeight - element.clientHeight - element.scrollTop <= 2;
                 }}
               />
-              {!showSetup && server.data?.permissions.manage && identity && (
-                <ConsoleCommand key={scope} serverId={serverId} />
-              )}
+              {!showSetup &&
+                server.data?.permissionKeys.includes('console.command') &&
+                identity && <ConsoleCommand key={scope} serverId={serverId} />}
             </div>
           ) : (
             <Notice>{t('web.unavailable')}</Notice>
@@ -551,26 +567,29 @@ export function ConsolePage({ serverId }: { serverId: string }) {
           />
         )}
       </div>
-      <Dialog open={restart} title={t('web.restart')} onClose={() => setRestart(false)}>
+      <ConfirmDialog
+        open={restart}
+        title={t('web.restart')}
+        confirmLabel={t('web.restart')}
+        onClose={() => setRestart(false)}
+        onConfirm={() => power('restart', true)}
+      >
         <p>{t('platform.restartWarning', { name: server.data?.name ?? '' })}</p>
-        <button type="button" disabled={powerBusy} onClick={() => void power('restart')}>
-          {t('web.restart')}
-        </button>
-      </Dialog>
-      <Dialog
+      </ConfirmDialog>
+      <ConfirmDialog
         open={Boolean(killTarget)}
         title={t('service.killTitle')}
+        confirmLabel={t('service.kill')}
+        destructive
         onClose={() => setKillTarget(undefined)}
+        onConfirm={async () => {
+          if (!killAvailable || server.data?.activeOperationId !== killTarget)
+            throw { messageKey: 'errors.conflict' };
+          await power('kill', true);
+        }}
       >
         <p>{t('service.killWarning')}</p>
-        <button
-          type="button"
-          disabled={powerBusy || !killAvailable || server.data?.activeOperationId !== killTarget}
-          onClick={() => void power('kill')}
-        >
-          {t('service.kill')}
-        </button>
-      </Dialog>
+      </ConfirmDialog>
       {!showSetup && (
         <Telemetry
           key={scope}

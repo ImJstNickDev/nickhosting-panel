@@ -7,7 +7,7 @@ import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
 
-describe('M5 server Console entry and informational Status navigation', () => {
+describe('M5 contextual server sidebar and informational Status navigation', () => {
   let fixture: Awaited<ReturnType<typeof browserHarness>>;
   let provider: Awaited<ReturnType<typeof installBrowserFixtures>>;
   let user: Page;
@@ -54,7 +54,7 @@ describe('M5 server Console entry and informational Status navigation', () => {
     await user.getByRole('link', { name: 'Survival', exact: true }).click();
     await browserExpect(user).toHaveURL(`${base}/console`);
     await browserExpect(user.getByRole('heading', { name: 'Survival', exact: true })).toBeVisible();
-    await browserExpect(user.locator('.tabs a[aria-current="page"]')).toHaveText('Console');
+    await browserExpect(user.locator('.sidebar a[aria-current="page"]')).toHaveText('Console');
     await user.goBack();
     await browserExpect(user).toHaveURL(`${fixture.origin}/servers`);
     await user.goForward();
@@ -63,33 +63,75 @@ describe('M5 server Console entry and informational Status navigation', () => {
     await browserExpect(user).toHaveURL(`${base}/console`);
   });
 
-  it('keeps Console first and Status last after Content, with keyboard access to the complete tab row', async () => {
+  it('groups native and integration destinations in a contextual, keyboard accessible sidebar', async () => {
     await user.goto(`${base}/console`);
-    const tabs = user.locator('.tabs');
-    const links = tabs.getByRole('link');
+    const navigation = user.locator('.sidebar .nav');
+    await browserExpect(user.locator('.sidebar-server')).toContainText('Survival');
+    await browserExpect(navigation.locator('.sidebar-group')).toHaveText([
+      'Your server',
+      'Tools',
+      'Config',
+    ]);
+    const links = navigation.getByRole('link');
     await browserExpect(links.first()).toHaveText('Console');
-    await browserExpect(links.nth(-2)).toHaveText('Content');
-    await browserExpect(links.last()).toHaveText('Status');
-    await browserExpect(tabs.getByRole('link', { name: 'Overview', exact: true })).toHaveCount(0);
+    for (const name of [
+      'Files',
+      'Activity',
+      'Players',
+      'Worlds',
+      'Datapacks',
+      'Modpacks',
+      'Backups',
+      'Schedules',
+      'Network',
+      'Settings',
+      'Subusers',
+    ]) {
+      await browserExpect(navigation.getByRole('link', { name, exact: true })).toBeVisible();
+    }
+    for (const name of ['SFTP', 'Status', 'Minecraft', 'Home']) {
+      await browserExpect(navigation.getByRole('link', { name, exact: true })).toHaveCount(0);
+    }
+    await browserExpect(user.locator('.game-section-tabs')).toHaveCount(0);
     await links.first().focus();
     for (let index = 1; index < (await links.count()); index += 1) {
       await user.keyboard.press('Tab');
       await browserExpect(links.nth(index)).toBeFocused();
       await browserExpect(links.nth(index)).toBeInViewport({ ratio: 0.99 });
     }
-    expect(
-      await links.last().evaluate((element) => getComputedStyle(element).outlineStyle),
-    ).not.toBe('none');
-    await user.keyboard.press('Enter');
-    await browserExpect(user).toHaveURL(`${base}/status`);
+    await user.goto(`${base}/status`);
     await browserExpect(user.getByRole('heading', { name: 'Status', exact: true })).toBeVisible();
-    await browserExpect(tabs.locator('[aria-current="page"]')).toHaveText('Status');
+    await browserExpect(user.locator('.sidebar a[data-section-active]')).toHaveText('Console');
     for (const label of ['Process', 'Game readiness', 'Installation']) {
       await browserExpect(user.getByText(label, { exact: true })).toBeVisible();
     }
-    for (const name of ['Start', 'Stop', 'Restart']) {
-      await browserExpect(user.getByRole('button', { name, exact: true })).toHaveCount(0);
-    }
+    await accessible();
+  });
+
+  it('preserves grouped links in the compact rail and mobile drawer, restoring focus on navigation', async () => {
+    await user.setViewportSize({ width: 1440, height: 800 });
+    await user.goto(`${base}/console`);
+    await user.getByRole('button', { name: 'Collapse navigation', exact: true }).click();
+    await browserExpect(user.locator('.shell')).toHaveAttribute('data-sidebar-collapsed', 'true');
+    await browserExpect(
+      user.locator('.sidebar').getByRole('link', { name: 'Files', exact: true }),
+    ).toBeVisible();
+    await user.locator('.sidebar').getByRole('link', { name: 'Files', exact: true }).click();
+    await browserExpect(user).toHaveURL(`${base}/files`);
+    await browserExpect(user.locator('#content')).toBeFocused();
+    await user.setViewportSize({ width: 390, height: 844 });
+    await user.getByRole('button', { name: 'Menu', exact: true }).click();
+    const drawer = user.getByRole('dialog', { name: 'Navigation', exact: true });
+    await browserExpect(drawer.locator('.sidebar-group')).toHaveText([
+      'Your server',
+      'Tools',
+      'Config',
+    ]);
+    await drawer.getByRole('link', { name: 'Console', exact: true }).click();
+    await browserExpect(drawer).not.toBeVisible();
+    await browserExpect(user.getByRole('heading', { name: 'Survival', exact: true })).toBeFocused();
+    await user.setViewportSize({ width: 1440, height: 1000 });
+    await user.getByRole('button', { name: 'Expand navigation', exact: true }).click();
     await accessible();
   });
 
@@ -183,10 +225,10 @@ describe('M5 server Console entry and informational Status navigation', () => {
               exact: true,
             }),
           ).toBeVisible();
-          await browserExpect(user.locator('.tabs a').last()).toHaveText('Status');
-          await browserExpect(user.locator('.tabs a').nth(-2)).toHaveText(
-            locale === 'en' ? 'Content' : 'Contenuti',
-          );
+          if (size === 'desktop')
+            await browserExpect(user.locator('.sidebar a[data-section-active]')).toHaveText(
+              'Console',
+            );
           if (tab === 'console') await browserExpect(user.locator('.console pre')).toBeVisible();
           await accessible();
           await user.screenshot({
@@ -246,9 +288,8 @@ describe('M5 server Console entry and informational Status navigation', () => {
     await browserExpect(viewer).toHaveURL(`${base}/status`);
     await browserExpect(viewer.getByRole('heading', { name: 'Status', exact: true })).toBeVisible();
     await browserExpect(
-      viewer.locator('.tabs').getByRole('link', { name: 'Console', exact: true }),
-    ).toHaveCount(0);
-    await browserExpect(viewer.locator('.tabs a').last()).toHaveText('Status');
+      viewer.locator('.sidebar').getByRole('link', { name: 'Console', exact: true }),
+    ).toHaveAttribute('href', `/servers/${provider.ids.serverId}/status`);
     expect(errors).toEqual([]);
   });
 });

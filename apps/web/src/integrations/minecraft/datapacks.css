@@ -1,6 +1,5 @@
 .minecraft-datapacks {
   width: 100%;
-  max-width: 1080px;
   margin-inline: auto;
   container-type: inline-size;
 }
@@ -10,15 +9,14 @@
 .datapack-row-actions,
 .datapack-change,
 .datapack-upload,
-.datapack-apply,
-.datapack-pages {
+.datapack-apply {
   display: flex;
   align-items: center;
 }
 .datapack-toolbar {
   gap: 12px;
   flex-wrap: wrap;
-  margin-bottom: 18px;
+  margin-bottom: 12px;
 }
 .datapack-world {
   display: flex;
@@ -32,54 +30,11 @@
   max-width: 240px;
   min-height: 38px;
 }
-.datapack-search {
-  position: relative;
-  flex: 1;
-  min-width: 170px;
-}
-.datapack-search > svg {
-  position: absolute;
-  left: 12px;
-  top: 50%;
-  transform: translateY(-50%);
-  color: var(--muted);
-  pointer-events: none;
-}
-.datapack-search input {
-  width: 100%;
-  padding-left: 38px;
-  min-height: 38px;
-  background: var(--surface);
-}
 .datapack-tools,
 .datapack-row-actions {
   gap: 3px;
 }
-.datapack-action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  min-height: 36px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  box-shadow: none;
-  color: var(--muted);
-}
-.datapack-action:hover:not(:disabled) {
-  background: var(--surface-subtle, #f1f3f5);
-  color: var(--blue);
-}
-.datapack-action--danger:hover:not(:disabled) {
-  color: var(--danger, #a13226);
-}
-.datapack-action:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
+
 .datapack-list {
   list-style: none;
   padding: 0;
@@ -231,13 +186,6 @@
   margin-left: auto;
   white-space: nowrap;
 }
-.datapack-pages {
-  justify-content: flex-end;
-  gap: 12px;
-  margin-top: 14px;
-  font-size: 0.8rem;
-  color: var(--muted);
-}
 @container (max-width: 620px) {
   .datapack-world {
     flex-basis: 100%;
@@ -265,15 +213,10 @@
   .datapack-row-actions {
     margin-left: 46px;
   }
-  .datapack-search {
-    min-width: 130px;
-  }
   .datapack-toolbar {
     gap: 8px;
   }
-  .datapack-action {
-    width: 34px;
-  }
+
   .datapack-upload {
     flex-wrap: wrap;
   }

@@ -9,6 +9,7 @@ import {
 } from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
+import { minecraftManifest } from '@nickhosting/minecraft';
 import type { ApplicationServer, PrivateTransferCache } from '@nickhosting/pterodactyl-adapter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDirectoryIdentityCache } from './directory-identity.js';
@@ -33,6 +34,23 @@ describe('management runtime execution-time authorization', () => {
   afterEach(async () => {
     await database?.destroy();
   });
+  async function bindMinecraftCommandFixture(serverId: string) {
+    const server = await f.db
+      .selectFrom('managed_servers')
+      .select('mapping_id')
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .insertInto('game_integrations')
+      .values({ id: 'minecraft', version: minecraftManifest.version, manifest: minecraftManifest })
+      .onConflict((c) => c.column('id').doNothing())
+      .execute();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'minecraft' })
+      .where('id', '=', server.mapping_id)
+      .execute();
+  }
   async function providerIdentity(serverId: string): Promise<ApplicationServer> {
     const server = await f.db
       .selectFrom('managed_servers')
@@ -143,6 +161,7 @@ describe('management runtime execution-time authorization', () => {
     'authorizes inactive-world %s without a host observer and still rejects revoked authority',
     async (kind) => {
       const queued = await stop();
+      await bindMinecraftCommandFixture(queued.server);
       await f.db
         .updateTable('server_operations')
         .set({
@@ -1043,6 +1062,7 @@ describe('management runtime execution-time authorization', () => {
     'shares one host preflight for %s handoff while rechecking revocation=%s',
     async (kind, revoke) => {
       const queued = await stop();
+      await bindMinecraftCommandFixture(queued.server);
       await f.db
         .updateTable('server_operations')
         .set({
@@ -1103,6 +1123,7 @@ describe('management runtime execution-time authorization', () => {
     'uses one final world-selection proof and keeps current authority when %s',
     async (change) => {
       const queued = await stop();
+      await bindMinecraftCommandFixture(queued.server);
       await f.db
         .updateTable('server_operations')
         .set({
@@ -1240,6 +1261,7 @@ describe('management runtime execution-time authorization', () => {
     'reuses Worlds-opening preparation without physical or provider reads at Select: %s',
     async (change) => {
       const queued = await stop();
+      await bindMinecraftCommandFixture(queued.server);
       await f.db
         .updateTable('server_operations')
         .set({
@@ -1571,6 +1593,58 @@ describe('management runtime execution-time authorization', () => {
     const runtime = await createManagementRuntime({ db: f.db, codec, adapter: f.adapter });
     return { serverId, sessionId, context, getRemote, read, batch, prepare, runtime };
   }
+
+  it('keeps direct file read, write and delete separate and rechecks transfer revocation', async () => {
+    const files = await interactiveFilesFixture();
+    const peer = await managementFixture(f.db, { interactive: true });
+    const grant = async (keys: string[]) =>
+      f.db
+        .insertInto('server_subusers')
+        .values({
+          server_id: files.serverId,
+          user_id: peer.context.actorUserId,
+          created_by: f.context.actorUserId,
+          permission_keys: JSON.stringify(keys),
+        })
+        .onConflict((c) =>
+          c
+            .columns(['server_id', 'user_id'])
+            .doUpdateSet({ permission_keys: JSON.stringify(keys) }),
+        )
+        .execute();
+    await grant(['files.read']);
+    expect(
+      await files.runtime.fileReadScope(peer.context, files.serverId, async (scope) =>
+        scope.read({ path: 'test.txt', maxBytes: 1024 }),
+      ),
+    ).toEqual(Buffer.from('fixture'));
+    const effect = vi.fn(async () => {});
+    await expect(
+      files.runtime.fileMutationAccess(peer.context, files.serverId, effect),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(
+      files.runtime.cleanupAccess(peer.context, files.serverId, effect),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    expect(effect).not.toHaveBeenCalled();
+    await grant(['files.read', 'files.write']);
+    await files.runtime.fileMutationAccess(peer.context, files.serverId, effect);
+    expect(effect).toHaveBeenCalledOnce();
+    await expect(
+      files.runtime.cleanupAccess(peer.context, files.serverId, effect),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    await grant(['files.read']);
+    await expect(
+      files.runtime.authorizeTransfer(peer.context, files.serverId, true, f.db),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    await f.db
+      .deleteFrom('server_subusers')
+      .where('server_id', '=', files.serverId)
+      .where('user_id', '=', peer.context.actorUserId)
+      .execute();
+    await expect(
+      files.runtime.authorizeTransfer(peer.context, files.serverId, false, f.db),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+  });
 
   it('shares one interactive Fileman read phase and rechecks authority only at its boundaries', async () => {
     const files = await interactiveFilesFixture();

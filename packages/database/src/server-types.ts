@@ -139,6 +139,14 @@ export interface ServerTables {
     enabled: Generated<boolean>;
   };
   projects: { id: string; owner_id: string; name: string; created_at: Generated<Date> };
+  server_subusers: {
+    server_id: string;
+    user_id: string;
+    permission_keys: Json<string[]>;
+    created_by: string;
+    created_at: Generated<Date>;
+    updated_at: Generated<Date>;
+  };
   project_members: { project_id: string; user_id: string; role: 'manager' | 'operator' | 'viewer' };
   managed_servers: {
     id: string;

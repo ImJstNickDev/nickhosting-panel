@@ -3,7 +3,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { AxeBuilder } from '@axe-core/playwright';
 import { expect as browserExpect, type Locator, type Page } from '@playwright/test';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
@@ -54,6 +54,20 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await harness?.close();
     await rm(stage, { recursive: true, force: true });
   });
+  afterEach(async () => {
+    // A failed localized scenario must not change the language or dialog handlers
+    // used by later independent scenarios. Keep fixture files and preferences intact.
+    user.removeAllListeners('dialog');
+    const session = await journeyRequest<{ actor: { locale: string } }>(
+      harness,
+      user,
+      '/v1/web/session',
+    );
+    if (session.actor.locale !== 'en')
+      await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'en' });
+    await user.evaluate(() => localStorage.setItem('nh.locale', 'en'));
+    await user.setViewportSize({ width: 1440, height: 1000 });
+  });
   async function openRoot(page: Page) {
     // goto preserves tab navigation by design. These scenario setups request root;
     // reload assertions below still exercise the real persisted navigation state.
@@ -89,6 +103,38 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     expect(box.y + box.height / 2).toBeGreaterThanOrEqual(0);
     expect(box.y + box.height / 2).toBeLessThan(viewport.height);
     return box;
+  }
+  async function dragVisibleFile(sourceName: string, destinationName: string) {
+    const source = row(sourceName).getByRole('button', { name: sourceName, exact: true });
+    const destination = row(destinationName);
+    const hitTarget = async (locator: Locator) => {
+      const box = await visibleDragBox(locator);
+      expect(
+        await locator.evaluate((element) => {
+          const rect = element.getBoundingClientRect();
+          return element.contains(
+            document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2),
+          );
+        }),
+      ).toBe(true);
+      return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    };
+    // Start on the actual filename before revealing a distant destination.
+    // Mobile lists cannot always show both at once; dragTo's pre-scrolling
+    // can put a different row under its previously measured source point.
+    const start = await hitTarget(source);
+    await user.mouse.move(start.x, start.y);
+    await user.mouse.down();
+    try {
+      await user.mouse.move(start.x + 5, start.y + 5, { steps: 3 });
+      await destination.evaluate((element) => element.scrollIntoView({ block: 'center' }));
+      const end = await hitTarget(destination);
+      await user.mouse.move(end.x, end.y, { steps: 10 });
+      await user.mouse.move(end.x + 1, end.y + 1, { steps: 2 });
+      await browserExpect(destination).toHaveClass(/fm-drop-hover/);
+    } finally {
+      await user.mouse.up();
+    }
   }
   const dialog = () => user.getByRole('dialog');
   const editorView = () => user.getByRole('region', { name: 'Text editor', exact: true });
@@ -236,11 +282,11 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await user.setViewportSize({ width: 1440, height: 1000 });
     expect(errors).toEqual([]);
   });
-  it('does not force tab focus after click or reload, while keeping keyboard navigation visible', async () => {
+  it('does not force sidebar link focus after click or reload, while keeping keyboard navigation visible', async () => {
     await openRoot(user);
-    const tabs = user.locator('.tabs');
+    const tabs = user.locator('.sidebar .nav');
     const filesTab = tabs.getByRole('link', { name: 'Files', exact: true });
-    await tabs.getByRole('link', { name: 'Connection', exact: true }).click();
+    await tabs.getByRole('link', { name: 'Network', exact: true }).click();
     await filesTab.click();
     await browserExpect(user.locator('.fm-tools')).toBeVisible();
     expect(await filesTab.evaluate((link) => link.matches(':focus-visible'))).toBe(false);
@@ -866,7 +912,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
           exact: true,
         })
         .check();
-      await row('move-a.txt').dragTo(row('drop-target'));
+      await dragVisibleFile('move-a.txt', 'drop-target');
     };
     for (const locale of ['en', 'it'] as const) {
       await journeyRequest(harness, user, '/api/auth/update-user', { locale });
@@ -880,6 +926,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
           ? 'File con lo stesso nome presente in drop-target'
           : 'A file with the same name exists in drop-target',
       );
+      await browserExpect(dialog().locator('.fm-conflict-file')).toHaveText('move-a.txt');
       await browserExpect(dialog().getByRole('button')).toHaveCount(5);
       const cancel = dialog().getByRole('button', {
         name: locale === 'it' ? 'Chiudi' : 'Close',
@@ -1007,7 +1054,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     });
     try {
       await openRoot(user);
-      await row('late-drop.txt').dragTo(row('late-target'));
+      await dragVisibleFile('late-drop.txt', 'late-target');
       await browserExpect(dialog()).toHaveAccessibleName(
         'A file with the same name exists in late-target',
       );
@@ -1017,7 +1064,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       await dialog().getByRole('button', { name: 'Close', exact: true }).click();
       expect(attempts).toBe(1);
       failOverwrite = true;
-      await row('late-drop.txt').dragTo(row('late-target'));
+      await dragVisibleFile('late-drop.txt', 'late-target');
       await dialog().getByRole('button', { name: 'Overwrite', exact: true }).click();
       await reached;
       await browserExpect(
@@ -1199,12 +1246,22 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
             ),
         ).toEqual(
           locale === 'en'
-            ? ['Save changes', 'Undo', 'Redo', 'Find', 'Open with', 'Back to files', 'Download']
+            ? [
+                'Save changes',
+                'Undo',
+                'Redo',
+                'Find',
+                'JSON Tree',
+                'Open with',
+                'Back to files',
+                'Download',
+              ]
             : [
                 'Salva modifiche',
                 'Annulla',
                 'Ripristina',
                 'Cerca',
+                'JSON Tree',
                 'Apri con',
                 'Torna ai file',
                 'Scarica',
@@ -1346,17 +1403,26 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
           .getByRole('button', { name: locale === 'en' ? 'root' : 'Torna ai file', exact: true })
           .click();
         await browserExpect(editor).toContainText('draft');
+        if (locale === 'it') await user.getByRole('button', { name: 'Menu', exact: true }).click();
         user.once('dialog', (confirmation) => confirmation.dismiss());
-        await user.locator('.tabs').getByRole('link', { name: 'Console', exact: true }).click();
+        await user
+          .locator('.sidebar .nav')
+          .getByRole('link', { name: 'Console', exact: true })
+          .click();
+        if (locale === 'it')
+          await browserExpect(user.getByRole('dialog', { name: 'Navigazione' })).not.toBeVisible();
         await browserExpect(editor).toContainText('draft');
         await editor.focus();
         await user.keyboard.press('Alt+k');
         await browserExpect(editor).toBeFocused();
         await user.keyboard.press('Alt+KeyG');
-        await browserExpect(
-          user.getByRole('combobox', { name: locale === 'en' ? 'Path' : 'Percorso', exact: true }),
-        ).toBeFocused();
-        await user.keyboard.press('Escape');
+        const pathPicker = user.getByRole('combobox', {
+          name: locale === 'en' ? 'Path' : 'Percorso',
+          exact: true,
+        });
+        await browserExpect(pathPicker).toBeFocused();
+        await pathPicker.press('Escape');
+        await browserExpect(pathPicker).toHaveCount(0);
         const audit = await new AxeBuilder({ page: user })
           .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
           .analyze();
@@ -1644,7 +1710,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
   it('keeps edits when browser Back is cancelled and leaves only after confirmation', async () => {
     await openRoot(user);
     await user.goto(base.replace(/files$/, 'console'));
-    await user.locator('.tabs').getByRole('link', { name: 'Files', exact: true }).click();
+    await user.locator('.sidebar .nav').getByRole('link', { name: 'Files', exact: true }).click();
     await row('alpha.txt').getByRole('button', { name: 'alpha.txt', exact: true }).click();
     const editor = editorView().getByRole('textbox', { name: 'Contents', exact: true });
     await editor.fill('Keep this draft');
@@ -1655,7 +1721,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     user.once('dialog', (confirmation) => confirmation.accept());
     await user.evaluate(() => history.back());
     await browserExpect(user).toHaveURL(base.replace(/files$/, 'console'));
-    await user.locator('.tabs').getByRole('link', { name: 'Files', exact: true }).click();
+    await user.locator('.sidebar .nav').getByRole('link', { name: 'Files', exact: true }).click();
   });
   it('keeps known binary jars and world data out of the text endpoint and mounted editor', async () => {
     await openRoot(user);
@@ -1689,7 +1755,14 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       user.off('request', track);
     }
   });
-  it('edits JSON with keyboard save and refuses concurrent overwrite while retaining the draft', async () => {
+  it('honors the saved JSON editor without the remote viewer service and refuses concurrent overwrite while retaining the draft', async () => {
+    const viewerBase = `/v1/servers/${provider.ids.serverId}/files/viewer`;
+    expect(await journeyRequest(harness, user, `${viewerBase}/capabilities`)).toMatchObject({
+      available: false,
+    });
+    expect(await journeyRequest(harness, user, `${viewerBase}/preferences`)).toEqual({
+      preferences: [{ scope: 'server', extension: 'json', viewerId: 'text' }],
+    });
     const beforeNavigation = editorRequests;
     await openRoot(user);
     await browserExpect.poll(() => editorRequests).toBe(beforeNavigation + 1);
@@ -1840,11 +1913,14 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       await row('beta.json').getByRole('button', { name: 'beta.json', exact: true }).click();
       await browserExpect(editor).not.toContainText('Recoverable draft');
       // Leaving Files must not drop the in-flight write or its eventual error.
-      await user.locator('.tabs').getByRole('link', { name: 'Console', exact: true }).click();
+      await user
+        .locator('.sidebar .nav')
+        .getByRole('link', { name: 'Console', exact: true })
+        .click();
       fail();
       const notice = user.locator('.file-save-notices');
       await browserExpect(notice).toContainText('Could not save alpha.txt');
-      await user.locator('.tabs').getByRole('link', { name: 'Files', exact: true }).click();
+      await user.locator('.sidebar .nav').getByRole('link', { name: 'Files', exact: true }).click();
       await row('beta.json').getByRole('button', { name: 'beta.json', exact: true }).click();
       await editor.fill('Another unsaved file');
       let confirmations = 0;
@@ -2177,7 +2253,10 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
         await page.keyboard.press('Alt+g');
         await browserExpect(input).toBeFocused();
         await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
-        await page.locator('.tabs').getByRole('link', { name: 'Console', exact: true }).click();
+        await page
+          .locator('.sidebar .nav')
+          .getByRole('link', { name: 'Console', exact: true })
+          .click();
         await browserExpect(page.locator('.file-manager')).toHaveCount(0);
         expect(
           await page.evaluate(() => {

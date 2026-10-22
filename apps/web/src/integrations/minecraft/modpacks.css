@@ -2,7 +2,7 @@
   min-height: 420px;
 }
 .modpacks-project .mods-project-open {
-  padding: 14px 12px;
+  padding: 4px;
 }
 .modpacks-project :where(.mods-project-open) > svg {
   flex-shrink: 0;
@@ -199,60 +199,20 @@
   font-size: 1rem;
 }
 .modpacks-choice {
-  display: flex;
-  align-items: center;
   justify-content: space-between;
-  gap: 16px;
   width: 100%;
   padding: 14px 0;
-  color: inherit;
-  text-align: left;
-  border: 0;
   border-bottom: 1px solid var(--line);
-  box-shadow: none;
-  background: transparent;
 }
 .modpacks-choice > span:first-child {
-  display: grid;
-  gap: 5px;
-}
-.modpacks-choice strong {
-  font-size: 0.83rem;
   font-weight: 550;
 }
 .modpacks-choice small {
-  font-weight: 400;
-  font-size: 0.74rem;
-  color: var(--muted);
   line-height: 1.5;
-}
-.modpacks-switch {
-  flex: 0 0 32px;
-  width: 32px;
-  height: 19px;
-  padding: 3px;
-  border-radius: 99px;
-  background: color-mix(in srgb, var(--muted) 35%, var(--surface));
-  transition: background 160ms;
-}
-.modpacks-switch i {
-  display: block;
-  width: 13px;
-  height: 13px;
-  background: #fff;
-  border-radius: 50%;
-  transition: transform 160ms;
-  box-shadow: 0 1px 3px #0002;
-}
-.modpacks-choice[aria-checked="true"] .modpacks-switch {
-  background: var(--blue);
-}
-.modpacks-choice[aria-checked="true"] .modpacks-switch i {
-  transform: translateX(13px);
 }
 .modpacks-apply {
   width: 100%;
-  margin-top: 18px;
+  margin-top: 12px;
 }
 .modpacks-preserved,
 .modpacks-notice,
@@ -446,12 +406,6 @@
     font-size: 0.8rem;
   }
 }
-@media (prefers-reduced-motion: reduce) {
-  .modpacks-switch,
-  .modpacks-switch i {
-    transition: none;
-  }
-}
 
 .modpacks-description-text {
   white-space: pre-wrap;
@@ -482,7 +436,7 @@
 .modpacks-catalog-layout {
   display: grid;
   grid-template-columns: minmax(140px, 190px) minmax(0, 1fr);
-  gap: 28px;
+  gap: 16px;
   align-items: start;
 }
 .modpacks-catalog-layout[data-details],
@@ -510,7 +464,7 @@
   background: transparent;
   color: var(--muted);
   text-align: left;
-  padding: 9px 10px;
+  padding: 7px 9px;
   font-size: 0.82rem;
   border-radius: 7px;
 }
@@ -527,7 +481,7 @@
   max-height: none;
   overflow: visible;
   border: 0;
-  padding: clamp(16px, 2vw, 28px);
+  padding: 12px;
   min-width: 0;
   width: 100%;
 }
@@ -593,12 +547,12 @@
 }
 
 .modpacks-details .mods-details-header > .mods-artwork {
-  width: 64px;
-  height: 64px;
-  flex-basis: 64px;
-  font-size: 1.8rem;
+  width: 48px;
+  height: 48px;
+  flex-basis: 48px;
+  font-size: 1.4rem;
   border-radius: 12px;
 }
 .modpacks-details .mods-details-header h3 {
-  font-size: clamp(1.15rem, 2vw, 1.5rem);
+  font-size: 1.15rem;
 }

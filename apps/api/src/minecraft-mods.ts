@@ -120,7 +120,12 @@ function registerMinecraftAddonRoutes(
   );
   const catalog = async (c: C) => {
     const context = await principal(c);
-    await authorizeServer(db, context, c.req.param('id') ?? '');
+    await authorizeServer(
+      db,
+      context,
+      c.req.param('id') ?? '',
+      `game.minecraft.${kind === 'plugin' ? 'plugins' : 'mods'}.read`,
+    );
     const runtime = await management();
     const content: { http?: ContentHttp; curseforge?: CurseForgeProvider } = options.codec
       ? ((await minecraftContentProviders(db, options.codec, env, options.contentHttp)).providers ??

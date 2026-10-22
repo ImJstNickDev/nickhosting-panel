@@ -22,7 +22,7 @@ export async function getServerGatewayMessages(
   env: Environment = {},
   modules: MessageModules = trustedGameModules,
 ) {
-  const server = await authorizeServer(db, context, serverId);
+  const server = await authorizeServer(db, context, serverId, 'settings.read');
   const mapping = await db
     .selectFrom('runtime_egg_mappings')
     .select(['game_id', 'runtime_id'])
@@ -59,7 +59,7 @@ export async function getServerGatewayMessages(
   let editable = false;
   if (available && context.sessionType === 'regular') {
     try {
-      await authorizeServer(db, context, serverId, 'server:manage');
+      await authorizeServer(db, context, serverId, 'settings.write');
       editable = true;
     } catch (error) {
       if (!(error instanceof DomainError) || error.code !== 'forbidden') throw error;
@@ -92,7 +92,7 @@ export async function setServerGatewayMessages(
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
     const context = await currentInteractiveContext(tx, previous, env);
-    await authorizeServer(tx, context, serverId, 'server:manage');
+    await authorizeServer(tx, context, serverId, 'settings.write');
     const current = await getServerGatewayMessages(tx, context, serverId, env, modules);
     if (!current.available || !current.definition) throw new DomainError('integration_unavailable');
     if (current.revision !== value.revision) throw new DomainError('conflict');

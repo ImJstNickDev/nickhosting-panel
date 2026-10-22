@@ -206,6 +206,8 @@ export function ActionForm({
   disabled = false,
   submitDisabled = false,
   footerStart,
+  onBusyChange,
+  onChange,
 }: {
   onSubmit: (data: FormData) => Promise<unknown>;
   children: ReactNode;
@@ -218,6 +220,8 @@ export function ActionForm({
   disabled?: boolean;
   submitDisabled?: boolean;
   footerStart?: ReactNode;
+  onBusyChange?: (busy: boolean) => void;
+  onChange?: () => void;
 }) {
   const t = useT();
   const [busy, setBusy] = useState(false);
@@ -232,6 +236,7 @@ export function ActionForm({
     event.stopPropagation();
     if (busy || disabled || submitDisabled) return;
     setBusy(true);
+    onBusyChange?.(true);
     setError(undefined);
     setDone(false);
     const data = new FormData(event.currentTarget);
@@ -242,6 +247,7 @@ export function ActionForm({
       setError(failure);
     } finally {
       setBusy(false);
+      onBusyChange?.(false);
     }
   }
   return (
@@ -267,7 +273,10 @@ export function ActionForm({
         const direction = event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 1;
         buttons[(index + direction + buttons.length) % buttons.length]?.focus();
       }}
-      onChange={() => setDone(false)}
+      onChange={() => {
+        setDone(false);
+        onChange?.();
+      }}
     >
       {Boolean(error) && (
         <div ref={errorRef} tabIndex={-1}>
@@ -326,25 +335,55 @@ export function Dialog({
   initialFocusSelector?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const returnFocus = useRef<Element | null>(null);
+  const controlledCloses = useRef(0);
   const titleId = useId();
   const t = useT();
   useEffect(() => {
     const element = ref.current;
     if (open && element && !element.open) {
+      returnFocus.current = document.activeElement;
       element.showModal();
       if (initialFocusSelector) element.querySelector<HTMLElement>(initialFocusSelector)?.focus();
-    } else if (!open && element?.open) element.close();
+    } else if (!open && element?.open) {
+      // close() queues its event. It may arrive after the parent has reopened
+      // this dialog for a new phase, so do not report our own synchronization
+      // as a fresh dismissal of that phase.
+      controlledCloses.current++;
+      element.close();
+    }
   }, [open, initialFocusSelector]);
+  useEffect(
+    () => () => {
+      const trigger = returnFocus.current;
+      queueMicrotask(() => {
+        // A conditionally mounted dialog is removed before close() can restore focus.
+        // Never steal focus from another dialog or a route that has already focused its heading.
+        if (
+          document.activeElement === document.body &&
+          trigger instanceof HTMLElement &&
+          trigger.isConnected
+        )
+          trigger.focus();
+      });
+    },
+    [],
+  );
   return (
     <dialog
       ref={ref}
       className={className}
       aria-labelledby={titleId}
       onCancel={(event) => {
+        if (event.target !== event.currentTarget) return;
         event.preventDefault();
-        onClose();
+        if (!closeDisabled) onClose();
       }}
-      onClose={onClose}
+      onClose={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (controlledCloses.current > 0) controlledCloses.current--;
+        else onClose();
+      }}
     >
       <header className="section-heading">
         <h2 id={titleId}>{title}</h2>

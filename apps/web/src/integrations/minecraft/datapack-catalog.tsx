@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useFormat, useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
 import { ErrorNotice } from '../../components/ui.js';
+import { Pagination } from '../../components/workspace-controls.js';
 import { gameUiClient } from '../../features/integrations.js';
 import { ViewerSelect } from '../../features/viewer-engine/viewer-select.js';
 import { ModsIcon } from './mods-primitives.js';
@@ -162,16 +163,28 @@ export function MinecraftDatapackCatalog({
         )}
       </div>
       {error || configuration.error || result.error ? (
-        <ErrorNotice error={error ?? configuration.error ?? result.error} />
+        <ErrorNotice
+          error={error ?? configuration.error ?? result.error}
+          retry={() => {
+            setError(undefined);
+            if (configuration.error) void configuration.refetch();
+            else void result.refetch();
+          }}
+        />
       ) : null}
       <div className="world-catalog-body" ref={results} tabIndex={-1} aria-busy={loading}>
+        {loading && (
+          <span className="sr-only" role="status">
+            {t('web.loading')}
+          </span>
+        )}
         {loading ? (
           <div className="world-catalog-skeleton" aria-hidden="true">
             {[0, 1, 2, 3].map((item) => (
               <span key={item} />
             ))}
           </div>
-        ) : !available ? (
+        ) : configuration.error ? null : !available ? (
           <p className="world-catalog-status">{t(key('catalog.unavailable'))}</p>
         ) : project ? (
           <ul className="world-catalog-files">
@@ -280,30 +293,19 @@ export function MinecraftDatapackCatalog({
         )}
       </div>
       {available && result.data && result.data.total > 20 && (
-        <nav className="datapack-pages" aria-label={t(key('browse'))}>
-          <button
-            type="button"
-            className="secondary"
-            disabled={currentOffset === 0}
-            onClick={() => changePage(Math.max(0, currentOffset - 20))}
-          >
-            {t(key('previous'))}
-          </button>
-          <span>
-            {t(key('page'), {
-              page: Math.floor(currentOffset / 20) + 1,
-              pages: Math.ceil(result.data.total / 20),
-            })}
-          </span>
-          <button
-            type="button"
-            className="secondary"
-            disabled={currentOffset + 20 >= result.data.total || currentOffset >= 9980}
-            onClick={() => changePage(currentOffset + 20)}
-          >
-            {t(key('next'))}
-          </button>
-        </nav>
+        <Pagination
+          label={t('web.pagination')}
+          previousLabel={t(key('previous'))}
+          nextLabel={t(key('next'))}
+          summary={t(key('page'), {
+            page: Math.floor(currentOffset / 20) + 1,
+            pages: Math.ceil(result.data.total / 20),
+          })}
+          canPrevious={currentOffset > 0}
+          canNext={currentOffset + 20 < result.data.total && currentOffset < 9980}
+          onPrevious={() => changePage(Math.max(0, currentOffset - 20))}
+          onNext={() => changePage(currentOffset + 20)}
+        />
       )}
     </section>
   );

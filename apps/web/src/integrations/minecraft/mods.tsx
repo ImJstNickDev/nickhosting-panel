@@ -13,6 +13,7 @@ import { idempotencyKey, queryClient } from '../../api/client.js';
 import { useFormat } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
 import { ErrorNotice } from '../../components/ui.js';
+import { SearchField } from '../../components/workspace-controls.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { ViewerSelect } from '../../features/viewer-engine/viewer-select.js';
 import {
@@ -114,6 +115,17 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
     initial?.packs.length ? 'installed' : 'discover',
   );
   const [project, setProject] = useState<ModCatalogProject>();
+  const workspace = useRef<HTMLElement>(null);
+  const previousView = useRef(view);
+  useEffect(() => {
+    if (previousView.current === view) return;
+    previousView.current = view;
+    requestAnimationFrame(() =>
+      workspace.current
+        ?.querySelector<HTMLElement>('[data-view-focus], .mods-tabs button[aria-pressed="true"]')
+        ?.focus(),
+    );
+  }, [view]);
   const known = useRef(new Map<string, ModCatalogProject>());
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<unknown>();
@@ -121,8 +133,11 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
   const foregroundLock = useRef(false);
   const applyIntent = useRef<{ revision: number; idempotencyKey: string } | undefined>(undefined);
   const actionIntents = useRef(new Map<string, string>());
-  const disabled =
-    !props.canManage || props.pending || !data?.supported || !data.installed || Boolean(busy);
+  const canWrite = props.permissionKeys.includes(`game.minecraft.${kind}.write`);
+  const canDelete = props.permissionKeys.includes(`game.minecraft.${kind}.delete`);
+  const disabled = props.pending || !data?.supported || !data.installed || Boolean(busy);
+  const canApply =
+    data?.changes.every((change) => (change.action === 'delete' ? canDelete : canWrite)) === true;
   const nonInstallChanges = data?.changes.filter((change) => change.action !== 'install') ?? [];
   const count = selection.roots.length + nonInstallChanges.length;
   const uncertain = data?.changes.some((change) => change.state === 'uncertain');
@@ -170,6 +185,7 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
     setProject(value);
   }
   function choose(value: ModCatalogProject, checked: boolean) {
+    if (!canWrite) return;
     if (disabled) return;
     known.current.set(projectIdentity(value), value);
     setApplied(false);
@@ -190,6 +206,7 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
     );
   }
   function version(value: ModCatalogProject, file: ModCatalogVersion, force: boolean) {
+    if (!canWrite) return;
     if (disabled) return;
     known.current.set(projectIdentity(value), value);
     selection.change((roots) => {
@@ -226,7 +243,8 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
     }
   }
   async function apply() {
-    if (disabled || !ready || !data || foregroundLock.current || toggles.pending) return;
+    if (disabled || !canApply || !ready || !data || foregroundLock.current || toggles.pending)
+      return;
     foregroundLock.current = true;
     setBusy('apply');
     setError(undefined);
@@ -268,7 +286,7 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
     serverId: props.serverId,
     selection,
     data,
-    disabled,
+    disabled: disabled || !canWrite,
     known: known.current,
     onVersion: version,
     onProject: openProject,
@@ -276,7 +294,8 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
   };
   return (
     <section
-      className="minecraft-mods"
+      ref={workspace}
+      className="workspace-surface minecraft-mods"
       data-kind={kind}
       aria-label={t(`games.minecraft.sections.${kind}`)}
     >
@@ -288,7 +307,7 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
               label={t(modsKey('back'))}
               onClick={() => setView('discover')}
             />
-            <h2>
+            <h2 data-view-focus tabIndex={-1}>
               {t(modsKey('review'))}
               <span>{count}</span>
             </h2>
@@ -339,7 +358,7 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
             <button
               type="button"
               className="mods-primary"
-              disabled={disabled || !ready || toggles.pending}
+              disabled={disabled || !canApply || !ready || toggles.pending}
               onClick={() => void apply()}
             >
               <ModsIcon name={busy === 'apply' ? 'refresh' : 'check'} />
@@ -378,6 +397,7 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
           <div hidden={view !== 'installed'}>
             <InstalledMods
               {...common}
+              deleteDisabled={disabled || !canDelete}
               onDiscover={() => setView('discover')}
               onReview={() => setView('review')}
               onProject={(value) => {
@@ -386,8 +406,9 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
               }}
               onAction={(pack, action) =>
                 action !== 'delete'
-                  ? toggles.toggle(pack, action)
-                  : void operation(`${action}:${pack.path}`, (key) =>
+                  ? canWrite && toggles.toggle(pack, action)
+                  : canDelete &&
+                    void operation(`${action}:${pack.path}`, (key) =>
                       modsController.change(props.serverId, {
                         path: pack.path,
                         action,
@@ -544,18 +565,14 @@ function DiscoverMods(
   return (
     <div className="mods-discover mods-discover-page">
       <div className="mods-search-toolbar" hidden={Boolean(project)}>
-        <label className="mods-search">
-          <ModsIcon name="search" />
-          <input
-            ref={searchInput}
-            disabled={comingSoon}
-            type="search"
-            aria-label={t(modsKey('search'))}
-            placeholder={t(modsKey('search'))}
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
-        </label>
+        <SearchField
+          ref={searchInput}
+          disabled={comingSoon}
+          label={t(modsKey('search'))}
+          placeholder={t(modsKey('search'))}
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+        />
         <ViewerSelect
           label={t(modsKey('provider'))}
           value={provider}
@@ -772,6 +789,7 @@ function DiscoverMods(
 
 function InstalledMods(
   props: SharedProps & {
+    deleteDisabled: boolean;
     onDiscover(): void;
     onReview(): void;
     onAction(pack: Snapshot['packs'][number], action: 'enable' | 'disable' | 'delete'): void;
@@ -847,19 +865,15 @@ function InstalledMods(
   return (
     <div className="mods-installed">
       <div className="mods-search-toolbar">
-        <label className="mods-search">
-          <ModsIcon name="search" />
-          <input
-            type="search"
-            aria-label={t(modsKey('searchInstalled'))}
-            placeholder={t(modsKey('searchInstalled'))}
-            value={search}
-            onChange={(event) => {
-              setSearch(event.target.value);
-              setOffset(0);
-            }}
-          />
-        </label>
+        <SearchField
+          label={t(modsKey('searchInstalled'))}
+          placeholder={t(modsKey('searchInstalled'))}
+          value={search}
+          onChange={(event) => {
+            setSearch(event.target.value);
+            setOffset(0);
+          }}
+        />
         {kind === 'mods' && (
           <ViewerSelect
             label={t(modsKey('environment'))}
@@ -1048,7 +1062,7 @@ function InstalledMods(
                       <ModsAction
                         icon="delete"
                         label={t(modsKey('delete'), { name: pack.metadata?.name ?? pack.name })}
-                        disabled={props.disabled || changing}
+                        disabled={props.deleteDisabled || changing}
                         destructive
                         onClick={() => props.onAction(pack, 'delete')}
                       />

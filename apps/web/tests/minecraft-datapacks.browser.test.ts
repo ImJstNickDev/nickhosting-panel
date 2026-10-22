@@ -662,6 +662,34 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
     await journeyRequest(fixture, user, '/api/auth/update-user', { locale: 'en' });
     await user.setViewportSize({ width: 1440, height: 1000 });
   });
+  it('offers retry for catalog configuration errors without claiming the provider is unconfigured, then restores opener focus', async () => {
+    await user.goto(route());
+    const catalogUrl = `${fixture.origin}${base()}/catalog`;
+    await user.route(catalogUrl, (request) =>
+      request.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: { code: 'integration_unavailable', messageKey: 'errors.integration_unavailable' },
+        }),
+      }),
+    );
+    const browse = user.getByRole('button', { name: 'Find datapacks', exact: true });
+    await browse.click();
+    const catalog = user.getByRole('region', { name: 'Find datapacks', exact: true });
+    await browserExpect(
+      catalog.getByRole('button', { name: 'Try again', exact: true }),
+    ).toBeVisible();
+    await browserExpect(
+      catalog.getByText('This provider is not configured.', { exact: true }),
+    ).toHaveCount(0);
+    await user.unroute(catalogUrl);
+    await catalog.getByRole('button', { name: 'Try again', exact: true }).click();
+    await browserExpect(catalog.getByRole('button', { name: /Catalog pack/ })).toBeVisible();
+    await catalog.getByRole('button', { name: 'Back to installed datapacks', exact: true }).click();
+    await browserExpect(browse).toBeFocused();
+  });
+
   it('keeps manage actions unavailable for a project viewer and rejects mutation directly', async () => {
     const project = await journeyRequest<{ id: string }>(fixture, user, '/v1/projects', {
       name: 'Datapack readers',

@@ -3,8 +3,8 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { ApiError, download, idempotencyKey } from '../../api/client.js';
 import { hashFile } from '../../api/hash.js';
 import { useFormat, useT } from '../../app/i18n.js';
-import { Tooltip } from '../../components/tooltip.js';
 import { Check, ConfirmDialog, Dialog, ErrorNotice, Input } from '../../components/ui.js';
+import { IconAction, Pagination, SearchField } from '../../components/workspace-controls.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { gameUiClient } from '../../features/integrations.js';
 import { MinecraftWorldCatalog, type SelectedCatalogWorld } from './world-catalog.js';
@@ -101,7 +101,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
   const [operationError, setOperationError] = useState<unknown>();
   const [progress, setProgress] = useState<Progress>();
   const [selection, setSelection] = useState<Selection>();
-  const [backup, setBackup] = useState(true);
+  const [backup, setBackup] = useState(props.permissionKeys.includes('backups.create'));
   const [busy, setBusy] = useState(false);
   const [uncertain, setUncertain] = useState<Intent>();
   const [dragging, setDragging] = useState(false);
@@ -110,13 +110,14 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
   const picker = useRef<HTMLInputElement>(null);
   const folderPicker = useRef<HTMLInputElement>(null);
   const importKey = useRef(idempotencyKey());
+  const can = (action: string) => props.permissionKeys.includes(`game.minecraft.worlds.${action}`);
   const mutationsDisabled =
     !props.canManage || !supported || props.pending || busy || Boolean(uncertain);
-  const disabled = mutationsDisabled || !offline;
+  const disabled = mutationsDisabled || !offline || !can('select');
   const importStateAllowed =
     offline || (props.runtimeState === 'running' && snapshot?.selectedWorld != null);
-  const importDisabled = mutationsDisabled || !importStateAllowed;
-  const removeDisabled = mutationsDisabled || !importStateAllowed;
+  const importDisabled = mutationsDisabled || !importStateAllowed || !can('import');
+  const removeDisabled = mutationsDisabled || !importStateAllowed || !can('delete');
   const activeRoots = configuredWorldRoots(snapshot?.selectedWorld);
   const activeWorld = (name: string) => !activeRoots || activeRoots.includes(name.toLowerCase());
   const rows = snapshot?.worlds ?? [];
@@ -297,6 +298,18 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
     }
   }
   function allowsState(intent: Intent) {
+    if (
+      !can(
+        intent.command.kind === 'world-remove'
+          ? 'delete'
+          : intent.command.kind === 'world-select'
+            ? 'select'
+            : 'import',
+      )
+    )
+      return false;
+    if (intent.command.kind === 'world-import' && intent.command.replace && !can('delete'))
+      return false;
     if (intent.command.kind === 'world-remove')
       return (
         importStateAllowed &&
@@ -392,7 +405,8 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
     )
       return;
     if (existing) {
-      setBackup(true);
+      if (!can('delete')) return;
+      setBackup(props.permissionKeys.includes('backups.create'));
       setSelection({ action: 'replace', name: target, requestKey: idempotencyKey() });
       return;
     }
@@ -405,11 +419,19 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
     if ((action === 'delete' ? removeDisabled || activeWorld(name) : disabled) || transfer.current)
       return;
     setOperationError(undefined);
-    setBackup(action !== 'delete' && offline);
+    setBackup(action !== 'delete' && offline && props.permissionKeys.includes('backups.create'));
     setSelection({ action, name, requestKey: idempotencyKey() });
   }
   async function confirm() {
-    if (!selection || (selection.action === 'delete' ? removeDisabled : disabled)) return;
+    if (
+      !selection ||
+      (selection.action === 'delete'
+        ? removeDisabled
+        : selection.action === 'replace'
+          ? importDisabled || !can('delete')
+          : disabled)
+    )
+      return;
     if (selection.action === 'select') {
       if (
         snapshot?.compatibility !== 'available' ||
@@ -455,34 +477,27 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
   }
 
   return (
-    <div className="minecraft-worlds">
+    <div className="workspace-surface minecraft-worlds">
       <div className="minecraft-worlds-toolbar">
-        <div className="minecraft-worlds-search">
-          <Icon name="search" />
-          <input
-            aria-label={t(key('search'))}
-            placeholder={t(key('search'))}
-            type="search"
-            value={search}
-            onChange={(event) => {
-              setSearch(event.target.value);
-              setPage(0);
-            }}
-          />
-        </div>
+        <SearchField
+          label={t(key('search'))}
+          placeholder={t(key('search'))}
+          value={search}
+          onChange={(event) => {
+            setSearch(event.target.value);
+            setPage(0);
+          }}
+        />
         <div className="minecraft-worlds-controls">
-          <Tooltip content={t(key('refresh'))}>
-            <button
-              type="button"
-              className="minecraft-world-action"
-              aria-label={t(key('refresh'))}
-              disabled={refreshing || busy || Boolean(progress)}
-              onClick={() => void refresh()}
-            >
-              <Icon name="refresh" />
-            </button>
-          </Tooltip>
-          {props.canManage && (
+          <IconAction
+            tooltip={t(key('refresh'))}
+            label={t(key('refresh'))}
+            disabled={refreshing || busy || Boolean(progress)}
+            onClick={() => void refresh()}
+          >
+            <Icon name="refresh" />
+          </IconAction>
+          {can('import') && (
             <button
               type="button"
               className="secondary minecraft-worlds-import"
@@ -493,7 +508,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
               {t(key('catalog.browse'))}
             </button>
           )}
-          {props.canManage && (
+          {can('import') && (
             <button
               type="button"
               className="minecraft-worlds-import"
@@ -610,74 +625,67 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
                       </div>
                     </div>
                     <div className="minecraft-world-actions">
-                      {props.canManage && !selected && (
-                        <Tooltip
-                          content={
+                      {can('select') && !selected && (
+                        <IconAction
+                          tooltip={
                             world.status !== 'verified'
                               ? t(key('cannotChange'))
                               : actionName('select')
                           }
+                          label={actionName('select')}
+                          disabled={
+                            disabled ||
+                            world.status !== 'verified' ||
+                            snapshot.compatibility !== 'available'
+                          }
+                          onClick={() => choose('select', world.name)}
                         >
-                          <button
-                            type="button"
-                            className="minecraft-world-action"
-                            aria-label={actionName('select')}
-                            disabled={
-                              disabled ||
-                              world.status !== 'verified' ||
-                              snapshot.compatibility !== 'available'
-                            }
-                            onClick={() => choose('select', world.name)}
-                          >
-                            <Icon name="select" />
-                          </button>
-                        </Tooltip>
+                          <Icon name="select" />
+                        </IconAction>
                       )}
-                      <Tooltip content={actionName('download')}>
-                        <button
-                          type="button"
-                          className="minecraft-world-action"
-                          aria-label={actionName('download')}
-                          disabled={!offline || props.pending || busy || Boolean(uncertain)}
-                          onClick={() => {
-                            try {
-                              download(`/v1/servers/${props.serverId}/files/archive`, {
-                                root: '',
-                                files: JSON.stringify([world.name]),
-                              });
-                            } catch (error) {
-                              setOperationError(error);
-                            }
-                          }}
-                        >
-                          <Icon name="download" />
-                        </button>
-                      </Tooltip>
-                      {props.canManage && (
-                        <Tooltip
-                          content={
+                      <IconAction
+                        tooltip={actionName('download')}
+                        label={actionName('download')}
+                        disabled={
+                          !can('download') ||
+                          !offline ||
+                          props.pending ||
+                          busy ||
+                          Boolean(uncertain)
+                        }
+                        onClick={() => {
+                          try {
+                            download(
+                              `/v1/servers/${props.serverId}/minecraft/worlds/${encodeURIComponent(world.name)}/archive`,
+                            );
+                          } catch (error) {
+                            setOperationError(error);
+                          }
+                        }}
+                      >
+                        <Icon name="download" />
+                      </IconAction>
+                      {can('delete') && (
+                        <IconAction
+                          tooltip={
                             activeWorld(world.name)
                               ? t(key('selectedCannotDelete'))
                               : !world.validation
                                 ? t(key('cannotDelete'))
                                 : actionName('delete')
                           }
+                          destructive
+                          label={actionName('delete')}
+                          disabled={
+                            removeDisabled ||
+                            activeWorld(world.name) ||
+                            !world.validation ||
+                            snapshot.selectedWorld === null
+                          }
+                          onClick={() => choose('delete', world.name)}
                         >
-                          <button
-                            type="button"
-                            className="minecraft-world-action minecraft-world-action--danger"
-                            aria-label={actionName('delete')}
-                            disabled={
-                              removeDisabled ||
-                              activeWorld(world.name) ||
-                              !world.validation ||
-                              snapshot.selectedWorld === null
-                            }
-                            onClick={() => choose('delete', world.name)}
-                          >
-                            <Icon name="delete" />
-                          </button>
-                        </Tooltip>
+                          <Icon name="delete" />
+                        </IconAction>
                       )}
                     </div>
                   </li>
@@ -691,27 +699,16 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
             </div>
           )}
           {visible.length > 50 && (
-            <nav className="minecraft-worlds-pagination" aria-label={t(key('pagination'))}>
-              <button
-                type="button"
-                className="secondary"
-                disabled={currentPage === 0}
-                onClick={() => setPage(currentPage - 1)}
-              >
-                {t(key('previous'))}
-              </button>
-              <span>
-                {t(key('page'), { page: String(currentPage + 1), total: String(lastPage + 1) })}
-              </span>
-              <button
-                type="button"
-                className="secondary"
-                disabled={currentPage === lastPage}
-                onClick={() => setPage(currentPage + 1)}
-              >
-                {t(key('next'))}
-              </button>
-            </nav>
+            <Pagination
+              label={t(key('pagination'))}
+              previousLabel={t(key('previous'))}
+              nextLabel={t(key('next'))}
+              summary={t(key('page'), { page: currentPage + 1, total: lastPage + 1 })}
+              canPrevious={currentPage > 0}
+              canNext={currentPage < lastPage}
+              onPrevious={() => setPage(currentPage - 1)}
+              onNext={() => setPage(currentPage + 1)}
+            />
           )}
         </>
       )}
@@ -910,7 +907,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
               <Check
                 label={t(key('backup'))}
                 checked={backup}
-                disabled={busy || !offline}
+                disabled={busy || !offline || !props.permissionKeys.includes('backups.create')}
                 onChange={(event) => {
                   setBackup(event.target.checked);
                   setSelection({ ...selection, requestKey: idempotencyKey() });

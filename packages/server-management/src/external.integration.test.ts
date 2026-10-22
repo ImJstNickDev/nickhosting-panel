@@ -22,6 +22,7 @@ import {
   previewServerDns,
   reconcileExternalServices,
   reconcileServerStorageQuota,
+  reconcileServerUserSftpCredentials,
   revealSftpCredential,
   revokeSftpCredential,
   rotateSftpCredential,
@@ -69,6 +70,7 @@ async function fixture(mode: 'custom-subdomain' | 'static-host-port' = 'custom-s
       [actor[authSessionId], randomUUID(), actor.actorUserId],
     );
   const manifest: GameManifest = {
+    serverPermissions: [],
     id: `fixture-${number}`,
     version: '1.0.0',
     nameKey: `games.fixture-${number}.name`,
@@ -334,6 +336,59 @@ async function fixture(mode: 'custom-subdomain' | 'static-host-port' = 'custom-s
 }
 
 describe('durable server external services', () => {
+  it('issues exact direct file scopes and revokes the old provider login after grant reduction', async () => {
+    const f = await fixture();
+    const keys = ['files.read', 'files.sftp', 'files.write'];
+    await f.db
+      .insertInto('server_subusers')
+      .values({
+        server_id: f.serverId,
+        user_id: f.other.actorUserId,
+        created_by: f.context.actorUserId,
+        permission_keys: JSON.stringify(keys),
+      })
+      .execute();
+    const issued = await createSftpCredential(
+      f.db,
+      f.other,
+      f.serverId,
+      { credentialId: randomUUID() },
+      f.options,
+    );
+    const remote = f.users.get(issued.username as string);
+    expect(remote?.permissions).toEqual({
+      '/': ['list', 'download', 'upload', 'overwrite', 'create_dirs'],
+    });
+    await f.db
+      .updateTable('server_subusers')
+      .set({ permission_keys: JSON.stringify(['files.read', 'files.sftp']) })
+      .where('server_id', '=', f.serverId)
+      .where('user_id', '=', f.other.actorUserId)
+      .execute();
+    await reconcileServerUserSftpCredentials(f.db, f.serverId, f.other.actorUserId, f.options);
+    expect(f.users.has(issued.username as string)).toBe(false);
+    const next = await createSftpCredential(
+      f.db,
+      f.other,
+      f.serverId,
+      { credentialId: randomUUID() },
+      f.options,
+    );
+    expect(f.users.get(next.username as string)?.permissions).toEqual({
+      '/': ['list', 'download'],
+    });
+    await f.db
+      .deleteFrom('server_subusers')
+      .where('server_id', '=', f.serverId)
+      .where('user_id', '=', f.other.actorUserId)
+      .execute();
+    await reconcileServerUserSftpCredentials(f.db, f.serverId, f.other.actorUserId, f.options);
+    expect(f.users.has(next.username as string)).toBe(false);
+    await expect(listSftpCredentials(f.db, f.other, f.serverId)).rejects.toMatchObject({
+      code: 'forbidden',
+    });
+  });
+
   it.each(['primary', 'auxiliary'] as const)(
     'reveals an active %s password repeatedly without provider work or credential mutation',
     async (kind) => {
@@ -1841,7 +1896,8 @@ describe('automatic personal primary SFTP reconciliation', () => {
       return provider;
     };
     expect(await reconcileExternalServices(f.db, f.options)).toEqual({ recovered: 0, failed: 100 });
-    expect(await reconcileExternalServices(f.db, f.options)).toEqual({ recovered: 1, failed: 99 });
+    // The unchanged active credential is also reauthorized within the 100-row budget.
+    expect(await reconcileExternalServices(f.db, f.options)).toEqual({ recovered: 1, failed: 98 });
     expect(
       await f.db
         .selectFrom('external_sftp_credentials')

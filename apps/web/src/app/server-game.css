@@ -1,11 +1,3 @@
-.game-section-tabs {
-  gap: 1.25rem;
-  margin-top: -0.5rem;
-}
-.game-section-tabs a {
-  padding: 0.5rem 0 0.7rem;
-  font-size: 0.9rem;
-}
 .game-form-skeleton {
   min-height: 32rem;
   border-radius: 12px;
@@ -20,4 +12,23 @@
   color: var(--muted);
   background: transparent;
   border-color: transparent;
+}
+
+.settings-navigation {
+  display: flex;
+  gap: 1.25rem;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 1.25rem;
+}
+.settings-navigation a {
+  white-space: nowrap;
+  padding: 0.6rem 0.15rem;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  text-decoration: none;
+}
+.settings-navigation a[aria-current="page"] {
+  color: #202b37;
+  border-bottom-color: var(--blue);
 }

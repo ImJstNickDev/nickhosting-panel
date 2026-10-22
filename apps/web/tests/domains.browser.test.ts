@@ -215,7 +215,11 @@ describe('Domain choices and management (isolated responses, real components)', 
       }
       if (path === '/v1/platform/servers/domain-fixture')
         return route.fulfill({
-          json: { name: 'Fixture server', permissions: { manage: canManage } },
+          json: {
+            name: 'Fixture server',
+            permissions: { manage: canManage },
+            permissionKeys: canManage ? ['network.read', 'network.write'] : ['network.read'],
+          },
         });
       if (path.endsWith('/connections'))
         return route.fulfill({

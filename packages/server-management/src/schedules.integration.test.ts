@@ -55,6 +55,93 @@ const create = (patch: Record<string, unknown> = {}) =>
   createSchedule(f.db, f.context, serverId, input(patch));
 const due = (now = at) => runDueSchedules(f.db, {}, { now });
 const outcomes = (id: string) => listScheduleOutcomes(f.db, f.context, serverId, id);
+describe('granular schedule delegation', () => {
+  async function delegate(keys: string[]) {
+    const user = await managementFixture(f.db, { interactive: true });
+    await f.db
+      .insertInto('server_subusers')
+      .values({
+        server_id: serverId,
+        user_id: user.context.actorUserId,
+        created_by: f.context.actorUserId,
+        permission_keys: JSON.stringify(keys),
+      })
+      .execute();
+    return user.context;
+  }
+  it('requires both schedule write and the scheduled effect permission', async () => {
+    const actor = await delegate(['schedules.read', 'schedules.write']);
+    await expect(createSchedule(f.db, actor, serverId, input())).rejects.toMatchObject({
+      code: 'forbidden',
+    });
+    await f.db
+      .updateTable('server_subusers')
+      .set({
+        permission_keys: JSON.stringify([
+          'schedules.read',
+          'schedules.write',
+          'backups.read',
+          'backups.create',
+        ]),
+      })
+      .where('server_id', '=', serverId)
+      .where('user_id', '=', actor.actorUserId)
+      .execute();
+    const schedule = await createSchedule(f.db, actor, serverId, input());
+    expect(schedule.authorizerId).toBe(actor.actorUserId);
+    await expect(
+      deleteSchedule(f.db, actor, serverId, schedule.id, { revision: 1 }),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(
+      runScheduleNow(f.db, actor, serverId, schedule.id, {
+        revision: 1,
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+  });
+  it('rechecks the original authorizer on dispatch and again before queued effects', async () => {
+    const keys = ['schedules.read', 'schedules.write', 'backups.read', 'backups.create'];
+    const actor = await delegate(keys);
+    const schedule = await createSchedule(f.db, actor, serverId, input());
+    expect((await due()).dispatched).toBe(1);
+    const job = await jobOf(schedule.id);
+    await authorizeQueuedEffect(f.db, job, serverId);
+    await f.db
+      .updateTable('server_subusers')
+      .set({
+        permission_keys: JSON.stringify(['schedules.read', 'schedules.write', 'backups.read']),
+      })
+      .where('server_id', '=', serverId)
+      .where('user_id', '=', actor.actorUserId)
+      .execute();
+    await expect(authorizeQueuedEffect(f.db, job, serverId)).rejects.toMatchObject({
+      code: 'forbidden',
+    });
+  });
+  it('does not dispatch a scheduled backup after its authorizer loses schedule write', async () => {
+    const actor = await delegate([
+      'schedules.read',
+      'schedules.write',
+      'backups.read',
+      'backups.create',
+    ]);
+    const schedule = await createSchedule(f.db, actor, serverId, input());
+    await f.db
+      .updateTable('server_subusers')
+      .set({
+        permission_keys: JSON.stringify(['schedules.read', 'backups.read', 'backups.create']),
+      })
+      .where('server_id', '=', serverId)
+      .where('user_id', '=', actor.actorUserId)
+      .execute();
+    expect((await due()).dispatched).toBe(0);
+    expect((await outcomes(schedule.id)).items[0]).toMatchObject({
+      status: 'skipped',
+      reason: 'forbidden',
+    });
+  });
+});
+
 async function allowStarts() {
   await setGatewayPolicy(f.db, f.context, serverId, {
     enabled: true,

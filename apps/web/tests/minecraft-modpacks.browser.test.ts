@@ -117,6 +117,17 @@ describe('Minecraft Modpacks full-page experience', () => {
                   runtimeId: 'fabric',
                   runtimeState: 'stopped',
                   permissions: { read: true, manage: core.manage },
+                  permissionKeys: [
+                    'game.minecraft.modpacks.read',
+                    ...(core.manage
+                      ? [
+                          'game.minecraft.modpacks.write',
+                          'game.minecraft.worlds.read',
+                          'game.minecraft.worlds.delete',
+                          'backups.create',
+                        ]
+                      : []),
+                  ],
                   capabilities: { files: true },
                   activeOperationId: core.activeOperationId,
                 });
@@ -452,6 +463,25 @@ describe('Minecraft Modpacks full-page experience', () => {
       fullPage: true,
     });
     expect(writes).toEqual([]);
+  });
+  it('keeps optional backup unavailable without its separate permission', async () => {
+    await page.goto(`${origin}modpacks-fixture?nobackup`);
+    await details();
+    await check(
+      page.getByRole('checkbox', { name: 'Create a backup first', exact: true }),
+    ).toBeDisabled();
+    await check(page.getByRole('button', { name: 'Install', exact: true })).toBeEnabled();
+    expect(writes).toEqual([]);
+  });
+  it('preserves worlds when reset permission was not delegated', async () => {
+    await page.goto(`${origin}modpacks-fixture?nodeleteworlds`);
+    await details();
+    const keepWorlds = page.getByRole('checkbox', { name: 'Keep worlds', exact: true });
+    await check(keepWorlds).toBeChecked();
+    await check(keepWorlds).toBeDisabled();
+    await page.getByRole('button', { name: 'Install', exact: true }).click();
+    await check(page).toHaveURL(new RegExp(`/servers/${server}/console$`));
+    expect(writes[0]?.body).toMatchObject({ worldPolicy: 'preserve' });
   });
   it('installs the stable version with a durable intent and goes directly to Console', async () => {
     await open();

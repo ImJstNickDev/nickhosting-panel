@@ -31,6 +31,13 @@ function ModsFixture() {
           serverName="Fabric"
           runtimeState="running"
           canManage={!new URLSearchParams(location.search).has('readonly')}
+          permissionKeys={
+            new URLSearchParams(location.search).has('readonly')
+              ? []
+              : ['read', 'write', 'delete'].map(
+                  (action) => `game.minecraft.${plugins ? 'plugins' : 'mods'}.${action}`,
+                )
+          }
           pending={false}
           onAccepted={() => {}}
           reload={async () => {}}

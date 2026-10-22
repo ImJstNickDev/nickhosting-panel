@@ -50,6 +50,7 @@ import {
   resolveModpackRuntime,
 } from './modpack-runtime.js';
 import { createOperationTiming } from './operation-timing.js';
+import { permissionRuntime } from './permission-runtime.js';
 import { authorizeServer, enqueueServerOperation } from './registry.js';
 import type { ManagementRuntime } from './runtime.js';
 
@@ -96,7 +97,14 @@ export async function modpackActor(
     };
   }
   const current = await currentInteractiveContext(db, previous, env);
-  const server = await authorizeServer(db, current, row.server_id, 'server:manage');
+  const server = await authorizeServer(db, current, row.server_id, 'game.minecraft.modpacks.write');
+  if ((row.selection as { worldPolicy?: string }).worldPolicy === 'reset')
+    await authorizeServer(db, current, row.server_id, 'game.minecraft.worlds.delete');
+  if (
+    (row.apply_request as { backupBefore?: boolean } | null)?.backupBefore ||
+    (row.selection as { install?: { backupBefore?: boolean } } | null)?.install?.backupBefore
+  )
+    await authorizeServer(db, current, row.server_id, 'backups.create');
   if (server.owner_id !== row.resource_owner_id) throw new DomainError('forbidden');
   return current;
 }
@@ -108,7 +116,8 @@ export function createMinecraftModpackBridge(options: {
   http?: ContentHttp;
   curseforge?: CurseForgeProvider;
 }) {
-  const { db, runtime, env = {} } = options;
+  const { db, env = {} } = options;
+  const runtime = permissionRuntime(options.runtime, 'game.minecraft.modpacks');
   const operation = (id: string) =>
     db
       .selectFrom('minecraft_modpack_operations')
@@ -530,7 +539,12 @@ export function createMinecraftModpackBridge(options: {
       recover: (row, prepared, plan, caller) =>
         withModpackServerLock(db, row.server_id, async (connection) => {
           const actor = await currentInteractiveContext(connection, caller, env);
-          const server = await authorizeServer(connection, actor, row.server_id, 'server:manage');
+          const server = await authorizeServer(
+            connection,
+            actor,
+            row.server_id,
+            'game.minecraft.modpacks.write',
+          );
           if (server.owner_id !== row.resource_owner_id) throw new DomainError('forbidden');
           const job = await connection
             .selectFrom('server_operations')

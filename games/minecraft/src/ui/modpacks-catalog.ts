@@ -18,6 +18,10 @@ export const minecraftModpacksMessages: Record<string, [string, string]> = {
   'modpacks.moreBlockers': ['{count} more items', 'Altri {count} elementi'],
   'modpacks.morePaths': ['{count} more paths', 'Altri {count} percorsi'],
   'modpacks.removedPaths': ['Files to remove ({count})', 'File da rimuovere ({count})'],
+  'modpacks.worldsPermission': [
+    'Your access permits keeping existing worlds only.',
+    'I tuoi permessi consentono solo di conservare i mondi esistenti.',
+  ],
   'modpacks.worldsReset': [
     'Existing worlds will be removed.',
     'I mondi esistenti verranno rimossi.',

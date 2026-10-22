@@ -870,13 +870,59 @@ describe('M5 browser files, backups, console and automation', () => {
     ).toBeVisible();
     await harness.screenshot(user, 'backups-desktop-en');
   });
+  it('retains Settings drafts through metadata refresh failure and confirms sidebar navigation', async () => {
+    await user.goto(`${base}/settings`);
+    const name = user.getByLabel('Name', { exact: true });
+    await name.fill('Unsaved server draft');
+    const metadata = `**/v1/platform/servers/${provider.ids.serverId}`;
+    await user.route(metadata, (route) =>
+      route.request().method() === 'GET'
+        ? route.fulfill({
+            status: 503,
+            json: {
+              error: {
+                code: 'integration_unavailable',
+                messageKey: 'errors.integration_unavailable',
+              },
+            },
+          })
+        : route.continue(),
+    );
+    try {
+      await user.evaluate(
+        `import('/src/api/client.ts').then(({ queryClient }) => queryClient.invalidateQueries({ queryKey: ['server', ${JSON.stringify(provider.ids.serverId)}] }))`,
+      );
+      await browserExpect(user.getByRole('alert').first()).toBeVisible();
+      await browserExpect(name).toHaveValue('Unsaved server draft');
+      await user.getByRole('link', { name: 'Console', exact: true }).click();
+      const confirmation = user.getByRole('dialog', { name: 'Unsaved changes', exact: true });
+      await browserExpect(confirmation).toBeVisible();
+      await confirmation.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await browserExpect(name).toHaveValue('Unsaved server draft');
+      await user.getByRole('link', { name: 'Console', exact: true }).click();
+      await confirmation.getByRole('button', { name: 'Discard changes', exact: true }).click();
+      await browserExpect(user).toHaveURL(`${base}/console`);
+    } finally {
+      await user.unroute(metadata);
+    }
+  });
+
   it('issues, retrieves, rotates and revokes scoped SFTP credentials without claiming retained transport revocation', async () => {
     await user.goto(`${base}/sftp`);
+    await browserExpect(user).toHaveURL(`${base}/files?sftp=open`);
+    const sftp = user.getByRole('dialog', { name: 'SFTP', exact: true });
+    await browserExpect(sftp).toBeVisible();
     await user.getByRole('button', { name: 'Add access', exact: true }).click();
-    await user.getByRole('dialog').getByLabel('Name', { exact: true }).fill('Backup script');
-    await user.getByRole('dialog').getByRole('button', { name: 'Add access', exact: true }).click();
+    await user
+      .getByRole('dialog', { name: 'Add access', exact: true })
+      .getByLabel('Name', { exact: true })
+      .fill('Backup script');
+    await user
+      .getByRole('dialog', { name: 'Add access', exact: true })
+      .getByRole('button', { name: 'Add access', exact: true })
+      .click();
     await browserExpect(user.getByLabel('Password', { exact: true })).not.toHaveValue('');
-    await user.getByRole('button', { name: 'Close', exact: true }).click();
+    await user.locator('.sftp-issued').getByRole('button', { name: 'Close', exact: true }).click();
     const active = user
       .getByRole('row')
       .filter({ has: user.getByRole('button', { name: 'Rotate password', exact: true }) });
@@ -886,19 +932,30 @@ describe('M5 browser files, backups, console and automation', () => {
       'type',
       'text',
     );
-    await user.getByRole('button', { name: 'Close', exact: true }).click();
+    await user.locator('.sftp-issued').getByRole('button', { name: 'Close', exact: true }).click();
     await browserExpect(user.getByLabel('Password', { exact: true })).toHaveCount(0);
     await active.getByRole('button', { name: 'Rotate password', exact: true }).click();
     await user
-      .getByRole('dialog')
+      .getByRole('dialog', { name: 'Rotate password', exact: true })
       .getByRole('button', { name: 'Rotate password', exact: true })
       .click();
     await browserExpect(user.getByLabel('Password', { exact: true })).not.toHaveValue('');
-    await user.getByRole('button', { name: 'Close', exact: true }).click();
+    await user.locator('.sftp-issued').getByRole('button', { name: 'Close', exact: true }).click();
     await active.getByRole('button', { name: 'Revoke', exact: true }).click();
-    await user.getByRole('dialog').getByRole('button', { name: 'Revoke', exact: true }).click();
+    await user
+      .getByRole('dialog', { name: 'Revoke', exact: true })
+      .getByRole('button', { name: 'Revoke', exact: true })
+      .click();
     await browserExpect(user.getByRole('button', { name: 'Revoke', exact: true })).toHaveCount(0);
     await harness.screenshot(user, 'sftp-desktop-en');
+    await user.keyboard.press('Escape');
+    await browserExpect(sftp).not.toBeVisible();
+    const trigger = user.getByRole('button', { name: 'SFTP', exact: true });
+    await trigger.click();
+    await browserExpect(sftp).toBeVisible();
+    await user.keyboard.press('Escape');
+    await browserExpect(sftp).not.toBeVisible();
+    await browserExpect(trigger).toBeFocused();
   });
   it('persists schedules and explicit automation consent, and presents configured direct routing truthfully', async () => {
     await user.goto(`${base}/automation`);

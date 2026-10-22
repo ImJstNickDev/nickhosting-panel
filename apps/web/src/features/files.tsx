@@ -14,11 +14,12 @@ import {
   useRef,
   useState,
 } from 'react';
-import { useBlocker, useLocation } from 'react-router';
+import { useLocation } from 'react-router';
 import { fileEditorAvailability } from '../../../../packages/core/src/file-content.js';
 import { ApiError, api, apiError, download, queryClient, upload } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
+import { useNavigationGuard } from '../components/navigation-guard.js';
 import { Tooltip } from '../components/tooltip.js';
 import {
   ActionForm,
@@ -42,6 +43,7 @@ import {
   visibleFiles,
 } from './file-manager-model.js';
 import type { FileEditorControls } from './file-text-editor.js';
+import { SftpPage } from './sftp.js';
 
 const importEditor = () =>
   import('./viewer-engine/document-editor.js').then((module) => ({
@@ -189,6 +191,10 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   );
   const saves = useFileSaveRecords(saveScope);
   const location = useLocation();
+  const [sftpOpen, setSftpOpen] = useState(
+    () => new URLSearchParams(location.search).get('sftp') === 'open',
+  );
+  const [sftpBusy, setSftpBusy] = useState(false);
   const recoveredSave = useRef<string | undefined>(undefined);
   const saveIdentity = useRef(saveScope?.join('\0'));
   saveIdentity.current = saveScope?.join('\0');
@@ -553,8 +559,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     rows,
     enabled: Boolean(saveScope && files.data && !files.error && !displaying),
   });
-  const canManage = server.data?.permissions.manage === true;
+  const canManage = server.data?.permissionKeys.includes('files.write') === true;
   const canMutate = canManage && server.data?.availableActions.files === true;
+  const canDelete =
+    server.data?.permissionKeys.includes('files.delete') === true &&
+    server.data?.availableActions.files === true;
+  const canSftp = server.data?.permissionKeys.includes('files.sftp') === true;
   const canMutateRef = useRef(canMutate);
   canMutateRef.current = canMutate;
   const uploadAvailable = transfers.data?.upload.available === true;
@@ -682,7 +692,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   }, [dirty, pendingViewChanges]);
   const navigationGuard = useRef<() => boolean>(() => false);
   navigationGuard.current = () => hasUnsubmittedChanges() || mutationRunning.current;
-  const navigationBlocker = useBlocker(useCallback(() => navigationGuard.current(), []));
+  const navigationBlocker = useNavigationGuard(() => navigationGuard.current(), true);
   const handledNavigation = useRef<(() => void) | undefined>(undefined);
   useEffect(() => {
     // A draft update may render again before the router applies reset/proceed.
@@ -798,6 +808,14 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   }
   function chooseMode(value: Mode | 'move' | 'copy', names = selectedNames, folder = directory) {
     if (mutationRunning.current || transferFlow.active) return;
+    if (
+      value === 'delete'
+        ? !canDelete
+        : value === 'move' || value === 'rename'
+          ? !canMutate || !canDelete
+          : value !== 'view' && !canMutate
+    )
+      return;
     if (!menu) menuTrigger.current = document.activeElement as HTMLElement;
     setError(undefined);
     setMenu(undefined);
@@ -865,12 +883,15 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         const capabilities = await queryClient.ensureQueryData(
           viewerCapabilitiesQuery(serverId, viewerIdentity),
         );
-        if (capabilities.available) {
-          const preferences =
-            viewerPreferences.data?.preferences ??
-            (await queryClient.ensureQueryData(viewerPreferencesQuery(serverId, viewerIdentity)))
-              .preferences;
-          viewerId = preferredViewer(source, preferences);
+        // Local document/editor preferences do not require the optional remote
+        // viewer service. Keep remote-only choices behind its availability gate.
+        const preferences =
+          viewerPreferences.data?.preferences ??
+          (await queryClient.ensureQueryData(viewerPreferencesQuery(serverId, viewerIdentity)))
+            .preferences;
+        const preferred = preferredViewer(source, preferences);
+        if (capabilities.available || canUseDocumentView(source, preferred)) {
+          viewerId = preferred;
           if (isSingleCompressed(source) && savedViewer(source, preferences) === 'archive')
             autoDecodeCompressed = false;
         }
@@ -1159,7 +1180,15 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     );
   }
   async function renameEditor(name: string, reason: 'enter' | 'blur') {
-    if (!canMutate || dirty || pendingViewChanges || mutationRunning.current || saving || reading)
+    if (
+      !canMutate ||
+      !canDelete ||
+      dirty ||
+      pendingViewChanges ||
+      mutationRunning.current ||
+      saving ||
+      reading
+    )
       throw { messageKey: 'errors.forbidden' };
     if (!validFilename(name)) throw { messageKey: 'file.invalidName' };
     const original = files.data?.find((entry) => entry.name === targets[0]);
@@ -1269,6 +1298,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         !clipboardIdentity ||
         !selectedNames.length ||
         !canMutate ||
+        (key === 'x' && !canDelete) ||
         (key === 'c' && capabilities.data?.copy !== true)
       )
         return;
@@ -1281,7 +1311,11 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         action: key === 'x' ? 'move' : 'copy',
       });
     } else if (modifier && key === 'v' && scopedClipboard) {
-      if (!canMutate || (scopedClipboard.action === 'copy' && capabilities.data?.copy !== true))
+      if (
+        !canMutate ||
+        (scopedClipboard.action === 'move' && !canDelete) ||
+        (scopedClipboard.action === 'copy' && capabilities.data?.copy !== true)
+      )
         return;
       event.preventDefault();
       if (!validMoveTarget(scopedClipboard.source, scopedClipboard.names, directory)) {
@@ -1306,7 +1340,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               : undefined,
         },
       );
-    } else if (!modifier && event.key === 'Delete' && selectedNames.length && canMutate) {
+    } else if (!modifier && event.key === 'Delete' && selectedNames.length && canDelete) {
       event.preventDefault();
       chooseMode('delete');
     }
@@ -1326,7 +1360,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     if (!event.shiftKey || !anchor) setAnchor(entry.name);
   }
   function dropFolder(event: DragEvent, folder: string) {
-    if (!event.dataTransfer.types.includes(dragType) || !canMutate || mutationRunning.current)
+    if (
+      !event.dataTransfer.types.includes(dragType) ||
+      !canMutate ||
+      !canDelete ||
+      mutationRunning.current
+    )
       return;
     event.preventDefault();
     event.stopPropagation();
@@ -1361,6 +1400,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     if (event.dataTransfer.types.includes(dragType)) event.stopPropagation();
     if (
       !canMutate ||
+      !canDelete ||
       mutationRunning.current ||
       !event.dataTransfer.types.includes(dragType) ||
       !payload ||
@@ -1967,7 +2007,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   </Tooltip>
                 ) : (
                   mode === 'edit' &&
-                  canManage && (
+                  canManage &&
+                  canDelete && (
                     <Tooltip
                       placement="cursor"
                       content={t(dirty ? 'file.saveBeforeRename' : 'service.rename')}
@@ -2005,6 +2046,11 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 shortcut={macKeyboard ? '⌥ + K' : 'ALT + K'}
               />
               <div className="fm-tools">
+                {canSftp && (
+                  <button type="button" className="secondary" onClick={() => setSftpOpen(true)}>
+                    {t('web.sftp')}
+                  </button>
+                )}
                 <Tooltip placement="cursor" content={t('file.refresh')}>
                   <button
                     type="button"
@@ -2276,7 +2322,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     type="button"
                     className="fm-tool"
                     aria-label={t('file.move')}
-                    disabled={!canMutate || fileActionsBusy}
+                    disabled={!canMutate || !canDelete || fileActionsBusy}
                     onClick={() => chooseMode('move')}
                   >
                     <ToolbarIcon kind="move" />
@@ -2293,18 +2339,20 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     <ToolbarIcon kind="copy" />
                   </button>
                 </Tooltip>
-                <Tooltip placement="cursor" content={t('web.delete')}>
-                  <button
-                    type="button"
-                    className="fm-tool fm-selection-delete"
-                    aria-label={t('web.delete')}
-                    disabled={!canMutate || fileActionsBusy}
-                    onClick={() => chooseMode('delete')}
-                  >
-                    <ToolbarIcon kind="delete" />
-                  </button>
-                </Tooltip>
               </>
+            )}
+            {canDelete && (
+              <Tooltip placement="cursor" content={t('web.delete')}>
+                <button
+                  type="button"
+                  className="fm-tool fm-selection-delete"
+                  aria-label={t('web.delete')}
+                  disabled={!canDelete || fileActionsBusy}
+                  onClick={() => chooseMode('delete')}
+                >
+                  <ToolbarIcon kind="delete" />
+                </button>
+              </Tooltip>
             )}
           </FilemanSelectionBar>
         )}
@@ -2573,7 +2621,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 selectEntry(entry, event);
                 event.currentTarget.querySelector<HTMLButtonElement>('.fm-filename')?.focus();
               },
-              draggable: canMutate && !entry.is_symlink && !fileActionsBusy,
+              draggable: canMutate && canDelete && !entry.is_symlink && !fileActionsBusy,
               onDragStart: (event) => {
                 const names = selected.has(entry.name) ? selectedNames : [entry.name];
                 dragSession.current = {
@@ -2672,7 +2720,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 <button
                   type="button"
                   role="menuitem"
-                  disabled={!canMutate}
+                  disabled={!canMutate || !canDelete}
                   onClick={() => chooseMode('rename', [menu.entry.name])}
                 >
                   {t('service.rename')}
@@ -2680,7 +2728,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 <button
                   type="button"
                   role="menuitem"
-                  disabled={!canMutate}
+                  disabled={!canMutate || !canDelete}
                   onClick={() => chooseMode('move', [menu.entry.name])}
                 >
                   {t('file.move')}
@@ -2722,12 +2770,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
             >
               {t('file.copyPath')}
             </button>
-            {canManage && !menu.entry.is_symlink && (
+            {canDelete && !menu.entry.is_symlink && (
               <button
                 type="button"
                 role="menuitem"
                 className="danger"
-                disabled={!canMutate}
+                disabled={!canDelete}
                 onClick={() => chooseMode('delete', [menu.entry.name])}
               >
                 {t('web.delete')}
@@ -2849,6 +2897,20 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           </button>
         </Dialog>
         {transferFlow.dialog}
+        {sftpOpen && canSftp && (
+          <Dialog
+            open
+            title={t('web.sftp')}
+            closeIcon
+            className="sftp-dialog"
+            closeDisabled={sftpBusy}
+            onClose={() => {
+              if (!sftpBusy) setSftpOpen(false);
+            }}
+          >
+            <SftpPage serverId={serverId} embedded onBusyChange={setSftpBusy} />
+          </Dialog>
+        )}
         <ConfirmDialog
           key={`delete:${targets.join(',')}`}
           open={mode === 'delete'}
@@ -2858,7 +2920,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           busy={mutating}
           onClose={closeEditor}
           onConfirm={async () => {
-            if (!canMutate) throw { messageKey: 'error.forbidden' };
+            if (!canDelete) throw { messageKey: 'error.forbidden' };
             await mutation({
               action: 'delete',
               root: directory,

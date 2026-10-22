@@ -13,6 +13,7 @@ import {
   getSettings,
 } from '@nickhosting/database';
 import { evaluateGameAccess, type FilemanReadService } from '@nickhosting/game-sdk';
+import { minecraftContentPermissionKeys } from '@nickhosting/minecraft';
 import {
   type ApplicationServer,
   type ContainerObserver,
@@ -155,11 +156,31 @@ export async function authorizeQueuedEffect(
       db,
       context,
       serverId,
-      ['start', 'stop', 'restart', 'backup'].includes(operation.action)
-        ? 'server:operate'
-        : 'server:manage',
+      ['start', 'stop', 'restart', 'kill'].includes(operation.action)
+        ? 'console.power'
+        : operation.action === 'backup'
+          ? 'backups.create'
+          : operation.action === 'restore'
+            ? 'backups.restore'
+            : operation.action === 'minecraft-content'
+              ? 'server:read'
+              : 'server:manage',
     ),
   );
+  if (operation.action === 'minecraft-content') {
+    const content = operation.plan.minecraftContent as
+      | { command?: Parameters<typeof minecraftContentPermissionKeys>[0] }
+      | undefined;
+    if (!content?.command) throw new DomainError('forbidden');
+    for (const permission of minecraftContentPermissionKeys(content.command))
+      await authorizeServer(db, context, serverId, permission);
+  }
+  if (
+    operation.plan.backupBefore === true ||
+    (operation.plan.minecraftContent as { backupBefore?: boolean } | undefined)?.backupBefore ===
+      true
+  )
+    await authorizeServer(db, context, serverId, 'backups.create');
   if (server.owner_id !== job.resource_owner_id) throw new DomainError('forbidden');
   if (operation.plan.scheduleAutomation !== undefined)
     await authorizeScheduledEffect(db, jobId, serverId);
@@ -1152,6 +1173,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     timing?: UploadTiming,
     expectedServer?: Awaited<ReturnType<typeof authorizeServer>>,
     storageCleanup = false,
+    permission = storageCleanup ? 'files.delete' : write ? 'files.write' : 'files.read',
   ): Promise<void> {
     const timed = <T>(name: string, work: () => Promise<T>) =>
       timing ? timing.measure(name, work) : work();
@@ -1159,7 +1181,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       currentInteractiveContext(connection, context, env),
     );
     const server = await timed('transfer.serverPermission', () =>
-      authorizeServer(connection, current, serverId, write ? 'server:manage' : 'server:read'),
+      authorizeServer(connection, current, serverId, permission),
     );
     if (write) await assertStorageMutationAllowed(connection, storageCleanup);
     if (
@@ -1192,6 +1214,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       | 'upload-transfer' = 'fresh',
     timing?: UploadTiming,
     storageCleanup = false,
+    permission = storageCleanup ? 'files.delete' : write ? 'files.write' : 'files.read',
   ) {
     const timed = <T>(name: string, work: () => Promise<T>) =>
       timing ? timing.measure(name, work) : work();
@@ -1218,7 +1241,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
           currentInteractiveContext(connection, context, env),
         );
         const server = await timed('access.permissionFirst', () =>
-          authorizeServer(connection, current, serverId, write ? 'server:manage' : 'server:read'),
+          authorizeServer(connection, current, serverId, permission),
         );
         if (!server.pterodactyl_id || !server.pterodactyl_identifier)
           throw new DomainError('conflict');
@@ -1257,7 +1280,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
           currentInteractiveContext(connection, current, env),
         );
         const latest = await timed('access.permissionSecond', () =>
-          authorizeServer(connection, refreshed, serverId, write ? 'server:manage' : 'server:read'),
+          authorizeServer(connection, refreshed, serverId, permission),
         );
         if (reuseIdentity && directoryServerIdentity(latest) !== directoryServerIdentity(server))
           throw new DomainError('conflict');
@@ -1304,8 +1327,9 @@ export async function createManagementRuntime(options: ManagementOptions) {
     write: boolean,
     work: Parameters<typeof withAccess<T>>[3],
     timing?: UploadTiming,
+    permission = write ? 'files.write' : 'files.read',
   ) {
-    return withAccess(context, serverId, write, work, 'fresh', timing);
+    return withAccess(context, serverId, write, work, 'fresh', timing, false, permission);
   }
   /** Callbacks are restricted to explicit deletion, preserving all normal
    * session, ownership, provider-identity and exclusive server-lock checks. */
@@ -1314,16 +1338,27 @@ export async function createManagementRuntime(options: ManagementOptions) {
     serverId: string,
     work: Parameters<typeof withAccess<T>>[3],
     timing?: UploadTiming,
+    permission = 'files.delete',
   ) {
-    return withAccess(context, serverId, true, work, 'fresh', timing, true);
+    return withAccess(context, serverId, true, work, 'fresh', timing, true, permission);
   }
   function authorizeCleanupTransfer(
     context: AuthContext,
     serverId: string,
     connection: Kysely<Database>,
     timing?: UploadTiming,
+    permission = 'files.delete',
   ) {
-    return authorizeTransfer(context, serverId, true, connection, timing, undefined, true);
+    return authorizeTransfer(
+      context,
+      serverId,
+      true,
+      connection,
+      timing,
+      undefined,
+      true,
+      permission,
+    );
   }
   async function listFiles(
     context: AuthContext,
@@ -1472,8 +1507,9 @@ export async function createManagementRuntime(options: ManagementOptions) {
     serverId: string,
     work: Parameters<typeof withAccess<T>>[3],
     timing?: UploadTiming,
+    permission = 'files.read',
   ) {
-    return withAccess(context, serverId, false, work, 'directory', timing);
+    return withAccess(context, serverId, false, work, 'directory', timing, false, permission);
   }
   /** A fresh request-local Fileman phase for an already-authorized managed
    * access callback. It reuses the configured batch directory transport. */
@@ -1500,15 +1536,31 @@ export async function createManagementRuntime(options: ManagementOptions) {
       ...args: Parameters<Parameters<typeof withAccess<T>>[3]>
     ) => Promise<T>,
     signal?: AbortSignal,
+    permission = 'files.read',
   ) {
     signal?.throwIfAborted();
-    return fileReadAccess(context, serverId, async (identifier, connection, current, server) => {
-      const files = fileReadPhase(identifier, server, signal);
-      const result = await work(files, identifier, connection, current, server);
-      signal?.throwIfAborted();
-      await authorizeTransfer(current, serverId, false, connection, undefined, server);
-      return result;
-    });
+    return fileReadAccess(
+      context,
+      serverId,
+      async (identifier, connection, current, server) => {
+        const files = fileReadPhase(identifier, server, signal);
+        const result = await work(files, identifier, connection, current, server);
+        signal?.throwIfAborted();
+        await authorizeTransfer(
+          current,
+          serverId,
+          false,
+          connection,
+          undefined,
+          server,
+          false,
+          permission,
+        );
+        return result;
+      },
+      undefined,
+      permission,
+    );
   }
   /** Optional preparation only. Grants stay inside the adapter and never confer
    * permission to write; the eventual durable effect keeps its own final guards. */
@@ -1549,10 +1601,11 @@ export async function createManagementRuntime(options: ManagementOptions) {
     serverId: string,
     work: Parameters<typeof withAccess<T>>[3],
     timing?: UploadTiming,
+    permission = 'files.write',
   ) {
     // Reuse the same bounded identity proof as browsing/uploads, while retaining
     // fresh authorization, exclusive lifecycle locking and pending-upload fences.
-    return withAccess(context, serverId, true, work, 'upload', timing);
+    return withAccess(context, serverId, true, work, 'upload', timing, false, permission);
   }
   function uploadAccess<T>(
     context: AuthContext,
@@ -1574,6 +1627,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     prepare = false,
     timing?: UploadTiming,
     transfer = false,
+    permission = 'files.write',
   ) {
     return withAccess(
       context,
@@ -1582,6 +1636,8 @@ export async function createManagementRuntime(options: ManagementOptions) {
       work,
       prepare ? 'upload-prepare' : transfer ? 'upload-transfer' : 'upload-batch',
       timing,
+      false,
+      permission,
     );
   }
   function uploadBatchBinding(server: Parameters<typeof directoryServerIdentity>[0]) {

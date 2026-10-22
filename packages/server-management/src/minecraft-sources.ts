@@ -245,16 +245,20 @@ async function current(
     ? options.authorize(db, context)
     : currentInteractiveContext(db, context, env);
 }
+function sourcePermission(kind: Source['kind']) {
+  return kind === 'world' ? 'game.minecraft.worlds.import' : `game.minecraft.${kind}s.write`;
+}
 async function authorizeScope(
   db: Kysely<Database>,
   context: AuthContext,
   serverId: string | undefined,
+  kind: Source['kind'],
 ) {
   if (!serverId) {
     if (context.sessionType !== 'regular') throw new DomainError('forbidden');
     return context.subjectUserId;
   }
-  return (await authorizeServer(db, context, serverId, 'server:manage')).owner_id;
+  return (await authorizeServer(db, context, serverId, sourcePermission(kind))).owner_id;
 }
 
 /** Catalog browsing and acquisition use the same local managed-server boundary. */
@@ -262,9 +266,18 @@ export async function authorizeMinecraftWorldCatalog(
   db: Kysely<Database>,
   context: AuthContext,
   serverId: string,
-  permission: 'server:read' | 'server:manage' = 'server:read',
+  permission: string = 'game.minecraft.worlds.read',
 ) {
-  const server = await authorizeServer(db, context, serverId, permission);
+  const server = await authorizeServer(
+    db,
+    context,
+    serverId,
+    permission === 'server:read'
+      ? 'game.minecraft.worlds.read'
+      : permission === 'server:manage'
+        ? 'game.minecraft.worlds.import'
+        : permission,
+  );
   const mapping = await db
     .selectFrom('runtime_egg_mappings')
     .select('game_id')
@@ -292,7 +305,7 @@ async function ownedSource(
   // outside its exact scope; unbound wizard sources are private to the subject.
   if (row.server_id) {
     if (serverId !== undefined && row.server_id !== serverId) throw new DomainError('forbidden');
-    if ((await authorizeScope(db, context, row.server_id)) !== row.owner_user_id)
+    if ((await authorizeScope(db, context, row.server_id, row.kind)) !== row.owner_user_id)
       throw new DomainError('forbidden');
   } else {
     if (serverId !== undefined) {
@@ -302,7 +315,7 @@ async function ownedSource(
         .where('source_id', '=', row.id)
         .where('server_id', '=', serverId)
         .executeTakeFirst();
-      if (!binding || (await authorizeScope(db, context, serverId)) !== row.owner_user_id)
+      if (!binding || (await authorizeScope(db, context, serverId, row.kind)) !== row.owner_user_id)
         throw new DomainError('forbidden');
     } else if (row.owner_user_id !== context.subjectUserId || context.sessionType !== 'regular')
       throw new DomainError('forbidden');
@@ -411,7 +424,7 @@ export async function bindMinecraftSource(
 ) {
   const actor = await current(db, context, env, options);
   const row = await ownedSource(db, actor, reference);
-  const server = await authorizeServer(db, actor, serverId, 'server:manage');
+  const server = await authorizeServer(db, actor, serverId, sourcePermission(row.kind));
   if (
     row.state !== 'ready' ||
     row.owner_user_id !== server.owner_id ||
@@ -469,7 +482,7 @@ export function createMinecraftSourceStore(
     return db.transaction().execute(async (tx) => {
       await lockResources(tx);
       const actor = await reauthorize(tx);
-      const ownerId = await authorizeScope(tx, actor, input.serverId);
+      const ownerId = await authorizeScope(tx, actor, input.serverId, input.kind);
       const existing = await tx
         .selectFrom('minecraft_sources')
         .selectAll()
@@ -806,7 +819,7 @@ export function createMinecraftSourceStore(
     },
     async acquireModrinth(input: unknown, signal?: AbortSignal) {
       const value = parse(minecraftSourceModrinthSchema, input);
-      await authorizeScope(db, await reauthorize(), value.serverId);
+      await authorizeScope(db, await reauthorize(), value.serverId, 'modpack');
       const { values } = await getSettings(db, env);
       const policy = contentPolicyValues(values, 'minecraft');
       if (!options.http && !values.contentMetadataUserAgent)
@@ -863,7 +876,7 @@ export function createMinecraftSourceStore(
         }),
         input,
       );
-      await authorizeScope(db, await reauthorize(), value.serverId);
+      await authorizeScope(db, await reauthorize(), value.serverId, 'datapack');
       const { values } = await getSettings(db, env);
       const policy = contentPolicyValues(values, 'minecraft');
       if (!options.http && !values.contentMetadataUserAgent)
@@ -922,7 +935,7 @@ export function createMinecraftSourceStore(
       artifact: ContentArtifact,
       signal?: AbortSignal,
     ) {
-      await authorizeScope(db, await reauthorize(), input.serverId);
+      await authorizeScope(db, await reauthorize(), input.serverId, input.kind ?? 'mod');
       artifact = parse(artifactSchema, artifact);
       const kind = input.kind ?? 'mod';
       const directory = kind === 'plugin' ? 'plugins' : 'mods';

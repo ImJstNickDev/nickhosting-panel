@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import {
+  type AuthContext,
   DomainError,
   decodeEditableText,
   FILE_EDITOR_MAX_BYTES,
@@ -13,7 +14,7 @@ import {
   relativePath,
   type ServerFile,
 } from '@nickhosting/pterodactyl-adapter';
-import { createUploadTiming } from '@nickhosting/server-management';
+import { createUploadTiming, type ManagementRuntime } from '@nickhosting/server-management';
 import type { Hono } from 'hono';
 import { ZipFile } from 'yazl';
 import { z } from 'zod';
@@ -357,63 +358,113 @@ export function registerFileBrowsingRoutes(
     }
     const parsed = z.array(z.string().min(1).max(255)).min(1).max(10000).safeParse(raw);
     if (!parsed.success) throw new DomainError('validation_failed');
-    const authorize = () => service.authorizeTransfer(context, serverId, false);
-    const { id, serverName, entries } = await service.access(
+    return downloadServerArchive(service, context, serverId, {
+      root,
+      requestedAt,
+      files: parsed.data,
+      signal: c.req.raw.signal,
+    });
+  });
+}
+
+/** Shared archive transport. Domain callers supply a fixed validated selection and
+ * their own capability; request data can never choose an authorization key. */
+export async function downloadServerArchive(
+  service: ManagementRuntime,
+  context: AuthContext,
+  serverId: string,
+  selection: {
+    root: string;
+    requestedAt?: Date;
+    files: string[];
+    signal?: AbortSignal;
+    permission?: string;
+    validate?: Parameters<ManagementRuntime['access']>[3];
+  },
+) {
+  const permission = selection.permission ?? 'files.read';
+  const requestedAt = selection.requestedAt ?? new Date();
+  const authorize = () =>
+    service.authorizeTransfer(
       context,
       serverId,
       false,
-      async (id, connection, current, server) => ({
+      undefined,
+      undefined,
+      undefined,
+      false,
+      permission,
+    );
+  const { id, serverName, entries } = await service.access(
+    context,
+    serverId,
+    false,
+    async (id, connection, current, server) => {
+      await selection.validate?.(id, connection, current, server);
+      return {
         id,
         serverName: server.name,
         entries: await collectArchiveEntries(
           service.adapter,
           id,
-          root,
-          parsed.data,
-          () => service.authorizeTransfer(current, serverId, false, connection),
-          c.req.raw.signal,
+          selection.root,
+          selection.files,
+          () =>
+            service.authorizeTransfer(
+              current,
+              serverId,
+              false,
+              connection,
+              undefined,
+              undefined,
+              false,
+              permission,
+            ),
+          selection.signal,
         ),
-      }),
-    );
-    const name =
-      serverName
-        .normalize('NFKD')
-        .replace(/\p{M}/gu, '')
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .slice(0, 100)
-        .replace(/-+$/g, '') || 'server';
-    const timestamp = requestedAt.toISOString().slice(0, 19).replace('T', '_').replaceAll(':', '_');
-    const filename = `nhpanel-${name}-${timestamp}.zip`;
-    const stream = streamFileZip(
-      entries,
-      async (entry, signal) => {
-        await authorize();
-        const current = await inspectFilePath(service.adapter, id, entry.path);
-        if (
-          !current?.is_file ||
-          current.size !== entry.file.size ||
-          current.modified_at !== entry.file.modified_at
-        )
-          throw new DomainError('conflict');
-        return (
-          await service.adapter.downloadFile(id, entry.path, {
-            signal,
-            authorize,
-            maxBytes: entry.file.size,
-          })
-        ).body;
-      },
-      c.req.raw.signal,
-    );
-    return new Response(stream, {
-      headers: {
-        'content-type': 'application/zip',
-        'content-disposition': `attachment; filename="${filename}"`,
-        'cache-control': 'no-store',
-        'x-content-type-options': 'nosniff',
-      },
-    });
+      };
+    },
+    undefined,
+    permission,
+  );
+  const name =
+    serverName
+      .normalize('NFKD')
+      .replace(/\p{M}/gu, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 100)
+      .replace(/-+$/g, '') || 'server';
+  const timestamp = requestedAt.toISOString().slice(0, 19).replace('T', '_').replaceAll(':', '_');
+  const filename = `nhpanel-${name}-${timestamp}.zip`;
+  const stream = streamFileZip(
+    entries,
+    async (entry, signal) => {
+      await authorize();
+      const current = await inspectFilePath(service.adapter, id, entry.path);
+      if (
+        !current?.is_file ||
+        current.size !== entry.file.size ||
+        current.modified_at !== entry.file.modified_at
+      )
+        throw new DomainError('conflict');
+      return (
+        await service.adapter.downloadFile(id, entry.path, {
+          signal,
+          authorize,
+          maxBytes: entry.file.size,
+        })
+      ).body;
+    },
+    selection.signal,
+  );
+  return new Response(stream, {
+    headers: {
+      'content-type': 'application/zip',
+      'content-disposition': `attachment; filename="${filename}"`,
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+    },
   });
 }

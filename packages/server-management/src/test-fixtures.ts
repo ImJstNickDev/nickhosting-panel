@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { type AuthContext, authSessionId } from '@nickhosting/core';
 import { type Database, getSettings } from '@nickhosting/database';
 import type { GameManifest } from '@nickhosting/game-sdk';
+import { minecraftManifest } from '@nickhosting/minecraft';
 import type { Allocation, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
 import { vi } from 'vitest';
@@ -124,6 +125,7 @@ export async function managementFixture(
     gameId = `fixture-${randomUUID()}`;
   const providerNodeId = ++sequence;
   const manifest: GameManifest = {
+    serverPermissions: [],
     id: gameId,
     version: '1.0.0',
     nameKey: `games.${gameId}.name`,
@@ -337,5 +339,50 @@ export async function managementFixture(
     limits,
     input,
     server,
+  };
+}
+
+/** Real compiled Minecraft authorization with isolated generic provisioning.
+ * The generic source mapping remains unchanged so each fixture server can be
+ * provisioned independently before binding its completed local test record. */
+export async function minecraftManagementFixture(
+  db: Kysely<Database>,
+  options: { interactive?: boolean } = {},
+) {
+  const fixture = await managementFixture(db, options);
+  await db
+    .insertInto('game_integrations')
+    .values({ id: 'minecraft', version: minecraftManifest.version, manifest: minecraftManifest })
+    .onConflict((c) => c.column('id').doNothing())
+    .execute();
+  const source = await db
+    .selectFrom('runtime_egg_mappings')
+    .selectAll()
+    .where('id', '=', fixture.mappingId)
+    .executeTakeFirstOrThrow();
+  const mappingId = randomUUID();
+  await db
+    .insertInto('runtime_egg_mappings')
+    .values({
+      ...source,
+      id: mappingId,
+      game_id: 'minecraft',
+      environment: JSON.stringify(source.environment),
+      port_roles: JSON.stringify(source.port_roles),
+      feature_limits: JSON.stringify(source.feature_limits),
+    })
+    .execute();
+  return {
+    ...fixture,
+    mappingId,
+    server: async (patch: Record<string, unknown> = {}) => {
+      const serverId = await fixture.server(patch);
+      await db
+        .updateTable('managed_servers')
+        .set({ mapping_id: mappingId })
+        .where('id', '=', serverId)
+        .execute();
+      return serverId;
+    },
   };
 }

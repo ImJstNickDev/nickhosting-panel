@@ -17,6 +17,7 @@ import {
   Time,
   text,
 } from '../components/ui.js';
+import { IconAction } from '../components/workspace-controls.js';
 import { type Backup, serverPath, useServer, useTransfers } from './service-contracts.js';
 import './backups.css';
 
@@ -75,19 +76,9 @@ function IconButton({
   danger?: boolean;
 }) {
   return (
-    <Tooltip content={label}>
-      <button
-        type="button"
-        className={`backup-icon${danger ? ' backup-danger' : ''}`}
-        aria-label={label}
-        onClick={() => {
-          if (!disabled) onClick();
-        }}
-        aria-disabled={disabled}
-      >
-        <Icon name={icon} />
-      </button>
-    </Tooltip>
+    <IconAction label={label} destructive={danger} onClick={onClick} disabled={disabled}>
+      <Icon name={icon} />
+    </IconAction>
   );
 }
 function BackupDialog({
@@ -257,6 +248,7 @@ function BackupWorkspace({ serverId }: { serverId: string }) {
   const items = backups.data ?? [],
     manage = server.data?.permissions.manage === true,
     stopped = server.data?.runtimeState === 'offline';
+  const can = (key: string) => server.data?.permissionKeys.includes(key) === true;
   const used = items.filter((backup) => !backup.completed_at || backup.is_successful).length;
   const limit = settings?.limit,
     full = limit !== undefined && limit !== null && used >= limit;
@@ -304,7 +296,7 @@ function BackupWorkspace({ serverId }: { serverId: string }) {
           )}
         </div>
         <div className="backup-tools">
-          {manage && (
+          {can('schedules.read') && (
             <Tooltip content={t('web.schedules')}>
               <Link
                 className="backup-icon"
@@ -321,7 +313,7 @@ function BackupWorkspace({ serverId }: { serverId: string }) {
             disabled={backups.isFetching}
             onClick={refresh}
           />
-          {manage && settings?.supported && (
+          {can('backups.create') && settings?.supported && (
             <Tooltip content={full ? t('backup.full') : t('service.createBackup')}>
               <button
                 className="backup-create"
@@ -428,13 +420,15 @@ function BackupWorkspace({ serverId }: { serverId: string }) {
                           )}
                           {backup.completed_at && backup.is_successful && (
                             <>
-                              <IconButton
-                                label={t('backup.download', { name: backupName(backup) })}
-                                icon="download"
-                                disabled={Boolean(busyId)}
-                                onClick={() => void rowAction(backup, 'download')}
-                              />
-                              {manage && (
+                              {can('backups.download') && (
+                                <IconButton
+                                  label={t('backup.download', { name: backupName(backup) })}
+                                  icon="download"
+                                  disabled={Boolean(busyId)}
+                                  onClick={() => void rowAction(backup, 'download')}
+                                />
+                              )}
+                              {can('backups.restore') && (
                                 <IconButton
                                   label={
                                     settings?.canRestore
@@ -456,29 +450,27 @@ function BackupWorkspace({ serverId }: { serverId: string }) {
                             </>
                           )}
                           {manage && (
-                            <>
-                              <IconButton
-                                label={t(backup.is_locked ? 'backup.unlock' : 'backup.lock', {
-                                  name: backupName(backup),
-                                })}
-                                icon={backup.is_locked ? 'lock' : 'unlock'}
-                                disabled={!backup.completed_at || Boolean(busyId)}
-                                onClick={() => void rowAction(backup, 'lock')}
-                              />
-                              <IconButton
-                                label={
-                                  backup.is_locked
-                                    ? t('backup.unlockToDelete')
-                                    : t('backup.delete', { name: backupName(backup) })
-                                }
-                                icon="delete"
-                                danger
-                                disabled={
-                                  backup.is_locked || !backup.completed_at || Boolean(busyId)
-                                }
-                                onClick={() => setSelected({ backup, action: 'delete' })}
-                              />
-                            </>
+                            <IconButton
+                              label={t(backup.is_locked ? 'backup.unlock' : 'backup.lock', {
+                                name: backupName(backup),
+                              })}
+                              icon={backup.is_locked ? 'lock' : 'unlock'}
+                              disabled={!backup.completed_at || Boolean(busyId)}
+                              onClick={() => void rowAction(backup, 'lock')}
+                            />
+                          )}
+                          {can('backups.delete') && (
+                            <IconButton
+                              label={
+                                backup.is_locked
+                                  ? t('backup.unlockToDelete')
+                                  : t('backup.delete', { name: backupName(backup) })
+                              }
+                              icon="delete"
+                              danger
+                              disabled={backup.is_locked || !backup.completed_at || Boolean(busyId)}
+                              onClick={() => setSelected({ backup, action: 'delete' })}
+                            />
                           )}
                         </div>
                       </td>
@@ -490,7 +482,7 @@ function BackupWorkspace({ serverId }: { serverId: string }) {
           </div>
         )
       )}
-      {full && manage && <p className="backup-footnote">{t('backup.full')}</p>}
+      {full && can('backups.create') && <p className="backup-footnote">{t('backup.full')}</p>}
       {create && (
         <BackupDialog
           title={t('service.createBackup')}
@@ -637,7 +629,11 @@ function BackupWorkspace({ serverId }: { serverId: string }) {
                       </span>
                     </label>
                   </fieldset>
-                  <Check name="backupBefore" label={t('backup.beforeRestore')} disabled={full} />
+                  <Check
+                    name="backupBefore"
+                    label={t('backup.beforeRestore')}
+                    disabled={full || !can('backups.create')}
+                  />
                   {full && <p className="backup-footnote">{t('backup.beforeRestoreFull')}</p>}
                   <p className="backup-footnote">{t('backup.restoreStopped')}</p>
                 </>

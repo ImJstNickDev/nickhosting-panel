@@ -4,10 +4,12 @@ import { type createDatabase, gameCatalog, getSettings, registerGame } from '@ni
 import {
   createMinecraftIdentityProvider,
   minecraftAvatarUrl,
+  minecraftContentPermissionKeys,
   minecraftEditablePropertyKeys,
   minecraftManifest,
   minecraftRuntimeRequestSchema,
   minecraftWizard,
+  minecraftWorldName,
   parseMinecraftProperties,
   verifyMinecraftPlayer,
 } from '@nickhosting/minecraft';
@@ -21,12 +23,14 @@ import {
   getFabricCatalog,
   getForgeCatalog,
   getPaperCatalog,
+  getServerPermissionKeys,
   importMinecraftEvidence,
   inspectMinecraftCombination,
   inspectMinecraftWorlds,
   listMinecraftOwnerCombinations,
   type ManagementRuntime,
   minecraftCatalog,
+  minecraftContentCommandSchema,
   minecraftContentWipePreview,
   minecraftOwnerCombinationDetail,
   operationSchema,
@@ -51,7 +55,9 @@ import {
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import { minecraftStoredConfigurationSchema } from '../../../packages/server-management/src/minecraft-content-contracts.js';
+import { permissionRuntime } from '../../../packages/server-management/src/permission-runtime.js';
 import type { Variables } from './app.js';
+import { downloadServerArchive } from './file-browsing.js';
 import { registerMinecraftDatapackRoutes } from './minecraft-datapacks.js';
 import { registerMinecraftModpackRoutes } from './minecraft-modpacks.js';
 import { registerMinecraftModRoutes } from './minecraft-mods.js';
@@ -520,8 +526,11 @@ export function registerMinecraftRoutes(
   app.post('/v1/servers/:id/minecraft/operations', async (c) => {
     const context = await principal(c),
       serverId = c.req.param('id');
-    await authorizeServer(db, context, serverId, 'server:manage');
     const input = parse(operationSchema, await body(c));
+    for (const key of input.action === 'minecraft-content'
+      ? minecraftContentPermissionKeys(parse(minecraftContentCommandSchema, input.command))
+      : ['server:manage'])
+      await authorizeServer(db, context, serverId, key);
     const { options: content } = await contentOptions(context, serverId);
     if (input.action === 'minecraft-content') {
       const plan = await prepareMinecraftContentPlan(db, serverId, input.command, content);
@@ -576,11 +585,52 @@ export function registerMinecraftRoutes(
       ),
     });
   });
+  app.get('/v1/servers/:id/minecraft/worlds/:world/archive', async (c) => {
+    const context = await principal(c),
+      serverId = c.req.param('id');
+    const world = minecraftWorldName(c.req.param('world'));
+    const permission = 'game.minecraft.worlds.download';
+    await authorizeServer(db, context, serverId, permission);
+    const service = await management();
+    return downloadServerArchive(service, context, serverId, {
+      root: '',
+      files: [world],
+      signal: c.req.raw.signal,
+      permission,
+      validate: async (identifier, connection, current, server) => {
+        if (server.runtime_state !== 'offline' || server.active_operation_id)
+          throw new DomainError('conflict');
+        const snapshot = await inspectMinecraftWorlds(
+          connection,
+          service.adapter,
+          serverId,
+          () =>
+            service.authorizeTransfer(
+              current,
+              serverId,
+              false,
+              connection,
+              undefined,
+              server,
+              false,
+              permission,
+            ),
+          env,
+          c.req.raw.signal,
+          service.fileReadPhase(identifier, server, c.req.raw.signal),
+        );
+        if (
+          !snapshot.worlds.some((entry) => entry.name === world && entry.status !== 'unavailable')
+        )
+          throw new DomainError('not_found');
+      },
+    });
+  });
   app.get('/v1/servers/:id/minecraft/worlds', async (c) => {
     const context = await principal(c),
       serverId = c.req.param('id');
-    await authorizeServer(db, context, serverId);
-    const service = await management();
+    await authorizeServer(db, context, serverId, 'game.minecraft.worlds.read');
+    const service = permissionRuntime(await management(), 'game.minecraft.worlds');
     c.header('cache-control', 'no-store');
     return c.json(
       await service.fileReadScope(
@@ -610,14 +660,15 @@ export function registerMinecraftRoutes(
   app.get('/v1/servers/:id/minecraft', async (c) => {
     const serverId = c.req.param('id');
     const context = await principal(c);
-    await authorizeServer(db, context, serverId);
+    const server = await authorizeServer(db, context, serverId, 'game.minecraft.properties.read');
+    const permissions = await getServerPermissionKeys(db, context, server);
     const profile = await db
       .selectFrom('minecraft_server_profiles')
       .selectAll()
       .where('server_id', '=', serverId)
       .executeTakeFirst();
     if (!profile) throw new DomainError('not_found');
-    const service = await management();
+    const service = permissionRuntime(await management(), 'game.minecraft.properties');
     c.header('Cache-Control', 'no-store');
     const [effectiveProperties, choice, content] = await Promise.all([
       service.fileReadScope(
@@ -644,6 +695,7 @@ export function registerMinecraftRoutes(
         .where('server_id', '=', serverId)
         .execute(),
     ]);
+    const configuration = parse(z.record(z.string(), z.unknown()), profile.configuration);
     return c.json({
       choiceId: profile.combination_id,
       version: choice.combination.release,
@@ -651,8 +703,29 @@ export function registerMinecraftRoutes(
       supportedProperties: Object.keys(effectiveProperties),
       effectiveProperties,
       installed: profile.installed,
-      configuration: profile.configuration,
-      content,
+      configuration: {
+        eula: configuration.eula,
+        properties: configuration.properties,
+        operators: permissions.includes('game.minecraft.players.read')
+          ? configuration.operators
+          : [],
+        whitelist: permissions.includes('game.minecraft.players.read')
+          ? configuration.whitelist
+          : [],
+        ...(permissions.includes('game.minecraft.modpacks.read') &&
+        configuration.modpack !== undefined
+          ? { modpack: configuration.modpack }
+          : {}),
+      },
+      content: content.filter(
+        (item) =>
+          permissions.includes('game.minecraft.modpacks.read') ||
+          (item.path.startsWith('mods/') && permissions.includes('game.minecraft.mods.read')) ||
+          (item.path.startsWith('plugins/') &&
+            permissions.includes('game.minecraft.plugins.read')) ||
+          (/^[^/]+\/datapacks\//.test(item.path) &&
+            permissions.includes('game.minecraft.datapacks.read')),
+      ),
     });
   });
 }

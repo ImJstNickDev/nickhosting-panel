@@ -25,9 +25,13 @@ import { provisioningPresentation, successfulStartAfter } from './provisioning.j
 import {
   authorizeServer,
   enqueueServerOperation,
+  getServerPermissionKeys,
   ownerOnly,
   parse,
   publicServer,
+  revokeReducedServerCredentialPermissions,
+  serverSubusersAvailable,
+  snapshotServerCredentialPermissions,
 } from './registry.js';
 import { publicIdleTimeout, resolveIdleTimeout } from './sleep-policy.js';
 import { hasStopProcessBaseline, stopEscalation } from './stop-escalation.js';
@@ -90,13 +94,25 @@ function page<T>(rows: T[], limit: number, key: (row: T) => { at: Date; id: stri
 function owner(context: AuthContext) {
   return context.role === 'owner' && context.sessionType === 'regular';
 }
-function visibleServers(db: DB, context: AuthContext) {
+async function visibleServers(db: DB, context: AuthContext) {
+  const directAvailable = await serverSubusersAvailable(db);
   assertAuthContext(context);
   let query = db.selectFrom('managed_servers').selectAll().where('deleted_at', 'is', null);
   if (!owner(context))
     query = query.where((e) =>
       e.or([
         e('owner_id', '=', context.subjectUserId),
+        ...(directAvailable
+          ? [
+              e.exists(
+                e
+                  .selectFrom('server_subusers')
+                  .select('server_id')
+                  .whereRef('server_subusers.server_id', '=', 'managed_servers.id')
+                  .where('server_subusers.user_id', '=', context.subjectUserId),
+              ),
+            ]
+          : []),
         e.exists(
           e
             .selectFrom('project_members')
@@ -110,7 +126,9 @@ function visibleServers(db: DB, context: AuthContext) {
 }
 async function scopedServer(db: DB, context: AuthContext, serverId: string) {
   parse(z.uuid(), serverId);
-  const row = await visibleServers(db, context).where('id', '=', serverId).executeTakeFirst();
+  const row = await (await visibleServers(db, context))
+    .where('id', '=', serverId)
+    .executeTakeFirst();
   if (!row) throw new DomainError('not_found');
   return row;
 }
@@ -136,7 +154,7 @@ export async function listPlatformServers(
   const value = parse(serverQuerySchema, input),
     after = cursor(value.cursor, true);
   if (value.scope === 'others') ownerOnly(context);
-  let inventory = visibleServers(db, context);
+  let inventory = await visibleServers(db, context);
   if (value.scope === 'mine') inventory = inventory.where('owner_id', '=', context.subjectUserId);
   if (value.scope === 'others')
     inventory = inventory.where('owner_id', '!=', context.subjectUserId);
@@ -307,8 +325,9 @@ async function describeServer(
     initialDenied && !(await successfulStartAfter(db, row.id, initialDenied.created_at));
   const manifest = gameManifestSchema.safeParse(mapping.manifest);
   const scope = { ownerUserId: row.owner_id, memberRole: member?.role };
+  const permissionKeys = await getServerPermissionKeys(db, context, row);
   const manage = hasPermission(context, 'server:manage', scope),
-    operate = hasPermission(context, 'server:operate', scope);
+    operate = permissionKeys.includes('console.power');
   const idle = !row.active_operation_id && !upload;
   const configured = row.pterodactyl_id !== null && row.pterodactyl_identifier !== null;
   const installed = row.installation_state === 'installed';
@@ -349,6 +368,7 @@ async function describeServer(
       offline: 'required' as const,
     },
     backupLimit: mapping.feature_limits.backups,
+    permissionKeys,
     permissions: {
       read: true,
       operate,
@@ -375,12 +395,18 @@ async function describeServer(
         (!stopEscalation(activeStop.policy_snapshot) ||
           stopEscalation(activeStop.policy_snapshot)?.state === 'rejected'),
       restart: operate && idle && configured && installed && row.runtime_state === 'running',
-      backup: operate && idle && configured && installed && capabilities?.backups === true,
+      backup:
+        permissionKeys.includes('backups.create') &&
+        idle &&
+        configured &&
+        installed &&
+        capabilities?.backups === true,
       configure: manage && idle && row.runtime_state === 'offline' && !reservation,
-      metadata: manage,
+      metadata: permissionKeys.includes('settings.write'),
       delete: manage && idle && row.runtime_state === 'offline' && !reservation,
-      files: configured && capabilities?.files === true,
-      console: configured && capabilities?.console === true,
+      files: permissionKeys.includes('files.read') && configured && capabilities?.files === true,
+      console:
+        permissionKeys.includes('console.read') && configured && capabilities?.console === true,
     },
     firstStart: unresolvedFirstStart
       ? {
@@ -423,7 +449,7 @@ export async function updatePlatformServer(
     await lockResources(tx);
     const current = await currentInteractiveContext(tx, context, env);
     const server = await scopedServer(tx, current, serverId);
-    await authorizeServer(tx, current, serverId, 'server:manage');
+    await authorizeServer(tx, current, serverId, 'settings.write');
     // Moving a server changes its sharing boundary. Project managers may rename,
     // but only the resource owner/regular Owner may grant a different audience.
     if (value.projectId !== undefined && value.projectId !== server.project_id) {
@@ -440,6 +466,10 @@ export async function updatePlatformServer(
         if (project.owner_id !== server.owner_id) throw new DomainError('forbidden');
       }
     }
+    const credentialPermissions =
+      value.projectId !== undefined && value.projectId !== server.project_id
+        ? await snapshotServerCredentialPermissions(tx, [serverId])
+        : [];
     await tx
       .updateTable('managed_servers')
       .set({
@@ -449,6 +479,7 @@ export async function updatePlatformServer(
       })
       .where('id', '=', serverId)
       .execute();
+    await revokeReducedServerCredentialPermissions(tx, credentialPermissions);
     await recordAudit(tx, current, 'server.metadata.updated', {
       serverId,
       fields: Object.keys(value),
@@ -576,12 +607,24 @@ export async function deletePlatformProject(
   projectId: string,
   input: unknown,
   env: Environment = {},
+  accessChanged?: (serverIds: string[]) => Promise<void>,
 ) {
   parse(z.object({ confirm: z.literal(true) }).strict(), input);
-  return db.transaction().execute(async (tx) => {
+  let affectedServerIds: string[] = [];
+  const deleted = await db.transaction().execute(async (tx) => {
     await lockResources(tx);
     const current = await currentInteractiveContext(tx, context, env);
     await projectAccess(tx, current, projectId, true);
+    const affectedServers = await tx
+      .selectFrom('managed_servers')
+      .select('id')
+      .where('project_id', '=', projectId)
+      .execute();
+    affectedServerIds = affectedServers.map((server) => server.id);
+    const credentialPermissions = await snapshotServerCredentialPermissions(
+      tx,
+      affectedServers.map((server) => server.id),
+    );
     const result = await tx
       .updateTable('managed_servers')
       .set({ project_id: null, updated_at: new Date() })
@@ -590,12 +633,15 @@ export async function deletePlatformProject(
       .execute();
     await tx.deleteFrom('project_members').where('project_id', '=', projectId).execute();
     await tx.deleteFrom('projects').where('id', '=', projectId).execute();
+    await revokeReducedServerCredentialPermissions(tx, credentialPermissions);
     await recordAudit(tx, current, 'project.deleted', {
       projectId,
       detachedServers: result.length,
     });
     return { detachedServers: result.length };
   });
+  await accessChanged?.(affectedServerIds);
+  return deleted;
 }
 
 /** Reuse the worker's filesystem samples; nodes on one host share one disk reading. */
@@ -835,7 +881,8 @@ export async function getPlatformUser(
   return { ...user, quota: await getPlatformQuota(db, context, userId, env) };
 }
 
-function activityQuery(db: DB, context: AuthContext) {
+async function activityQuery(db: DB, context: AuthContext) {
+  const directAvailable = await serverSubusersAvailable(db);
   assertAuthContext(context);
   let query = db
     .selectFrom('operation_jobs as job')
@@ -849,6 +896,23 @@ function activityQuery(db: DB, context: AuthContext) {
           e('job.resource_owner_id', '=', context.subjectUserId),
         ]),
         e('server.owner_id', '=', context.subjectUserId),
+        ...(directAvailable
+          ? [
+              e.exists(
+                e
+                  .selectFrom('server_subusers')
+                  .select('server_id')
+                  .whereRef('server_subusers.server_id', '=', 'server.id')
+                  .where('server_subusers.user_id', '=', context.subjectUserId)
+                  .where((access) =>
+                    access.or([
+                      access('job.actor_id', '=', context.subjectUserId),
+                      sql<boolean>`server_subusers.permission_keys @> '["activity.read"]'::jsonb`,
+                    ]),
+                  ),
+              ),
+            ]
+          : []),
         e.exists(
           e
             .selectFrom('project_members')
@@ -910,12 +974,19 @@ const publicFileTransferSchema = z
 
 export async function getPlatformJob(db: DB, context: AuthContext, jobId: string) {
   parse(z.uuid(), jobId);
-  const job = await activityQuery(db, context).where('job.id', '=', jobId).executeTakeFirst();
+  const job = await (await activityQuery(db, context))
+    .where('job.id', '=', jobId)
+    .executeTakeFirst();
   if (!job) throw new DomainError('not_found');
   let retryAction = await retryEligibility(db, jobId);
   if (retryAction && job.serverId) {
     try {
-      await authorizeServer(db, context, job.serverId, 'server:operate');
+      await authorizeServer(
+        db,
+        context,
+        job.serverId,
+        retryAction === 'backup' ? 'backups.create' : 'console.power',
+      );
     } catch {
       retryAction = null;
     }
@@ -1127,6 +1198,7 @@ export async function getPlatformConnections(
   serverId: string,
   env: Environment = {},
 ) {
+  await authorizeServer(db, context, serverId, 'network.read');
   const server = await scopedServer(db, context, serverId);
   const [settings, mapping, allocations, routes, assignments, preference] = await Promise.all([
     getSettings(db, env),
@@ -1342,7 +1414,7 @@ export async function getPlatformTransfers(
       providerAccount?.status === 'ready' &&
       providerAccount.provider_id === server.provider_user_id &&
       providerAccount.provider_url === settings.values.pterodactylBaseUrl?.replace(/\/$/, '');
-  const reason = !info.permissions.manage
+  const reason = !info.permissionKeys.includes('files.write')
     ? 'forbidden'
     : server.active_operation_id || pending
       ? 'conflict'
@@ -1396,7 +1468,7 @@ export async function getPlatformTransfers(
           ? { hostname: settings.values.sftpPublicHostname, port: settings.values.sftpPublicPort }
           : null,
       canIssue:
-        info.permissions.manage &&
+        info.permissionKeys.includes('files.sftp') &&
         context.sessionType === 'regular' &&
         !!settings.values.sftpPublicHostname &&
         !!settings.values.sftpPublicPort,
@@ -1409,7 +1481,7 @@ export async function getPlatformTransfers(
       events: await providerBackupEventsEnabled(db, serverId),
       canCreate: info.availableActions.backup && (await backupSchemaAvailable(db)),
       canRestore:
-        info.permissions.manage &&
+        info.permissionKeys.includes('backups.restore') &&
         (await backupSchemaAvailable(db)) &&
         !server.active_operation_id &&
         server.runtime_state === 'offline',
@@ -1423,6 +1495,7 @@ export async function getPlatformSleepPolicy(
   serverId: string,
   env: Environment = {},
 ) {
+  await authorizeServer(db, context, serverId, 'settings.read');
   const server = await scopedServer(db, context, serverId),
     state = await db
       .selectFrom('gateway_server_states')
@@ -1519,6 +1592,7 @@ export async function listPlatformMetrics(
   serverId: string,
   input: unknown = {},
 ) {
+  await authorizeServer(db, context, serverId, 'console.read');
   await scopedServer(db, context, serverId);
   const value = parse(
     z

@@ -40,7 +40,7 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
       root: `${process.cwd()}/apps/web`,
       configFile: false,
       cacheDir: `${process.cwd()}/.codex/local/sftp-ui-vite`,
-      server: { host: '127.0.0.1', port: 0 },
+      server: { host: '127.0.0.1', port: 0, hmr: false, watch: null },
     });
     await vite.listen();
     origin = vite.resolvedUrls?.local[0] ?? '';
@@ -124,7 +124,11 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
         });
       if (path === '/v1/platform/servers/sftp-fixture')
         return route.fulfill({
-          json: { permissions: { manage: canIssue }, name: 'Fixture server' },
+          json: {
+            permissions: { manage: canIssue },
+            permissionKeys: canIssue ? ['files.read', 'files.sftp'] : ['files.read'],
+            name: 'Fixture server',
+          },
         });
       if (method === 'GET' && path.endsWith('/sftp')) return route.fulfill({ json: credentials });
       if (path.includes('/sftp')) {
@@ -170,6 +174,26 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
     await page.goto(`${origin}sftp-fixture-page`);
     await check(page.getByRole('heading', { name: 'SFTP', exact: true })).toBeVisible();
   }
+
+  it('clears a previous copy success when the next clipboard request fails', async () => {
+    await open();
+    await page.getByRole('button', { name: 'Copy hostname', exact: true }).click();
+    await check(page.getByRole('button', { name: 'Copied', exact: true })).toBeVisible();
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: async () => {
+            throw new Error('Clipboard unavailable');
+          },
+        },
+      });
+    });
+    await page.getByRole('button', { name: 'Copied', exact: true }).click();
+    await check(page.getByRole('button', { name: 'Copy hostname', exact: true })).toBeVisible();
+    await check(page.locator('.sftp-copy-error')).toBeVisible();
+    await check(page.getByRole('button', { name: 'Copied', exact: true })).toHaveCount(0);
+  });
 
   it('copies connection data and confirms rotation/revocation without per-row forms', async () => {
     await open();

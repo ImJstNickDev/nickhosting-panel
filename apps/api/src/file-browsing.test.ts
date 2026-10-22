@@ -198,6 +198,8 @@ describe('file browsing and streaming ZIP', () => {
       'abc',
       false,
       expect.any(Function),
+      undefined,
+      'files.read',
     );
     expect(f.service.authorizeTransfer.mock.calls.length).toBeGreaterThanOrEqual(names.length);
   });

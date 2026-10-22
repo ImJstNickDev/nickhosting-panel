@@ -1,6 +1,5 @@
 .minecraft-mods {
   width: 100%;
-  max-width: 1320px;
   min-width: 0;
   margin-inline: auto;
   container-type: inline-size;
@@ -26,15 +25,14 @@
 .mods-installed-version,
 .mods-dependency-row,
 .mods-review-controls,
-.mods-force-actions,
-.mods-pagination {
+.mods-force-actions {
   display: flex;
   align-items: center;
 }
 .mods-header {
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 18px;
+  margin-bottom: 12px;
   min-height: 40px;
 }
 .mods-header-actions {
@@ -101,30 +99,6 @@
   gap: 10px;
   flex-wrap: wrap;
   margin-bottom: 12px;
-}
-.mods-search {
-  display: flex;
-  align-items: center;
-  position: relative;
-  flex: 1 1 220px;
-  min-width: 0;
-}
-.mods-search > svg {
-  position: absolute;
-  left: 12px;
-  pointer-events: none;
-  color: var(--muted);
-}
-.mods-search input {
-  width: 100%;
-  min-height: 40px;
-  padding-left: 38px;
-  margin: 0;
-  background: var(--surface);
-}
-.mods-search input:focus {
-  outline: 0;
-  box-shadow: none;
 }
 .mods-select.ve-select {
   position: relative;
@@ -256,7 +230,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 20px;
-  min-height: 480px;
+  min-height: 320px;
   align-items: start;
 }
 .mods-catalog-layout[data-details] {
@@ -282,7 +256,7 @@
   display: flex;
   align-items: stretch;
   gap: 5px;
-  padding: 11px 9px 11px 4px;
+  padding: 9px 8px;
   border: 1px solid transparent;
   border-radius: 10px;
   transition:
@@ -426,9 +400,9 @@
   min-width: 0;
   max-height: 72vh;
   overflow: auto;
-  padding: 20px;
+  padding: 14px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 8px;
   background: var(--surface);
   scrollbar-gutter: stable;
   animation: mods-detail-enter 140ms ease-out;
@@ -677,16 +651,9 @@
   color: var(--muted);
   font-size: 0.8rem;
 }
-.mods-pagination {
-  gap: 8px;
-  justify-content: center;
-  margin-top: 15px;
-  font-size: 0.75rem;
-  color: var(--muted);
-}
 .mods-installed-row {
   gap: 14px;
-  padding: 16px 8px;
+  padding: 10px 8px;
   border-bottom: 1px solid var(--line);
 }
 .mods-installed-row:last-child {
@@ -697,7 +664,7 @@
   flex-direction: column;
   flex: 1;
   min-width: 0;
-  gap: 7px;
+  gap: 4px;
 }
 .mods-installed-copy > strong {
   font-size: 0.9rem;
@@ -945,9 +912,6 @@
   }
   .mods-search-toolbar {
     gap: 8px;
-  }
-  .mods-search {
-    flex-basis: 100%;
   }
   .mods-beta-toggle {
     margin-left: auto;

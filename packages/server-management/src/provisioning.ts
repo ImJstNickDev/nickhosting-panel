@@ -7,7 +7,7 @@ import {
   type ModpackProvisioning,
   modpackProvisioningPresentation,
 } from './modpack-provisioning.js';
-import { authorizeServer } from './registry.js';
+import { authorizeServer, getServerPermissionKeys } from './registry.js';
 
 export const provisioningStages = [
   'preparing',
@@ -222,7 +222,7 @@ export async function getServerProvisioning(
   )
     return null;
   let transcript: InstallationTranscript = { logs: [], available: false };
-  if (cache) {
+  if (cache && (await getServerPermissionKeys(db, context, server)).includes('console.read')) {
     try {
       const value = await cache.get(installationLogKey(row.job_id));
       if (value) transcript = JSON.parse(value) as InstallationTranscript;

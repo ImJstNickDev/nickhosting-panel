@@ -1,6 +1,14 @@
 import { useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useEffectEvent, useState } from 'react';
-import { Link, Navigate, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router';
+import {
+  Link,
+  Navigate,
+  Outlet,
+  useLocation,
+  useMatch,
+  useNavigate,
+  useSearchParams,
+} from 'react-router';
 import { ApiError, api } from '../api/client.js';
 import { AccountMenu } from '../components/account-menu.js';
 import { Sidebar, type SidebarIconName, useSidebarCollapsed } from '../components/sidebar.js';
@@ -8,8 +16,12 @@ import { Tooltip } from '../components/tooltip.js';
 import { ErrorNotice, Loading, Time } from '../components/ui.js';
 import { fileSaveScope } from '../features/file-background-save.js';
 import { FileSaveNotices } from '../features/file-save-notices.js';
+import { gameUiRegistry } from '../features/integrations.js';
+import { platformPath, type ServerInfo } from '../features/service-contracts.js';
 import { useLocale, useT } from './i18n.js';
+import { serverNavigation } from './server-navigation.js';
 import { identityChanged, isSignedOut, useSession, useWebConfig } from './session.js';
+import { focusWorkspace } from './workspace-focus.js';
 
 export function Shell() {
   const t = useT();
@@ -17,6 +29,14 @@ export function Shell() {
   const config = useWebConfig();
   const location = useLocation();
   const navigate = useNavigate();
+  const serverRoute = useMatch('/servers/:serverId/*');
+  const serverId = serverRoute?.params.serverId;
+  const server = useQuery({
+    queryKey: ['server', serverId],
+    queryFn: () => api<ServerInfo>(platformPath(serverId ?? '')),
+    enabled: Boolean(serverId),
+    refetchInterval: 10000,
+  });
   const [open, setOpen] = useState(false);
   const closeNavigation = useCallback(() => setOpen(false), []);
   const [collapsed, toggleSidebar] = useSidebarCollapsed();
@@ -31,8 +51,7 @@ export function Shell() {
   useEffect(() => {
     setOpen(false);
     // The modal finishes its exit before moving focus into the new page.
-    if (!document.querySelector('dialog.mobile-navigation[open]'))
-      document.querySelector<HTMLElement>('h1')?.focus();
+    if (!document.querySelector('dialog.mobile-navigation[open]')) focusWorkspace();
   }, [location.pathname]);
   const applySessionLocale = useEffectEvent((value: 'en' | 'it') => {
     if (value && locale !== 'pseudo' && locale !== value) setLocale(value);
@@ -137,7 +156,24 @@ export function Shell() {
           instanceName={config.data?.instanceName ?? 'NickHosting'}
           name={current.subject.name}
           showHome={ownerArea && (ordinaryOwner || readOnlyAdmin)}
-          navigation={navigation.map(([to, key, icon]) => ({ to, label: t(key), icon }))}
+          serverIdentity={
+            serverId
+              ? {
+                  name: server.data?.name ?? t('web.loading'),
+                  detail: server.data
+                    ? `${t(gameUiRegistry.get(server.data.gameId)?.descriptor.nameKey ?? 'web.server')} · ${server.data.runtimeId}`
+                    : '',
+                }
+              : undefined
+          }
+          navigation={
+            serverId
+              ? server.data &&
+                !(server.error instanceof ApiError && [401, 403, 404].includes(server.error.status))
+                ? serverNavigation(server.data, location.pathname, t)
+                : []
+              : navigation.map(([to, key, icon]) => ({ to, label: t(key), icon }))
+          }
         />
         <div className="workspace">
           <header className="topbar">
@@ -162,10 +198,12 @@ export function Shell() {
                 <path d="M4 6h16M4 12h16M4 18h16" />
               </svg>
             </button>
-            <span>
-              {ownerArea
-                ? t(ordinaryOwner ? 'web.owner' : 'web.administration')
-                : (config.data?.instanceName ?? 'NickHosting')}
+            <span className="topbar-context" title={serverId ? server.data?.name : undefined}>
+              {serverId
+                ? (server.data?.name ?? t('web.loading'))
+                : ownerArea
+                  ? t(ordinaryOwner ? 'web.owner' : 'web.administration')
+                  : (config.data?.instanceName ?? 'NickHosting')}
             </span>
             <div className="topbar-account-actions">
               {(ordinaryOwner || readOnlyAdmin) && (
@@ -202,7 +240,7 @@ export function Shell() {
               />
             </div>
           </header>
-          <main id="content">
+          <main id="content" tabIndex={-1}>
             {session.error && transientSessionFailure && (
               <ErrorNotice error={session.error} retry={() => void session.refetch()} />
             )}

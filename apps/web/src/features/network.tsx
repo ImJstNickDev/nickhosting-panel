@@ -1,8 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '../api/client.js';
 import { useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
+import { useUnsavedChanges } from '../components/navigation-guard.js';
 import { Tooltip } from '../components/tooltip.js';
 import {
   ActionForm,
@@ -51,11 +52,26 @@ export function NetworkPage({ serverId }: { serverId: string }) {
   const [remove, setRemove] = useState<DnsAssignments[number]>();
   const [editing, setEditing] = useState(false),
     [choice, setChoice] = useState<ConnectionChoice>({});
+  const [editingBusy, setEditingBusy] = useState(false);
+  const [editingDirty, setEditingDirty] = useState(false);
+  const [discard, setDiscard] = useState(false);
+  useUnsavedChanges(editing && editingDirty, editing && editingBusy);
+  const closeEditor = () => {
+    setEditing(false);
+    setEditingDirty(false);
+    setPlan(undefined);
+  };
   const [plan, setPlan] = useState<DnsPlan>(),
     [error, setError] = useState<unknown>(),
     [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(timer);
+  }, [copied]);
   const canManage =
-    server.data?.permissions.manage && session.data?.context.sessionType === 'regular';
+    server.data?.permissionKeys.includes('network.write') &&
+    session.data?.context.sessionType === 'regular';
   const assignment = connection.data?.primaryDnsAssignmentId
     ? dns.data?.find((item) => item.id === connection.data?.primaryDnsAssignmentId)
     : (dns.data?.find((item) => item.state === 'active') ?? dns.data?.[0]);
@@ -76,9 +92,8 @@ export function NetworkPage({ serverId }: { serverId: string }) {
       method: assignment ? 'PUT' : 'POST',
       body: choice,
     });
-    setEditing(false);
-    setPlan(undefined);
     await refresh();
+    closeEditor();
   }
   return (
     <>
@@ -86,7 +101,7 @@ export function NetworkPage({ serverId }: { serverId: string }) {
         {connection.isPending ? (
           <Loading />
         ) : connection.error ? (
-          <ErrorNotice error={connection.error} />
+          <ErrorNotice error={connection.error} retry={() => void connection.refetch()} />
         ) : (
           <>
             <div className="connection-primary">
@@ -103,6 +118,7 @@ export function NetworkPage({ serverId }: { serverId: string }) {
                       type="button"
                       aria-label={t('web.copy')}
                       onClick={async () => {
+                        setCopied(false);
                         try {
                           await navigator.clipboard.writeText(address);
                           setCopied(true);
@@ -160,6 +176,7 @@ export function NetworkPage({ serverId }: { serverId: string }) {
                       onClick={() => {
                         setChoice(assignmentConnectionChoice(assignment, options.data));
                         setPlan(undefined);
+                        setEditingDirty(false);
                         setEditing(true);
                       }}
                     >
@@ -265,13 +282,16 @@ export function NetworkPage({ serverId }: { serverId: string }) {
       <Dialog
         open={editing}
         title={t('connection.edit')}
+        closeDisabled={editingBusy}
         onClose={() => {
-          setEditing(false);
-          setPlan(undefined);
+          if (editingBusy) return;
+          if (editingDirty) setDiscard(true);
+          else closeEditor();
         }}
       >
-        {options.data && (
+        {editing && options.data && (
           <ActionForm
+            onBusyChange={setEditingBusy}
             submitLabel={t(plan ? 'web.save' : 'service.previewAddress')}
             success={false}
             onSubmit={async () => {
@@ -292,6 +312,7 @@ export function NetworkPage({ serverId }: { serverId: string }) {
               options={options.data}
               value={choice}
               onChange={(value) => {
+                setEditingDirty(true);
                 setChoice(value);
                 setPlan(undefined);
               }}
@@ -305,6 +326,19 @@ export function NetworkPage({ serverId }: { serverId: string }) {
           </ActionForm>
         )}
       </Dialog>
+      <ConfirmDialog
+        open={discard}
+        title={t('web.unsavedChanges')}
+        confirmLabel={t('web.discardChanges')}
+        destructive
+        onClose={() => setDiscard(false)}
+        onConfirm={async () => {
+          setDiscard(false);
+          closeEditor();
+        }}
+      >
+        <p>{t('web.leaveUnsaved')}</p>
+      </ConfirmDialog>
     </>
   );
 }

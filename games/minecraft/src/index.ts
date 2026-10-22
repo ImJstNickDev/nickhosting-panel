@@ -18,6 +18,7 @@ export * from './paper-policy.js';
 export * from './protocol.js';
 export * from './releases.js';
 export * from './runtime.js';
+export * from './server-permissions.js';
 export * from './vanilla-egg.js';
 export * from './vanilla-policy.js';
 export * from './wizard.js';

@@ -44,6 +44,7 @@ import { modAlternativeAdvice, modUpdateAdvice } from './minecraft-mod-advice.js
 import { resolveModsAutomatically } from './minecraft-mod-auto-resolution.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
+import { permissionRuntime } from './permission-runtime.js';
 import { authorizeServer, parse } from './registry.js';
 import type { ManagementRuntime } from './runtime.js';
 import { assertServerStorageCapacity, serverStorageLimitBytes } from './storage-capacity.js';
@@ -218,7 +219,11 @@ export function createMinecraftModsService(options: {
   curseforge?: CurseForgeProvider;
   kind?: 'mod' | 'plugin';
 }) {
-  const { db, runtime, env = {}, kind = 'mod' } = options;
+  const { db, env = {}, kind = 'mod' } = options;
+  const runtime = permissionRuntime(
+    options.runtime,
+    `game.minecraft.${kind === 'plugin' ? 'plugins' : 'mods'}`,
+  );
   const directory = kind === 'plugin' ? 'plugins' : 'mods';
   const tables =
     kind === 'plugin'
@@ -285,6 +290,11 @@ export function createMinecraftModsService(options: {
           .execute();
         return;
       }
+      const runtime = permissionRuntime(
+        options.runtime,
+        `game.minecraft.${directory}`,
+        mutationAction(candidates),
+      );
       await runtime.fileMutationAccess(
         context,
         serverId,
@@ -312,6 +322,7 @@ export function createMinecraftModsService(options: {
             }
           }
           if (paths.length) {
+            await authorizeChanges(connection, current, serverId, candidates);
             await runtime.authorizeTransfer(current, serverId, true, connection, undefined, server);
             const unique = [...new Set(paths)];
             for (let offset = 0; offset < unique.length; offset += 1000)
@@ -352,7 +363,7 @@ export function createMinecraftModsService(options: {
   async function authorized(
     context: AuthContext,
     serverId: string,
-    write = false,
+    write: boolean | 'delete' = false,
     connection = db,
   ) {
     const actor = await currentInteractiveContext(connection, context, env);
@@ -360,7 +371,7 @@ export function createMinecraftModsService(options: {
       connection,
       actor,
       serverId,
-      write ? 'server:manage' : undefined,
+      `game.minecraft.${directory}.${write === 'delete' ? 'delete' : write ? 'write' : 'read'}`,
     );
     return { actor, server };
   }
@@ -1288,6 +1299,21 @@ export function createMinecraftModsService(options: {
     }
     return entries;
   }
+  const mutationAction = (changes: Change[]) =>
+    changes.length && changes.every((row) => row.action === 'delete') ? 'delete' : 'write';
+  async function authorizeChanges(
+    connection: Kysely<Database>,
+    context: AuthContext,
+    serverId: string,
+    changes: Change[],
+  ) {
+    if (changes.some((row) => row.action !== 'delete'))
+      await authorizeServer(connection, context, serverId, `game.minecraft.${directory}.write`);
+    if (
+      changes.some((row) => row.action === 'delete' || parse(planSchema, row.plan).retired.length)
+    )
+      await authorizeServer(connection, context, serverId, `game.minecraft.${directory}.delete`);
+  }
   async function publish(
     identifier: string,
     connection: Kysely<Database>,
@@ -1295,16 +1321,25 @@ export function createMinecraftModsService(options: {
     server: Parameters<ManagementRuntime['fileReadPhase']>[1],
     serverId: string,
     dispatch: { id: string; changes: Change[]; moves: z.infer<typeof moveSchema>[] },
+    runtime: ManagementRuntime = permissionRuntime(
+      options.runtime,
+      `game.minecraft.${directory}`,
+      mutationAction(dispatch.changes),
+    ),
   ) {
     const { id, changes, moves } = dispatch;
+    await authorizeChanges(connection, current, serverId, changes);
     try {
       await runtime.authorizeTransfer(current, serverId, true, connection, undefined, server);
-      for (let offset = 0; offset < moves.length; offset += 1000)
+      for (let offset = 0; offset < moves.length; offset += 1000) {
+        await runtime.authorizeTransfer(current, serverId, true, connection, undefined, server);
+        await authorizeChanges(connection, current, serverId, changes);
         await runtime.adapter.renameFiles(
           identifier,
           '',
           moves.slice(offset, offset + 1000).map(({ from, to }) => ({ from, to })),
         );
+      }
       const files = runtime.fileReadPhase(identifier, server);
       const after = await verifyMoves(files, moves);
       await connection
@@ -1609,7 +1644,18 @@ export function createMinecraftModsService(options: {
     },
     async change(context: AuthContext, serverId: string, input: unknown) {
       const value = parse(installedChangeSchema, input);
-      await authorized(context, serverId, true);
+      const runtime = permissionRuntime(
+        options.runtime,
+        `game.minecraft.${directory}`,
+        value.action === 'delete' ? 'delete' : 'write',
+      );
+      const { actor } = await authorized(
+        context,
+        serverId,
+        value.action === 'delete' ? 'delete' : true,
+      );
+      if (value.action === 'delete')
+        await authorizeServer(db, actor, serverId, `game.minecraft.${directory}.delete`);
       await cleanupTasks.get(taskKey(serverId));
       const result = await runtime.fileMutationAccess(
         context,
@@ -1877,7 +1923,16 @@ export function createMinecraftModsService(options: {
     },
     async cancel(context: AuthContext, serverId: string, changeId: string) {
       parse(z.uuid(), changeId);
-      await authorized(context, serverId, true);
+      await authorized(context, serverId);
+      const candidate = await db
+        .selectFrom(tables.changes)
+        .select('action')
+        .where('id', '=', changeId)
+        .where('server_id', '=', serverId)
+        .executeTakeFirst();
+      const action = candidate?.action === 'delete' ? 'delete' : 'write';
+      const runtime = permissionRuntime(options.runtime, `game.minecraft.${directory}`, action);
+      await authorized(context, serverId, action === 'delete' ? 'delete' : true);
       await cleanupTasks.get(taskKey(serverId));
       await runtime.fileMutationAccess(context, serverId, async (_id, connection) => {
         const row = await connection
@@ -1900,7 +1955,9 @@ export function createMinecraftModsService(options: {
     },
     async apply(context: AuthContext, serverId: string, input: unknown) {
       const value = parse(minecraftModApplySchema, input);
-      await authorized(context, serverId, true);
+      const action = mutationAction(await rows(db, serverId));
+      const runtime = permissionRuntime(options.runtime, `game.minecraft.${directory}`, action);
+      await authorized(context, serverId, action === 'delete' ? 'delete' : true);
       await cleanupTasks.get(taskKey(serverId));
       const result = await runtime.fileMutationAccess(
         context,
@@ -1942,6 +1999,7 @@ export function createMinecraftModsService(options: {
             const changes = (await rows(tx, serverId)).filter(
               (row) => row.action !== 'install' || row.revision === value.revision,
             );
+            await authorizeChanges(tx, current, serverId, changes);
             if (!changes.length || changes.some((row) => row.state !== 'ready'))
               throw new DomainError('conflict');
             const currentTarget = (await profile(tx, serverId)).target;
@@ -2013,7 +2071,9 @@ export function createMinecraftModsService(options: {
       return result;
     },
     async recover(context: AuthContext, serverId: string) {
-      await authorized(context, serverId, true);
+      const action = mutationAction(await rows(db, serverId));
+      const runtime = permissionRuntime(options.runtime, `game.minecraft.${directory}`, action);
+      await authorized(context, serverId, action === 'delete' ? 'delete' : true);
       await cleanupTasks.get(taskKey(serverId));
       return runtime.uploadBatchAccess(
         context,

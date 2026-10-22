@@ -28,6 +28,20 @@ createRoot(root).render(
               serverName="Fixture"
               runtimeState="running"
               canManage={!new URLSearchParams(location.search).has('readonly')}
+              permissionKeys={
+                new URLSearchParams(location.search).has('readonly')
+                  ? []
+                  : [
+                      'game.minecraft.modpacks.read',
+                      'game.minecraft.modpacks.write',
+                      ...(new URLSearchParams(location.search).has('nodeleteworlds')
+                        ? []
+                        : ['game.minecraft.worlds.read', 'game.minecraft.worlds.delete']),
+                      ...(new URLSearchParams(location.search).has('nobackup')
+                        ? []
+                        : ['backups.create']),
+                    ]
+              }
               pending={false}
               onAccepted={() => {}}
               reload={async () => {}}

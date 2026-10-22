@@ -1,97 +1,72 @@
-import { useEffect, useRef } from 'react';
-import { Navigate, NavLink, Outlet, useLocation, useMatch, useParams } from 'react-router';
+import { Link, Navigate, Outlet, useLocation, useMatch, useParams } from 'react-router';
 import { ApiError } from '../api/client.js';
 import { ErrorNotice, Loading } from '../components/ui.js';
 import { GameSections } from '../features/game-sections.js';
-import {
-  availableGameSections,
-  gameUiRegistry,
-  getGameSectionView,
-} from '../features/integrations.js';
+import { availableGameSections } from '../features/integrations.js';
 import { ProvisioningHistory } from '../features/provisioning.js';
 import { useServer } from '../features/service-contracts.js';
-import './server-game.css';
 import { useT } from './i18n.js';
+import './server-game.css';
 
 function accessLost(error: unknown) {
   return error instanceof ApiError && [401, 403, 404].includes(error.status);
 }
 
 export function ServerShell() {
-  const location = useLocation(),
-    tabsElement = useRef<HTMLElement>(null);
-  const gameRoute = useMatch('/servers/:serverId/game/:sectionId');
   const statusRoute = useMatch('/servers/:serverId/status');
-  const { serverId = '' } = useParams(),
-    t = useT(),
-    server = useServer(serverId);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reveal the active tab after route or loaded server changes.
-  useEffect(() => {
-    const active = tabsElement.current?.querySelector<HTMLAnchorElement>('[aria-current="page"]');
-    active?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-  }, [location.pathname, server.data?.id]);
+  const { serverId = '' } = useParams();
+  const server = useServer(serverId);
+  const location = useLocation();
+  const t = useT();
   if (server.isPending) return <Loading />;
-  const renderer =
-    server.data && gameRoute
-      ? gameUiRegistry
-          .get(server.data.gameId)
-          ?.descriptor.sections.find(
-            (section) =>
-              section.id === gameRoute.params.sectionId ||
-              section.aliases.includes(gameRoute.params.sectionId ?? ''),
-          )?.renderer
-      : undefined;
-  // A transient background failure must not discard a custom view's request
-  // receipt. Its section boundary shows the error and blocks mutations.
-  if (server.error && (!server.data || !getGameSectionView(renderer) || accessLost(server.error)))
+  if (!server.data || (server.error && accessLost(server.error)))
     return <ErrorNotice error={server.error} retry={() => void server.refetch()} />;
-
-  const value = server.data,
-    base = `/servers/${serverId}`;
-  const tabs: string[][] = [
-    ...(value.capabilities?.console || value.permissions.operate
-      ? [['console', 'web.console']]
+  const base = `/servers/${serverId}`;
+  const settingsSections = availableGameSections(server.data).filter(
+    (s) => s.navigation?.placement === 'settings',
+  );
+  const settingsLinks = [
+    ...(server.data.permissionKeys.includes('settings.read')
+      ? [{ to: `${base}/settings`, label: t('serverSettings.general') }]
       : []),
-    ...(value.capabilities?.files
+    ...settingsSections.map((s) => ({ to: `${base}/game/${s.id}`, label: t(s.titleKey) })),
+    ...(server.data.permissionKeys.includes('settings.read')
       ? [
-          ['files', 'web.files'],
-          ['sftp', 'SFTP'],
+          { to: `${base}/settings/sleep`, label: t('automation.tab.sleep') },
+          ...(server.data.connectionMode === 'gateway' && server.data.capabilities?.gatewayMessages
+            ? [{ to: `${base}/settings/messages`, label: t('automation.tab.messages') }]
+            : []),
         ]
       : []),
-    ...(value.capabilities?.backups ? [['backups', 'web.backups']] : []),
-    ['network', 'web.network'],
-    ['automation', 'web.automation'],
-    ['activity', 'web.activity'],
-    ...(value.permissions.manage ? [['settings', 'web.settings']] : []),
   ];
-  const game = gameUiRegistry.get(value.gameId);
-  const gameSections = availableGameSections(value);
+  const inSettings =
+    location.pathname.startsWith(`${base}/settings`) ||
+    settingsLinks.some((link) => link.to === location.pathname);
+  if (
+    location.pathname === `${base}/settings` &&
+    !server.data.permissionKeys.includes('settings.read') &&
+    settingsLinks[0]
+  )
+    return <Navigate to={settingsLinks[0].to} replace />;
   return (
     <>
-      <nav
-        ref={tabsElement}
-        className="tabs"
-        aria-label={t('web.servers')}
-        onFocusCapture={(event) => {
-          if (event.target instanceof HTMLAnchorElement)
-            event.target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-        }}
-      >
-        {tabs.map(([slug, key]) => (
-          <NavLink key={slug} to={`${base}/${slug}`} end={slug !== 'automation'}>
-            {key === 'SFTP' ? key : t(key ?? '')}
-          </NavLink>
-        ))}
-        {game && Boolean(gameSections?.length) && (
-          <NavLink to={`${base}/game`}>{t(game.descriptor.nameKey)}</NavLink>
-        )}
-        <NavLink to={`${base}/status`} end>
-          {t('web.serverStatus')}
-        </NavLink>
-      </nav>
+      {server.error && <ErrorNotice error={server.error} retry={() => void server.refetch()} />}
+      {inSettings && (
+        <nav className="settings-navigation" aria-label={t('web.settings')}>
+          {settingsLinks.map((link) => (
+            <Link
+              key={link.to}
+              to={link.to}
+              aria-current={location.pathname === link.to ? 'page' : undefined}
+            >
+              {link.label}
+            </Link>
+          ))}
+        </nav>
+      )}
       <Outlet />
       {statusRoute && (
-        <ProvisioningHistory serverId={serverId} operationId={value.activeOperationId} />
+        <ProvisioningHistory serverId={serverId} operationId={server.data.activeOperationId} />
       )}
     </>
   );
@@ -99,20 +74,11 @@ export function ServerShell() {
 export function ServerGameSection() {
   const { serverId = '', sectionId = '' } = useParams(),
     location = useLocation(),
-    server = useServer(serverId),
-    t = useT();
+    server = useServer(serverId);
   if (server.isPending) return <Loading />;
-  const renderer =
-    server.data &&
-    gameUiRegistry
-      .get(server.data.gameId)
-      ?.descriptor.sections.find(
-        (section) => section.id === sectionId || section.aliases.includes(sectionId),
-      )?.renderer;
-  if (server.error && (!server.data || !getGameSectionView(renderer) || accessLost(server.error)))
+  if (server.error && (!server.data || accessLost(server.error)))
     return <ErrorNotice error={server.error} retry={() => void server.refetch()} />;
 
-  const game = gameUiRegistry.get(server.data.gameId);
   const sections = availableGameSections(server.data);
   if (!sectionId && sections?.[0]) return <Navigate to={sections[0].id} replace />;
   const canonical = sections.find((section) => section.aliases.includes(sectionId));
@@ -128,23 +94,12 @@ export function ServerGameSection() {
       />
     );
   return (
-    <>
-      {game && Boolean(sections?.length) && (
-        <nav className="tabs game-section-tabs" aria-label={t(game.descriptor.nameKey)}>
-          {sections?.map((section) => (
-            <NavLink key={section.id} to={`/servers/${serverId}/game/${section.id}`} end>
-              {t(section.titleKey)}
-            </NavLink>
-          ))}
-        </nav>
-      )}
-      <GameSections
-        key={`${serverId}:${sectionId}`}
-        serverId={serverId}
-        sectionId={sectionId}
-        gameId={server.data.gameId}
-      />
-    </>
+    <GameSections
+      key={`${serverId}:${sectionId}`}
+      serverId={serverId}
+      sectionId={sectionId}
+      gameId={server.data.gameId}
+    />
   );
 }
 
@@ -156,7 +111,11 @@ export function ServerIndex() {
   return (
     <Navigate
       to={
-        server.data.capabilities?.console || server.data.permissions.operate ? 'console' : 'status'
+        (server.data.capabilities?.console &&
+          server.data.permissionKeys.includes('console.read')) ||
+        server.data.permissionKeys.includes('console.power')
+          ? 'console'
+          : 'status'
       }
       replace
     />

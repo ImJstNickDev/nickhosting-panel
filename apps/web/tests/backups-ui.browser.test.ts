@@ -25,6 +25,7 @@ const fixture = (number = 1) => ({
 });
 
 describe('Backups interface (isolated API responses, real rendered component)', () => {
+  let permissionKeys: string[] | undefined;
   let vite: ViteDevServer, browser: Browser, context: BrowserContext, page: Page, origin: string;
   let backups: ReturnType<typeof fixture>[],
     writes: { method: string; body: Record<string, unknown> }[],
@@ -50,7 +51,7 @@ describe('Backups interface (isolated API responses, real rendered component)', 
       root: `${process.cwd()}/apps/web`,
       configFile: false,
       cacheDir: `${process.cwd()}/.codex/local/backups-ui-vite`,
-      server: { host: '127.0.0.1', port: 0 },
+      server: { host: '127.0.0.1', port: 0, hmr: false, watch: null },
     });
     await vite.listen();
     origin = vite.resolvedUrls?.local[0] ?? '';
@@ -74,6 +75,7 @@ describe('Backups interface (isolated API responses, real rendered component)', 
     required = false;
     limit = 5;
     manage = true;
+    permissionKeys = undefined;
     listReads = 0;
     jobState = 'queued';
     activeOperationId = null;
@@ -154,6 +156,10 @@ describe('Backups interface (isolated API responses, real rendered component)', 
             grantBlockedReason: null,
           },
         });
+      if (path.endsWith('/schedules/preview'))
+        return route.fulfill({
+          json: { nextRuns: [new Date(Date.now() + 3600000).toISOString()] },
+        });
       if (path.endsWith('/schedules') && method === 'GET') return route.fulfill({ json: [] });
       if (path.endsWith('/transfers'))
         return route.fulfill({
@@ -172,7 +178,25 @@ describe('Backups interface (isolated API responses, real rendered component)', 
         return route.fulfill({
           json: {
             name: 'Fixture server',
+            capabilities: { backups: true },
             permissions: { manage },
+            permissionKeys:
+              permissionKeys ??
+              (manage
+                ? [
+                    'backups.read',
+                    'backups.create',
+                    'backups.download',
+                    'backups.restore',
+                    'backups.delete',
+                    'schedules.read',
+                    'schedules.write',
+                    'schedules.run',
+                    'schedules.delete',
+                    'settings.read',
+                    'settings.write',
+                  ]
+                : ['backups.read', 'backups.download', 'schedules.read']),
             runtimeState: running ? 'running' : 'offline',
             activeOperationId,
           },
@@ -232,6 +256,26 @@ describe('Backups interface (isolated API responses, real rendered component)', 
     page.evaluate(() =>
       (window as unknown as { backupEvents: { listener?: () => void } }).backupEvents.listener?.(),
     );
+
+  it('exposes only the additional backup action that a direct grant permits', async () => {
+    manage = false;
+    permissionKeys = ['backups.read', 'backups.delete'];
+    await open();
+    await check(
+      page.getByRole('button', { name: 'Delete Before world update', exact: true }),
+    ).toBeVisible();
+    for (const name of [
+      'Create backup',
+      'Restore Before world update',
+      'Download Before world update',
+      'Rename Before world update',
+    ])
+      await check(page.getByRole('button', { name, exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Delete Before world update', exact: true }).click();
+    await check(page.getByRole('dialog')).toBeVisible();
+    await page.keyboard.press('Escape');
+    expect(writes).toEqual([]);
+  });
 
   it('renders responsive accessible EN/IT tables and locked actions', async () => {
     await open();
@@ -496,6 +540,7 @@ describe('Backups interface (isolated API responses, real rendered component)', 
     await dialog.getByRole('combobox', { name: 'Repeat', exact: true }).selectOption('interval');
     await dialog.getByRole('spinbutton', { name: 'Interval (minutes)', exact: true }).fill('1440');
     await dialog.getByRole('combobox', { name: 'Server during backup' }).selectOption('live');
+    await dialog.locator('summary').click();
     const retention = dialog.getByRole('checkbox', { name: 'Remove older automatic backups' });
     await check(retention).not.toBeChecked();
     await retention.check();
@@ -546,6 +591,7 @@ describe('Backups interface (isolated API responses, real rendered component)', 
     const mode = dialog.getByRole('combobox', { name: 'Server during backup' });
     await check(mode).toHaveValue('auto');
     await check(mode.locator('option[value=live]')).toHaveCount(0);
+    await dialog.locator('summary').click();
     await check(
       dialog.getByRole('checkbox', { name: 'Remove older automatic backups' }),
     ).toBeDisabled();
@@ -569,6 +615,7 @@ describe('Backups interface (isolated API responses, real rendered component)', 
     const dialog = page.getByRole('dialog');
     await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('Offline backup');
     await dialog.getByRole('combobox', { name: 'Server during backup' }).selectOption('offline');
+    await dialog.locator('summary').click();
     await dialog.getByRole('checkbox', { name: 'Remove older automatic backups' }).check();
     const keep = dialog.getByRole('spinbutton', { name: 'Successful backups to keep' });
     await check(keep).toHaveValue('7');

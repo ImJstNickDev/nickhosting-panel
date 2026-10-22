@@ -24,7 +24,7 @@ import {
   reconcileManagedServer,
 } from '@nickhosting/server-management';
 import { sql } from 'kysely';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../../packages/auth/src/test-fixtures.js';
 import { createDownloadProxy } from '../../../packages/pterodactyl-adapter/src/downloads.js';
 import { createUploadProxy } from '../../../packages/pterodactyl-adapter/src/uploads.js';
@@ -437,6 +437,12 @@ describe('M2 Hono API with real invitation, password and session authentication'
   beforeEach(async () => {
     await f.observe();
   });
+  afterEach(async () => {
+    // Cases share this isolated schema; an HTTP-created unlimited server must not
+    // invalidate the finite legacy commitment assumed by the next case.
+    await sql`update managed_servers set limits=jsonb_set(limits,'{disk}','64'::jsonb)
+      where owner_id=${userId} and (limits->>'disk')::numeric=0`.execute(f.db);
+  });
   afterAll(async () => {
     await database?.destroy();
   });
@@ -580,10 +586,19 @@ describe('M2 Hono API with real invitation, password and session authentication'
     }
   });
   it('saves a 2000-allocation Owner pool with bounded JSON, authentication and Origin checks', async () => {
+    // Pool replacement must use an unused node; earlier cases own active servers.
+    const target = {
+      nodeId: randomUUID(),
+      hostId: f.hostId,
+      providerNodeId: f.providerNodeId + 10000,
+    };
+    await sql`insert into managed_nodes select (jsonb_populate_record(null::managed_nodes, to_jsonb(node) || jsonb_build_object('id', ${target.nodeId}::text, 'pterodactyl_node_id', ${target.providerNodeId}::integer))).* from managed_nodes node where id=${f.nodeId}`.execute(
+      f.db,
+    );
     const previous = await f.db
       .selectFrom('managed_nodes')
       .selectAll()
-      .where('id', '=', f.nodeId)
+      .where('id', '=', target.nodeId)
       .executeTakeFirstOrThrow();
     const inventory = Array.from({ length: 2000 }, (_, index) => ({
       id: 50000 + index,
@@ -592,12 +607,16 @@ describe('M2 Hono API with real invitation, password and session authentication'
       assigned: false,
     }));
     const originalList = f.adapter.listAllocations;
+    const originalGetNode = f.adapter.getNode;
+    f.adapter.getNode = vi.fn(
+      async () => ({ id: target.providerNodeId }) as Awaited<ReturnType<typeof originalGetNode>>,
+    );
     const list = vi.fn(async () => inventory);
     f.adapter.listAllocations = list;
     const payload = {
-      id: f.nodeId,
-      physicalHostId: f.hostId,
-      pterodactylNodeId: f.providerNodeId,
+      id: target.nodeId,
+      physicalHostId: target.hostId,
+      pterodactylNodeId: target.providerNodeId,
       provisionUserId: 1,
       backendAllocationPool: {
         allocations: inventory.map((a) => ({ allocationId: a.id, address: a.ip, port: a.port })),
@@ -637,13 +656,14 @@ describe('M2 Hono API with real invitation, password and session authentication'
           await f.db
             .selectFrom('managed_nodes')
             .select('backend_allocation_pool')
-            .where('id', '=', f.nodeId)
+            .where('id', '=', target.nodeId)
             .executeTakeFirstOrThrow()
         ).backend_allocation_pool,
       ).toEqual(payload.backendAllocationPool);
       expect(list).toHaveBeenCalled();
     } finally {
       f.adapter.listAllocations = originalList;
+      f.adapter.getNode = originalGetNode;
       await f.db
         .updateTable('managed_nodes')
         .set({
@@ -651,8 +671,9 @@ describe('M2 Hono API with real invitation, password and session authentication'
           installer_memory_mib: previous.installer_memory_mib,
           installer_cpu_percent: previous.installer_cpu_percent,
         })
-        .where('id', '=', f.nodeId)
+        .where('id', '=', target.nodeId)
         .execute();
+      await f.db.deleteFrom('managed_nodes').where('id', '=', target.nodeId).execute();
     }
   });
   it('exposes and enforces the environment-locked physical memory bound over HTTP', async () => {
@@ -883,7 +904,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
         })
       ).status,
     ).toBe(204);
-    expect(identity.mock.calls.length - identityBefore).toBe(2);
+    expect(identity.mock.calls.length - identityBefore).toBe(1);
   });
   it('authorizes directory batches once per request and keeps metadata prefetch separate from downloads', async () => {
     const server = await f.server();
@@ -933,7 +954,11 @@ describe('M2 Hono API with real invitation, password and session authentication'
           { directory: 'logs', files: [fileEntry('a.txt')] },
         ],
       });
-      expect(batch).toHaveBeenCalledExactlyOnceWith(expect.any(String), ['world', 'logs']);
+      expect(batch).toHaveBeenCalledExactlyOnceWith(
+        expect.any(String),
+        ['world', 'logs'],
+        undefined,
+      );
       expect(downloads).not.toHaveBeenCalled();
       for (const directories of [[], ['world', 'world'], ['../world'], Array(49).fill('world')])
         expect((await request(user, path, { directories })).status).toBe(400);
@@ -992,6 +1017,107 @@ describe('M2 Hono API with real invitation, password and session authentication'
     expect(own.ports[0]).toHaveProperty('port');
     expect(JSON.stringify(own)).not.toMatch(/pterodactyl|external_id|address|provision_user/);
   });
+  it('enforces direct granular file, console and backup grants through real authenticated routes', async () => {
+    const server = await f.server();
+    const subuser = `/v1/platform/servers/${server}/subusers/${peerId}`;
+    const grant = async (permissionKeys: string[]) => {
+      const result = await request(user, subuser, { permissionKeys }, { method: 'PUT' });
+      expect(result.status).toBe(200);
+    };
+    await grant(['files.read']);
+    expect((await request(peer, `/v1/servers/${server}/files`)).status).toBe(200);
+    for (const suffix of ['/backups', '/resources', '/console'])
+      expect((await request(peer, `/v1/servers/${server}${suffix}`)).status).toBe(403);
+    expect(
+      (
+        await request(peer, `/v1/servers/${server}/files`, {
+          action: 'write',
+          path: 'fixture.txt',
+          content: 'hello',
+        })
+      ).status,
+    ).toBe(403);
+    await grant(['files.read', 'files.write']);
+    expect(
+      (
+        await request(peer, `/v1/servers/${server}/files`, {
+          action: 'write',
+          path: 'fixture.txt',
+          content: 'hello',
+        })
+      ).status,
+    ).toBe(204);
+    expect(
+      (
+        await request(peer, `/v1/servers/${server}/files`, {
+          action: 'rename',
+          root: '',
+          files: [{ from: 'server.properties', to: 'moved.properties' }],
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await request(peer, `/v1/servers/${server}/files`, {
+          action: 'delete',
+          root: '',
+          files: ['server.properties'],
+          confirm: true,
+        })
+      ).status,
+    ).toBe(403);
+    await grant(['console.read']);
+    const consoleResponse = await request(peer, `/v1/servers/${server}/console`);
+    expect(consoleResponse.status).toBe(200);
+    await consoleResponse.body?.cancel();
+    expect((await request(peer, `/v1/servers/${server}/console`, { command: 'list' })).status).toBe(
+      403,
+    );
+    expect(
+      (
+        await request(peer, `/v1/servers/${server}/operations`, {
+          action: 'stop',
+          idempotencyKey: randomUUID(),
+        })
+      ).status,
+    ).toBe(403);
+    await grant(['console.read', 'console.command']);
+    expect((await request(peer, `/v1/servers/${server}/console`, { command: 'list' })).status).toBe(
+      204,
+    );
+    await grant(['backups.read']);
+    expect((await request(peer, `/v1/servers/${server}/backups`)).status).toBe(200);
+    expect((await request(peer, `/v1/servers/${server}/backups/${backupId}/download`)).status).toBe(
+      403,
+    );
+    expect(
+      (
+        await request(
+          peer,
+          `/v1/servers/${server}/backups/${backupId}`,
+          { confirm: true },
+          { method: 'DELETE' },
+        )
+      ).status,
+    ).toBe(403);
+    await grant(['backups.read', 'backups.download']);
+    const downloaded = await request(peer, `/v1/servers/${server}/backups/${backupId}/download`);
+    expect(downloaded.status).toBe(200);
+    await downloaded.arrayBuffer();
+    expect(
+      (
+        await request(
+          peer,
+          `/v1/servers/${server}/backups/${backupId}`,
+          { name: 'changed' },
+          { method: 'PATCH' },
+        )
+      ).status,
+    ).toBe(403);
+    expect((await request(user, subuser, undefined, { method: 'DELETE' })).status).toBe(200);
+    expect((await request(peer, `/v1/servers/${server}/backups`)).status).toBe(403);
+  });
+
   it('applies current project viewer/operator/manager rights to files, console and backups', async () => {
     const projectResponse = await request(user, '/v1/projects', { name: 'API project' });
     expect(projectResponse.status).toBe(201);
@@ -2306,6 +2432,15 @@ describe('M2 Hono API with real invitation, password and session authentication'
       fetcher: async (url, init) => {
         const target = new URL(String(url));
         if (target.origin === 'https://panel.example.test') {
+          if (target.pathname.endsWith('/files/list'))
+            return Response.json({ object: 'list', data: [] });
+          if (target.pathname.endsWith('/files/rename')) {
+            const move = JSON.parse(String(init?.body)).files[0] as { from: string; to: string };
+            expect(move.from).toMatch(/^world\/\.nh-upload-[0-9a-f-]+\.pending$/);
+            uploaded.push(move.to.slice(move.to.lastIndexOf('/') + 1));
+            return new Response(null, { status: 204 });
+          }
+          if (target.pathname.endsWith('/files/delete')) return new Response(null, { status: 204 });
           if (target.pathname.endsWith('/transfer-settings')) {
             expect(init?.method).toBe('GET');
             return Response.json({
@@ -2339,7 +2474,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
         const content = await new Response(init?.body).text();
         const filename = /filename="([^"]+)"/.exec(content)?.[1];
         if (!filename) throw new Error('Missing multipart fixture filename');
-        uploaded.push(filename);
+        expect(filename).toMatch(/^\.nh-upload-[0-9a-f-]+\.pending$/);
         return new Response(null, { status: 204 });
       },
     });
@@ -3753,7 +3888,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
     }
   });
 
-  it('settles two cancelled HTTP uploads after multipart rejection and accepts another batch', async () => {
+  it('settles two cancelled HTTP uploads after staging acknowledgement and accepts another batch', async () => {
     const serverId = await f.server();
     const batchId = randomUUID();
     const paths = ['cancel-a.bin', 'cancel-b.bin'];
@@ -3761,30 +3896,36 @@ describe('M2 Hono API with real invitation, password and session authentication'
     const original = uploadFile.getMockImplementation();
     let entered = 0;
     let writes = 0;
-    const proxy = createUploadProxy({
+    const staged = createPterodactylAdapter({
       baseURL: 'https://panel.example.test',
       applicationKey: 'isolated-key',
+      clientKey: 'isolated-client',
       uploadOrigins: ['https://wings.example.test'],
-      fetcher: async (_url, init) => {
-        entered++;
-        try {
-          await new Request('https://wings.example.test/upload/file', {
-            ...init,
-            duplex: 'half',
-          } as RequestInit).formData();
-        } catch {
-          return Response.json(
-            { error: 'Failed to get multipart form data from request.' },
-            { status: 400 },
-          );
+      fetcher: async (url, init) => {
+        const target = new URL(String(url));
+        if (target.pathname.endsWith('/files/list'))
+          return Response.json({ object: 'list', data: [] });
+        if (target.pathname.endsWith('/files/upload'))
+          return Response.json({ attributes: { url: 'https://wings.example.test/upload/file' } });
+        if (target.pathname.endsWith('/files/delete')) {
+          const input = JSON.parse(String(init?.body));
+          expect(input.files).toEqual([expect.stringMatching(/^\.nh-upload-[0-9a-f-]+\.pending$/)]);
+          return new Response(null, { status: 204 });
         }
-        writes++;
+        if (target.pathname.endsWith('/files/rename')) {
+          writes++;
+          return new Response(null, { status: 204 });
+        }
+        expect(target.origin).toBe('https://wings.example.test');
+        entered++;
+        await new Request('https://wings.example.test/upload/file', {
+          ...init,
+          duplex: 'half',
+        } as RequestInit).formData();
         return new Response(null, { status: 204 });
       },
     });
-    uploadFile.mockImplementation((_id, path, input) =>
-      proxy('https://wings.example.test/upload/file', path, input),
-    );
+    uploadFile.mockImplementation((...args) => staged.uploadFile(...args));
     const server = createServer(getRequestListener(app.fetch));
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');

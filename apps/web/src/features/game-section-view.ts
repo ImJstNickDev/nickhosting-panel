@@ -16,6 +16,7 @@ export interface GameSectionViewProps {
   serverName: string;
   runtimeState: string;
   canManage: boolean;
+  permissionKeys: readonly string[];
   pending: boolean;
   /** The server's exact active operation is confirmed paused; only its recovery may proceed. */
   recoverableOperationId?: string;

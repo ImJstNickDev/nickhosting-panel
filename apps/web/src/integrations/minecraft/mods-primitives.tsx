@@ -3,7 +3,7 @@ import type {
   MinecraftModMetadata,
   ModCatalogProject,
 } from '../../../../../games/minecraft/src/ui/mods-controller.js';
-import { Tooltip } from '../../components/tooltip.js';
+import { IconAction, Pagination } from '../../components/workspace-controls.js';
 import { useAddonsT } from './addons-context.js';
 
 export const modsKey = (name: string) => `games.minecraft.mods.${name}`;
@@ -115,19 +115,12 @@ export function ModsAction({
   destructive?: boolean;
 }) {
   return (
-    <Tooltip content={label}>
-      <button
-        type="button"
-        className={`mods-icon-action${destructive ? ' destructive' : ''}`}
-        aria-label={label}
-        disabled={disabled}
-        onClick={onClick}
-      >
-        <ModsIcon name={icon} />
-      </button>
-    </Tooltip>
+    <IconAction label={label} disabled={disabled} onClick={onClick} destructive={destructive}>
+      <ModsIcon name={icon} />
+    </IconAction>
   );
 }
+
 export function ModsCheckbox({
   label,
   checked,
@@ -238,23 +231,19 @@ export function ModsPagination({
   const t = useAddonsT();
   const pages = Math.max(1, Math.ceil(total / 20));
   return (
-    <div className="mods-pagination">
-      <ModsAction
-        icon="back"
-        label={t(modsKey('previous'))}
-        disabled={offset === 0}
-        onClick={() => onChange(Math.max(0, offset - 20))}
-      />
-      <span>{t(modsKey('page'), { page: Math.floor(offset / 20) + 1, pages })}</span>
-      <ModsAction
-        icon="next"
-        label={t(modsKey('next'))}
-        disabled={offset + 20 >= total || offset >= 9980}
-        onClick={() => onChange(offset + 20)}
-      />
-    </div>
+    <Pagination
+      label={t('web.pagination')}
+      previousLabel={t(modsKey('previous'))}
+      nextLabel={t(modsKey('next'))}
+      summary={t(modsKey('page'), { page: Math.floor(offset / 20) + 1, pages })}
+      canPrevious={offset > 0}
+      canNext={offset + 20 < total && offset < 9980}
+      onPrevious={() => onChange(Math.max(0, offset - 20))}
+      onNext={() => onChange(offset + 20)}
+    />
   );
 }
+
 export function projectIdentity(project: Pick<ModCatalogProject, 'provider' | 'id'>) {
   return `${project.provider}:${project.id}`;
 }

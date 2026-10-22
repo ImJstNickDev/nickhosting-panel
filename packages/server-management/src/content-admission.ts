@@ -14,6 +14,7 @@ import {
   getSettings,
   recordAudit,
 } from '@nickhosting/database';
+import { minecraftContentPermissionKeys } from '@nickhosting/minecraft';
 import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources } from './admission.js';
@@ -183,6 +184,7 @@ export async function reserveContentStaging(
         'server.id',
         'server.active_operation_id',
         'operation.action',
+        'operation.plan',
         'mapping.game_id',
       ])
       .where('job.id', '=', jobId)
@@ -198,7 +200,14 @@ export async function reserveContentStaging(
       !['provision', 'minecraft-content', 'reinstall', 'wipe'].includes(job.action)
     )
       throw new DomainError('forbidden');
-    await authorizeServer(tx, context, serverId, 'server:manage');
+    if (job.action === 'minecraft-content') {
+      const content = job.plan.minecraftContent as
+        | { command?: Parameters<typeof minecraftContentPermissionKeys>[0] }
+        | undefined;
+      if (!content?.command) throw new DomainError('forbidden');
+      for (const permission of minecraftContentPermissionKeys(content.command))
+        await authorizeServer(tx, context, serverId, permission);
+    } else await authorizeServer(tx, context, serverId, 'server:manage');
     const { values } = await getSettings(tx, env);
     const root = contentStorageRoot(values.contentWorkRoot, env);
     const bytes = BigInt(expandedBytes) + 65536n;

@@ -43,9 +43,37 @@ defines permission, uncertainty, stream and configuration behavior. These
 implementation notes do not replace the acceptance standards below or claim the
 pending final consolidated review has passed.
 
+### Server workspace (2026-10-22)
+
+Inside a server, the left sidebar shows server identity, an All servers exit and
+three groups: Your server (Console, Files, Activity), Tools (integration-declared
+Players, Worlds, Mods, Plugins, Datapacks, Modpacks, Backups and Schedules), and
+Config (Network, Settings, Subusers). Capabilities, runtime and effective granular
+permissions filter entries. The compact rail and mobile drawer preserve the same
+routes and accessible names. Native and game top-level tabs are removed.
+
+Settings has local route navigation for General, game properties, Sleep/Wake and
+Gateway messages when available. Existing automation sleep/message URLs redirect
+to Settings; Schedules remains at `/automation`. Console links to Status/details.
+SFTP opens in a Files dialog; `/sftp` redirects to `/files?sftp=open`.
+
+The shared workspace controls provide icon actions, search, pagination and switches;
+game listings keep their own domain metadata while using compact bounded surfaces.
+Console restart/kill and schedule run/delete share the same confirmation component,
+with errors inside the dialog and dismissal blocked during submission. Settings,
+game forms, Gateway messages and Subusers register with a single router navigation
+guard; Files retains its specialized save/transfer confirmation through that guard.
+Transient descriptor failures keep loaded form state and display a retry action.
+
+Subusers is independent of project creation. Its matrix presents READ, WRITE and
+ADDITIONAL as columns of independent operations, with inherited grants and their
+project shown separately. Delegated editors cannot grant beyond their own authority,
+change themselves or edit users with broader effective access. See
+[server rework](M5-SERVER-REWORK.md) for the scope and evidence.
+
 ### Personal settings
 
-Personal Settings uses the same route-based tab navigation as server pages:
+Personal Settings uses route-based local navigation:
 Profile at `/settings` and Security at `/settings/security`. Profile contains name,
 read-only username, language, email and linked login methods; Security contains
 password, two-factor authentication, passkeys and sessions. Sidebar/account-menu
@@ -122,7 +150,7 @@ layouts use the same controls as the rest of the WebPanel.
 
 ### SFTP interface
 
-SFTP uses the Files/Console visual conventions: a compact connection summary,
+The SFTP dialog in Files uses the Files/Console visual conventions: a compact connection summary,
 copyable `sftp://` host and separate port, and an always-visible additional-access
 table with quiet icon actions. Revoked accesses are hidden initially; the keyboard-
 accessible Show revoked switch filters locally without changing quota accounting.
@@ -238,7 +266,7 @@ sits beside seven compact resource cards: Address, Uptime, CPU Load, Memory, Dis
 Network (Inbound) and Network (Outbound). The three power buttons sit above that
 column; the card column and terminal share both top and bottom edges. The server
 name appears below the tabs, left-aligned with the terminal and vertically centered
-with the power controls. Other server tabs omit the repeated server-name heading and retain their section titles. On narrow screens the
+with the power controls. Other server sections omit the repeated server-name heading and retain their section titles. On narrow screens the
 controls precede the terminal and resource cards follow it. Uptime uses measured
 provider milliseconds; only confirmed offline state gets an Offline value and red
 icon background. Failed, missing or expired readings remain unavailable. Cards and

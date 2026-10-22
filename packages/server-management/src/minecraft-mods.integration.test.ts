@@ -20,7 +20,7 @@ import { ZipFile } from 'yazl';
 import { createMinecraftModsService } from './minecraft-mods.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
 import { createManagementRuntime } from './runtime.js';
-import { managementFixture } from './test-fixtures.js';
+import { minecraftManagementFixture } from './test-fixtures.js';
 
 // Real isolated PostgreSQL, authorization/runtime and source ingestion. Only the
 // external provider's filesystem/console is substituted; no live game resources.
@@ -42,7 +42,7 @@ describe('Minecraft Mods durable preparation and publication', () => {
   });
 
   async function fixture(running = true, kind: 'mod' | 'plugin' = 'mod') {
-    const f = await managementFixture(database.db, { interactive: true });
+    const f = await minecraftManagementFixture(database.db, { interactive: true });
     const serverId = await f.server();
     await f.db
       .updateTable('managed_servers')
@@ -1489,6 +1489,57 @@ describe('Minecraft Mods durable preparation and publication', () => {
       }),
     ).rejects.toBeDefined();
     expect(f.renameFiles).not.toHaveBeenCalled();
+  });
+  it('separates direct Mods delete from write and rechecks revocation before publication', async () => {
+    const f = await fixture();
+    const peer = await minecraftManagementFixture(f.db, { interactive: true });
+    await installedMod(f, 'mods/deletable.jar', 'deletable');
+    const grant = async (keys: string[]) =>
+      f.db
+        .insertInto('server_subusers')
+        .values({
+          server_id: f.serverId,
+          user_id: peer.context.subjectUserId,
+          created_by: f.context.actorUserId,
+          permission_keys: JSON.stringify(keys),
+        })
+        .onConflict((c) =>
+          c
+            .columns(['server_id', 'user_id'])
+            .doUpdateSet({ permission_keys: JSON.stringify(keys) }),
+        )
+        .execute();
+    const change = { path: 'mods/deletable.jar', action: 'delete', idempotencyKey: randomUUID() };
+    await grant(['game.minecraft.mods.read', 'game.minecraft.mods.write']);
+    await expect(f.service.change(peer.context, f.serverId, change)).rejects.toMatchObject({
+      code: 'forbidden',
+    });
+    await grant(['game.minecraft.mods.read', 'game.minecraft.mods.delete']);
+    await f.service.change(peer.context, f.serverId, change);
+    await expect(
+      f.service.toggle(peer.context, f.serverId, {
+        path: 'mods/deletable.jar',
+        action: 'disable',
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    const snapshot = await f.service.snapshot(peer.context, f.serverId);
+    await grant(['game.minecraft.mods.read']);
+    await expect(
+      f.service.apply(peer.context, f.serverId, {
+        revision: snapshot.revision,
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    expect(f.renameFiles).not.toHaveBeenCalled();
+    await grant(['game.minecraft.mods.read', 'game.minecraft.mods.delete']);
+    await f.service.apply(peer.context, f.serverId, {
+      revision: snapshot.revision,
+      idempotencyKey: randomUUID(),
+    });
+    await f.service.drain();
+    expect(f.files.has('mods/deletable.jar')).toBe(false);
+    expect(f.renameFiles).toHaveBeenCalledOnce();
   });
   it('requires manager authority and live session before changing a selection', async () => {
     const f = await catalogFixture();

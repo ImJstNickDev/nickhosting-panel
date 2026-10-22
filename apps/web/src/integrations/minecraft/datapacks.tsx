@@ -10,8 +10,8 @@ import { Link } from 'react-router';
 import { ApiError, idempotencyKey, queryClient } from '../../api/client.js';
 import { hashFile } from '../../api/hash.js';
 import { useT } from '../../app/i18n.js';
-import { Tooltip } from '../../components/tooltip.js';
 import { ConfirmDialog, ErrorNotice } from '../../components/ui.js';
+import { IconAction, Pagination, SearchField } from '../../components/workspace-controls.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { gameUiClient } from '../../features/integrations.js';
 import { contentPreparationErrorKey } from './content-preparation-error.js';
@@ -146,7 +146,19 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
   });
   const data = inventory.data;
   const supported = data?.installed && data.supported;
-  const disabled = !props.canManage || !supported || props.pending || Boolean(busy);
+  const canWrite = props.permissionKeys.includes('game.minecraft.datapacks.write');
+  const canDelete = props.permissionKeys.includes('game.minecraft.datapacks.delete');
+  const browseButton = useRef<HTMLButtonElement>(null);
+  const disabled = !supported || props.pending || Boolean(busy);
+  const canApply = changesPermit();
+  function changesPermit() {
+    return (
+      (data?.changes ?? []).every((change) =>
+        change.action === 'delete' ? canDelete : canWrite,
+      ) &&
+      ((data?.changes.length ?? 0) > 0 || canWrite)
+    );
+  }
   const changes = data?.changes ?? [];
   const nativePending = changes.some(
     (change) =>
@@ -167,6 +179,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
         data.running &&
         world === data.selectedWorld)) &&
     !disabled &&
+    canApply &&
     !progress &&
     !preparing &&
     !preparations.some(
@@ -186,8 +199,8 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
     };
   }, []);
   useEffect(() => {
-    if (!props.canManage) transfer.current?.abort();
-  }, [props.canManage]);
+    if (!canWrite) transfer.current?.abort();
+  }, [canWrite]);
   function requestKey(identity: string) {
     const value = requestKeys.current.get(identity) ?? idempotencyKey();
     requestKeys.current.set(identity, value);
@@ -324,6 +337,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
     }
   }
   async function apply() {
+    if (!canApply) return;
     const confirmedIds = new Set(changes.map((change) => change.id));
     await mutate(`apply:${world}`, async () => {
       const result = await controller.applyDatapacks(props.serverId, {
@@ -345,6 +359,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
     });
   }
   async function stage(action: Action, pack?: Pack, sourceId?: string, name?: string) {
+    if (action === 'delete' ? !canDelete : !canWrite) return;
     const identity = `${world}:${action}:${pack?.path ?? sourceId ?? name}`;
     await mutate(identity, () =>
       controller.datapackChange(props.serverId, {
@@ -358,7 +373,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
     );
   }
   async function upload(files: FileList | null, folder = false) {
-    if (disabled || nativePending || transfer.current || !files?.length) return;
+    if (disabled || !canWrite || nativePending || transfer.current || !files?.length) return;
     const first = files[0];
     if (!first) return;
     const selectedWorld = world;
@@ -423,25 +438,26 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
     name: 'upload' | 'folder' | 'browse' | 'refresh',
     icon: Parameters<typeof DatapackIcon>[0]['name'],
     onClick: () => void,
-    blocked = disabled || nativePending,
+    blocked = disabled || !canWrite || nativePending,
   ) {
     return (
-      <Tooltip content={t(key(name))}>
-        <button
-          type="button"
-          className="datapack-action"
-          aria-label={t(key(name))}
-          onClick={onClick}
-          disabled={blocked}
-        >
-          <DatapackIcon name={icon} />
-        </button>
-      </Tooltip>
+      <IconAction
+        tooltip={t(key(name))}
+        ref={name === 'browse' ? browseButton : undefined}
+        label={t(key(name))}
+        onClick={onClick}
+        disabled={blocked}
+      >
+        <DatapackIcon name={icon} />
+      </IconAction>
     );
   }
   if (data && !data.worlds.length && !inventory.error)
     return (
-      <section className="minecraft-datapacks" aria-label={t('games.minecraft.sections.datapacks')}>
+      <section
+        className="workspace-surface minecraft-datapacks"
+        aria-label={t('games.minecraft.sections.datapacks')}
+      >
         <div className="datapack-no-worlds" role="status">
           <DatapackIcon name="world" />
           <p>{t(key('noWorlds'))}</p>
@@ -449,7 +465,10 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
       </section>
     );
   return (
-    <section className="minecraft-datapacks" aria-label={t('games.minecraft.sections.datapacks')}>
+    <section
+      className="workspace-surface minecraft-datapacks"
+      aria-label={t('games.minecraft.sections.datapacks')}
+    >
       <div hidden={catalog}>
         <div className="datapack-toolbar">
           <label className="datapack-world">
@@ -472,19 +491,15 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
               ))}
             </select>
           </label>
-          <div className="datapack-search">
-            <DatapackIcon name="search" />
-            <input
-              type="search"
-              value={search}
-              placeholder={t(key('search'))}
-              aria-label={t(key('search'))}
-              onChange={(event) => {
-                setSearch(event.target.value);
-                setPage(0);
-              }}
-            />
-          </div>
+          <SearchField
+            value={search}
+            placeholder={t(key('search'))}
+            label={t(key('search'))}
+            onChange={(event) => {
+              setSearch(event.target.value);
+              setPage(0);
+            }}
+          />
           <div className="datapack-tools">
             {action('browse', 'search', () => setCatalog(true))}
             {action(
@@ -494,13 +509,13 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
                 replacement.current = undefined;
                 picker.current?.click();
               },
-              disabled || nativePending || Boolean(progress) || preparing,
+              disabled || !canWrite || nativePending || Boolean(progress) || preparing,
             )}
             {action(
               'folder',
               'folder',
               () => folderPicker.current?.click(),
-              disabled || nativePending || Boolean(progress) || preparing,
+              disabled || !canWrite || nativePending || Boolean(progress) || preparing,
             )}
             {action(
               'refresh',
@@ -559,16 +574,13 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
                   />
                 ) : null}
                 {progress.phase !== 'staging' && (
-                  <Tooltip content={t(key('cancelUpload'))}>
-                    <button
-                      type="button"
-                      className="datapack-action"
-                      aria-label={t(key('cancelUpload'))}
-                      onClick={() => transfer.current?.abort()}
-                    >
-                      <DatapackIcon name="close" />
-                    </button>
-                  </Tooltip>
+                  <IconAction
+                    tooltip={t(key('cancelUpload'))}
+                    label={t(key('cancelUpload'))}
+                    onClick={() => transfer.current?.abort()}
+                  >
+                    <DatapackIcon name="close" />
+                  </IconAction>
                 )}
               </div>
             )}
@@ -598,77 +610,66 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
                         ))}
                       </span>
                       {item.plan && (
-                        <Tooltip content={t(key('dependencies.details'))}>
-                          <button
-                            type="button"
-                            className="datapack-action"
-                            aria-label={t(key('actionFor'), {
-                              action: t(key('dependencies.details')),
-                              name: item.file.name,
-                            })}
-                            disabled={['queued', 'preparing'].includes(item.state)}
-                            onClick={() => {
-                              setCatalog(false);
-                              setDependencyDetails(item.identity);
-                            }}
-                          >
-                            <DatapackIcon name="inspect" />
-                          </button>
-                        </Tooltip>
+                        <IconAction
+                          tooltip={t(key('dependencies.details'))}
+                          label={t(key('actionFor'), {
+                            action: t(key('dependencies.details')),
+                            name: item.file.name,
+                          })}
+                          disabled={['queued', 'preparing'].includes(item.state)}
+                          onClick={() => {
+                            setCatalog(false);
+                            setDependencyDetails(item.identity);
+                          }}
+                        >
+                          <DatapackIcon name="inspect" />
+                        </IconAction>
                       )}
                       {item.state === 'failed' && (
-                        <Tooltip content={t(key('dependencies.retry'))}>
-                          <button
-                            type="button"
-                            className="datapack-action"
-                            aria-label={t(key('dependencies.retry'))}
-                            onClick={() =>
-                              revisePreparation(
-                                item.identity,
-                                item.optionalProjectIds ?? [],
-                                item.disablePaths ?? [],
-                              )
-                            }
-                          >
-                            <DatapackIcon name="refresh" />
-                          </button>
-                        </Tooltip>
+                        <IconAction
+                          tooltip={t(key('dependencies.retry'))}
+                          label={t(key('dependencies.retry'))}
+                          onClick={() =>
+                            revisePreparation(
+                              item.identity,
+                              item.optionalProjectIds ?? [],
+                              item.disablePaths ?? [],
+                            )
+                          }
+                        >
+                          <DatapackIcon name="refresh" />
+                        </IconAction>
                       )}
                       {item.state !== 'preparing' && (
-                        <Tooltip
-                          content={t(
+                        <IconAction
+                          tooltip={t(
                             key(
                               item.state === 'ready' || item.state === 'failed'
                                 ? 'dependencies.hide'
                                 : 'dependencies.removeQueue',
                             ),
                           )}
-                        >
-                          <button
-                            className="datapack-action"
-                            type="button"
-                            aria-label={t(key('actionFor'), {
-                              action: t(
-                                key(
-                                  item.state === 'ready' || item.state === 'failed'
-                                    ? 'dependencies.hide'
-                                    : 'dependencies.removeQueue',
-                                ),
+                          label={t(key('actionFor'), {
+                            action: t(
+                              key(
+                                item.state === 'ready' || item.state === 'failed'
+                                  ? 'dependencies.hide'
+                                  : 'dependencies.removeQueue',
                               ),
-                              name: item.file.name,
-                            })}
-                            onClick={() => {
-                              preparationQueue.current = preparationQueue.current.filter(
-                                (candidate) =>
-                                  candidate.identity !== item.identity ||
-                                  candidate.world !== item.world,
-                              );
-                              publishPreparations();
-                            }}
-                          >
-                            <DatapackIcon name="close" />
-                          </button>
-                        </Tooltip>
+                            ),
+                            name: item.file.name,
+                          })}
+                          onClick={() => {
+                            preparationQueue.current = preparationQueue.current.filter(
+                              (candidate) =>
+                                candidate.identity !== item.identity ||
+                                candidate.world !== item.world,
+                            );
+                            publishPreparations();
+                          }}
+                        >
+                          <DatapackIcon name="close" />
+                        </IconAction>
                       )}
                     </div>
                   ))}
@@ -687,27 +688,24 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
                         <small>{t(contentPreparationErrorKey(change.error))}</small>
                       )}
                     </span>
-                    <Tooltip content={t(key('discard'))}>
-                      <button
-                        type="button"
-                        className="datapack-action"
-                        aria-label={t(key('actionFor'), {
-                          action: t(key('discard')),
-                          name: change.name,
-                        })}
-                        disabled={
-                          disabled ||
-                          !(change.cancellable ?? ['ready', 'failed'].includes(change.state))
-                        }
-                        onClick={() =>
-                          void mutate(`cancel:${change.id}`, () =>
-                            controller.cancelDatapackChange(props.serverId, change.id),
-                          )
-                        }
-                      >
-                        <DatapackIcon name="close" />
-                      </button>
-                    </Tooltip>
+                    <IconAction
+                      tooltip={t(key('discard'))}
+                      label={t(key('actionFor'), {
+                        action: t(key('discard')),
+                        name: change.name,
+                      })}
+                      disabled={
+                        disabled ||
+                        !(change.cancellable ?? ['ready', 'failed'].includes(change.state))
+                      }
+                      onClick={() =>
+                        void mutate(`cancel:${change.id}`, () =>
+                          controller.cancelDatapackChange(props.serverId, change.id),
+                        )
+                      }
+                    >
+                      <DatapackIcon name="close" />
+                    </IconAction>
                   </div>
                 ))}
               </section>
@@ -750,28 +748,25 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
                         </div>
                       </div>
                       <div className="datapack-row-actions">
-                        <Tooltip content={t(key('inspect'))}>
-                          <button
-                            type="button"
-                            className="datapack-action"
-                            aria-expanded={inspected === pack.path}
-                            aria-label={t(key('actionFor'), {
-                              action: t(key('inspect')),
-                              name: pack.name,
-                            })}
-                            onClick={() =>
-                              setInspected((current) =>
-                                current === pack.path ? undefined : pack.path,
-                              )
-                            }
-                          >
-                            <DatapackIcon name="inspect" />
-                          </button>
-                        </Tooltip>
+                        <IconAction
+                          tooltip={t(key('inspect'))}
+                          aria-expanded={inspected === pack.path}
+                          label={t(key('actionFor'), {
+                            action: t(key('inspect')),
+                            name: pack.name,
+                          })}
+                          onClick={() =>
+                            setInspected((current) =>
+                              current === pack.path ? undefined : pack.path,
+                            )
+                          }
+                        >
+                          <DatapackIcon name="inspect" />
+                        </IconAction>
                         {pack.state !== 'pending' && (
                           <>
-                            <Tooltip
-                              content={t(
+                            <IconAction
+                              tooltip={t(
                                 key(
                                   nativeEnable && changes.length > 0
                                     ? 'applyFirst'
@@ -783,72 +778,65 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
                                         : 'disable',
                                 ),
                               )}
+                              label={t(key('actionFor'), {
+                                action: t(key(enable ? 'enable' : 'disable')),
+                                name: pack.name,
+                              })}
+                              disabled={
+                                disabled ||
+                                !canWrite ||
+                                nativePending ||
+                                nativeBlocked ||
+                                changed ||
+                                preparing ||
+                                Boolean(progress)
+                              }
+                              onClick={() => void stage(enable ? 'enable' : 'disable', pack)}
                             >
-                              <button
-                                type="button"
-                                className="datapack-action"
-                                aria-label={t(key('actionFor'), {
-                                  action: t(key(enable ? 'enable' : 'disable')),
-                                  name: pack.name,
-                                })}
-                                disabled={
-                                  disabled ||
-                                  nativePending ||
-                                  nativeBlocked ||
-                                  changed ||
-                                  preparing ||
-                                  Boolean(progress)
-                                }
-                                onClick={() => void stage(enable ? 'enable' : 'disable', pack)}
-                              >
-                                <DatapackIcon name={enable ? 'enable' : 'disable'} />
-                              </button>
-                            </Tooltip>
+                              <DatapackIcon name={enable ? 'enable' : 'disable'} />
+                            </IconAction>
                             {pack.kind === 'zip' && (
-                              <Tooltip content={t(key('replace'))}>
-                                <button
-                                  type="button"
-                                  className="datapack-action"
-                                  aria-label={t(key('actionFor'), {
-                                    action: t(key('replace')),
-                                    name: pack.name,
-                                  })}
-                                  disabled={
-                                    disabled ||
-                                    nativePending ||
-                                    changed ||
-                                    preparing ||
-                                    Boolean(progress)
-                                  }
-                                  onClick={() => {
-                                    replacement.current = pack;
-                                    picker.current?.click();
-                                  }}
-                                >
-                                  <DatapackIcon name="replace" />
-                                </button>
-                              </Tooltip>
-                            )}
-                            <Tooltip content={t(key('delete'))}>
-                              <button
-                                type="button"
-                                className="datapack-action datapack-action--danger"
-                                aria-label={t(key('actionFor'), {
-                                  action: t(key('delete')),
+                              <IconAction
+                                tooltip={t(key('replace'))}
+                                label={t(key('actionFor'), {
+                                  action: t(key('replace')),
                                   name: pack.name,
                                 })}
                                 disabled={
                                   disabled ||
+                                  !canWrite ||
                                   nativePending ||
                                   changed ||
                                   preparing ||
                                   Boolean(progress)
                                 }
-                                onClick={() => setRemove(pack)}
+                                onClick={() => {
+                                  replacement.current = pack;
+                                  picker.current?.click();
+                                }}
                               >
-                                <DatapackIcon name="delete" />
-                              </button>
-                            </Tooltip>
+                                <DatapackIcon name="replace" />
+                              </IconAction>
+                            )}
+                            <IconAction
+                              tooltip={t(key('delete'))}
+                              destructive
+                              label={t(key('actionFor'), {
+                                action: t(key('delete')),
+                                name: pack.name,
+                              })}
+                              disabled={
+                                disabled ||
+                                !canDelete ||
+                                nativePending ||
+                                changed ||
+                                preparing ||
+                                Boolean(progress)
+                              }
+                              onClick={() => setRemove(pack)}
+                            >
+                              <DatapackIcon name="delete" />
+                            </IconAction>
                           </>
                         )}
                       </div>
@@ -886,25 +874,16 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
               <p className="datapack-empty">{t(key(search ? 'noResults' : 'empty'))}</p>
             )}
             {pages > 1 && (
-              <nav className="datapack-pages" aria-label={t(key('search'))}>
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={currentPage === 0}
-                  onClick={() => setPage(currentPage - 1)}
-                >
-                  {t(key('previous'))}
-                </button>
-                <span>{t(key('page'), { page: currentPage + 1, pages })}</span>
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={currentPage >= pages - 1}
-                  onClick={() => setPage(currentPage + 1)}
-                >
-                  {t(key('next'))}
-                </button>
-              </nav>
+              <Pagination
+                label={t('web.pagination')}
+                previousLabel={t(key('previous'))}
+                nextLabel={t(key('next'))}
+                summary={t(key('page'), { page: currentPage + 1, pages })}
+                canPrevious={currentPage > 0}
+                canNext={currentPage < pages - 1}
+                onPrevious={() => setPage(currentPage - 1)}
+                onNext={() => setPage(currentPage + 1)}
+              />
             )}
             {(changes.length > 0 || data.reload.state !== 'not_required') && (
               <footer className="datapack-apply">
@@ -986,6 +965,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
           release={data?.version}
           disabled={
             disabled ||
+            !canWrite ||
             nativePending ||
             preparations.filter((item) => ['queued', 'preparing'].includes(item.state)).length >= 16
           }
@@ -996,7 +976,10 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
                 .map((item) => [item.identity, item.state]),
             )
           }
-          onClose={() => setCatalog(false)}
+          onClose={() => {
+            setCatalog(false);
+            requestAnimationFrame(() => browseButton.current?.focus());
+          }}
           onQueue={queueCatalog}
         />
       )}

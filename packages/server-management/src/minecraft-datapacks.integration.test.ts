@@ -16,7 +16,7 @@ import { createMinecraftDatapackCatalogService } from './minecraft-datapack-cata
 import { createMinecraftDatapackService } from './minecraft-datapacks.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
 import { createManagementRuntime } from './runtime.js';
-import { managementFixture, pendingUploadFixture } from './test-fixtures.js';
+import { minecraftManagementFixture, pendingUploadFixture } from './test-fixtures.js';
 
 // Real isolated PostgreSQL, authorization/runtime and source ingestion. Only the
 // external provider's filesystem/console is substituted; no live game resources.
@@ -37,7 +37,7 @@ describe('Minecraft datapack durable preparation and publication', () => {
   });
 
   async function fixture(running = true) {
-    const f = await managementFixture(database.db, { interactive: true });
+    const f = await minecraftManagementFixture(database.db, { interactive: true });
     const serverId = await f.server();
     await f.db
       .updateTable('managed_servers')

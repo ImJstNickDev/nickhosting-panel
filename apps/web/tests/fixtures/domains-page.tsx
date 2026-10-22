@@ -1,9 +1,10 @@
 import { QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { MemoryRouter, useLocation } from 'react-router';
+import { createMemoryRouter, RouterProvider, useLocation } from 'react-router';
 import { api, queryClient } from '../../src/api/client.js';
 import { LocaleProvider } from '../../src/app/i18n.js';
+import { NavigationGuardProvider } from '../../src/components/navigation-guard.js';
 import { useConnectionAvailability } from '../../src/features/connection-availability.js';
 import {
   type ConnectionChoice,
@@ -101,11 +102,20 @@ function Fixture() {
 const root = document.getElementById('root');
 if (!root) throw new Error('Missing root');
 createRoot(root).render(
-  <MemoryRouter>
-    <QueryClientProvider client={queryClient}>
-      <LocaleProvider>
-        <Fixture />
-      </LocaleProvider>
-    </QueryClientProvider>
-  </MemoryRouter>,
+  <QueryClientProvider client={queryClient}>
+    <LocaleProvider>
+      <RouterProvider
+        router={createMemoryRouter([
+          {
+            path: '*',
+            element: (
+              <NavigationGuardProvider>
+                <Fixture />
+              </NavigationGuardProvider>
+            ),
+          },
+        ])}
+      />
+    </LocaleProvider>
+  </QueryClientProvider>,
 );

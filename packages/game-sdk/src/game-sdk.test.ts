@@ -76,6 +76,7 @@ describe('game rollout contracts', () => {
 
 describe('game integration manifest', () => {
   const manifest: GameManifest = {
+    serverPermissions: [],
     id: 'fixture-game',
     version: '0.1.0',
     nameKey: 'games.fixture-game.name',

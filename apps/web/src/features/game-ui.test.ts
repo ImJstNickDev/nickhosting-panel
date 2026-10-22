@@ -88,7 +88,7 @@ describe('trusted game frontend rendering', () => {
     expect(markup).toContain('fabric-workshop.svg');
     expect(markup).toContain('alt=""');
   });
-  it('keeps creation runtime-first and renders a real archive picker for pack replacement', () => {
+  it('keeps creation runtime-first and delegates pack replacement to its bundled workspace', () => {
     const markup = render(
       h(GameFields, {
         module: minecraftUiModule,
@@ -102,21 +102,15 @@ describe('trusted game frontend rendering', () => {
     expect(markup).not.toContain('type="file"');
     expect(markup).toContain('https://www.minecraft.net/en-us/eula');
     expect(markup).not.toContain('format="uuid"');
-    const fields = minecraftUiModule.descriptor.sections
-      .find((section) => section.id === 'modpacks')
-      ?.forms.find((form) => form.id === 'replace-pack')?.fields;
-    expect(fields).toBeDefined();
-    const replacement = render(
-      h(GameFields, {
-        module: minecraftUiModule,
-        fields: fields ?? [],
-        values: {},
-        onChange: () => {},
-      }),
+    const section = minecraftUiModule.descriptor.sections.find(
+      (section) => section.id === 'modpacks',
     );
-    expect(replacement).toContain('type="file"');
-    expect(replacement).toContain('accept=".mrpack,.zip"');
-    expect(replacement).not.toContain('format="uuid"');
+    expect(section).toMatchObject({
+      renderer: 'minecraft-modpacks',
+      loader: 'modpacks',
+      forms: [],
+      requiredPermissions: ['game.minecraft.modpacks.read'],
+    });
   });
   it('renders false and missing property values without submitting guessed defaults', () => {
     const fields =

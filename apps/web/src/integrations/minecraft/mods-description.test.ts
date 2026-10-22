@@ -47,7 +47,7 @@ describe('provider mod descriptions', () => {
       expect(html).toContain('<p>Ready</p>');
     },
   );
-  it('renders sanitized HTML while deferring external images until the user requests them', () => {
+  it('renders sanitized HTML with lazy external images and no executable content', () => {
     const html = renderToStaticMarkup(
       createElement(ModsDescription, {
         format: 'html',
@@ -56,8 +56,9 @@ describe('provider mod descriptions', () => {
     );
     expect(html).toContain('<p>Before<br/>After</p>');
     expect(html).toContain('<hr/>');
-    expect(html).not.toContain('<img');
-    expect(html).toContain('loadImages');
+    expect(html).toContain('src="https://example.test/banner.png"');
+    expect(html).toContain('loading="lazy"');
+    expect(html).toContain('referrerPolicy="no-referrer"');
     expect(html).not.toContain('alert(');
     expect(html).not.toContain('onclick');
     expect(html).not.toContain('onerror');

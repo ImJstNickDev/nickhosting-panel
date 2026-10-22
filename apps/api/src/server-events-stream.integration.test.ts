@@ -1,4 +1,4 @@
-import { DomainError } from '@nickhosting/core';
+import { type AuthContext, DomainError } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { Hono } from 'hono';
 import { sql } from 'kysely';
@@ -11,11 +11,13 @@ let database: Awaited<ReturnType<typeof createTestDatabase>>;
 let fixture: Awaited<ReturnType<typeof managementFixture>>;
 let serverId: string;
 let revoked = false;
+let current: AuthContext;
 let app: Hono<{ Variables: Variables }>;
 beforeAll(async () => {
   database = await createTestDatabase();
   fixture = await managementFixture(database.db);
   serverId = await fixture.server();
+  current = fixture.context;
   app = new Hono<{ Variables: Variables }>();
   registerServerRoutes(app, {
     db: database.db,
@@ -23,7 +25,7 @@ beforeAll(async () => {
     env: {},
     principal: async () => {
       if (revoked) throw new DomainError('unauthenticated');
-      return fixture.context;
+      return current;
     },
     management: async () => {
       throw new Error('Unexpected provider access');
@@ -33,6 +35,7 @@ beforeAll(async () => {
 });
 beforeEach(() => {
   revoked = false;
+  current = fixture.context;
 });
 afterAll(async () => {
   await database?.destroy();
@@ -135,6 +138,37 @@ it('reauthorizes before delivering a commit after session revocation', async () 
     const ended = promptly(stream.next());
     await publish();
     expect(await ended).toBeUndefined();
+  } finally {
+    await stream.close();
+  }
+});
+
+it('sends only invalidation hints without Activity permission and closes after direct revocation', async () => {
+  const peer = await managementFixture(database.db);
+  await database.db
+    .insertInto('server_subusers')
+    .values({
+      server_id: serverId,
+      user_id: peer.context.subjectUserId,
+      permission_keys: JSON.stringify(['files.read']),
+      created_by: fixture.context.actorUserId,
+    })
+    .execute();
+  current = peer.context;
+  const stream = await connect();
+  try {
+    expect((await stream.next())?.event).toBe('ready');
+    const next = promptly(stream.next());
+    await publish('servers.operation.failed');
+    expect(await next).toMatchObject({ event: 'activity', data: { serverId } });
+    await database.db
+      .deleteFrom('server_subusers')
+      .where('server_id', '=', serverId)
+      .where('user_id', '=', current.subjectUserId)
+      .execute();
+    const closed = promptly(stream.next());
+    await publish();
+    expect(await closed).toBeUndefined();
   } finally {
     await stream.close();
   }

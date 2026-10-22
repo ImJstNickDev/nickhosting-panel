@@ -39,7 +39,12 @@ import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources } from './admission.js';
 import { currentInteractiveContext } from './interactive-context.js';
-import { authorizeServer, parse } from './registry.js';
+import {
+  authorizeServer,
+  getServerPermissionKeys,
+  parse,
+  serverSubusersAvailable,
+} from './registry.js';
 import { serverStorageLimitBytes } from './storage-capacity.js';
 
 type SftpRow = Selectable<Database['external_sftp_credentials']>;
@@ -92,45 +97,95 @@ async function currentContext(db: Kysely<Database>, previous: AuthContext): Prom
 const credentialActor = (authority: CredentialAuthority) =>
   authority.context ? authority.context.actorUserId : authority.service.subjectUserId;
 
-/** Background personal access has a subject, never a fabricated browser session.
- * Match server:manage exactly; project ownership alone does not grant membership. */
+/** SFTP issuance is independent from file mutation rights. */
+export async function authorizeSftpAccess(
+  db: Kysely<Database>,
+  context: AuthContext,
+  serverId: string,
+) {
+  const server = await authorizeServer(db, context, serverId, 'files.sftp');
+  return server;
+}
+
+/** Background personal access retains the original subject's current grants. */
 async function authorizeCredential(
   db: Kysely<Database>,
   authority: CredentialAuthority,
   serverId: string,
 ) {
   if (authority.context)
-    return authorizeServer(
-      db,
-      await currentContext(db, authority.context),
-      serverId,
-      'server:manage',
-    );
+    return authorizeSftpAccess(db, await currentContext(db, authority.context), serverId);
   const actorId = authority.service.subjectUserId;
-  const server = await db
-    .selectFrom('managed_servers as server')
-    .innerJoin('user as actor', (join) => join.on('actor.id', '=', actorId))
-    .selectAll('server')
-    .where('server.id', '=', serverId)
-    .where('server.deleted_at', 'is', null)
-    .where((eb) =>
-      eb.or([
-        eb('actor.id', '=', eb.ref('server.owner_id')),
-        eb('actor.role', '=', 'owner'),
-        eb.exists(
-          eb
-            .selectFrom('project_members')
-            .select('user_id')
-            .whereRef('project_id', '=', 'server.project_id')
-            .where('user_id', '=', actorId)
-            .where('role', '=', 'manager'),
-        ),
-      ]),
-    )
+  const user = await db
+    .selectFrom('user')
+    .select(['id', 'role'])
+    .where('id', '=', actorId)
     .executeTakeFirst();
-  if (!server) throw new DomainError('forbidden');
-  return server;
+  if (!user) throw new DomainError('forbidden');
+  return authorizeSftpAccess(
+    db,
+    {
+      actorUserId: actorId,
+      subjectUserId: actorId,
+      role: user.role,
+      sessionType: 'regular',
+      ownerElevation: false,
+    },
+    serverId,
+  );
 }
+async function credentialPermissions(
+  db: Kysely<Database>,
+  authority: CredentialAuthority,
+  serverId: string,
+): Promise<NonNullable<SftpCredentialRequest['permissions']>> {
+  const actorId = credentialActor(authority);
+  const actor = await db
+    .selectFrom('user')
+    .select(['id', 'role'])
+    .where('id', '=', actorId)
+    .executeTakeFirst();
+  if (!actor) throw new DomainError('forbidden');
+  const context: AuthContext = {
+    actorUserId: actorId,
+    subjectUserId: actorId,
+    role: actor.role,
+    sessionType: 'regular',
+    ownerElevation: false,
+  };
+  const server = await authorizeSftpAccess(db, context, serverId);
+  const keys = await getServerPermissionKeys(db, context, server);
+  const permissions: NonNullable<SftpCredentialRequest['permissions']> = ['list', 'download'];
+  if (keys.includes('files.write')) permissions.push('upload', 'overwrite', 'create_dirs');
+  if (keys.includes('files.delete')) permissions.push('delete');
+  if (keys.includes('files.write') && keys.includes('files.delete')) permissions.push('rename');
+  return permissions;
+}
+const samePermissions = (left: readonly string[], right: readonly string[]) =>
+  JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
+const legacySftpPermissions = [
+  'list',
+  'download',
+  'upload',
+  'overwrite',
+  'delete',
+  'rename',
+  'create_dirs',
+];
+async function assertCredentialScope(
+  db: Kysely<Database>,
+  intent: CredentialIntent,
+  serverId: string,
+) {
+  if (
+    !samePermissions(
+      await credentialPermissions(db, intent, serverId),
+      intent.request.permissions ?? legacySftpPermissions,
+    )
+  )
+    throw new DomainError('forbidden');
+}
+
 async function credentialAudit(
   db: Kysely<Database>,
   authority: CredentialAuthority,
@@ -268,6 +323,7 @@ async function runCredential(
   const intent = credentialIntent(row, options);
   const { provider, scope } = await sftpProvider(db, options);
   if (scope !== intent.scope) throw new DomainError('configuration_invalid');
+  if (row.state === 'revoking') intent.action = 'revoke';
   if (intent.request.expiresAt !== 0 && intent.request.expiresAt <= now(options).getTime()) {
     intent.action = 'revoke';
     await saveIntent(db, row, intent, options, 'revoking');
@@ -275,6 +331,7 @@ async function runCredential(
   if (intent.action !== 'revoke') {
     try {
       await authorizeCredential(db, intent, row.server_id);
+      await assertCredentialScope(db, intent, row.server_id);
     } catch (error) {
       // Revocation is driven only by an authoritative permission denial. A database
       // outage or corrupt encrypted intent must not masquerade as removed access.
@@ -293,6 +350,7 @@ async function runCredential(
         });
       });
     }
+    if (row.state === 'active' && intent.action !== 'revoke') return row;
     // A storage transition fences issuance and rotation, but cannot defer
     // removing credentials after an authoritative loss of permission.
     if (intent.action !== 'revoke') {
@@ -328,6 +386,7 @@ async function runCredential(
       const fresh = await authorizeCredential(db, intent, row.server_id);
       if (fresh.active_operation_id || fresh.pterodactyl_uuid !== intent.request.externalServerUuid)
         throw new DomainError('conflict');
+      await assertCredentialScope(db, intent, row.server_id);
       if (intent.action === 'create') ref = await provider.ensureCredential(intent.request);
       else {
         if (!ref) throw new DomainError('conflict');
@@ -367,12 +426,12 @@ async function deliverCredential(
   if (intent.delivered || row.state !== 'active') return { ...result, password: undefined };
   if (row.expires_at && row.expires_at <= now(options)) throw new DomainError('conflict');
   if (row.actor_id !== context.actorUserId) throw new DomainError('forbidden');
-  await authorizeServer(
+  await authorizeSftpAccess(
     db,
     await currentInteractiveContext(db, context, options.env ?? {}),
     row.server_id,
-    'server:manage',
   );
+  await assertCredentialScope(db, intent, row.server_id);
   const password = intent.request.password;
   intent.delivered = true;
   // Do not decrypt for GET. Commit delivery before returning; explicit password
@@ -498,6 +557,7 @@ async function ensureCredential(
         password: generateSftpPassword(),
         expiresAt,
         quotaBytes: serverStorageLimitBytes(server.limits.disk) ?? 0,
+        permissions: await credentialPermissions(connection, authority, serverId),
       },
     };
     row = await connection
@@ -547,7 +607,7 @@ export async function listSftpCredentials(
   context: AuthContext,
   serverId: string,
 ) {
-  await authorizeServer(db, context, serverId, 'server:manage');
+  await authorizeSftpAccess(db, context, serverId);
   return (
     await db
       .selectFrom('external_sftp_credentials')
@@ -574,7 +634,7 @@ export async function revealSftpCredential(
   parse(z.object({}).strict(), input);
   return locked(db, serverId, async (connection) => {
     const verified = await currentInteractiveContext(connection, context, options.env ?? {});
-    await authorizeServer(connection, verified, serverId, 'server:manage');
+    await authorizeSftpAccess(connection, verified, serverId);
     const row = await connection
       .selectFrom('external_sftp_credentials')
       .selectAll()
@@ -595,6 +655,7 @@ export async function revealSftpCredential(
       intent.request.expiresAt !== (row.expires_at?.getTime() ?? 0)
     )
       throw new DomainError('secret_invalid');
+    await assertCredentialScope(connection, intent, serverId);
     await recordAudit(connection, verified, 'server.sftp.password_revealed', {
       serverId,
       credentialId,
@@ -615,7 +676,7 @@ export async function rotateSftpCredential(
   const { rotationId } = parse(z.object({ rotationId: z.uuid() }).strict(), input);
   return locked(db, serverId, async (connection) => {
     const verified = await currentInteractiveContext(connection, context, options.env ?? {});
-    const server = await authorizeServer(connection, verified, serverId, 'server:manage');
+    const server = await authorizeSftpAccess(connection, verified, serverId);
     if (server.active_operation_id) throw new DomainError('conflict');
     await connection.transaction().execute(async (tx) => {
       await lockResources(tx);
@@ -757,7 +818,7 @@ export async function revokeSftpCredential(
   parse(z.uuid(), credentialId);
   return locked(db, serverId, async (connection) => {
     const verified = await currentInteractiveContext(connection, context, options.env ?? {});
-    await authorizeServer(connection, verified, serverId, 'server:manage');
+    await authorizeSftpAccess(connection, verified, serverId);
     const row = await connection
       .selectFrom('external_sftp_credentials')
       .selectAll()
@@ -798,6 +859,26 @@ export async function cleanupServerExternalServices(
     });
   });
 }
+/** Called after membership commits, before reporting completed access changes.
+ * Rechecks grants, disables mismatched credentials and requests provider disconnect. */
+export async function reconcileServerUserSftpCredentials(
+  db: Kysely<Database>,
+  serverId: string,
+  userId: string,
+  options: ExternalServiceOptions,
+) {
+  return locked(db, serverId, async (connection) => {
+    const rows = await connection
+      .selectFrom('external_sftp_credentials')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .where('actor_id', '=', userId)
+      .where('state', '!=', 'revoked')
+      .execute();
+    for (const row of rows) await runCredential(connection, row, options);
+  });
+}
+
 /** Bounded periodic recovery. Failures retain durable pending/uncertain rows and are counted, never hidden. */
 const reconciliationCursors = new WeakMap<
   Kysely<Database>,
@@ -818,27 +899,6 @@ export async function reconcileExternalServices(
     .innerJoin('user', 'user.id', 'external_sftp_credentials.actor_id')
     .selectAll('external_sftp_credentials')
     .where('external_sftp_credentials.state', '!=', 'revoked')
-    .where((eb) =>
-      eb.or([
-        eb('external_sftp_credentials.state', '!=', 'active'),
-        eb('external_sftp_credentials.expires_at', '<=', now(options)),
-        eb('managed_servers.deleted_at', 'is not', null),
-        eb.and([
-          eb('user.role', '!=', 'owner'),
-          eb('external_sftp_credentials.actor_id', '!=', eb.ref('managed_servers.owner_id')),
-          eb.not(
-            eb.exists(
-              eb
-                .selectFrom('project_members')
-                .select('project_members.user_id')
-                .whereRef('project_members.project_id', '=', 'managed_servers.project_id')
-                .whereRef('project_members.user_id', '=', 'external_sftp_credentials.actor_id')
-                .where('project_members.role', '=', 'manager'),
-            ),
-          ),
-        ]),
-      ]),
-    )
     .orderBy(sql<boolean>`external_sftp_credentials.id::text > ${cursor.credential}`, 'desc')
     .orderBy('external_sftp_credentials.id')
     .limit(100)
@@ -860,9 +920,11 @@ export async function reconcileExternalServices(
           .selectAll()
           .where('id', '=', row.id)
           .executeTakeFirstOrThrow();
-        if (current.state !== 'revoked') await runCredential(connection, current, options);
+        if (current.state !== 'revoked') {
+          const result = await runCredential(connection, current, options);
+          if (current.state !== 'active' || result.state !== current.state) recovered++;
+        }
       });
-      recovered++;
     } catch {
       failed++;
     } finally {
@@ -871,6 +933,9 @@ export async function reconcileExternalServices(
   }
   // Explicitly authorized subjects, not a synthetic interactive Owner. Global
   // Owners have server:manage; project viewers/operators and unrelated users do not.
+  const directPrimary = (await serverSubusersAvailable(db))
+    ? sql<boolean>`exists (select 1 from server_subusers member where member.server_id = server.id and member.user_id = actor.id and member.permission_keys @> '["files.read","files.sftp"]'::jsonb)`
+    : sql<boolean>`false`;
   const primary = await db
     .selectFrom('managed_servers as server')
     .crossJoin('user as actor')
@@ -883,6 +948,7 @@ export async function reconcileExternalServices(
       eb.or([
         eb('actor.id', '=', eb.ref('server.owner_id')),
         eb('actor.role', '=', 'owner'),
+        directPrimary,
         eb.exists(
           eb
             .selectFrom('project_members')

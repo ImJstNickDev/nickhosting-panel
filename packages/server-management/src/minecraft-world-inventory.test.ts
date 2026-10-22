@@ -117,13 +117,25 @@ describe('Minecraft world inventory snapshot', () => {
       { name: 'older', is_file: false },
       { name: 'notes', is_file: false },
     ]);
-    const listDirectories = vi.fn(async () => [
-      {
-        directory: 'older',
-        files: [{ name: 'level.dat', is_file: true, is_symlink: false, size: level.length }],
-      },
-      { directory: 'notes', files: [] },
-    ]);
+    const listDirectories = vi.fn(async (directories: string[]) =>
+      directories[0] === ''
+        ? [
+            {
+              directory: '',
+              files: [
+                { name: 'older', is_file: false },
+                { name: 'notes', is_file: false },
+              ],
+            },
+          ]
+        : [
+            {
+              directory: 'older',
+              files: [{ name: 'level.dat', is_file: true, is_symlink: false, size: level.length }],
+            },
+            { directory: 'notes', files: [] },
+          ],
+    );
     const files = createFilemanReadService({
       adapter: f.adapter,
       identifier: 'provider',
@@ -142,8 +154,10 @@ describe('Minecraft world inventory snapshot', () => {
       files,
     );
     expect(result.worlds).toHaveLength(1);
-    expect(f.listFiles).toHaveBeenCalledTimes(1);
-    expect(listDirectories).toHaveBeenCalledExactlyOnceWith(['older', 'notes']);
+    expect(f.listFiles).not.toHaveBeenCalled();
+    expect(listDirectories).toHaveBeenCalledTimes(2);
+    expect(listDirectories).toHaveBeenNthCalledWith(1, ['']);
+    expect(listDirectories).toHaveBeenNthCalledWith(2, ['older', 'notes']);
     expect(f.adapter.prefetchDownloads).toHaveBeenCalledExactlyOnceWith('provider', [
       'older/level.dat',
     ]);

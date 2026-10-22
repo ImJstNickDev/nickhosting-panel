@@ -135,7 +135,7 @@ export async function resolveModpackRuntime(input: {
 }): Promise<MinecraftModpackRuntimeBinding | null> {
   const { db, adapter, context, serverId, env = {} } = input;
   const target = contentTargetSchema.parse(input.target);
-  const server = await authorizeServer(db, context, serverId, 'server:manage');
+  const server = await authorizeServer(db, context, serverId, 'game.minecraft.modpacks.write');
   if (
     !declaredTarget(target) ||
     (['fabric', 'forge'].includes(target.loader) && !target.loaderVersion)
