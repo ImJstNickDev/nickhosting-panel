@@ -521,7 +521,8 @@
 }
 .minecraft-player-level {
   position: absolute;
-  bottom: calc(100% - 5px);
+  /* One native XP-bar pixel is 1/5 of its rendered height. */
+  bottom: calc(120% - 5px);
   left: 50%;
   transform: translateX(-50%);
   display: flex;

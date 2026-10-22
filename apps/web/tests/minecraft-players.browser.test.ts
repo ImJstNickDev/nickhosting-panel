@@ -804,8 +804,8 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     expect(hudGeometry.gap).toBeGreaterThanOrEqual(0);
     expect(hudGeometry.gap).toBeLessThanOrEqual(4);
     expect(hudGeometry.ratio).toBeCloseTo(182 / 5, 0);
-    expect(hudGeometry.levelBottom).toBeGreaterThanOrEqual(4);
-    expect(hudGeometry.levelBottom).toBeLessThanOrEqual(6);
+    expect(hudGeometry.levelBottom).toBeGreaterThanOrEqual(2);
+    expect(hudGeometry.levelBottom).toBeLessThanOrEqual(4);
     expect(hudGeometry.fillWidth).toBeCloseTo(hudGeometry.width, 0);
     await user.locator('.minecraft-player-hud').screenshot({
       path: resolve('.codex/local/m5-browser/screenshots/minecraft-player-hud-desktop-en.png'),

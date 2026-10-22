@@ -61,7 +61,9 @@ two leading rows per mined/used/killed/distance category, with available local
 Minecraft icons. Missing values remain unknown. The HUD keeps health/food close
 to the XP bar, preserves its native 182:5 proportions and clips the full-width
 progress texture without stretching its segments. The centered level uses local
-bitmap digits with the game's green fill and dark outline; ordinary text remains
+bitmap digits with the game's green fill and dark outline. Its final vertical
+alignment is raised by one native XP-bar texel (one fifth of the rendered bar
+height), so the adjustment scales with the inventory width; ordinary text remains
 the fallback when those optional resources have not been prepared.
 
 NBT decoding uses the same bounded structural preflight as world inspection,
