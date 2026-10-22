@@ -854,7 +854,10 @@ describe('Minecraft Players UI contracts', () => {
     expect(await minecraftUiModule.handlers.players?.(client, { serverId, values: {} })).toEqual({
       values: {},
       rows: [],
-      metadata: { players: snapshot, installed: true },
+      metadata: {
+        players: { ...snapshot, knownPlayers: [], knownPlayersState: 'unavailable' },
+        installed: true,
+      },
     });
     expect(client.request).toHaveBeenCalledTimes(1);
     expect(client.request.mock.calls[0]?.[0]).toBe(`/v1/servers/${serverId}/minecraft/players`);

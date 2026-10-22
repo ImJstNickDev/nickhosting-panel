@@ -72,6 +72,26 @@ describe('compiled Minecraft permission boundaries', () => {
       assertServerPermissionKeys(['game.minecraft.mods.delete'], minecraftServerPermissions),
     ).toThrow('validation_failed');
   });
+  it('declares each rich player action independently and requires its read grant', () => {
+    const viewers = legacyServerPermissionKeys('viewer', minecraftServerPermissions);
+    for (const action of ['heal', 'feed', 'starve', 'kill', 'gamemode', 'teleport', 'reset']) {
+      const key = `game.minecraft.players.${action}`;
+      expect(minecraftServerPermissions.find((entry) => entry.key === key)).toMatchObject({
+        kind: 'additional',
+        legacy: 'manage',
+      });
+      expect(viewers).not.toContain(key);
+      expect(() => assertServerPermissionKeys([key], minecraftServerPermissions)).toThrow(
+        'validation_failed',
+      );
+      expect(() =>
+        assertServerPermissionKeys(
+          ['game.minecraft.players.read', key],
+          minecraftServerPermissions,
+        ),
+      ).not.toThrow();
+    }
+  });
   it('rejects foreign permission and translation namespaces, missing reads and duplicate declarations', () => {
     const read = minecraftServerPermissions.find(
       (definition) => definition.key === 'game.minecraft.mods.read',

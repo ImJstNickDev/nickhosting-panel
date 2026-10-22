@@ -14,6 +14,22 @@ const server = (permissionKeys: string[], runtimeId = 'vanilla') =>
 const translate = (key: string) => key;
 
 describe('contextual server navigation', () => {
+  it('keeps a game section active on nested detail routes without matching sibling prefixes', () => {
+    const value = server(['game.minecraft.players.read']);
+    const detail = serverNavigation(
+      value,
+      '/servers/server-fixture/game/players/player-id',
+      translate,
+    );
+    expect(detail.filter((item) => item.active).map((item) => item.to)).toEqual([
+      '/servers/server-fixture/game/players',
+    ]);
+    expect(
+      serverNavigation(value, '/servers/server-fixture/game/players-other', translate).some(
+        (item) => item.active,
+      ),
+    ).toBe(false);
+  });
   it('does not expose native destinations without their read permission', () => {
     const navigation = serverNavigation(
       server(['console.read', 'files.read']),

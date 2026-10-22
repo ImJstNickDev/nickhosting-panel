@@ -1,4 +1,5 @@
 export const activityWebMessages: Record<string, readonly [string, string]> = {
+  'activity.event.playerReset': ['Reset player data', 'Reimposta dati del giocatore'],
   'activity.event.modsApplied': ['Apply mod changes', 'Applica modifiche alle mod'],
   'activity.event.modsReconciled': ['Recover mod preparation', 'Recupera preparazione delle mod'],
   'activity.event.pluginsApplied': ['Apply plugin changes', 'Applica modifiche ai plugin'],

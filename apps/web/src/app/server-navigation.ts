@@ -104,7 +104,9 @@ export function serverNavigation(
         label: t(entry.label),
         icon: entry.icon,
         group: t(`serverNav.${group}`),
-        active: entry.active ?? pathname === `${base}/${entry.slug}`,
+        active:
+          entry.active ??
+          (pathname === `${base}/${entry.slug}` || pathname.startsWith(`${base}/${entry.slug}/`)),
       })),
   );
 }

@@ -29,11 +29,13 @@ import {
   parseMinecraftWhitelistProperties,
 } from '../../../games/minecraft/src/player-management.js';
 import { minecraftStoredConfigurationSchema } from '../../../packages/server-management/src/minecraft-content-contracts.js';
+import { discoverMinecraftPlayers } from '../../../packages/server-management/src/minecraft-player-details.js';
 import { permissionRuntime } from '../../../packages/server-management/src/permission-runtime.js';
 import type { Variables } from './app.js';
+import { registerMinecraftPlayerDetailRoutes } from './minecraft-player-details.js';
 
 type C = Context<{ Variables: Variables }>;
-type Options = {
+export type MinecraftPlayerRouteOptions = {
   db: ReturnType<typeof createDatabase>['db'];
   env: Readonly<Record<string, string | undefined>>;
   principal: (c: C, regularOnly?: boolean) => Promise<AuthContext>;
@@ -160,7 +162,7 @@ export async function observeMinecraftPlayers(
 }
 export function registerMinecraftPlayerRoutes(
   app: Hono<{ Variables: Variables }>,
-  options: Options,
+  options: MinecraftPlayerRouteOptions,
 ) {
   const { db, env, principal, body, management } = options;
   const online = new Map<string, { expires: number; result: Promise<Online> }>();
@@ -199,9 +201,16 @@ export function registerMinecraftPlayerRoutes(
             'server.properties',
           ])
           .catch(() => {});
+        const known = await discoverMinecraftPlayers(files)
+          .then((result) => ({
+            knownPlayers: result.knownPlayers,
+            knownPlayersState: 'available' as const,
+          }))
+          .catch(() => ({ knownPlayers: [], knownPlayersState: 'unavailable' as const }));
         return {
           supported: true,
           installed: true,
+          ...known,
           ...(await readPlayerFiles(files)),
         };
       },
@@ -430,4 +439,5 @@ export function registerMinecraftPlayerRoutes(
     });
     return c.json({ outcome: 'dispatched' as const }, 202);
   });
+  registerMinecraftPlayerDetailRoutes(app, options);
 }

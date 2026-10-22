@@ -427,6 +427,7 @@ export function ConfirmDialog({
   confirmLabel,
   destructive = false,
   busy = false,
+  submitDisabled = false,
 }: {
   open: boolean;
   title: string;
@@ -436,6 +437,7 @@ export function ConfirmDialog({
   confirmLabel?: string;
   destructive?: boolean;
   busy?: boolean;
+  submitDisabled?: boolean;
 }) {
   const t = useT();
   const [submitting, setSubmitting] = useState(false);
@@ -458,6 +460,7 @@ export function ConfirmDialog({
           success={false}
           destructive={destructive}
           disabled={busy}
+          submitDisabled={submitDisabled}
           onCancel={close}
           arrowActionNavigation
           submitLabel={confirmLabel ?? t('web.confirm')}

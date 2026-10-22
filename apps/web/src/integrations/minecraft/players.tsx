@@ -1,6 +1,7 @@
 import { createMinecraftUiController, minecraftUiModule } from '@nickhosting/minecraft/ui';
 import { useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useParams } from 'react-router';
 import { ApiError, idempotencyKey } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
@@ -13,6 +14,9 @@ import {
 } from '../../components/workspace-controls.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { gameUiClient } from '../../features/integrations.js';
+import { PlayerCard } from './player-card.js';
+import { MinecraftPlayerDetailView } from './player-detail.js';
+import { type PlayerActionSelection, PlayerGameplayActionDialog } from './player-detail-actions.js';
 import { type MinecraftPlayerRow, mergeMinecraftPlayers } from './players-model.js';
 import './players.css';
 
@@ -107,6 +111,18 @@ function Avatar({ name, uuid, avatar }: { name: string; uuid?: string; avatar?: 
 
 export function MinecraftPlayersSection(props: GameSectionViewProps) {
   const t = useT();
+  const detailUuid = useParams()['*'] ?? '';
+  const [gameplaySelection, setGameplaySelection] = useState<PlayerActionSelection>();
+  const returnFocus = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!detailUuid && returnFocus.current) {
+      const uuid = returnFocus.current;
+      returnFocus.current = undefined;
+      requestAnimationFrame(() =>
+        document.querySelector<HTMLAnchorElement>(`a[data-player-id="${uuid}"]`)?.focus(),
+      );
+    }
+  }, [detailUuid]);
   const id = useId();
   const snapshot = props.data.metadata?.players as Snapshot | undefined;
   const running = props.runtimeState === 'running';
@@ -252,7 +268,7 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
     }
   }
   function choose(action: Action, player?: MinecraftPlayerRow) {
-    if (disabled || !can(action)) return;
+    if (disabled || !can(action) || player?.nameKnown === false) return;
     setReason('');
     setLevel(player?.operator?.level ?? 4);
     setBypass(player?.operator?.bypassesPlayerLimit ?? false);
@@ -368,23 +384,29 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
   }
   const actionLabel = (action: Action, name: string) =>
     t(key('actionFor'), { action: t(key(action)), name });
-  const rowAction = (
-    row: MinecraftPlayerRow,
-    action: Action,
-    icon: Parameters<typeof Icon>[0]['name'],
-  ) =>
-    can(action) ? (
-      <IconAction
+  const rowAction = (row: MinecraftPlayerRow, action: Action) =>
+    can(action) && row.nameKnown !== false ? (
+      <button
+        type="button"
+        className="secondary"
         key={action}
-        tooltip={actionLabel(action, row.name)}
-        destructive={action === 'ban' || action === 'kick'}
-        label={actionLabel(action, row.name)}
+        aria-label={actionLabel(action, row.name)}
         disabled={disabled}
         onClick={() => choose(action, row)}
       >
-        <Icon name={icon} />
-      </IconAction>
+        {t(key(action))}
+      </button>
     ) : null;
+  const playerActions = (row: MinecraftPlayerRow) =>
+    props.canManage
+      ? [
+          rowAction(row, row.operator ? 'deop' : 'op'),
+          offline && row.operator && rowAction(row, 'edit-operator'),
+          rowAction(row, row.whitelisted ? 'whitelist-remove' : 'whitelist-add'),
+          running && rowAction(row, row.banned ? 'pardon' : 'ban'),
+          running && row.online && rowAction(row, 'kick'),
+        ].filter(Boolean)
+      : [];
   const candidate = verified
     ? (rows.find(
         (row) =>
@@ -405,273 +427,293 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
 
   return (
     <div className="workspace-surface minecraft-players" aria-busy={props.pending || busy}>
-      <div className="minecraft-players-toolbar">
-        <SearchField
-          label={t(key('search'))}
-          placeholder={t(key('search'))}
-          value={search}
-          onChange={(event) => {
-            setSearch(event.target.value);
-            setPage(0);
+      {detailUuid ? (
+        <MinecraftPlayerDetailView
+          serverId={props.serverId}
+          uuid={detailUuid}
+          row={rows.find((row) => row.uuid === detailUuid)}
+          pending={disabled}
+          permissionKeys={props.permissionKeys}
+          legacyActions={playerActions}
+          onAction={(action) => setGameplaySelection({ uuid: detailUuid, action })}
+          onBack={() => {
+            returnFocus.current = detailUuid;
           }}
-          autoComplete="off"
-          data-1p-ignore
-          data-lpignore="true"
         />
-        <div className="minecraft-players-controls">
-          <Tooltip content={t(key('whitelistHelp'))}>
-            <span>
-              <Switch
-                label={t(key('whitelistEnabled'))}
-                checked={snapshot.whitelistEnabled}
-                disabled={disabled || !can('whitelist-on')}
-                onChange={(checked) => choose(checked ? 'whitelist-on' : 'whitelist-off')}
-                stateLabel={t(key(snapshot.whitelistEnabled ? 'on' : 'off'))}
-              />
-            </span>
-          </Tooltip>
-          <IconAction
-            tooltip={t(key('refresh'))}
-            label={t(key('refresh'))}
-            disabled={busy || online.isFetching}
-            onClick={() => void refresh()}
-          >
-            <Icon name="refresh" />
-          </IconAction>
-          {(can('whitelist-add') || can('op') || can('ban')) && (
-            <button
-              type="button"
-              className="secondary minecraft-players-add"
-              disabled={disabled}
-              aria-expanded={adding}
-              aria-controls={`${id}-add`}
-              onClick={() => setAdding((current) => !current)}
-            >
-              <Icon name="plus" />
-              {t(key('add'))}
-            </button>
-          )}
-        </div>
-      </div>
-      {adding && (
-        <div id={`${id}-add`} className="minecraft-players-add-panel">
-          <div className="minecraft-players-lookup">
-            <label htmlFor={`${id}-username`}>{t(key('username'))}</label>
-            <div>
-              <input
-                ref={lookupInput}
-                id={`${id}-username`}
-                value={username}
-                maxLength={16}
-                autoComplete="off"
-                autoCapitalize="none"
-                spellCheck={false}
-                data-1p-ignore
-                data-lpignore="true"
-                disabled={disabled}
-                aria-invalid={invalidName}
-                aria-describedby={invalidName ? `${id}-invalid-name` : undefined}
-                onChange={(event) => {
-                  lookupRequest.current?.abort();
-                  setLookupBusy(false);
-                  setUsername(event.target.value);
-                  setVerified(undefined);
-                  setLookupError(undefined);
-                  setInvalidName(false);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault();
-                    if (!lookupBusy && !disabled) void lookup();
-                  }
-                }}
-              />
-              <button
-                type="button"
-                className="secondary"
-                disabled={disabled || lookupBusy || !username.trim()}
-                onClick={() => void lookup()}
-              >
-                {t(lookupBusy ? 'web.pending' : key('lookup'))}
-              </button>
-            </div>
-          </div>
-          {invalidName && (
-            <p id={`${id}-invalid-name`} className="field-error" role="alert">
-              {t(key('invalidName'))}
-            </p>
-          )}
-          {Boolean(lookupError) && <ErrorNotice error={lookupError} />}
-          {verified && candidate && (
-            <div className="minecraft-players-preview">
-              <Avatar name={verified.name} avatar={verified.avatar} uuid={verified.uuid} />
-              <div className="minecraft-players-preview-name">
-                <strong>{verified.name}</strong>
-                <small>{t(key('verified'))}</small>
-              </div>
-              <div className="minecraft-players-preview-actions">
-                {!candidate.whitelisted && can('whitelist-add') && (
-                  <button
-                    type="button"
-                    className="secondary"
-                    disabled={disabled}
-                    onClick={() => choose('whitelist-add', candidate)}
-                  >
-                    {t(key('whitelist-add'))}
-                  </button>
-                )}
-                {!candidate.operator && can('op') && (
-                  <button
-                    type="button"
-                    className="secondary"
-                    disabled={disabled}
-                    onClick={() => choose('op', candidate)}
-                  >
-                    {t(key('op'))}
-                  </button>
-                )}
-                {running && !candidate.banned && can('ban') && (
-                  <button
-                    type="button"
-                    className="secondary"
-                    disabled={disabled}
-                    onClick={() => choose('ban', candidate)}
-                  >
-                    {t(key('ban'))}
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-      <fieldset className="minecraft-players-filters">
-        <legend className="visually-hidden">{t(key('filters'))}</legend>
-        {filters.map((item) => (
-          <label key={item}>
-            <input
-              type="radio"
-              name={`${id}-filter`}
-              value={item}
-              checked={filter === item}
-              onChange={() => {
-                setFilter(item);
+      ) : (
+        <>
+          <div className="minecraft-players-toolbar">
+            <SearchField
+              label={t(key('search'))}
+              placeholder={t(key('search'))}
+              value={search}
+              onChange={(event) => {
+                setSearch(event.target.value);
                 setPage(0);
               }}
+              autoComplete="off"
+              data-1p-ignore
+              data-lpignore="true"
             />
-            <span>
-              {t(key(item))}
-              {(item !== 'online' || onlineAvailable) && (
-                <small>{rows.filter((row) => matches(row, item)).length}</small>
+            <div className="minecraft-players-controls">
+              <Tooltip content={t(key('whitelistHelp'))}>
+                <span>
+                  <Switch
+                    label={t(key('whitelistEnabled'))}
+                    checked={snapshot.whitelistEnabled}
+                    disabled={disabled || !can('whitelist-on')}
+                    onChange={(checked) => choose(checked ? 'whitelist-on' : 'whitelist-off')}
+                    stateLabel={t(key(snapshot.whitelistEnabled ? 'on' : 'off'))}
+                  />
+                </span>
+              </Tooltip>
+              <IconAction
+                tooltip={t(key('refresh'))}
+                label={t(key('refresh'))}
+                disabled={busy || online.isFetching}
+                onClick={() => void refresh()}
+              >
+                <Icon name="refresh" />
+              </IconAction>
+              {(can('whitelist-add') || can('op') || can('ban')) && (
+                <button
+                  type="button"
+                  className="secondary minecraft-players-add"
+                  disabled={disabled}
+                  aria-expanded={adding}
+                  aria-controls={`${id}-add`}
+                  onClick={() => setAdding((current) => !current)}
+                >
+                  <Icon name="plus" />
+                  {t(key('add'))}
+                </button>
               )}
-            </span>
-          </label>
-        ))}
-      </fieldset>
-      {!props.canManage && <p className="minecraft-players-status">{t(key('readOnly'))}</p>}
-      {status && (
-        <p className="minecraft-players-status" role="status">
-          {status}
-        </p>
-      )}
-      {dispatched && !uncertainError && (
-        <p className="minecraft-players-dispatched" role="status">
-          {t(key(dispatched.action === 'kick' ? 'kickDispatched' : 'dispatched'))}
-        </p>
-      )}
-      {Boolean(uncertainError) && <ErrorNotice error={uncertainError} />}
-      {Boolean(refreshError) && <ErrorNotice error={refreshError} retry={() => void refresh()} />}
-      <ul className="minecraft-players-list" aria-label={t('games.minecraft.sections.players')}>
-        {pageRows.map((row) => (
-          <li className="minecraft-player" key={row.uuid ?? row.name.toLowerCase()}>
-            <Avatar name={row.name} uuid={row.uuid} />
-            <div className="minecraft-player-identity">
-              <strong>{row.name}</strong>
-              <div className="minecraft-player-roles">
-                {row.online && (
-                  <span className="minecraft-player-role minecraft-player-role--online">
-                    <i aria-hidden="true" />
-                    {t(key('online'))}
-                  </span>
-                )}
-                {row.operator && (
-                  <Tooltip content={t(key('operatorDetails'), { level: row.operator.level })}>
-                    <button
-                      type="button"
-                      className="minecraft-player-role"
-                      aria-label={t(key('operatorDetails'), { level: row.operator.level })}
-                    >
-                      <Icon name="op" />
-                      {t(key('operator'))}
-                    </button>
-                  </Tooltip>
-                )}
-                {row.whitelisted && (
-                  <span className="minecraft-player-role">{t(key('whitelisted'))}</span>
-                )}
-                {row.banned && (
-                  <Tooltip
-                    content={
-                      row.banned.reason
-                        ? t(key('banReason'), { reason: row.banned.reason })
-                        : t(key('bannedRole'))
-                    }
-                  >
-                    <button
-                      type="button"
-                      className="minecraft-player-role minecraft-player-role--banned"
-                    >
-                      {t(key('bannedRole'))}
-                    </button>
-                  </Tooltip>
-                )}
-              </div>
             </div>
-            {props.canManage && (
-              <div className="minecraft-player-actions">
-                {rowAction(row, row.operator ? 'deop' : 'op', 'op')}
-                {offline && row.operator && rowAction(row, 'edit-operator', 'edit')}
-                {rowAction(
-                  row,
-                  row.whitelisted ? 'whitelist-remove' : 'whitelist-add',
-                  'whitelist',
-                )}
-                {running && rowAction(row, row.banned ? 'pardon' : 'ban', 'ban')}
-                {running && row.online && rowAction(row, 'kick', 'kick')}
+          </div>
+          {adding && (
+            <div id={`${id}-add`} className="minecraft-players-add-panel">
+              <div className="minecraft-players-lookup">
+                <label htmlFor={`${id}-username`}>{t(key('username'))}</label>
+                <div>
+                  <input
+                    ref={lookupInput}
+                    id={`${id}-username`}
+                    value={username}
+                    maxLength={16}
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    data-1p-ignore
+                    data-lpignore="true"
+                    disabled={disabled}
+                    aria-invalid={invalidName}
+                    aria-describedby={invalidName ? `${id}-invalid-name` : undefined}
+                    onChange={(event) => {
+                      lookupRequest.current?.abort();
+                      setLookupBusy(false);
+                      setUsername(event.target.value);
+                      setVerified(undefined);
+                      setLookupError(undefined);
+                      setInvalidName(false);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        if (!lookupBusy && !disabled) void lookup();
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={disabled || lookupBusy || !username.trim()}
+                    onClick={() => void lookup()}
+                  >
+                    {t(lookupBusy ? 'web.pending' : key('lookup'))}
+                  </button>
+                </div>
               </div>
+              {invalidName && (
+                <p id={`${id}-invalid-name`} className="field-error" role="alert">
+                  {t(key('invalidName'))}
+                </p>
+              )}
+              {Boolean(lookupError) && <ErrorNotice error={lookupError} />}
+              {verified && candidate && (
+                <div className="minecraft-players-preview">
+                  <Avatar name={verified.name} avatar={verified.avatar} uuid={verified.uuid} />
+                  <div className="minecraft-players-preview-name">
+                    <strong>{verified.name}</strong>
+                    <small>{t(key('verified'))}</small>
+                  </div>
+                  <div className="minecraft-players-preview-actions">
+                    {!candidate.whitelisted && can('whitelist-add') && (
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={disabled}
+                        onClick={() => choose('whitelist-add', candidate)}
+                      >
+                        {t(key('whitelist-add'))}
+                      </button>
+                    )}
+                    {!candidate.operator && can('op') && (
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={disabled}
+                        onClick={() => choose('op', candidate)}
+                      >
+                        {t(key('op'))}
+                      </button>
+                    )}
+                    {running && !candidate.banned && can('ban') && (
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={disabled}
+                        onClick={() => choose('ban', candidate)}
+                      >
+                        {t(key('ban'))}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          <fieldset className="minecraft-players-filters">
+            <legend className="visually-hidden">{t(key('filters'))}</legend>
+            {filters.map((item) => (
+              <label key={item}>
+                <input
+                  type="radio"
+                  name={`${id}-filter`}
+                  value={item}
+                  checked={filter === item}
+                  onChange={() => {
+                    setFilter(item);
+                    setPage(0);
+                  }}
+                />
+                <span>
+                  {t(key(item))}
+                  {(item !== 'online' || onlineAvailable) && (
+                    <small>{rows.filter((row) => matches(row, item)).length}</small>
+                  )}
+                </span>
+              </label>
+            ))}
+          </fieldset>
+          {!props.canManage && <p className="minecraft-players-status">{t(key('readOnly'))}</p>}
+          {snapshot.knownPlayersState === 'unavailable' && (
+            <p className="minecraft-players-status">{t(key('knownPlayersUnavailable'))}</p>
+          )}
+          {status && (
+            <p className="minecraft-players-status" role="status">
+              {status}
+            </p>
+          )}
+          {dispatched && !uncertainError && (
+            <p className="minecraft-players-dispatched" role="status">
+              {t(key(dispatched.action === 'kick' ? 'kickDispatched' : 'dispatched'))}
+            </p>
+          )}
+          {Boolean(uncertainError) && <ErrorNotice error={uncertainError} />}
+          {Boolean(refreshError) && (
+            <ErrorNotice error={refreshError} retry={() => void refresh()} />
+          )}
+          <ul className="minecraft-players-list" aria-label={t('games.minecraft.sections.players')}>
+            {pageRows.map((row) => (
+              <PlayerCard
+                key={row.uuid ?? row.name.toLowerCase()}
+                row={row}
+                to={row.uuid ? `/servers/${props.serverId}/game/players/${row.uuid}` : undefined}
+                hasActions={
+                  row.nameKnown !== false &&
+                  (can('op') ||
+                    can('whitelist-add') ||
+                    (running && (can('ban') || (row.online && can('kick')))))
+                }
+                actions={
+                  <>
+                    {playerActions(row)}
+                    {row.uuid &&
+                      (['heal', 'feed'] as const).map(
+                        (action) =>
+                          props.permissionKeys.includes(`game.minecraft.players.${action}`) && (
+                            <button
+                              type="button"
+                              className="secondary"
+                              key={action}
+                              disabled={
+                                disabled || !running || !row.online || row.nameKnown === false
+                              }
+                              onClick={() => {
+                                if (row.uuid) setGameplaySelection({ uuid: row.uuid, action });
+                              }}
+                            >
+                              {t(key(action))}
+                            </button>
+                          ),
+                      )}
+                  </>
+                }
+              />
+            ))}
+            {visible.length === 0 && (
+              <li className="minecraft-players-empty">
+                {filter === 'online' && !onlineAvailable
+                  ? status
+                  : t(
+                      key(
+                        search.trim()
+                          ? 'noMatches'
+                          : filter === 'online'
+                            ? 'onlineEmpty'
+                            : filter === 'all'
+                              ? 'empty'
+                              : 'noMatches',
+                      ),
+                    )}
+              </li>
             )}
-          </li>
-        ))}
-        {visible.length === 0 && (
-          <li className="minecraft-players-empty">
-            {filter === 'online' && !onlineAvailable
-              ? status
-              : t(
-                  key(
-                    search.trim()
-                      ? 'noMatches'
-                      : filter === 'online'
-                        ? 'onlineEmpty'
-                        : filter === 'all'
-                          ? 'empty'
-                          : 'noMatches',
-                  ),
-                )}
-          </li>
-        )}
-      </ul>
-      {lastPage > 0 && (
-        <Pagination
-          label={t(key('pagination'))}
-          previousLabel={t(key('previous'))}
-          nextLabel={t(key('next'))}
-          summary={t(key('page'), { page: currentPage + 1, total: lastPage + 1 })}
-          canPrevious={currentPage > 0}
-          canNext={currentPage < lastPage}
-          onPrevious={() => setPage(currentPage - 1)}
-          onNext={() => setPage(currentPage + 1)}
-        />
+          </ul>
+          {lastPage > 0 && (
+            <Pagination
+              label={t(key('pagination'))}
+              previousLabel={t(key('previous'))}
+              nextLabel={t(key('next'))}
+              summary={t(key('page'), { page: currentPage + 1, total: lastPage + 1 })}
+              canPrevious={currentPage > 0}
+              canNext={currentPage < lastPage}
+              onPrevious={() => setPage(currentPage - 1)}
+              onNext={() => setPage(currentPage + 1)}
+            />
+          )}
+        </>
       )}
+      {detailUuid && (
+        <>
+          {dispatched && !uncertainError && (
+            <p className="minecraft-players-dispatched" role="status">
+              {t(key(dispatched.action === 'kick' ? 'kickDispatched' : 'dispatched'))}
+            </p>
+          )}
+          {Boolean(uncertainError) && <ErrorNotice error={uncertainError} />}
+          {Boolean(refreshError) && (
+            <ErrorNotice error={refreshError} retry={() => void refresh()} />
+          )}
+        </>
+      )}
+      <PlayerGameplayActionDialog
+        serverId={props.serverId}
+        selection={gameplaySelection}
+        permissionKeys={props.permissionKeys}
+        pending={props.pending || busy}
+        onClose={() => setGameplaySelection(undefined)}
+        onChanged={() => refresh()}
+      />
       <ConfirmDialog
         open={Boolean(selection)}
         title={selection ? t(key(selection.action)) : ''}

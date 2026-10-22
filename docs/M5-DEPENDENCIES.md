@@ -26,6 +26,29 @@ Minecraft texture is bundled. Each trusted first-party game module must supply
 its artwork/provenance; the shared card renderer supplies cropping, labels,
 fallbacks and accessibility.
 
+## Minecraft player bodies
+
+`skinview3d` 3.4.2 is pinned and dynamically imported only for an active body
+preview. Its renderer dependencies (`three` and `skinview-utils`) are MIT;
+upstream code is unmodified. Preserve their notices in the generated bundle
+license report. The arm-wave motion is original application code; no animation
+or markup was copied from the reference site. See the
+[upstream renderer](https://github.com/bs-community/skinview3d).
+
+The existing MCHeads provider supplies UUID-addressed body PNGs and raw skin
+PNGs ([API documentation](https://mcheads.org/docs)). Requests omit credentials
+and referrers. This is an external appearance request, not a source of player
+identity or permission authority. Static previews and the authored SVG fallback
+work without WebGL; reduced motion disables the animated renderer. User skins
+and locally prepared Minecraft item textures are not repository-licensed assets
+and are not committed to source control.
+
+The integrated production build emits a separate 524.97 kB / 130.80 kB gzip renderer
+chunk. Its license inventory includes skinview3d 3.4.2, skinview-utils 0.7.1 and
+three 0.156.1. The optional item atlas is fetched by inventory images, not on the
+initial Players card list; SVG fragment crops and one-fetch caching are verified
+in Chromium and Firefox.
+
 ## Wave streaming decoder
 
 `mediabunny` 1.61.4 is pinned for the browser waveform Worker. It supplies parsers

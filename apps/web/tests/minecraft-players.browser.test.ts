@@ -5,6 +5,7 @@ import { DomainError } from '@nickhosting/core';
 import type { ConsoleRelayOptions } from '@nickhosting/pterodactyl-adapter';
 import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { minecraftPlayerDataFixture } from '../../../games/minecraft/src/player-data-fixture.js';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
@@ -191,6 +192,8 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     return result;
   }
   async function screenshot(page: Page, name: string) {
+    if (await page.locator('.minecraft-player-menu-popover:popover-open').count())
+      await page.keyboard.press('Escape');
     // All displayed identities are fixture-only; keep the search/input controls
     // visible for meaningful layout review instead of masking autocomplete=off.
     await page.screenshot({
@@ -210,7 +213,20 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     );
   }
 
+  async function openActions(page = user) {
+    const trigger = page.getByRole('button', { name: `Actions for ${player.name}`, exact: true });
+    const popup = page.getByRole('dialog', { name: `Actions for ${player.name}`, exact: true });
+    if (!(await popup.isVisible())) await trigger.click();
+    await browserExpect(popup).toBeVisible();
+    await browserExpect(trigger).toHaveAttribute('aria-expanded', 'true');
+    return popup;
+  }
+  async function rowAction(label: string, page = user) {
+    await openActions(page);
+    return page.getByRole('button', { name: `${label}: ${player.name}`, exact: true });
+  }
   async function choose(label: string, row = true) {
+    if (row) await openActions();
     await user
       .getByRole('button', { name: row ? `${label}: ${player.name}` : label, exact: true })
       .click();
@@ -222,7 +238,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
   it('adds and removes verified player access offline through durable jobs', async () => {
     await user.goto(route());
     await browserExpect(
-      user.getByText('No players in the saved lists.', { exact: true }),
+      user.getByText('No known players on this server.', { exact: true }),
     ).toBeVisible();
     await browserExpect(
       user.getByText('Server offline. Online players cannot be checked.', { exact: true }),
@@ -253,9 +269,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     await operation(() =>
       dialog.getByRole('button', { name: 'Make operator', exact: true }).click(),
     );
-    await browserExpect(
-      user.getByRole('button', { name: `Remove operator: ${player.name}`, exact: true }),
-    ).toBeEnabled();
+    await browserExpect(await rowAction('Remove operator')).toBeEnabled();
     expect(JSON.parse((await provider.files()).get('ops.json')?.toString() ?? 'null')).toEqual([
       { name: player.name, uuid, level: 2, bypassesPlayerLimit: true },
     ]);
@@ -267,9 +281,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     await operation(() =>
       dialog.getByRole('button', { name: 'Remove operator', exact: true }).click(),
     );
-    await browserExpect(
-      user.getByRole('button', { name: `Make operator: ${player.name}`, exact: true }),
-    ).toBeEnabled();
+    await browserExpect(await rowAction('Make operator')).toBeEnabled();
     dialog = await choose('Remove from whitelist');
     await operation(() =>
       dialog.getByRole('button', { name: 'Remove from whitelist', exact: true }).click(),
@@ -293,9 +305,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     ] as const) {
       const dialog = await choose(label);
       await action(() => dialog.getByRole('button', { name: label, exact: true }).click(), command);
-      await browserExpect(
-        user.getByRole('button', { name: `${next}: ${player.name}`, exact: true }),
-      ).toBeEnabled();
+      await browserExpect(await rowAction(next)).toBeEnabled();
     }
     await user.getByRole('switch', { name: 'Whitelist', exact: true }).click();
     let dialog = user.getByRole('dialog', { name: 'Enable whitelist', exact: true });
@@ -323,9 +333,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
       () => dialog.getByRole('button', { name: 'Ban player', exact: true }).click(),
       `ban ${player.name} Browser test`,
     );
-    await browserExpect(
-      user.getByRole('button', { name: `Unban player: ${player.name}`, exact: true }),
-    ).toBeEnabled();
+    await browserExpect(await rowAction('Unban player')).toBeEnabled();
     for (const [label, command, next] of [
       ['Unban player', `pardon ${player.name}`, 'Ban player'],
       ['Remove operator', `deop ${player.name}`, 'Make operator'],
@@ -333,9 +341,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     ] as const) {
       dialog = await choose(label);
       await action(() => dialog.getByRole('button', { name: label, exact: true }).click(), command);
-      await browserExpect(
-        user.getByRole('button', { name: `${next}: ${player.name}`, exact: true }),
-      ).toBeEnabled();
+      await browserExpect(await rowAction(next)).toBeEnabled();
     }
     await user.getByRole('switch', { name: 'Whitelist', exact: true }).click();
     dialog = user.getByRole('dialog', { name: 'Disable whitelist', exact: true });
@@ -480,9 +486,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     );
     await browserExpect(user.getByRole('dialog')).toHaveCount(0);
     await browserExpect(user.getByRole('alert')).toBeVisible();
-    await browserExpect(
-      user.getByRole('button', { name: `Make operator: ${player.name}`, exact: true }),
-    ).toBeDisabled();
+    await browserExpect(await rowAction('Make operator')).toBeDisabled();
     await browserExpect(
       user.locator('.minecraft-player').getByText('Operator', { exact: true }),
     ).toHaveCount(0);
@@ -499,9 +503,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
       ),
     );
     await user.getByRole('button', { name: 'Refresh players', exact: true }).click();
-    await browserExpect(
-      user.getByRole('button', { name: `Remove operator: ${player.name}`, exact: true }),
-    ).toBeEnabled();
+    await browserExpect(await rowAction('Remove operator')).toBeEnabled();
     await browserExpect(user.getByRole('alert')).toHaveCount(0);
     expect(commands).toHaveLength(attempts);
   });
@@ -529,7 +531,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     try {
       await user.getByRole('button', { name: 'Refresh players', exact: true }).click();
       await browserExpect(
-        user.getByText('Online players are unavailable. Saved lists are still shown.', {
+        user.getByText('Online players are unavailable. Saved players are still shown.', {
           exact: true,
         }),
       ).toBeVisible({ timeout: 20_000 }); // Honor the real five-second cache and polling interval.
@@ -586,7 +588,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     await user.goto(route());
     await browserExpect(user.getByRole('alert')).toBeVisible();
     await browserExpect(
-      user.getByText('No players in the saved lists.', { exact: true }),
+      user.getByText('No known players on this server.', { exact: true }),
     ).toHaveCount(0);
     await screenshot(user, 'minecraft-players-provider-error-desktop-en');
     failFiles = false;
@@ -635,6 +637,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     );
     await running(true);
     await delegated.page.goto(route());
+    await openActions(delegated.page);
     await browserExpect(
       delegated.page.getByRole('button', { name: `Kick player: ${player.name}`, exact: true }),
     ).toBeVisible();
@@ -655,6 +658,234 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     }
     await accessible(delegated.page);
     await running(false);
+  });
+
+  async function savedPlayer() {
+    await provider.adapter.createDirectory(identifier, 'world', 'playerdata');
+    await provider.adapter.createDirectory(identifier, 'world', 'stats');
+    const files = await provider.files();
+    files.set('usercache.json', Buffer.from(JSON.stringify([{ name: player.name, uuid }])));
+    files.set(`world/playerdata/${uuid}.dat`, minecraftPlayerDataFixture());
+    files.set(
+      `world/stats/${uuid}.json`,
+      Buffer.from(
+        JSON.stringify({
+          stats: {
+            'minecraft:custom': {
+              'minecraft:play_time': 72000,
+              'minecraft:deaths': 2,
+              'minecraft:player_kills': 5,
+              'minecraft:walk_one_cm': 125050,
+              'minecraft:damage_dealt': 123,
+            },
+            'minecraft:mined': { 'minecraft:stone': 125, 'minecraft:dirt': 64 },
+            'minecraft:used': { 'minecraft:diamond_pickaxe': 80 },
+            'minecraft:killed': { 'minecraft:zombie': 12 },
+          },
+        }),
+      ),
+    );
+    return files;
+  }
+  it('opens full body cards and the saved player detail with inventory, statistics and return focus', async () => {
+    await running(false);
+    await savedPlayer();
+    await user.goto(route());
+    await user.getByRole('searchbox', { name: 'Search players', exact: true }).fill('Browser');
+    const card = user.getByRole('link', { name: `View player: ${player.name}`, exact: true });
+    await browserExpect(card.locator('.minecraft-player-body')).toBeVisible();
+    await openActions();
+    await browserExpect(user.getByRole('link', { name: 'View player', exact: true })).toBeVisible();
+    await screenshot(user, 'minecraft-players-cards-desktop-en');
+    await card.click();
+    await browserExpect(user).toHaveURL(`${route()}/${uuid}`);
+    await browserExpect(
+      user.getByRole('heading', { name: player.name, exact: true }),
+    ).toBeFocused();
+    await browserExpect(
+      user.getByRole('heading', { name: 'Inventory', exact: true }),
+    ).toBeVisible();
+    await browserExpect(
+      user.getByRole('img', { name: 'Slot 0: Diamond pickaxe × 1', exact: true }),
+    ).toBeVisible();
+    await browserExpect(
+      user.getByRole('img', { name: 'Slot 0: Diamond × 12', exact: true }),
+    ).toBeVisible();
+    await browserExpect(user.locator('.minecraft-statistics-summary')).toContainText('1h 0m 0s');
+    await browserExpect(user.locator('.minecraft-statistics-summary')).toContainText('2.5');
+    await browserExpect(
+      user.getByText(
+        'These values come from saved server files. They may differ from the player’s current state.',
+        { exact: true },
+      ),
+    ).toBeVisible();
+    await user.getByLabel('Category', { exact: true }).selectOption('distance');
+    await browserExpect(user.locator('.minecraft-statistics-list')).toContainText('1,250.5 blocks');
+    await user.getByLabel('Category', { exact: true }).selectOption('all');
+    await browserExpect(
+      user.locator('.minecraft-statistics-list').getByText('12.3', { exact: true }),
+    ).toBeVisible();
+    await screenshot(user, 'minecraft-player-detail-desktop-en');
+    await accessible();
+    await user.setViewportSize({ width: 320, height: 844 });
+    await screenshot(user, 'minecraft-player-detail-small-mobile-en');
+    await accessible();
+    await user.setViewportSize({ width: 1440, height: 1000 });
+    await user.getByRole('link', { name: '← Players', exact: true }).click();
+    await browserExpect(card).toBeFocused();
+    await browserExpect(
+      user.getByRole('searchbox', { name: 'Search players', exact: true }),
+    ).toHaveValue('Browser');
+  });
+  it('distinguishes pending and failed detail reads and lets blocked actions be cancelled', async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const url = `**${api()}/players/${uuid}`;
+    await user.route(url, async (request) => {
+      await gate;
+      await request.continue();
+    });
+    try {
+      await user.goto(`${route()}/${uuid}`);
+      await browserExpect(user.getByRole('status').filter({ hasText: 'Loading' })).toBeVisible();
+      await screenshot(user, 'minecraft-player-detail-loading-desktop-en');
+    } finally {
+      release();
+      await user.unroute(url);
+    }
+    await browserExpect(
+      user.getByRole('heading', { name: player.name, exact: true }),
+    ).toBeVisible();
+    await user.route(url, async (request) =>
+      request.fulfill({
+        status: 503,
+        json: {
+          error: { code: 'integration_unavailable', messageKey: 'errors.integration_unavailable' },
+        },
+      }),
+    );
+    await user.getByRole('button', { name: 'Refresh saved data', exact: true }).click();
+    await browserExpect(user.getByRole('alert')).toBeVisible();
+    await screenshot(user, 'minecraft-player-detail-error-desktop-en');
+    await user.unroute(url);
+    await user.getByRole('button', { name: 'Try again', exact: true }).click();
+    await browserExpect(
+      user.getByRole('heading', { name: player.name, exact: true }),
+    ).toBeVisible();
+    await user.getByRole('button', { name: 'Reset saved data', exact: true }).click();
+    const dialog = user.getByRole('dialog', { name: 'Reset saved data', exact: true });
+    await browserExpect(
+      dialog.getByRole('button', { name: 'Reset saved data', exact: true }),
+    ).toBeDisabled();
+    await browserExpect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeEnabled();
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await browserExpect(dialog).toHaveCount(0);
+  });
+  it('shows missing saved data honestly without inventing empty inventory or zero vitals', async () => {
+    const files = await savedPlayer();
+    files.delete(`world/playerdata/${uuid}.dat`);
+    files.delete(`world/stats/${uuid}.json`);
+    try {
+      await user.goto(`${route()}/${uuid}`);
+      await browserExpect(
+        user.getByText('No saved player data was found.', { exact: true }),
+      ).toBeVisible();
+      await browserExpect(
+        user.getByText('No readable saved inventory is available.', { exact: true }),
+      ).toHaveCount(2);
+      await browserExpect(
+        user.getByText('Saved statistics are unavailable.', { exact: true }),
+      ).toBeVisible();
+      await browserExpect(user.locator('.minecraft-player-hud')).toHaveCount(0);
+      await browserExpect(user.locator('.minecraft-item-slot')).toHaveCount(0);
+      await screenshot(user, 'minecraft-player-detail-missing-desktop-en');
+      await accessible();
+    } finally {
+      await savedPlayer();
+    }
+  });
+
+  it('dispatches authorized gameplay actions without presenting saved vitals as confirmation', async () => {
+    await running(true);
+    await user.goto(`${route()}/${uuid}`);
+    const heal = user.getByRole('button', { name: 'Heal', exact: true });
+    await browserExpect(heal).toBeEnabled();
+    await heal.click();
+    let dialog = user.getByRole('dialog', { name: 'Heal', exact: true });
+    let response = user.waitForResponse(
+      (result) =>
+        result.request().method() === 'POST' &&
+        result.url().endsWith(`${api()}/players/${uuid}/actions`),
+    );
+    await dialog.getByRole('button', { name: 'Heal', exact: true }).click();
+    expect((await response).status()).toBe(202);
+    await browserExpect(
+      user.getByText('Command sent. Saved values are not confirmation that it was applied.', {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await browserExpect(user.locator('.minecraft-player-values').first()).toContainText('13');
+    await user.getByRole('button', { name: 'Teleport', exact: true }).click();
+    dialog = user.getByRole('dialog', { name: 'Teleport', exact: true });
+    await browserExpect(
+      dialog.getByRole('button', { name: 'Teleport', exact: true }),
+    ).toBeDisabled();
+    for (const [axis, value] of [
+      ['X', '10.5'],
+      ['Y', '70'],
+      ['Z', '-20'],
+    ] as const)
+      await dialog.getByLabel(axis, { exact: true }).fill(value);
+    response = user.waitForResponse(
+      (result) =>
+        result.request().method() === 'POST' &&
+        result.url().endsWith(`${api()}/players/${uuid}/actions`),
+    );
+    await dialog.getByRole('button', { name: 'Teleport', exact: true }).click();
+    expect((await response).status()).toBe(202);
+    expect(commands.at(-1)).toContain('10.5 70 -20');
+    await browserExpect(
+      user.getByRole('button', { name: 'Reset saved data', exact: true }),
+    ).toBeDisabled();
+    await user.getByRole('button', { name: 'Reset saved data', exact: true }).focus();
+    await browserExpect(user.getByRole('tooltip')).toContainText(
+      'Stop the server before resetting saved data.',
+    );
+    await user.keyboard.press('Escape');
+    await screenshot(user, 'minecraft-player-detail-running-desktop-en');
+    await accessible();
+    await running(false);
+  });
+  it('resets only the explicitly selected saved scope and preserves inventory', async () => {
+    await running(false);
+    const files = await savedPlayer();
+    const inventory = files.get(`world/playerdata/${uuid}.dat`);
+    await user.goto(`${route()}/${uuid}`);
+    await user.getByRole('button', { name: 'Reset saved data', exact: true }).click();
+    const dialog = user.getByRole('dialog', { name: 'Reset saved data', exact: true });
+    await dialog.getByRole('checkbox', { name: 'Statistics', exact: true }).check();
+    await screenshot(user, 'minecraft-player-reset-confirm-desktop-en');
+    const response = user.waitForResponse(
+      (result) =>
+        result.request().method() === 'POST' &&
+        result.url().endsWith(`${api()}/players/${uuid}/actions`),
+    );
+    await dialog.getByRole('button', { name: 'Reset saved data', exact: true }).click();
+    const result = await response;
+    expect(result.status(), await result.text()).toBe(200);
+    expect(files.get(`world/playerdata/${uuid}.dat`)).toEqual(inventory);
+    expect(files.has(`world/stats/${uuid}.json`)).toBe(false);
+    await browserExpect(
+      user.getByText('Selected saved data was reset. Recoverable copies remain on the server.', {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await browserExpect(
+      user.getByRole('img', { name: 'Slot 0: Diamond pickaxe × 1', exact: true }),
+    ).toBeVisible();
+    await savedPlayer();
   });
 
   it('renders localized mobile player controls without overflow', async () => {
@@ -682,6 +913,23 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     await user.getByRole('button', { name: 'Aggiungi giocatore', exact: true }).click();
     await browserExpect(user.getByLabel('Nome utente Minecraft', { exact: true })).toBeFocused();
     await screenshot(user, 'minecraft-players-add-mobile-it');
+    await accessible();
+    await user.getByRole('button', { name: 'Aggiungi giocatore', exact: true }).click();
+    await user.getByRole('link', { name: `Apri giocatore: ${player.name}`, exact: true }).click();
+    await browserExpect(
+      user.getByRole('heading', { name: 'Inventario', exact: true }),
+    ).toBeVisible();
+    for (const width of [390, 320]) {
+      await user.setViewportSize({ width, height: 844 });
+      await screenshot(user, `minecraft-player-detail-${width}-mobile-it`);
+      await accessible();
+      const title = await user
+        .getByRole('heading', { name: player.name, exact: true })
+        .boundingBox();
+      expect(title?.height).toBeLessThan(35);
+    }
+    await user.setViewportSize({ width: 1440, height: 1000 });
+    await screenshot(user, 'minecraft-player-detail-desktop-it');
     await accessible();
     expect(pageErrors).toEqual([]);
   });

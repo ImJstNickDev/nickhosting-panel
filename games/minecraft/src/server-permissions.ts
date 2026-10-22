@@ -12,7 +12,20 @@ const permission = (resource: string, action: string): ServerPermissionDefinitio
 /** Compiled integration data, never a browser-supplied authorization policy. */
 export const minecraftServerPermissions: readonly ServerPermissionDefinition[] = [
   ...['read', 'write'].map((action) => permission('properties', action)),
-  ...['read', 'whitelist', 'op', 'kick', 'ban'].map((action) => permission('players', action)),
+  ...[
+    'read',
+    'whitelist',
+    'op',
+    'kick',
+    'ban',
+    'heal',
+    'feed',
+    'starve',
+    'kill',
+    'gamemode',
+    'teleport',
+    'reset',
+  ].map((action) => permission('players', action)),
   ...['read', 'import', 'select', 'download', 'delete'].map((action) =>
     permission('worlds', action),
   ),

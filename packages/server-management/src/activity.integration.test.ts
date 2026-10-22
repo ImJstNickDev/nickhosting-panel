@@ -43,6 +43,41 @@ async function audit(
 }
 
 describe('unified activity', () => {
+  it('groups player reset receipts and exposes recovery paths without raw file hashes', async () => {
+    const serverId = await f.server();
+    const operationId = randomUUID();
+    const metadata = {
+      operationId,
+      entries: [
+        {
+          path: 'world/players/data/player.dat',
+          target: 'world/players/data/player.dat.nickhosting-reset-operation',
+        },
+      ],
+      moves: [{ sha256: 'PRIVATE_FILE_HASH' }],
+    };
+    await audit(
+      serverId,
+      'server.minecraft.player.reset',
+      { ...metadata, outcome: 'requested' },
+      new Date('2026-01-01T00:00:00Z'),
+    );
+    await audit(
+      serverId,
+      'server.minecraft.player.reset',
+      { ...metadata, outcome: 'uncertain' },
+      new Date('2026-01-01T00:00:01Z'),
+    );
+    const result = await listUnifiedActivity(f.db, f.context, { serverId });
+    const resets = result.items.filter((item) => item.action === 'server.minecraft.player.reset');
+    expect(resets).toHaveLength(1);
+    expect(resets[0]).toMatchObject({
+      category: 'settings',
+      state: 'uncertain',
+      metadata: { operationId, entries: metadata.entries },
+    });
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_FILE_HASH');
+  });
   it('does not expose command text to a direct Activity reader and includes Subusers changes', async () => {
     const serverId = await f.server();
     const peer = await managementFixture(f.db);
@@ -172,7 +207,7 @@ describe('unified activity', () => {
     });
     expect((await listUnifiedActivity(f.db, peer.context)).items).toEqual([]);
     await expect(listUnifiedActivity(f.db, peer.context, { serverId })).rejects.toThrow(
-      'not_found',
+      'forbidden',
     );
     await setProjectMember(f.db, f.context, project.id, {
       userId: peer.context.subjectUserId,
@@ -493,7 +528,7 @@ describe('unified activity', () => {
       role: null,
     });
     await expect(listUnifiedActivity(f.db, peer.context, { serverId })).rejects.toThrow(
-      'not_found',
+      'forbidden',
     );
     expect(
       (await listUnifiedActivity(f.db, f.context, { serverId, category: 'access' })).items[0]

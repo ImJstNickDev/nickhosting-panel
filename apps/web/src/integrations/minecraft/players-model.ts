@@ -2,6 +2,7 @@ import type { MinecraftPlayers as Snapshot } from '@nickhosting/minecraft/ui';
 
 export type MinecraftPlayerRow = {
   name: string;
+  nameKnown?: boolean;
   uuid?: string;
   online: boolean;
   operator?: Snapshot['operators'][number];
@@ -43,6 +44,13 @@ export function mergeMinecraftPlayers(
     row.whitelistEntry = player;
   }
   for (const player of snapshot.banned) add(player).banned = player;
+  for (const player of snapshot.knownPlayers ?? []) {
+    const row = add({ name: player.name ?? player.uuid, uuid: player.uuid });
+    if (player.name) {
+      row.name = player.name;
+      row.nameKnown = true;
+    } else if (row.name === player.uuid) row.nameKnown = false;
+  }
   for (const player of online) add(player).online = true;
   return [...new Set(rows.values())].sort(
     (a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name),

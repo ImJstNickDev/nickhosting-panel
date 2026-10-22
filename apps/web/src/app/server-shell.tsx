@@ -72,7 +72,7 @@ export function ServerShell() {
   );
 }
 export function ServerGameSection() {
-  const { serverId = '', sectionId = '' } = useParams(),
+  const { serverId = '', sectionId = '', '*': detail = '' } = useParams(),
     location = useLocation(),
     server = useServer(serverId);
   if (server.isPending) return <Loading />;
@@ -86,7 +86,7 @@ export function ServerGameSection() {
     return (
       <Navigate
         to={{
-          pathname: `/servers/${serverId}/game/${canonical.id}`,
+          pathname: `/servers/${serverId}/game/${canonical.id}${detail ? `/${detail.split('/').map(encodeURIComponent).join('/')}` : ''}`,
           search: location.search,
           hash: location.hash,
         }}

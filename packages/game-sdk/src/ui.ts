@@ -640,7 +640,13 @@ export interface TrustedGameUiModule {
   /** Bundled first-party assets only; never supplied by the API descriptor. */
   assets?: Readonly<Record<string, string>>;
   /** Trusted integration owns avatar provider and bundled fallback; never API-supplied URLs. */
-  playerAppearance?: { fallback: string; avatarUrl(name: string): string };
+  playerAppearance?: {
+    fallback: string;
+    avatarUrl(name: string): string;
+    bodyFallback?: string;
+    bodyUrl?(uuid: string): string;
+    skinUrl?(uuid: string): string;
+  };
 }
 /** Presentation guards only; API handlers remain authoritative for authorization. */
 export function availableGameUiSections(

@@ -24,3 +24,11 @@ player name to that service; they are decorative and never identity proof.
 a small grass-topped voxel block with a configuration gear. It contains no copied
 game textures or logos. The integration contributes this decorative file icon
 through its trusted UI descriptor; the shared file manager has no Minecraft check.
+
+`player-body-placeholder.svg` is original voxel geometry authored on 2026-10-22:
+a neutral full-body figure with a teal shirt and dark trousers. It contains no
+copied Minecraft skin or user artwork. Full-body and animated previews use the
+trusted module's MCHeads player/skin URLs and send the player's UUID to that
+service. They are decorative, never identity proof. Animation uses skinview3d
+3.4.2 (MIT), loaded only on interaction; its Three.js and skinview-utils runtime
+dependencies are also MIT. No remote player skin is stored in this repository.

@@ -18,6 +18,7 @@ const eventLabels: Record<string, string> = {
   'server.member.updated': 'memberUpdated',
   'server.subuser.updated': 'memberUpdated',
   'server.metadata.updated': 'settingsUpdated',
+  'server.minecraft.player.reset': 'playerReset',
   'minecraft.mods.applied': 'modsApplied',
   'minecraft.mods.preparation_reconciled': 'modsReconciled',
   'minecraft.plugins.applied': 'pluginsApplied',

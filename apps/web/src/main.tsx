@@ -105,7 +105,7 @@ const router = createBrowserRouter(
           <Route path="settings/messages" element={<ServerPage component={AutomationPage} />} />
           <Route path="subusers" element={<ServerPage component={ServerSubusers} />} />
           <Route path="game" element={<ServerGameSection />} />
-          <Route path="game/:sectionId" element={<ServerGameSection />} />
+          <Route path="game/:sectionId/*" element={<ServerGameSection />} />
         </Route>
         <Route path="/owner" element={<OwnerHealthPage />} />
         <Route path="/owner/users" element={<OwnerUsersPage />} />

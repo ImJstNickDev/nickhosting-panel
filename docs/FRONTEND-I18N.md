@@ -72,6 +72,15 @@ project shown separately. Delegated editors cannot grant beyond their own author
 change themselves or edit users with broader effective access. See
 [server rework](M5-SERVER-REWORK.md) for the scope and evidence.
 
+### Minecraft Players
+
+Players uses full-body identity cards with a separate ellipsis menu and a nested
+detail route. Hover/focus waves are optional decorative motion and respect reduced
+motion. The detail groups saved inventory/Ender Chest, player actions and actual
+statistics, retaining the shared workspace surfaces, dialogs and permission
+rules. Saved state and live presence are distinguished; unknown values are not
+displayed as zero. See [Players workspace](M5-MINECRAFT-PLAYERS.md).
+
 ### Personal settings
 
 Personal Settings uses route-based local navigation:

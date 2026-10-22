@@ -1503,6 +1503,30 @@ Standard managed-server authorization, lifecycle locks, provider identity and
 actor/subject audit apply. Typed commands appear in Activity through the existing
 console audit model. No new provider keys, database tables or deployment settings.
 
+### Minecraft player details — 2026-10-22
+
+The Players list additionally exposes bounded `knownPlayers` with UUID, nullable
+name and discovery sources, plus `knownPlayersState`. Saved file identities and
+usercache entries complement the existing authoritative access lists. Discovery
+failure is explicit and does not fabricate an empty player history.
+
+`GET /v1/servers/:id/minecraft/players/:uuid` requires Players READ and returns a
+saved-file snapshot, revision, layout, nullable inventory/Ender Chest, vitals,
+position, statistics and per-action capabilities. Its canonical UUID must be
+known to this server. It does not provide arbitrary paths or raw NBT. Both older
+world roots and recent `world/players/{data,stats,advancements}` are supported.
+
+`POST /v1/servers/:id/minecraft/players/:uuid/actions` accepts only typed
+`heal|feed|starve|kill|gamemode|teleport|reset` payloads and requires the matching
+additional Players grant. Live actions return202 with `outcome: dispatched`;
+they do not assert that the game applied the effect. Reset requires offline
+state, selected scopes, `confirm:true` and a SHA256 snapshot revision. A verified
+reset returns200 with `outcome: confirmed`, an operation ID and recovery paths;
+unknown or partial effects remain `operation_uncertain`. All mutations retain
+the shared lock, current authorization and durable actor/subject audit. There is
+no automatic replay. See [Players workspace](M5-MINECRAFT-PLAYERS.md) for identity,
+file bounds, recovery semantics and limitations.
+
 ### Minecraft Worlds inventory — 2026-10-17
 
 `GET /v1/servers/:id/minecraft/worlds` now returns an object instead of the old

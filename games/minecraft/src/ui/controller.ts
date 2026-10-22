@@ -7,6 +7,19 @@ import type { GameUiClient, UiOption, UiValues } from '@nickhosting/game-sdk/ui'
 import { z } from 'zod';
 import { minecraftContentCapabilities } from '../content-capabilities.js';
 import {
+  type MinecraftPlayerDetailAction,
+  minecraftKnownPlayerSchema,
+  minecraftPlayerDetailActionSchema,
+  minecraftPlayerDetailSchema,
+} from '../player-details-contracts.js';
+
+export type {
+  MinecraftKnownPlayer,
+  MinecraftPlayerDetail,
+  MinecraftPlayerDetailAction,
+} from '../player-details-contracts.js';
+
+import {
   type MinecraftDatapackChange,
   type MinecraftDatapackSnapshot,
   minecraftDatapackApplySchema,
@@ -203,6 +216,8 @@ export const minecraftPlayersSchema = z
       .max(100000),
     whitelistEnabled: z.boolean(),
     enforceWhitelist: z.boolean(),
+    knownPlayers: z.array(minecraftKnownPlayerSchema).max(10000).default([]),
+    knownPlayersState: z.enum(['available', 'unavailable']).default('unavailable'),
   })
   .strip();
 export type MinecraftPlayers = z.infer<typeof minecraftPlayersSchema>;
@@ -499,6 +514,37 @@ export function createMinecraftUiController(client: GameUiClient) {
       return minecraftOnlinePlayersSchema.parse(
         await request(serverPath(serverId, '/players/online'), 'GET', undefined, signal),
       );
+    },
+    async playerDetails(serverId: string, playerUuid: string, signal?: AbortSignal) {
+      return minecraftPlayerDetailSchema.parse(
+        await request(
+          serverPath(serverId, `/players/${encodeURIComponent(uuid.parse(playerUuid))}`),
+          'GET',
+          undefined,
+          signal,
+        ),
+      );
+    },
+    async playerDetailAction(
+      serverId: string,
+      playerUuid: string,
+      input: MinecraftPlayerDetailAction,
+      signal?: AbortSignal,
+    ) {
+      return z
+        .object({
+          outcome: z.enum(['dispatched', 'confirmed']),
+          operationId: z.string(),
+          recoveryPaths: z.array(z.string()).optional(),
+        })
+        .parse(
+          await request(
+            serverPath(serverId, `/players/${encodeURIComponent(uuid.parse(playerUuid))}/actions`),
+            'POST',
+            minecraftPlayerDetailActionSchema.parse(input),
+            signal,
+          ),
+        );
     },
     async playerAction(serverId: string, action: MinecraftPlayerAction, signal?: AbortSignal) {
       return z

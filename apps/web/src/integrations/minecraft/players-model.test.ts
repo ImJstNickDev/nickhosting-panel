@@ -3,6 +3,8 @@ import { mergeMinecraftPlayers } from './players-model.js';
 
 const id = '069a79f4-44e9-4726-a5be-fca90e38aaf5';
 const snapshot = {
+  knownPlayers: [],
+  knownPlayersState: 'available' as const,
   supported: true,
   installed: true,
   operators: [{ uuid: id, name: 'OldName', level: 4, bypassesPlayerLimit: false }],
@@ -36,5 +38,30 @@ describe('Minecraft Players row identity', () => {
     expect(rows.find((row) => row.online)).toMatchObject({ name: 'OldName', whitelisted: false });
     expect(rows.find((row) => row.online)?.operator).toBeUndefined();
     expect(rows.find((row) => row.online)?.uuid).toBeUndefined();
+  });
+  it('includes server-discovered players without inventing a command name for UUID-only data', () => {
+    const uuid = '22222222-2222-4222-8222-222222222222';
+    const rows = mergeMinecraftPlayers(
+      { ...snapshot, knownPlayers: [{ uuid, name: null, sources: ['playerdata'] }] },
+      [],
+    );
+    expect(rows.find((row) => row.uuid === uuid)).toMatchObject({
+      name: uuid,
+      nameKnown: false,
+      online: false,
+      whitelisted: false,
+    });
+    const named = mergeMinecraftPlayers(
+      {
+        ...snapshot,
+        knownPlayers: [{ uuid, name: 'SavedPlayer', sources: ['usercache', 'playerdata'] }],
+      },
+      [{ name: 'SavedPlayer' }],
+    );
+    expect(named.find((row) => row.uuid === uuid)).toMatchObject({
+      name: 'SavedPlayer',
+      nameKnown: true,
+      online: true,
+    });
   });
 });

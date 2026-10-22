@@ -589,6 +589,9 @@ export const minecraftUiModule = defineTrustedGameUiModule({
   },
   playerAppearance: {
     fallback: new URL('./assets/player-placeholder.svg', import.meta.url).href,
+    bodyFallback: new URL('./assets/player-body-placeholder.svg', import.meta.url).href,
+    bodyUrl: (uuid) => `https://api.mcheads.org/player/${encodeURIComponent(uuid)}/256`,
+    skinUrl: (uuid) => `https://api.mcheads.org/skin/${encodeURIComponent(uuid)}`,
     avatarUrl: (name) => `https://api.mcheads.org/head/${encodeURIComponent(name)}/64`,
   },
   creationCatalog: {
