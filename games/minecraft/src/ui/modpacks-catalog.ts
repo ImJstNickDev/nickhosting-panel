@@ -3,6 +3,10 @@ export const minecraftModpacksMessages: Record<string, [string, string]> = {
   'modpacks.noUpdates': ['You’re up to date', 'Il modpack è aggiornato'],
   'modpacks.checkingUpdates': ['Checking…', 'Controllo…'],
   'modpacks.categories': ['Categories', 'Categorie'],
+  'modpacks.categoryLimit': [
+    'Select up to {count} categories.',
+    'Seleziona fino a {count} categorie.',
+  ],
   'modpacks.allCategories': ['All categories', 'Tutte le categorie'],
   'modpacks.inspecting': ['Checking files', 'Controllo dei file'],
   'modpacks.checking': ['Checking installation', 'Controllo dell’installazione'],

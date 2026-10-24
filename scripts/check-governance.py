@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check the Git index before publication; heuristic scans are not a secret audit."""
 
+import hashlib
 import ipaddress
 import os
 from pathlib import Path, PurePosixPath
@@ -17,6 +18,20 @@ from urllib.parse import unquote, urlsplit
 
 def git(*args, cwd=None, input=None):
     return subprocess.run(["git", *args], cwd=cwd, input=input, capture_output=True)
+
+
+# Reviewed official provider marks; exact paths and hashes, never arbitrary binaries.
+PROVIDER_MARKS = {
+    "apps/web/src/integrations/minecraft/provider-logos/curseforge.ico": "b1c9f08adaa8f91957bcd20e2796814557683ed051173ae31779752632efc5b9",
+    "apps/web/src/integrations/minecraft/provider-logos/ftb.png": "40ecb82b09c672c9220f17ff770e8b4394c1b4b022faa1854c9b8bb22ba13f14",
+    "apps/web/src/integrations/minecraft/provider-logos/modrinth.png": "893398804334d69eb89d0d3748a454e6ea530df62cf1894b4f50535dc4a4ae86",
+    "apps/web/src/integrations/minecraft/provider-logos/technic.ico": "80707aa58b73ff234d13c8d5242bcb2f5804d984190ec40d44cdc12a48cd867d",
+    "apps/web/src/integrations/minecraft/provider-logos/voidswrath.png": "c006fccc62d1bcc560d3bd015ca930a534f7abd35e6485575719d8716bba634f",
+}
+
+
+def safe_provider_mark(path, blob):
+    return PROVIDER_MARKS.get(path) == hashlib.sha256(blob).hexdigest()
 
 
 def safe_review_png(path, blob):
@@ -57,7 +72,7 @@ def main():
         print("FAIL: run inside the initialized project Git repository")
         return 1
     root = Path(os.fsdecode(root_result.stdout.strip()))
-    failures, files, images = [], {}, set()
+    failures, files, images, marks = [], {}, set(), set()
     entries = git("ls-files", "--stage", "-z", cwd=root)
     if entries.returncode:
         print("FAIL: cannot read Git index")
@@ -74,6 +89,9 @@ def main():
         blob = git("show", f":{path}", cwd=root)
         if not blob.returncode and safe_review_png(path, blob.stdout):
             images.add(path)
+            continue
+        if not blob.returncode and safe_provider_mark(path, blob.stdout):
+            marks.add(path)
             continue
         try:
             if blob.returncode or b"\0" in blob.stdout:
@@ -183,7 +201,7 @@ def main():
     whitespace = git("diff", "--cached", "--check", cwd=root)
     if whitespace.returncode:
         failures.append("git diff --cached --check failed; inspect locally before publishing")
-    print(f"Checked {len(files)} indexed text files, {len(images)} review PNGs, {links} relative links, "
+    print(f"Checked {len(files)} indexed text files, {len(images)} review PNGs, {len(marks)} pinned provider marks, {links} relative links, "
           f"{len(tomls)} TOML files and {len(excluded) + len(allowed)} ignore cases.")
     for failure in failures:
         print(f"FAIL: {failure}")

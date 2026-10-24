@@ -9,6 +9,7 @@ import {
   modpackCatalogDetailsSchema,
   modpackCatalogProjectsSchema,
   modpackCatalogVersionsSchema,
+  modpackSearchCategories,
 } from './modpack-catalog.js';
 import {
   download,
@@ -225,7 +226,9 @@ export class CurseForgeModpackCatalog implements ModpackCatalog {
       sortField: '2',
       sortOrder: 'desc',
     });
-    if (input.category) params.set('categoryId', String(cfId(input.category)));
+    const categories = modpackSearchCategories(input).map(cfId);
+    if (categories.length === 1) params.set('categoryId', String(categories[0]));
+    else if (categories.length > 1) params.set('categoryIds', JSON.stringify(categories));
     const raw = z
       .object({
         data: z.array(projectSchema).max(50),

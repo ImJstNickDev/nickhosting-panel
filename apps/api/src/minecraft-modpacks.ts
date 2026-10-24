@@ -9,7 +9,7 @@ import { authorizeServer, type ManagementRuntime, parse } from '@nickhosting/ser
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import {
-  modpackCategoryIdSchema,
+  modpackCategoryIdsSchema,
   modpackProviderSchema,
 } from '../../../packages/content-providers/src/modpack-catalog.js';
 import { minecraftModpackSchemaAvailable } from '../../../packages/server-management/src/minecraft-modpack-schema.js';
@@ -28,7 +28,7 @@ const search = z.strictObject({
   provider: modpackProviderSchema,
   query: z.string().max(200).default(''),
   offset,
-  category: modpackCategoryIdSchema.optional(),
+  categories: modpackCategoryIdsSchema.optional(),
 });
 export function registerMinecraftModpackRoutes(
   app: Hono<{ Variables: Variables }>,
@@ -123,7 +123,11 @@ export function registerMinecraftModpackRoutes(
     });
   });
   app.get(`${base}/catalog/search`, async (c) => {
-    const query = parse(search, c.req.query());
+    const { category, ...params } = c.req.query();
+    const query = parse(search, {
+      ...params,
+      ...(category !== undefined ? { categories: c.req.queries('category') } : {}),
+    });
     return c.json(await (await provider(c, query.provider)).search(query, c.req.raw.signal));
   });
   app.get(`${base}/catalog/categories`, async (c) => {

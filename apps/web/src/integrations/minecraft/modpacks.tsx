@@ -5,6 +5,7 @@ import {
   createMinecraftModpacksController,
   type MinecraftModpackOperation,
   type MinecraftModpacksSnapshot,
+  MODPACK_CATEGORY_LIMIT,
   type ModpackCatalogProject,
   type ModpackCatalogVersion,
   type ModpackProvider,
@@ -16,6 +17,7 @@ import { Pagination, SearchField } from '../../components/workspace-controls.js'
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { gameUiClient } from '../../features/integrations.js';
 import { ViewerSelect } from '../../features/viewer-engine/viewer-select.js';
+import { formatModpackCategoryName, ModpackCategoryIcon } from './modpack-category.js';
 import { ModpackProviderLabel } from './modpack-provider-label.js';
 import {
   modpackKey as k,
@@ -527,7 +529,7 @@ function ModpackDiscover(props: {
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
   const [offset, setOffset] = useState(0);
-  const [category, setCategory] = useState('');
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const scrollPosition = useRef(0);
   const opener = useRef<HTMLButtonElement | null>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -573,11 +575,11 @@ function ModpackDiscover(props: {
     enabled: props.visible && available,
   });
   const projects = useQuery({
-    queryKey: [...q(props.serverId, 'search'), provider, query, offset, category],
+    queryKey: [...q(props.serverId, 'search'), provider, query, offset, selectedCategories],
     queryFn: ({ signal }) =>
       controller.search(
         props.serverId,
-        { provider, query, offset, category: category || undefined },
+        { provider, query, offset, categories: selectedCategories },
         signal,
       ),
     staleTime: 60_000,
@@ -621,7 +623,7 @@ function ModpackDiscover(props: {
           onChange={(value) => {
             setProvider(value as ModpackProvider);
             setOffset(0);
-            setCategory('');
+            setSelectedCategories([]);
             props.onProject(undefined);
           }}
         />
@@ -676,27 +678,58 @@ function ModpackDiscover(props: {
           <h4>{t(k('categories'))}</h4>
           <button
             type="button"
-            aria-pressed={!category}
+            aria-pressed={selectedCategories.length === 0}
             onClick={() => {
-              setCategory('');
+              setSelectedCategories([]);
               setOffset(0);
             }}
           >
-            {t(k('allCategories'))}
+            <ModpackCategoryIcon name="all" />
+            <span>{t(k('allCategories'))}</span>
           </button>
           {categories.data?.items.map((item) => (
             <button
               type="button"
               key={item.id}
-              aria-pressed={category === item.id}
+              aria-pressed={selectedCategories.includes(item.id)}
+              disabled={
+                selectedCategories.length >= MODPACK_CATEGORY_LIMIT &&
+                !selectedCategories.includes(item.id)
+              }
               onClick={() => {
-                setCategory(item.id);
+                setSelectedCategories((current) =>
+                  current.includes(item.id)
+                    ? current.filter((id) => id !== item.id)
+                    : current.length < MODPACK_CATEGORY_LIMIT
+                      ? [...current, item.id].sort()
+                      : current,
+                );
                 setOffset(0);
               }}
             >
-              {item.name}
+              <ModpackCategoryIcon name={item.name} />
+              <span>{formatModpackCategoryName(item.name)}</span>
+              {selectedCategories.includes(item.id) && (
+                <svg
+                  className="modpacks-category-check"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  aria-hidden="true"
+                >
+                  <path d="m3 8 3 3 7-7" />
+                </svg>
+              )}
             </button>
           ))}
+          {selectedCategories.length >= MODPACK_CATEGORY_LIMIT && (
+            <p className="modpacks-category-limit" role="status">
+              {t(k('categoryLimit'), { count: MODPACK_CATEGORY_LIMIT })}
+            </p>
+          )}
         </aside>
         <div hidden={Boolean(project)} className="mods-results" aria-busy={projects.isFetching}>
           {config.isPending || (available && projects.isPending) ? (

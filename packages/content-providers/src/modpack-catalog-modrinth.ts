@@ -9,7 +9,7 @@ import {
   modpackCatalogDetailsSchema,
   modpackCatalogProjectsSchema,
   modpackCatalogVersionsSchema,
-  modpackCategoryIdSchema,
+  modpackSearchCategories,
 } from './modpack-catalog.js';
 import {
   download,
@@ -132,9 +132,7 @@ export class ModrinthModpackCatalog implements ModpackCatalog {
           'client_or_server',
           'client_or_server_prefers_both',
         ].map((value) => `environment:${value}`),
-        ...(input.category
-          ? [[`categories:${modpackCategoryIdSchema.parse(input.category)}`]]
-          : []),
+        ...modpackSearchCategories(input).map((category) => [`categories:${category}`]),
       ]),
     });
     const result = z

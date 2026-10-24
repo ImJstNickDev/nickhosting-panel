@@ -87,6 +87,16 @@ describe('Modrinth modpack catalog', () => {
     expect(facets[1]).not.toContain('environment:client_only');
     expect(facets[1]).not.toContain('environment:singleplayer_only');
   });
+  it('applies all selected Modrinth categories before pagination and removes duplicates', async () => {
+    const { catalog, json } = modrinth();
+    await catalog.search({ categories: ['technology', 'adventure', 'technology'], offset: 20 });
+    const url = new URL(json.mock.calls[0]?.[0] ?? '');
+    const facets = JSON.parse(url.searchParams.get('facets') ?? 'null');
+    expect(facets.slice(2)).toEqual([['categories:adventure'], ['categories:technology']]);
+    expect(url.searchParams.get('offset')).toBe('20');
+    await expect(catalog.search({ categories: ['adventure', 'bad:facet'] })).rejects.toThrow();
+    await expect(catalog.search({ categories: Array(11).fill('adventure') })).rejects.toThrow();
+  });
   it('discovers only modpack categories without exposing upstream SVG', async () => {
     const mock = transport({
       'api.modrinth.com/v2/tag/category': [
@@ -572,5 +582,12 @@ describe('CurseForge modpack category filtering', () => {
     const url = new URL(json.mock.calls.at(-1)?.[0] ?? '');
     expect(url.searchParams.get('categoryId')).toBe('4472');
     expect(url.searchParams.has('isServerPack')).toBe(false);
+    await catalog.search({ categories: ['4481', '4472', '4481'], offset: 20 });
+    const multi = new URL(json.mock.calls.at(-1)?.[0] ?? '');
+    expect(JSON.parse(multi.searchParams.get('categoryIds') ?? 'null')).toEqual([4472, 4481]);
+    expect(multi.searchParams.has('categoryId')).toBe(false);
+    expect(multi.searchParams.get('index')).toBe('20');
+    await expect(catalog.search({ categories: ['4472', 'bad'] })).rejects.toThrow();
+    await expect(catalog.search({ categories: Array(11).fill('4472') })).rejects.toThrow();
   });
 });

@@ -459,6 +459,8 @@
   font-weight: 550;
 }
 .modpacks-categories button {
+  justify-content: flex-start;
+  gap: 9px;
   border: 0;
   box-shadow: none;
   background: transparent;
@@ -572,4 +574,20 @@
   height: 20px;
   flex: 0 0 20px;
   object-fit: contain;
+}
+
+.modpacks-categories button > svg {
+  flex-shrink: 0;
+}
+.modpacks-categories button > span {
+  flex: 1;
+}
+.modpacks-category-check {
+  margin-left: auto;
+}
+.modpacks-category-limit {
+  margin: 4px 9px;
+  max-width: 16rem;
+  color: var(--muted);
+  font-size: 0.75rem;
 }

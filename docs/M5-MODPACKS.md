@@ -478,3 +478,25 @@ marks are served locally; official sources and ownership are recorded in
 `apps/web/src/integrations/minecraft/provider-logos/README.md`. Existing catalog availability, keyboard
 selection, accessible names and search behavior are unchanged. The provider-only
 CSS class leaves other selectors unchanged.
+
+### Multiple category filters
+
+Categories are independent toggle buttons with title-cased provider names,
+semantic decorative icons and a check mark on each selected category. All
+categories clears the selection. Filters survive the trip into pack details and
+back; changing providers clears them, and changing filters resets pagination.
+The mobile category strip remains horizontally scrollable.
+
+The controller accepts `categories: string[]` and sends repeated `category`
+parameters to `GET /v1/servers/:id/minecraft/modpacks/catalog/search`. The shared
+limit is ten entries, validated before deduplication and canonical sorting;
+legacy single-category requests remain supported. At the limit, only unselected
+categories are disabled and a translated notice explains the limit. Selected
+categories and All categories remain usable.
+
+Filtering occurs at the provider before pagination: Modrinth uses separate
+[AND facets](https://docs.modrinth.com/api/operations/searchprojects/); CurseForge
+uses its native [categoryIds array](https://docs.curseforge.com/rest-api/#search-mods),
+whose documentation does not specify AND/OR semantics. The UI does not promise
+a universal boolean matching rule or filter just the loaded result page. Providers
+without a category taxonomy retain their existing category-free view.

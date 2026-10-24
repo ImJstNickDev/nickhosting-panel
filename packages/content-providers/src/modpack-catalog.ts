@@ -96,6 +96,16 @@ export const modpackCategoryIdSchema = z
   .min(1)
   .max(128)
   .regex(/^[a-zA-Z0-9_-]+$/);
+export const MODPACK_CATEGORY_LIMIT = 10;
+export const modpackCategoryIdsSchema = z
+  .array(modpackCategoryIdSchema)
+  .max(MODPACK_CATEGORY_LIMIT)
+  .transform((ids) => [...new Set(ids)].sort());
+export function modpackSearchCategories(input: ModpackCatalogSearchInput): string[] {
+  return modpackCategoryIdsSchema.parse(
+    input.categories ?? (input.category ? [input.category] : []),
+  );
+}
 export const modpackCatalogCategoriesSchema = z
   .object({
     items: z
@@ -106,6 +116,8 @@ export const modpackCatalogCategoriesSchema = z
 export type ModpackCatalogCategories = z.infer<typeof modpackCatalogCategoriesSchema>;
 
 export interface ModpackCatalogSearchInput {
+  categories?: string[];
+  /** Legacy single-category input; categories takes precedence. */
   category?: string;
   query?: string;
   offset?: number;

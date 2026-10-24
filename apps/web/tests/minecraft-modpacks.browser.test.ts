@@ -143,7 +143,13 @@ describe('Minecraft Modpacks full-page experience', () => {
                   providers: providers.map((id) => ({ id, available: providerAvailable })),
                 });
               if (url.pathname === `${base}/catalog/categories`)
-                return json({ items: [{ id: 'adventure', name: 'Adventure' }] });
+                return json({
+                  items: [
+                    { id: 'adventure', name: 'adventure' },
+                    { id: 'technology', name: 'technology' },
+                    { id: 'rpg', name: 'RPG' },
+                  ],
+                });
               if (url.pathname === `${base}/catalog/search`)
                 return json({
                   items: [project(url.searchParams.get('provider') as ModpackProvider)],
@@ -474,25 +480,89 @@ describe('Minecraft Modpacks full-page experience', () => {
       ),
     ).toEqual([]);
   });
-  it('filters categories in the catalog and retains the chosen category on Back', async () => {
+  it('toggles multiple categories, preserves selection on Back and clears it with All or a provider change', async () => {
     await open();
-    const request = page.waitForRequest(
-      (request) =>
-        request.url().includes('/catalog/search?') &&
-        new URL(request.url()).searchParams.get('category') === 'adventure',
-    );
-    await page.getByRole('button', { name: 'Adventure', exact: true }).click();
-    await request;
+    const category = (name: string) => page.getByRole('button', { name, exact: true });
+    async function select(name: string, expected: string[]) {
+      const request = page.waitForRequest((request) => {
+        const url = new URL(request.url());
+        return (
+          url.pathname.endsWith('/catalog/search') &&
+          JSON.stringify(url.searchParams.getAll('category')) === JSON.stringify(expected)
+        );
+      });
+      await category(name).click();
+      await request;
+    }
+    await select('Adventure', ['adventure']);
+    await select('Technology', ['adventure', 'technology']);
+    await check(category('Adventure')).toHaveAttribute('aria-pressed', 'true');
+    await check(category('Technology')).toHaveAttribute('aria-pressed', 'true');
+    await check(category('All categories')).toHaveAttribute('aria-pressed', 'false');
+    await check(category('RPG')).toBeVisible();
+    expect(
+      await category('Adventure').evaluate((button) => getComputedStyle(button).justifyContent),
+    ).toBe('flex-start');
+    await check(category('RPG').locator('svg')).toHaveCount(1);
     await details();
     await page.getByRole('button', { name: 'Back to Discover' }).click();
-    await check(page.getByRole('button', { name: 'Adventure', exact: true })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    );
+    await check(category('Adventure')).toHaveAttribute('aria-pressed', 'true');
+    await check(category('Technology')).toHaveAttribute('aria-pressed', 'true');
     await page.screenshot({
       path: '.codex/local/m5-browser/screenshots/modpacks-categories-desktop-en.png',
       fullPage: true,
     });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/modpacks-categories-mobile-en.png',
+      fullPage: true,
+    });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(
+      false,
+    );
+    await select('Adventure', ['technology']);
+    await check(category('Adventure')).toHaveAttribute('aria-pressed', 'false');
+    await check(category('Technology')).toHaveAttribute('aria-pressed', 'true');
+    // Cached query results need not issue another network request.
+    await category('All categories').click();
+    await check(category('Technology')).toHaveAttribute('aria-pressed', 'false');
+    await check(category('All categories')).toHaveAttribute('aria-pressed', 'true');
+    await category('Adventure').focus();
+    await page.keyboard.press('Space');
+    await check(category('Adventure')).toHaveAttribute('aria-pressed', 'true');
+    await page.getByRole('combobox', { name: 'Catalog', exact: true }).click();
+    await page.getByRole('option', { name: 'CurseForge', exact: true }).click();
+    await check(category('All categories')).toHaveAttribute('aria-pressed', 'true');
+    await check(category('Adventure')).toHaveAttribute('aria-pressed', 'false');
+    expect(writes).toEqual([]);
+  });
+  it('keeps selected categories removable at the provider limit', async () => {
+    await page.route('**/catalog/categories?**', (route) =>
+      route.fulfill({
+        json: {
+          items: Array.from({ length: 11 }, (_, index) => ({
+            id: `category${index}`,
+            name: `category ${index}`,
+          })),
+        },
+      }),
+    );
+    await open();
+    const categories = page.locator('.modpacks-categories');
+    for (let index = 0; index < 10; index++) {
+      const button = categories.getByRole('button', { name: `Category ${index}`, exact: true });
+      await button.click();
+      await check(button).toHaveAttribute('aria-pressed', 'true');
+    }
+    await check(categories.getByRole('status')).toHaveText('Select up to 10 categories.');
+    await check(
+      categories.getByRole('button', { name: 'Category 10', exact: true }),
+    ).toBeDisabled();
+    await categories.getByRole('button', { name: 'Category 0', exact: true }).click();
+    await check(categories.getByRole('button', { name: 'Category 10', exact: true })).toBeEnabled();
+    await check(categories.getByRole('status')).toHaveCount(0);
+    await categories.getByRole('button', { name: 'All categories', exact: true }).click();
+    await check(categories.locator('button[aria-pressed="true"]')).toHaveCount(1);
     expect(writes).toEqual([]);
   });
   it('keeps optional backup unavailable without its separate permission', async () => {

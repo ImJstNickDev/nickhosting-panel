@@ -35,7 +35,7 @@ const failed: MinecraftModpackOperation = {
   updatedAt: '2026-10-21T12:00:00Z',
 };
 function setup(result: unknown = { installed: null, operation: null }) {
-  const request = vi.fn(async () => result);
+  const request = vi.fn(async (_path: string, _options?: unknown) => result);
   return {
     request,
     controller: createMinecraftModpacksController({ request } as unknown as GameUiClient),
@@ -48,6 +48,42 @@ describe('Modpack UI controller', () => {
     expect(request).toHaveBeenCalledWith(`/v1/servers/${server}/minecraft/modpacks`, {
       signal: undefined,
     });
+  });
+  it('encodes canonical repeated categories and preserves pagination and cancellation', async () => {
+    const { controller, request } = setup({ items: [], offset: 20, limit: 20, total: 0 });
+    const signal = new AbortController().signal;
+    await controller.search(
+      server,
+      {
+        provider: 'modrinth',
+        query: 'sky',
+        offset: 20,
+        categories: ['technology', 'adventure', 'technology'],
+      },
+      signal,
+    );
+    const params = new URL(request.mock.calls[0]?.[0] ?? '', 'https://example.test').searchParams;
+    expect(params.getAll('category')).toEqual(['adventure', 'technology']);
+    expect(params.get('offset')).toBe('20');
+    expect(request).toHaveBeenCalledWith(expect.any(String), { signal });
+    await controller.search(server, {
+      provider: 'modrinth',
+      query: '',
+      offset: 0,
+      category: 'adventure',
+    });
+    expect(request).toHaveBeenLastCalledWith(expect.stringContaining('category=adventure'), {
+      signal: undefined,
+    });
+  });
+  it('rejects malformed and excessive categories before transport', async () => {
+    const { controller, request } = setup();
+    for (const categories of [['adventure', 'bad:facet'], [''], Array(11).fill('adventure')]) {
+      await expect(
+        controller.search(server, { provider: 'modrinth', query: '', offset: 0, categories }),
+      ).rejects.toThrow();
+    }
+    expect(request).not.toHaveBeenCalled();
   });
   it('encodes opaque provider identities and preserves abort signals', async () => {
     const { controller, request } = setup({

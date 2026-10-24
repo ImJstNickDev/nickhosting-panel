@@ -6,6 +6,7 @@ import {
   modpackCatalogProjectsSchema,
   modpackCatalogVersionsSchema,
   modpackProviderSchema,
+  modpackSearchCategories,
 } from '../../../../packages/content-providers/src/modpack-catalog.js';
 import {
   type MinecraftModpackApply,
@@ -22,6 +23,7 @@ export type {
   ModpackCatalogVersion,
   ModpackProvider,
 } from '../../../../packages/content-providers/src/modpack-catalog.js';
+export { MODPACK_CATEGORY_LIMIT } from '../../../../packages/content-providers/src/modpack-catalog.js';
 export type {
   MinecraftModpackApply,
   MinecraftModpackOperation,
@@ -81,7 +83,13 @@ export function createMinecraftModpacksController(client: GameUiClient) {
     },
     async search(
       serverId: string,
-      input: { provider: ModpackProvider; query: string; offset: number; category?: string },
+      input: {
+        provider: ModpackProvider;
+        query: string;
+        offset: number;
+        categories?: string[];
+        category?: string;
+      },
       signal?: AbortSignal,
     ) {
       const params = new URLSearchParams({
@@ -89,7 +97,7 @@ export function createMinecraftModpacksController(client: GameUiClient) {
         query: z.string().max(200).parse(input.query),
         offset: String(offsetSchema.parse(input.offset)),
       });
-      if (input.category) params.set('category', identity.parse(input.category));
+      for (const category of modpackSearchCategories(input)) params.append('category', category);
       return modpackCatalogProjectsSchema.parse(
         await client.request(path(serverId, `/catalog/search?${params}`), { signal }),
       );

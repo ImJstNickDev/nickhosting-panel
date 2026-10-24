@@ -144,12 +144,37 @@ describe('Modpack API boundaries', () => {
       (await f.app.request(`${base}/catalog/search?provider=modrinth&category=adventure`)).status,
     ).toBe(200);
     expect(f.catalog.search).toHaveBeenCalledWith(
-      { provider: 'modrinth', query: '', offset: 0, category: 'adventure' },
+      { provider: 'modrinth', query: '', offset: 0, categories: ['adventure'] },
       expect.any(AbortSignal),
     );
     expect(
       (await f.app.request(`${base}/catalog/search?provider=modrinth&category=bad%3Afacet`)).status,
     ).toBe(400);
+    expect(f.service.prepare).not.toHaveBeenCalled();
+  });
+  it('validates every repeated category and bounds the raw list before deduplicating', async () => {
+    const f = fixture();
+    expect(
+      (
+        await f.app.request(
+          `${base}/catalog/search?provider=modrinth&category=technology&category=adventure&category=technology&offset=20`,
+        )
+      ).status,
+    ).toBe(200);
+    expect(f.catalog.search).toHaveBeenLastCalledWith(
+      { provider: 'modrinth', query: '', offset: 20, categories: ['adventure', 'technology'] },
+      expect.any(AbortSignal),
+    );
+    f.catalog.search.mockClear();
+    for (const suffix of [
+      'category=adventure&category=bad%3Afacet',
+      'category=adventure&category=',
+      Array.from({ length: 11 }, () => 'category=adventure').join('&'),
+    ])
+      expect(
+        (await f.app.request(`${base}/catalog/search?provider=modrinth&${suffix}`)).status,
+      ).toBe(400);
+    expect(f.catalog.search).not.toHaveBeenCalled();
     expect(f.service.prepare).not.toHaveBeenCalled();
   });
   it('only explicit preparation/application request intents enter the durable service', async () => {
