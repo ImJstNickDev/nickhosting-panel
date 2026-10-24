@@ -1,12 +1,18 @@
-import { randomUUID } from 'node:crypto';
-import { readFile, statfs } from 'node:fs/promises';
-import { availableParallelism, cpus } from 'node:os';
-import { setTimeout as delay } from 'node:timers/promises';
+import { createHash, randomUUID } from 'node:crypto';
 import { type AuthContext, assertPermission, DomainError } from '@nickhosting/core';
-import { type Database, getSettings, type HostSnapshot, recordAudit } from '@nickhosting/database';
+import {
+  assertStoragePolicyIdle,
+  type Database,
+  getSettings,
+  type HostSnapshot,
+  recordAudit,
+} from '@nickhosting/database';
 import { type Kysely, sql, type Transaction } from 'kysely';
 import { z } from 'zod';
 import { effectiveNodeOverhead, resolveHostOverride } from './configuration.js';
+import { sampleLocalResources } from './host-resources.js';
+import { storageCommitments } from './storage-accounting.js';
+import { getUserStorageBudget } from './storage-user-budget.js';
 
 export type DB = Kysely<Database> | Transaction<Database>;
 export type Environment = Readonly<Record<string, string | undefined>>;
@@ -95,8 +101,19 @@ export const hostSnapshotSchema = z
     availableDiskMiB: quantity,
     managed: z.record(z.uuid(), z.object({ memoryMiB: quantity, cpuPercent: quantity }).strict()),
     observedAt: z.iso.datetime(),
+    sourceFingerprint: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
   })
   .strict();
+
+/** Private binding prevents reuse after an effective observation path change. */
+export function hostObservationFingerprint(hostId: string, observerId: string, path: string) {
+  return createHash('sha256')
+    .update(JSON.stringify([hostId, observerId, path]))
+    .digest('hex');
+}
 
 /** Host and user locks have one global order across creation/admission/policy updates. */
 export async function lockResources(tx: DB) {
@@ -126,11 +143,14 @@ export async function checkedObservation(tx: DB, hostId: string, env: Environmen
     observation.observer_id !== host.observer_id ||
     !parsed.success ||
     age < 0 ||
-    age > config.observationMaxAgeSeconds * 1000
+    age > Math.min(config.observationMaxAgeSeconds, 4) * 1000
   )
     throw new DomainError('resources_unavailable');
   if (
     parsed.data.availableMemoryMiB > parsed.data.totalMemoryMiB ||
+    (parsed.data.sourceFingerprint !== undefined &&
+      parsed.data.sourceFingerprint !==
+        hostObservationFingerprint(hostId, host.observer_id, host.local_disk_path)) ||
     new Date(parsed.data.observedAt).getTime() !== observation.observed_at.getTime()
   )
     throw new DomainError('resources_unavailable');
@@ -395,17 +415,33 @@ export async function checkStorage(
   excludeServerId?: string,
 ) {
   await lockResources(tx);
+  await assertStoragePolicyIdle(tx);
   const { host, snapshot, config } = await checkedObservation(tx, hostId, env);
+  const budget =
+    config.storagePolicy === 'PER_USER_BUDGET'
+      ? await getUserStorageBudget(tx, ownerId, config.defaultUserStorageMiB)
+      : 0;
   const rows = await tx
     .selectFrom('managed_servers as s')
     .innerJoin('managed_nodes as n', 'n.id', 's.node_id')
     .innerJoin('runtime_egg_mappings as m', 'm.id', 's.mapping_id')
-    .select(['s.id', 's.owner_id', 's.limits', 'm.feature_limits', 'n.physical_host_id'])
+    .select([
+      's.id',
+      's.owner_id',
+      's.limits',
+      's.pterodactyl_id',
+      'm.feature_limits',
+      'n.physical_host_id',
+    ])
     .where('s.deleted_at', 'is', null)
     .execute();
-  const active = rows.filter((r) => r.id !== excludeServerId);
-  const allowance = (row: (typeof rows)[number]) =>
-    row.limits.disk * (1 + row.feature_limits.backups);
+  const active = rows.filter(
+    (r) =>
+      r.id !== excludeServerId &&
+      (r.physical_host_id === hostId || (budget > 0 && r.owner_id === ownerId)),
+  );
+  const commitments = await storageCommitments(tx, active, env);
+  const allowance = (row: (typeof rows)[number]) => commitments.get(row.id) ?? 0;
   const hostReserved = active
     .filter((r) => r.physical_host_id === hostId)
     .reduce((sum, r) => sum + allowance(r), 0);
@@ -418,16 +454,9 @@ export async function checkStorage(
   // after a user removes content. Do not credit it against durable disk allowances.
   if (hostReserved + additionalMiB > snapshot.availableDiskMiB - Number(host.disk_headroom_mib))
     throw new DomainError('storage_exhausted');
-  if (config.storagePolicy === 'PER_USER_BUDGET') {
-    const limits = await tx
-      .selectFrom('resource_user_limits')
-      .selectAll()
-      .where('user_id', '=', ownerId)
-      .executeTakeFirst();
-    const budget =
-      limits && (!limits.expires_at || limits.expires_at > new Date())
-        ? Number(limits.storage_mib)
-        : config.defaultUserStorageMiB;
+  if (budget > 0) {
+    if (active.some((server) => server.owner_id === ownerId && server.limits.disk === 0))
+      throw new DomainError('conflict');
     if (
       active.filter((r) => r.owner_id === ownerId).reduce((sum, r) => sum + allowance(r), 0) +
         additionalMiB >
@@ -437,7 +466,12 @@ export async function checkStorage(
   }
 }
 
-export async function setUserLimits(db: Kysely<Database>, context: AuthContext, input: unknown) {
+export async function setUserLimits(
+  db: Kysely<Database>,
+  context: AuthContext,
+  input: unknown,
+  env: Environment = {},
+) {
   assertPermission(context, 'platform:manage');
   if (context.sessionType !== 'regular') throw new DomainError('forbidden');
   const parsed = z
@@ -445,7 +479,7 @@ export async function setUserLimits(db: Kysely<Database>, context: AuthContext, 
       userId: z.string().min(1),
       memoryMiB: z.number().int().positive(),
       cpuPercent: z.number().int().positive(),
-      storageMiB: z.number().int().positive(),
+      storageMiB: z.number().int().positive().optional(),
       expiresAt: z.iso.datetime().optional(),
       reason: z.string().trim().min(8).max(300),
     })
@@ -457,6 +491,7 @@ export async function setUserLimits(db: Kysely<Database>, context: AuthContext, 
     throw new DomainError('validation_failed');
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
+    await assertStoragePolicyIdle(tx);
     const active = await tx
       .selectFrom('resource_reservations')
       .selectAll()
@@ -474,16 +509,55 @@ export async function setUserLimits(db: Kysely<Database>, context: AuthContext, 
       .where('s.owner_id', '=', value.userId)
       .where('s.deleted_at', 'is', null)
       .execute();
+    const persistent = await tx
+      .selectFrom('storage_user_budgets')
+      .select('storage_mib')
+      .where('user_id', '=', value.userId)
+      .executeTakeFirst();
+    const { values: settings } = await getSettings(tx, env);
+    const legacy = await tx
+      .selectFrom('resource_user_limits')
+      .select(['storage_mib', 'expires_at'])
+      .where('user_id', '=', value.userId)
+      .executeTakeFirst();
+    // The legacy row shares compute/storage expiry. Omitting storage cannot
+    // silently turn an active temporary allowance into a permanent exception.
     if (
+      value.storageMiB === undefined &&
+      !persistent &&
+      legacy?.expires_at &&
+      legacy.expires_at > new Date()
+    )
+      throw new DomainError('conflict');
+    // Unlimited/finite transitions reconcile provider and SFTP caps through the
+    // storage plan. Compute-only edits omit storage and retain its current policy.
+    if (
+      value.storageMiB !== undefined &&
+      (persistent?.storage_mib === '0' ||
+        (settings.storagePolicy === 'PER_USER_BUDGET' &&
+          disks.some((server) => server.limits.disk === 0)))
+    )
+      throw new DomainError('conflict', 409, { reason: 'storage_policy_transition_required' });
+    if (
+      persistent &&
+      value.expiresAt &&
+      value.storageMiB !== undefined &&
+      Number(persistent.storage_mib ?? settings.defaultUserStorageMiB) !== value.storageMiB
+    )
+      throw new DomainError('validation_failed');
+    if (
+      value.storageMiB !== undefined &&
       disks.reduce((sum, r) => sum + r.limits.disk * (1 + r.feature_limits.backups), 0) >
-      value.storageMiB
+        value.storageMiB
     )
       throw new DomainError('conflict');
     const row = {
       user_id: value.userId,
       memory_mib: value.memoryMiB,
       cpu_percent: value.cpuPercent,
-      storage_mib: String(value.storageMiB),
+      storage_mib: String(
+        value.storageMiB ?? legacy?.storage_mib ?? settings.defaultUserStorageMiB,
+      ),
       expires_at: value.expiresAt ? new Date(value.expiresAt) : null,
       updated_at: new Date(),
     };
@@ -492,6 +566,31 @@ export async function setUserLimits(db: Kysely<Database>, context: AuthContext, 
       .values(row)
       .onConflict((c) => c.column('user_id').doUpdateSet(row))
       .execute();
+    if (value.storageMiB === undefined && !persistent)
+      await tx
+        .insertInto('storage_user_budgets')
+        .values({
+          user_id: value.userId,
+          storage_mib:
+            legacy && (!legacy.expires_at || legacy.expires_at > new Date())
+              ? legacy.storage_mib
+              : null,
+        })
+        .execute();
+    if (!value.expiresAt && value.storageMiB !== undefined)
+      await tx
+        .insertInto('storage_user_budgets')
+        .values({
+          user_id: value.userId,
+          storage_mib: String(value.storageMiB),
+          updated_at: new Date(),
+        })
+        .onConflict((conflict) =>
+          conflict
+            .column('user_id')
+            .doUpdateSet({ storage_mib: String(value.storageMiB), updated_at: new Date() }),
+        )
+        .execute();
     await recordAudit(tx, context, 'resource.user_limits.updated', { ...value });
   });
 }
@@ -503,6 +602,7 @@ export async function observeLocalHost(
   observerId: string,
   managed: HostSnapshot['managed'],
   env: Environment = {},
+  sample: typeof sampleLocalResources = sampleLocalResources,
 ) {
   const host = resolveHostOverride(
     await db
@@ -513,35 +613,13 @@ export async function observeLocalHost(
     env,
   );
   if (host.observer_id !== observerId) throw new DomainError('configuration_invalid');
-  const before = cpus().map((cpu) => cpu.times);
-  await delay(250);
-  const after = cpus().map((cpu) => cpu.times);
-  let idle = 0,
-    total = 0;
-  for (let i = 0; i < Math.min(before.length, after.length); i++) {
-    const a = after[i],
-      b = before[i];
-    if (!a || !b) continue;
-    idle += a.idle - b.idle;
-    total +=
-      Object.values(a).reduce((s, v) => s + v, 0) - Object.values(b).reduce((s, v) => s + v, 0);
-  }
-  const info = await readFile('/proc/meminfo', 'utf8');
-  const amount = (name: string) =>
-    Number(new RegExp(`^${name}:\\s+(\\d+)`, 'm').exec(info)?.[1]) / 1024;
-  const disk = await statfs(host.local_disk_path);
-  const now = new Date();
+  const measured = await sample(host.local_disk_path);
   const snapshot = hostSnapshotSchema.parse({
-    totalMemoryMiB: amount('MemTotal'),
-    availableMemoryMiB: amount('MemAvailable'),
-    cpuCapacityPercent: availableParallelism() * 100,
-    cpuBusyPercent: total
-      ? Math.max(0, (1 - idle / total) * availableParallelism() * 100)
-      : availableParallelism() * 100,
-    availableDiskMiB: (disk.bavail * disk.bsize) / 1048576,
+    ...measured,
     managed,
-    observedAt: now.toISOString(),
+    sourceFingerprint: hostObservationFingerprint(hostId, observerId, host.local_disk_path),
   });
+  const now = new Date(snapshot.observedAt);
   await db
     .insertInto('host_observations')
     .values({
@@ -551,11 +629,14 @@ export async function observeLocalHost(
       observed_at: now,
     })
     .onConflict((c) =>
-      c.column('host_id').doUpdateSet({
-        snapshot: JSON.stringify(snapshot),
-        observed_at: now,
-        observer_id: observerId,
-      }),
+      c
+        .column('host_id')
+        .doUpdateSet({
+          snapshot: JSON.stringify(snapshot),
+          observed_at: now,
+          observer_id: observerId,
+        })
+        .where('host_observations.observed_at', '<', now),
     )
     .execute();
   return snapshot;

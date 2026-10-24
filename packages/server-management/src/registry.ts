@@ -2,13 +2,28 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import {
   type AuthContext,
+  assertAuthContext,
   assertPermission,
+  authSessionId,
   DomainError,
+  hasPermission,
+  legacyServerPermissionKeys,
   type Permission,
+  resolveDnsOptions,
+  type ServerPermissionDefinition,
+  serverPermissionDefinitions,
+  validateDnsLabel,
 } from '@nickhosting/core';
-import { type Database, getSettings, recordAudit } from '@nickhosting/database';
+import {
+  assertStoragePolicyIdle,
+  type Database,
+  getSettings,
+  notifyJobOutbox,
+  recordAudit,
+} from '@nickhosting/database';
 import { evaluateGameAccess, gameManifestSchema } from '@nickhosting/game-sdk';
 import {
+  minecraftContentPermissionKeys,
   minecraftRuntimeMappingSchema,
   type ResolvedMinecraftRuntime,
   validateMinecraftRuntimeMapping,
@@ -27,7 +42,6 @@ import {
   lockResources,
   reserveStartInTransaction,
 } from './admission.js';
-
 import {
   allocationAddressesOverlap,
   assertBackendPoolNamespace,
@@ -35,21 +49,33 @@ import {
   poolAllowsLoopbackEgg,
   validatedBackendInventory,
 } from './allocation-pool.js';
+import { backupOptionsSchema, resolveBackupMode } from './backup-policy.js';
+import { consumeDnsWizardReservation } from './dns-reservations.js';
+import { trustedGameModules } from './game-modules.js';
+import { planProvisionGateway } from './gateway-provision.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import {
   type MinecraftPreparedContent,
   minecraftConfigurationSchema,
+  minecraftContentAllowsOnline,
   minecraftStoredConfigurationSchema,
 } from './minecraft-content-contracts.js';
+import { assertNoModpackPublication } from './minecraft-modpack-schema.js';
 import { requireMinecraftChoice } from './minecraft-registry.js';
 import { bindMinecraftSource } from './minecraft-sources.js';
+import { minecraftProvisionStartup } from './minecraft-startup.js';
+import { backupSchemaAvailable } from './provider-backup-events.js';
+import { integrationImageCandidates, mappingProvisionImage } from './runtime-images.js';
+import { killRequestSchema, requestStopEscalation } from './stop-escalation.js';
+import { storageCommitments } from './storage-accounting.js';
+import { getUserStorageBudget } from './storage-user-budget.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
 export const limitsSchema = z
   .object({
     memory: z.number().int().min(32).max(1048576),
     cpu: z.number().int().min(1).max(100000),
-    disk: z.number().int().min(16).max(1073741824),
+    disk: z.union([z.literal(0), z.number().int().min(16).max(1073741824)]),
     swap: z.literal(0).default(0),
     io: z.number().int().min(10).max(1000).default(500),
   })
@@ -63,8 +89,16 @@ export const createServerSchema = z
     mappingId: id,
     name,
     projectId: id.optional(),
-    limits: limitsSchema,
+    limits: limitsSchema.extend({ disk: limitsSchema.shape.disk.optional() }),
     autoStart: z.boolean().default(true),
+    connection: z
+      .object({
+        reservationId: z.uuid().optional(),
+        domainId: z.string().min(1).max(64).optional(),
+        subdomain: z.string().min(1).max(63).optional(),
+      })
+      .strict()
+      .optional(),
     minecraft: z
       .object({ choiceId: z.uuid(), configuration: minecraftConfigurationSchema })
       .strict()
@@ -72,6 +106,8 @@ export const createServerSchema = z
   })
   .strict();
 export const operationSchema = z.discriminatedUnion('action', [
+  killRequestSchema,
+  backupOptionsSchema.extend({ action: z.literal('backup'), idempotencyKey: keySchema }),
   z
     .object({
       action: z.literal('minecraft-content'),
@@ -79,9 +115,7 @@ export const operationSchema = z.discriminatedUnion('action', [
       command: z.unknown(),
     })
     .strict(),
-  z
-    .object({ action: z.enum(['start', 'stop', 'restart', 'backup']), idempotencyKey: keySchema })
-    .strict(),
+  z.object({ action: z.enum(['start', 'stop', 'restart']), idempotencyKey: keySchema }).strict(),
   z
     .object({
       action: z.enum(['reinstall', 'wipe', 'delete']),
@@ -97,6 +131,7 @@ export const operationSchema = z.discriminatedUnion('action', [
       confirm: z.literal(true),
       backupId: id,
       truncate: z.boolean().default(true),
+      backupBefore: z.boolean().default(false),
     })
     .strict(),
   z
@@ -117,7 +152,7 @@ export async function authorizeServer(
   db: DB,
   context: AuthContext,
   serverId: string,
-  permission: Permission = 'server:read',
+  permission: Permission | string = 'server:read',
 ) {
   parse(id, serverId);
   const row = await db
@@ -127,6 +162,7 @@ export async function authorizeServer(
     .where('deleted_at', 'is', null)
     .executeTakeFirst();
   if (!row) throw new DomainError('not_found');
+  assertAuthContext(context);
   const member = row.project_id
     ? await db
         .selectFrom('project_members')
@@ -135,17 +171,174 @@ export async function authorizeServer(
         .where('user_id', '=', context.subjectUserId)
         .executeTakeFirst()
     : undefined;
-  assertPermission(context, permission, { ownerUserId: row.owner_id, memberRole: member?.role });
+  const scope = { ownerUserId: row.owner_id, memberRole: member?.role };
+  if (permission.includes(':')) {
+    if (!hasPermission(context, permission as Permission, scope)) {
+      if (
+        !['server:read', 'jobs:read'].includes(permission) ||
+        !(await getServerPermissionKeys(db, context, row)).length
+      )
+        throw new DomainError('forbidden');
+    }
+  } else if (!(await getServerPermissionKeys(db, context, row)).includes(permission)) {
+    throw new DomainError('forbidden');
+  }
   return row;
+}
+
+/** Fail closed for direct grants while an additive deployment awaits its migration. */
+export async function serverSubusersAvailable(db: DB): Promise<boolean> {
+  const result = await sql<{
+    present: boolean;
+  }>`select to_regclass(current_schema() || '.server_subusers') is not null as present`.execute(db);
+  return result.rows[0]?.present === true;
+}
+
+export async function getServerPermissionDefinitions(
+  db: DB,
+  server: { mapping_id: string },
+): Promise<ServerPermissionDefinition[]> {
+  const mapping = await db
+    .selectFrom('runtime_egg_mappings')
+    .select('game_id')
+    .where('id', '=', server.mapping_id)
+    .executeTakeFirst();
+  const manifest = mapping ? trustedGameModules.get(mapping.game_id)?.manifest : undefined;
+  const extension =
+    (manifest as { serverPermissions?: ServerPermissionDefinition[] } | undefined)
+      ?.serverPermissions ?? [];
+  return [...serverPermissionDefinitions, ...extension];
+}
+
+export async function getServerPermissionKeys(
+  db: DB,
+  context: AuthContext,
+  server: { id: string; owner_id: string; project_id: string | null; mapping_id: string },
+): Promise<string[]> {
+  assertAuthContext(context);
+  const definitions = await getServerPermissionDefinitions(db, server);
+  if (context.role === 'owner' || server.owner_id === context.subjectUserId)
+    return definitions.map(({ key }) => key);
+  const member = server.project_id
+    ? await db
+        .selectFrom('project_members')
+        .select('role')
+        .where('project_id', '=', server.project_id)
+        .where('user_id', '=', context.subjectUserId)
+        .executeTakeFirst()
+    : undefined;
+  const direct = (await serverSubusersAvailable(db))
+    ? await db
+        .selectFrom('server_subusers')
+        .select('permission_keys')
+        .where('server_id', '=', server.id)
+        .where('user_id', '=', context.subjectUserId)
+        .executeTakeFirst()
+    : undefined;
+  const known = new Set(definitions.map(({ key }) => key));
+  return [
+    ...new Set([
+      ...legacyServerPermissionKeys(member?.role, definitions),
+      ...(direct?.permission_keys ?? []).filter((key) => known.has(key)),
+    ]),
+  ];
+}
+
+/** Capture only issued transports, inside the same resource transaction as access changes. */
+export async function snapshotServerCredentialPermissions(
+  db: DB,
+  serverIds: string[],
+  userId?: string,
+) {
+  if (!serverIds.length) return [];
+  let query = db
+    .selectFrom('external_sftp_credentials as credential')
+    .innerJoin('managed_servers as server', 'server.id', 'credential.server_id')
+    .innerJoin('user as actor', 'actor.id', 'credential.actor_id')
+    .selectAll('server')
+    .select(['actor.id as credential_user_id', 'actor.role as credential_role'])
+    .where('server.id', 'in', serverIds)
+    .where('credential.state', '!=', 'revoked');
+  if (userId) query = query.where('credential.actor_id', '=', userId);
+  const rows = await query.distinct().execute();
+  return Promise.all(
+    rows.map(async (row) => ({
+      serverId: row.id,
+      userId: row.credential_user_id,
+      permissionKeys: await getServerPermissionKeys(
+        db,
+        {
+          actorUserId: row.credential_user_id,
+          subjectUserId: row.credential_user_id,
+          role: row.credential_role,
+          sessionType: 'regular',
+          ownerElevation: false,
+        },
+        row,
+      ),
+    })),
+  );
+}
+export async function revokeReducedServerCredentialPermissions(
+  db: DB,
+  snapshots: Awaited<ReturnType<typeof snapshotServerCredentialPermissions>>,
+) {
+  for (const snapshot of snapshots) {
+    const server = await db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', snapshot.serverId)
+      .where('deleted_at', 'is', null)
+      .executeTakeFirst();
+    const user = await db
+      .selectFrom('user')
+      .select('role')
+      .where('id', '=', snapshot.userId)
+      .executeTakeFirst();
+    const keys =
+      server && user
+        ? await getServerPermissionKeys(
+            db,
+            {
+              actorUserId: snapshot.userId,
+              subjectUserId: snapshot.userId,
+              role: user.role,
+              sessionType: 'regular',
+              ownerElevation: false,
+            },
+            server,
+          )
+        : [];
+    if (snapshot.permissionKeys.some((key) => key.startsWith('files.') && !keys.includes(key)))
+      await db
+        .updateTable('external_sftp_credentials')
+        .set({ state: 'revoking' })
+        .where('server_id', '=', snapshot.serverId)
+        .where('actor_id', '=', snapshot.userId)
+        .where('state', 'in', ['pending', 'active', 'uncertain'])
+        .execute();
+  }
 }
 
 export async function listServers(db: DB, context: AuthContext) {
   assertPermission(context, 'server:read', { ownerUserId: context.subjectUserId });
+  const directAvailable = await serverSubusersAvailable(db);
   let query = db.selectFrom('managed_servers').selectAll().where('deleted_at', 'is', null);
   if (context.role !== 'owner' || context.sessionType !== 'regular') {
     query = query.where((expression) =>
       expression.or([
         expression('owner_id', '=', context.subjectUserId),
+        ...(directAvailable
+          ? [
+              expression.exists(
+                expression
+                  .selectFrom('server_subusers')
+                  .select('server_id')
+                  .whereRef('server_subusers.server_id', '=', 'managed_servers.id')
+                  .where('server_subusers.user_id', '=', context.subjectUserId),
+              ),
+            ]
+          : []),
         expression.exists(
           expression
             .selectFrom('project_members')
@@ -173,6 +366,7 @@ export function publicServer(row: Awaited<ReturnType<typeof authorizeServer>>) {
     activeOperationId: row.active_operation_id,
     lastObservedAt: row.last_observed_at,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -185,7 +379,7 @@ function digest(value: unknown) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 async function previousRequest(
-  tx: Transaction<Database>,
+  tx: Kysely<Database>,
   context: AuthContext,
   key: string,
   hash: string,
@@ -254,6 +448,7 @@ async function insertOperation(
     })
     .execute();
   await tx.insertInto('job_outbox').values({ job_id: jobId, last_dispatched_at: null }).execute();
+  await notifyJobOutbox(tx);
   await tx
     .updateTable('managed_servers')
     .set({ active_operation_id: jobId, updated_at: new Date() })
@@ -275,22 +470,72 @@ async function insertOperation(
   return { serverId: server.id, jobId };
 }
 
+/** Idempotent catalog creation reuses the accepted request even if installer latest changed. */
+export async function findManagedCreationRequest(
+  db: Kysely<Database>,
+  context: AuthContext,
+  key: string,
+  request: unknown,
+  env: Environment = {},
+) {
+  const current = await currentInteractiveContext(db, context, env);
+  assertPermission(current, 'server:manage', { ownerUserId: current.subjectUserId });
+  return previousRequest(
+    db,
+    current,
+    key,
+    digest({ kind: 'create', subject: current.subjectUserId, value: request }),
+  );
+}
+
 export async function createManagedServer(
   db: Kysely<Database>,
   adapter: PterodactylAdapter,
   context: AuthContext,
   input: unknown,
   env: Environment = {},
-  options: { minecraftInitialContent?: MinecraftPreparedContent } = {},
+  options: { minecraftInitialContent?: MinecraftPreparedContent; creationRequest?: unknown } = {},
 ) {
   assertPermission(context, 'server:manage', { ownerUserId: context.subjectUserId });
-  const value = parse(createServerSchema, input);
-  const hash = digest({ kind: 'create', subject: context.subjectUserId, value });
+  const request = parse(createServerSchema, input);
+  const hash = digest({
+    kind: 'create',
+    subject: context.subjectUserId,
+    value: options.creationRequest ?? request,
+  });
   return db.transaction().execute(async (tx) => {
-    await requestLock(tx, context, value.idempotencyKey);
-    const previous = await previousRequest(tx, context, value.idempotencyKey, hash);
+    await requestLock(tx, context, request.idempotencyKey);
+    const previous = await previousRequest(tx, context, request.idempotencyKey, hash);
     if (previous) return previous;
     await lockResources(tx);
+    await assertStoragePolicyIdle(tx);
+    const { values: config } = await getSettings(tx, env);
+    const providerOwner = await tx
+      .selectFrom('provider_accounts as account')
+      .innerJoin('provider_change_feeds as feed', 'feed.instance_id', 'account.instance_id')
+      .select(['account.provider_id', 'account.provider_url', 'account.status'])
+      .where('feed.enabled', '=', true)
+      .where('feed.provider_url', '=', config.pterodactylBaseUrl?.replace(/\/$/, '') ?? '')
+      .where('account.user_id', '=', context.subjectUserId)
+      .executeTakeFirst();
+    if (
+      !providerOwner?.provider_id ||
+      providerOwner.status !== 'ready' ||
+      providerOwner.provider_url !== config.pterodactylBaseUrl?.replace(/\/$/, '')
+    )
+      throw new DomainError('integration_unavailable');
+    const unlimited =
+      config.storagePolicy === 'GLOBAL_POOL' ||
+      (await getUserStorageBudget(tx, context.subjectUserId, config.defaultUserStorageMiB)) === 0;
+    if ((request.limits.disk === undefined || request.limits.disk === 0) && !unlimited)
+      throw new DomainError('validation_failed');
+    const value = {
+      ...request,
+      limits: parse(limitsSchema, {
+        ...request.limits,
+        disk: unlimited ? 0 : request.limits.disk,
+      }),
+    };
     const mapping = await tx
       .selectFrom('runtime_egg_mappings')
       .selectAll()
@@ -298,7 +543,7 @@ export async function createManagedServer(
       .executeTakeFirst();
     if (!mapping?.enabled) throw new DomainError('not_found');
     const minecraft =
-      mapping.game_id === 'minecraft-java'
+      mapping.game_id === 'minecraft'
         ? await requireMinecraftChoice(
             tx,
             await currentInteractiveContext(tx, context, env),
@@ -307,7 +552,7 @@ export async function createManagedServer(
           )
         : undefined;
     if (
-      (mapping.game_id === 'minecraft-java') !== (value.minecraft !== undefined) ||
+      (mapping.game_id === 'minecraft') !== (value.minecraft !== undefined) ||
       (minecraft && minecraft.row.mapping_id !== mapping.id)
     )
       throw new DomainError('validation_failed');
@@ -326,6 +571,25 @@ export async function createManagedServer(
       )
         throw new DomainError('validation_failed');
     } else if (options.minecraftInitialContent) throw new DomainError('validation_failed');
+    const integration = await tx
+      .selectFrom('game_integrations')
+      .select('manifest')
+      .where('id', '=', mapping.game_id)
+      .executeTakeFirstOrThrow();
+    const connectionDeclaration = parse(gameManifestSchema, integration.manifest).connection;
+    const dnsOptions = resolveDnsOptions(config, connectionDeclaration, mapping.game_id);
+    if (value.connection) {
+      if (
+        connectionDeclaration.mode === 'static-host-port' ||
+        !dnsOptions.configured ||
+        (value.connection.domainId &&
+          !dnsOptions.domains.some((domain) => domain.id === value.connection?.domainId)) ||
+        (value.connection.subdomain && !dnsOptions.customizable)
+      )
+        throw new DomainError('validation_failed');
+      if (value.connection.subdomain)
+        value.connection.subdomain = validateDnsLabel(value.connection.subdomain, config);
+    }
     const node = await tx
       .selectFrom('managed_nodes')
       .selectAll()
@@ -353,7 +617,6 @@ export async function createManagedServer(
       if (!project || project.owner_id !== context.subjectUserId)
         throw new DomainError('forbidden');
     }
-    const { values: config } = await getSettings(tx, env);
     const count = await tx
       .selectFrom('managed_servers')
       .select(tx.fn.countAll<string>().as('n'))
@@ -397,11 +660,21 @@ export async function createManagedServer(
       tx,
       context.subjectUserId,
       node.physical_host_id,
-      value.limits.disk * (1 + mapping.feature_limits.backups),
+      (value.limits.disk || config.defaultServerStorageMiB) * (1 + mapping.feature_limits.backups),
       env,
     );
     const { pool, allocations: inventory } = await validatedBackendInventory(adapter, node, env);
     await assertBackendPoolNamespace(tx, node, pool, env);
+    const connectionMode =
+      minecraft && (!minecraft.capabilities.gateway || !config.gatewayEnabled)
+        ? 'direct'
+        : 'gateway';
+    const directClaims = await tx
+      .selectFrom('server_allocations')
+      .select('direct_endpoint')
+      .where('direct_endpoint', 'is not', null)
+      .execute();
+
     const owned = await tx
       .selectFrom('server_allocations as allocation')
       .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'allocation.node_id')
@@ -415,6 +688,15 @@ export async function createManagedServer(
       .execute();
     const free: typeof inventory = [];
     for (const allocation of inventory) {
+      if (connectionMode === 'direct') {
+        if (
+          !allocation.directEndpoint ||
+          directClaims.some((claim) =>
+            isDeepStrictEqual(claim.direct_endpoint, allocation.directEndpoint),
+          )
+        )
+          continue;
+      } else if (allocation.delivery === 'direct' || !pool.gatewayBindAddresses.length) continue;
       if (
         allocation.assigned ||
         (canonicalAllocationAddress(allocation.ip) === '127.0.0.1' &&
@@ -453,6 +735,7 @@ export async function createManagedServer(
       .values({
         id: serverId,
         owner_id: context.subjectUserId,
+        provider_user_id: providerOwner.provider_id,
         project_id: value.projectId ?? null,
         mapping_id: mapping.id,
         node_id: node.id,
@@ -462,11 +745,38 @@ export async function createManagedServer(
         pterodactyl_uuid: null,
         pterodactyl_identifier: null,
         limits: JSON.stringify(value.limits),
+        connection_mode: connectionMode,
         active_operation_id: jobId,
         last_observed_at: null,
         deleted_at: null,
       })
       .execute();
+    const reservedConnection =
+      value.connection?.subdomain || value.connection?.reservationId
+        ? await consumeDnsWizardReservation(
+            tx,
+            context,
+            mapping.game_id,
+            serverId,
+            value.connection,
+            env,
+          )
+        : undefined;
+    if (connectionDeclaration.mode !== 'static-host-port' && dnsOptions.configured) {
+      await tx
+        .insertInto('server_dns_preferences')
+        .values({
+          server_id: serverId,
+          domain_id:
+            reservedConnection?.domainId ??
+            value.connection?.domainId ??
+            dnsOptions.defaultDomainId,
+          subdomain: reservedConnection?.subdomain ?? value.connection?.subdomain ?? null,
+          assignment_id: null,
+          enabled: true,
+        })
+        .execute();
+    }
     const allocationRows = roles.map((role, index) => {
       const allocation = free[index];
       if (!allocation) throw new DomainError('allocation_unavailable');
@@ -477,6 +787,8 @@ export async function createManagedServer(
         pterodactyl_allocation_id: allocation.id,
         address: canonicalAllocationAddress(allocation.ip),
         backend_address: allocation.backendAddress,
+        direct_endpoint:
+          connectionMode === 'direct' ? JSON.stringify(allocation.directEndpoint) : null,
         port: allocation.port,
         role: role.role,
         protocols: role.protocols,
@@ -484,6 +796,12 @@ export async function createManagedServer(
       };
     });
     await tx.insertInto('server_allocations').values(allocationRows).execute();
+    const plannedServer = await tx
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const gatewayProvision = await planProvisionGateway(tx, plannedServer, mapping.game_id, env);
     const primary = allocationRows.find((r) => r.is_primary);
     if (!primary) throw new DomainError('configuration_invalid');
     const environment = { ...mapping.environment };
@@ -505,10 +823,10 @@ export async function createManagedServer(
     const provision: ProvisionPlan = {
       name: value.name,
       externalId,
-      userId: node.provision_user_id,
+      userId: providerOwner.provider_id,
       eggId: mapping.egg_id,
-      dockerImage: mapping.docker_image,
-      startup: mapping.startup,
+      dockerImage: mappingProvisionImage(mapping, minecraft?.row.binding),
+      startup: minecraft ? minecraftProvisionStartup(minecraft) : mapping.startup,
       environment,
       limits: value.limits,
       featureLimits: mapping.feature_limits,
@@ -548,6 +866,7 @@ export async function createManagedServer(
       {
         provision,
         autoStart: value.autoStart,
+        ...(gatewayProvision ? { gatewayProvision } : {}),
         ...(options.minecraftInitialContent
           ? { minecraftInitialContent: options.minecraftInitialContent }
           : {}),
@@ -636,23 +955,46 @@ export async function enqueueLockedServerOperation(
   } = {},
 ) {
   const value = parse(operationSchema, input);
+  if (value.action === 'kill') throw new DomainError('conflict');
+  if (
+    (['backup', 'restore'].includes(value.action) ||
+      ('backupBefore' in value && value.backupBefore) ||
+      options.minecraftPlan?.backupBefore) &&
+    !(await backupSchemaAvailable(tx))
+  )
+    throw new DomainError('configuration_invalid');
+  if (value.action !== 'stop') await assertStoragePolicyIdle(tx);
   const hash = digest({ kind: 'operation', subject: context.subjectUserId, serverId, value });
   const server = await authorizeServer(
     tx,
     context,
     serverId,
-    ['start', 'stop', 'restart', 'backup'].includes(value.action)
-      ? 'server:operate'
-      : 'server:manage',
+    ['start', 'stop', 'restart'].includes(value.action)
+      ? 'console.power'
+      : value.action === 'backup'
+        ? 'backups.create'
+        : value.action === 'restore'
+          ? 'backups.restore'
+          : value.action === 'minecraft-content'
+            ? 'server:read'
+            : 'server:manage',
   );
+  if (value.action === 'minecraft-content') {
+    if (!options.minecraftPlan) throw new DomainError('forbidden');
+    for (const permission of minecraftContentPermissionKeys(options.minecraftPlan.command))
+      await authorizeServer(tx, context, serverId, permission);
+  }
+  if (('backupBefore' in value && value.backupBefore) || options.minecraftPlan?.backupBefore)
+    await authorizeServer(tx, context, serverId, 'backups.create');
   if (server.active_operation_id) throw new DomainError('conflict');
+  await assertNoModpackPublication(tx, serverId);
   if (value.action === 'start' || value.action === 'restart') {
     const mapping = await tx
       .selectFrom('runtime_egg_mappings')
       .select('game_id')
       .where('id', '=', server.mapping_id)
       .executeTakeFirstOrThrow();
-    if (mapping.game_id === 'minecraft-java') {
+    if (mapping.game_id === 'minecraft') {
       const profile = await tx
         .selectFrom('minecraft_server_profiles')
         .select('installed')
@@ -728,12 +1070,19 @@ export async function enqueueLockedServerOperation(
       }
     }
   }
+  const onlineWorldContent =
+    value.action === 'minecraft-content' && minecraftContentAllowsOnline(options.minecraftPlan);
+  if (onlineWorldContent && !['offline', 'running'].includes(server.runtime_state))
+    throw new DomainError('conflict');
   const reservation = await tx
     .selectFrom('resource_reservations')
     .selectAll()
     .where('server_id', '=', serverId)
     .executeTakeFirst();
+  if (onlineWorldContent && reservation && reservation.state !== 'running')
+    throw new DomainError('operation_uncertain');
   if (
+    !onlineWorldContent &&
     ['configure', 'reinstall', 'wipe', 'restore', 'delete', 'minecraft-content'].includes(
       value.action,
     ) &&
@@ -757,6 +1106,7 @@ export async function enqueueLockedServerOperation(
       .execute();
   }
   if (
+    !onlineWorldContent &&
     ['wipe', 'reinstall', 'restore', 'configure', 'delete', 'minecraft-content'].includes(
       value.action,
     ) &&
@@ -764,11 +1114,36 @@ export async function enqueueLockedServerOperation(
   )
     throw new DomainError('conflict');
   if ('backupBefore' in value) plan.backupBefore = value.backupBefore;
+  if (value.action === 'backup') {
+    const mapping = await tx
+      .selectFrom('runtime_egg_mappings')
+      .select('game_id')
+      .where('id', '=', server.mapping_id)
+      .executeTakeFirstOrThrow();
+    const policy = trustedGameModules.get(mapping.game_id)?.manifest.backupPolicy;
+    plan.backupOptions = backupOptionsSchema.parse({
+      name: value.name,
+      ignored: value.ignored,
+      isLocked: value.isLocked,
+      mode: value.mode,
+    });
+    plan.backupMode = resolveBackupMode(value.mode, policy);
+  }
   if (value.action === 'restore') {
-    plan.backupId = value.backupId;
+    plan.restoreBackupId = value.backupId;
     plan.truncate = value.truncate;
   }
   if (value.action === 'configure') {
+    const { values: config } = await getSettings(tx, env);
+    const unlimited =
+      config.storagePolicy === 'GLOBAL_POOL' ||
+      (await getUserStorageBudget(tx, server.owner_id, config.defaultUserStorageMiB)) === 0;
+    if (
+      (!unlimited && value.limits.disk === 0) ||
+      (server.limits.disk === 0 && value.limits.disk !== 0) ||
+      (server.limits.disk !== 0 && value.limits.disk === 0)
+    )
+      throw new DomainError('conflict');
     const node = await tx
       .selectFrom('managed_nodes')
       .selectAll()
@@ -783,7 +1158,15 @@ export async function enqueueLockedServerOperation(
       tx,
       server.owner_id,
       node.physical_host_id,
-      value.limits.disk * (1 + mapping.feature_limits.backups),
+      value.limits.disk === 0
+        ? ((
+            await storageCommitments(
+              tx,
+              [{ ...server, feature_limits: mapping.feature_limits }],
+              env,
+            )
+          ).get(serverId) ?? 0)
+        : value.limits.disk * (1 + mapping.feature_limits.backups),
       env,
       serverId,
     );
@@ -839,6 +1222,7 @@ export async function enqueueServerOperation(
   } = {},
 ) {
   const value = parse(operationSchema, input);
+  if (value.action === 'kill') return requestStopEscalation(db, context, serverId, value, env);
   const hash = digest({ kind: 'operation', subject: context.subjectUserId, serverId, value });
   if (value.action === 'stop') {
     // A manual stop immediately revokes wake consent, even if a previously queued
@@ -857,8 +1241,11 @@ export async function enqueueServerOperation(
       // M3 consent changes are interactive effects. Do not carry authority
       // across either lock wait. Legacy internal M2 calls without a Gateway
       // policy retain their existing context contract.
-      const actor = policy ? await currentInteractiveContext(tx, context, env) : context;
-      await authorizeServer(tx, actor, serverId, 'server:operate');
+      const actor =
+        policy || context[authSessionId]
+          ? await currentInteractiveContext(tx, context, env)
+          : context;
+      await authorizeServer(tx, actor, serverId, 'console.power');
       await tx
         .updateTable('managed_servers')
         .set({ intent: 'manually_stopped' })
@@ -892,13 +1279,14 @@ export async function enqueueServerOperation(
     const previous = await previousRequest(tx, context, value.idempotencyKey, hash);
     if (previous) return previous;
     await lockResources(tx);
+    if (value.action !== 'stop') await assertStoragePolicyIdle(tx);
     const policy = await tx
       .selectFrom('gateway_server_states')
       .selectAll()
       .where('server_id', '=', serverId)
       .executeTakeFirst();
     const actor =
-      policy || value.action === 'minecraft-content'
+      policy || context[authSessionId] || value.action === 'minecraft-content'
         ? await currentInteractiveContext(tx, context, env)
         : context;
     const result = await enqueueLockedServerOperation(
@@ -974,6 +1362,8 @@ export async function setProjectMember(
     input,
   );
   return db.transaction().execute(async (tx) => {
+    await lockResources(tx);
+    if (context[authSessionId]) context = await currentInteractiveContext(tx, context, {});
     const project = await tx
       .selectFrom('projects')
       .selectAll()
@@ -982,10 +1372,23 @@ export async function setProjectMember(
     if (!project) throw new DomainError('not_found');
     assertPermission(context, 'server:manage', { ownerUserId: project.owner_id });
     if (value.userId === project.owner_id) throw new DomainError('conflict');
-    if (
-      !(await tx.selectFrom('user').select('id').where('id', '=', value.userId).executeTakeFirst())
-    )
-      throw new DomainError('not_found');
+    const member = await tx
+      .selectFrom('user')
+      .select(['id', 'name', 'username'])
+      .where('id', '=', value.userId)
+      .executeTakeFirst();
+    if (!member) throw new DomainError('not_found');
+    const affectedServers = await tx
+      .selectFrom('managed_servers')
+      .select('id')
+      .where('project_id', '=', projectId)
+      .where('deleted_at', 'is', null)
+      .execute();
+    const credentialPermissions = await snapshotServerCredentialPermissions(
+      tx,
+      affectedServers.map((server) => server.id),
+      value.userId,
+    );
     if (value.role)
       await tx
         .insertInto('project_members')
@@ -1000,7 +1403,20 @@ export async function setProjectMember(
         .where('project_id', '=', projectId)
         .where('user_id', '=', value.userId)
         .execute();
+    await revokeReducedServerCredentialPermissions(tx, credentialPermissions);
     await recordAudit(tx, context, 'project.member.updated', { projectId, ...value });
+    // Snapshot the servers affected now: moving a server to another project later
+    // must neither import unrelated history nor lose this access change.
+    await sql`insert into audit_events (id, actor_user_id, subject_user_id, action, correlation_id, metadata, created_at)
+      select gen_random_uuid(), ${context.actorUserId}, ${context.subjectUserId}, 'server.member.updated',
+        ${context.support?.id ?? randomUUID()}, jsonb_build_object(
+          'serverId', server.id, 'operationId', ${randomUUID()}::text, 'source', 'panel', 'outcome', 'succeeded',
+          'memberName', ${member.name}::text, 'memberUsername', ${member.username}::text, 'role', ${value.role ?? 'removed'}::text
+        ), clock_timestamp()
+      from managed_servers server where server.project_id = ${projectId} and server.deleted_at is null`.execute(
+      tx,
+    );
+    return credentialPermissions.map(({ serverId, userId }) => ({ serverId, userId }));
   });
 }
 
@@ -1020,7 +1436,8 @@ export async function setRuntimeMapping(
         nodeId: id,
         nestId: z.number().int().positive(),
         eggId: z.number().int().positive(),
-        dockerImage: z.string().min(1),
+        imageMode: z.enum(['static', 'integration']).default('static'),
+        dockerImage: z.string().min(1).optional(),
         startup: z.string().min(1),
         environment: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), z.string()),
         portRoles: z
@@ -1055,6 +1472,11 @@ export async function setRuntimeMapping(
       .strict(),
     input,
   );
+  if (
+    (value.imageMode === 'static' && !value.dockerImage) ||
+    (value.imageMode === 'integration' && value.dockerImage !== undefined)
+  )
+    throw new DomainError('validation_failed');
   const game = await db
     .selectFrom('game_integrations')
     .select('manifest')
@@ -1092,7 +1514,11 @@ export async function setRuntimeMapping(
   if (
     !supportsStopConfirmation(egg) ||
     egg.nest !== value.nestId ||
-    ![egg.docker_image, ...Object.values(egg.docker_images ?? {})].includes(value.dockerImage)
+    !(
+      value.imageMode === 'static'
+        ? [value.dockerImage ?? '']
+        : integrationImageCandidates(value.gameId, value.runtimeId)
+    ).some((image) => [egg.docker_image, ...Object.values(egg.docker_images ?? {})].includes(image))
   )
     throw new DomainError('validation_failed');
   return db.transaction().execute(async (tx) => {
@@ -1105,7 +1531,8 @@ export async function setRuntimeMapping(
       node_id: node.id,
       nest_id: egg.nest,
       egg_id: egg.id,
-      docker_image: value.dockerImage,
+      image_mode: value.imageMode,
+      docker_image: value.imageMode === 'static' ? (value.dockerImage ?? '') : '',
       startup: value.startup,
       environment: JSON.stringify(value.environment),
       port_roles: JSON.stringify(value.portRoles),
@@ -1135,6 +1562,7 @@ export async function setRuntimeMapping(
         'nest_id',
         'egg_id',
         'docker_image',
+        'image_mode',
         'startup',
       ] as const)
         if (previous[key] !== row[key]) throw new DomainError('conflict');

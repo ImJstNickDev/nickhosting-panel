@@ -1,7 +1,12 @@
 import { DomainError, type PlatformRole } from '@nickhosting/core';
 import { z } from 'zod';
+import { gatewayMessageDefinitionSchema } from './gateway-messages.js';
+import { runtimeImagePolicySchema } from './runtime-images.js';
 
+export * from './fileman-transfers.js';
 export * from './gateway.js';
+export * from './gateway-messages.js';
+export * from './runtime-images.js';
 
 export const gameRolloutStates = [
   'development',
@@ -61,6 +66,11 @@ const translationKey = z.string().regex(/^games\.[a-z][a-z0-9-]*\.[a-zA-Z0-9_.-]
 const settingKey = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$/);
 
 export const connectionModeSchema = z.discriminatedUnion('mode', [
+  z.strictObject({
+    mode: z.literal('shared-host'),
+    defaultLabel: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/),
+    allowCustomSubdomain: z.boolean(),
+  }),
   z
     .object({
       mode: z.literal('custom-subdomain'),
@@ -101,18 +111,49 @@ const capabilitySchema = z
     worlds: z.boolean(),
     idleDetection: z.boolean(),
     gracefulStop: z.boolean(),
+    gatewayMessages: z.boolean().optional(),
     readiness: z.boolean(),
     wake: z.enum(['unsupported', 'manual', 'verified-protocol']),
   })
   .strict();
 export type GameCapabilities = z.infer<typeof capabilitySchema>;
 
+export const gameBackupPolicySchema = z.strictObject({
+  offline: z.enum(['required', 'recommended', 'none']),
+});
+export type GameBackupPolicy = z.infer<typeof gameBackupPolicySchema>;
+
+/** Compiled integration hooks must be repeatable after worker recovery. Core
+ * persists preparation before invoking it and always attempts cleanup. */
+export interface GameBackupHooks<Context> {
+  prepareBackup?(context: Context, mode: 'offline' | 'live'): Promise<void>;
+  /** Compensation only: reverse this backup's preparation, even when the
+   * initiating actor or schedule has since lost authority. Never start a new
+   * backup, process or unrelated mutation from this hook. */
+  cleanupBackup?(context: Context, mode: 'offline' | 'live'): Promise<void>;
+}
+
 export const gameManifestSchema = z
   .object({
     id: identifier,
     version: z.string().regex(/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/),
     nameKey: translationKey,
+    serverPermissions: z
+      .array(
+        z.strictObject({
+          key: z.string().regex(/^game\.[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/),
+          resource: z.string().regex(/^game\.[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/),
+          kind: z.enum(['read', 'write', 'additional']),
+          legacy: z.enum(['read', 'operate', 'manage']),
+          labelKey: translationKey.optional(),
+          resourceLabelKey: translationKey.optional(),
+        }),
+      )
+      .max(128)
+      .default([]),
     capabilities: capabilitySchema,
+    backupPolicy: gameBackupPolicySchema.optional(),
+    gatewayMessages: gatewayMessageDefinitionSchema.optional(),
     connection: connectionModeSchema,
     ports: z.array(portRequirementSchema).min(1),
     runtimes: z
@@ -122,6 +163,7 @@ export const gameManifestSchema = z
             id: identifier,
             nameKey: translationKey,
             supportedGameVersions: z.array(z.string().min(1)),
+            imagePolicy: runtimeImagePolicySchema.optional(),
             supports: z.record(z.string(), z.boolean()),
           })
           .strict(),
@@ -163,6 +205,32 @@ export const gameManifestSchema = z
   })
   .strict()
   .superRefine((manifest, context) => {
+    const permissionKeys = new Set(manifest.serverPermissions.map(({ key }) => key));
+    for (const definition of manifest.serverPermissions) {
+      if (
+        !definition.resource.startsWith(`game.${manifest.id}.`) ||
+        !definition.key.startsWith(`${definition.resource}.`) ||
+        !permissionKeys.has(`${definition.resource}.read`) ||
+        (definition.kind === 'read' && definition.key !== `${definition.resource}.read`) ||
+        (definition.kind === 'write' && definition.key !== `${definition.resource}.write`) ||
+        (definition.resourceLabelKey &&
+          !definition.resourceLabelKey.startsWith(`games.${manifest.id}.`)) ||
+        (definition.kind === 'additional' &&
+          ['read', 'write'].includes(definition.key.split('.').at(-1) ?? '')) ||
+        (definition.labelKey && !definition.labelKey.startsWith(`games.${manifest.id}.`))
+      )
+        context.addIssue({
+          code: 'custom',
+          path: ['serverPermissions'],
+          message: 'invalid_permission_namespace',
+        });
+    }
+    if (permissionKeys.size !== manifest.serverPermissions.length)
+      context.addIssue({
+        code: 'custom',
+        path: ['serverPermissions'],
+        message: 'duplicate_permission',
+      });
     const unique = (values: string[], path: string) => {
       if (new Set(values).size !== values.length)
         context.addIssue({ code: 'custom', path: [path], message: 'duplicate_identifier' });
@@ -311,3 +379,5 @@ export function defineGameIntegration(integration: GameIntegration): GameIntegra
   }
   return { ...integration, manifest: parsed.data };
 }
+
+export * from './fileman-read.js';

@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { assertAuthContext } from '@nickhosting/core';
+import { assertAuthContext, SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { IdentityMail, IdentityOptions } from './contracts.js';
@@ -109,6 +109,7 @@ describe('real PostgreSQL identity boundaries', () => {
       pool: database.pool,
       baseURL: 'http://localhost:3999',
       authSecret: randomBytes(32).toString('base64url'),
+      secretCodec: new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } }),
       bootstrapToken,
       mail: async (message) => {
         mails.push(message);
@@ -144,11 +145,17 @@ describe('real PostgreSQL identity boundaries', () => {
           token: bootstrapToken,
           email: `owner${index}@example.com`,
           name: 'Owner',
+          username: `owner_${index}`,
           password,
         }),
       ),
     );
-    expect(attempts.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(
+      attempts.filter((result) => result.status === 'fulfilled'),
+      attempts
+        .map((result) => (result.status === 'rejected' ? String(result.reason) : 'fulfilled'))
+        .join('; '),
+    ).toHaveLength(1);
     expect(
       attempts
         .filter((result) => result.status === 'rejected')
@@ -179,6 +186,90 @@ describe('real PostgreSQL identity boundaries', () => {
         pterodactylApplicationKey: randomBytes(32).toString('base64url'),
       }),
     ).rejects.toMatchObject({ code: 'setup_completed' });
+  });
+
+  it('keeps unique usernames separate from editable display names and rejects invalid handles', async () => {
+    const invite = await invitation({ maxUses: 20 });
+    const signupWith = (address: string, username: unknown) =>
+      new AuthClient(identity).request(
+        '/sign-up/email',
+        { email: address, name: 'Shared Display Name', username, password },
+        { 'x-invitation-token': invite.token },
+      );
+    for (const invalid of [
+      'UPPER',
+      'ab',
+      '_first',
+      'has space',
+      'a.b',
+      'éclair',
+      'a'.repeat(41),
+      null,
+    ]) {
+      const response = await signupWith('invalid-handle@example.com', invalid);
+      expect(response.status).toBe(400);
+    }
+    const client = new AuthClient(identity);
+    const response = await client.request(
+      '/sign-up/email',
+      {
+        email: 'handle@example.com',
+        name: 'Shared Display Name',
+        username: 'chosen_handle-1',
+        password,
+      },
+      { 'x-invitation-token': invite.token },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ user: { username: 'chosen_handle-1' } });
+    const duplicate = await signupWith('duplicate-handle@example.com', 'chosen_handle-1');
+    expect(duplicate.status).toBe(409);
+    expect(await duplicate.json()).toMatchObject({ code: 'USERNAME_TAKEN' });
+    expect((await signupWith('other-handle@example.com', 'other_handle')).status).toBe(200);
+    await verifyEmail('handle@example.com', client);
+    expect(
+      (await client.request('/sign-in/email', { email: 'handle@example.com', password })).status,
+    ).toBe(200);
+    expect((await client.request('/update-user', { name: 'Renamed Display' })).status).toBe(200);
+    expect((await client.request('/update-user', { username: 'replacement' })).status).toBe(400);
+    expect((await client.request('/get-session')).status).toBe(200);
+    const session = await (await client.request('/get-session')).json();
+    expect(session).toMatchObject({
+      user: { username: 'chosen_handle-1', name: 'Renamed Display' },
+    });
+    const consumed = await database.pool.query(
+      'SELECT "remainingUses" FROM invitation WHERE id=$1',
+      [invite.id],
+    );
+    expect(consumed.rows[0]?.remainingUses).toBe(18);
+  });
+
+  it('allows only one concurrent signup to claim a chosen username without consuming rejected invitations', async () => {
+    const invites = await Promise.all([invitation(), invitation()]);
+    const responses = await Promise.all(
+      invites.map((invite, index) =>
+        new AuthClient(identity).request(
+          '/sign-up/email',
+          {
+            email: `handle-race-${index}@example.com`,
+            name: 'Race',
+            username: 'one_race_handle',
+            password,
+          },
+          { 'x-invitation-token': invite.token },
+        ),
+      ),
+    );
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    const consumed = await database.pool.query(
+      'SELECT sum("remainingUses")::int AS remaining FROM invitation WHERE id=ANY($1::text[])',
+      [invites.map((invite) => invite.id)],
+    );
+    expect(consumed.rows[0]?.remaining).toBe(1);
+    expect(
+      (await database.pool.query('SELECT id FROM "user" WHERE username=$1', ['one_race_handle']))
+        .rowCount,
+    ).toBe(1);
   });
 
   it('rejects direct credential signup without an invitation and ignores client role escalation', async () => {
@@ -280,6 +371,10 @@ describe('real PostgreSQL identity boundaries', () => {
     expect(response.status).toBe(302);
     expect(response.headers.get('location')).toBe('/');
     expect((await identity.authenticate(client.headers())).context.role).toBe('user');
+    const oauthUser = await database.pool.query('SELECT username FROM "user" WHERE email=$1', [
+      'discord@example.com',
+    ]);
+    expect(oauthUser.rows[0]?.username).toMatch(/^user_[a-f0-9]{32}$/);
     await expect(identity.inspectInvitation(invite.token)).rejects.toMatchObject({
       code: 'invitation_exhausted',
     });
@@ -518,6 +613,9 @@ describe('real PostgreSQL identity boundaries', () => {
   });
 
   it('rolls invitation consumption back if credential insertion fails after user creation', async () => {
+    const beforeEnrollment = await database.pool.query(
+      'SELECT user_id FROM provider_accounts ORDER BY user_id',
+    );
     const invite = await invitation();
     await database.pool.query(`CREATE FUNCTION fixture_reject_account() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
@@ -545,6 +643,9 @@ describe('real PostgreSQL identity boundaries', () => {
           ])
         ).rowCount,
       ).toBe(0);
+      expect(
+        (await database.pool.query('SELECT user_id FROM provider_accounts ORDER BY user_id')).rows,
+      ).toEqual(beforeEnrollment.rows);
     } finally {
       await database.pool.query(
         'DROP TRIGGER fixture_reject ON account; DROP FUNCTION fixture_reject_account()',

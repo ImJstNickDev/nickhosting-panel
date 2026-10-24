@@ -66,18 +66,18 @@ export function minecraftWizard(
     id,
     kind,
     required,
-    labelKey: `games.minecraft-java.fields.${id}`,
+    labelKey: `games.minecraft.fields.${id}`,
   });
   return {
     steps: [
       {
         id: 'choose-game',
-        titleKey: 'games.minecraft-java.steps.chooseGame',
+        titleKey: 'games.minecraft.steps.chooseGame',
         fields: [field('game', 'choice')],
       },
       {
         id: 'configure',
-        titleKey: 'games.minecraft-java.steps.configure',
+        titleKey: 'games.minecraft.steps.configure',
         fields: [
           ...(modpack
             ? []
@@ -91,12 +91,12 @@ export function minecraftWizard(
       },
       {
         id: 'resources',
-        titleKey: 'games.minecraft-java.steps.resources',
+        titleKey: 'games.minecraft.steps.resources',
         fields: [field('resources', 'resources')],
       },
       {
         id: 'create',
-        titleKey: 'games.minecraft-java.steps.create',
+        titleKey: 'games.minecraft.steps.create',
         fields: [field('eulaAccepted', 'confirmation'), field('create', 'confirmation')],
       },
     ],

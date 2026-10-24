@@ -4,7 +4,9 @@ import {
   assertConfigWritable,
   assertPermission,
   DomainError,
+  normalizeLegacyContentSettings,
   type PlatformConfig,
+  platformConfigPatchSchema,
   resolveConfig,
   type SecretCodec,
 } from '@nickhosting/core';
@@ -12,6 +14,8 @@ import { evaluateGameAccess, gameManifestSchema, gameRolloutSchema } from '@nick
 import { type Kysely, sql, type Transaction } from 'kysely';
 import type { PoolClient } from 'pg';
 import type { Database } from './index.js';
+import { notifyGatewayChange } from './job-notifications.js';
+import { assertStoragePolicyIdle } from './storage-policy.js';
 
 type DB = Kysely<Database> | Transaction<Database>;
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -56,6 +60,9 @@ export async function updateSettings(
   env: Environment = {},
 ) {
   regularOwner(context);
+  const parsedPatch = platformConfigPatchSchema.safeParse(patch);
+  if (!parsedPatch.success) throw new DomainError('configuration_invalid');
+  patch = parsedPatch.data;
   return db.transaction().execute(async (tx) => {
     await sql`select pg_advisory_xact_lock(hashtextextended(current_schema() || ':resources', 0))`.execute(
       tx,
@@ -69,8 +76,16 @@ export async function updateSettings(
       .where('key', '=', 'platform')
       .executeTakeFirst();
     assertConfigWritable(patch, resolveConfig(previous?.value ?? {}, env));
-    const value = { ...previous?.value, ...patch };
+    const value = {
+      ...(normalizeLegacyContentSettings(previous?.value ?? {}) as Partial<PlatformConfig>),
+      ...patch,
+    };
+    // Internal reset requests use undefined; JSON PATCH clients cannot supply
+    // it. Remove the stored override before resolving/validating default policy.
+    for (const key of Object.keys(value) as Array<keyof PlatformConfig>)
+      if (value[key] === undefined) delete value[key];
     const resolved = resolveConfig(value, env);
+    await assertStoragePolicyIdle(tx);
     // Policy changes must validate already committed reservations under the same
     // lock as admission; switching storage modes cannot hide existing use.
     const reservations = await tx.selectFrom('resource_reservations').selectAll().execute();
@@ -81,6 +96,13 @@ export async function updateSettings(
       .where('s.deleted_at', 'is', null)
       .execute();
     const exceptions = await tx.selectFrom('resource_user_limits').selectAll().execute();
+    const storageBudgets = await tx.selectFrom('storage_user_budgets').selectAll().execute();
+    if (
+      servers.length > 0 &&
+      resolved.values.storagePolicy !==
+        resolveConfig(previous?.value ?? {}, env).values.storagePolicy
+    )
+      throw new DomainError('conflict', 409, { reason: 'storage_policy_transition_required' });
     const owners = new Set([
       ...reservations.map((r) => r.owner_id),
       ...servers.map((s) => s.owner_id),
@@ -91,14 +113,18 @@ export async function updateSettings(
       );
       const memory = exception?.memory_mib ?? resolved.values.defaultUserMemoryMiB;
       const cpu = exception?.cpu_percent ?? resolved.values.defaultUserCpuPercent;
-      const storage = exception
-        ? Number(exception.storage_mib)
-        : resolved.values.defaultUserStorageMiB;
+      const storageBudget = storageBudgets.find((budget) => budget.user_id === owner);
+      const storage = Number(
+        storageBudget
+          ? (storageBudget.storage_mib ?? resolved.values.defaultUserStorageMiB)
+          : (exception?.storage_mib ?? resolved.values.defaultUserStorageMiB),
+      );
       const active = reservations.filter((r) => r.owner_id === owner);
       if (
         active.reduce((s, r) => s + r.memory_mib, 0) > memory ||
         active.reduce((s, r) => s + r.cpu_percent, 0) > cpu ||
         (resolved.values.storagePolicy === 'PER_USER_BUDGET' &&
+          storage > 0 &&
           servers
             .filter((r) => r.owner_id === owner)
             .reduce((s, r) => s + r.limits.disk * (1 + r.feature_limits.backups), 0) > storage)
@@ -110,6 +136,20 @@ export async function updateSettings(
       .values({ key: 'platform', value })
       .onConflict((c) => c.column('key').doUpdateSet({ value, updated_at: new Date() }))
       .execute();
+    if (
+      'gameIdleTimeouts' in patch ||
+      'defaultIdleTimeoutSeconds' in patch ||
+      'idleTimeoutUserAccess' in patch
+    ) {
+      // Generic settings writes share the specialized editor's idle fence.
+      await tx.updateTable('gateway_server_states').set({ idle_since: null }).execute();
+    }
+    if (
+      'gameAutoWakePolicies' in patch ||
+      'defaultAutoWakeEnabled' in patch ||
+      'autoWakeUserAccess' in patch
+    )
+      await notifyGatewayChange(tx);
     await recordAudit(tx, context, 'settings.updated', { fields: Object.keys(patch) });
     return resolved;
   });
@@ -121,6 +161,8 @@ export const secretNames = [
   'discordClientSecret',
   'smtpPassword',
   'sftpgoApiKey',
+  'sftpgoEventSecret',
+  'viewerSftpgoApiKey',
   'cloudflareApiToken',
   'gatewayControlToken',
   'curseforgeApiKey',
@@ -132,6 +174,8 @@ const secretEnv: Record<SecretName, string> = {
   discordClientSecret: 'DISCORD_CLIENT_SECRET',
   smtpPassword: 'SMTP_PASSWORD',
   sftpgoApiKey: 'NH_SFTPGO_API_KEY',
+  sftpgoEventSecret: 'NH_SFTPGO_EVENT_SECRET',
+  viewerSftpgoApiKey: 'NH_VIEWER_SFTPGO_API_KEY',
   cloudflareApiToken: 'NH_CLOUDFLARE_API_TOKEN',
   gatewayControlToken: 'NH_GATEWAY_CONTROL_TOKEN',
   curseforgeApiKey: 'NH_CURSEFORGE_API_KEY',
@@ -159,12 +203,14 @@ export async function getSecret(
 /** Only presence/source can be returned to HTTP clients. */
 export async function secretStatus(db: DB, env: Environment = {}) {
   const rows = await db.selectFrom('encrypted_secrets').select('name').execute();
-  return secretNames.map((name) => ({
-    name,
-    configured: env[secretEnv[name]] !== undefined || rows.some((r) => r.name === name),
-    source: env[secretEnv[name]] !== undefined ? 'environment' : 'database',
-    locked: env[secretEnv[name]] !== undefined,
-  }));
+  return secretNames
+    .filter((name) => name !== 'pterodactylClientKey')
+    .map((name) => ({
+      name,
+      configured: env[secretEnv[name]] !== undefined || rows.some((r) => r.name === name),
+      source: env[secretEnv[name]] !== undefined ? 'environment' : 'database',
+      locked: env[secretEnv[name]] !== undefined,
+    }));
 }
 
 export async function storeSecret(
@@ -225,7 +271,6 @@ export async function saveBootstrapConfiguration(
   );
   const entries: [SecretName, string | undefined][] = [
     ['pterodactylApplicationKey', input.pterodactylApplicationKey],
-    ['pterodactylClientKey', input.pterodactylClientKey],
   ];
   for (const [name, value] of entries) {
     if (value && env[secretEnv[name]] === undefined)

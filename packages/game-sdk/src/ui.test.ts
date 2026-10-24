@@ -1,0 +1,555 @@
+import { describe, expect, it } from 'vitest';
+import {
+  actionAvailability,
+  availableGameUiSections,
+  createTrustedGameUiRegistry,
+  defineTrustedGameUiModule,
+  gameUiDescriptorSchema,
+  type TrustedGameUiModule,
+  uiFieldSchema,
+  uiFormSchema,
+  uiOptionSchema,
+  validateUiValues,
+  visibleFields,
+} from './ui.js';
+
+it('accepts bounded presentation keys and explicit patch forms without executable URLs', () => {
+  const form = { id: 'settings', titleKey: 'games.fixture-arena.settings', fields: [] };
+  expect(
+    uiFormSchema.parse({ ...form, renderer: 'fixture-settings', submitChangedOnly: true }),
+  ).toMatchObject({ renderer: 'fixture-settings', submitChangedOnly: true });
+  expect(
+    uiFormSchema.safeParse({ ...form, renderer: 'https://example.test/view.js' }).success,
+  ).toBe(false);
+  expect(uiFormSchema.parse(form).submitChangedOnly).toBeUndefined();
+});
+
+it('retains only a trusted bounded message-editor key across registry construction', () => {
+  const source = moduleFixture();
+  const registry = createTrustedGameUiRegistry([
+    { ...source, gatewayMessageEditor: 'fixture-26.1' },
+  ]);
+  expect(registry.get(source.descriptor.gameId)?.gatewayMessageEditor).toBe('fixture-26.1');
+  expect(() =>
+    defineTrustedGameUiModule({
+      ...source,
+      gatewayMessageEditor: 'https://example.test/editor.js',
+    }),
+  ).toThrow('game_ui_gateway_editor_invalid');
+  expect(
+    gameUiDescriptorSchema.safeParse({ ...source.descriptor, gatewayMessageEditor: 'fixture-26.1' })
+      .success,
+  ).toBe(false);
+});
+
+function fixture() {
+  return gameUiDescriptorSchema.parse({
+    gameId: 'fixture-arena',
+    schemaVersion: 1,
+    nameKey: 'games.fixture-arena.name',
+    creation: {
+      choicesHandler: 'choices',
+      createHandler: 'create',
+      fields: [
+        {
+          id: 'mode',
+          labelKey: 'games.fixture-arena.mode',
+          type: 'choice',
+          required: true,
+          options: [
+            { value: 'duel', labelKey: 'games.fixture-arena.duel' },
+            { value: 'team', labelKey: 'games.fixture-arena.team' },
+          ],
+        },
+        {
+          id: 'slots',
+          labelKey: 'games.fixture-arena.slots',
+          type: 'number',
+          min: 2,
+          max: 16,
+          required: true,
+          when: [{ field: 'mode', operator: 'equals', values: ['team'] }],
+        },
+        {
+          id: 'map',
+          labelKey: 'games.fixture-arena.map',
+          type: 'choice',
+          required: true,
+          source: { handler: 'maps', dependsOn: ['mode'] },
+        },
+      ],
+    },
+    sections: [
+      {
+        id: 'arena',
+        titleKey: 'games.fixture-arena.arena',
+        loader: 'load-arena',
+        requiredPermissions: ['server:read'],
+        requiredCapabilities: ['arena'],
+        forms: [
+          {
+            id: 'arena-settings',
+            titleKey: 'games.fixture-arena.arena',
+            fields: [],
+            action: {
+              id: 'save',
+              handler: 'save',
+              labelKey: 'games.fixture-arena.save',
+              requiredPermissions: ['server:manage'],
+              requiredCapabilities: ['arena'],
+              requiresStopped: true,
+            },
+          },
+        ],
+      },
+    ],
+    ports: [
+      {
+        role: 'game',
+        labelKey: 'games.fixture-arena.game',
+        transports: ['tcp', 'udp'],
+        required: true,
+      },
+      {
+        role: 'query',
+        labelKey: 'games.fixture-arena.query',
+        transports: ['udp'],
+        required: false,
+      },
+    ],
+    connectionModes: [
+      { mode: 'static-host-port', showPort: true },
+      { mode: 'custom-subdomain', srv: { service: '_fixture', transport: 'udp' } },
+    ],
+  });
+}
+function moduleFixture(): TrustedGameUiModule {
+  const names = ['name', 'mode', 'duel', 'team', 'slots', 'map', 'arena', 'save', 'game', 'query'];
+  const catalog = Object.fromEntries(names.map((name) => [`games.fixture-arena.${name}`, name]));
+  return {
+    descriptor: fixture(),
+    catalogs: { en: catalog, it: catalog },
+    handlers: Object.fromEntries(
+      ['choices', 'create', 'maps', 'load-arena', 'save'].map((handler) => [
+        handler,
+        async () => [],
+      ]),
+    ),
+  };
+}
+describe('browser game UI descriptors', () => {
+  it('accepts file icon rules only for bounded extensions and registered static assets', () => {
+    const module = moduleFixture();
+    const descriptor = {
+      ...module.descriptor,
+      fileIcons: [{ extensions: ['properties'], assetId: 'configuration' }],
+    };
+    expect(() => defineTrustedGameUiModule({ ...module, descriptor })).toThrow('asset_missing');
+    const registered = defineTrustedGameUiModule({
+      ...module,
+      descriptor,
+      assets: { configuration: '/assets/config.svg' },
+    });
+    expect(registered.descriptor.fileIcons?.[0]?.extensions).toEqual(['properties']);
+    expect(Object.isFrozen(registered.descriptor.fileIcons?.[0]?.extensions)).toBe(true);
+    for (const fileIcons of [
+      [{ extensions: ['properties'], assetId: 'https://untrusted.invalid/icon.svg' }],
+      [{ extensions: ['../properties'], assetId: 'configuration' }],
+      [{ extensions: [], assetId: 'configuration' }],
+      [{ extensions: ['properties'], assetId: 'configuration', editor: 'executable' }],
+    ])
+      expect(gameUiDescriptorSchema.safeParse({ ...descriptor, fileIcons }).success).toBe(false);
+  });
+  it('round-trips bounded serializable descriptors with alternate transport and connection modes', () => {
+    const descriptor = fixture();
+    expect(gameUiDescriptorSchema.parse(JSON.parse(JSON.stringify(descriptor)))).toEqual(
+      descriptor,
+    );
+    expect(descriptor.ports[0]?.transports).toEqual(['tcp', 'udp']);
+    expect(descriptor.connectionModes.map((m) => m.mode)).toEqual([
+      'static-host-port',
+      'custom-subdomain',
+    ]);
+  });
+  it('accepts bounded runtime allowlists and rejects ambiguous section route aliases', () => {
+    const descriptor = fixture();
+    const section = descriptor.sections[0];
+    if (!section) throw new Error('missing fixture section');
+    expect(section.aliases).toEqual([]);
+    expect(section.runtimeIds).toBeUndefined();
+    const parse = (sections: unknown[]) =>
+      gameUiDescriptorSchema.safeParse({ ...descriptor, sections });
+    expect(
+      parse([{ ...section, runtimeIds: ['arena-classic', 'arena-next'], aliases: ['old-arena'] }])
+        .success,
+    ).toBe(true);
+    for (const runtimeIds of [
+      [],
+      ['arena-classic', 'arena-classic'],
+      ['https://example.test/runtime'],
+      Array.from({ length: 33 }, (_, index) => `runtime-${index}`),
+    ])
+      expect(parse([{ ...section, runtimeIds }]).success).toBe(false);
+    for (const aliases of [
+      ['arena'],
+      ['old-arena', 'old-arena'],
+      ['../old-arena'],
+      Array.from({ length: 17 }, (_, index) => `old-${index}`),
+    ])
+      expect(parse([{ ...section, aliases }]).success).toBe(false);
+    expect(
+      parse([
+        { ...section, aliases: ['another'] },
+        { ...section, id: 'another' },
+      ]).success,
+    ).toBe(false);
+    expect(
+      parse([
+        { ...section, aliases: ['old-arena'] },
+        { ...section, id: 'another', aliases: ['old-arena'] },
+      ]).success,
+    ).toBe(false);
+  });
+  it('filters section navigation and aliases by every permission, capability and runtime guard', () => {
+    const source = moduleFixture();
+    const section = source.descriptor.sections[0];
+    if (!section) throw new Error('missing fixture section');
+    const module = defineTrustedGameUiModule({
+      ...source,
+      descriptor: gameUiDescriptorSchema.parse({
+        ...source.descriptor,
+        sections: [
+          {
+            ...section,
+            runtimeIds: ['arena-classic', 'arena-next'],
+            requiredPermissions: ['server:read', 'server:manage'],
+            aliases: ['old-arena'],
+          },
+          { ...section, id: 'common', requiredCapabilities: [] },
+        ],
+      }),
+    });
+    const context = {
+      runtimeId: 'arena-classic',
+      permissions: ['server:read', 'server:manage'],
+      capabilities: { arena: true },
+    };
+    expect(availableGameUiSections(module, context).map((item) => item.id)).toEqual([
+      'arena',
+      'common',
+    ]);
+    expect(
+      availableGameUiSections(module, { ...context, runtimeId: 'arena-next' }).map(
+        (item) => item.id,
+      ),
+    ).toEqual(['arena', 'common']);
+    for (const override of [
+      { runtimeId: 'unknown-runtime' },
+      { permissions: ['server:read'] },
+      { capabilities: null },
+      { capabilities: {} },
+      { capabilities: { arena: false } },
+      { capabilities: { arena: 'true' } },
+    ]) {
+      const available = availableGameUiSections(module, { ...context, ...override });
+      expect(available.map((item) => item.id)).toEqual(['common']);
+      expect(available.find((item) => item.aliases.includes('old-arena'))).toBeUndefined();
+    }
+    expect(availableGameUiSections(module, { ...context, permissions: [] })).toEqual([]);
+    expect(
+      availableGameUiSections(module, context).find((item) => item.aliases.includes('old-arena'))
+        ?.id,
+    ).toBe('arena');
+  });
+  it('rejects executable URLs, undeclared fields, duplicate ports and oversized lists', () => {
+    const descriptor = fixture();
+    expect(
+      gameUiDescriptorSchema.safeParse({
+        ...descriptor,
+        moduleUrl: 'https://example.invalid/plugin.js',
+      }).success,
+    ).toBe(false);
+    expect(
+      gameUiDescriptorSchema.safeParse({
+        ...descriptor,
+        ports: [...descriptor.ports, descriptor.ports[0]],
+      }).success,
+    ).toBe(false);
+    expect(
+      gameUiDescriptorSchema.safeParse({
+        ...descriptor,
+        sections: Array(33).fill(descriptor.sections[0]),
+      }).success,
+    ).toBe(false);
+    const bad = structuredClone(descriptor);
+    if (bad.creation.fields[2]?.type === 'choice' && bad.creation.fields[2].source)
+      bad.creation.fields[2].source.dependsOn = ['undeclared'];
+    expect(gameUiDescriptorSchema.safeParse(bad).success).toBe(false);
+  });
+  it('rejects cross-game translation namespaces, invalid bounds and ambiguous conditions', () => {
+    expect(
+      gameUiDescriptorSchema.safeParse({ ...fixture(), nameKey: 'games.other.name' }).success,
+    ).toBe(false);
+    const descriptor = fixture();
+    const field = descriptor.creation.fields[1];
+    if (field?.type === 'number') field.min = 50;
+    expect(gameUiDescriptorSchema.safeParse(descriptor).success).toBe(false);
+    expect(
+      uiFieldSchema.safeParse({
+        id: 'ok',
+        labelKey: 'games.fixture-arena.ok',
+        type: 'boolean',
+        when: [{ field: 'mode', operator: 'equals', values: [] }],
+      }).success,
+    ).toBe(false);
+  });
+  it('handles conditional fields, async evidence-filtered options and unknown/disabled selections', () => {
+    const fields = fixture().creation.fields;
+    expect(visibleFields(fields, { mode: 'duel' }).map((f) => f.id)).toEqual(['mode', 'map']);
+    expect(
+      validateUiValues(
+        fields,
+        { mode: 'duel', slots: 999, map: 'arena-1' },
+        { map: [{ value: 'arena-1', label: 'Arena 1', disabled: false }] },
+      ),
+    ).toEqual([]);
+    expect(
+      validateUiValues(fields, { mode: 'team', slots: 1, map: 'unknown' }, { map: [] }),
+    ).toEqual([
+      { field: 'slots', code: 'invalid' },
+      { field: 'map', code: 'unavailable' },
+    ]);
+    expect(
+      validateUiValues(
+        fields,
+        { mode: 'duel', map: 'arena-1' },
+        { map: [{ value: 'arena-1', label: 'Arena 1', disabled: true }] },
+      ),
+    ).toEqual([{ field: 'map', code: 'unavailable' }]);
+  });
+  it('validates booleans, player inputs, integer limits and does not accept inherited values', () => {
+    const fields = [
+      uiFieldSchema.parse({
+        id: 'consent',
+        labelKey: 'games.fixture-arena.consent',
+        type: 'boolean',
+        mustBeTrue: true,
+        required: true,
+      }),
+      uiFieldSchema.parse({
+        id: 'players',
+        labelKey: 'games.fixture-arena.players',
+        type: 'multi-text',
+        format: 'player-name',
+        maxItems: 2,
+        maxLength: 16,
+      }),
+    ];
+    expect(validateUiValues(fields, { consent: false, players: ['bad name'] })).toEqual([
+      { field: 'consent', code: 'invalid' },
+      { field: 'players', code: 'invalid' },
+    ]);
+    expect(validateUiValues(fields, Object.create({ consent: true }))).toEqual([
+      { field: 'consent', code: 'required' },
+    ]);
+  });
+  it('never treats capabilities as permissions, rollout, verified runtime or provider readiness', () => {
+    const action = fixture().sections[0]?.forms[0]?.action;
+    if (!action) throw new Error('missing fixture');
+    const context = {
+      permissions: ['server:manage'],
+      capabilities: ['arena'],
+      rolloutAllowed: true,
+      runtimeVerified: true,
+      providerConfigured: true,
+      state: 'offline',
+    };
+    expect(actionAvailability(action, context)).toEqual({ enabled: true });
+    expect(actionAvailability(action, { ...context, permissions: [] })).toEqual({
+      enabled: false,
+      reason: 'forbidden',
+    });
+    expect(actionAvailability(action, { ...context, capabilities: [] })).toEqual({
+      enabled: false,
+      reason: 'unsupported',
+    });
+    for (const flag of ['rolloutAllowed', 'runtimeVerified', 'providerConfigured'])
+      expect(actionAvailability(action, { ...context, [flag]: false })).toEqual({
+        enabled: false,
+        reason: 'unavailable',
+      });
+    expect(actionAvailability(action, { ...context, state: 'running' })).toEqual({
+      enabled: false,
+      reason: 'requires-stopped',
+    });
+  });
+  it('registers only supplied static modules and validates both locales and every handler', () => {
+    const module = moduleFixture();
+    const registry = createTrustedGameUiRegistry([module]);
+    expect(registry.get('fixture-arena')?.descriptor.gameId).toBe('fixture-arena');
+    expect(registry.get('untrusted-api-game')).toBeUndefined();
+    expect(Object.isFrozen(registry.get('fixture-arena')?.descriptor.creation.fields)).toBe(true);
+    expect(() => createTrustedGameUiRegistry([module, module])).toThrow('duplicate');
+    expect(() => defineTrustedGameUiModule({ ...module, handlers: {} })).toThrow('handler_missing');
+    expect(() =>
+      defineTrustedGameUiModule({ ...module, catalogs: { en: module.catalogs.en, it: {} } }),
+    ).toThrow('translation_missing');
+  });
+});
+
+it('accepts only registered artwork identifiers and fails safely without artwork', () => {
+  const descriptor = fixture();
+  expect(
+    gameUiDescriptorSchema.safeParse({
+      ...descriptor,
+      artwork: { assetId: 'https://untrusted.invalid/art.svg' },
+    }).success,
+  ).toBe(false);
+  expect(
+    gameUiDescriptorSchema.safeParse({
+      ...descriptor,
+      artwork: { assetId: 'landscape', url: 'https://untrusted.invalid/art.svg' },
+    }).success,
+  ).toBe(false);
+  const module = moduleFixture();
+  expect(() =>
+    defineTrustedGameUiModule({
+      ...module,
+      descriptor: { ...descriptor, artwork: { assetId: 'landscape' } },
+    }),
+  ).toThrow('asset_missing');
+  expect(
+    createTrustedGameUiRegistry([module]).get('fixture-arena')?.descriptor.artwork,
+  ).toBeUndefined();
+  const option = { value: 'runtime', label: 'Runtime' };
+  expect(uiOptionSchema.parse({ ...option, artwork: { assetId: 'runtime-card' } })).toMatchObject({
+    artwork: { assetId: 'runtime-card' },
+  });
+  expect(
+    uiOptionSchema.safeParse({
+      ...option,
+      artwork: { assetId: 'https://untrusted.invalid/art.svg' },
+    }).success,
+  ).toBe(false);
+  expect(
+    uiOptionSchema.safeParse({
+      ...option,
+      artwork: { assetId: 'runtime-card', url: 'https://untrusted.invalid/art.svg' },
+    }).success,
+  ).toBe(false);
+});
+
+describe('installer page contracts', () => {
+  it('declares a common address page without fake game fields and rejects duplicate or misplaced address pages', () => {
+    const descriptor = fixture();
+    const address = { id: 'address', titleKey: 'games.fixture-arena.name', kind: 'address' };
+    const parse = (pages: unknown[]) =>
+      gameUiDescriptorSchema.safeParse({
+        ...descriptor,
+        creation: { ...descriptor.creation, pages },
+      });
+    expect(parse([address]).success).toBe(true);
+    expect(parse([address, { ...address, id: 'another' }]).success).toBe(false);
+    expect(parse([{ ...address, field: 'mode' }]).success).toBe(false);
+    expect(parse([{ ...address, position: 'before-name' }]).success).toBe(false);
+    expect(parse([{ ...address, lookupHandler: 'lookup' }]).success).toBe(false);
+  });
+
+  it('requires existing correctly typed fields and unique resource presets', () => {
+    const descriptor = fixture();
+    expect(
+      gameUiDescriptorSchema.safeParse({
+        ...descriptor,
+        creation: {
+          ...descriptor.creation,
+          pages: [
+            {
+              id: 'version',
+              titleKey: 'games.fixture-arena.name',
+              field: 'missing',
+              kind: 'version-list',
+            },
+          ],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      gameUiDescriptorSchema.safeParse({
+        ...descriptor,
+        creation: {
+          ...descriptor.creation,
+          pages: [
+            {
+              id: 'players',
+              titleKey: 'games.fixture-arena.name',
+              field: 'mode',
+              kind: 'players',
+              lookupHandler: 'lookup',
+            },
+          ],
+        },
+      }).success,
+    ).toBe(false);
+    const preset = {
+      id: 'small',
+      labelKey: 'games.fixture-arena.name',
+      memoryMiB: 2048,
+      cpuPercent: 100,
+    };
+    expect(
+      gameUiDescriptorSchema.safeParse({
+        ...descriptor,
+        creation: { ...descriptor.creation, resourcePresets: [preset, preset] },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+it('shares a trusted integration catalog across field handlers without executable API descriptors', async () => {
+  const source = moduleFixture();
+  const catalog = {
+    handlers: ['choices', 'maps'],
+    load: async () => [{ value: 'duel-map', label: 'Duel map', disabled: false }],
+    options: (data: unknown) => data as { value: string; label: string; disabled: boolean }[],
+  };
+  const module = defineTrustedGameUiModule({ ...source, creationCatalog: catalog });
+  const data = await module.creationCatalog?.load({ request: async () => [] });
+  expect(module.creationCatalog?.options(data, 'maps', { mode: 'duel' })).toEqual([
+    { value: 'duel-map', label: 'Duel map', disabled: false },
+  ]);
+  expect(Object.isFrozen(module.creationCatalog?.handlers)).toBe(true);
+  expect(() =>
+    defineTrustedGameUiModule({
+      ...source,
+      creationCatalog: { ...catalog, handlers: ['unknown'] },
+    }),
+  ).toThrow('game_ui_catalog_invalid');
+  expect(
+    gameUiDescriptorSchema.safeParse({ ...source.descriptor, creationCatalog: catalog }).success,
+  ).toBe(false);
+});
+
+it('declares bounded Owner sections without granting server access or executable URLs', () => {
+  const source = moduleFixture();
+  const section = {
+    id: 'versions',
+    titleKey: 'games.fixture-arena.name',
+    component: 'arena-versions',
+  };
+  const registered = defineTrustedGameUiModule({
+    ...source,
+    descriptor: { ...source.descriptor, administration: [section] },
+  });
+  expect(registered.descriptor.administration).toEqual([section]);
+  expect(Object.isFrozen(registered.descriptor.administration)).toBe(true);
+  for (const administration of [
+    [{ ...section, id: 'runtime' }],
+    [section, section],
+    [{ ...section, component: 'https://example.test/module.js' }],
+    [{ ...section, titleKey: 'games.other.name' }],
+    [{ ...section, requiredCapabilities: ['enabled'] }],
+  ])
+    expect(gameUiDescriptorSchema.safeParse({ ...source.descriptor, administration }).success).toBe(
+      false,
+    );
+});

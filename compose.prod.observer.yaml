@@ -1,0 +1,25 @@
+# Direct Docker API access is host-equivalent privilege, even with a read-only bind.
+# API/worker only. Never activate dev and prod concurrently on the same host.
+services:
+  api:
+    environment:
+      NH_PROD_DOCKER_OBSERVER_SOCKET: /var/run/docker.sock
+      NH_PROD_OBSERVER_ID: ${NH_PROD_PHYSICAL_HOST_ID:?Physical observer identity required}
+    group_add: ["${NH_PROD_DOCKER_GID:?Host Docker socket group required}"]
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+        bind: { create_host_path: false }
+  worker:
+    environment:
+      NH_PROD_DOCKER_OBSERVER_SOCKET: /var/run/docker.sock
+      NH_PROD_OBSERVER_ID: ${NH_PROD_PHYSICAL_HOST_ID:?Physical observer identity required}
+    group_add: ["${NH_PROD_DOCKER_GID:?Host Docker socket group required}"]
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+        bind: { create_host_path: false }

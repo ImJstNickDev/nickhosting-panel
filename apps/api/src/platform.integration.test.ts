@@ -1,0 +1,420 @@
+import { randomBytes } from 'node:crypto';
+import { createIdentity, type IdentityMail } from '@nickhosting/auth';
+import { SecretCodec } from '@nickhosting/core';
+import { createTestDatabase } from '@nickhosting/database/testing';
+import { createManagementRuntime } from '@nickhosting/server-management';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { AuthClient } from '../../../packages/auth/src/test-fixtures.js';
+import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
+import { createApp } from './app.js';
+
+describe('M5 additive platform HTTP contracts with actual identity/session handlers', () => {
+  let database: Awaited<ReturnType<typeof createTestDatabase>>;
+  let f: Awaited<ReturnType<typeof managementFixture>>;
+  let app: ReturnType<typeof createApp>;
+  let management: Awaited<ReturnType<typeof createManagementRuntime>>;
+  let owner: AuthClient, user: AuthClient, peer: AuthClient;
+  let peerId: string;
+  const origin = 'http://localhost:3999',
+    password = 'Isolated-platform-password-639!';
+  const mails: IdentityMail[] = [];
+  async function request(
+    client: AuthClient | null,
+    path: string,
+    data?: unknown,
+    method?: string,
+    extra: Record<string, string> = {},
+  ) {
+    const headers = client?.headers(extra) ?? new Headers({ origin, ...extra });
+    if (data !== undefined) headers.set('content-type', 'application/json');
+    const response = await app.request(
+      `${origin}${path}`,
+      {
+        method: method ?? (data === undefined ? 'GET' : 'POST'),
+        headers,
+        ...(data === undefined ? {} : { body: JSON.stringify(data) }),
+      },
+      {
+        incoming: {
+          socket: {
+            remoteAddress: client?.headers().get('x-nh-client-ip') ?? '192.0.2.254',
+            remotePort: 51000,
+            remoteFamily: 'IPv4',
+          },
+        },
+      },
+    );
+    client?.absorb(response);
+    return response;
+  }
+  async function verify(client: AuthClient, email: string) {
+    const mail = mails.findLast((m) => m.to === email && m.template === 'verify-email');
+    if (!mail) throw new Error('Missing isolated verification mail');
+    const url = new URL(mail.url);
+    expect((await request(client, `${url.pathname}${url.search}`)).status).toBe(302);
+    const response = await request(client, '/api/auth/sign-in/email', { email, password });
+    expect(response.status).toBe(200);
+    return (await response.json()).user.id as string;
+  }
+  async function invited(client: AuthClient, email: string) {
+    const invite = await request(owner, '/v1/owner/invitations', { email });
+    expect(invite.status).toBe(201);
+    const token = (await invite.json()).token as string;
+    expect(
+      (
+        await request(
+          client,
+          '/api/auth/sign-up/email',
+          { name: 'Isolated member', email, password },
+          'POST',
+          { 'x-invitation-token': token },
+        )
+      ).status,
+    ).toBe(200);
+    return verify(client, email);
+  }
+  beforeAll(async () => {
+    database = await createTestDatabase();
+    f = await managementFixture(database.db);
+    await f.db.deleteFrom('provider_accounts').where('user_id', '=', f.owner.actorUserId).execute();
+    await f.db.deleteFrom('user').where('id', '=', f.owner.actorUserId).execute();
+    const bootstrapToken = randomBytes(32).toString('base64url');
+    const identity = createIdentity({
+      secretCodec: new SecretCodec({ activeKeyId: 'fixture', keys: { fixture: randomBytes(32) } }),
+      pool: database.pool,
+      baseURL: origin,
+      authSecret: randomBytes(32).toString('base64url'),
+      bootstrapToken,
+      mail: async (m) => {
+        mails.push(m);
+      },
+      completeSetup: async () => {},
+    });
+    owner = new AuthClient(identity);
+    user = new AuthClient(identity);
+    peer = new AuthClient(identity);
+    const codec = new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } });
+    management = await createManagementRuntime({ db: database.db, codec, adapter: f.adapter });
+    app = createApp({
+      database,
+      identity: async () => identity,
+      codec,
+      management: async () => management,
+      origins: [origin],
+      log: () => {},
+    });
+    const claim = await request(owner, '/v1/setup/owner', {
+      token: bootstrapToken,
+      name: 'Owner',
+      email: 'platform-owner@example.test',
+      password,
+    });
+    expect(claim.status, await claim.text()).toBe(201);
+    const ownerId = await verify(owner, 'platform-owner@example.test');
+    f.owner.actorUserId = ownerId;
+    f.owner.subjectUserId = ownerId;
+    const userId = await invited(user, 'platform-user@example.test');
+    // Transport is injected in these tests; move the isolated ready provider identity
+    // to the actual invite-created principal without altering the auth pipeline.
+    await f.db.deleteFrom('provider_accounts').where('user_id', '=', userId).execute();
+    await f.db
+      .updateTable('provider_accounts')
+      .set({ user_id: userId })
+      .where('user_id', '=', f.context.subjectUserId)
+      .execute();
+    f.context.actorUserId = userId;
+    f.context.subjectUserId = userId;
+    peerId = await invited(peer, 'platform-peer@example.test');
+  });
+  afterAll(async () => {
+    await database?.destroy();
+  });
+  beforeEach(async () => {
+    // Auth bootstrap is deliberately real and can outlast admission's strict
+    // physical-observation freshness window. Each case owns a fresh sample.
+    await f.observe();
+  });
+  it('protects storage-policy plans and completes explicit changes through durable reconciliation', async () => {
+    const path = '/v1/owner/storage-policy';
+    expect((await request(null, path)).status).toBe(401);
+    expect((await request(user, path)).status).toBe(403);
+    const current = await request(owner, path);
+    expect(current.headers.get('cache-control')).toBe('no-store');
+    expect(await current.json()).toMatchObject({ policy: 'GLOBAL_POOL', transition: null });
+    for (const policy of ['PER_USER_BUDGET', 'GLOBAL_POOL']) {
+      const input = { policy, defaultUserStorageMiB: 1024 };
+      expect((await request(user, `${path}/preview`, input)).status).toBe(403);
+      expect(
+        (
+          await request(owner, `${path}/preview`, input, 'POST', {
+            origin: 'https://attacker.example.test',
+          })
+        ).status,
+      ).toBe(403);
+      const preview = await request(owner, `${path}/preview`, input);
+      expect(preview.status).toBe(201);
+      const plan = await preview.json();
+      expect(plan).toMatchObject({ status: 'draft', policy, users: [] });
+      expect((await request(user, `${path}/${plan.id}`)).status).toBe(403);
+      const apply = await request(owner, `${path}/${plan.id}/apply`, { users: [] });
+      expect(apply.status).toBe(202);
+      expect(await apply.json()).toMatchObject({ status: 'applying' });
+      await management.storagePolicy.processPending();
+      expect(await (await request(owner, path)).json()).toMatchObject({
+        policy,
+        transition: { id: plan.id, status: 'completed' },
+      });
+    }
+  });
+  it('requires verified session and Owner role, rejects forged origin, preserves existing list shape', async () => {
+    for (const path of [
+      '/v1/platform/servers',
+      '/v1/platform/quotas',
+      '/v1/platform/activity',
+      '/v1/platform/owner/users',
+    ])
+      expect((await request(null, path)).status).toBe(401);
+    expect((await request(user, '/v1/platform/owner/users')).status).toBe(403);
+    expect((await request(owner, '/v1/platform/owner/users?limit=1')).status).toBe(200);
+    const id = await f.server();
+    expect(
+      (
+        await request(user, `/v1/platform/servers/${id}`, { name: 'Forged' }, 'PATCH', {
+          origin: 'https://attacker.example.test',
+        })
+      ).status,
+    ).toBe(403);
+    expect(Array.isArray(await (await request(user, '/v1/servers')).json())).toBe(true);
+    const response = await request(user, '/v1/platform/servers?limit=1');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toMatchObject({ items: [{ id }], nextCursor: null });
+    expect((await request(user, '/v1/platform/servers?limit=0')).status).toBe(400);
+  });
+  it('completes project sharing, rename, regroup and group-only deletion through actual handlers', async () => {
+    const response = await request(user, '/v1/projects', { name: 'Browser project' });
+    expect(response.status).toBe(201);
+    const project = await response.json();
+    const id = await f.server({ projectId: project.id });
+    expect((await request(peer, `/v1/platform/servers/${id}`)).status).toBe(404);
+    const lookup = await request(user, `/v1/platform/projects/${project.id}/collaborator`, {
+      email: 'platform-peer@example.test',
+    });
+    expect(await lookup.json()).toMatchObject({ user: { id: peerId } });
+    expect(
+      (
+        await request(
+          user,
+          `/v1/projects/${project.id}/members`,
+          { userId: peerId, role: 'manager' },
+          'PUT',
+        )
+      ).status,
+    ).toBe(204);
+    expect(
+      (await request(peer, `/v1/platform/servers/${id}`, { name: 'Shared server' }, 'PATCH'))
+        .status,
+    ).toBe(200);
+    expect(
+      (await request(peer, `/v1/platform/servers/${id}`, { projectId: null }, 'PATCH')).status,
+    ).toBe(403);
+    expect(
+      (
+        await request(
+          user,
+          `/v1/platform/projects/${project.id}`,
+          { name: 'Renamed project' },
+          'PATCH',
+        )
+      ).status,
+    ).toBe(200);
+    expect(await (await request(peer, `/v1/platform/projects/${project.id}`)).json()).toMatchObject(
+      { canManage: false, name: 'Renamed project' },
+    );
+    expect(
+      (await request(user, `/v1/platform/projects/${project.id}`, { confirm: true }, 'DELETE'))
+        .status,
+    ).toBe(200);
+    expect((await request(peer, `/v1/platform/servers/${id}`)).status).toBe(404);
+    expect(await (await request(user, `/v1/platform/servers/${id}`)).json()).toMatchObject({
+      name: 'Shared server',
+      projectId: null,
+    });
+  });
+  it('exposes quota, state and safe network/transfer descriptors without private provider data', async () => {
+    const id = await f.server();
+    for (const suffix of ['connections', 'transfers', 'sleep-policy', 'metrics']) {
+      const response = await request(user, `/v1/platform/servers/${id}/${suffix}`);
+      expect(response.status).toBe(200);
+      expect(await response.text()).not.toMatch(
+        /10\.0\.0\.2|pterodactyl_uuid|external_id|provider_ref|token|password/,
+      );
+    }
+    const quotas = await request(user, '/v1/platform/quotas');
+    expect(await quotas.json()).toMatchObject({
+      limits: { serverCount: null },
+      committed: { memoryMiB: 0 },
+      measured: [],
+    });
+  });
+  it('serves project-scoped job details and denies unrelated requests and unsafe retries', async () => {
+    const project = await (await request(user, '/v1/projects', { name: 'Job sharing' })).json();
+    const id = await f.server({ projectId: project.id });
+    const operation = await f.db
+      .selectFrom('server_operations')
+      .select('job_id')
+      .where('server_id', '=', id)
+      .executeTakeFirstOrThrow();
+    expect((await request(peer, `/v1/platform/jobs/${operation.job_id}`)).status).toBe(404);
+    expect(
+      (
+        await request(
+          user,
+          `/v1/projects/${project.id}/members`,
+          { userId: peerId, role: 'viewer' },
+          'PUT',
+        )
+      ).status,
+    ).toBe(204);
+    const detail = await request(peer, `/v1/platform/jobs/${operation.job_id}`);
+    expect(await detail.json()).toMatchObject({
+      serverId: id,
+      state: 'succeeded',
+      retry: { allowed: false },
+    });
+    const activity = (await (
+      await request(peer, `/v1/platform/activity?serverId=${id}`)
+    ).json()) as {
+      items: { serverId: string; jobId: string | null }[];
+    };
+    // Membership changes also have an attributable audit entry. Every row must
+    // remain server-scoped, and the original job must still be visible.
+    expect(activity.items.length).toBeGreaterThan(0);
+    expect(activity.items.every((item) => item.serverId === id)).toBe(true);
+    expect(activity.items.some((item) => item.jobId === operation.job_id)).toBe(true);
+    expect(
+      (
+        await request(
+          user,
+          `/v1/projects/${project.id}/members`,
+          { userId: peerId, role: null },
+          'PUT',
+        )
+      ).status,
+    ).toBe(204);
+    expect((await request(peer, `/v1/platform/jobs/${operation.job_id}`)).status).toBe(404);
+  });
+  it('reflects stored Owner rollout and attributable audit while rejecting unprivileged discovery', async () => {
+    expect((await request(user, '/v1/platform/owner/games')).status).toBe(403);
+    expect((await request(user, '/v1/owner/game-modules')).status).toBe(403);
+    expect(await (await request(owner, '/v1/owner/game-modules')).json()).toEqual([
+      expect.objectContaining({ id: 'minecraft' }),
+    ]);
+    expect((await request(owner, '/v1/platform/owner/games')).status).toBe(200);
+    const auditedProject = await (
+      await request(user, '/v1/projects', { name: 'Audit fixture' })
+    ).json();
+    expect(
+      (
+        await request(
+          user,
+          `/v1/platform/projects/${auditedProject.id}`,
+          { confirm: true },
+          'DELETE',
+        )
+      ).status,
+    ).toBe(200);
+    const audit = await request(owner, '/v1/platform/owner/audit?action=project.deleted&limit=1');
+    expect(await audit.json()).toMatchObject({ items: [{ action: 'project.deleted' }] });
+    expect((await request(peer, '/v1/platform/owner/audit')).status).toBe(403);
+    const userDetail = await request(owner, `/v1/platform/owner/users/${f.context.subjectUserId}`);
+    expect(await userDetail.json()).toMatchObject({
+      id: f.context.subjectUserId,
+      quota: { userId: f.context.subjectUserId },
+    });
+  });
+  it('requires regular Owner authorization for inherited sleep policies and rejects unknown runtimes', async () => {
+    const path = '/v1/owner/integrations/minecraft/sleep-policy';
+    expect((await request(user, path)).status).toBe(403);
+    expect((await request(null, path)).status).toBe(401);
+    expect(await (await request(owner, path)).json()).toMatchObject({
+      gameId: 'minecraft',
+      gameTimeoutSeconds: null,
+      effectiveGameSeconds: -1,
+      locked: false,
+    });
+    expect(
+      (
+        await request(
+          owner,
+          path,
+          { gameTimeoutSeconds: 600, runtimeTimeouts: { invented: 30 } },
+          'PUT',
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (await request(owner, path, { gameTimeoutSeconds: 0, runtimeTimeouts: {} }, 'PUT')).status,
+    ).toBe(400);
+    const saved = await request(
+      owner,
+      path,
+      { gameTimeoutSeconds: 600, runtimeTimeouts: { vanilla: 120, paper: -1 } },
+      'PUT',
+    );
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({
+      effectiveGameSeconds: 600,
+      runtimeTimeouts: { vanilla: 120, paper: -1 },
+    });
+    expect(
+      (await request(user, path, { gameTimeoutSeconds: -1, runtimeTimeouts: {} }, 'PUT')).status,
+    ).toBe(403);
+    expect((await request(owner, '/v1/owner/integrations/unknown/sleep-policy')).status).toBe(404);
+  });
+  it('authorizes Gateway messages through actual sessions and rejects forged Origin writes', async () => {
+    const id = await f.server();
+    const configured = await request(
+      user,
+      `/v1/servers/${id}/gateway`,
+      {
+        enabled: true,
+        protocolId: 'fixture',
+        gameVersion: '1',
+        idleTimeoutSeconds: 10,
+        readinessTimeoutSeconds: 60,
+        readinessMaxAgeSeconds: 15,
+        estimateMaxAgeSeconds: 86400,
+        wakeRetrySeconds: 10,
+      },
+      'PUT',
+    );
+    expect(configured.status).toBe(200);
+    await f.db
+      .insertInto('game_integrations')
+      .values({ id: 'minecraft', version: '1.0.0', manifest: { ...f.manifest, id: 'minecraft' } })
+      .onConflict((c) => c.column('id').doNothing())
+      .execute();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'minecraft' })
+      .where('id', '=', f.mappingId)
+      .execute();
+    const path = `/v1/servers/${id}/gateway-messages`;
+    expect((await request(null, path)).status).toBe(401);
+    expect((await request(peer, path)).status).toBe(403);
+    const initial = await request(user, path);
+    expect(initial.status).toBe(200);
+    const value = await initial.json();
+    const body = {
+      revision: value.revision,
+      overrides: { sleeping: { motd: 'My server', disconnect: 'Please wait' } },
+    };
+    expect(
+      (await request(user, path, body, 'PUT', { origin: 'https://attacker.example.test' })).status,
+    ).toBe(403);
+    expect((await request(peer, path, body, 'PUT')).status).toBe(403);
+    expect((await request(user, path, body, 'PUT')).status).toBe(200);
+    expect((await request(user, path, body, 'PUT')).status).toBe(409);
+    expect(await (await request(user, path)).json()).toMatchObject({ overrides: body.overrides });
+  });
+});

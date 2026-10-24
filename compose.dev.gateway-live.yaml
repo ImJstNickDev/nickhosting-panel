@@ -1,0 +1,37 @@
+# Proposed runtime overlay. Requires separate exact Owner approval before use.
+# Never apply to production. See docs/M5-ENVIRONMENTS.md.
+services:
+  gateway:
+    security_opt: !override
+      - no-new-privileges:true
+      - apparmor:unconfined
+    depends_on:
+      node-probe: { condition: service_healthy }
+  node-probe:
+    profiles: [gateway]
+    image: nickhosting-dev-app:local
+    user: "${NH_DEV_UID:?Development UID required}:${NH_DEV_GID:?Development GID required}"
+    entrypoint: [node, --import, tsx, /app/apps/game-gateway/src/node-probe-main.ts]
+    environment:
+      NH_NODE_PROBE_ADDRESS: ${NH_DEV_NODE_PROBE_ADDRESS:?Approved exact private backend address required}
+      NH_NODE_PROBE_PORT: ${NH_DEV_NODE_PROBE_PORT:?Approved exact TCP probe port required}
+    network_mode: host
+    init: true
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_grace_period: 10s
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.25
+    logging: { driver: json-file, options: { max-size: 10m, max-file: "3" } }
+    volumes:
+      - { type: bind, source: ./apps/game-gateway/src, target: /app/apps/game-gateway/src, read_only: true, bind: { create_host_path: false } }
+    healthcheck:
+      test: [CMD, node, --import, tsx, /app/apps/game-gateway/src/node-probe-main.ts, --health]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3

@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { isDeepStrictEqual } from 'node:util';
 import { DomainError } from '@nickhosting/core';
 import type { Allocation, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import { z } from 'zod';
@@ -44,6 +45,26 @@ const exactAddress = z
       !['0.0.0.0', '::'].includes(value) &&
       !value.startsWith('::ffff:'),
   );
+function unicastDirectAddress(value: string) {
+  if (isIP(value) === 4) {
+    const parts = value.split('.').map(Number);
+    const a = parts[0] ?? 0,
+      b = parts[1] ?? 0;
+    return a > 0 && a < 224 && a !== 127 && !(a === 169 && b === 254);
+  }
+  return isIP(value) === 6 && (/^[23][0-9a-f]{3}:/.test(value) || privateBackendAddress(value));
+}
+export const directEndpointSchema = z
+  .object({
+    hostname: z
+      .union([z.hostname(), z.ipv4(), z.ipv6()])
+      .transform((value) =>
+        isIP(value) ? canonicalAllocationAddress(value) : value.toLowerCase().replace(/\.$/, ''),
+      )
+      .refine((value) => (isIP(value) ? unicastDirectAddress(value) : value !== 'localhost')),
+    port: z.number().int().min(1).max(65535),
+  })
+  .strict();
 const loopbackRemapSchema = z
   .object({
     wingsVersion: z.literal('1.11.13'),
@@ -85,17 +106,17 @@ export const backendAllocationPoolSchema = z
         z
           .object({
             allocationId: z.number().int().positive(),
-            address: z
-              .string()
-              .refine((value) => value === '127.0.0.1' || privateBackendAddress(value)),
-            backendAddress: z.string().refine(privateBackendAddress).optional(),
+            address: exactAddress,
+            backendAddress: exactAddress.optional(),
+            delivery: z.enum(['backend', 'direct']).optional(),
+            directEndpoint: directEndpointSchema.optional(),
             port: z.number().int().min(1).max(65535),
           })
           .strict(),
       )
       .min(1)
       .max(10000),
-    gatewayBindAddresses: z.array(exactAddress).min(1).max(32),
+    gatewayBindAddresses: z.array(exactAddress).max(32),
     loopbackRemap: loopbackRemapSchema.optional(),
   })
   .strict()
@@ -105,19 +126,34 @@ export const backendAllocationPoolSchema = z
       new Set(pool.allocations.map((item) => `${backendAllocationAddress(item)}:${item.port}`))
         .size === pool.allocations.length &&
       new Set(pool.gatewayBindAddresses).size === pool.gatewayBindAddresses.length &&
+      (pool.gatewayBindAddresses.length > 0 ||
+        pool.allocations.every((pin) => pin.directEndpoint)) &&
+      new Set(
+        pool.allocations
+          .filter((pin) => pin.directEndpoint)
+          .map((pin) => `${pin.directEndpoint?.hostname}:${pin.directEndpoint?.port}`),
+      ).size === pool.allocations.filter((pin) => pin.directEndpoint).length &&
       pool.allocations.every(
         (pin) =>
+          (pin.delivery === 'direct'
+            ? Boolean(pin.directEndpoint) && unicastDirectAddress(pin.address)
+            : pin.address === '127.0.0.1' || privateBackendAddress(pin.address)) &&
           (pin.address === '127.0.0.1'
             ? pool.loopbackRemap !== undefined &&
               pin.backendAddress === pool.loopbackRemap.interfaceAddress
             : pin.backendAddress === undefined || pin.backendAddress === pin.address) &&
-          pool.gatewayBindAddresses.every(
-            (gateway) => !allocationAddressesOverlap(backendAllocationAddress(pin), gateway),
-          ),
+          (pin.delivery === 'direct' ||
+            pool.gatewayBindAddresses.every(
+              (gateway) => !allocationAddressesOverlap(backendAllocationAddress(pin), gateway),
+            )),
       ),
   );
 export type BackendAllocationPool = z.infer<typeof backendAllocationPoolSchema>;
-export type BackendAllocation = Allocation & { backendAddress: string };
+export type BackendAllocation = Allocation & {
+  backendAddress: string;
+  delivery?: 'backend' | 'direct';
+  directEndpoint?: { hostname: string; port: number };
+};
 export function poolAllowsLoopbackEgg(
   pool: BackendAllocationPool,
   mapping: { nest_id: number; egg_id: number },
@@ -198,7 +234,12 @@ export async function validatedBackendInventory(
       )
     )
       throw new DomainError('allocation_unavailable');
-    selected.push({ ...allocation, backendAddress: backendAllocationAddress(pin) });
+    selected.push({
+      ...allocation,
+      backendAddress: backendAllocationAddress(pin),
+      delivery: pin.delivery,
+      directEndpoint: pin.directEndpoint,
+    });
   }
   return { pool, allocations: selected };
 }
@@ -211,7 +252,7 @@ export async function assertServerBackendAllocations(
 ) {
   const server = await db
     .selectFrom('managed_servers')
-    .select(['id', 'node_id', 'mapping_id'])
+    .select(['id', 'node_id', 'mapping_id', 'connection_mode'])
     .where('id', '=', serverId)
     .where('deleted_at', 'is', null)
     .executeTakeFirst();
@@ -240,7 +281,11 @@ export async function assertServerBackendAllocations(
             allocation.id === claim.pterodactyl_allocation_id &&
             canonicalAllocationAddress(allocation.ip) === claim.address &&
             allocation.backendAddress === claim.backend_address &&
-            allocation.port === claim.port,
+            allocation.port === claim.port &&
+            (server.connection_mode === 'direct'
+              ? isDeepStrictEqual(allocation.directEndpoint ?? null, claim.direct_endpoint) &&
+                claim.direct_endpoint !== null
+              : allocation.delivery !== 'direct'),
         ),
     )
   )
@@ -262,7 +307,9 @@ export async function assertServerBackendAllocations(
   });
 }
 
-/** Owner/environment pool edits cannot overlap another node's backend or gateway namespace. */
+/** Direct bindings may share ingress IPs, but never an actual Gateway listener endpoint.
+ * Backend-only IP separation and immutable claims still apply across the physical host.
+ */
 export async function assertBackendPoolNamespace(
   db: DB,
   node: { id: string; physical_host_id: string },
@@ -272,12 +319,14 @@ export async function assertBackendPoolNamespace(
   const claims = await db
     .selectFrom('server_allocations as allocation')
     .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'allocation.node_id')
+    .innerJoin('managed_servers as ownerServer', 'ownerServer.id', 'allocation.server_id')
     .select([
       'allocation.node_id',
       'allocation.pterodactyl_allocation_id',
       'allocation.address',
       'allocation.backend_address',
       'allocation.port',
+      'ownerServer.connection_mode',
     ])
     .where('ownerNode.physical_host_id', '=', node.physical_host_id)
     .execute();
@@ -290,6 +339,7 @@ export async function assertBackendPoolNamespace(
     )
       throw new DomainError('allocation_unavailable');
     if (
+      claim.connection_mode !== 'direct' &&
       pool.gatewayBindAddresses.some((gateway) =>
         allocationAddressesOverlap(gateway, claim.backend_address),
       )
@@ -302,7 +352,8 @@ export async function assertBackendPoolNamespace(
         sameClaim &&
         (claim.address !== pin.address ||
           claim.backend_address !== backendAllocationAddress(pin) ||
-          claim.port !== pin.port)
+          claim.port !== pin.port ||
+          (claim.connection_mode === 'gateway' && pin.delivery === 'direct'))
       )
         throw new DomainError('allocation_unavailable');
       if (
@@ -313,6 +364,31 @@ export async function assertBackendPoolNamespace(
         throw new DomainError('allocation_unavailable');
     }
   }
+  // Disabled routes retain their endpoint for safe re-enabling; Pterodactyl
+  // allocations reserve both transports, independently of the advertised role.
+  const routes = await db
+    .selectFrom('gateway_routes as route')
+    .innerJoin('managed_servers as server', 'server.id', 'route.server_id')
+    .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'server.node_id')
+    .select(['route.public_address', 'route.public_port'])
+    .where('ownerNode.physical_host_id', '=', node.physical_host_id)
+    .execute();
+  if (
+    routes.some(
+      (route) =>
+        pool.allocations.some(
+          (pin) =>
+            pin.port === route.public_port &&
+            allocationAddressesOverlap(backendAllocationAddress(pin), route.public_address),
+        ) ||
+        claims.some(
+          (claim) =>
+            claim.port === route.public_port &&
+            allocationAddressesOverlap(claim.backend_address, route.public_address),
+        ),
+    )
+  )
+    throw new DomainError('allocation_unavailable');
   const siblings = await db
     .selectFrom('managed_nodes')
     .selectAll()
@@ -333,15 +409,19 @@ export async function assertBackendPoolNamespace(
             ),
         ),
       ) ||
-        pool.allocations.some((pin) =>
-          other.gatewayBindAddresses.some((gateway) =>
-            allocationAddressesOverlap(backendAllocationAddress(pin), gateway),
-          ),
+        pool.allocations.some(
+          (pin) =>
+            pin.delivery !== 'direct' &&
+            other.gatewayBindAddresses.some((gateway) =>
+              allocationAddressesOverlap(backendAllocationAddress(pin), gateway),
+            ),
         ) ||
-        other.allocations.some((pin) =>
-          pool.gatewayBindAddresses.some((gateway) =>
-            allocationAddressesOverlap(backendAllocationAddress(pin), gateway),
-          ),
+        other.allocations.some(
+          (pin) =>
+            pin.delivery !== 'direct' &&
+            pool.gatewayBindAddresses.some((gateway) =>
+              allocationAddressesOverlap(backendAllocationAddress(pin), gateway),
+            ),
         ))
     )
       throw new DomainError('allocation_unavailable');

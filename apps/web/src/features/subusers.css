@@ -1,0 +1,138 @@
+.subusers-workspace {
+  border: 1px solid var(--border, #cdd6d9);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.subusers-list {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.subusers-list > li {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 14px 16px;
+}
+.subusers-list > li + li {
+  border-top: 1px solid var(--border, #cdd6d9);
+}
+.subusers-identity,
+.subusers-origin {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+.subusers-identity {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+.subusers-identity small,
+.subusers-origin small {
+  color: var(--muted, #52616c);
+}
+.subusers-dialog {
+  width: min(960px, calc(100vw - 32px));
+}
+.subusers-matrix {
+  width: 100%;
+  display: block;
+  border: 1px solid var(--border, #cdd6d9);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-block: 16px;
+}
+.subusers-matrix-row {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr 1fr 2fr;
+  gap: 12px;
+  padding: 12px;
+}
+.subusers-matrix-row + .subusers-matrix-row {
+  border-top: 1px solid var(--border, #cdd6d9);
+}
+.subusers-matrix-heading {
+  background: var(--surface-muted, #f2f4f5);
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+.subusers-matrix-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: start;
+  gap: 10px 14px;
+}
+.subusers-permission {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  font-size: 0.86rem;
+}
+.subusers-permission > span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.subusers-permission input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+.subusers-permission small {
+  max-width: 190px;
+  color: var(--muted, #52616c);
+}
+.subusers-mobile-column {
+  display: none;
+}
+@media (max-width: 760px) {
+  .subusers-list > li {
+    flex-wrap: wrap;
+    gap: 10px 16px;
+  }
+  .subusers-list > li > .actions {
+    flex-basis: 100%;
+  }
+  .subusers-matrix-row {
+    grid-template-columns: 1fr;
+  }
+  .subusers-matrix-heading {
+    display: none;
+  }
+  .subusers-matrix-cell {
+    display: grid;
+    grid-template-columns: 84px 1fr;
+  }
+  .subusers-permission {
+    grid-column: 2;
+  }
+  .subusers-mobile-column {
+    display: block;
+    grid-column: 1;
+    grid-row: 1;
+    font-size: 0.8rem;
+    color: var(--muted, #52616c);
+  }
+}
+
+.subusers-matrix thead,
+.subusers-matrix tbody {
+  display: block;
+}
+.subusers-matrix th,
+.subusers-matrix td {
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+}
+
+.subusers-dialog .dialog-close-icon {
+  background: transparent;
+  color: var(--muted);
+  border: 0;
+  padding: 8px;
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+}

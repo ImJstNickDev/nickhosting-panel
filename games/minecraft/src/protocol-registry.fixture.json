@@ -1,0 +1,4422 @@
+{
+  "source": {
+    "url": "https://raw.githubusercontent.com/PrismarineJS/minecraft-data/33a0f3e7323e124a81960a6d6c62df797d69cd85/data/pc/common/protocolVersions.json",
+    "sha256": "ec1186190718bd975bbe364920a7ca590fbd9de4fba83ffb29c0f098e1ea938f"
+  },
+  "rows": [
+    {
+      "minecraftVersion": "26.4-snapshot-2",
+      "version": 1073742164,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.4-snapshot-1",
+      "version": 1073742163,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.3",
+      "version": 777,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "26.3-rc-3",
+      "version": 1073742162,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.3-rc-2",
+      "version": 1073742161,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.3-rc-1",
+      "version": 1073742160,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.3-pre-3",
+      "version": 1073742159,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.3-pre-2",
+      "version": 1073742158,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.3-pre-1",
+      "version": 1073742157,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.3-snapshot-10",
+      "version": 1073742156,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.3-snapshot-9",
+      "version": 1073742155,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.3-snapshot-8",
+      "version": 1073742154,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.3-snapshot-7",
+      "version": 1073742153,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.3-snapshot-6",
+      "version": 1073742152,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.3-snapshot-5",
+      "version": 1073742151,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.3-snapshot-4",
+      "version": 1073742150,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.3-snapshot-3",
+      "version": 1073742149,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.3-snapshot-2",
+      "version": 1073742148,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.3-snapshot-1",
+      "version": 1073742147,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.2",
+      "version": 776,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "26.2-rc-2",
+      "version": 1073742146,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.2-rc-1",
+      "version": 1073742145,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.2-pre-6",
+      "version": 1073742144,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.2-pre-5",
+      "version": 1073742143,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.2-pre-4",
+      "version": 1073742142,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.2-pre-3",
+      "version": 1073742141,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.2-pre-2",
+      "version": 1073742140,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.2-pre-1",
+      "version": 1073742139,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.2-snapshot-8",
+      "version": 1073742138,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.2-snapshot-7",
+      "version": 1073742137,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.2-snapshot-6",
+      "version": 1073742136,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.2-snapshot-5",
+      "version": 1073742135,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.2-snapshot-4",
+      "version": 1073742134,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.2-snapshot-3",
+      "version": 1073742133,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.2-snapshot-2",
+      "version": 1073742132,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1.2",
+      "version": 775,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "26.1.2-rc-1",
+      "version": 1073742131,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.2-snapshot-1",
+      "version": 1073742130,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26w14a",
+      "version": 1073742129,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1.1",
+      "version": 775,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "26.1.1-rc-1",
+      "version": 1073742128,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1",
+      "version": 775,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "26.1-rc-3",
+      "version": 1073742127,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1-rc-2",
+      "version": 1073742126,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1-rc-1",
+      "version": 1073742125,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1-pre-3",
+      "version": 1073742124,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1-pre-2",
+      "version": 1073742123,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1-pre-1",
+      "version": 1073742122,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1-snapshot-11",
+      "version": 1073742121,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1-snapshot-10",
+      "version": 1073742120,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1-snapshot-9",
+      "version": 1073742119,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1-snapshot-8",
+      "version": 1073742118,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1-snapshot-7",
+      "version": 1073742117,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1-snapshot-6",
+      "version": 1073742116,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1-snapshot-5",
+      "version": 1073742115,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1-snapshot-4",
+      "version": 1073742114,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1-snapshot-3",
+      "version": 1073742113,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1-snapshot-2",
+      "version": 1073742112,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "26.1-snapshot-1",
+      "version": 1073742111,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.11",
+      "version": 774,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.21.11-rc3",
+      "version": 1073742110,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.11-rc2",
+      "version": 1073742109,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.11-rc1",
+      "version": 1073742108,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.11-pre5",
+      "version": 1073742107,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.11-pre4",
+      "version": 1073742106,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.11-pre3",
+      "version": 1073742105,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.11-pre2",
+      "version": 1073742104,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.11-pre1",
+      "version": 1073742103,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w46a",
+      "version": 1073742102,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w45a",
+      "version": 1073742101,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w44a",
+      "version": 1073742100,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w43a",
+      "version": 1073742099,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w42a",
+      "version": 1073742098,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w41a",
+      "version": 1073742097,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.10",
+      "version": 773,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.21.10-rc1",
+      "version": 1073742098,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.9",
+      "version": 773,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.21.9-rc1",
+      "version": 1073742097,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.9-pre4",
+      "version": 1073742096,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.9-pre3",
+      "version": 1073742095,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.9-pre2",
+      "version": 1073742094,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.9-pre1",
+      "version": 1073742093,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w37a",
+      "version": 1073742092,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w36b",
+      "version": 1073742091,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w36a",
+      "version": 1073742090,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w35a",
+      "version": 1073742089,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w34b",
+      "version": 1073742088,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w34a",
+      "version": 1073742087,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w33a",
+      "version": 1073742086,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w32a",
+      "version": 1073742085,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w31a",
+      "version": 1073742084,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.8",
+      "version": 772,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.21.8-rc1",
+      "version": 1073742083,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.7",
+      "version": 772,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.21.7-rc2",
+      "version": 1073742082,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.7-rc1",
+      "version": 1073742081,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.6",
+      "version": 771,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.21.6-rc1",
+      "version": 1073742080,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.6-pre4",
+      "version": 1073742079,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.6-pre3",
+      "version": 1073742078,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.6-pre2",
+      "version": 1073742077,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.6-pre1",
+      "version": 1073742076,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w21a",
+      "version": 1073742075,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w20a",
+      "version": 1073742074,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w19a",
+      "version": 1073742073,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w18a",
+      "version": 1073742072,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w17a",
+      "version": 1073742071,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w16a",
+      "version": 1073742070,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w15a",
+      "version": 1073742069,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w14craftmine",
+      "version": 1073742068,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.5",
+      "version": 770,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.21.5-rc2",
+      "version": 1073742067,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.5-rc1",
+      "version": 1073742066,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.5-pre3",
+      "version": 1073742065,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.5-pre2",
+      "version": 1073742064,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.5-pre1",
+      "version": 1073742063,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w10a",
+      "version": 1073742062,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w09b",
+      "version": 1073742061,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w09a",
+      "version": 1073742060,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w08a",
+      "version": 1073742059,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w07a",
+      "version": 1073742058,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w06a",
+      "version": 1073742057,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w05a",
+      "version": 1073742056,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w04a",
+      "version": 1073742055,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w03a",
+      "version": 1073742054,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "25w02a",
+      "version": 1073742053,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.4",
+      "version": 769,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.21.4-rc3",
+      "version": 1073742052,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.4-rc2",
+      "version": 1073742051,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.4-rc1",
+      "version": 1073742050,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.4-pre3",
+      "version": 1073742049,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.4-pre2",
+      "version": 1073742048,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.4-pre1",
+      "version": 1073742047,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w46a",
+      "version": 1073742046,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w45a",
+      "version": 1073742045,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w44a",
+      "version": 1073742044,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.3",
+      "version": 768,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.21.2",
+      "version": 768,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.21.2-rc2",
+      "version": 1073742043,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.2-rc1",
+      "version": 1073742042,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.2-pre5",
+      "version": 1073742041,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.2-pre4",
+      "version": 1073742040,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.2-pre3",
+      "version": 1073742039,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.2-pre2",
+      "version": 1073742038,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.2-pre1",
+      "version": 1073742037,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w40a",
+      "version": 1073742036,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w39a",
+      "version": 1073742035,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w38a",
+      "version": 1073742034,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w37a",
+      "version": 1073742033,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w36a",
+      "version": 1073742032,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w35a",
+      "version": 1073742031,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w34a",
+      "version": 1073742030,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w33a",
+      "version": 1073742029,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21.1",
+      "version": 767,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.21.1-rc1",
+      "version": 1073742028,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21",
+      "version": 767,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.21-rc1",
+      "version": 1073742027,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21-pre4",
+      "version": 1073742026,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21-pre3",
+      "version": 1073742025,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21-pre2",
+      "version": 1073742024,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.21-pre1",
+      "version": 1073742023,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w21b",
+      "version": 1073742022,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w21a",
+      "version": 1073742021,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w20a",
+      "version": 1073742020,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w19b",
+      "version": 1073742019,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w19a",
+      "version": 1073742018,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w18a",
+      "version": 1073742017,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.6",
+      "version": 766,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.20.6-rc1",
+      "version": 1073742016,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.5",
+      "version": 766,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.20.5-rc3",
+      "version": 1073742015,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.5-rc2",
+      "version": 1073742014,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.5-rc1",
+      "version": 1073742013,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.5-pre4",
+      "version": 1073742012,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.5-pre3",
+      "version": 1073742011,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.5-pre2",
+      "version": 1073742010,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.5-pre1",
+      "version": 1073742009,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w14a",
+      "version": 1073742008,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w14potato",
+      "version": 1073742007,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w13a",
+      "version": 1073742006,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w12a",
+      "version": 1073742005,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w11a",
+      "version": 1073742004,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w10a",
+      "version": 1073742003,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w09a",
+      "version": 1073742002,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w07a",
+      "version": 1073742001,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w06a",
+      "version": 1073742000,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w05b",
+      "version": 1073741999,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w05a",
+      "version": 1073741997,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w04a",
+      "version": 1073741997,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w03b",
+      "version": 1073741996,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "24w03a",
+      "version": 1073741995,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "23w51b",
+      "version": 1073741994,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.4",
+      "version": 765,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.20.4-rc1",
+      "version": 1073741993,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.3",
+      "version": 765,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.20.3-rc1",
+      "version": 1073741992,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.3-pre4",
+      "version": 1073741991,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.3-pre3",
+      "version": 1073741990,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.3-pre2",
+      "version": 1073741989,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.3-pre1",
+      "version": 1073741988,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "23w46a",
+      "version": 1073741987,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "23w45a",
+      "version": 1073741986,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "23w44a",
+      "version": 1073741985,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "23w43b",
+      "version": 1073741984,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "23w43a",
+      "version": 1073741983,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "23w42a",
+      "version": 1073741981,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "23w41a",
+      "version": 1073741980,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "23w40a",
+      "version": 1073741978,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.2",
+      "version": 764,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.20.2-rc2",
+      "version": 1073741977,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.2-rc1",
+      "version": 1073741976,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.2-pre4",
+      "version": 1073741975,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.2-pre3",
+      "version": 1073741974,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.2-pre2",
+      "version": 1073741973,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.2-pre1",
+      "version": 1073741972,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "23w35a",
+      "version": 1073741971,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "23w33a",
+      "version": 1073741970,
+      "usesNetty": true,
+      "releaseType": "snapshot"
+    },
+    {
+      "minecraftVersion": "1.20.1",
+      "version": 763,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.20",
+      "version": 763,
+      "usesNetty": true,
+      "releaseType": "release"
+    },
+    {
+      "minecraftVersion": "1.19.4",
+      "version": 762,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "23w03a",
+      "version": 1073741939,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.3",
+      "version": 761,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.3-rc3",
+      "version": 1073741938,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.3-rc2",
+      "version": 1073741937,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.3-rc1",
+      "version": 1073741936,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.3-pre3",
+      "version": 1073741935,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.3-pre2",
+      "version": 1073741934,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.3-pre1",
+      "version": 1073741933,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w46a",
+      "version": 1073741932,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w45a",
+      "version": 1073741931,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w44a",
+      "version": 1073741930,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w43a",
+      "version": 1073741929,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w42a",
+      "version": 1073741928,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.2",
+      "version": 760,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.2-rc2",
+      "version": 1073741927,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.2-rc1",
+      "version": 1073741926,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.1",
+      "version": 760,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.1-rc3",
+      "version": 1073741925,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.1-rc2",
+      "version": 1073741924,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.1-pre6",
+      "version": 1073741923,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.1-pre5",
+      "version": 1073741922,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.1-pre4",
+      "version": 1073741921,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.1-pre3",
+      "version": 1073741920,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.1-pre2",
+      "version": 1073741919,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.1-rc1",
+      "version": 1073741918,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19.1-pre1",
+      "version": 1073741917,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w24a",
+      "version": 1073741916,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19",
+      "version": 759,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19-rc2",
+      "version": 1073741915,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19-rc1",
+      "version": 1073741914,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19-pre5",
+      "version": 1073741913,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19-pre4",
+      "version": 1073741912,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19-pre3",
+      "version": 1073741911,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19-pre2",
+      "version": 1073741910,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.19-pre1",
+      "version": 1073741909,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w19a",
+      "version": 1073741908,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w18a",
+      "version": 1073741907,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w17a",
+      "version": 1073741906,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w16b",
+      "version": 1073741905,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w16a",
+      "version": 1073741904,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w15a",
+      "version": 1073741903,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w14a",
+      "version": 1073741902,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w13oneblockatatime",
+      "version": 1073741901,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w13a",
+      "version": 1073741900,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w12a",
+      "version": 1073741899,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w11a",
+      "version": 1073741898,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18.2",
+      "version": 758,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18.2-rc1",
+      "version": 1073741897,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18.2-pre3",
+      "version": 1073741896,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18.2-pre2",
+      "version": 1073741895,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18.2-pre1",
+      "version": 1073741894,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w07a",
+      "version": 1073741892,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w06a",
+      "version": 1073741891,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w05a",
+      "version": 1073741890,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "22w03a",
+      "version": 1073741889,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18.1",
+      "version": 757,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18.1-rc3",
+      "version": 1073741888,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18.1-rc2",
+      "version": 1073741887,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18.1-rc1",
+      "version": 1073741886,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18.1-pre1",
+      "version": 1073741885,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18",
+      "version": 757,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18-rc4",
+      "version": 1073741884,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18-rc3",
+      "version": 1073741883,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18-rc2",
+      "version": 1073741882,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18-rc1",
+      "version": 1073741881,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18-pre8",
+      "version": 1073741880,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18-pre7",
+      "version": 1073741879,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18-pre6",
+      "version": 1073741878,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18-pre5",
+      "version": 1073741877,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18-pre4",
+      "version": 1073741876,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18-pre3",
+      "version": 1073741875,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18-pre2",
+      "version": 1073741874,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.18-pre1",
+      "version": 1073741873,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w44a",
+      "version": 1073741872,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w43a",
+      "version": 1073741871,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w42a",
+      "version": 1073741870,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w41a",
+      "version": 1073741869,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w40a",
+      "version": 1073741868,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w39a",
+      "version": 1073741867,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w38a",
+      "version": 1073741866,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w37a",
+      "version": 1073741865,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.17.1",
+      "version": 756,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.17.1-rc2",
+      "version": 1073741864,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.17.1-rc1",
+      "version": 1073741863,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.17.1-pre3",
+      "version": 1073741862,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.17.1-pre2",
+      "version": 1073741861,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.17.1-pre1",
+      "version": 1073741860,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.17",
+      "version": 755,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.17-rc2",
+      "version": 1073741859,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.17-rc1",
+      "version": 1073741858,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.17-pre5",
+      "version": 1073741857,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.17-pre4",
+      "version": 1073741856,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.17-pre3",
+      "version": 1073741855,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.17-pre2",
+      "version": 1073741854,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.17-pre1",
+      "version": 1073741853,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w20a",
+      "version": 1073741852,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w19a",
+      "version": 1073741851,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w18a",
+      "version": 1073741850,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w17a",
+      "version": 1073741849,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w16a",
+      "version": 1073741847,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w15a",
+      "version": 1073741846,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w14a",
+      "version": 1073741845,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w13a",
+      "version": 1073741844,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w11a",
+      "version": 1073741843,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w10a",
+      "version": 1073741842,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w08b",
+      "version": 1073741841,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w08a",
+      "version": 1073741840,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w07a",
+      "version": 1073741839,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w06a",
+      "version": 1073741838,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w05b",
+      "version": 1073741837,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w05a",
+      "version": 1073741836,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "21w03a",
+      "version": 1073741835,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16.5",
+      "version": 754,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16.5-rc1",
+      "version": 1073741834,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w51a",
+      "version": 1073741833,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w49a",
+      "version": 1073741832,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w48a",
+      "version": 1073741831,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w46a",
+      "version": 1073741830,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w45a",
+      "version": 1073741829,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16.4",
+      "version": 754,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16.4-rc1",
+      "version": 1073741827,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16.4-pre2",
+      "version": 1073741826,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16.4-pre1",
+      "version": 1073741825,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16.3",
+      "version": 753,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16.3-rc1",
+      "version": 752,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16.2",
+      "version": 751,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16.2-rc2",
+      "version": 750,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16.2-rc1",
+      "version": 749,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16.2-pre3",
+      "version": 748,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16.2-pre2",
+      "version": 746,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16.2-pre1",
+      "version": 744,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w30a",
+      "version": 743,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w29a",
+      "version": 741,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w28a",
+      "version": 740,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w27a",
+      "version": 738,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16.1",
+      "version": 736,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16",
+      "version": 735,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16-rc1",
+      "version": 734,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16-pre8",
+      "version": 733,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16-pre7",
+      "version": 732,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16-pre6",
+      "version": 730,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16-pre5",
+      "version": 729,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16-pre4",
+      "version": 727,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16-pre3",
+      "version": 725,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16-pre2",
+      "version": 722,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.16-pre1",
+      "version": 721,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w22a",
+      "version": 719,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w21a",
+      "version": 718,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w20b",
+      "version": 717,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w20a",
+      "version": 716,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w19a",
+      "version": 715,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w18a",
+      "version": 714,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w17a",
+      "version": 713,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w16a",
+      "version": 712,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w15a",
+      "version": 711,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w14a",
+      "version": 710,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w14infinite",
+      "version": 709,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w13b",
+      "version": 709,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w13a",
+      "version": 708,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w12a",
+      "version": 707,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w11a",
+      "version": 706,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w10a",
+      "version": 705,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w09a",
+      "version": 704,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w08a",
+      "version": 703,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w07a",
+      "version": 702,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "20w06a",
+      "version": 701,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.15.2",
+      "version": 578,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.15.2-pre2",
+      "version": 577,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.15.2-pre1",
+      "version": 576,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.15.1",
+      "version": 575,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.15.1-pre1",
+      "version": 574,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.15",
+      "version": 573,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.15-pre7",
+      "version": 572,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.15-pre6",
+      "version": 571,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.15-pre5",
+      "version": 570,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.15-pre4",
+      "version": 569,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.15-pre3",
+      "version": 567,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.15-pre2",
+      "version": 566,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.15-pre1",
+      "version": 565,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w46b",
+      "version": 564,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w46a",
+      "version": 563,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w45b",
+      "version": 562,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w45a",
+      "version": 561,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w44a",
+      "version": 560,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w42a",
+      "version": 559,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w41a",
+      "version": 558,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w40a",
+      "version": 557,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w39a",
+      "version": 556,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w38b",
+      "version": 555,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w38a",
+      "version": 554,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w37a",
+      "version": 553,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w36a",
+      "version": 552,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w35a",
+      "version": 551,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w34a",
+      "version": 550,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.4",
+      "version": 498,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.4-pre7",
+      "version": 497,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.4-pre6",
+      "version": 496,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.4-pre5",
+      "version": 495,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.4-pre4",
+      "version": 494,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.4-pre3",
+      "version": 493,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.4-pre2",
+      "version": 492,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.4-pre1",
+      "version": 491,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.3",
+      "version": 490,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.3-pre4",
+      "version": 489,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.3-pre3",
+      "version": 488,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.3-pre2",
+      "version": 487,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.3-pre1",
+      "version": 486,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.2",
+      "version": 485,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.2-pre4",
+      "version": 484,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.2-pre3",
+      "version": 483,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.2-pre2",
+      "version": 482,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.2-pre1",
+      "version": 481,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.1",
+      "version": 480,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.1-pre2",
+      "version": 479,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14.1-pre1",
+      "version": 478,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14",
+      "version": 477,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14-pre5",
+      "version": 476,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14-pre4",
+      "version": 475,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14-pre3",
+      "version": 474,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14-pre2",
+      "version": 473,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.14-pre1",
+      "version": 472,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w14b",
+      "version": 471,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w14a",
+      "version": 470,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w13b",
+      "version": 469,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w13a",
+      "version": 468,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w12b",
+      "version": 467,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w12a",
+      "version": 466,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w11b",
+      "version": 465,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w11a",
+      "version": 464,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w09a",
+      "version": 463,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w08b",
+      "version": 462,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w08a",
+      "version": 461,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w07a",
+      "version": 460,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w06a",
+      "version": 459,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w05a",
+      "version": 458,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w04b",
+      "version": 457,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w04a",
+      "version": 456,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w03c",
+      "version": 455,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w03b",
+      "version": 454,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w03a",
+      "version": 453,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "19w02a",
+      "version": 452,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w50a",
+      "version": 451,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w49a",
+      "version": 450,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w48b",
+      "version": 449,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w48a",
+      "version": 448,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w47b",
+      "version": 447,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w47a",
+      "version": 446,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w46a",
+      "version": 445,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w45a",
+      "version": 444,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w44a",
+      "version": 443,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w43c",
+      "version": 442,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w43b",
+      "version": 441,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w43a",
+      "version": 441,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13.2",
+      "version": 404,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13.2-pre2",
+      "version": 403,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13.2-pre1",
+      "version": 402,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13.1",
+      "version": 401,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13.1-pre2",
+      "version": 400,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13.1-pre1",
+      "version": 399,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w33a",
+      "version": 398,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w32a",
+      "version": 397,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w31a",
+      "version": 396,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w30b",
+      "version": 395,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w30a",
+      "version": 394,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13",
+      "version": 393,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13-pre10",
+      "version": 392,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13-pre9",
+      "version": 391,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13-pre8",
+      "version": 390,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13-pre7",
+      "version": 389,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13-pre6",
+      "version": 388,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13-pre5",
+      "version": 387,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13-pre4",
+      "version": 386,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13-pre3",
+      "version": 385,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13-pre2",
+      "version": 384,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.13-pre1",
+      "version": 383,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w22c",
+      "version": 382,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w22b",
+      "version": 381,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w22a",
+      "version": 380,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w21b",
+      "version": 379,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w21a",
+      "version": 378,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w20c",
+      "version": 377,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w20b",
+      "version": 376,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w20a",
+      "version": 375,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w19b",
+      "version": 374,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w19a",
+      "version": 373,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w16a",
+      "version": 372,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w15a",
+      "version": 371,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w14b",
+      "version": 370,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w14a",
+      "version": 369,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w11a",
+      "version": 368,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w10d",
+      "version": 367,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w10c",
+      "version": 366,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w10b",
+      "version": 365,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w10a",
+      "version": 364,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w09a",
+      "version": 363,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w08b",
+      "version": 362,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w08a",
+      "version": 361,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w07c",
+      "version": 360,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w07b",
+      "version": 359,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w07a",
+      "version": 358,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w06a",
+      "version": 357,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w05a",
+      "version": 356,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w03b",
+      "version": 355,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w03a",
+      "version": 354,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w02a",
+      "version": 353,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "18w01a",
+      "version": 352,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w50a",
+      "version": 351,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w49b",
+      "version": 350,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w49a",
+      "version": 349,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w48a",
+      "version": 348,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w47b",
+      "version": 347,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w47a",
+      "version": 346,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w46a",
+      "version": 345,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w45b",
+      "version": 344,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w45a",
+      "version": 343,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w43b",
+      "version": 342,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w43a",
+      "version": 341,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.12.2",
+      "version": 340,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.12.2-pre2",
+      "version": 339,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.12.2-pre1",
+      "version": 339,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.12.1",
+      "version": 338,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.12.1-pre1",
+      "version": 337,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w31a",
+      "version": 336,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.12",
+      "version": 335,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.12-pre7",
+      "version": 334,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.12-pre6",
+      "version": 333,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.12-pre5",
+      "version": 332,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.12-pre4",
+      "version": 331,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.12-pre3",
+      "version": 330,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.12-pre2",
+      "version": 329,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.12-pre1",
+      "version": 328,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w18b",
+      "version": 327,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w18a",
+      "version": 326,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w17b",
+      "version": 325,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w17a",
+      "version": 324,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w16b",
+      "version": 323,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w16a",
+      "version": 322,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w15a",
+      "version": 321,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w14a",
+      "version": 320,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w13b",
+      "version": 319,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w13a",
+      "version": 318,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "17w06a",
+      "version": 317,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.11.2",
+      "version": 316,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.11.1",
+      "version": 316,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w50a",
+      "version": 316,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.11",
+      "version": 315,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.11-pre1",
+      "version": 314,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w44a",
+      "version": 313,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w43a",
+      "version": 313,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w42a",
+      "version": 312,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w41a",
+      "version": 311,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w40a",
+      "version": 310,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w39c",
+      "version": 309,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w39b",
+      "version": 308,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w39a",
+      "version": 307,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w38a",
+      "version": 306,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w36a",
+      "version": 305,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w35a",
+      "version": 304,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w33a",
+      "version": 303,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w32b",
+      "version": 302,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w32a",
+      "version": 301,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.10.2",
+      "version": 210,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.10.1",
+      "version": 210,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.10",
+      "version": 210,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.10-pre2",
+      "version": 205,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.10-pre1",
+      "version": 204,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w21b",
+      "version": 203,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w21a",
+      "version": 202,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w20a",
+      "version": 201,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.9.4",
+      "version": 110,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.9.3",
+      "version": 110,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.9.3-pre3",
+      "version": 110,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.9.3-pre2",
+      "version": 110,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.9.3-pre1",
+      "version": 109,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w15b",
+      "version": 109,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w15a",
+      "version": 109,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w14a",
+      "version": 109,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.9.2",
+      "version": 109,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.9.1",
+      "version": 108,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.9.1-pre3",
+      "version": 108,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.9.1-pre2",
+      "version": 108,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.9.1-pre1",
+      "version": 107,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.9",
+      "version": 107,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.9-pre4",
+      "version": 106,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.9-pre3",
+      "version": 105,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.9-pre2",
+      "version": 104,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.9-pre1",
+      "version": 103,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w07b",
+      "version": 102,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w07a",
+      "version": 101,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w06a",
+      "version": 100,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w05b",
+      "version": 99,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w05a",
+      "version": 98,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w04a",
+      "version": 97,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w03a",
+      "version": 96,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "16w02a",
+      "version": 95,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w51b",
+      "version": 94,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w51a",
+      "version": 93,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w50a",
+      "version": 92,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w49b",
+      "version": 91,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w49a",
+      "version": 90,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w47c",
+      "version": 89,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w47b",
+      "version": 88,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w47a",
+      "version": 87,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w46a",
+      "version": 86,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w45a",
+      "version": 85,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w44b",
+      "version": 84,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w44a",
+      "version": 83,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w43c",
+      "version": 82,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w43b",
+      "version": 81,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w43a",
+      "version": 80,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w42a",
+      "version": 79,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w41b",
+      "version": 78,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w41a",
+      "version": 77,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w40b",
+      "version": 76,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w40a",
+      "version": 75,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w39c",
+      "version": 74,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w39b",
+      "version": 74,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w39a",
+      "version": 74,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w38b",
+      "version": 73,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w38a",
+      "version": 72,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w37a",
+      "version": 71,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w36d",
+      "version": 70,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w36c",
+      "version": 69,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w36b",
+      "version": 68,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w36a",
+      "version": 67,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w35e",
+      "version": 66,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w35d",
+      "version": 65,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w35c",
+      "version": 64,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w35b",
+      "version": 63,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w35a",
+      "version": 62,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w34d",
+      "version": 61,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w34c",
+      "version": 60,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w34b",
+      "version": 59,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w34a",
+      "version": 58,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w33c",
+      "version": 57,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w33b",
+      "version": 56,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w33a",
+      "version": 55,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w32c",
+      "version": 54,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w32b",
+      "version": 53,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w32a",
+      "version": 52,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w31c",
+      "version": 51,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w31b",
+      "version": 50,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w31a",
+      "version": 49,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "15w14a",
+      "version": 48,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.9",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.8",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.7",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.6",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.5",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.4",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.3",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.2",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.2-pre7",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.2-pre6",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.2-pre5",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.2-pre4",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.2-pre3",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.2-pre2",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.2-pre1",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.1",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.1-pre5",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.1-pre4",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.1-pre3",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.1-pre2",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8.1-pre1",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8",
+      "version": 47,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8-pre3",
+      "version": 46,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8-pre2",
+      "version": 45,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.8-pre1",
+      "version": 44,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w34d",
+      "version": 43,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w34c",
+      "version": 42,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w34b",
+      "version": 41,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w34a",
+      "version": 40,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w33c",
+      "version": 39,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w33b",
+      "version": 38,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w33a",
+      "version": 37,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w32d",
+      "version": 36,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w32c",
+      "version": 35,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w32b",
+      "version": 34,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w32a",
+      "version": 33,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w31a",
+      "version": 32,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w30c",
+      "version": 31,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w30b",
+      "version": 30,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w30a",
+      "version": 30,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w29b",
+      "version": 29,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w29a",
+      "version": 29,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w28b",
+      "version": 28,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w28a",
+      "version": 27,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w27b",
+      "version": 26,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w27a",
+      "version": 26,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w26c",
+      "version": 25,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w26b",
+      "version": 24,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w26a",
+      "version": 23,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w25b",
+      "version": 22,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w25a",
+      "version": 21,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w21b",
+      "version": 20,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w21a",
+      "version": 19,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w20b",
+      "version": 18,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w20a",
+      "version": 18,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w19a",
+      "version": 17,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w18b",
+      "version": 16,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w18a",
+      "version": 16,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w17a",
+      "version": 15,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w11b",
+      "version": 14,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w11a",
+      "version": 14,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w10c",
+      "version": 13,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w10b",
+      "version": 13,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w10a",
+      "version": 13,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w08a",
+      "version": 12,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w07a",
+      "version": 11,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w06b",
+      "version": 10,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w06a",
+      "version": 10,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w05b",
+      "version": 9,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w05a",
+      "version": 9,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w04b",
+      "version": 8,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w04a",
+      "version": 7,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w03b",
+      "version": 6,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w03a",
+      "version": 6,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w02c",
+      "version": 5,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w02b",
+      "version": 5,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "14w02a",
+      "version": 5,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7.10",
+      "version": 5,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7.10-pre4",
+      "version": 5,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7.10-pre3",
+      "version": 5,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7.10-pre2",
+      "version": 5,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7.10-pre1",
+      "version": 5,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7.9",
+      "version": 5,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7.8",
+      "version": 5,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7.7",
+      "version": 5,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7.6",
+      "version": 5,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7.6-pre2",
+      "version": 5,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7.6-pre1",
+      "version": 5,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7.5",
+      "version": 4,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7.4",
+      "version": 4,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7.3-pre",
+      "version": 4,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "13w49a",
+      "version": 4,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "13w48b",
+      "version": 4,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "13w48a",
+      "version": 4,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "13w47e",
+      "version": 4,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "13w47d",
+      "version": 4,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "13w47c",
+      "version": 4,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "13w47b",
+      "version": 4,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "13w47a",
+      "version": 4,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7.2",
+      "version": 4,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7.1-pre",
+      "version": 3,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.7-pre",
+      "version": 3,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "13w43a",
+      "version": 2,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "13w42b",
+      "version": 1,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "13w42a",
+      "version": 1,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "13w41b",
+      "version": 0,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "13w41a",
+      "version": 0,
+      "usesNetty": true
+    },
+    {
+      "minecraftVersion": "1.6.4",
+      "version": 78,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.6.2",
+      "version": 74,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.6.1",
+      "version": 73,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.6-pre",
+      "version": 72,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w26a",
+      "version": 72,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w25c",
+      "version": 71,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w25b",
+      "version": 71,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w25a",
+      "version": 71,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w24b",
+      "version": 70,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w24a",
+      "version": 69,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w23b",
+      "version": 68,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w23a",
+      "version": 67,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w22a",
+      "version": 67,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w21b",
+      "version": 67,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w21a",
+      "version": 67,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w19a",
+      "version": 66,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w18a",
+      "version": 65,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w17a",
+      "version": 64,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w16b",
+      "version": 63,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.5.2",
+      "version": 61,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.5.1",
+      "version": 60,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.5",
+      "version": 60,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w09b",
+      "version": 59,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w06a",
+      "version": 58,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w05b",
+      "version": 57,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w05a",
+      "version": 56,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w04a",
+      "version": 55,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w03a",
+      "version": 54,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w02a",
+      "version": 53,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "13w01a",
+      "version": 52,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.4.7",
+      "version": 51,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.4.6",
+      "version": 51,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w49a",
+      "version": 50,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.4.5",
+      "version": 49,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.4.4",
+      "version": 49,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.4.3-pre",
+      "version": 48,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.4.2",
+      "version": 47,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w41a",
+      "version": 46,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w40a",
+      "version": 45,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w34b",
+      "version": 42,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w34a",
+      "version": 41,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w32a",
+      "version": 40,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.3.2",
+      "version": 39,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.3.1",
+      "version": 39,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w27a",
+      "version": 38,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w26a",
+      "version": 37,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w25a",
+      "version": 37,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w24a",
+      "version": 36,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w23a",
+      "version": 35,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w22a",
+      "version": 34,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w21ab",
+      "version": 33,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w19a",
+      "version": 32,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w18a",
+      "version": 32,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w17a",
+      "version": 31,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w16a",
+      "version": 30,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.2.5",
+      "version": 29,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.2.4",
+      "version": 29,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.2.3",
+      "version": 28,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.2.2",
+      "version": 28,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.2.1",
+      "version": 28,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w07a",
+      "version": 27,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w06a",
+      "version": 25,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w01a",
+      "version": 24,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w03a",
+      "version": 24,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w04a",
+      "version": 24,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "12w05a",
+      "version": 24,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.1",
+      "version": 23,
+      "usesNetty": false
+    },
+    {
+      "minecraftVersion": "1.0.0",
+      "version": 22,
+      "usesNetty": false
+    }
+  ]
+}

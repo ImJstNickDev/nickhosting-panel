@@ -1,0 +1,34 @@
+.game-form-skeleton {
+  min-height: 32rem;
+  border-radius: 12px;
+  background: var(--line);
+  opacity: 0.35;
+}
+.game-form-reset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.6rem;
+  color: var(--muted);
+  background: transparent;
+  border-color: transparent;
+}
+
+.settings-navigation {
+  display: flex;
+  gap: 1.25rem;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 1.25rem;
+}
+.settings-navigation a {
+  white-space: nowrap;
+  padding: 0.6rem 0.15rem;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  text-decoration: none;
+}
+.settings-navigation a[aria-current="page"] {
+  color: #202b37;
+  border-bottom-color: var(--blue);
+}

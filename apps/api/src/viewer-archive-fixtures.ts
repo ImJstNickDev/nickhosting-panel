@@ -1,0 +1,8 @@
+// Python stdlib-created TAR compression fixtures; no external executable is needed by tests.
+export const tarXz =
+  '/Td6WFoAAATm1rRGAgAhARYAAAB0L+Wj4Cf/AI1dADMbyc2KqWBCvRPbYeN42O7Og0jrwGoXSsWhiKgaSsydm3BIBGqnHiL6kx6+u0Z0XqYlVWL4anl5zS2pqjF+7UuTMLXrqVYXBSwoztommLkGjVgp+80AQrskvzLpEmISVXcw1qroFlTT26OOQQ97iuZwGvjHMK0X0+xoHHYgJiBD59WsReY8I4upreuLAAAAAACsVF68tl0qTgABqQGAUAAAwCXDQbHEZ/sCAAAAAARZWg==';
+export const tarBz2 =
+  'QlpoOTFBWSZTWT7pskEAAJN/gMuAIABQAf+QACBAAGfV3koISCAAlAlIk09R6Mp6Rk009TQaB4glJAAAAAAAfZ8QguaqADxpEQQqm4KR8KiMfHBBBQCkzk97U5DARgoEI9qhDI2F/WpV1xExrZuOOSwgQj8L/Z6WfWf6ebaWaOLBwtQr8TlXIUj5r4FGJbN2lBsG4iIGou5IpwoSB902SCA=';
+// libarchive test_read_format_rar5_stored.rar, BSD-2-Clause fixture; source/notice in M5-VIEWER-FORMATS.md.
+export const rar5 =
+  'UmFyIRoHAQAzkrXlCgEFBgAFAQGAgAA4MAZjLAIDC50ABJ0ApIMCtEOglYAAAQ5oZWxsb3dvcmxkLnR4dAoDE34Oq1tW6Q4aaGVsbG8gbGliYXJjaGl2ZSB0ZXN0IHN1aXRlIQodd1ZRAwUEAA==';

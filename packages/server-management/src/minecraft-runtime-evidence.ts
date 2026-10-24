@@ -1,5 +1,8 @@
 import { DomainError } from '@nickhosting/core';
 import {
+  getForgeInstalledTarget,
+  isFabricUpdatedBinding,
+  isForgeEnhancedBinding,
   type MinecraftEvidence,
   minecraftDigest,
   minecraftRuntimeMappingSchema,
@@ -7,11 +10,14 @@ import {
   validateMinecraftRuntimeMapping,
 } from '@nickhosting/minecraft';
 import type { ApplicationServer, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
+import { sql } from 'kysely';
+import { z } from 'zod';
 import type { DB, Environment } from './admission.js';
 import {
   assertMinecraftDeclaredEnvironment,
   inspectMinecraftCombination,
 } from './minecraft-registry.js';
+import { minecraftProvisionStartup } from './minecraft-startup.js';
 
 type MinecraftChoice = Awaited<ReturnType<typeof inspectMinecraftCombination>>;
 
@@ -57,6 +63,8 @@ export async function assertMinecraftEggEnvironment(
   if (
     egg.id !== choice.mapping.egg_id ||
     egg.nest !== choice.mapping.nest_id ||
+    (choice.mapping.image_mode === 'integration' &&
+      ![egg.docker_image, ...Object.values(egg.docker_images ?? {})].includes(binding.image)) ||
     !egg.relationships?.variables
   )
     throw new DomainError('configuration_invalid');
@@ -96,8 +104,8 @@ function launchEnvironmentKeys(environment: Record<string, unknown>): string[] {
   ];
 }
 
-/** Supported Fabric launch shape, not an arbitrary shell/JVM parser. The verified
- * launcher and its Mojang target must remain authoritative. Unsupported commands
+/** Supported Java launch shapes, not an arbitrary shell/JVM parser. The verified
+ * launcher or Forge arguments remain authoritative. Unsupported commands
  * require a new evidence-backed integration contract rather than a checkbox. */
 export function assertMinecraftJavaLaunch(
   startup: string,
@@ -152,11 +160,25 @@ export function assertMinecraftVerifiedLaunch(
   environment: Record<string, string>,
   profile: string,
   launcher: string | undefined,
-  report: MinecraftEvidence,
+  report: MinecraftEvidence | null,
+  choice?: Pick<MinecraftChoice, 'row'>,
 ): void {
-  if (profile === 'forge') {
+  const binding = choice && minecraftRuntimeMappingSchema.parse(choice.row.binding);
+  if (choice && binding && isForgeEnhancedBinding(binding)) {
+    const target = getForgeInstalledTarget(
+      choice.row.resolved_runtime as ResolvedMinecraftRuntime,
+      binding,
+    );
+    assertMinecraftJavaLaunch(
+      startup,
+      environment,
+      target.kind === 'forge'
+        ? { kind: 'forge', paths: [target.path] }
+        : { kind: 'jar', path: target.path },
+    );
+  } else if (profile === 'forge') {
     const paths =
-      report.server?.installedFiles
+      report?.server?.installedFiles
         ?.map((file) => file.path)
         .filter((path) =>
           /^libraries\/net\/minecraftforge\/forge\/[^/]+\/unix_args\.txt$/.test(path),
@@ -173,9 +195,10 @@ export function assertMinecraftVerifiedLaunch(
 export async function assertMinecraftRemoteLaunch(
   db: DB,
   serverId: string,
-  remote: ApplicationServer,
+  remoteInput: ApplicationServer | Promise<ApplicationServer>,
   env: Environment,
   adapter: Pick<PterodactylAdapter, 'getEgg'>,
+  validateEggMetadata = true,
 ): Promise<void> {
   const profile = await db
     .selectFrom('minecraft_server_profiles')
@@ -185,13 +208,25 @@ export async function assertMinecraftRemoteLaunch(
   const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
   const binding = minecraftRuntimeMappingSchema.parse(choice.row.binding);
   const expected = await minecraftProvisionEnvironment(db, serverId, choice);
-  await assertMinecraftEggEnvironment(adapter, choice, expected);
+  const startup = minecraftProvisionStartup(choice);
+  const checks = await Promise.allSettled([
+    remoteInput,
+    // Installed power operations validate the actual launch below. The egg
+    // catalog is still required for installation and explicit revalidation.
+    validateEggMetadata
+      ? assertMinecraftEggEnvironment(adapter, choice, expected)
+      : Promise.resolve(),
+  ]);
+  for (const result of checks) if (result.status === 'rejected') throw result.reason;
+  const serverProof = checks[0];
+  if (serverProof.status !== 'fulfilled') throw new DomainError('integration_unavailable');
+  const remote = serverProof.value;
   const actual = remote.container.environment;
   if (
     choice.mappingDigest !== choice.row.mapping_digest ||
     remote.egg !== choice.mapping.egg_id ||
     remote.container.image !== binding.image ||
-    remote.container.startup_command !== choice.mapping.startup ||
+    remote.container.startup_command !== startup ||
     !actual ||
     Object.entries(expected).some(
       ([key, value]) =>
@@ -199,7 +234,7 @@ export async function assertMinecraftRemoteLaunch(
     )
   )
     throw new DomainError('provenance_mismatch');
-  if (actual.STARTUP !== undefined && actual.STARTUP !== choice.mapping.startup)
+  if (actual.STARTUP !== undefined && actual.STARTUP !== startup)
     throw new DomainError('provenance_mismatch');
   // These variables affect Java even when absent from the startup template. A
   // provider-added injection must never inherit trust from an image digest.
@@ -247,18 +282,19 @@ export async function assertMinecraftRemoteLaunch(
     remote.feature_limits.allocations !== choice.mapping.feature_limits.allocations
   )
     throw new DomainError('provenance_mismatch');
-  for (const [, name] of choice.mapping.startup.matchAll(/\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}/g)) {
+  for (const [, name] of startup.matchAll(/\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}/g)) {
     if (name && !(name in launch)) throw new DomainError('configuration_invalid');
     if (name && actual[name] !== undefined && String(actual[name]) !== launch[name])
       throw new DomainError('provenance_mismatch');
   }
   const evidence = await requireMinecraftRuntimeImageEvidence(db, serverId, null, env);
   assertMinecraftVerifiedLaunch(
-    choice.mapping.startup,
+    startup,
     launch,
     binding.profile,
     binding.artifactPaths.server,
     evidence.report,
+    choice,
   );
 }
 
@@ -266,17 +302,19 @@ export async function assertMinecraftRemoteLaunch(
  * An absent server container is explicitly unobserved: verified artifact/config
  * installation may precede an admitted first start, but playable readiness cannot.
  * The hash alone proves neither the Java version nor protocol support; the signed
- * exact-combination real-server report provides that separate test evidence. */
+ * exact-combination report remains required for experimental non-Vanilla loaders.
+ * Declared Vanilla records the first installed container identity independently. */
 export async function requireMinecraftRuntimeImageEvidence(
   db: DB,
   serverId: string,
   observed: string | null,
   env: Environment = {},
+  verifiedProcessEpoch?: string,
 ): Promise<{
-  expected: string;
+  expected: string | null;
   observed: string | null;
   verified: boolean;
-  report: MinecraftEvidence;
+  report: MinecraftEvidence | null;
 }> {
   const server = await db
     .selectFrom('managed_servers')
@@ -293,16 +331,115 @@ export async function requireMinecraftRuntimeImageEvidence(
   const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
   if (
     choice.row.mapping_id !== server.mapping_id ||
-    choice.mapping.game_id !== 'minecraft-java' ||
+    choice.mapping.game_id !== 'minecraft' ||
     choice.mapping.runtime_id !== choice.combination.profile ||
     choice.row.mapping_digest !== choice.mappingDigest
   )
     throw new DomainError('provenance_mismatch');
+  if (
+    choice.supportAuthority === 'integration' &&
+    choice.capabilities.installation &&
+    (choice.combination.profile !== 'fabric' ||
+      isFabricUpdatedBinding(minecraftRuntimeMappingSchema.parse(choice.row.binding))) &&
+    (choice.combination.profile !== 'forge' ||
+      isForgeEnhancedBinding(minecraftRuntimeMappingSchema.parse(choice.row.binding)))
+  ) {
+    // Compiled runtime support is not a per-instance test certificate. Image
+    // identity is observed locally and pinned once, after actual installation;
+    // future container replacement must preserve that identity.
+    if (observed !== null && !/^sha256:[a-f0-9]{64}$/.test(observed))
+      throw new DomainError('provenance_mismatch');
+    if (
+      profile.runtime_image_transition !== null &&
+      profile.runtime_image_transition !== undefined
+    ) {
+      const transition = z
+        .object({ operationId: z.uuid(), combinationId: z.uuid(), after: z.iso.datetime() })
+        .strict()
+        .safeParse(profile.runtime_image_transition);
+      if (
+        !transition.success ||
+        transition.data.combinationId !== profile.combination_id ||
+        profile.runtime_image_digest !== null
+      )
+        throw new DomainError('provenance_mismatch');
+      const operation = await db
+        .selectFrom('minecraft_modpack_operations')
+        .select(['state', 'resource_owner_id', 'runtime_transition'])
+        .where('id', '=', transition.data.operationId)
+        .where('server_id', '=', serverId)
+        .executeTakeFirst();
+      const journal = z
+        .object({
+          state: z.literal('verified'),
+          mappingDigest: z.string(),
+          target: z.object({ combinationId: z.uuid(), mappingId: z.uuid() }),
+        })
+        .safeParse(operation?.runtime_transition);
+      if (
+        operation?.state !== 'applied' ||
+        operation.resource_owner_id !== server.owner_id ||
+        !journal.success ||
+        journal.data.mappingDigest !== choice.mappingDigest ||
+        journal.data.target.combinationId !== profile.combination_id ||
+        journal.data.target.mappingId !== server.mapping_id
+      )
+        throw new DomainError('provenance_mismatch');
+      // Reinstall keeps the previous stopped game container. Only the existing
+      // process-epoch verifier can attest the new container after first start.
+      // Startup preflight must not pin the old container's otherwise valid image.
+      if (
+        !observed ||
+        !verifiedProcessEpoch ||
+        !Number.isFinite(Date.parse(verifiedProcessEpoch)) ||
+        Date.parse(verifiedProcessEpoch) <= Date.parse(transition.data.after)
+      )
+        return { expected: null, observed: null, verified: false, report: null };
+      await db
+        .updateTable('minecraft_server_profiles')
+        .set({ runtime_image_digest: observed, runtime_image_transition: 'null' })
+        .where('server_id', '=', serverId)
+        .where('combination_id', '=', profile.combination_id)
+        .where('runtime_image_digest', 'is', null)
+        .where(
+          sql<string>`runtime_image_transition->>'operationId'`,
+          '=',
+          transition.data.operationId,
+        )
+        .execute();
+      const pinned = await db
+        .selectFrom('minecraft_server_profiles')
+        .select(['runtime_image_digest', 'runtime_image_transition'])
+        .where('server_id', '=', serverId)
+        .executeTakeFirstOrThrow();
+      if (pinned.runtime_image_digest !== observed || pinned.runtime_image_transition !== null)
+        throw new DomainError('provenance_mismatch');
+      return { expected: observed, observed, verified: true, report: null };
+    }
+    let expected = profile.runtime_image_digest;
+    if (observed !== null && profile.installed && expected === null) {
+      await db
+        .updateTable('minecraft_server_profiles')
+        .set({ runtime_image_digest: observed })
+        .where('server_id', '=', serverId)
+        .where('runtime_image_digest', 'is', null)
+        .execute();
+      const pinned = await db
+        .selectFrom('minecraft_server_profiles')
+        .select('runtime_image_digest')
+        .where('server_id', '=', serverId)
+        .executeTakeFirstOrThrow();
+      expected = pinned.runtime_image_digest;
+    }
+    if (observed !== null && expected !== null && observed !== expected)
+      throw new DomainError('provenance_mismatch');
+    return { expected, observed, verified: observed !== null, report: null };
+  }
   if (choice.support !== 'verified') {
     const rollout = await db
       .selectFrom('game_rollouts')
       .selectAll()
-      .where('integration_id', '=', 'minecraft-java')
+      .where('integration_id', '=', 'minecraft')
       .executeTakeFirst();
     const owner = await db
       .selectFrom('user')

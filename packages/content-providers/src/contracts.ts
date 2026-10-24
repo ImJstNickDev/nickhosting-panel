@@ -9,7 +9,7 @@ export const contentTargetSchema = z
   })
   .strict();
 export type ContentTarget = z.infer<typeof contentTargetSchema>;
-export const hashesSchema = z
+const artifactHashesSchema = z
   .object({
     sha512: z
       .string()
@@ -24,26 +24,50 @@ export const hashesSchema = z
       .regex(/^[a-f0-9]{40}$/)
       .optional(),
   })
-  .strict()
-  .refine((h) => Object.keys(h).length > 0);
+  .strict();
+export const hashesSchema = artifactHashesSchema.refine((h) => Object.keys(h).length > 0);
 export type ContentHashes = z.infer<typeof hashesSchema>;
 export const artifactSchema = z
   .object({
     path: z.string(),
     urls: z.array(z.string().url()).min(1).max(8),
     size: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-    hashes: hashesSchema,
+    hashes: artifactHashesSchema,
+    /** SpiGet publishes no digests/exact sizes: size is a bounded ceiling, staging seals SHA256. */
+    integrity: z.literal('spiget-tls').optional(),
     projectId: z.string().optional(),
     versionId: z.string().optional(),
     kind: z.enum(['mod', 'plugin', 'override']),
     // unknown requires independently inspected embedded JAR metadata before staging succeeds.
     serverSide: z.enum(['required', 'optional', 'unknown']),
+    // Explicit per-version Mods consent; cannot relax download, integrity or path policy.
+    allowClientOnly: z.literal(true).optional(),
+    compatibilityOverride: z
+      .array(z.enum(['minecraft-version', 'loader', 'client-only', 'singleplayer-only']))
+      .min(1)
+      .max(4)
+      .optional(),
   })
-  .strict();
+  .strict()
+  .refine((artifact) => {
+    if (artifact.integrity !== 'spiget-tls') return Object.keys(artifact.hashes).length > 0;
+    if (
+      artifact.kind !== 'plugin' ||
+      Object.keys(artifact.hashes).length ||
+      artifact.urls.length !== 1 ||
+      !/^[1-9][0-9]*$/.test(artifact.projectId ?? '') ||
+      !/^[1-9][0-9]*$/.test(artifact.versionId ?? '')
+    )
+      return false;
+    return (
+      artifact.urls[0] ===
+      `https://api.spiget.org/v2/resources/${artifact.projectId}/versions/${artifact.versionId}/download/proxy`
+    );
+  });
 export type ContentArtifact = z.infer<typeof artifactSchema>;
 export const incompatibleContentSchema = z
   .object({
-    provider: z.enum(['modrinth', 'curseforge']),
+    provider: z.enum(['modrinth', 'curseforge', 'hangar', 'spiget']),
     projectId: z.string().min(1).max(128),
     versionId: z.string().min(1).max(128).optional(),
   })
@@ -70,7 +94,7 @@ export const contentPlanSchema = z
       .array(
         z
           .object({
-            provider: z.enum(['modrinth', 'curseforge']),
+            provider: z.enum(['modrinth', 'curseforge', 'hangar', 'spiget']),
             projectId: z.string(),
             versionId: z.string(),
             dependencies: z.array(z.string()),
@@ -85,6 +109,8 @@ export const contentPlanSchema = z
 export type ContentPlan = z.infer<typeof contentPlanSchema>;
 export interface ContentLimits {
   maxEntries: number;
+  /** Central-directory records scanned without extracting opaque JAR resources. */
+  maxJarEntries: number;
   maxArchiveBytes: number;
   maxExpandedBytes: number;
   maxFileBytes: number;
@@ -94,6 +120,7 @@ export interface ContentLimits {
 }
 export const defaultContentLimits: ContentLimits = {
   maxEntries: 20000,
+  maxJarEntries: 250000,
   maxArchiveBytes: 8 * 1024 ** 3,
   maxExpandedBytes: 16 * 1024 ** 3,
   maxFileBytes: 8 * 1024 ** 3,
@@ -165,6 +192,26 @@ export function validateContentPlan(input: unknown): ContentPlan {
   return plan;
 }
 export interface ContentHttp {
+  /** Read-only metadata bulk queries (e.g. CurseForge pinned file IDs), never mutations. */
+  jsonPost?(
+    url: string,
+    body: unknown,
+    options?: { headers?: Readonly<Record<string, string>>; signal?: AbortSignal },
+  ): Promise<unknown>;
+  text?(
+    url: string,
+    options?: { headers?: Readonly<Record<string, string>>; signal?: AbortSignal },
+  ): Promise<string>;
+  downloadModpack?(
+    artifact: import('./modpack-recipes.js').ModpackDownload,
+    destination: string,
+    options?: {
+      signal?: AbortSignal;
+      maxBytes?: number;
+      /** Awaited before writing; validated Content-Length or the bounded fallback maximum. */
+      onSize?: (bytes: number) => Promise<void>;
+    },
+  ): Promise<{ sha256: string; size: number }>;
   json(
     url: string,
     options?: { headers?: Readonly<Record<string, string>>; signal?: AbortSignal },
@@ -180,6 +227,7 @@ export interface StagedContentFile {
   size: number;
   sha256: string;
   source: 'download' | 'override';
+  environment?: 'server' | 'client' | 'both';
 }
 export interface StagedContent {
   directory: string;

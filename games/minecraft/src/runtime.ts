@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import { forgeJavaMajor } from './forge-policy.js';
+import { paperJavaMajor } from './paper-policy.js';
+import { vanillaJavaMajor } from './vanilla-policy.js';
 
 export const minecraftRuntimeProfiles = ['vanilla', 'paper', 'folia', 'fabric', 'forge'] as const;
 export type MinecraftRuntimeProfile = (typeof minecraftRuntimeProfiles)[number];
@@ -9,6 +12,11 @@ const exactVersion = z
   .min(1)
   .max(96)
   .regex(/^[a-zA-Z0-9][a-zA-Z0-9._+-]*$/);
+const releaseVersion = z
+  .string()
+  .min(1)
+  .max(96)
+  .regex(/^[a-zA-Z0-9][a-zA-Z0-9._+ -]*[a-zA-Z0-9._+-]$|^[a-zA-Z0-9]$/);
 const javaVersion = z.number().int().min(8).max(100);
 const sha1 = z.string().regex(/^[a-f0-9]{40}$/i);
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/i);
@@ -69,6 +77,8 @@ export interface ResolvedMinecraftRuntime {
   readonly installation: {
     readonly kind: 'server-jar' | 'fabric-installer' | 'forge-installer';
     readonly args: readonly string[];
+    /** Exact renamed universal JAR receipt for pre-1.13 Forge only. */
+    readonly serverJarSha1?: string;
   };
   readonly evidence: readonly RuntimeSourceEvidence[];
 }
@@ -166,9 +176,9 @@ function freeze<T>(value: T): T {
 }
 export const minecraftRuntimeRequestSchema = z
   .object({
-    release: exactVersion,
+    release: releaseVersion,
     profile: z.enum(minecraftRuntimeProfiles),
-    buildId: z.number().int().positive().optional(),
+    buildId: z.number().int().nonnegative().optional(),
     loaderVersion: exactVersion.optional(),
     installerVersion: exactVersion.optional(),
   })
@@ -217,16 +227,24 @@ export async function resolveMinecraftRuntime(
     return fail('minecraft_metadata_integrity');
   const release = parse(
     z.object({
-      id: exactVersion,
-      javaVersion: z.object({ majorVersion: javaVersion }),
+      id: releaseVersion,
+      javaVersion: z.object({ majorVersion: javaVersion }).optional(),
       downloads: z.object({
-        server: z.object({ url: z.string(), sha1, size: z.number().int().positive() }),
+        server: z.object({ url: z.string(), sha1, size: z.number().int().positive() }).optional(),
       }),
     }),
     json(releaseDocument),
   );
   if (release.id !== request.release) return fail('minecraft_release_mismatch');
-  let javaMajor = release.javaVersion.majorVersion;
+  if (!release.downloads.server) return fail('minecraft_server_download_unavailable');
+  let javaMajor =
+    request.profile === 'vanilla' || request.profile === 'fabric'
+      ? vanillaJavaMajor(request.release, entry.type, release.javaVersion?.majorVersion)
+      : request.profile === 'forge'
+        ? forgeJavaMajor(request.release, release.javaVersion?.majorVersion)
+        : request.profile === 'paper'
+          ? (release.javaVersion?.majorVersion ?? 8)
+          : (release.javaVersion?.majorVersion ?? fail('minecraft_java_unknown'));
   let upstreamSupport: string | undefined;
   let upstreamChannel: string | undefined;
   let artifacts: RuntimeArtifact[] = [
@@ -245,7 +263,11 @@ export async function resolveMinecraftRuntime(
         version: z.object({
           id: exactVersion,
           support: z.object({ status: z.string().max(100) }).optional(),
-          java: z.object({ version: z.object({ minimum: javaVersion }) }),
+          java: z.object({
+            version: z.object({
+              minimum: request.profile === 'paper' ? z.number().int().min(6).max(100) : javaVersion,
+            }),
+          }),
         }),
         builds: z.array(z.number().int()).max(100_000),
       }),
@@ -271,7 +293,14 @@ export async function resolveMinecraftRuntime(
     upstreamSupport = version.version.support?.status;
     upstreamChannel = build.channel;
     const artifact = build.downloads['server:default'];
-    javaMajor = Math.max(javaMajor, version.version.java.version.minimum);
+    javaMajor =
+      request.profile === 'paper'
+        ? paperJavaMajor(
+            request.release,
+            version.version.java.version.minimum,
+            release.javaVersion?.majorVersion,
+          )
+        : Math.max(javaMajor, version.version.java.version.minimum);
     artifacts = [
       {
         role: 'server',
@@ -284,12 +313,12 @@ export async function resolveMinecraftRuntime(
     const pair = parse(
       z.object({
         loader: z.object({ version: exactVersion }),
-        intermediary: z.object({ version: exactVersion }),
-        launcherMeta: z.object({ min_java_version: javaVersion }),
+        intermediary: z.object({ version: releaseVersion }),
+        launcherMeta: z.object({ min_java_version: javaVersion.optional() }),
       }),
       json(
         await read(
-          `https://meta.fabricmc.net/v2/versions/loader/${request.release}/${request.loaderVersion}`,
+          `https://meta.fabricmc.net/v2/versions/loader/${encodeURIComponent(request.release)}/${request.loaderVersion}`,
         ),
       ),
     );
@@ -297,16 +326,17 @@ export async function resolveMinecraftRuntime(
     // Since 26.1 the official intermediary identity can be 0.0.0 (unobfuscated).
     // Exact server-profile inheritance establishes the requested game identity instead.
     const serverProfile = parse(
-      z.object({ inheritsFrom: exactVersion, mainClass: z.string().min(1).max(500) }),
+      z.object({ inheritsFrom: releaseVersion, mainClass: z.string().min(1).max(500) }),
       json(
         await read(
-          `https://meta.fabricmc.net/v2/versions/loader/${request.release}/${request.loaderVersion}/server/json`,
+          `https://meta.fabricmc.net/v2/versions/loader/${encodeURIComponent(request.release)}/${request.loaderVersion}/server/json`,
         ),
       ),
     );
     if (
       serverProfile.inheritsFrom !== request.release ||
-      !serverProfile.mainClass.startsWith('net.fabricmc.')
+      (!serverProfile.mainClass.startsWith('net.fabricmc.') &&
+        serverProfile.mainClass !== 'net.minecraft.launchwrapper.Launch')
     )
       return fail('minecraft_loader_mismatch');
     const installers = parse(
@@ -324,7 +354,12 @@ export async function resolveMinecraftRuntime(
       new TextDecoder().decode((await read(`${url}.sha256`)).bytes).trim(),
     );
     artifacts.push({ role: 'installer', url, sha256: hash.toLowerCase() });
-    javaMajor = Math.max(javaMajor, pair.launcherMeta.min_java_version);
+    // Fabric recommends Java 17 for 1.17–1.20.4. The shared Minecraft baseline
+    // already selects 17 for 1.18–1.20.4; only stable 1.17/1.17.1 need an override.
+    // Snapshot requirements remain metadata-led. https://wiki.fabricmc.net/install
+    const recommendedJava =
+      entry.type === 'release' && /^1\.17(?:\.1)?$/.test(request.release) ? 17 : javaMajor;
+    javaMajor = Math.max(javaMajor, recommendedJava, pair.launcherMeta.min_java_version ?? 8);
     installation = {
       kind: 'fabric-installer',
       args: [
@@ -349,7 +384,20 @@ export async function resolveMinecraftRuntime(
     const url = `https://maven.minecraftforge.net/net/minecraftforge/forge/${coordinate}/forge-${coordinate}-installer.jar`;
     const hash = parse(sha1, new TextDecoder().decode((await read(`${url}.sha1`)).bytes).trim());
     artifacts.push({ role: 'installer', url, sha1: hash.toLowerCase() });
-    installation = { kind: 'forge-installer', args: ['--installServer'] };
+    const serverJarSha1 =
+      Number(request.release.split('.')[1]) <= 12
+        ? parse(
+            sha1,
+            new TextDecoder()
+              .decode((await read(url.replace('-installer.jar', '-universal.jar.sha1'))).bytes)
+              .trim(),
+          ).toLowerCase()
+        : undefined;
+    installation = {
+      kind: 'forge-installer',
+      args: ['--installServer'],
+      ...(serverJarSha1 ? { serverJarSha1 } : {}),
+    };
   }
   return freeze({
     ...request,
@@ -388,7 +436,7 @@ const artifactPath = z
 export const minecraftRuntimeMappingSchema = z
   .object({
     profile: z.enum(minecraftRuntimeProfiles),
-    release: exactVersion,
+    release: releaseVersion,
     image: z.string().min(1).max(500),
     imageJavaMajor: javaVersion,
     declaredEggVariables: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/)).max(100),

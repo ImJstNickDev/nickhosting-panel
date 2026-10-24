@@ -1,11 +1,16 @@
-import { inspectModpack, ModrinthProvider } from '@nickhosting/content-providers';
-import { type AuthContext, DomainError } from '@nickhosting/core';
-import { type createDatabase, getSettings, registerGame } from '@nickhosting/database';
+import { type ContentHttp, inspectModpack, ModrinthProvider } from '@nickhosting/content-providers';
+import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
+import { type createDatabase, gameCatalog, getSettings, registerGame } from '@nickhosting/database';
 import {
   createMinecraftIdentityProvider,
   minecraftAvatarUrl,
+  minecraftContentPermissionKeys,
+  minecraftEditablePropertyKeys,
   minecraftManifest,
+  minecraftRuntimeRequestSchema,
   minecraftWizard,
+  minecraftWorldName,
+  parseMinecraftProperties,
   verifyMinecraftPlayer,
 } from '@nickhosting/minecraft';
 import {
@@ -14,31 +19,58 @@ import {
   createMinecraftSourceStore,
   createServerSchema,
   enqueueServerOperation,
+  findManagedCreationRequest,
+  getFabricCatalog,
+  getForgeCatalog,
+  getPaperCatalog,
+  getServerPermissionKeys,
   importMinecraftEvidence,
   inspectMinecraftCombination,
-  listMinecraftWorlds,
+  inspectMinecraftWorlds,
+  listMinecraftOwnerCombinations,
   type ManagementRuntime,
   minecraftCatalog,
+  minecraftContentCommandSchema,
   minecraftContentWipePreview,
+  minecraftOwnerCombinationDetail,
   operationSchema,
   ownerOnly,
   parse,
   prepareMinecraftContentPlan,
   prepareMinecraftCreationConfig,
+  registerFabricCatalogCombination,
   registerMinecraftCombination,
+  requestFabricCatalogRefresh,
+  requestForgeCatalogRefresh,
+  requestPaperCatalogRefresh,
   requireMinecraftChoice,
+  resolveFabricCreationChoice,
+  resolveForgeCreationChoice,
+  resolvePaperCreationChoice,
   setMinecraftAvailability,
+  setMinecraftBulkAvailability,
+  syncFabricRegisteredCatalog,
+  syncMinecraftCatalog,
 } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import { minecraftStoredConfigurationSchema } from '../../../packages/server-management/src/minecraft-content-contracts.js';
+import { permissionRuntime } from '../../../packages/server-management/src/permission-runtime.js';
 import type { Variables } from './app.js';
+import { downloadServerArchive } from './file-browsing.js';
+import { registerMinecraftDatapackRoutes } from './minecraft-datapacks.js';
+import { registerMinecraftModpackRoutes } from './minecraft-modpacks.js';
+import { registerMinecraftModRoutes } from './minecraft-mods.js';
+import { registerMinecraftPlayerRoutes } from './minecraft-players.js';
 
 type C = Context<{ Variables: Variables }>;
 // Public choices carry all runtime-selection authority; an Owner-only mapping
 // selector is neither required nor accepted by the dedicated creation endpoint.
-const minecraftCreateSchema = createServerSchema.omit({ mappingId: true }).required({
-  minecraft: true,
+const minecraftCreateSchema = createServerSchema.omit({ mappingId: true }).extend({
+  minecraft: createServerSchema.shape.minecraft.unwrap().extend({
+    choiceId: z.string().min(1).max(256),
+    loaderVersion: minecraftRuntimeRequestSchema.shape.loaderVersion.optional(),
+  }),
 });
 export function registerMinecraftRoutes(
   app: Hono<{ Variables: Variables }>,
@@ -48,8 +80,14 @@ export function registerMinecraftRoutes(
     principal: (c: C, regularOnly?: boolean) => Promise<AuthContext>;
     body: (c: Context) => Promise<unknown>;
     management: () => Promise<ManagementRuntime>;
+    codec?: SecretCodec;
+    contentHttp?: ContentHttp;
   },
 ) {
+  registerMinecraftPlayerRoutes(app, options);
+  registerMinecraftDatapackRoutes(app, options);
+  registerMinecraftModRoutes(app, options);
+  registerMinecraftModpackRoutes(app, options);
   const { db, env, principal, body, management } = options;
   const owner = async (c: C) => {
     const context = await principal(c, true);
@@ -71,34 +109,92 @@ export function registerMinecraftRoutes(
         .strict(),
       await body(c),
     );
-    await registerGame(db, context, minecraftManifest, { gameId: 'minecraft-java', ...rollout });
+    await registerGame(db, context, minecraftManifest, { gameId: 'minecraft', ...rollout });
     return c.body(null, 204);
+  });
+  app.get('/v1/owner/minecraft/fabric/catalog', async (c) => {
+    await owner(c);
+    c.header('Cache-Control', 'no-store');
+    return c.json(await getFabricCatalog(db));
+  });
+  app.post('/v1/owner/minecraft/fabric/catalog', async (c) => {
+    await owner(c);
+    parse(z.object({}).strict(), await body(c));
+    c.header('Cache-Control', 'no-store');
+    return c.json(await requestFabricCatalogRefresh(db), 202);
+  });
+  app.get('/v1/owner/minecraft/paper/catalog', async (c) => {
+    await owner(c);
+    c.header('Cache-Control', 'no-store');
+    return c.json(await getPaperCatalog(db));
+  });
+  app.post('/v1/owner/minecraft/paper/catalog', async (c) => {
+    await owner(c);
+    parse(z.object({}).strict(), await body(c));
+    c.header('Cache-Control', 'no-store');
+    return c.json(await requestPaperCatalogRefresh(db), 202);
+  });
+  app.get('/v1/owner/minecraft/forge/catalog', async (c) => {
+    await owner(c);
+    c.header('Cache-Control', 'no-store');
+    return c.json(await getForgeCatalog(db));
+  });
+  app.post('/v1/owner/minecraft/forge/catalog', async (c) => {
+    await owner(c);
+    parse(z.object({}).strict(), await body(c));
+    c.header('Cache-Control', 'no-store');
+    return c.json(await requestForgeCatalogRefresh(db), 202);
+  });
+  app.get('/v1/minecraft/forge/catalog', async (c) => {
+    const games = await gameCatalog(db, await principal(c));
+    if (!games.some((game) => game.id === 'minecraft')) throw new DomainError('forbidden');
+    c.header('Cache-Control', 'no-store');
+    return c.json(await getForgeCatalog(db));
+  });
+  app.get('/v1/minecraft/fabric/catalog', async (c) => {
+    const games = await gameCatalog(db, await principal(c));
+    if (!games.some((game) => game.id === 'minecraft')) throw new DomainError('forbidden');
+    c.header('Cache-Control', 'no-store');
+    return c.json(await getFabricCatalog(db));
+  });
+  app.post('/v1/owner/minecraft/fabric/combinations', async (c) => {
+    const context = await owner(c);
+    return c.json(
+      await registerFabricCatalogCombination(
+        db,
+        async () => (await management()).adapter,
+        context,
+        await body(c),
+        env,
+      ),
+      201,
+    );
+  });
+  app.post('/v1/owner/minecraft/fabric/combinations/sync', async (c) => {
+    const context = await owner(c);
+    return c.json(
+      await syncFabricRegisteredCatalog(
+        db,
+        async () => (await management()).adapter,
+        context,
+        await body(c),
+        env,
+      ),
+    );
+  });
+  app.post('/v1/owner/minecraft/catalog/sync', async (c) => {
+    const context = await owner(c);
+    return c.json(
+      await syncMinecraftCatalog(db, (await management()).adapter, context, await body(c), env),
+    );
   });
   app.get('/v1/owner/minecraft/compatibility', async (c) => {
     await owner(c);
-    const rows = await db
-      .selectFrom('minecraft_combinations')
-      .select('id')
-      .orderBy('created_at', 'desc')
-      .limit(1000)
-      .execute();
-    const result = [];
-    for (const row of rows) {
-      const choice = await inspectMinecraftCombination(db, row.id, env);
-      result.push({
-        id: row.id,
-        mappingId: choice.row.mapping_id,
-        enabled: choice.row.enabled,
-        combination: choice.combination,
-        runtime: choice.row.resolved_runtime,
-        binding: choice.row.binding,
-        identityDigest: choice.row.identity_digest,
-        mappingDigest: choice.mappingDigest,
-        support: choice.support,
-        evidence: choice.evidence,
-      });
-    }
-    return c.json(result);
+    return c.json(await listMinecraftOwnerCombinations(db, c.req.query(), env));
+  });
+  app.get('/v1/owner/minecraft/compatibility/:id', async (c) => {
+    await owner(c);
+    return c.json(await minecraftOwnerCombinationDetail(db, c.req.param('id'), env));
   });
   app.post('/v1/owner/minecraft/compatibility', async (c) => {
     const context = await owner(c);
@@ -112,6 +208,10 @@ export function registerMinecraftRoutes(
       ),
       201,
     );
+  });
+  app.put('/v1/owner/minecraft/compatibility/availability', async (c) => {
+    await setMinecraftBulkAvailability(db, await owner(c), await body(c), env);
+    return c.body(null, 204);
   });
   app.put('/v1/owner/minecraft/compatibility/:id/availability', async (c) => {
     await setMinecraftAvailability(db, await owner(c), c.req.param('id'), await body(c), env);
@@ -132,7 +232,7 @@ export function registerMinecraftRoutes(
           id: choice.id,
           release: choice.version,
           runtime: choice.runtime,
-          nameKey: `games.minecraft-java.runtimes.${choice.runtime}`,
+          nameKey: `games.minecraft.runtimes.${choice.runtime}`,
         })),
       ),
     );
@@ -143,7 +243,7 @@ export function registerMinecraftRoutes(
     const player = await verifyMinecraftPlayer(
       c.req.param('name'),
       createMinecraftIdentityProvider({
-        userAgent: settings.values.minecraftMetadataUserAgent ?? '',
+        userAgent: settings.values.contentMetadataUserAgent ?? '',
       }),
     );
     return c.json({
@@ -339,7 +439,7 @@ export function registerMinecraftRoutes(
           id: choice.id,
           release: choice.version,
           runtime: choice.runtime,
-          nameKey: `games.minecraft-java.runtimes.${choice.runtime}`,
+          nameKey: `games.minecraft.runtimes.${choice.runtime}`,
         })),
         {
           provider: plan.format === 'curseforge' ? 'curseforge' : 'modrinth',
@@ -356,14 +456,54 @@ export function registerMinecraftRoutes(
   app.post('/v1/minecraft/servers', async (c) => {
     const context = await principal(c);
     const input = parse(minecraftCreateSchema, await body(c));
-    const choice = await requireMinecraftChoice(db, context, input.minecraft.choiceId, env);
+    const fabric = input.minecraft.choiceId.startsWith('fabric:');
+    const paper = input.minecraft.choiceId.startsWith('paper:');
+    const forge = input.minecraft.choiceId.startsWith('forge:');
+    const catalogChoice = fabric || paper || forge;
+    if ((fabric || forge) !== (input.minecraft.loaderVersion !== undefined))
+      throw new DomainError('validation_failed');
+    if (catalogChoice) {
+      const previous = await findManagedCreationRequest(
+        db,
+        context,
+        input.idempotencyKey,
+        input,
+        env,
+      );
+      if (previous) return c.json(previous, 202);
+    }
+    const choice =
+      fabric || forge
+        ? await (forge ? resolveForgeCreationChoice : resolveFabricCreationChoice)(
+            db,
+            (await management()).adapter,
+            context,
+            {
+              choiceId: input.minecraft.choiceId,
+              loaderVersion: input.minecraft.loaderVersion ?? '',
+            },
+            env,
+          )
+        : paper
+          ? await resolvePaperCreationChoice(
+              db,
+              (await management()).adapter,
+              context,
+              { choiceId: input.minecraft.choiceId },
+              env,
+            )
+          : await requireMinecraftChoice(db, context, input.minecraft.choiceId, env);
     const { service, options: content } = await contentOptions(context);
     const prepared = await prepareMinecraftCreationConfig(
       db,
-      input.minecraft.choiceId,
+      choice.row.id,
       input.minecraft.configuration,
       content,
     );
+    // Content preparation can involve remote work; sample immediately before admission.
+    // The first server cannot depend on worker reconciliation having sampled this host.
+    await service.refreshStorage(db, { mappingId: choice.row.mapping_id });
+    await service.refreshObservations();
     return c.json(
       await createManagedServer(
         db,
@@ -372,10 +512,13 @@ export function registerMinecraftRoutes(
         {
           ...input,
           mappingId: choice.row.mapping_id,
-          minecraft: { ...input.minecraft, configuration: prepared.configuration },
+          minecraft: { choiceId: choice.row.id, configuration: prepared.configuration },
         },
         env,
-        { minecraftInitialContent: prepared.initialContent },
+        {
+          minecraftInitialContent: prepared.initialContent,
+          ...(catalogChoice ? { creationRequest: input } : {}),
+        },
       ),
       202,
     );
@@ -383,8 +526,11 @@ export function registerMinecraftRoutes(
   app.post('/v1/servers/:id/minecraft/operations', async (c) => {
     const context = await principal(c),
       serverId = c.req.param('id');
-    await authorizeServer(db, context, serverId, 'server:manage');
     const input = parse(operationSchema, await body(c));
+    for (const key of input.action === 'minecraft-content'
+      ? minecraftContentPermissionKeys(parse(minecraftContentCommandSchema, input.command))
+      : ['server:manage'])
+      await authorizeServer(db, context, serverId, key);
     const { options: content } = await contentOptions(context, serverId);
     if (input.action === 'minecraft-content') {
       const plan = await prepareMinecraftContentPlan(db, serverId, input.command, content);
@@ -439,44 +585,147 @@ export function registerMinecraftRoutes(
       ),
     });
   });
+  app.get('/v1/servers/:id/minecraft/worlds/:world/archive', async (c) => {
+    const context = await principal(c),
+      serverId = c.req.param('id');
+    const world = minecraftWorldName(c.req.param('world'));
+    const permission = 'game.minecraft.worlds.download';
+    await authorizeServer(db, context, serverId, permission);
+    const service = await management();
+    return downloadServerArchive(service, context, serverId, {
+      root: '',
+      files: [world],
+      signal: c.req.raw.signal,
+      permission,
+      validate: async (identifier, connection, current, server) => {
+        if (server.runtime_state !== 'offline' || server.active_operation_id)
+          throw new DomainError('conflict');
+        const snapshot = await inspectMinecraftWorlds(
+          connection,
+          service.adapter,
+          serverId,
+          () =>
+            service.authorizeTransfer(
+              current,
+              serverId,
+              false,
+              connection,
+              undefined,
+              server,
+              false,
+              permission,
+            ),
+          env,
+          c.req.raw.signal,
+          service.fileReadPhase(identifier, server, c.req.raw.signal),
+        );
+        if (
+          !snapshot.worlds.some((entry) => entry.name === world && entry.status !== 'unavailable')
+        )
+          throw new DomainError('not_found');
+      },
+    });
+  });
   app.get('/v1/servers/:id/minecraft/worlds', async (c) => {
     const context = await principal(c),
       serverId = c.req.param('id');
-    await authorizeServer(db, context, serverId, 'server:manage');
+    await authorizeServer(db, context, serverId, 'game.minecraft.worlds.read');
+    const service = permissionRuntime(await management(), 'game.minecraft.worlds');
+    c.header('cache-control', 'no-store');
     return c.json(
-      await listMinecraftWorlds(
-        db,
-        (await management()).adapter,
+      await service.fileReadScope(
+        context,
         serverId,
-        async () => {
-          await authorizeServer(db, await principal(c), serverId, 'server:manage');
+        async (files, _identifier, connection, _current, server) => {
+          const results = await Promise.allSettled([
+            service.prepareWorldSelection(server, connection),
+            inspectMinecraftWorlds(
+              connection,
+              service.adapter,
+              serverId,
+              async () => {},
+              env,
+              c.req.raw.signal,
+              files,
+              service.worldPreparation,
+            ),
+          ]);
+          if (results[1].status === 'rejected') throw results[1].reason;
+          return results[1].value;
         },
-        env,
+        c.req.raw.signal,
       ),
     );
   });
   app.get('/v1/servers/:id/minecraft', async (c) => {
     const serverId = c.req.param('id');
-    await authorizeServer(db, await principal(c), serverId);
+    const context = await principal(c);
+    const server = await authorizeServer(db, context, serverId, 'game.minecraft.properties.read');
+    const permissions = await getServerPermissionKeys(db, context, server);
     const profile = await db
       .selectFrom('minecraft_server_profiles')
       .selectAll()
       .where('server_id', '=', serverId)
       .executeTakeFirst();
     if (!profile) throw new DomainError('not_found');
-    const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
-    const content = await db
-      .selectFrom('minecraft_content_items')
-      .select(['path', 'artifact', 'installed_at'])
-      .where('server_id', '=', serverId)
-      .execute();
+    const service = permissionRuntime(await management(), 'game.minecraft.properties');
+    c.header('Cache-Control', 'no-store');
+    const [effectiveProperties, choice, content] = await Promise.all([
+      service.fileReadScope(
+        context,
+        serverId,
+        async (files, _identifier, _connection, current) => {
+          // Optional grants remain private and do not delay showing the current file.
+          void service.prepareFileWrites(current, serverId, ['server.properties']).catch(() => {});
+          const bytes = await files.read({ path: 'server.properties', maxBytes: 1048576 });
+          if (!bytes) throw new DomainError('not_found');
+          const properties = parseMinecraftProperties(Buffer.from(bytes).toString('utf8'));
+          return Object.fromEntries(
+            Object.entries(properties).filter(([key]) =>
+              minecraftEditablePropertyKeys.includes(key),
+            ),
+          );
+        },
+        c.req.raw.signal,
+      ),
+      inspectMinecraftCombination(db, profile.combination_id, env),
+      db
+        .selectFrom('minecraft_content_items')
+        .select(['path', 'artifact', 'installed_at'])
+        .where('server_id', '=', serverId)
+        .execute(),
+    ]);
+    const configuration = parse(z.record(z.string(), z.unknown()), profile.configuration);
     return c.json({
       choiceId: profile.combination_id,
       version: choice.combination.release,
       runtime: choice.combination.profile,
+      supportedProperties: Object.keys(effectiveProperties),
+      effectiveProperties,
       installed: profile.installed,
-      configuration: profile.configuration,
-      content,
+      configuration: {
+        eula: configuration.eula,
+        properties: configuration.properties,
+        operators: permissions.includes('game.minecraft.players.read')
+          ? configuration.operators
+          : [],
+        whitelist: permissions.includes('game.minecraft.players.read')
+          ? configuration.whitelist
+          : [],
+        ...(permissions.includes('game.minecraft.modpacks.read') &&
+        configuration.modpack !== undefined
+          ? { modpack: configuration.modpack }
+          : {}),
+      },
+      content: content.filter(
+        (item) =>
+          permissions.includes('game.minecraft.modpacks.read') ||
+          (item.path.startsWith('mods/') && permissions.includes('game.minecraft.mods.read')) ||
+          (item.path.startsWith('plugins/') &&
+            permissions.includes('game.minecraft.plugins.read')) ||
+          (/^[^/]+\/datapacks\//.test(item.path) &&
+            permissions.includes('game.minecraft.datapacks.read')),
+      ),
     });
   });
 }

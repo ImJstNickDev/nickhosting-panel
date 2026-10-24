@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { crc32 } from 'node:zlib';
-import { inspectJarSide, visitArchive } from './archive.js';
+import { inspectJarEnvironment, visitArchive } from './archive.js';
 import {
   type ContentHttp,
   type ContentLimits,
@@ -22,6 +22,17 @@ export function contentPlanDigest(input: ContentPlan): string {
   return createHash('sha256')
     .update(JSON.stringify(validateContentPlan(input)))
     .digest('hex');
+}
+/** Explicit runtime boundary takes precedence over the legacy staging-fixture convention. */
+export function contentStagingRootAllowed(root: string, storageBoundary?: string): boolean {
+  if (!isAbsolute(root) || resolve(root) === sep) return false;
+  if (storageBoundary !== undefined)
+    return (
+      isAbsolute(storageBoundary) &&
+      resolve(storageBoundary) !== sep &&
+      resolve(root).startsWith(`${resolve(storageBoundary)}${sep}`)
+    );
+  return resolve(root).split(sep).includes('mountdata');
 }
 export async function contentStageDirectory(path: string): Promise<void> {
   if (!isAbsolute(path)) fail('stage_root');
@@ -62,15 +73,18 @@ async function assertJar(
   path: string,
   declared: 'required' | 'optional' | 'unknown',
   limits: Partial<ContentLimits>,
-): Promise<void> {
-  const side = await inspectJarSide(path, limits);
-  if (side === 'client' || (side === 'unknown' && declared === 'unknown'))
+  allowClient = false,
+): Promise<StagedContentFile['environment']> {
+  const side = await inspectJarEnvironment(path, limits);
+  if ((side === 'client' && !allowClient) || (side === 'unknown' && declared === 'unknown'))
     fail('client_or_unknown_content');
+  return side === 'unknown' ? undefined : side;
 }
 export async function stageContent(
   input: ContentPlan,
   options: {
     mountdataRoot: string;
+    storageBoundary?: string;
     jobId: string;
     archivePath?: string;
     http: ContentHttp;
@@ -85,7 +99,7 @@ export async function stageContent(
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(options.jobId) || !isAbsolute(options.mountdataRoot))
     fail('stage_job');
   const root = resolve(options.mountdataRoot);
-  if (root === sep || !root.split(sep).includes('mountdata')) fail('stage_root');
+  if (!contentStagingRootAllowed(root, options.storageBoundary)) fail('stage_root');
   await contentStageDirectory(root);
   if ((await realpath(root)) !== root) fail('stage_root');
   const parent = join(root, 'content-staging');
@@ -119,11 +133,35 @@ export async function stageContent(
     for (const artifact of plan.artifacts) {
       options.signal?.throwIfAborted();
       const target = join(files, artifact.path);
+      const sealPath = join(
+        job,
+        `seal-${createHash('sha256').update(artifact.path).digest('hex')}.json`,
+      );
       await contentStageDirectory(dirname(target));
       // Recovered files are verified against source hashes, never trusted by presence.
       if (await exists(target)) {
         const actual = await digestFile(target);
-        if (actual.size !== artifact.size) fail('stage_existing_mismatch');
+        if (artifact.integrity === 'spiget-tls') {
+          if (!(await exists(sealPath))) {
+            // A crash before sealing is not a completed download; reacquire instead of trusting bytes.
+            await rm(target);
+            fail('stage_existing_unsealed');
+          } else {
+            const info = await lstat(sealPath);
+            if (!info.isFile() || info.isSymbolicLink() || info.size > 1024)
+              fail('stage_existing_mismatch');
+            const seal = JSON.parse(await readFile(sealPath, 'utf8')) as {
+              size?: number;
+              sha256?: string;
+            };
+            if (
+              seal.size !== actual.size ||
+              seal.sha256 !== actual.sha256 ||
+              actual.size > artifact.size
+            )
+              fail('stage_existing_mismatch');
+          }
+        } else if (actual.size !== artifact.size) fail('stage_existing_mismatch');
         const hashes = Object.fromEntries(
           Object.keys(artifact.hashes).map((name) => [name, createHash(name)]),
         );
@@ -136,8 +174,20 @@ export async function stageContent(
           )
         )
           fail('stage_existing_mismatch');
-        if (target.endsWith('.jar')) await assertJar(target, artifact.serverSide, limits);
-        manifest.push({ path: artifact.path, ...actual, source: 'download' });
+        const environment = target.endsWith('.jar')
+          ? await assertJar(
+              target,
+              artifact.serverSide,
+              limits,
+              artifact.kind === 'mod' && artifact.allowClientOnly === true,
+            )
+          : undefined;
+        manifest.push({
+          path: artifact.path,
+          ...actual,
+          source: 'download',
+          ...(environment ? { environment } : {}),
+        });
         continue;
       }
       await assertContentDiskSpace(job, artifact.size, options.diskPolicy);
@@ -148,7 +198,9 @@ export async function stageContent(
         });
         const actual = await digestFile(temporary);
         if (
-          actual.size !== artifact.size ||
+          (artifact.integrity === 'spiget-tls'
+            ? actual.size > artifact.size
+            : actual.size !== artifact.size) ||
           reported.sha256 !== actual.sha256 ||
           reported.size !== actual.size
         )
@@ -166,9 +218,25 @@ export async function stageContent(
           )
         )
           fail('download_hash');
-        if (target.endsWith('.jar')) await assertJar(temporary, artifact.serverSide, limits);
+        const environment = target.endsWith('.jar')
+          ? await assertJar(
+              temporary,
+              artifact.serverSide,
+              limits,
+              artifact.kind === 'mod' && artifact.allowClientOnly === true,
+            )
+          : undefined;
+        if (artifact.integrity === 'spiget-tls') {
+          if (await exists(sealPath)) await rm(sealPath);
+          await readWriteExclusive(sealPath, JSON.stringify(actual));
+        }
         await rename(temporary, target);
-        manifest.push({ path: artifact.path, ...actual, source: 'download' });
+        manifest.push({
+          path: artifact.path,
+          ...actual,
+          source: 'download',
+          ...(environment ? { environment } : {}),
+        });
       } finally {
         await rm(temporary, { force: true });
       }
@@ -253,13 +321,13 @@ async function readWriteExclusive(path: string, content: string): Promise<void> 
 /** Only the coordinator, after proving the DB job is not running, may clear a crash-left lock. */
 export async function recoverContentStageLock(options: {
   mountdataRoot: string;
+  storageBoundary?: string;
   jobId: string;
   expectedPlanDigest: string;
   assertExclusiveJob: () => Promise<void>;
 }): Promise<void> {
   if (
-    !isAbsolute(options.mountdataRoot) ||
-    !resolve(options.mountdataRoot).split(sep).includes('mountdata') ||
+    !contentStagingRootAllowed(options.mountdataRoot, options.storageBoundary) ||
     !/^[A-Za-z0-9_-]{1,128}$/.test(options.jobId)
   )
     fail('stage_job');

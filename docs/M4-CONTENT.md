@@ -61,6 +61,14 @@ Each job pins one plan digest. An existing file is rehashed before reuse; corrup
 
 Default configurable budgets are 20,000 ZIP entries, 8 GiB archive/per-file sizes, 16 GiB expanded output, 500:1 expansion ratio, 8 MiB metadata and 512 resolved projects. These are safety budgets, not a fixed small upload limit. Owners may adjust budgets after considering actual storage; unsupported oversized content receives an explicit failure before publication.
 
+World archive transfers share the root listing between collision checks and
+upload preparation. Once that read proves the exact job staging directory absent,
+the upload adapter does not list the nonexistent directory again: Wings can
+return 500 for that request. Other upload paths retain their normal lookups.
+The signed upload grant and quota checks remain concurrent; all must settle
+before any bytes are sent. Root errors, existing destinations and case-alias
+collisions still prevent transfer. This requires no Panel or Wings modification.
+
 ## Evidence and limits
 
 Package checks on 2026-10-09:

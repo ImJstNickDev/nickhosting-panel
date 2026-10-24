@@ -10,6 +10,7 @@ import { resolve } from 'node:path';
 import { parseEnv } from 'node:util';
 import { createGatewayDataPlane } from '../apps/game-gateway/src/data-plane.js';
 import { probeNodeEndpoint } from '../apps/game-gateway/src/node-probe.js';
+import { storagePath } from '../deploy/storage-root.mjs';
 import type {
   GatewayProtocolAdapter,
   GatewayRoute,
@@ -348,7 +349,7 @@ async function main() {
     JSON.parse(docker('info', '--format', '{{json .ID}}')),
     required('NH_M3_DOCKER_DAEMON_ID'),
   );
-  const stateDirectory = resolve('mountdata/test-assets');
+  const stateDirectory = storagePath('test-assets');
   await mkdir(stateDirectory, { recursive: true });
   const ledgerPath = resolve(stateDirectory, `m3-network-${fixtureUuid}.json`);
   const lock = await open(`${ledgerPath}.lock`, 'wx', 0o600);
@@ -754,7 +755,7 @@ async function main() {
       checks,
       directInventoryCount: ledger.results.at(-1)?.directInventoryCount,
       fixtureUuid,
-      provenanceLedger: `mountdata/test-assets/m3-network-${fixtureUuid}.json`,
+      provenanceLedger: storagePath(`test-assets/m3-network-${fixtureUuid}.json`),
       infrastructureMutations: 0,
       independentProductionNamespaceProof: false,
       timingMs,

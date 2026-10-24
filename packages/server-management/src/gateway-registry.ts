@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { type AuthContext, assertPermission, DomainError } from '@nickhosting/core';
+import {
+  type AuthContext,
+  assertPermission,
+  DomainError,
+  gatewayMessageOverridesSchema,
+} from '@nickhosting/core';
 import { type Database, getSettings, recordAudit } from '@nickhosting/database';
 import {
   type GatewayMinecraftProtocol,
@@ -7,28 +12,30 @@ import {
   gatewayMinecraftProtocolSchema,
   gatewaySnapshotSchema,
 } from '@nickhosting/game-sdk';
-import { minecraftDigest } from '@nickhosting/minecraft';
+import { minecraftGatewayDeclaration } from '@nickhosting/minecraft';
 import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
 import { type DB, type Environment, lockResources } from './admission.js';
 import {
   allocationAddressesOverlap,
+  backendAllocationAddress,
   canonicalAllocationAddress,
   effectiveBackendAllocationPool,
 } from './allocation-pool.js';
 import { getGatewayState } from './gateway-orchestration.js';
+import { getGatewayPresentationVariables } from './gateway-presentation.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { authorizeServer, parse } from './registry.js';
 
-/** Existing managed servers retain verified management when creation availability is disabled.
- * Experimental testing is always checked against the actual server Owner, never the API caller. */
+/** Existing managed servers retain declared routing when creation availability is disabled.
+ * Compiled support declarations are independent of local diagnostic test reports. */
 export async function requireMinecraftGatewayProtocol(
   db: DB,
   serverId: string,
   registration: { handlerId: string; gameVersion: string },
   env: Environment = {},
-  now = new Date(),
+  _now = new Date(),
 ): Promise<GatewayMinecraftProtocol | undefined> {
   const server = await db
     .selectFrom('managed_servers as server')
@@ -39,12 +46,13 @@ export async function requireMinecraftGatewayProtocol(
     .where('server.deleted_at', 'is', null)
     .executeTakeFirst();
   if (!server) throw new DomainError('not_found');
-  if (server.game_id !== 'minecraft-java') {
+  if (server.connection_mode === 'direct') throw new DomainError('integration_unavailable');
+  if (server.game_id !== 'minecraft') {
     if (registration.handlerId === 'minecraft-java') throw new DomainError('configuration_invalid');
     return undefined;
   }
   const unavailable = () =>
-    new DomainError('integration_unavailable', 503, { reason: 'minecraft_gateway_evidence' });
+    new DomainError('integration_unavailable', 503, { reason: 'minecraft_gateway_unsupported' });
   const profile = await db
     .selectFrom('minecraft_server_profiles')
     .selectAll()
@@ -55,57 +63,31 @@ export async function requireMinecraftGatewayProtocol(
   const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
   if (
     choice.row.mapping_id !== server.mapping_id ||
+    choice.row.mapping_digest !== choice.mappingDigest ||
     choice.mapping.game_id !== server.game_id ||
     choice.mapping.runtime_id !== server.runtime_id ||
     choice.combination.profile !== server.runtime_id ||
     registration.handlerId !== 'minecraft-java' ||
     registration.gameVersion !== choice.combination.release ||
-    choice.combination.family !== 'netty' ||
+    choice.combination.family === 'unknown' ||
     choice.combination.protocolId === null
   )
     throw unavailable();
-  const rollout = await db
-    .selectFrom('game_rollouts')
-    .selectAll()
-    .where('integration_id', '=', 'minecraft-java')
-    .executeTakeFirst();
-  if (!rollout) throw unavailable();
-  if (choice.support !== 'verified') {
-    const owner = await db
-      .selectFrom('user')
-      .select(['id', 'role'])
-      .where('id', '=', server.owner_id)
-      .executeTakeFirst();
-    if (
-      choice.support !== 'experimental' ||
-      rollout.state !== 'private-testing' ||
-      !owner ||
-      (owner.role !== 'owner' && !rollout.allowlist.includes(owner.id))
-    )
-      throw unavailable();
-  }
-  const matching = choice.evidence
-    .filter(
-      (report) =>
-        report.combinationDigest === minecraftDigest(choice.combination) &&
-        report.choiceDigest === choice.row.identity_digest &&
-        report.mappingDigest === choice.mappingDigest &&
-        Date.parse(report.recordedAt) <= now.getTime() &&
-        now.getTime() - Date.parse(report.recordedAt) < 180 * 86400000,
-    )
-    .sort((a, b) => Date.parse(b.recordedAt) - Date.parse(a.recordedAt));
-  const report = matching[0];
-  if (!report || (matching[1] && matching[1].recordedAt === report.recordedAt)) throw unavailable();
+  const declaration = minecraftGatewayDeclaration(choice.combination.profile);
+  if (!choice.capabilities.gateway || !declaration) throw unavailable();
+  const { values } = await getSettings(db, env);
   return gatewayMinecraftProtocolSchema.parse({
+    ...(values.minecraftGatewayResponses ? { responses: values.minecraftGatewayResponses } : {}),
     release: choice.combination.release,
     protocolId: choice.combination.protocolId,
-    family: 'netty',
+    family: choice.combination.family,
     transfer: 'transfer' in choice.combination && choice.combination.transfer === true,
     acceptsTransfers: false,
     choiceId: choice.row.id,
     choiceDigest: choice.row.identity_digest,
-    evidenceRunId: report.runId,
-    evidenceExpiresAt: new Date(Date.parse(report.recordedAt) + 180 * 86400000).toISOString(),
+    supportSource: 'integration',
+    declarationId: declaration.id,
+    declarationVersion: declaration.version,
   });
 }
 
@@ -154,7 +136,8 @@ export async function setGatewayRoute(
     assertPermission(current, 'settings:write');
     if (current.sessionType !== 'regular') throw new DomainError('forbidden');
     const config = await gatewayConfiguration(tx, env);
-    const server = await authorizeServer(tx, current, value.serverId, 'server:manage');
+    const server = await authorizeServer(tx, current, value.serverId, 'settings.write');
+    if (server.connection_mode === 'direct') throw new DomainError('integration_unavailable');
     if (
       !server.pterodactyl_uuid ||
       !server.pterodactyl_id ||
@@ -171,28 +154,6 @@ export async function setGatewayRoute(
         env,
       );
     }
-    const node = await tx
-      .selectFrom('managed_nodes')
-      .selectAll()
-      .where('id', '=', server.node_id)
-      .executeTakeFirstOrThrow();
-    const claim = await tx
-      .selectFrom('server_allocations')
-      .selectAll()
-      .where('id', '=', value.allocationId)
-      .where('server_id', '=', server.id)
-      .where('node_id', '=', node.id)
-      .executeTakeFirst();
-    const pool = effectiveBackendAllocationPool(node, env);
-    if (
-      !node.enabled ||
-      node.physical_host_id !== config.gatewayPhysicalHostId ||
-      !claim ||
-      !claim.protocols.includes(value.transport) ||
-      !pool?.gatewayBindAddresses.includes(address) ||
-      allocationAddressesOverlap(address, claim.backend_address)
-    )
-      throw new DomainError('allocation_unavailable');
     const existing = await tx
       .selectFrom('gateway_routes')
       .selectAll()
@@ -204,22 +165,20 @@ export async function setGatewayRoute(
     if (
       old &&
       (old.server_id !== server.id ||
-        old.allocation_id !== claim.id ||
+        old.allocation_id !== value.allocationId ||
         old.public_address !== address ||
         old.public_port !== value.publicPort ||
         old.transport !== value.transport)
     )
       throw new DomainError('conflict');
-    if (
-      existing.some(
-        (row) =>
-          row.id !== id &&
-          row.public_port === value.publicPort &&
-          row.transport === value.transport &&
-          allocationAddressesOverlap(address, row.public_address),
-      )
-    )
-      throw new DomainError('allocation_unavailable');
+    const claim = await validateGatewayRouteEndpoint(
+      tx,
+      server.node_id,
+      { ...value, id },
+      config,
+      env,
+      !old,
+    );
     await tx
       .insertInto('gateway_routes')
       .values({
@@ -245,6 +204,111 @@ export async function setGatewayRoute(
     return { id };
   });
 }
+/** Shared namespace validation. Caller holds the global resource lock. No auth
+ * bypass: interactive authorization and trusted durable provision ownership are
+ * checked independently by their entry points. */
+export async function validateGatewayRouteEndpoint(
+  tx: DB,
+  serverNodeId: string,
+  value: z.infer<typeof routeInput> & { id: string },
+  config: { gatewayId: string; gatewayPhysicalHostId: string },
+  env: Environment = {},
+  checkDisabled = true,
+) {
+  const address = canonicalAllocationAddress(value.publicAddress);
+  if (
+    !address ||
+    address !== value.publicAddress ||
+    ['0.0.0.0', '::'].includes(address) ||
+    address.startsWith('::ffff:')
+  )
+    throw new DomainError('validation_failed');
+  const node = await tx
+    .selectFrom('managed_nodes')
+    .selectAll()
+    .where('id', '=', serverNodeId)
+    .executeTakeFirstOrThrow();
+  const claim = await tx
+    .selectFrom('server_allocations')
+    .selectAll()
+    .where('id', '=', value.allocationId)
+    .where('server_id', '=', value.serverId)
+    .where('node_id', '=', node.id)
+    .executeTakeFirst();
+  const pool = effectiveBackendAllocationPool(node, env);
+  if (
+    !node.enabled ||
+    node.physical_host_id !== config.gatewayPhysicalHostId ||
+    !claim ||
+    !claim.protocols.includes(value.transport) ||
+    !pool?.gatewayBindAddresses.includes(address) ||
+    allocationAddressesOverlap(address, claim.backend_address)
+  )
+    throw new DomainError('allocation_unavailable');
+  const existing = await tx
+    .selectFrom('gateway_routes')
+    .selectAll()
+    .where('gateway_id', '=', config.gatewayId)
+    .execute();
+  if (
+    existing.some(
+      (row) =>
+        row.id !== value.id &&
+        row.public_port === value.publicPort &&
+        row.transport === value.transport &&
+        allocationAddressesOverlap(address, row.public_address),
+    )
+  )
+    throw new DomainError('allocation_unavailable');
+  if (value.enabled || checkDisabled) {
+    // Direct allocations can share the Gateway's IP, but never its listener port.
+    // Include disabled pools and retained claims: removing an editable pin does
+    // not release the corresponding provider binding. Wings publishes both
+    // transports, independently of the game's declared transport roles.
+    const hostNodes = await tx
+      .selectFrom('managed_nodes')
+      .selectAll()
+      .where('physical_host_id', '=', node.physical_host_id)
+      .execute();
+    for (const hostNode of hostNodes) {
+      const hostPool = effectiveBackendAllocationPool(hostNode, env);
+      if (
+        hostPool?.allocations.some(
+          (pin) =>
+            pin.port === value.publicPort &&
+            allocationAddressesOverlap(address, backendAllocationAddress(pin)),
+        )
+      )
+        throw new DomainError('allocation_unavailable');
+    }
+    const hostClaims = await tx
+      .selectFrom('server_allocations as allocation')
+      .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'allocation.node_id')
+      .select('allocation.backend_address')
+      .where('ownerNode.physical_host_id', '=', node.physical_host_id)
+      .where('allocation.port', '=', value.publicPort)
+      .execute();
+    if (hostClaims.some((entry) => allocationAddressesOverlap(address, entry.backend_address)))
+      throw new DomainError('allocation_unavailable');
+    const hostRoutes = await tx
+      .selectFrom('gateway_routes as route')
+      .innerJoin('server_allocations as allocation', 'allocation.id', 'route.allocation_id')
+      .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'allocation.node_id')
+      .select(['route.id', 'route.public_address'])
+      .where('ownerNode.physical_host_id', '=', node.physical_host_id)
+      .where('route.public_port', '=', value.publicPort)
+      .where('route.transport', '=', value.transport)
+      .execute();
+    if (
+      hostRoutes.some(
+        (entry) =>
+          entry.id !== value.id && allocationAddressesOverlap(address, entry.public_address),
+      )
+    )
+      throw new DomainError('allocation_unavailable');
+  }
+  return claim;
+}
 export async function listGatewayRoutes(db: DB, context: AuthContext) {
   assertPermission(context, 'settings:write');
   if (context.sessionType !== 'regular') throw new DomainError('forbidden');
@@ -267,7 +331,7 @@ export async function listGatewayRoutes(db: DB, context: AuthContext) {
 }
 /** One serialized full snapshot, with persisted monotonic content revisions. */
 export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment = {}) {
-  return db.transaction().execute(async (tx) => {
+  const snapshot = async (tx: Kysely<Database>) => {
     await lockResources(tx);
     const config = await gatewayConfiguration(tx, env),
       gatewayId = config.gatewayId;
@@ -283,7 +347,15 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
       .selectAll('route')
       .select([
         'server.node_id',
+        'server.name as server_name',
+        'policy.gateway_messages',
+        'policy.startup_deadline_at',
+        'policy.readiness_timeout_seconds',
+        'server.runtime_state',
+        'server.active_operation_id',
         'mapping.game_id',
+        'mapping.runtime_id',
+        'policy.game_version',
         'policy.protocol_id as stored_handler_id',
         'allocation.address',
         'allocation.backend_address',
@@ -294,20 +366,84 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
       .where('route.gateway_id', '=', gatewayId)
       .where('route.enabled', '=', true)
       .where('server.deleted_at', 'is', null)
+      .where('server.connection_mode', '=', 'gateway')
       .where('server.pterodactyl_uuid', 'is not', null)
+      // An active reinstall may be between provider startup configuration and
+      // registry confirmation. Withdraw only this route until the operation
+      // releases it; never validate or renew a route with a transitional egg.
+      .where((eb) =>
+        eb.not(
+          eb.exists(
+            eb
+              .selectFrom('server_operations as installing')
+              .select('installing.job_id')
+              .whereRef('installing.job_id', '=', 'server.active_operation_id')
+              .whereRef('installing.server_id', '=', 'server.id')
+              .where('installing.action', '=', 'reinstall'),
+          ),
+        ),
+      )
       .where('node.enabled', '=', true)
       .where('node.physical_host_id', '=', config.gatewayPhysicalHostId)
       .orderBy('route.id')
       .limit(10001)
       .execute();
     if (rows.length > 10000) throw new DomainError('configuration_invalid');
+    const presentationVariables = await getGatewayPresentationVariables(
+      tx,
+      rows.map((row) => ({
+        id: row.server_id,
+        runtimeId: row.runtime_id,
+        gameVersion: row.game_version ?? '',
+      })),
+    );
+    // One batched lookup, selecting the latest operation before checking success.
+    // Filtering for successful stops in SQL would resurrect an older proof after a
+    // newer failed/uncertain operation. No per-route operation/reservation query.
+    const serverIds = [
+      ...new Set(
+        rows
+          .filter((row) => row.runtime_state === 'offline' || row.active_operation_id !== null)
+          .map((row) => row.server_id),
+      ),
+    ];
+    const completedOperations = serverIds.length
+      ? await tx
+          .selectFrom('server_operations as operation')
+          .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+          .leftJoin(
+            'resource_reservations as reservation',
+            'reservation.server_id',
+            'operation.server_id',
+          )
+          .select([
+            'operation.server_id',
+            'operation.job_id',
+            'operation.action',
+            'operation.phase',
+            'operation.effect_state',
+            'operation.plan',
+            'job.state',
+            'job.completed_at',
+            'reservation.server_id as reserved_server_id',
+          ])
+          .where('operation.server_id', 'in', serverIds)
+          .distinctOn('operation.server_id')
+          .orderBy('operation.server_id')
+          .orderBy('job.created_at', 'desc')
+          .orderBy('job.id', 'desc')
+          .execute()
+      : [];
+    const latestOperations = new Map(
+      completedOperations.map((operation) => [operation.server_id, operation]),
+    );
     const routes: GatewayRoute[] = [];
     for (const row of rows) {
       let state: Awaited<ReturnType<typeof getGatewayState>>;
       let minecraft: GatewayMinecraftProtocol | undefined;
       try {
         state = await getGatewayState(tx, row.server_id, { env });
-        if (row.game_id === 'minecraft-java') {
+        if (row.game_id === 'minecraft') {
           minecraft = await requireMinecraftGatewayProtocol(
             tx,
             row.server_id,
@@ -319,11 +455,51 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
         }
       } catch (error) {
         if (
-          (row.game_id === 'minecraft-java' || row.stored_handler_id === 'minecraft-java') &&
+          (row.game_id === 'minecraft' || row.stored_handler_id === 'minecraft-java') &&
           (error instanceof DomainError || error instanceof z.ZodError)
         )
           continue;
         throw error;
+      }
+      const operation = latestOperations.get(row.server_id);
+      let completedSleep: GatewayRoute['completedSleep'];
+      if (
+        state.state === 'sleeping' &&
+        row.runtime_state === 'offline' &&
+        row.active_operation_id === null &&
+        operation &&
+        !operation.reserved_server_id &&
+        operation.state === 'succeeded' &&
+        operation.completed_at &&
+        operation.completed_at.getTime() <= now &&
+        operation.action === 'stop' &&
+        operation.phase === 'complete' &&
+        operation.effect_state === 'confirmed' &&
+        operation.plan.stopConfirmed === true
+      ) {
+        const marker = z
+          .object({
+            kind: z.literal('sleep'),
+            generation: z.uuid(),
+            quiescenceUntil: z.iso.datetime({ offset: true }),
+          })
+          .safeParse(operation.plan.gatewayAutomation);
+        const confirmedAt = z.iso
+          .datetime({ offset: true })
+          .safeParse(operation.plan.stopConfirmedAt);
+        if (
+          marker.success &&
+          marker.data.generation === state.generation &&
+          confirmedAt.success &&
+          Date.parse(confirmedAt.data) <= operation.completed_at.getTime()
+        ) {
+          completedSleep = {
+            jobId: operation.job_id,
+            generation: marker.data.generation,
+            quiescenceUntil: marker.data.quiescenceUntil,
+            completedAt: operation.completed_at.toISOString(),
+          };
+        }
       }
       const payload = {
         id: row.id,
@@ -331,6 +507,7 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
         nodeId: row.node_id,
         allocationId: row.allocation_id,
         generation: state.generation,
+        ...(completedSleep ? { completedSleep } : {}),
         ...(state.sleepEligibleAt ? { sleepEligibleAt: state.sleepEligibleAt } : {}),
         ...(state.wakeJobId ? { wakeJobId: state.wakeJobId } : {}),
         public: { address: row.public_address, port: row.public_port, transport: row.transport },
@@ -342,6 +519,37 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
           ...(minecraft ? { minecraft } : {}),
         },
         mode: state.state,
+        wakeEnabled: state.wakeEnabled,
+        presentation: {
+          serverName: row.server_name,
+          variables: presentationVariables.get(row.server_id),
+          ...(operation?.action === 'stop' &&
+          row.active_operation_id === operation.job_id &&
+          ['queued', 'running', 'uncertain'].includes(operation.state)
+            ? { stopping: true }
+            : {}),
+          messages: gatewayMessageOverridesSchema.parse(row.gateway_messages ?? {}),
+          ...(state.errorCode === 'resources_unavailable'
+            ? { blockedReason: 'capacity_denied' as const }
+            : state.errorCode === 'integration_unavailable'
+              ? { blockedReason: 'unavailable' as const }
+              : {}),
+          ...(state.state === 'waking' && row.startup_deadline_at && row.readiness_timeout_seconds
+            ? {
+                ...(state.startupEstimate
+                  ? {
+                      estimatedStartupSeconds: Math.min(
+                        86400,
+                        Math.ceil(state.startupEstimate.p90Ms / 1000),
+                      ),
+                    }
+                  : {}),
+                startupBeganAt: new Date(
+                  row.startup_deadline_at.getTime() - row.readiness_timeout_seconds * 1000,
+                ).toISOString(),
+              }
+            : {}),
+        },
         locale: row.locale === 'it' ? ('it' as const) : ('en' as const),
       };
       const hash = digest(payload),
@@ -386,7 +594,7 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
         Math.min(
           now + config.gatewayLeaseSeconds * 1000,
           ...routes.map((route) =>
-            route.protocol?.minecraft
+            route.protocol?.minecraft && route.protocol.minecraft.supportSource !== 'integration'
               ? Date.parse(route.protocol.minecraft.evidenceExpiresAt)
               : Number.POSITIVE_INFINITY,
           ),
@@ -394,7 +602,10 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
       ).toISOString(),
       routes,
     });
-  });
+  };
+  // Readiness revalidates routes under its existing resource transaction. Keep
+  // snapshot revision writes in that transaction instead of nesting a new one.
+  return db.isTransaction ? snapshot(db) : db.transaction().execute(snapshot);
 }
 export async function requireGatewayRoute(
   db: Kysely<Database>,
@@ -423,7 +634,7 @@ export async function gatewaySafetyContext(db: DB, route: GatewayRoute) {
       's.pterodactyl_id',
       's.pterodactyl_uuid',
       's.external_id',
-      'n.provision_user_id',
+      's.provider_user_id',
       'n.pterodactyl_node_id',
       'a.pterodactyl_allocation_id',
       'm.nest_id',
@@ -431,14 +642,16 @@ export async function gatewaySafetyContext(db: DB, route: GatewayRoute) {
     ])
     .where('s.id', '=', route.serverId)
     .where('s.deleted_at', 'is', null)
+    .where('s.connection_mode', '=', 'gateway')
     .where('a.id', '=', route.allocationId)
     .executeTakeFirst();
-  if (!row?.pterodactyl_id || !row.pterodactyl_uuid) throw new DomainError('not_found');
+  if (!row?.pterodactyl_id || !row.pterodactyl_uuid || !row.provider_user_id)
+    throw new DomainError('not_found');
   return {
     providerServerId: row.pterodactyl_id,
     providerServerUuid: row.pterodactyl_uuid,
     externalId: row.external_id,
-    providerUserId: row.provision_user_id,
+    providerUserId: row.provider_user_id,
     providerNodeId: row.pterodactyl_node_id,
     providerAllocationId: row.pterodactyl_allocation_id,
     nestId: row.nest_id,

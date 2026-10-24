@@ -1,0 +1,807 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { authSessionId } from '@nickhosting/core';
+import { createTestDatabase } from '@nickhosting/database/testing';
+import { type FilemanReadService, filemanTransferManifestSchema } from '@nickhosting/game-sdk';
+import type { ApplicationServer, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { minecraftModpackPrepareSchema } from '../../../games/minecraft/src/modpack-contracts.js';
+import type { MinecraftModpackOperationRow } from './minecraft-modpacks.js';
+import {
+  modpackDigest,
+  type PreparedMinecraftModpack,
+  planMinecraftModpack,
+} from './minecraft-modpacks-plan.js';
+import { createMinecraftModpackBridge } from './modpack-bridge.js';
+import {
+  completeModpackJob,
+  createModpackContext,
+  withModpackServerLock,
+} from './modpack-context.js';
+import type { ManagementRuntime } from './runtime.js';
+import { minecraftManagementFixture } from './test-fixtures.js';
+
+let database: Awaited<ReturnType<typeof createTestDatabase>>;
+beforeAll(async () => {
+  database = await createTestDatabase();
+});
+afterAll(async () => {
+  await database?.destroy();
+});
+
+async function fixture(running = true) {
+  const f = await minecraftManagementFixture(database.db, { interactive: true });
+  const serverId = await f.server();
+  await f.db
+    .updateTable('managed_servers')
+    .set({ connection_mode: 'direct' })
+    .where('id', '=', serverId)
+    .execute();
+  const originalJob = await f.db
+    .selectFrom('server_operations')
+    .select('job_id')
+    .where('server_id', '=', serverId)
+    .executeTakeFirstOrThrow();
+  const server = await f.db
+    .selectFrom('managed_servers')
+    .selectAll()
+    .where('id', '=', serverId)
+    .executeTakeFirstOrThrow();
+  const allocations = await f.db
+    .selectFrom('server_allocations')
+    .selectAll()
+    .where('server_id', '=', serverId)
+    .execute();
+  const remote = {
+    id: server.pterodactyl_id,
+    uuid: server.pterodactyl_uuid,
+    identifier: server.pterodactyl_identifier,
+    external_id: server.external_id,
+    node: f.providerNodeId,
+    user: server.provider_user_id,
+    allocation: allocations.find((a) => a.is_primary)?.pterodactyl_allocation_id,
+    relationships: {
+      allocations: {
+        data: allocations.map((a) => ({
+          attributes: {
+            id: a.pterodactyl_allocation_id,
+            assigned: true,
+            ip: a.address,
+            port: a.port,
+          },
+        })),
+      },
+    },
+  } as unknown as ApplicationServer;
+  const adapter = {
+    ...f.adapter,
+    getApplicationServer: vi.fn(async () => remote),
+    stopWithConfirmation: vi.fn(async (_id, _identifier, options) => {
+      expect(await options.authorize()).toBe(true);
+      await options.beforePower();
+      running = false;
+      await options.onConfirmed();
+      return { confirmed: true };
+    }),
+  } as unknown as PterodactylAdapter;
+  const runtime = {
+    adapter,
+    containerObserver: { stopped: vi.fn(async (_uuid, kind) => kind === 'installer' || !running) },
+    lifecycle: {},
+    fileDirectoryBatch: vi.fn(async () => []),
+  } as unknown as ManagementRuntime;
+  const row = await f.db
+    .insertInto('minecraft_modpack_operations')
+    .values({
+      id: randomUUID(),
+      server_id: serverId,
+      actor_user_id: f.context.actorUserId,
+      actor_session_id: f.context[authSessionId] as string,
+      subject_user_id: f.context.subjectUserId,
+      support_session_id: null,
+      resource_owner_id: server.owner_id,
+      physical_host_id: f.hostId,
+      held_bytes: '0',
+      staging_root: null,
+      idempotency_key: randomUUID(),
+      selection: '{}',
+      state: 'applying',
+      phase: 'checking',
+      progress: 'null',
+      prepared: 'null',
+      plan: 'null',
+      plan_digest: null,
+      blockers: '[]',
+      apply_request: 'null',
+      apply_actor_user_id: f.context.actorUserId,
+      apply_actor_session_id: f.context[authSessionId] as string,
+      apply_subject_user_id: f.context.subjectUserId,
+      apply_support_session_id: null,
+      apply_idempotency_key: randomUUID(),
+      journal: '[]',
+      backup_id: null,
+      restart_required: false,
+      error: null,
+      lease_token: randomUUID(),
+      lease_until: new Date(Date.now() + 60000),
+    })
+    .returningAll()
+    .executeTakeFirstOrThrow();
+  const options = {
+    db: f.db,
+    runtime,
+    operation: row,
+    env: {},
+    currentAuth: async () => f.context,
+  };
+  return { ...f, serverId, runtime, adapter, row, options, originalJob: originalJob.job_id };
+}
+
+describe('Modpacks real lifecycle and Fileman context', () => {
+  it('preflights the sealed archive before effects and reuses it across runtime recovery', async () => {
+    const f = await fixture(false);
+    const directory = await mkdtemp(join(tmpdir(), 'modpack-capacity-'));
+    try {
+      const stagingKey = join(directory, 'prepared');
+      await mkdir(join(stagingKey, 'mods'), { recursive: true });
+      const contents = Buffer.from('sealed mod content');
+      await writeFile(join(stagingKey, 'mods', 'pack.jar'), contents);
+      const target = {
+        minecraftVersion: '1.21.1',
+        loader: 'fabric' as const,
+        loaderVersion: '0.16.10',
+      };
+      const prepared: PreparedMinecraftModpack = {
+        pack: {
+          project: {
+            provider: 'modrinth',
+            id: 'pack',
+            name: 'Pack',
+            summary: '',
+            authors: [],
+            websiteUrl: 'https://example.test/pack',
+          },
+          version: {
+            id: 'v1',
+            projectId: 'pack',
+            name: 'v1',
+            version: '1',
+            minecraftVersions: ['1.21.1'],
+            loaders: ['fabric'],
+            available: true,
+            channel: 'release',
+            source: 'modrinth-index',
+          },
+        },
+        target,
+        stagingKey,
+        blockers: [],
+        files: [
+          {
+            path: 'mods/pack.jar',
+            size: contents.length,
+            sha256: createHash('sha256').update(contents).digest('hex'),
+            modifiedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      };
+      const combinationId = randomUUID();
+      const plan = planMinecraftModpack({
+        selection: minecraftModpackPrepareSchema.parse({
+          provider: 'modrinth',
+          projectId: 'pack',
+          versionId: 'v1',
+          mode: 'install',
+          idempotencyKey: 'preflight',
+        }),
+        prepared,
+        observation: {
+          combinationId,
+          mappingId: f.mappingId,
+          entries: [],
+          worldRoots: [],
+          protectedPaths: [],
+          replacePaths: [],
+        },
+        previous: null,
+        runtime: { combinationId, mappingId: f.mappingId, target },
+      });
+      const policy = {
+        providerMaxFileBytes: 22,
+        temporaryDiskPath: resolve('.'),
+        temporaryDiskBudgetBytes: 16 * 1024 ** 2,
+        temporaryDiskHeadroomBytes: 0,
+      };
+      await f.db
+        .updateTable('physical_hosts')
+        .set({
+          local_disk_path: resolve('.'),
+          disk_headroom_mib: '0',
+          upload_policy: JSON.stringify(policy),
+        })
+        .where('id', '=', f.hostId)
+        .execute();
+      const options = { ...f.options, env: { NH_OBSERVER_ID: 'isolated-observer' } };
+      const host = await createModpackContext(options);
+      await expect(host.preflightPublication(prepared, plan)).rejects.toMatchObject({
+        code: 'validation_failed',
+        status: 413,
+      });
+      expect(host.context.operation().effect_started_at).toBeNull();
+      expect(host.context.operation().plan.modpackArchive).toMatchObject({
+        sourceSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        contentLength: expect.any(Number),
+      });
+      const archive = await readFile(join(directory, 'publication.zip'));
+      expect(
+        await f.db
+          .selectFrom('upload_ingestion_claims')
+          .select('id')
+          .where('server_id', '=', f.serverId)
+          .execute(),
+      ).toEqual([]);
+      await f.db
+        .updateTable('physical_hosts')
+        .set({ upload_policy: JSON.stringify({ ...policy, providerMaxFileBytes: 1024 ** 2 }) })
+        .where('id', '=', f.hostId)
+        .execute();
+      await host.preflightPublication(prepared, plan);
+      const recovered = await createModpackContext(options);
+      await recovered.preflightPublication(prepared, plan);
+      expect(await readFile(join(directory, 'publication.zip'))).toEqual(archive);
+      const fileman = recovered.context.fileman;
+      if (!fileman) throw new Error('Expected Fileman');
+      fileman.readScope = () =>
+        ({
+          listMany: async (paths: readonly string[]) =>
+            paths.map((directory) => ({ directory, files: [] })),
+        }) as unknown as FilemanReadService;
+      fileman.uploadArchive = vi.fn(async (input) => {
+        const completed = await input.completion;
+        const manifest = filemanTransferManifestSchema.parse({
+          id: input.id,
+          destinationRoot: input.destinationRoot,
+          files: completed.files,
+        });
+        expect(manifest.files[0]).not.toHaveProperty('modifiedAt');
+        throw new Error('checked_transfer_manifest');
+      });
+      await expect(recovered.publication.publish(prepared, plan)).rejects.toThrow(
+        'checked_transfer_manifest',
+      );
+      expect(fileman.uploadArchive).toHaveBeenCalledTimes(1);
+      await writeFile(join(directory, 'publication.zip'), Buffer.alloc(archive.length, 42));
+      const changed = await createModpackContext(options);
+      await expect(changed.preflightPublication(prepared, plan)).rejects.toMatchObject({
+        code: 'operation_uncertain',
+      });
+      expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([false, true])(
+    'recovers a missing synthetic job only without dispatch evidence=%s',
+    async (dispatched) => {
+      const f = await fixture(false);
+      const combinationId = randomUUID();
+      await f.db
+        .insertInto('minecraft_combinations')
+        .values({
+          id: combinationId,
+          mapping_id: f.mappingId,
+          identity_digest: 'a'.repeat(64),
+          mapping_digest: 'b'.repeat(64),
+          combination: '{}',
+          resolved_runtime: '{}',
+          binding: '{}',
+        })
+        .execute();
+      await f.db
+        .insertInto('minecraft_server_profiles')
+        .values({
+          server_id: f.serverId,
+          combination_id: combinationId,
+          installed: true,
+          configuration: '{}',
+        })
+        .execute();
+      const selection = minecraftModpackPrepareSchema.parse({
+        provider: 'modrinth',
+        projectId: 'pack',
+        versionId: 'v1',
+        mode: 'install',
+        idempotencyKey: 'recovery',
+      });
+      const prepared: PreparedMinecraftModpack = {
+        pack: {
+          project: {
+            provider: 'modrinth',
+            id: 'pack',
+            name: 'Pack',
+            summary: '',
+            authors: [],
+            websiteUrl: 'https://example.test/pack',
+          },
+          version: {
+            id: 'v1',
+            projectId: 'pack',
+            name: 'v1',
+            version: '1',
+            minecraftVersions: ['1.21.1'],
+            loaders: ['vanilla'],
+            available: true,
+            channel: 'release',
+            source: 'modrinth-index',
+          },
+        },
+        target: { minecraftVersion: '1.21.1', loader: 'vanilla' },
+        stagingKey: 'private',
+        files: [],
+        blockers: [],
+      };
+      const plan = planMinecraftModpack({
+        selection,
+        prepared,
+        observation: {
+          combinationId,
+          mappingId: f.mappingId,
+          entries: [],
+          worldRoots: ['world'],
+          protectedPaths: [],
+          replacePaths: [],
+        },
+        previous: null,
+        runtime: { combinationId, mappingId: f.mappingId, target: prepared.target },
+      });
+      await f.db
+        .updateTable('minecraft_modpack_operations')
+        .set({
+          state: 'uncertain',
+          lease_token: null,
+          lease_until: null,
+          selection: JSON.stringify(selection),
+          prepared: JSON.stringify(prepared),
+          plan: JSON.stringify(plan),
+          plan_digest: modpackDigest({ prepared, plan }),
+          journal: JSON.stringify(
+            dispatched
+              ? [{ phase: 'stopping', state: 'dispatched', at: new Date().toISOString() }]
+              : [],
+          ),
+        })
+        .where('id', '=', f.row.id)
+        .execute();
+      const bridge = createMinecraftModpackBridge({ db: f.db, runtime: f.runtime });
+      const snapshot = await bridge.recover(f.context, f.serverId, f.row.id);
+      expect(snapshot.operation?.state).toBe(dispatched ? 'uncertain' : 'failed');
+      expect(
+        await f.db
+          .selectFrom('server_operations')
+          .select('job_id')
+          .where('job_id', '=', f.row.id)
+          .executeTakeFirst(),
+      ).toBeUndefined();
+      expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+      expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+    },
+  );
+  it('reads both container states concurrently and does not reread an already stopped server', async () => {
+    const f = await fixture(false);
+    const context = await createModpackContext(f.options);
+    const observer = f.runtime.containerObserver;
+    if (!observer) throw new Error('Missing fixture observer');
+    const stopped = vi.mocked(observer.stopped);
+    await context.stop();
+    expect(stopped.mock.calls.map(([, kind]) => kind)).toEqual(['server', 'installer']);
+    expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+    stopped.mockClear();
+    const results: ((value: boolean) => void)[] = [];
+    stopped.mockImplementation(() => new Promise<boolean>((resolve) => results.push(resolve)));
+    const checking = context.assertStopped();
+    expect(results).toHaveLength(2);
+    results[0]?.(true);
+    results[1]?.(false);
+    await expect(checking).rejects.toMatchObject({ code: 'conflict' });
+  });
+
+  it('retains stop proof only inside the uninterrupted exclusive context', async () => {
+    const f = await fixture(false);
+    const host = await createModpackContext({ ...f.options, retainStoppedProof: true });
+    const observer = f.runtime.containerObserver;
+    if (!observer) throw new Error('Missing fixture observer');
+    const stopped = vi.mocked(observer.stopped);
+    await host.stop();
+    await host.assertStopped();
+    await host.context.assertStopped();
+    expect(stopped).toHaveBeenCalledTimes(2);
+    const recovered = await createModpackContext({ ...f.options, retainStoppedProof: true });
+    stopped.mockResolvedValue(false);
+    await expect(recovered.assertStopped()).rejects.toMatchObject({ code: 'conflict' });
+    expect(stopped).toHaveBeenCalledTimes(4);
+  });
+
+  it('merges independent host checkpoints without losing an archive or stop journal', async () => {
+    const f = await fixture(false);
+    const host = await createModpackContext(f.options);
+    await Promise.all([
+      host.context.update({ plan: { stopped: true, wasRunning: true } }),
+      host.context.update({ plan: { modpackArchive: { binding: 'sealed' } } }),
+    ]);
+    const row = await f.db
+      .selectFrom('server_operations')
+      .select('plan')
+      .where('job_id', '=', f.row.id)
+      .executeTakeFirstOrThrow();
+    expect(row.plan).toMatchObject({
+      stopped: true,
+      wasRunning: true,
+      modpackArchive: { binding: 'sealed' },
+      modpackOperationId: f.row.id,
+    });
+  });
+
+  it('prepares only explicit installation intents under their original live lease', async () => {
+    const f = await fixture(false);
+    const selection = minecraftModpackPrepareSchema.parse({
+      provider: 'modrinth',
+      projectId: 'pack',
+      versionId: 'v1',
+      mode: 'replace',
+      idempotencyKey: 'parallel',
+      install: { backupBefore: false },
+    });
+    const row = await f.db
+      .updateTable('minecraft_modpack_operations')
+      .set({
+        state: 'preparing',
+        selection: JSON.stringify(selection),
+        apply_actor_user_id: null,
+        apply_actor_session_id: null,
+        apply_subject_user_id: null,
+      })
+      .where('id', '=', f.row.id)
+      .returningAll()
+      .executeTakeFirstOrThrow();
+    const host = await createModpackContext({
+      ...f.options,
+      operation: row,
+      preparingInstall: true,
+    });
+    await host.stop();
+    await f.db
+      .updateTable('minecraft_modpack_operations')
+      .set({ state: 'applying' })
+      .where('id', '=', row.id)
+      .execute();
+    await host.authorize();
+    await f.db
+      .updateTable('minecraft_modpack_operations')
+      .set({ lease_token: randomUUID() })
+      .where('id', '=', row.id)
+      .execute();
+    await expect(host.authorize()).rejects.toMatchObject({ code: 'operation_uncertain' });
+    await expect(
+      createModpackContext({
+        ...f.options,
+        operation: { ...row, selection: { ...selection, install: undefined } },
+        preparingInstall: true,
+      }),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+  });
+
+  it('creates one synthetic reinstall with the same operation id and no generic outbox delivery', async () => {
+    const f = await fixture();
+    const host = await withModpackServerLock(f.db, f.serverId, (db) =>
+      createModpackContext({ ...f.options, db }),
+    );
+    expect(host.context.fileman).toBeDefined();
+    const operation = await f.db
+      .selectFrom('server_operations')
+      .selectAll()
+      .where('job_id', '=', f.row.id)
+      .executeTakeFirstOrThrow();
+    expect(operation).toMatchObject({
+      action: 'reinstall',
+      server_id: f.serverId,
+      plan: { modpackOperationId: f.row.id },
+    });
+    expect(
+      await f.db
+        .selectFrom('job_outbox')
+        .select('job_id')
+        .where('job_id', '=', f.row.id)
+        .executeTakeFirst(),
+    ).toBeUndefined();
+    expect(
+      (
+        await f.db
+          .selectFrom('managed_servers')
+          .select('active_operation_id')
+          .where('id', '=', f.serverId)
+          .executeTakeFirstOrThrow()
+      ).active_operation_id,
+    ).toBe(f.row.id);
+  });
+  it.each([true, false])(
+    'stops a direct server and records prior running state=%s without Gateway state',
+    async (running) => {
+      const f = await fixture(running);
+      const host = await createModpackContext(f.options);
+      await host.stop();
+      expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(running ? 1 : 0);
+      const operation = await f.db
+        .selectFrom('server_operations')
+        .select('plan')
+        .where('job_id', '=', f.row.id)
+        .executeTakeFirstOrThrow();
+      expect(operation.plan.wasRunning).toBe(running);
+      expect(
+        (
+          await f.db
+            .selectFrom('managed_servers')
+            .select('runtime_state')
+            .where('id', '=', f.serverId)
+            .executeTakeFirstOrThrow()
+        ).runtime_state,
+      ).toBe('offline');
+      expect(
+        await f.db
+          .selectFrom('resource_reservations')
+          .select('server_id')
+          .where('server_id', '=', f.serverId)
+          .executeTakeFirst(),
+      ).toBeUndefined();
+    },
+  );
+  it.each(['exact', 'other-claim', 'changed-scope', 'expired-lease'] as const)(
+    'admits only the retained publication claim and preserves lifecycle history: %s',
+    async (reason) => {
+      const f = await fixture(false);
+      const first = await createModpackContext(f.options);
+      const server = first.context.server;
+      const destinationRoot = `.nickhosting-pack-${f.row.id}-stage`;
+      const file = { path: 'mods/pack.jar', size: 10, sha256: 'c'.repeat(64) };
+      const manifest = {
+        id: `modpack.${f.row.id}`,
+        destinationRoot,
+        files: [{ ...file, path: `${destinationRoot}/${file.path}` }],
+      };
+      const skeleton = {
+        ...manifest,
+        files: manifest.files.map((file) => ({
+          path: file.path,
+          size: file.size,
+          sha256: '0'.repeat(64),
+        })),
+      };
+      const claimId = randomUUID();
+      const scopeHash = 'b'.repeat(64);
+      const identity = {
+        providerId: server.pterodactyl_id,
+        providerUuid: server.pterodactyl_uuid,
+        identifier: server.pterodactyl_identifier,
+        externalId: server.external_id,
+        nodeId: f.providerNodeId,
+      };
+      const archive = {
+        binding: createHash('sha256')
+          .update(JSON.stringify({ skeleton, source: 'a'.repeat(64), bytes: 1000 }))
+          .digest('hex'),
+        claimId,
+        claimScopeHash: scopeHash,
+        manifest,
+        request: {
+          operationId: f.row.id,
+          identity,
+          destinationRoot,
+          archiveSha256: 'a'.repeat(64),
+          files: manifest.files.map(({ path, size }) => ({ path, size })),
+        },
+        commitDispatched: true,
+        completed: false,
+      };
+      await first.context.update({
+        plan: {
+          ...first.context.operation().plan,
+          fileArchive: archive,
+          wasRunning: true,
+          stopped: true,
+        },
+      });
+      const claim = {
+        id: claimId,
+        server_id: f.serverId,
+        physical_host_id: f.hostId,
+        actor_user_id: f.context.actorUserId,
+        declared_bytes: '1010',
+        reserved_bytes: '2020',
+        scope_hash: scopeHash,
+        scope: JSON.stringify({
+          nodeId: server.node_id,
+          pterodactylNodeId: f.providerNodeId,
+          pterodactylServerId: server.pterodactyl_id,
+          pterodactylServerUuid: server.pterodactyl_uuid,
+          externalId: server.external_id,
+        }),
+      };
+      await f.db.insertInto('upload_ingestion_claims').values(claim).execute();
+      if (reason === 'other-claim')
+        await f.db
+          .updateTable('upload_ingestion_claims')
+          .set({ id: randomUUID() })
+          .where('id', '=', claimId)
+          .execute();
+      if (reason === 'changed-scope')
+        await f.db
+          .updateTable('upload_ingestion_claims')
+          .set({ scope_hash: 'd'.repeat(64) })
+          .where('id', '=', claimId)
+          .execute();
+      const target = { minecraftVersion: '1.12.2', loader: 'forge', loaderVersion: '14.23.5.2860' };
+      const plan = {
+        sourceCombinationId: randomUUID(),
+        sourceMappingId: f.mappingId,
+        previousOperationId: null,
+        runtime: { combinationId: randomUUID(), mappingId: f.mappingId, target },
+        write: [file],
+        remove: [],
+        preserve: [],
+        retained: [],
+        expected: [
+          { path: 'mods', entry: null },
+          { path: file.path, entry: null },
+        ],
+        worldRoots: [],
+        protectedPaths: [],
+        blockers: [],
+      };
+      const operation = await f.db
+        .updateTable('minecraft_modpack_operations')
+        .set({
+          plan: JSON.stringify(plan),
+          apply_request: JSON.stringify({
+            operationId: f.row.id,
+            planDigest: 'e'.repeat(64),
+            confirm: true,
+            backupBefore: false,
+            expectedDeletePaths: [],
+            idempotencyKey: 'resume',
+          }),
+          runtime_transition: JSON.stringify({ state: 'verified' }),
+          publication: JSON.stringify({ state: 'staging', batches: [], rollbackCreated: false }),
+          journal: JSON.stringify(
+            [
+              'stopping:dispatched',
+              'stopping:confirmed',
+              'runtime:dispatched',
+              'runtime:confirmed',
+              'publishing:dispatched',
+            ].map((step) => {
+              const [phase, state] = step.split(':');
+              return { phase, state, at: new Date().toISOString() };
+            }),
+          ),
+          ...(reason === 'expired-lease' ? { lease_until: new Date(0) } : {}),
+        })
+        .where('id', '=', f.row.id)
+        .returningAll()
+        .executeTakeFirstOrThrow();
+      const resumed = createModpackContext({
+        ...f.options,
+        operation,
+        currentAuth: async () => f.owner,
+      });
+      if (reason === 'exact') {
+        const host = await resumed;
+        await host.authorize();
+        expect(host.context.operation().plan).toMatchObject({
+          wasRunning: true,
+          stopped: true,
+          fileArchive: archive,
+        });
+        expect(host.context.fileman?.resumeArchive).toBeDefined();
+      } else await expect(resumed).rejects.toMatchObject({ code: 'operation_uncertain' });
+      expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+      expect(
+        await f.db
+          .selectFrom('upload_ingestion_claims')
+          .select('id')
+          .where('server_id', '=', f.serverId)
+          .executeTakeFirst(),
+      ).toBeDefined();
+    },
+  );
+
+  it('refuses publication authority after another operation owns the server', async () => {
+    const f = await fixture();
+    const host = await createModpackContext(f.options);
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: f.originalJob })
+      .where('id', '=', f.serverId)
+      .execute();
+    await expect(host.authorize()).rejects.toMatchObject({ code: 'conflict' });
+    const readScope = host.context.fileman?.readScope?.();
+    if (!readScope) throw new Error('Fileman read scope missing');
+    await expect(readScope.list('mods')).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    expect(f.runtime.fileDirectoryBatch).not.toHaveBeenCalled();
+  });
+  it.each(['changed', 'expired'] as const)(
+    'refuses effects after the Modpacks worker lease is %s',
+    async (reason) => {
+      const f = await fixture();
+      const host = await createModpackContext(f.options);
+      await f.db
+        .updateTable('minecraft_modpack_operations')
+        .set(
+          reason === 'changed'
+            ? { lease_token: randomUUID() }
+            : { lease_until: new Date(Date.now() - 1000) },
+        )
+        .where('id', '=', f.row.id)
+        .execute();
+      await expect(host.stop()).rejects.toMatchObject({ code: 'operation_uncertain' });
+      expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+    },
+  );
+  it('cleanup releases a failed pre-publication job without claiming successful installation', async () => {
+    const f = await fixture(false);
+    await createModpackContext(f.options);
+    await f.db
+      .updateTable('minecraft_modpack_operations')
+      .set({ state: 'failed', error: 'conflict', lease_token: null, lease_until: null })
+      .where('id', '=', f.row.id)
+      .execute();
+    const bridge = createMinecraftModpackBridge({ db: f.db, runtime: f.runtime });
+    await bridge.process(f.row.id);
+    expect(
+      (
+        await f.db
+          .selectFrom('managed_servers')
+          .select('active_operation_id')
+          .where('id', '=', f.serverId)
+          .executeTakeFirstOrThrow()
+      ).active_operation_id,
+    ).toBeNull();
+    expect(
+      await f.db
+        .selectFrom('operation_jobs')
+        .select(['state', 'error_code'])
+        .where('id', '=', f.row.id)
+        .executeTakeFirstOrThrow(),
+    ).toMatchObject({ state: 'failed', error_code: 'conflict' });
+    expect(
+      await f.db
+        .selectFrom('minecraft_modpack_receipts')
+        .select('server_id')
+        .where('server_id', '=', f.serverId)
+        .executeTakeFirst(),
+    ).toBeUndefined();
+    expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+  });
+  it('completed cleanup cannot clear a newer operation guard', async () => {
+    const f = await fixture(false);
+    await createModpackContext(f.options);
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: f.originalJob })
+      .where('id', '=', f.serverId)
+      .execute();
+    await completeModpackJob(f.db, { ...f.row, state: 'applied' } as MinecraftModpackOperationRow);
+    expect(
+      (
+        await f.db
+          .selectFrom('managed_servers')
+          .select('active_operation_id')
+          .where('id', '=', f.serverId)
+          .executeTakeFirstOrThrow()
+      ).active_operation_id,
+    ).toBe(f.originalJob);
+  });
+});

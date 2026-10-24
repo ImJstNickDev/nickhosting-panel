@@ -2,10 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { authSessionId } from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
+import { sql } from 'kysely';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setPhysicalHost } from './configuration.js';
-import { managementFixture } from './test-fixtures.js';
+import { managementFixture, pendingUploadFixture } from './test-fixtures.js';
 import {
+  assertUploadIngestionCapacity,
   recoverUploadIngestion,
   reserveUploadIngestion,
   uploadStagingAvailableBytes,
@@ -138,6 +140,205 @@ describe('durable multipart ingestion admission', () => {
     expect(sample).not.toHaveBeenCalled();
     expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
   });
+  it('preflights read-only with the exact effective host policy and reservation values', async () => {
+    const server = await f.server();
+    await configure();
+    const override = { ...policy, providerMaxFileBytes: 4 * 1024 ** 2 };
+    const hostOverride = {
+      ...(await hostInput()),
+      uploadPolicy: undefined,
+      localDiskPath: '/isolated-override',
+      observerId: 'override-observer',
+      diskHeadroomMiB: 512,
+    };
+    const configuration = {
+      NH_OBSERVER_ID: hostOverride.observerId,
+      NH_HOST_POLICIES: JSON.stringify({ [f.hostId]: hostOverride }),
+      NH_UPLOAD_POLICIES: JSON.stringify({ [f.hostId]: override }),
+    };
+    const declaredBytes = 9 * 1024 ** 2;
+    const options = {
+      availableBytes: vi.fn<(path: string) => Promise<bigint>>(enough.availableBytes),
+      providerLargestFileBytes: 2 * 1024 ** 2,
+      multipartCount: 3,
+    };
+    const audits = await f.db.selectFrom('audit_events').selectAll().execute();
+    const capacity = await f.db.transaction().execute(async (tx) => {
+      await sql`set transaction read only`.execute(tx);
+      const result = await assertUploadIngestionCapacity(
+        tx,
+        server,
+        declaredBytes,
+        configuration,
+        options,
+      );
+      const locks = await sql`select 1 from pg_locks
+        where pid = pg_backend_pid() and locktype = 'advisory'`.execute(tx);
+      expect(locks.rows).toEqual([]);
+      return result;
+    });
+    expect(capacity).toMatchObject({
+      hostId: f.hostId,
+      reservedBytes: 2 * declaredBytes + 3 * uploadMultipartAllowanceBytes,
+      scope: { observerId: hostOverride.observerId, policy: override },
+    });
+    expect(options.availableBytes.mock.calls.map(([path]) => path)).toEqual([
+      policy.temporaryDiskPath,
+      hostOverride.localDiskPath,
+    ]);
+    expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
+    expect(await f.db.selectFrom('audit_events').selectAll().execute()).toEqual(audits);
+    await f.db.connection().execute(async (connection) => {
+      const lease = await reserveUploadIngestion(
+        connection,
+        f.context,
+        server,
+        declaredBytes,
+        configuration,
+        options,
+      );
+      try {
+        const claim = await connection
+          .selectFrom('upload_ingestion_claims')
+          .selectAll()
+          .executeTakeFirstOrThrow();
+        expect(claim.reserved_bytes).toBe(String(capacity.reservedBytes));
+        expect(claim.scope).toEqual(capacity.scope);
+        expect(claim.physical_host_id).toBe(capacity.hostId);
+        await lease.rejectBeforeDispatch();
+      } finally {
+        await lease.unlock();
+      }
+    });
+  });
+  it('preflight rejects disabled policy, host, node and missing observer before filesystem reads', async () => {
+    const server = await f.server();
+    const observe = vi.fn(enough.availableBytes);
+    const check = (configuration = env) =>
+      assertUploadIngestionCapacity(f.db, server, 1, configuration, { availableBytes: observe });
+    await expect(check()).rejects.toMatchObject({ code: 'configuration_invalid' });
+    await configure();
+    await expect(check({ NH_OBSERVER_ID: '' })).rejects.toMatchObject({
+      code: 'configuration_invalid',
+    });
+    await expect(check({ NH_OBSERVER_ID: 'other-observer' })).rejects.toMatchObject({
+      code: 'configuration_invalid',
+    });
+    await f.db
+      .updateTable('managed_nodes')
+      .set({ enabled: false })
+      .where('id', '=', f.nodeId)
+      .execute();
+    await expect(check()).rejects.toMatchObject({ code: 'configuration_invalid' });
+    await f.db
+      .updateTable('managed_nodes')
+      .set({ enabled: true })
+      .where('id', '=', f.nodeId)
+      .execute();
+    await f.db
+      .updateTable('physical_hosts')
+      .set({ enabled: false })
+      .where('id', '=', f.hostId)
+      .execute();
+    await expect(check()).rejects.toMatchObject({ code: 'configuration_invalid' });
+    expect(observe).not.toHaveBeenCalled();
+    expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
+  });
+  it('preflight rejects the same byte and multipart bounds without creating a claim', async () => {
+    const server = await f.server();
+    await configure();
+    const observe = vi.fn(enough.availableBytes);
+    for (const [declaredBytes, options] of [
+      [policy.providerMaxFileBytes + 1, {}],
+      [policy.providerMaxFileBytes, { providerLargestFileBytes: 1 }],
+      [1, { providerLargestFileBytes: 2 }],
+      [1, { multipartCount: 7 }],
+      [Number.MAX_SAFE_INTEGER, { providerLargestFileBytes: 1 }],
+    ] as const) {
+      await expect(
+        f.db.transaction().execute(async (tx) => {
+          await sql`set transaction read only`.execute(tx);
+          return assertUploadIngestionCapacity(tx, server, declaredBytes, env, {
+            ...options,
+            availableBytes: observe,
+          });
+        }),
+      ).rejects.toMatchObject({ code: 'validation_failed', status: 413 });
+      await expect(
+        f.db.connection().execute((connection) =>
+          reserveUploadIngestion(connection, f.context, server, declaredBytes, env, {
+            ...options,
+            availableBytes: observe,
+          }),
+        ),
+      ).rejects.toMatchObject({ code: 'validation_failed', status: 413 });
+    }
+    expect(observe).not.toHaveBeenCalled();
+    expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
+  });
+  it('preflight counts other-host transfers and both filesystem headrooms without retaining capacity', async () => {
+    const server = await f.server();
+    await configure();
+    const other = await managementFixture(f.db);
+    const pending = await pendingUploadFixture(f.db, await other.server());
+    const retained = await f.db.selectFrom('upload_ingestion_claims').selectAll().execute();
+    const declaredBytes = 1024;
+    const required = 67584n + BigInt(2 * declaredBytes + uploadMultipartAllowanceBytes);
+    const free = {
+      staging: required + BigInt(policy.temporaryDiskHeadroomBytes),
+      destination: required + 256n * 1024n ** 2n,
+    };
+    for (const mount of ['staging', 'destination'] as const) {
+      const options = {
+        availableBytes: async (path: string) => {
+          const key = path === policy.temporaryDiskPath ? 'staging' : 'destination';
+          return free[key] - (key === mount ? 1n : 0n);
+        },
+      };
+      await expect(
+        assertUploadIngestionCapacity(f.db, server, declaredBytes, env, options),
+      ).rejects.toMatchObject({ code: 'resources_unavailable' });
+      await expect(
+        f.db
+          .connection()
+          .execute((connection) =>
+            reserveUploadIngestion(connection, f.context, server, declaredBytes, env, options),
+          ),
+      ).rejects.toMatchObject({ code: 'resources_unavailable' });
+    }
+    await expect(
+      assertUploadIngestionCapacity(f.db, server, declaredBytes, env, {
+        availableBytes: async (path) =>
+          path === policy.temporaryDiskPath ? free.staging : free.destination,
+      }),
+    ).resolves.toMatchObject({ reservedBytes: 2 * declaredBytes + uploadMultipartAllowanceBytes });
+    expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual(
+      retained,
+    );
+    expect(retained[0]?.id).toBe(pending);
+    await pendingUploadFixture(f.db, server);
+    const observe = vi.fn(enough.availableBytes);
+    await expect(
+      assertUploadIngestionCapacity(f.db, server, declaredBytes, env, { availableBytes: observe }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    expect(observe).not.toHaveBeenCalled();
+  });
+  it('rechecks current policy during atomic reservation after a successful preflight', async () => {
+    const server = await f.server();
+    await configure();
+    await expect(
+      assertUploadIngestionCapacity(f.db, server, 2, env, enough),
+    ).resolves.toBeDefined();
+    await configure({ ...policy, providerMaxFileBytes: 1 });
+    await expect(
+      f.db
+        .connection()
+        .execute((connection) =>
+          reserveUploadIngestion(connection, f.context, server, 2, env, enough),
+        ),
+    ).rejects.toMatchObject({ code: 'validation_failed', status: 413 });
+    expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
+  });
   it('charges the full temporary copy and bounded multipart overhead against budget and real free headroom', async () => {
     const server = await f.server(),
       bytes = 1024 ** 2;
@@ -181,6 +382,52 @@ describe('durable multipart ingestion admission', () => {
     });
     expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
   });
+  it.each(['rejectBeforeDispatch', 'rejectBeforePublication'] as const)(
+    'releases proven %s failures with a distinct audit and admits the next upload',
+    async (reject) => {
+      const server = await f.server();
+      await configure();
+      await f.db.connection().execute(async (connection) => {
+        const claim = await reserveUploadIngestion(connection, f.context, server, 123, env, enough);
+        try {
+          await claim[reject]();
+          await expect(claim.complete()).rejects.toMatchObject({ code: 'conflict' });
+        } finally {
+          await claim.unlock();
+        }
+        await expect(claim[reject]()).rejects.toMatchObject({ code: 'conflict' });
+        expect(
+          await connection.selectFrom('upload_ingestion_claims').selectAll().execute(),
+        ).toEqual([]);
+        const next = await reserveUploadIngestion(connection, f.context, server, 123, env, enough);
+        try {
+          await next[reject]();
+        } finally {
+          await next.unlock();
+        }
+      });
+      const audits = await f.db
+        .selectFrom('audit_events')
+        .select(['action', 'metadata'])
+        .where('action', 'in', [
+          'server.upload.confirmed',
+          'server.upload.not_dispatched',
+          'server.upload.not_published',
+        ])
+        .execute();
+      expect(audits).toHaveLength(2);
+      expect(
+        audits.every(
+          (audit) =>
+            audit.action ===
+            (reject === 'rejectBeforeDispatch'
+              ? 'server.upload.not_dispatched'
+              : 'server.upload.not_published'),
+        ),
+      ).toBe(true);
+      expect(audits[0]?.metadata).toMatchObject({ serverId: server, claimId: expect.any(String) });
+    },
+  );
   it('serializes simultaneous claims on one physical host including sibling nodes', async () => {
     const first = await f.server(),
       second = await f.server();

@@ -1,12 +1,19 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
-import { minecraftDigest, minecraftVerificationChecks } from '@nickhosting/minecraft';
+import {
+  fetchPaperCatalog,
+  minecraftDigest,
+  minecraftManifest,
+  minecraftVerificationChecks,
+} from '@nickhosting/minecraft';
 import {
   importMinecraftEvidence,
   inspectMinecraftCombination,
   type ManagementRuntime,
   minecraftMappingDigest,
+  refreshStorageObservations,
+  type StorageObservationScope,
   signMinecraftEvidence,
 } from '@nickhosting/server-management';
 import { Hono } from 'hono';
@@ -19,6 +26,7 @@ import { registerServerRoutes } from './servers.js';
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
 let fixture: Awaited<ReturnType<typeof managementFixture>>;
 let app: Hono<{ Variables: Variables }>;
+let routeEnv: Record<string, string>;
 let actor: Awaited<ReturnType<typeof managementFixture>>['context'];
 const management = vi.fn<() => Promise<ManagementRuntime>>();
 const env = { NH_MINECRAFT_EVIDENCE_KEY: '1'.repeat(64) };
@@ -29,8 +37,31 @@ afterAll(async () => {
   await database?.destroy();
 });
 beforeEach(async () => {
+  // Each case owns its choices; large catalog fixtures must not enable later cases.
+  await database.db.updateTable('minecraft_combinations').set({ enabled: false }).execute();
   fixture = await managementFixture(database.db, { interactive: true });
+  const node = await fixture.db
+    .selectFrom('managed_nodes')
+    .selectAll()
+    .where('id', '=', fixture.nodeId)
+    .executeTakeFirstOrThrow();
+  if (!node.backend_allocation_pool) throw new Error('Missing isolated allocation pool');
+  const directHost = `fixture-${randomUUID()}.example.test`;
+  await fixture.db
+    .updateTable('managed_nodes')
+    .set({
+      backend_allocation_pool: JSON.stringify({
+        ...node.backend_allocation_pool,
+        allocations: node.backend_allocation_pool.allocations.map((pin) => ({
+          ...pin,
+          directEndpoint: { hostname: directHost, port: pin.port },
+        })),
+      }),
+    })
+    .where('id', '=', fixture.nodeId)
+    .execute();
   actor = fixture.context;
+  routeEnv = {};
   management.mockReset().mockRejectedValue(new DomainError('integration_unavailable'));
   app = new Hono<{ Variables: Variables }>();
   app.onError((error, c) =>
@@ -41,14 +72,14 @@ beforeEach(async () => {
   );
   registerMinecraftRoutes(app, {
     db: fixture.db,
-    env,
+    env: routeEnv,
     principal: async () => actor,
     body: async (c) => c.req.json(),
     management,
   });
   registerServerRoutes(app, {
     db: fixture.db,
-    env,
+    env: routeEnv,
     principal: async () => actor,
     management,
     acquireUploadSlot: () => () => {},
@@ -56,20 +87,20 @@ beforeEach(async () => {
 });
 // Signed synthetic compatibility records are confined to this isolated database;
 // no provider server is provisioned and no public compatibility is asserted.
-async function eligibleChoice() {
+async function eligibleChoice(attest = true) {
   await fixture.db
     .insertInto('game_integrations')
     .values({
-      id: 'minecraft-java',
+      id: 'minecraft',
       version: '1.0.0',
-      manifest: {},
+      manifest: JSON.stringify(minecraftManifest),
     })
     .onConflict((c) => c.column('id').doNothing())
     .execute();
   await fixture.db
     .insertInto('game_rollouts')
     .values({
-      integration_id: 'minecraft-java',
+      integration_id: 'minecraft',
       state: 'public',
       allowlist: [],
     })
@@ -78,7 +109,7 @@ async function eligibleChoice() {
   await fixture.db
     .updateTable('runtime_egg_mappings')
     .set({
-      game_id: 'minecraft-java',
+      game_id: 'minecraft',
       runtime_id: 'vanilla',
       startup: 'java -jar server.jar',
     })
@@ -153,18 +184,21 @@ async function eligibleChoice() {
     },
     client: { implementation: 'isolated-fixture-client', version: '1', protocolId: 767 },
   };
-  await importMinecraftEvidence(
-    fixture.db,
-    fixture.owner,
-    id,
-    {
-      report,
-      signature: signMinecraftEvidence(report, env),
-    },
-    env,
-  );
+  if (attest)
+    await importMinecraftEvidence(
+      fixture.db,
+      fixture.owner,
+      id,
+      {
+        report,
+        signature: signMinecraftEvidence(report, env),
+      },
+      env,
+    );
   management.mockResolvedValue({
     adapter: fixture.adapter,
+    refreshStorage: (connection = fixture.db, scope?: StorageObservationScope) =>
+      refreshStorageObservations(connection, fixture.adapter, env, scope),
     refreshObservations: fixture.observe,
     minecraftOptions: async () => ({
       http: { json: vi.fn(), download: vi.fn() },
@@ -193,14 +227,624 @@ async function post(path: string, input: unknown) {
   });
 }
 describe('Minecraft backend API authorization and user projection', () => {
+  it('paginates more than 1000 Owner combinations without truncation, duplication or cursor ambiguity', async () => {
+    const firstId = await eligibleChoice(false);
+    const source = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', firstId)
+      .executeTakeFirstOrThrow();
+    const copies = Array.from({ length: 1000 }, (_, index) => {
+      const combination = {
+        ...(source.combination as Record<string, unknown>),
+        buildId: `fixture-${index}`,
+      };
+      return {
+        id: randomUUID(),
+        mapping_id: source.mapping_id,
+        identity_digest: minecraftDigest({ combination, binding: source.binding }),
+        combination: JSON.stringify(combination),
+        binding: JSON.stringify(source.binding),
+        resolved_runtime: JSON.stringify(source.resolved_runtime),
+        mapping_digest: source.mapping_digest,
+        enabled: source.enabled,
+      };
+    });
+    await fixture.db.insertInto('minecraft_combinations').values(copies).execute();
+    actor = fixture.owner;
+    const expected = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .select('id')
+      .orderBy('id', 'asc')
+      .execute();
+    let sqlCount = 0;
+    const measured = fixture.db.withPlugin({
+      transformQuery(args) {
+        sqlCount++;
+        return args.node;
+      },
+      async transformResult(args) {
+        return args.result;
+      },
+    });
+    const measuredApp = new Hono<{ Variables: Variables }>();
+    registerMinecraftRoutes(measuredApp, {
+      db: measured,
+      env,
+      principal: async () => actor,
+      body: async (c) => c.req.json(),
+      management,
+    });
+    const ids: string[] = [];
+    let after: string | null = null;
+    do {
+      sqlCount = 0;
+      const response = await measuredApp.request(
+        `/v1/owner/minecraft/compatibility?pageSize=100${after ? `&after=${after}` : ''}`,
+      );
+      expect(response.status).toBe(200);
+      expect(sqlCount).toBe(3);
+      const page = await response.json();
+      expect(page.items.length).toBeLessThanOrEqual(100);
+      expect(page.items[0]).toHaveProperty('releaseTime');
+      ids.push(...page.items.map((item: { id: string }) => item.id));
+      if (page.nextCursor) expect(page.nextCursor).toBe(page.items.at(-1).id);
+      after = page.nextCursor;
+    } while (after);
+    expect(ids).toEqual(expected.map((row) => row.id));
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.length).toBeGreaterThan(1000);
+    const summaryIds: string[] = [];
+    for (let page = 1; summaryIds.length < ids.length; page++) {
+      sqlCount = 0;
+      const response = await measuredApp.request(
+        `/v1/owner/minecraft/compatibility?view=summary&pageSize=100&page=${page}`,
+      );
+      expect(response.status).toBe(200);
+      expect(sqlCount).toBe(4);
+      const body = await response.json();
+      expect(body.total).toBe(ids.length);
+      summaryIds.push(...body.items.map((item: { id: string }) => item.id));
+    }
+    expect(summaryIds).toEqual(ids);
+  });
+  it('serves filtered chronological Owner summaries in bounded queries with lazy protected evidence details', async () => {
+    const sourceId = await eligibleChoice(false);
+    const source = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', sourceId)
+      .executeTakeFirstOrThrow();
+    const versions = [
+      { version: 'ordering-1.2', type: 'release', date: '2020-01-01', enabled: true },
+      { version: 'ordering-1.10', type: 'release', date: '2022-01-01', enabled: false },
+      { version: 'ordering-snapshot', type: 'snapshot', date: '2021-01-01', enabled: true },
+      { version: 'ordering-unknown', type: 'old_alpha', date: null, enabled: true },
+    ] as const;
+    for (const version of versions) {
+      await fixture.db
+        .insertInto('minecraft_combinations')
+        .values({
+          id: randomUUID(),
+          mapping_id: source.mapping_id,
+          identity_digest: minecraftDigest({ version, sourceId }),
+          mapping_digest: source.mapping_digest,
+          combination: JSON.stringify({
+            ...(source.combination as object),
+            release: version.version,
+            releaseType: version.type,
+          }),
+          resolved_runtime: '{}',
+          binding: '{}',
+          enabled: version.enabled,
+        })
+        .execute();
+      if (version.date)
+        await fixture.db
+          .insertInto('minecraft_release_metadata')
+          .values({
+            id: version.version,
+            release_type: version.type,
+            release_time: new Date(version.date),
+            metadata_url: 'https://example.test/metadata',
+            sha1: 'a'.repeat(40),
+          })
+          .onConflict((c) => c.column('id').doNothing())
+          .execute();
+    }
+    let count = 0;
+    const measured = fixture.db.withPlugin({
+      transformQuery(args) {
+        count++;
+        return args.node;
+      },
+      async transformResult(args) {
+        return args.result;
+      },
+    });
+    const measuredApp = new Hono<{ Variables: Variables }>();
+    registerMinecraftRoutes(measuredApp, {
+      db: measured,
+      env,
+      principal: async () => actor,
+      body: async (c) => c.req.json(),
+      management,
+    });
+    actor = fixture.owner;
+    const endpoint = '/v1/owner/minecraft/compatibility?view=summary&search=ordering-&pageSize=2';
+    const response = await measuredApp.request(endpoint);
+    expect(response.status).toBe(200);
+    expect(count).toBe(4);
+    const first = await response.json();
+    expect(first).toMatchObject({ total: 4, page: 1, pageSize: 2, runtimes: ['vanilla'] });
+    expect(
+      first.items.map((row: { combination: { release: string } }) => row.combination.release),
+    ).toEqual(['ordering-1.10', 'ordering-snapshot']);
+    expect(first.items[0]).not.toHaveProperty('evidence');
+    expect(first.items[0]).not.toHaveProperty('runtime');
+    const second = await (await measuredApp.request(`${endpoint}&page=2`)).json();
+    expect(
+      second.items.map((row: { combination: { release: string } }) => row.combination.release),
+    ).toEqual(['ordering-1.2', 'ordering-unknown']);
+    const filtered = await (
+      await measuredApp.request(
+        `${endpoint}&releaseType=release&availability=enabled&runtime=vanilla`,
+      )
+    ).json();
+    expect(filtered.total).toBe(1);
+    expect(filtered.items[0].combination.release).toBe('ordering-1.2');
+    const oldest = await (await measuredApp.request(`${endpoint}&order=oldest`)).json();
+    expect(
+      oldest.items.map((row: { combination: { release: string } }) => row.combination.release),
+    ).toEqual(['ordering-1.2', 'ordering-snapshot']);
+    const names = await (
+      await measuredApp.request(`${endpoint}&order=name-asc&releaseType=release`)
+    ).json();
+    expect(
+      names.items.map((row: { combination: { release: string } }) => row.combination.release),
+    ).toEqual(['ordering-1.2', 'ordering-1.10']);
+    const detail = await (
+      await app.request(`/v1/owner/minecraft/compatibility/${sourceId}`)
+    ).json();
+    expect(detail).toHaveProperty('evidence');
+    actor = fixture.context;
+    expect((await app.request(`/v1/owner/minecraft/compatibility/${sourceId}`)).status).toBe(403);
+    expect((await app.request(`${endpoint}&page=bad`)).status).toBe(403);
+    actor = fixture.owner;
+    expect((await app.request(`${endpoint}&page=bad`)).status).toBe(400);
+    expect((await app.request(`${endpoint}&order=unsafe`)).status).toBe(400);
+  });
+  it('groups release pages within one mapping and lazily pages every distinct configuration', async () => {
+    const sourceId = await eligibleChoice(false);
+    actor = fixture.owner;
+    const source = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', sourceId)
+      .executeTakeFirstOrThrow();
+    const variants = Array.from({ length: 103 }, (_, index) => ({
+      id: randomUUID(),
+      mapping_id: source.mapping_id,
+      identity_digest: minecraftDigest({ sourceId, variant: index }),
+      mapping_digest: source.mapping_digest,
+      combination: JSON.stringify({ ...(source.combination as object), buildId: String(index) }),
+      resolved_runtime: '{}',
+      binding: JSON.stringify(source.binding),
+      enabled: index % 2 === 0,
+    }));
+    await fixture.db.insertInto('minecraft_combinations').values(variants).execute();
+    await fixture.db
+      .insertInto('minecraft_combinations')
+      .values({
+        id: randomUUID(),
+        mapping_id: source.mapping_id,
+        identity_digest: minecraftDigest({ sourceId, release: '1.20.4' }),
+        mapping_digest: source.mapping_digest,
+        combination: JSON.stringify({
+          ...(source.combination as object),
+          release: '1.20.4',
+          javaMajor: 17,
+        }),
+        resolved_runtime: '{}',
+        binding: JSON.stringify(source.binding),
+        enabled: true,
+      })
+      .execute();
+    const base = `/v1/owner/minecraft/compatibility?view=workspace&runtime=vanilla&mappingId=${fixture.mappingId}`;
+    const response = await app.request(`${base}&pageSize=1&order=name-desc`);
+    expect(response.status, await response.clone().text()).toBe(200);
+    const first = await response.json();
+    expect(first).toMatchObject({ total: 2, page: 1, pageSize: 1 });
+    expect(first.items[0]).toMatchObject({ release: '1.21.1', variantCount: 104 });
+    expect(first.items[0]).not.toHaveProperty('choice');
+    const second = await (await app.request(`${base}&pageSize=1&page=2&order=name-desc`)).json();
+    expect(second.items[0]).toMatchObject({
+      release: '1.20.4',
+      variantCount: 1,
+      choice: {
+        image: 'fixture/image:1',
+        creation: { state: 'available', reason: null },
+        capabilities: { installation: true },
+      },
+    });
+    const ids: string[] = [];
+    for (const page of [1, 2]) {
+      const result = await (
+        await app.request(
+          `/v1/owner/minecraft/compatibility?view=summary&mappingId=${fixture.mappingId}&release=1.21.1&pageSize=100&page=${page}`,
+        )
+      ).json();
+      expect(result.total).toBe(104);
+      ids.push(...result.items.map((item: { id: string }) => item.id));
+    }
+    expect(new Set(ids)).toEqual(new Set([sourceId, ...variants.map((row) => row.id)]));
+    expect(
+      (await (await app.request(`${base}&availability=disabled`)).json()).items[0].variantCount,
+    ).toBe(51);
+    expect((await (await app.request(`${base}&search=missing`)).json()).total).toBe(0);
+    expect(
+      (await app.request('/v1/owner/minecraft/compatibility?view=workspace&runtime=vanilla'))
+        .status,
+    ).toBe(400);
+    expect((await app.request(base.replace(fixture.mappingId, 'invalid'))).status).toBe(400);
+    expect(management).not.toHaveBeenCalled();
+  });
+  it('reports ordinary creation eligibility independently from Owner switches and signed diagnostics', async () => {
+    const id = await eligibleChoice(false);
+    actor = fixture.owner;
+    const endpoint = `/v1/owner/minecraft/compatibility/${id}`;
+    const state = async () => (await (await app.request(endpoint)).json()).creation;
+    expect(await state()).toEqual({ state: 'available', reason: null });
+    expect((await (await app.request(endpoint)).json()).support).toBe('unverified');
+    await fixture.db
+      .updateTable('game_rollouts')
+      .set({ state: 'private-testing', allowlist: [] })
+      .where('integration_id', '=', 'minecraft')
+      .execute();
+    expect(await state()).toEqual({ state: 'private-testing', reason: null });
+    await fixture.db
+      .updateTable('game_rollouts')
+      .set({ state: 'development' })
+      .where('integration_id', '=', 'minecraft')
+      .execute();
+    expect(await state()).toEqual({ state: 'blocked', reason: 'rollout-development' });
+    await fixture.db
+      .updateTable('game_rollouts')
+      .set({ state: 'disabled-for-new-servers' })
+      .where('integration_id', '=', 'minecraft')
+      .execute();
+    expect(await state()).toEqual({ state: 'blocked', reason: 'rollout-disabled' });
+    await fixture.db
+      .updateTable('game_rollouts')
+      .set({ state: 'public' })
+      .where('integration_id', '=', 'minecraft')
+      .execute();
+    await fixture.db
+      .updateTable('minecraft_combinations')
+      .set({ enabled: false })
+      .where('id', '=', id)
+      .execute();
+    expect(await state()).toEqual({ state: 'blocked', reason: 'choice-disabled' });
+    await fixture.db
+      .updateTable('minecraft_combinations')
+      .set({ enabled: true })
+      .where('id', '=', id)
+      .execute();
+    await fixture.db
+      .updateTable('runtime_egg_mappings')
+      .set({ enabled: false })
+      .where('id', '=', fixture.mappingId)
+      .execute();
+    expect(await state()).toEqual({ state: 'blocked', reason: 'mapping-disabled' });
+    await fixture.db
+      .updateTable('runtime_egg_mappings')
+      .set({ enabled: true })
+      .where('id', '=', fixture.mappingId)
+      .execute();
+    await fixture.db
+      .updateTable('managed_nodes')
+      .set({ enabled: false })
+      .where('id', '=', fixture.nodeId)
+      .execute();
+    expect(await state()).toEqual({ state: 'blocked', reason: 'node-disabled' });
+    await fixture.db
+      .updateTable('managed_nodes')
+      .set({ enabled: true })
+      .where('id', '=', fixture.nodeId)
+      .execute();
+    await fixture.db
+      .updateTable('runtime_egg_mappings')
+      .set({ startup: 'changed' })
+      .where('id', '=', fixture.mappingId)
+      .execute();
+    expect(await state()).toEqual({ state: 'blocked', reason: 'mapping-changed' });
+    expect(management).not.toHaveBeenCalled();
+  });
+  it('applies bulk availability atomically and rejects mixed scopes, duplicates and revoked Owners', async () => {
+    const id = await eligibleChoice(false);
+    actor = fixture.owner;
+    const source = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirstOrThrow();
+    const other = randomUUID();
+    await fixture.db
+      .insertInto('minecraft_combinations')
+      .values({
+        id: other,
+        mapping_id: source.mapping_id,
+        identity_digest: minecraftDigest({ id, other }),
+        mapping_digest: source.mapping_digest,
+        combination: JSON.stringify({ ...(source.combination as object), buildId: 'other' }),
+        resolved_runtime: '{}',
+        binding: '{}',
+        enabled: true,
+      })
+      .execute();
+    const change = (value: unknown) =>
+      app.request('/v1/owner/minecraft/compatibility/availability', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(value),
+      });
+    const value = { mappingId: fixture.mappingId, ids: [id, other], enabled: false };
+    expect((await change({ ...value, ids: [id, randomUUID()] })).status).toBe(404);
+    expect(
+      (
+        await fixture.db
+          .selectFrom('minecraft_combinations')
+          .select('enabled')
+          .where('id', '=', id)
+          .executeTakeFirstOrThrow()
+      ).enabled,
+    ).toBe(true);
+    expect((await change({ ...value, mappingId: randomUUID() })).status).toBe(404);
+    expect((await change({ ...value, ids: [id, id] })).status).toBe(400);
+    expect(
+      (await change({ ...value, ids: Array.from({ length: 501 }, () => randomUUID()) })).status,
+    ).toBe(400);
+    expect((await change(value)).status).toBe(204);
+    expect(
+      (
+        await fixture.db
+          .selectFrom('minecraft_combinations')
+          .select('enabled')
+          .where('id', 'in', value.ids)
+          .execute()
+      ).every((row) => row.enabled === false),
+    ).toBe(true);
+    expect((await change({ ...value, enabled: true })).status).toBe(204);
+    await fixture.db
+      .updateTable('user')
+      .set({ role: 'user' })
+      .where('id', '=', actor.actorUserId)
+      .execute();
+    try {
+      expect((await change(value)).status).toBe(403);
+      expect(
+        (
+          await fixture.db
+            .selectFrom('minecraft_combinations')
+            .select('enabled')
+            .where('id', '=', id)
+            .executeTakeFirstOrThrow()
+        ).enabled,
+      ).toBe(true);
+    } finally {
+      await fixture.db
+        .updateTable('user')
+        .set({ role: 'owner' })
+        .where('id', '=', actor.actorUserId)
+        .execute();
+    }
+    expect(management).not.toHaveBeenCalled();
+  });
+  it('validates Owner catalog pagination after authorization and preserves empty legacy arrays', async () => {
+    const endpoint = '/v1/owner/minecraft/compatibility';
+    expect((await app.request(`${endpoint}?pageSize=101&after=bad`)).status).toBe(403);
+    actor = fixture.owner;
+    for (const query of [
+      'pageSize=101',
+      'pageSize=0',
+      'pageSize=1.5',
+      'after=bad',
+      'unexpected=true',
+    ]) {
+      expect((await app.request(`${endpoint}?${query}`)).status).toBe(400);
+    }
+    const afterLast = await app.request(
+      `${endpoint}?pageSize=100&after=ffffffff-ffff-4fff-bfff-ffffffffffff`,
+    );
+    expect(await afterLast.json()).toEqual({ items: [], nextCursor: null });
+    const legacy = await (await app.request(endpoint)).json();
+    expect(Array.isArray(legacy)).toBe(true);
+  });
+  it('serves Owner Fabric discovery locally and coalesces repeated sync requests without provider access', async () => {
+    actor = fixture.owner;
+    const endpoint = '/v1/owner/minecraft/fabric/catalog';
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({
+        next_check_at: new Date(Date.now() + 60_000),
+      })
+      .where('id', '=', 'fabric')
+      .execute();
+    const initial = await app.request(endpoint);
+    expect(initial.status).toBe(200);
+    expect(initial.headers.get('cache-control')).toBe('no-store');
+    expect(await initial.json()).toMatchObject({
+      synced: false,
+      games: [],
+      loaders: [],
+      installers: [],
+      latestInstallerVersion: null,
+    });
+    const repeated = await app.request(endpoint, { method: 'POST', body: '{}' });
+    expect(repeated.status).toBe(202);
+    expect(await repeated.json()).toMatchObject({ synced: false, status: { syncState: 'queued' } });
+    expect((await app.request(endpoint, { method: 'POST', body: '{"force":true}' })).status).toBe(
+      400,
+    );
+    expect(management).not.toHaveBeenCalled();
+  });
+  it('queues a due Owner request without contacting a slow upstream and keeps cached GET local', async () => {
+    actor = fixture.owner;
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({ requested_at: null, next_check_at: new Date(0), last_checked_at: null })
+      .where('id', '=', 'fabric')
+      .execute();
+    const upstream = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(() => new Promise<Response>(() => {}));
+    try {
+      const response = await app.request('/v1/owner/minecraft/fabric/catalog', {
+        method: 'POST',
+        body: '{}',
+      });
+      expect(response.status).toBe(202);
+      expect(await response.json()).toMatchObject({ status: { syncState: 'queued' } });
+      expect((await app.request('/v1/owner/minecraft/fabric/catalog')).status).toBe(200);
+      expect(upstream).not.toHaveBeenCalled();
+    } finally {
+      upstream.mockRestore();
+    }
+  });
+  it('gates the local consumer catalog on Minecraft rollout visibility without registering choices', async () => {
+    await eligibleChoice();
+    await fixture.db
+      .updateTable('game_rollouts')
+      .set({ state: 'private-testing', allowlist: [] })
+      .where('integration_id', '=', 'minecraft')
+      .execute();
+    const endpoint = '/v1/minecraft/fabric/catalog';
+    expect((await app.request(endpoint)).status).toBe(403);
+    await fixture.db
+      .updateTable('game_rollouts')
+      .set({ allowlist: [actor.subjectUserId] })
+      .where('integration_id', '=', 'minecraft')
+      .execute();
+    const before = await fixture.db.selectFrom('minecraft_combinations').selectAll().execute();
+    const response = await app.request(endpoint);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toHaveProperty('games');
+    expect(await fixture.db.selectFrom('minecraft_combinations').selectAll().execute()).toEqual(
+      before,
+    );
+    expect(management).not.toHaveBeenCalled();
+  });
+  it('validates discovered Fabric registrations locally before constructing the provider', async () => {
+    actor = fixture.owner;
+    const endpoint = '/v1/owner/minecraft/fabric/combinations';
+    expect((await app.request(endpoint, { method: 'POST', body: '{}' })).status).toBe(400);
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({
+        last_success_at: new Date(),
+        manifest_json: JSON.stringify({
+          games: [{ version: '1.21.1', stable: true }],
+          loaders: [{ version: '0.16.10', stable: true }],
+          installers: [{ version: '1.1.2', stable: true }],
+          relations: {
+            checkedAt: new Date().toISOString(),
+            loaderSets: [['0.16.10']],
+            gameLoaderSets: { '1.21.1': 0 },
+          },
+        }),
+      })
+      .where('id', '=', 'fabric')
+      .execute();
+    const rejected = await app.request(endpoint, {
+      method: 'POST',
+      body: JSON.stringify({
+        mappingId: fixture.mappingId,
+        release: '1.21.1',
+        loaderVersion: 'unknown',
+      }),
+    });
+    expect(rejected.status).toBe(400);
+    expect(await rejected.json()).toEqual({ code: 'validation_failed' });
+    const sync = await app.request(`${endpoint}/sync`, {
+      method: 'POST',
+      body: JSON.stringify({ mappingId: fixture.mappingId, limit: 21 }),
+    });
+    expect(sync.status).toBe(400);
+    expect(management).not.toHaveBeenCalled();
+    await fixture.db
+      .insertInto('game_integrations')
+      .values({ id: 'minecraft', version: '1.0.0', manifest: '{}' })
+      .onConflict((c) => c.column('id').doNothing())
+      .execute();
+    await fixture.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'minecraft', runtime_id: 'fabric', enabled: true })
+      .where('id', '=', fixture.mappingId)
+      .execute();
+    const mapping = await fixture.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', fixture.mappingId)
+      .executeTakeFirstOrThrow();
+    const id = randomUUID();
+    await fixture.db
+      .insertInto('minecraft_combinations')
+      .values({
+        id,
+        mapping_id: mapping.id,
+        identity_digest: 'a'.repeat(64),
+        mapping_digest: minecraftMappingDigest(mapping),
+        combination: JSON.stringify({
+          profile: 'fabric',
+          release: '1.21.1',
+          loaderVersion: '0.16.10',
+          installerVersion: '1.1.2',
+        }),
+        resolved_runtime: '{}',
+        binding: '{}',
+        enabled: false,
+      })
+      .execute();
+    const registered = await app.request(endpoint, {
+      method: 'POST',
+      body: JSON.stringify({ mappingId: mapping.id, release: '1.21.1', loaderVersion: '0.16.10' }),
+    });
+    expect(registered.status).toBe(201);
+    expect(await registered.json()).toEqual({ id });
+    const repeatedSync = await app.request(`${endpoint}/sync`, {
+      method: 'POST',
+      body: JSON.stringify({ mappingId: mapping.id }),
+    });
+    expect(repeatedSync.status).toBe(200);
+    expect(await repeatedSync.json()).toMatchObject({
+      items: [{ id, status: 'registered' }],
+      total: 1,
+      nextCursor: null,
+    });
+    expect(management).not.toHaveBeenCalled();
+    await fixture.db.deleteFrom('minecraft_combinations').where('id', '=', id).execute();
+    // Do not leak this fixture into local-catalog tests in the same suite.
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({ manifest_json: null, last_success_at: null })
+      .where('id', '=', 'fabric')
+      .execute();
+  });
   it('rejects user access to every technical compatibility administration route', async () => {
     const id = randomUUID();
     for (const [method, path] of [
       ['GET', '/v1/owner/minecraft/manifest'],
+      ['GET', '/v1/owner/minecraft/fabric/catalog'],
+      ['POST', '/v1/owner/minecraft/fabric/catalog'],
+      ['POST', '/v1/owner/minecraft/fabric/combinations'],
+      ['POST', '/v1/owner/minecraft/fabric/combinations/sync'],
       ['GET', '/v1/owner/minecraft/compatibility'],
       ['POST', '/v1/owner/minecraft/compatibility'],
+      ['POST', '/v1/owner/minecraft/catalog/sync'],
       ['POST', `/v1/owner/minecraft/compatibility/${id}/evidence`],
       ['PUT', `/v1/owner/minecraft/compatibility/${id}/availability`],
+      ['PUT', '/v1/owner/minecraft/compatibility/availability'],
     ] as const) {
       const result = await app.request(path, {
         method,
@@ -272,7 +916,23 @@ describe('Minecraft backend API authorization and user projection', () => {
     expect((await app.request('/v1/owner/runtime-mappings')).status).toBe(403);
     const catalog = await (await app.request('/v1/minecraft/choices')).json();
     const choice = catalog.find((entry: { id: string }) => entry.id === choiceId);
-    expect(choice).toEqual({ id: choiceId, version: '1.21.1', runtime: 'vanilla' });
+    expect(choice).toEqual({
+      capabilities: {
+        installation: true,
+        directConnection: true,
+        playerManagement: true,
+        gateway: true,
+        readiness: true,
+        playerIdle: true,
+        wake: true,
+        sleepWake: true,
+      },
+      id: choiceId,
+      version: '1.21.1',
+      releaseType: 'release',
+      releaseTime: null,
+      runtime: 'vanilla',
+    });
     const wizard = await (await app.request('/v1/minecraft/wizard')).json();
     expect(wizard.choices.some((entry: { id: string }) => entry.id === choiceId)).toBe(true);
     const input = createInput(choice.id);
@@ -298,6 +958,451 @@ describe('Minecraft backend API authorization and user projection', () => {
         .executeTakeFirstOrThrow(),
     ).toEqual({ combination_id: choiceId });
   });
+  it('creates Fabric from the independent catalog and preserves retry identity across installer updates', async () => {
+    const id = await eligibleChoice(false);
+    Object.assign(routeEnv, {
+      NH_GATEWAY_ENABLED: 'true',
+      NH_GATEWAY_ID: randomUUID(),
+      NH_GATEWAY_PHYSICAL_HOST_ID: fixture.hostId,
+    });
+    // Match a Gateway-only deployment: no public direct endpoint is configured.
+    await fixture.db
+      .updateTable('managed_nodes')
+      .set({
+        backend_allocation_pool: JSON.stringify(fixture.backendAllocationPool),
+      })
+      .where('id', '=', fixture.nodeId)
+      .execute();
+    await fixture.db
+      .updateTable('runtime_egg_mappings')
+      .set({
+        runtime_id: 'fabric',
+        port_roles: JSON.stringify([{ role: 'game', protocols: ['tcp'], primary: true }]),
+      })
+      .where('id', '=', fixture.mappingId)
+      .execute();
+    const mapping = await fixture.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', fixture.mappingId)
+      .executeTakeFirstOrThrow();
+    const old = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirstOrThrow();
+    const combination = {
+      ...(old.combination as Record<string, unknown>),
+      profile: 'fabric',
+      loaderVersion: '0.16.10',
+      installerVersion: '1.1.2',
+    };
+    const runtime = {
+      ...(old.resolved_runtime as Record<string, unknown>),
+      profile: 'fabric',
+      loaderVersion: '0.16.10',
+      installerVersion: '1.1.2',
+      installation: { kind: 'fabric-installer', args: [] },
+    };
+    const binding = {
+      ...(old.binding as Record<string, unknown>),
+      profile: 'fabric',
+      installationKind: 'fabric-installer',
+      declaredEggVariables: ['VERSION', 'LOADER', 'INSTALLER'],
+      bindings: { release: 'VERSION', loaderVersion: 'LOADER', installerVersion: 'INSTALLER' },
+    };
+    await fixture.db
+      .updateTable('minecraft_combinations')
+      .set({
+        combination: JSON.stringify(combination),
+        resolved_runtime: JSON.stringify(runtime),
+        binding: JSON.stringify(binding),
+        mapping_digest: minecraftMappingDigest(mapping),
+        enabled: false,
+      })
+      .where('id', '=', id)
+      .execute();
+    const snapshot = {
+      games: [{ version: '1.21.1', stable: true }],
+      loaders: [{ version: '0.16.10', stable: true }],
+      installers: [{ version: '1.1.2', stable: true }],
+    };
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({ manifest_json: JSON.stringify(snapshot), last_success_at: new Date() })
+      .where('id', '=', 'fabric')
+      .execute();
+    const choiceId = `fabric:${fixture.mappingId}:1.21.1`;
+    const choices = await (await app.request('/v1/minecraft/choices')).json();
+    expect(choices.find((choice: { id: string }) => choice.id === choiceId)).toMatchObject({
+      capabilities: { gateway: true, sleepWake: true },
+    });
+    const input = {
+      ...createInput(choiceId),
+      minecraft: { ...createInput(choiceId).minecraft, loaderVersion: '0.16.10' },
+    };
+    const response = await post('/v1/minecraft/servers', input);
+    expect(await response.clone().json()).not.toHaveProperty('code');
+    expect(response.status).toBe(202);
+    const created = await response.json();
+    const profile = await fixture.db
+      .selectFrom('minecraft_server_profiles')
+      .select('combination_id')
+      .where('server_id', '=', created.serverId)
+      .executeTakeFirstOrThrow();
+    expect(profile.combination_id).toBe(id);
+    expect(
+      await fixture.db
+        .selectFrom('managed_servers')
+        .select('connection_mode')
+        .where('id', '=', created.serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ connection_mode: 'gateway' });
+    expect(
+      await fixture.db
+        .selectFrom('gateway_routes')
+        .select(['enabled', 'transport'])
+        .where('server_id', '=', created.serverId)
+        .execute(),
+    ).toEqual([{ enabled: false, transport: 'tcp' }]);
+
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({
+        manifest_json: JSON.stringify({
+          ...snapshot,
+          installers: [{ version: '1.1.3', stable: true }],
+        }),
+      })
+      .where('id', '=', 'fabric')
+      .execute();
+    management.mockClear();
+    expect(await (await post('/v1/minecraft/servers', input)).json()).toEqual(created);
+    expect(management).not.toHaveBeenCalled();
+    expect((await post('/v1/minecraft/servers', { ...input, name: 'Changed replay' })).status).toBe(
+      409,
+    );
+    expect(
+      (
+        await post('/v1/minecraft/servers', {
+          ...input,
+          minecraft: { ...input.minecraft, loaderVersion: '0.16.9' },
+        })
+      ).status,
+    ).toBe(409);
+  });
+  it('restricts Forge discovery refresh to Owners and queues without contacting providers', async () => {
+    const endpoint = '/v1/owner/minecraft/forge/catalog';
+    expect((await app.request(endpoint)).status).toBe(403);
+    actor = fixture.owner;
+    expect((await app.request(endpoint)).status).toBe(200);
+    expect((await post(endpoint, {})).status).toBe(202);
+    expect(management).not.toHaveBeenCalled();
+    expect(
+      (
+        await fixture.db
+          .selectFrom('minecraft_metadata_sync')
+          .select('requested_at')
+          .where('id', '=', 'forge')
+          .executeTakeFirstOrThrow()
+      ).requested_at,
+    ).not.toBeNull();
+  });
+  it('restricts Paper discovery refresh to Owners and queues without contacting providers', async () => {
+    const endpoint = '/v1/owner/minecraft/paper/catalog';
+    expect((await app.request(endpoint)).status).toBe(403);
+    actor = fixture.owner;
+    expect((await app.request(endpoint)).status).toBe(200);
+    expect((await post(endpoint, {})).status).toBe(202);
+    expect(management).not.toHaveBeenCalled();
+    expect(
+      (
+        await fixture.db
+          .selectFrom('minecraft_metadata_sync')
+          .select('requested_at')
+          .where('id', '=', 'paper')
+          .executeTakeFirstOrThrow()
+      ).requested_at,
+    ).not.toBeNull();
+  });
+  it('creates Paper with latest cached build and preserves retry identity across build updates', async () => {
+    const id = await eligibleChoice(false);
+    Object.assign(routeEnv, {
+      NH_GATEWAY_ENABLED: 'true',
+      NH_GATEWAY_ID: randomUUID(),
+      NH_GATEWAY_PHYSICAL_HOST_ID: fixture.hostId,
+    });
+    // Match a Gateway-only deployment: no public direct endpoint is configured.
+    await fixture.db
+      .updateTable('managed_nodes')
+      .set({
+        backend_allocation_pool: JSON.stringify(fixture.backendAllocationPool),
+      })
+      .where('id', '=', fixture.nodeId)
+      .execute();
+    await fixture.db
+      .updateTable('runtime_egg_mappings')
+      .set({
+        runtime_id: 'paper',
+        port_roles: JSON.stringify([{ role: 'game', protocols: ['tcp'], primary: true }]),
+      })
+      .where('id', '=', fixture.mappingId)
+      .execute();
+    const mapping = await fixture.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', fixture.mappingId)
+      .executeTakeFirstOrThrow();
+    const old = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirstOrThrow();
+    const combination = {
+      ...(old.combination as Record<string, unknown>),
+      profile: 'paper',
+      buildId: '100',
+    };
+    const runtime = {
+      ...(old.resolved_runtime as Record<string, unknown>),
+      profile: 'paper',
+      buildId: 100,
+      installation: { kind: 'server-jar', args: [] },
+    };
+    const binding = {
+      ...(old.binding as Record<string, unknown>),
+      profile: 'paper',
+      installationKind: 'server-jar',
+      declaredEggVariables: ['MINECRAFT_VERSION', 'BUILD_NUMBER'],
+      bindings: { release: 'MINECRAFT_VERSION', buildId: 'BUILD_NUMBER' },
+    };
+    await fixture.db
+      .updateTable('minecraft_combinations')
+      .set({
+        combination: JSON.stringify(combination),
+        resolved_runtime: JSON.stringify(runtime),
+        binding: JSON.stringify(binding),
+        mapping_digest: minecraftMappingDigest(mapping),
+        enabled: false,
+      })
+      .where('id', '=', id)
+      .execute();
+    const makeSnapshot = (build: number) =>
+      fetchPaperCatalog({
+        read: async (url) => {
+          const value = url.endsWith('/paper')
+            ? { project: { id: 'paper' }, versions: { '1.21': ['1.21.1'] } }
+            : url.includes('/builds/')
+              ? {
+                  id: build,
+                  time: '2026-10-20T00:00:00Z',
+                  channel: 'STABLE',
+                  downloads: {
+                    'server:default': {
+                      url: `https://fill-data.papermc.io/v1/objects/${'a'.repeat(64)}/paper.jar`,
+                      size: 1,
+                      checksums: { sha256: 'a'.repeat(64) },
+                    },
+                  },
+                }
+              : { version: { id: '1.21.1', java: { version: { minimum: 21 } } }, builds: [build] };
+          const bytes = Buffer.from(JSON.stringify(value));
+          return {
+            bytes,
+            evidence: {
+              url,
+              sha256: createHash('sha256').update(bytes).digest('hex'),
+              retrievedAt: new Date().toISOString(),
+            },
+          };
+        },
+      });
+    const snapshot = await makeSnapshot(100);
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({ manifest_json: JSON.stringify(snapshot), last_success_at: new Date() })
+      .where('id', '=', 'paper')
+      .execute();
+    const choiceId = `paper:${fixture.mappingId}:1.21.1`;
+    const choices = await (await app.request('/v1/minecraft/choices')).json();
+    expect(choices.find((choice: { id: string }) => choice.id === choiceId)).toMatchObject({
+      capabilities: { gateway: true, sleepWake: true },
+    });
+    const input = {
+      ...createInput(choiceId),
+      minecraft: createInput(choiceId).minecraft,
+    };
+    const response = await post('/v1/minecraft/servers', input);
+    expect(await response.clone().json()).not.toHaveProperty('code');
+    expect(response.status).toBe(202);
+    const created = await response.json();
+    const profile = await fixture.db
+      .selectFrom('minecraft_server_profiles')
+      .select('combination_id')
+      .where('server_id', '=', created.serverId)
+      .executeTakeFirstOrThrow();
+    expect(profile.combination_id).toBe(id);
+    expect(
+      await fixture.db
+        .selectFrom('managed_servers')
+        .select('connection_mode')
+        .where('id', '=', created.serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ connection_mode: 'gateway' });
+    expect(
+      await fixture.db
+        .selectFrom('gateway_routes')
+        .select(['enabled', 'transport'])
+        .where('server_id', '=', created.serverId)
+        .execute(),
+    ).toEqual([{ enabled: false, transport: 'tcp' }]);
+
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({
+        manifest_json: JSON.stringify(await makeSnapshot(101)),
+      })
+      .where('id', '=', 'paper')
+      .execute();
+    management.mockClear();
+    expect(await (await post('/v1/minecraft/servers', input)).json()).toEqual(created);
+    expect(management).not.toHaveBeenCalled();
+    expect((await post('/v1/minecraft/servers', { ...input, name: 'Changed replay' })).status).toBe(
+      409,
+    );
+    expect(
+      (
+        await post('/v1/minecraft/servers', {
+          ...input,
+          minecraft: { ...input.minecraft, loaderVersion: '0.16.9' },
+        })
+      ).status,
+    ).toBe(400);
+  });
+  it('does not silently ignore Loader selections on registered UUID choices', async () => {
+    const choiceId = await eligibleChoice(false);
+    const input = createInput(choiceId);
+    management.mockClear();
+    expect(
+      (
+        await post('/v1/minecraft/servers', {
+          ...input,
+          minecraft: { ...input.minecraft, loaderVersion: '0.16.10' },
+        })
+      ).status,
+    ).toBe(400);
+    expect(management).not.toHaveBeenCalled();
+  });
+  it.each(['missing', 'stale'] as const)(
+    'refreshes %s host observations before first Minecraft creation',
+    async (kind) => {
+      const choiceId = await eligibleChoice(false);
+      if (kind === 'missing')
+        await fixture.db
+          .deleteFrom('host_observations')
+          .where('host_id', '=', fixture.hostId)
+          .execute();
+      else await fixture.observe({}, new Date(0));
+      const response = await post('/v1/minecraft/servers', createInput(choiceId));
+      expect(response.status).toBe(202);
+      const observation = await fixture.db
+        .selectFrom('host_observations')
+        .select('observed_at')
+        .where('host_id', '=', fixture.hostId)
+        .executeTakeFirstOrThrow();
+      expect(Date.now() - observation.observed_at.getTime()).toBeLessThan(15000);
+      const created = await response.json();
+      expect(
+        await fixture.db
+          .selectFrom('managed_servers')
+          .select('id')
+          .where('id', '=', created.serverId)
+          .executeTakeFirst(),
+      ).toBeDefined();
+    },
+  );
+  it('still refuses creation when the observer cannot supply a valid sample', async () => {
+    const choiceId = await eligibleChoice(false);
+    await fixture.db
+      .deleteFrom('host_observations')
+      .where('host_id', '=', fixture.hostId)
+      .execute();
+    const service = await management();
+    management.mockResolvedValue({ ...service, refreshObservations: async () => {} });
+    const response = await post('/v1/minecraft/servers', createInput(choiceId));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ code: 'resources_unavailable' });
+    expect(
+      await fixture.db
+        .selectFrom('managed_servers')
+        .select('id')
+        .where('owner_id', '=', actor.subjectUserId)
+        .execute(),
+    ).toEqual([]);
+  });
+  it('creates Vanilla without an evidence key/report and exposes accurate Owner feature diagnostics', async () => {
+    const choiceId = await eligibleChoice(false);
+    const response = await post('/v1/minecraft/servers', createInput(choiceId));
+    expect(response.status).toBe(202);
+    const result = await response.json();
+    const server = await fixture.db
+      .selectFrom('managed_servers')
+      .select('connection_mode')
+      .where('id', '=', result.serverId)
+      .executeTakeFirstOrThrow();
+    expect(server.connection_mode).toBe('direct');
+    actor = fixture.owner;
+    const diagnostics = await (await app.request('/v1/owner/minecraft/compatibility')).json();
+    expect(diagnostics.find((row: { id: string }) => row.id === choiceId)).toMatchObject({
+      supportAuthority: 'integration',
+      support: 'unverified',
+      evidence: [],
+      capabilities: {
+        installation: true,
+        directConnection: true,
+        gateway: true,
+        sleepWake: true,
+      },
+    });
+  });
+  it('refuses direct creation without an Owner-configured connection endpoint and queues no effects', async () => {
+    const choiceId = await eligibleChoice(false);
+    const node = await fixture.db
+      .selectFrom('managed_nodes')
+      .selectAll()
+      .where('id', '=', fixture.nodeId)
+      .executeTakeFirstOrThrow();
+    if (!node.backend_allocation_pool) throw new Error('Missing fixture allocation pool');
+    await fixture.db
+      .updateTable('managed_nodes')
+      .set({
+        backend_allocation_pool: JSON.stringify({
+          ...node.backend_allocation_pool,
+          allocations: node.backend_allocation_pool.allocations.map(
+            ({ directEndpoint: _endpoint, ...pin }) => pin,
+          ),
+        }),
+      })
+      .where('id', '=', node.id)
+      .execute();
+    const response = await post('/v1/minecraft/servers', createInput(choiceId));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: 'allocation_unavailable' });
+    expect(
+      await fixture.db
+        .selectFrom('managed_servers')
+        .select('id')
+        .where('owner_id', '=', actor.subjectUserId)
+        .execute(),
+    ).toEqual([]);
+    expect(
+      await fixture.db
+        .selectFrom('operation_jobs')
+        .select('id')
+        .where('actor_id', '=', actor.subjectUserId)
+        .execute(),
+    ).toEqual([]);
+  });
   it('rejects caller-supplied matching or conflicting mapping IDs on dedicated creation', async () => {
     const choiceId = await eligibleChoice();
     management.mockClear();
@@ -307,7 +1412,7 @@ describe('Minecraft backend API authorization and user projection', () => {
       ).toBe(400);
     expect(management).not.toHaveBeenCalled();
   });
-  it.each(['disabled', 'unallowlisted', 'unverified', 'unknown'] as const)(
+  it.each(['disabled', 'unallowlisted', 'unknown'] as const)(
     'rechecks %s choices before acquiring provider access',
     async (reason) => {
       let choiceId: string = await eligibleChoice();
@@ -321,12 +1426,7 @@ describe('Minecraft backend API authorization and user projection', () => {
         await fixture.db
           .updateTable('game_rollouts')
           .set({ state: 'private-testing', allowlist: [] })
-          .where('integration_id', '=', 'minecraft-java')
-          .execute();
-      if (reason === 'unverified')
-        await fixture.db
-          .deleteFrom('minecraft_verification_evidence')
-          .where('combination_id', '=', choiceId)
+          .where('integration_id', '=', 'minecraft')
           .execute();
       if (reason === 'unknown') choiceId = randomUUID();
       management.mockClear();

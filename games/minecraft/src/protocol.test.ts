@@ -1,8 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type Socket } from 'node:net';
-import type { GatewayProtocolContext, GatewayProtocolSession } from '@nickhosting/game-sdk';
+import type {
+  GatewayProbeDiagnostic,
+  GatewayProtocolContext,
+  GatewayProtocolSession,
+} from '@nickhosting/game-sdk';
 import { afterEach, describe, expect, it } from 'vitest';
+import { createMinecraftGatewayModuleAdapter } from './gateway-module.js';
 import {
   createMinecraftProtocolAdapter,
   encodeMinecraftVarInt,
@@ -56,6 +61,12 @@ function handshake(protocol = 766, intent = 1, host = 'localhost') {
     ]),
   );
 }
+function loginStart() {
+  return frameMinecraftPacket(0, Buffer.concat([encodedString('FixturePlayer'), Buffer.alloc(16)]));
+}
+function componentText(value: { text?: string; extra?: { text?: string }[] }) {
+  return (value.text ?? '') + (value.extra ?? []).map((entry) => entry.text ?? '').join('');
+}
 function session(ctx = context()): GatewayProtocolSession {
   const result = adapter.createSession?.(ctx);
   if (!result) throw new Error('session missing');
@@ -72,7 +83,7 @@ function decodeJson(bytes: Uint8Array | undefined) {
   return JSON.parse(frame.body.subarray(offset).toString());
 }
 
-describe('Minecraft exact-registry offline protocol sessions (fixtures, not real compatibility evidence)', () => {
+describe('Minecraft offline protocol sessions (fixtures, not real compatibility evidence)', () => {
   it('accepts bounded padded VarInts in framing, fields and status/ping packet IDs', () => {
     const padded = (value: number) => {
       const bytes = [...encodeMinecraftVarInt(value)];
@@ -91,7 +102,9 @@ describe('Minecraft exact-registry offline protocol sessions (fixtures, not real
           padded(intent),
         ]),
       );
-    expect(session().classify(request(2)).kind).toBe('join');
+    const joining = session();
+    expect(joining.classify(request(2)).kind).toBe('continue');
+    expect(joining.classify(loginStart()).kind).toBe('join');
     const current = session();
     expect(current.classify(request(1)).kind).toBe('continue');
     expect(current.classify(wrap(padded(0))).kind).toBe('status');
@@ -103,7 +116,7 @@ describe('Minecraft exact-registry offline protocol sessions (fixtures, not real
     expect(readMinecraftFrame(response, 1024)?.body.subarray(1)).toEqual(nonce);
     expect(() => readMinecraftFrame(Buffer.from([0x81, 0x80, 0x80, 0, 0]), 1024)).toThrow();
   });
-  it('does not infer modern support from legacy IDs, unknown releases, or future IDs', () => {
+  it('requires an enabled target while framing unknown modern clients safely', () => {
     expect(adapter.supports(context('1.5.2').route)).toBe(false);
     expect(adapter.supports(context('future').route)).toBe(false);
     expect(
@@ -112,8 +125,12 @@ describe('Minecraft exact-registry offline protocol sessions (fixtures, not real
         public: { ...context().route.public, transport: 'udp' },
       }),
     ).toBe(false);
-    for (const protocol of [61, 2000000000])
-      expect(session().classify(handshake(protocol, 2)).kind).toBe('unsupported');
+    for (const protocol of [61, 2000000000]) {
+      const current = session();
+      expect(current.classify(handshake(protocol, 2)).kind).toBe('continue');
+      expect(current.classify(loginStart()).kind).toBe('reject');
+      expect(componentText(decodeJson(current.response('sleeping').bytes))).toContain('version');
+    }
     expect(adapter.classify(handshake(), context()).kind).toBe('unsupported');
     expect(adapter.response(context(), 'sleeping')).toBeUndefined();
   });
@@ -127,7 +144,7 @@ describe('Minecraft exact-registry offline protocol sessions (fixtures, not real
         createMinecraftProtocolAdapter({ versions: invalid, supportedReleases: [] }),
       ).toThrow();
     expect(() =>
-      createMinecraftProtocolAdapter({ versions, supportedReleases: ['1.5.2'] }),
+      createMinecraftProtocolAdapter({ versions, supportedReleases: ['unknown'] }),
     ).toThrow();
   });
   it('handles every partial handshake prefix without classification or consumption', () => {
@@ -148,7 +165,7 @@ describe('Minecraft exact-registry offline protocol sessions (fixtures, not real
     expect(response.close).toBe(false);
     expect(decodeJson(response.bytes)).toMatchObject({
       version: { name: '1.20.5', protocol: 766 },
-      description: { text: expect.stringContaining('sleeping') },
+      description: { text: '', extra: [{ text: expect.stringContaining('sleeping') }] },
     });
     const payload = Buffer.from('ffffffffffffffff', 'hex');
     const ping = frameMinecraftPacket(1, payload);
@@ -172,34 +189,40 @@ describe('Minecraft exact-registry offline protocol sessions (fixtures, not real
   });
   it('recognizes only matching intentional login and returns localized login JSON disconnect', () => {
     const current = session(context('26.1', 'it'));
-    expect(current.classify(handshake(775, 2)).kind).toBe('join');
+    expect(current.classify(handshake(775, 2)).kind).toBe('continue');
+    expect(current.classify(loginStart()).kind).toBe('join');
     expect(decodeJson(current.response('waking').bytes)).toEqual({
-      text: 'Server in avvio. Riconnettiti tra poco.',
+      text: '',
+      extra: [{ text: 'Server in avvio. Riconnettiti tra poco.' }],
     });
     const mismatch = session();
-    expect(mismatch.classify(handshake(765, 2)).kind).toBe('reject');
-    expect(decodeJson(mismatch.response('sleeping').bytes).text).toContain('version');
+    expect(mismatch.classify(handshake(765, 2)).kind).toBe('continue');
+    expect(mismatch.classify(loginStart()).kind).toBe('reject');
+    expect(componentText(decodeJson(mismatch.response('sleeping').bytes))).toContain('version');
   });
-  it('returns actual configured status version to known mismatched clients without a join', () => {
+  it('mirrors known client wire IDs in status without claiming target join compatibility', () => {
     const current = session();
     expect(current.classify(handshake(4, 1)).kind).toBe('continue');
     expect(current.classify(frameMinecraftPacket(0)).kind).toBe('status');
     expect(decodeJson(current.response('blocked').bytes).version).toEqual({
       name: '1.20.5',
-      protocol: 766,
+      protocol: 4,
     });
   });
   it('requires both exact transfer capability and explicit transfer consent', () => {
     expect(session().classify(handshake(765, 3)).kind).toBe('unsupported');
     const refused = session();
-    expect(refused.classify(handshake(766, 3)).kind).toBe('reject');
-    expect(decodeJson(refused.response('sleeping').bytes).text).toContain('directly');
+    expect(refused.classify(handshake(766, 3)).kind).toBe('continue');
+    expect(refused.classify(loginStart()).kind).toBe('reject');
+    expect(componentText(decodeJson(refused.response('sleeping').bytes))).toContain('directly');
     const allowed = createMinecraftProtocolAdapter({
       versions,
       supportedReleases: ['1.20.5'],
       acceptsTransfers: true,
     });
-    expect(allowed.createSession?.(context()).classify(handshake(766, 3)).kind).toBe('join');
+    const transferred = allowed.createSession?.(context());
+    expect(transferred?.classify(handshake(766, 3)).kind).toBe('continue');
+    expect(transferred?.classify(loginStart()).kind).toBe('join');
   });
   it('keeps cross-client status, login, locale and ping state isolated', () => {
     const first = session();
@@ -207,7 +230,8 @@ describe('Minecraft exact-registry offline protocol sessions (fixtures, not real
     first.classify(handshake());
     first.classify(frameMinecraftPacket(0));
     second.classify(handshake(775, 2));
-    expect(decodeJson(second.response('blocked').bytes).text).toContain('Impossibile');
+    second.classify(loginStart());
+    expect(componentText(decodeJson(second.response('blocked').bytes))).toContain('Impossibile');
     expect(decodeJson(first.response('sleeping').bytes).version.protocol).toBe(766);
     const nonce = Buffer.from('0102030405060708', 'hex');
     first.classify(frameMinecraftPacket(1, nonce));
@@ -221,19 +245,23 @@ describe('Minecraft exact-registry offline protocol sessions (fixtures, not real
       Buffer.from([0xff, 0xff, 0xff, 0xff, 0xff]),
       Buffer.from([0x80, 0x00]),
       encodeMinecraftVarInt(5000),
-      frameMinecraftPacket(0, Buffer.alloc(0)),
       handshake(766, 4),
       handshake(766, 1, 'a'.repeat(262)),
       badHost,
       frameMinecraftPacket(0, Buffer.concat([handshake().subarray(2), Buffer.from([0])])),
     ])
-      expect(session().classify(input).kind).toBe('unsupported');
+      expect(session().classify(input).kind, input.toString('hex')).toBe('unsupported');
+    // 0100 is now an ambiguous incomplete Alpha login; never wake or reply.
+    const ambiguous = session();
+    expect(ambiguous.classify(frameMinecraftPacket(0)).kind).toBe('need-more');
+    expect(ambiguous.response('sleeping').bytes).toBeUndefined();
     // A legacy prefix is also a possible partial modern length; it receives no
     // response and no wake, then the Gateway classification deadline closes it.
     expect(session().classify(Buffer.from([0xfe, 0x01, 0xfa])).kind).toBe('need-more');
     const controller = new AbortController();
     const current = session({ ...context(), signal: controller.signal });
     current.classify(handshake(766, 2));
+    current.classify(loginStart());
     controller.abort();
     expect(current.response('waking')).toEqual({ close: true });
   });
@@ -250,17 +278,32 @@ describe('Minecraft exact-registry offline protocol sessions (fixtures, not real
       expect(current.classify(input).kind).toBe('unsupported');
     }
   });
+  it.each(['en', 'it'] as const)(
+    'reports stopping without a fabricated countdown in %s',
+    (locale) => {
+      const current = session(context('1.20.5', locale));
+      current.classify(handshake(766, 2));
+      current.classify(loginStart());
+      expect(componentText(decodeJson(current.response('stopping').bytes))).toBe(
+        locale === 'en'
+          ? 'Server stopping. Please try again shortly.'
+          : 'Server in spegnimento. Riprova tra poco.',
+      );
+    },
+  );
   it('generates all offline state messages without protocol IDs in the user message', () => {
     for (const mode of [
       'sleeping',
       'waking',
+      'stopping',
       'blocked',
       'maintenance',
       'manually_stopped',
     ] as const) {
       const current = session();
       current.classify(handshake(766, 2));
-      const text = decodeJson(current.response(mode).bytes).text;
+      current.classify(loginStart());
+      const text = componentText(decodeJson(current.response(mode).bytes));
       expect(text).not.toContain('766');
       expect(text.length).toBeGreaterThan(10);
     }
@@ -273,10 +316,24 @@ afterEach(async () => {
 });
 async function statusFixture(
   status: unknown,
-  options: { badPing?: boolean; silent?: boolean; partial?: boolean } = {},
+  options: {
+    badPing?: boolean;
+    silent?: boolean;
+    partial?: boolean;
+    onConnection?: () => void;
+    closeFirst?: number;
+  } = {},
 ) {
   const clients = new Set<Socket>();
+  let connections = 0;
   const server = createServer((socket) => {
+    options.onConnection?.();
+    if (++connections <= (options.closeFirst ?? 0)) {
+      // Graceful EOF after the request produces socket_closed deterministically;
+      // destroying before data can race with writes and produce ECONNRESET.
+      socket.once('data', () => socket.end());
+      return;
+    }
     clients.add(socket);
     socket.once('close', () => clients.delete(socket));
     socket.on('error', () => {});
@@ -317,6 +374,218 @@ async function statusFixture(
   return ctx;
 }
 describe('actual socket Minecraft status probes against isolated protocol fixtures', () => {
+  it('retries a transient waking status closure within the same observation', async () => {
+    let calls = 0;
+    const ctx = await statusFixture(
+      { version: { protocol: 766 }, players: { online: 0 } },
+      {
+        closeFirst: 1,
+        onConnection: () => {
+          calls++;
+        },
+      },
+    );
+    ctx.route = { ...ctx.route, mode: 'waking' };
+    const events: GatewayProbeDiagnostic[] = [];
+    expect(
+      await adapter.probeReadiness({ ...ctx, onProbeDiagnostic: (e) => events.push(e) }),
+    ).toEqual({ ready: true, playerCount: 0 });
+    expect(calls).toBe(2);
+    expect(events.filter((e) => e.stage === 'total').map((e) => [e.attempt, e.reason])).toEqual([
+      [1, 'socket_closed'],
+      [2, undefined],
+    ]);
+  });
+  it.each(['online', 'waking'] as const)(
+    'bounds retries for repeated closure in %s',
+    async (mode) => {
+      let calls = 0;
+      const ctx = await statusFixture(
+        {},
+        {
+          closeFirst: 10,
+          onConnection: () => {
+            calls++;
+          },
+        },
+      );
+      ctx.route = { ...ctx.route, mode };
+      expect(await adapter.probeReadiness(ctx)).toEqual({ ready: false });
+      expect(calls).toBe(mode === 'waking' ? 3 : 1);
+    },
+  );
+  it('cancels a pending retry and retains the original probe deadline', async () => {
+    let calls = 0;
+    const ctx = await statusFixture(
+      {},
+      {
+        closeFirst: 10,
+        onConnection: () => {
+          calls++;
+        },
+      },
+    );
+    ctx.route = { ...ctx.route, mode: 'waking' };
+    const abort = new AbortController();
+    expect(
+      await adapter.probeReadiness({
+        ...ctx,
+        signal: abort.signal,
+        onProbeDiagnostic: (e) => {
+          if (e.stage === 'total') setTimeout(() => abort.abort(), 10);
+        },
+      }),
+    ).toEqual({ ready: false });
+    expect(calls).toBe(1);
+    const short = createMinecraftProtocolAdapter({
+      versions,
+      supportedReleases: ['1.20.5'],
+      probeTimeoutMs: 50,
+    });
+    expect(await short.probeReadiness(ctx)).toEqual({ ready: false });
+    expect(calls).toBe(2);
+  });
+  it('does not retry a protocol mismatch while waking', async () => {
+    let calls = 0;
+    const ctx = await statusFixture(
+      { version: { protocol: 765 } },
+      {
+        onConnection: () => {
+          calls++;
+        },
+      },
+    );
+    ctx.route = { ...ctx.route, mode: 'waking' };
+    expect(await adapter.probeReadiness(ctx)).toEqual({ ready: false });
+    expect(calls).toBe(1);
+  });
+
+  it('diagnoses sequential TCP/status/pong stages without payloads and isolates sink failures', async () => {
+    const ctx = await statusFixture({ version: { protocol: 766 } }, { partial: true });
+    const events: GatewayProbeDiagnostic[] = [];
+    expect(
+      await adapter.probeReadiness({ ...ctx, onProbeDiagnostic: (event) => events.push(event) }),
+    ).toEqual({ ready: true });
+    expect(events.map((event) => event.stage)).toEqual([
+      'tcp_connect',
+      'status_response',
+      'pong',
+      'total',
+    ]);
+    for (const event of events) {
+      expect(event.outcome).toBe('ok');
+      expect(event.durationMs).toBeGreaterThanOrEqual(0);
+      expect(Object.keys(event).sort()).toEqual(['attempt', 'durationMs', 'outcome', 'stage']);
+    }
+    expect(events[1]?.durationMs).toBeGreaterThanOrEqual(3);
+    const total = events[3]?.durationMs ?? 0;
+    expect(total).toBeGreaterThanOrEqual(
+      events.slice(0, 3).reduce((sum, event) => sum + event.durationMs, 0),
+    );
+    expect(
+      await adapter.probeReadiness({
+        ...ctx,
+        onProbeDiagnostic: () => {
+          throw new Error('sink');
+        },
+      }),
+    ).toEqual({ ready: true });
+  });
+  it.each(['socket_closed', 'connection_refused'] as const)(
+    'distinguishes %s at connection setup',
+    async (reason) => {
+      const server = createServer((socket) => socket.destroy());
+      server.listen(0, '127.0.0.1');
+      await once(server, 'listening');
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('fixture');
+      if (reason === 'connection_refused')
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      else cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+      const ctx = context();
+      ctx.route.backend.port = address.port;
+      const events: GatewayProbeDiagnostic[] = [];
+      expect(
+        await adapter.probeReadiness({ ...ctx, onProbeDiagnostic: (event) => events.push(event) }),
+      ).toEqual({ ready: false });
+      expect(events.at(-1)).toMatchObject({ stage: 'total', outcome: 'failed', reason });
+    },
+  );
+  it.each([
+    ['protocol_mismatch', { version: { protocol: 765 } }, {}],
+    ['invalid_frame', { version: { protocol: 766 } }, { badPing: true }],
+    ['timeout', { version: { protocol: 766 } }, { silent: true }],
+  ] as const)(
+    'distinguishes %s without changing failed readiness',
+    async (reason, status, options) => {
+      const ctx = await statusFixture(status, options);
+      const events: GatewayProbeDiagnostic[] = [];
+      expect(
+        await probeMinecraftStatus(
+          { ...ctx, onProbeDiagnostic: (event) => events.push(event) },
+          versions[3] as MinecraftProtocolVersion,
+          { timeoutMs: 50 },
+        ),
+      ).toEqual({ ready: false });
+      expect(events.at(-1)).toMatchObject({ stage: 'total', outcome: 'failed', reason });
+      expect(events.at(-2)).toMatchObject({ outcome: 'failed', reason });
+    },
+  );
+
+  it('the deployed trusted module exposes a single coherent observation with its evidence gate', async () => {
+    let connections = 0;
+    const ctx = await statusFixture(
+      { version: { protocol: 766 }, players: { online: 0 } },
+      {
+        onConnection: () => {
+          connections++;
+        },
+      },
+    );
+    if (!ctx.route.protocol) throw new Error('fixture');
+    ctx.route.protocol.minecraft = {
+      release: '1.20.5',
+      protocolId: 766,
+      family: 'netty',
+      transfer: true,
+      acceptsTransfers: false,
+      choiceId: randomUUID(),
+      choiceDigest: 'a'.repeat(64),
+      evidenceRunId: randomUUID(),
+      evidenceExpiresAt: new Date(Date.now() + 60000).toISOString(),
+    };
+    expect(await createMinecraftGatewayModuleAdapter().observe?.(ctx)).toEqual({
+      ready: true,
+      idle: true,
+      playerCount: 0,
+    });
+    expect(connections).toBe(1);
+  });
+
+  it.each([0, 4, undefined])(
+    'collects readiness and explicit player count=%s in one status/ping exchange',
+    async (count) => {
+      let connections = 0;
+      const ctx = await statusFixture(
+        {
+          version: { protocol: 766 },
+          ...(count === undefined ? {} : { players: { online: count } }),
+        },
+        {
+          onConnection: () => {
+            connections++;
+          },
+        },
+      );
+      expect(await adapter.observe?.(ctx)).toEqual({
+        ready: true,
+        idle: count === 0,
+        ...(count === undefined ? {} : { playerCount: count }),
+      });
+      expect(connections).toBe(1);
+    },
+  );
+
   it('requires matching protocol status plus nonce echo and reports explicit zero player count', async () => {
     const ctx = await statusFixture(
       { version: { protocol: 766 }, players: { online: 0 } },
@@ -356,5 +625,65 @@ describe('actual socket Minecraft status probes against isolated protocol fixtur
     expect(await probeMinecraftStatus(large, version, { maximumBytes: 256 })).toEqual({
       ready: false,
     });
+  });
+});
+
+describe('per-server Gateway presentation', () => {
+  it('uses independent MOTD and disconnect overrides with placeholders and formatting', () => {
+    const ctx = context();
+    const presentation = {
+      serverName: 'Demo',
+      messages: { sleeping: { motd: '§a{server} sleeping', disconnect: 'Join later: {server}' } },
+    };
+    const status = session({ ...ctx, route: { ...ctx.route, presentation } });
+    status.classify(handshake());
+    status.classify(frameMinecraftPacket(0));
+    expect(componentText(decodeJson(status.response('sleeping').bytes).description)).toBe(
+      'Demo sleeping',
+    );
+    const login = session({ ...ctx, route: { ...ctx.route, presentation } });
+    login.classify(handshake(766, 2));
+    login.classify(loginStart());
+    expect(componentText(decodeJson(login.response('sleeping').bytes))).toBe('Join later: Demo');
+  });
+  it('emits space-aligned MOTD components while leaving disconnect alignment literal', () => {
+    const ctx = context();
+    const presentation = {
+      serverName: 'AAA',
+      messages: {
+        sleeping: { motd: '[align=center]§a{server}', disconnect: '[align=right]{server}' },
+      },
+    };
+    const status = session({ ...ctx, route: { ...ctx.route, presentation } });
+    status.classify(handshake());
+    status.classify(frameMinecraftPacket(0));
+    const description = decodeJson(status.response('sleeping').bytes).description;
+    expect(componentText(description)).toBe(`${' '.repeat(31)}AAA`);
+    expect(description.extra.at(-1)).toMatchObject({ text: 'AAA', color: 'green' });
+    const login = session({ ...ctx, route: { ...ctx.route, presentation } });
+    login.classify(handshake(766, 2));
+    login.classify(loginStart());
+    expect(componentText(decodeJson(login.response('sleeping').bytes))).toBe('[align=right]AAA');
+  });
+  it('explains disabled automatic wake rather than inviting a join to start', () => {
+    const ctx = context('1.20.5', 'it');
+    const status = session({ ...ctx, route: { ...ctx.route, wakeEnabled: false } });
+    status.classify(handshake());
+    status.classify(frameMinecraftPacket(0));
+    expect(componentText(decodeJson(status.response('sleeping').bytes).description)).toBe(
+      'Server spento. Avvialo dal pannello.',
+    );
+  });
+  it('renders capacity errors separately from generic blocking', () => {
+    const ctx = context();
+    const presentation = {
+      serverName: 'Demo',
+      messages: { capacity_denied: { disconnect: 'Capacity custom' } },
+      blockedReason: 'capacity_denied' as const,
+    };
+    const login = session({ ...ctx, route: { ...ctx.route, presentation } });
+    login.classify(handshake(766, 2));
+    login.classify(loginStart());
+    expect(componentText(decodeJson(login.response('blocked').bytes))).toBe('Capacity custom');
   });
 });

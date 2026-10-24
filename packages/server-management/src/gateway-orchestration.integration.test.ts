@@ -1,14 +1,24 @@
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { authSessionId } from '@nickhosting/core';
-import { createDatabase } from '@nickhosting/database';
+import {
+  createDatabase,
+  listenForGatewayChanges,
+  listenForJobOutbox,
+  notifyGatewayChange,
+  notifyJobOutbox,
+  updateSettings,
+} from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type {
   ApplicationServer,
   PterodactylAdapter,
   Resources,
 } from '@nickhosting/pterodactyl-adapter';
+import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { reserveStart } from './admission.js';
+import { trustedGameModules } from './game-modules.js';
 import {
   type GatewayObservation,
   type GatewayOrchestrationOptions,
@@ -16,16 +26,27 @@ import {
   getGatewayState,
   reconcileGatewayState,
   reportGatewayObservation,
+  reportGatewayProviderRunning,
   requestGatewayWake,
   setGatewayPolicy,
 } from './gateway-orchestration.js';
+import { getGatewaySnapshot, requireGatewayRoute, setGatewayRoute } from './gateway-registry.js';
 import {
   type LifecycleOptions,
   processServerOperation,
   reconcileManagedServer,
 } from './lifecycle.js';
+import { getPlatformSleepPolicy } from './platform-queries.js';
 import { enqueueServerOperation } from './registry.js';
 import { authorizeQueuedEffect } from './runtime.js';
+import {
+  createSchedule,
+  deleteSchedule,
+  getAutomationConsent,
+  runDueSchedules,
+  setAutomationConsent,
+} from './schedules.js';
+import { getGameSleepPolicy, resolveIdleTimeout, setGameSleepPolicy } from './sleep-policy.js';
 import { managementFixture, pendingUploadFixture } from './test-fixtures.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -79,6 +100,7 @@ async function row() {
 }
 async function lifecycleFixture() {
   const server = await row();
+  if (server.provider_user_id === null) throw new Error('Missing fixture provider account');
   const allocations = await f.db
     .selectFrom('server_allocations')
     .selectAll()
@@ -96,7 +118,7 @@ async function lifecycleFixture() {
     suspended: false,
     limits: server.limits,
     feature_limits: { databases: 0, allocations: 3, backups: 1 },
-    user: 1,
+    user: server.provider_user_id,
     node: f.providerNodeId,
     allocation: allocations.find((a) => a.is_primary)?.pterodactyl_allocation_id ?? 0,
     nest: 1,
@@ -182,8 +204,8 @@ async function lifecycleFixture() {
   };
   return { lifecycle, process, power, stop, processStartedAt: () => processStart };
 }
-async function started() {
-  await configure();
+async function started(patch: Partial<GatewayPolicy> = {}) {
+  await configure(patch);
   const fixture = await lifecycleFixture();
   const state = await wake();
   expect(state.state).toBe('waking');
@@ -191,6 +213,14 @@ async function started() {
   advance(1000);
   expect(await fixture.process(state.wakeJobId ?? '')).toBe('succeeded');
   return { ...fixture, state };
+}
+async function consent(allowed: boolean) {
+  const current = await getAutomationConsent(f.db, f.context, serverId);
+  return setAutomationConsent(f.db, f.context, serverId, {
+    allowed,
+    expectedAllowed: current.allowed,
+    expectedIntent: current.expectedIntent,
+  });
 }
 async function report(
   fixture: Awaited<ReturnType<typeof started>>,
@@ -217,6 +247,465 @@ async function report(
 }
 
 describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
+  it('migrates legacy positive and NULL timeouts to independent Owner authority without enabling sleep', async () => {
+    await configure();
+    const migration20 = await readFile(
+      new URL('../../database/migrations/020_sleep_policy_inheritance.sql', import.meta.url),
+      'utf8',
+    );
+    const migration21 = await readFile(
+      new URL('../../database/migrations/021_sleep_policy_owner_controls.sql', import.meta.url),
+      'utf8',
+    );
+    await expect(
+      f.db.transaction().execute(async (tx) => {
+        await sql`alter table gateway_server_states drop column owner_idle_timeout_seconds, drop column owner_idle_timeout_user_access, drop column idle_timeout_inherited`.execute(
+          tx,
+        );
+        await sql.raw(migration20).execute(tx);
+        expect(
+          (
+            await tx
+              .selectFrom('gateway_server_states')
+              .selectAll()
+              .where('server_id', '=', serverId)
+              .executeTakeFirstOrThrow()
+          ).idle_timeout_inherited,
+        ).toBe(false);
+        // Exercise both historical representations within this rolled-back fixture transaction.
+        await sql.raw(migration21).execute(tx);
+        expect(
+          await tx
+            .selectFrom('gateway_server_states')
+            .selectAll()
+            .where('server_id', '=', serverId)
+            .executeTakeFirstOrThrow(),
+        ).toMatchObject({
+          owner_idle_timeout_seconds: 10,
+          idle_timeout_seconds: null,
+          idle_timeout_inherited: true,
+        });
+        await sql`alter table gateway_server_states drop column owner_idle_timeout_seconds, drop column owner_idle_timeout_user_access`.execute(
+          tx,
+        );
+        await tx
+          .updateTable('gateway_server_states')
+          .set({ idle_timeout_seconds: null, idle_timeout_inherited: false })
+          .where('server_id', '=', serverId)
+          .execute();
+        await sql.raw(migration21).execute(tx);
+        expect(
+          await tx
+            .selectFrom('gateway_server_states')
+            .selectAll()
+            .where('server_id', '=', serverId)
+            .executeTakeFirstOrThrow(),
+        ).toMatchObject({
+          owner_idle_timeout_seconds: -1,
+          idle_timeout_seconds: null,
+          idle_timeout_inherited: true,
+        });
+        throw new Error('rollback isolated migration fixture');
+      }),
+    ).rejects.toThrow('rollback isolated migration fixture');
+  });
+
+  it('enforces hidden and shorten-only access against direct API policy changes and clamps old preferences', async () => {
+    await updateSettings(f.db, f.owner, {
+      defaultIdleTimeoutSeconds: 60,
+      idleTimeoutUserAccess: 'hidden',
+    });
+    await setGatewayPolicy(
+      f.db,
+      f.owner,
+      serverId,
+      { ...policy, idleTimeoutSeconds: null, idleTimeoutInherited: true },
+      options,
+    );
+    expect((await getPlatformSleepPolicy(f.db, f.context, serverId)).idleTimeout).toBeNull();
+    expect((await getPlatformSleepPolicy(f.db, f.context, serverId)).policy).not.toHaveProperty(
+      'idleTimeoutSeconds',
+    );
+    await expect(configure({ idleTimeoutSeconds: 10 })).rejects.toThrow('forbidden');
+    await expect(
+      configure({ idleTimeoutSeconds: null, idleTimeoutInherited: true, enabled: false }),
+    ).rejects.toThrow('forbidden');
+    await updateSettings(f.db, f.owner, { idleTimeoutUserAccess: 'shorten-only' });
+    await expect(configure({ idleTimeoutSeconds: 61 })).rejects.toThrow('forbidden');
+    await expect(
+      configure({ idleTimeoutSeconds: null, idleTimeoutInherited: false }),
+    ).rejects.toThrow('forbidden');
+    await configure({ idleTimeoutSeconds: 30 });
+    expect((await getPlatformSleepPolicy(f.db, f.context, serverId)).idleTimeout).toMatchObject({
+      overrideSeconds: 30,
+      effectiveSeconds: 30,
+      source: 'server',
+      ownerBaselineSeconds: 60,
+    });
+    await updateSettings(f.db, f.owner, { defaultIdleTimeoutSeconds: 15 });
+    expect((await getPlatformSleepPolicy(f.db, f.context, serverId)).idleTimeout).toMatchObject({
+      overrideSeconds: 30,
+      effectiveSeconds: 15,
+      source: 'default',
+    });
+    await updateSettings(f.db, f.owner, { idleTimeoutUserAccess: 'hidden' });
+    expect((await getPlatformSleepPolicy(f.db, f.owner, serverId)).idleTimeout).toMatchObject({
+      overrideSeconds: null,
+      effectiveSeconds: 15,
+    });
+    await expect(configure({ idleTimeoutUserAccess: 'editable' })).rejects.toThrow('forbidden');
+  });
+  it('keeps separate Owner server authority and respects game/runtime access precedence', async () => {
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .select('game_id')
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    await updateSettings(f.db, f.owner, {
+      defaultIdleTimeoutSeconds: 900,
+      idleTimeoutUserAccess: 'hidden',
+      gameIdleTimeouts: {
+        [mapping.game_id]: {
+          gameTimeoutSeconds: 600,
+          userAccess: 'editable',
+          runtimeTimeouts: { fixture: 300 },
+          runtimeUserAccess: { fixture: 'shorten-only' },
+        },
+      },
+    });
+    await setGatewayPolicy(
+      f.db,
+      f.owner,
+      serverId,
+      { ...policy, idleTimeoutSeconds: 120, idleTimeoutUserAccess: 'editable' },
+      options,
+    );
+    await configure({ idleTimeoutSeconds: null, idleTimeoutInherited: false });
+    expect((await getPlatformSleepPolicy(f.db, f.context, serverId)).idleTimeout).toMatchObject({
+      effectiveSeconds: -1,
+      ownerBaselineSeconds: 120,
+      overrideSeconds: -1,
+    });
+    const ownerView = await getPlatformSleepPolicy(f.db, f.owner, serverId);
+    expect(ownerView.idleTimeout).toMatchObject({
+      overrideSeconds: 120,
+      inheritedSeconds: 300,
+      inheritedUserAccess: 'shorten-only',
+      ownerUserAccessOverride: 'editable',
+    });
+    await setGatewayPolicy(
+      f.db,
+      f.owner,
+      serverId,
+      {
+        ...policy,
+        idleTimeoutSeconds: null,
+        idleTimeoutInherited: true,
+        idleTimeoutUserAccess: null,
+      },
+      options,
+    );
+    expect((await getPlatformSleepPolicy(f.db, f.context, serverId)).idleTimeout).toMatchObject({
+      effectiveSeconds: 300,
+      userAccess: 'shorten-only',
+      ownerBaselineSeconds: 300,
+    });
+  });
+  it('cannot extend idle time through repeated hidden or shorten-only no-op policy writes', async () => {
+    const fixture = await started();
+    await updateSettings(f.db, f.owner, {
+      defaultIdleTimeoutSeconds: 60,
+      idleTimeoutUserAccess: 'shorten-only',
+    });
+    await report(fixture);
+    const before = await f.db
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    await configure({ idleTimeoutSeconds: 10 });
+    const after = await f.db
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    expect(after.idle_since).toEqual(before.idle_since);
+    expect(after.generation).toBe(before.generation);
+    expect(after.state).toBe('online');
+  });
+  it('specialized game policy updates reset inherited idle evidence, preserve wake identity and honor environment locks', async () => {
+    await configure({
+      enabled: false,
+      mode: 'manually_stopped',
+      idleTimeoutInherited: true,
+      idleTimeoutSeconds: null,
+    });
+    const manifest = trustedGameModules.get('minecraft')?.manifest;
+    if (!manifest) throw new Error('Missing trusted Minecraft module');
+    await f.db
+      .insertInto('game_integrations')
+      .values({ id: manifest.id, version: manifest.version, manifest })
+      .onConflict((c) => c.column('id').doNothing())
+      .execute();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'minecraft', runtime_id: 'vanilla' })
+      .where('id', '=', f.mappingId)
+      .execute();
+    const before = await f.db
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ idle_since: clock })
+      .where('server_id', '=', serverId)
+      .execute();
+    await setGameSleepPolicy(f.db, f.owner, 'minecraft', {
+      gameTimeoutSeconds: 60,
+      runtimeTimeouts: { vanilla: 30 },
+      userAccess: 'shorten-only',
+      runtimeUserAccess: {},
+    });
+    const after = await f.db
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    expect(after.idle_since).toBeNull();
+    expect(after.generation).toBe(before.generation);
+    const env = { NH_GAME_IDLE_TIMEOUTS: '{}' };
+    expect(await getGameSleepPolicy(f.db, f.owner, 'minecraft', env)).toMatchObject({
+      locked: true,
+    });
+    await expect(
+      setGameSleepPolicy(
+        f.db,
+        f.owner,
+        'minecraft',
+        { gameTimeoutSeconds: 60, runtimeTimeouts: {} },
+        env,
+      ),
+    ).rejects.toThrow('conflict');
+    await expect(
+      setGameSleepPolicy(f.db, { ...f.owner, sessionType: 'support' }, 'minecraft', {
+        gameTimeoutSeconds: 60,
+        runtimeTimeouts: {},
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('inherits game then runtime defaults, supports server overrides and preserves legacy disabled sleep', async () => {
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    await updateSettings(f.db, f.owner, {
+      gameIdleTimeouts: {
+        [mapping.game_id]: { gameTimeoutSeconds: 120, runtimeTimeouts: { fixture: 60 } },
+      },
+    });
+    expect(await resolveIdleTimeout(f.db, serverId, null)).toMatchObject({
+      effectiveSeconds: 60,
+      source: 'runtime',
+      overrideSeconds: null,
+    });
+    expect(
+      await resolveIdleTimeout(f.db, serverId, {
+        idle_timeout_seconds: 15,
+        idle_timeout_inherited: false,
+      }),
+    ).toMatchObject({ effectiveSeconds: 15, source: 'server' });
+    expect(
+      await resolveIdleTimeout(f.db, serverId, {
+        idle_timeout_seconds: null,
+        idle_timeout_inherited: false,
+      }),
+    ).toMatchObject({ effectiveSeconds: -1, source: 'server' });
+    expect(
+      await resolveIdleTimeout(f.db, serverId, null, {
+        NH_GAME_IDLE_TIMEOUTS: JSON.stringify({
+          [mapping.game_id]: { gameTimeoutSeconds: 180, runtimeTimeouts: {} },
+        }),
+      }),
+    ).toMatchObject({ effectiveSeconds: 180, source: 'game' });
+    await configure({ idleTimeoutSeconds: null, idleTimeoutInherited: true });
+    const state = await getGatewayState(f.db, serverId);
+    expect((await wake()).state).toBe('waking');
+    expect(state.enabled).toBe(true);
+  });
+  it('honors environment-disabled sleep on duplicate observations and before the final worker power handoff', async () => {
+    const fixture = await started();
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .select('game_id')
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    await updateSettings(f.db, f.owner, {
+      gameIdleTimeouts: { [mapping.game_id]: { gameTimeoutSeconds: 10, runtimeTimeouts: {} } },
+    });
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ idle_timeout_inherited: true })
+      .where('server_id', '=', serverId)
+      .execute();
+    await report(fixture);
+    const env = {
+      NH_GAME_IDLE_TIMEOUTS: JSON.stringify({
+        [mapping.game_id]: { gameTimeoutSeconds: -1, runtimeTimeouts: {} },
+      }),
+    };
+    expect(await report(fixture, {}, { env })).toMatchObject({ sleepEligibleAt: null });
+    advance(10000);
+    const pending = await report(fixture);
+    fixture.lifecycle.env = env;
+    let externalPower = false;
+    fixture.stop.mockImplementationOnce(async (_id, _identifier, callbacks) => {
+      await callbacks.beforePower?.();
+      externalPower = true;
+      return { confirmed: false };
+    });
+    expect(await fixture.process(pending.sleepJobId ?? '')).toBe('failed');
+    expect(externalPower).toBe(false);
+    expect((await row()).runtime_state).toBe('running');
+  });
+  it('confirms an already sent sleep after inherited sleep is disabled without repeating remote power', async () => {
+    const fixture = await started();
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .select('game_id')
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    await updateSettings(f.db, f.owner, {
+      gameIdleTimeouts: { [mapping.game_id]: { gameTimeoutSeconds: 10, runtimeTimeouts: {} } },
+    });
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ idle_timeout_inherited: true })
+      .where('server_id', '=', serverId)
+      .execute();
+    await report(fixture);
+    advance(10000);
+    const pending = await report(fixture);
+    fixture.lifecycle.checkpoint = async (point) => {
+      if (point === 'remote_succeeded') throw new Error('isolated lost acknowledgement');
+    };
+    expect(await fixture.process(pending.sleepJobId ?? '')).toBe('waiting');
+    await updateSettings(f.db, f.owner, {
+      gameIdleTimeouts: { [mapping.game_id]: { gameTimeoutSeconds: -1, runtimeTimeouts: {} } },
+    });
+    advance(15001);
+    expect(await fixture.process(pending.sleepJobId ?? '')).toBe('succeeded');
+    expect(fixture.stop).toHaveBeenCalledTimes(1);
+  });
+  it('does not accumulate hidden idle time while sleep is disabled by the environment', async () => {
+    const fixture = await started();
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ idle_timeout_inherited: true })
+      .where('server_id', '=', serverId)
+      .execute();
+    const env = { NH_DEFAULT_IDLE_TIMEOUT_SECONDS: '-1' };
+    await report(fixture, {}, { env });
+    advance(10000);
+    await report(fixture, {}, { env });
+    expect(
+      (
+        await f.db
+          .selectFrom('gateway_server_states')
+          .select('idle_since')
+          .where('server_id', '=', serverId)
+          .executeTakeFirstOrThrow()
+      ).idle_since,
+    ).toBeNull();
+    advance(1);
+    expect(
+      await report(fixture, {}, { env: { NH_DEFAULT_IDLE_TIMEOUT_SECONDS: '10' } }),
+    ).toMatchObject({
+      state: 'online',
+      sleepJobId: null,
+      sleepEligibleAt: new Date(clock.getTime() + 10000).toISOString(),
+    });
+  });
+  it('disabling inherited sleep does not disable intentional wake', async () => {
+    await configure({ idleTimeoutSeconds: null, idleTimeoutInherited: true });
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .select('game_id')
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    await updateSettings(f.db, f.owner, {
+      gameIdleTimeouts: { [mapping.game_id]: { gameTimeoutSeconds: -1, runtimeTimeouts: {} } },
+    });
+    expect((await wake()).state).toBe('waking');
+  });
+  it.each([-1, 120])(
+    'fences a queued idle stop after inherited timeout changes to %s, retaining RAM and recovering readiness',
+    async (timeout) => {
+      const fixture = await started();
+      const mapping = await f.db
+        .selectFrom('runtime_egg_mappings')
+        .select('game_id')
+        .where('id', '=', f.mappingId)
+        .executeTakeFirstOrThrow();
+      await updateSettings(f.db, f.owner, {
+        gameIdleTimeouts: { [mapping.game_id]: { gameTimeoutSeconds: 10, runtimeTimeouts: {} } },
+      });
+      await f.db
+        .updateTable('gateway_server_states')
+        .set({ idle_timeout_inherited: true })
+        .where('server_id', '=', serverId)
+        .execute();
+      await report(fixture);
+      advance(10000);
+      const pending = await report(fixture);
+      expect(pending.sleepJobId).not.toBeNull();
+      await updateSettings(f.db, f.owner, {
+        gameIdleTimeouts: {
+          [mapping.game_id]: { gameTimeoutSeconds: timeout, runtimeTimeouts: {} },
+        },
+      });
+      expect(await fixture.process(pending.sleepJobId ?? '')).toBe('failed');
+      expect(fixture.stop).not.toHaveBeenCalled();
+      expect((await row()).runtime_state).toBe('running');
+      expect((await row()).active_operation_id).toBeNull();
+      expect(
+        await f.db
+          .selectFrom('resource_reservations')
+          .select('server_id')
+          .where('server_id', '=', serverId)
+          .execute(),
+      ).toHaveLength(1);
+      await reconcileGatewayState(f.db, serverId, options);
+      advance(1);
+      expect(await report(fixture)).toMatchObject({ state: 'online' });
+    },
+  );
+
+  it('rejects an already queued Gateway wake if the server is direct, without releasing its reservation', async () => {
+    await configure();
+    const state = await wake();
+    expect(state.wakeJobId).toBeTruthy();
+    const jobId = state.wakeJobId ?? '';
+    await expect(authorizeQueuedEffect(f.db, jobId, serverId)).resolves.toMatchObject({
+      subjectUserId: f.context.subjectUserId,
+    });
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'direct' })
+      .where('id', '=', serverId)
+      .execute();
+    await expect(authorizeQueuedEffect(f.db, jobId, serverId)).rejects.toThrow('forbidden');
+    expect(
+      await f.db
+        .selectFrom('resource_reservations')
+        .select('server_id')
+        .where('server_id', '=', serverId)
+        .executeTakeFirst(),
+    ).toBeDefined();
+  });
   it.each([
     ['resources', 'logout'],
     ['resources', 'demotion'],
@@ -592,9 +1081,9 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
     const fixture = await started();
     const input = { action: 'stop', idempotencyKey: randomUUID() };
     const stopped = await enqueueServerOperation(f.db, f.context, serverId, input);
-    expect(await fixture.process(stopped.jobId)).toBe('waiting');
-    advance(1000);
     expect(await fixture.process(stopped.jobId)).toBe('succeeded');
+    advance(1000);
+    expect(await fixture.process(stopped.jobId)).toBe('duplicate');
     const rearmed = await configure();
     expect(rearmed.state).toBe('sleeping');
     expect(await enqueueServerOperation(f.db, f.context, serverId, input)).toEqual(stopped);
@@ -639,6 +1128,168 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
         .execute(),
     ).toHaveLength(0);
   });
+  it('trusted provider running reuses the admitted successful start without inventing idle evidence', async () => {
+    const fixture = await started();
+    const server = await row();
+    const input = {
+      generation: fixture.state.generation,
+      wakeJobId: fixture.state.wakeJobId as string,
+      observedAt: clock.toISOString(),
+      providerIdentity: {
+        pterodactyl_id: server.pterodactyl_id,
+        pterodactyl_uuid: server.pterodactyl_uuid,
+        provider_user_id: server.provider_user_id,
+        external_id: server.external_id,
+        node_id: server.node_id,
+      },
+    };
+    const result = await reportGatewayProviderRunning(f.db, serverId, input, options);
+    expect(result.state).toBe('online');
+    expect(result.sleepEligibleAt).toBeNull();
+    expect(result.processStartedAt).toBe(fixture.processStartedAt());
+    await expect(
+      reportGatewayProviderRunning(f.db, serverId, { ...input, generation: randomUUID() }, options),
+    ).rejects.toThrow('conflict');
+    await expect(
+      reportGatewayProviderRunning(
+        f.db,
+        serverId,
+        {
+          ...input,
+          providerIdentity: { ...input.providerIdentity, provider_user_id: -1 },
+        },
+        options,
+      ),
+    ).rejects.toThrow('conflict');
+  });
+  it('provider running commits with real route revalidation inside its existing transaction', async () => {
+    clock = new Date(Date.now() - 2000);
+    const fixture = await started();
+    const server = await row();
+    const env = {
+      NH_GATEWAY_ENABLED: 'true',
+      NH_GATEWAY_ID: randomUUID(),
+      NH_GATEWAY_PHYSICAL_HOST_ID: f.hostId,
+    };
+    const allocation = await f.db
+      .selectFrom('server_allocations')
+      .select('id')
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const route = await setGatewayRoute(
+      f.db,
+      f.owner,
+      {
+        serverId,
+        allocationId: allocation.id,
+        publicAddress: f.backendAllocationPool.gatewayBindAddresses[0],
+        publicPort: 26000,
+        transport: 'tcp',
+      },
+      env,
+    );
+    const selected = await requireGatewayRoute(f.db, route.id, undefined, env);
+    expect(selected.mode).toBe('waking');
+    const result = await reportGatewayProviderRunning(
+      f.db,
+      serverId,
+      {
+        generation: fixture.state.generation,
+        wakeJobId: fixture.state.wakeJobId as string,
+        observedAt: clock.toISOString(),
+        providerIdentity: {
+          pterodactyl_id: server.pterodactyl_id,
+          pterodactyl_uuid: server.pterodactyl_uuid,
+          provider_user_id: server.provider_user_id,
+          external_id: server.external_id,
+          node_id: server.node_id,
+        },
+      },
+      {
+        ...options,
+        env,
+        validateObservation: async (tx) => {
+          // Match the startup SSE handler, including the real registry callback.
+          expect(tx.isTransaction).toBe(true);
+          const current = await requireGatewayRoute(tx, selected.id, selected.revision, env);
+          expect(current).toMatchObject({
+            mode: 'waking',
+            generation: fixture.state.generation,
+            wakeJobId: fixture.state.wakeJobId,
+          });
+        },
+      },
+    );
+    expect(result.state).toBe('online');
+    expect(result.sleepEligibleAt).toBeNull();
+    expect((await getGatewaySnapshot(f.db, env)).routes).toEqual([
+      expect.objectContaining({ id: selected.id, mode: 'online' }),
+    ]);
+  });
+  it.each(['pending', 'unconfirmed', 'missing-reservation', 'changed-epoch', 'provider-stopped'])(
+    'provider running cannot bypass %s durable start proof',
+    async (failure) => {
+      const fixture = await started();
+      const server = await row();
+      if (failure === 'pending')
+        await f.db
+          .updateTable('operation_jobs')
+          .set({ state: 'queued', completed_at: null })
+          .where('id', '=', fixture.state.wakeJobId as string)
+          .execute();
+      if (failure === 'unconfirmed')
+        await f.db
+          .updateTable('server_operations')
+          .set({ effect_state: 'prepared' })
+          .where('job_id', '=', fixture.state.wakeJobId as string)
+          .execute();
+      if (failure === 'missing-reservation')
+        await f.db.deleteFrom('resource_reservations').where('server_id', '=', serverId).execute();
+      const operation = await f.db
+        .selectFrom('server_operations')
+        .select('plan')
+        .where('job_id', '=', fixture.state.wakeJobId as string)
+        .executeTakeFirstOrThrow();
+      await expect(
+        reportGatewayProviderRunning(
+          f.db,
+          serverId,
+          {
+            generation: fixture.state.generation,
+            wakeJobId: fixture.state.wakeJobId as string,
+            observedAt: clock.toISOString(),
+            providerIdentity: {
+              pterodactyl_id: server.pterodactyl_id,
+              pterodactyl_uuid: server.pterodactyl_uuid,
+              provider_user_id: server.provider_user_id,
+              external_id: server.external_id,
+              node_id: server.node_id,
+            },
+          },
+          {
+            ...options,
+            validateLiveReadiness: () => {
+              if (failure === 'provider-stopped') throw new Error('operation_uncertain');
+            },
+            validateObservation: async (tx) => {
+              if (failure === 'changed-epoch')
+                await tx
+                  .updateTable('server_operations')
+                  .set({
+                    plan: JSON.stringify({
+                      ...operation.plan,
+                      startProcessStartedAt: new Date().toISOString(),
+                    }),
+                  })
+                  .where('job_id', '=', fixture.state.wakeJobId as string)
+                  .execute();
+            },
+          },
+        ),
+      ).rejects.toThrow('operation_uncertain');
+      expect((await getGatewayState(f.db, serverId, options)).state).not.toBe('online');
+    },
+  );
   it('container running is insufficient; correlated game readiness records the real duration once', async () => {
     const fixture = await started();
     expect((await row()).runtime_state).toBe('running');
@@ -777,9 +1428,9 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
         .where('server_id', '=', serverId)
         .execute(),
     ).toHaveLength(1);
-    expect(await fixture.process(sleeping.sleepJobId ?? '')).toBe('waiting');
-    advance(1000);
     expect(await fixture.process(sleeping.sleepJobId ?? '')).toBe('succeeded');
+    advance(1000);
+    expect(await fixture.process(sleeping.sleepJobId ?? '')).toBe('duplicate');
     expect(fixture.stop).toHaveBeenCalledTimes(1);
     expect((await row()).intent).toBe('sleeping');
     expect((await reconcileGatewayState(f.db, serverId, options)).state).toBe('sleeping');
@@ -791,6 +1442,446 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
         .execute(),
     ).toHaveLength(0);
     expect((await wake()).state).toBe('waking');
+  });
+  it('keeps the 60-second idle interval while automatic starts are paused and preserves the pause after sleep and manual start', async () => {
+    const fixture = await started({ idleTimeoutSeconds: 60 });
+    const online = await report(fixture);
+    advance(10000);
+    await report(fixture);
+    const beforePause = await getGatewayState(f.db, serverId, options);
+    expect(await consent(false)).toMatchObject({ allowed: false });
+    expect(await getGatewayState(f.db, serverId, options)).toMatchObject({
+      state: 'online',
+      generation: beforePause.generation,
+      readinessObservedAt: beforePause.readinessObservedAt,
+      sleepEligibleAt: online.sleepEligibleAt,
+    });
+    for (let elapsed = 20; elapsed < 60; elapsed += 10) {
+      advance(10000);
+      expect(await report(fixture)).toMatchObject({ state: 'online', sleepJobId: null });
+    }
+    advance(10000);
+    const pending = await report(fixture);
+    expect(pending.sleepJobId).not.toBeNull();
+    expect(await fixture.process(pending.sleepJobId ?? '')).toBe('succeeded');
+    expect(fixture.stop).toHaveBeenCalledTimes(1);
+    expect(await getAutomationConsent(f.db, f.context, serverId)).toMatchObject({ allowed: false });
+    expect(await row()).toMatchObject({ runtime_state: 'offline', automatic_starts_paused: true });
+    expect(await wake()).toMatchObject({ wakeJobId: null });
+    expect((await row()).active_operation_id).toBeNull();
+
+    const manual = await enqueueServerOperation(f.db, f.context, serverId, {
+      action: 'start',
+      idempotencyKey: randomUUID(),
+    });
+    expect(await fixture.process(manual.jobId)).toBe('waiting');
+    advance(1000);
+    expect(await fixture.process(manual.jobId)).toBe('succeeded');
+    expect(await row()).toMatchObject({ runtime_state: 'running', automatic_starts_paused: true });
+    expect(await getAutomationConsent(f.db, f.context, serverId)).toMatchObject({ allowed: false });
+    expect(fixture.power).toHaveBeenCalledTimes(2);
+  });
+  it('allows an already queued idle stop to finish when automatic starts are paused', async () => {
+    const fixture = await started();
+    await report(fixture);
+    advance(10000);
+    const pending = await report(fixture);
+    expect(pending.sleepJobId).not.toBeNull();
+    await consent(false);
+    expect(await getGatewayState(f.db, serverId, options)).toMatchObject({
+      generation: pending.generation,
+      sleepJobId: pending.sleepJobId,
+    });
+    expect(await fixture.process(pending.sleepJobId ?? '')).toBe('succeeded');
+    expect(fixture.stop).toHaveBeenCalledTimes(1);
+    expect(await row()).toMatchObject({ runtime_state: 'offline', automatic_starts_paused: true });
+    expect(await wake()).toMatchObject({ wakeJobId: null });
+  });
+  it('revokes a queued Gateway wake when automatic starts pause and cannot reallow it before settlement', async () => {
+    await configure();
+    const fixture = await lifecycleFixture();
+    const pending = await wake();
+    expect(pending.wakeJobId).not.toBeNull();
+    await consent(false);
+    await expect(authorizeQueuedEffect(f.db, pending.wakeJobId ?? '', serverId)).rejects.toThrow(
+      'forbidden',
+    );
+    await expect(consent(true)).rejects.toThrow('conflict');
+    expect(await fixture.process(pending.wakeJobId ?? '')).toBe('failed');
+    expect(fixture.power).not.toHaveBeenCalled();
+    expect(await consent(true)).toMatchObject({ allowed: true });
+    expect(await fixture.process(pending.wakeJobId ?? '')).toBe('duplicate');
+    expect(fixture.power).not.toHaveBeenCalled();
+  });
+  it('commits the sleeping snapshot and notifies immediately when the confirmed stop finishes, without a reconciliation tick', async () => {
+    clock = new Date(Date.now() - 11000);
+    const fixture = await started();
+    const env = {
+      NH_GATEWAY_ENABLED: 'true',
+      NH_GATEWAY_ID: randomUUID(),
+      NH_GATEWAY_PHYSICAL_HOST_ID: f.hostId,
+    };
+    const allocation = await f.db
+      .selectFrom('server_allocations')
+      .select('id')
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const route = await setGatewayRoute(
+      f.db,
+      f.owner,
+      {
+        serverId,
+        allocationId: allocation.id,
+        publicAddress: f.backendAllocationPool.gatewayBindAddresses[0],
+        publicPort: 26000,
+        transport: 'tcp',
+      },
+      env,
+    );
+    await report(fixture);
+    advance(10000);
+    const quiescenceUntil = new Date(Date.now() + 15000).toISOString();
+    const pending = await report(fixture, { quiescenceUntil });
+    expect(pending.sleepJobId).not.toBeNull();
+    fixture.lifecycle.now = () => new Date();
+    fixture.lifecycle.env = env;
+    const changed = vi.fn();
+    const subscription = await listenForGatewayChanges(database.pool, changed, vi.fn());
+    try {
+      expect(await fixture.process(pending.sleepJobId ?? '')).toBe('succeeded');
+      // Direct row and snapshot reads: neither invokes the periodic reconciler.
+      expect(
+        await f.db
+          .selectFrom('gateway_server_states')
+          .select(['state', 'sleep_job_id'])
+          .where('server_id', '=', serverId)
+          .executeTakeFirstOrThrow(),
+      ).toEqual({ state: 'sleeping', sleep_job_id: null });
+      const snapshot = await getGatewaySnapshot(f.db, env);
+      expect(snapshot.routes.find((item) => item.id === route.id)).toMatchObject({
+        mode: 'sleeping',
+        completedSleep: {
+          jobId: pending.sleepJobId,
+          generation: pending.generation,
+          quiescenceUntil,
+        },
+      });
+      await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+      expect(fixture.stop).toHaveBeenCalledOnce();
+    } finally {
+      subscription.close();
+    }
+  });
+  it('delivers only committed schema-scoped Gateway hints, independently from job notifications', async () => {
+    const changed = vi.fn(),
+      jobChanged = vi.fn();
+    const subscription = await listenForGatewayChanges(database.pool, changed, vi.fn());
+    const jobs = await listenForJobOutbox(database.pool, jobChanged, vi.fn());
+    const other = await createTestDatabase();
+    try {
+      await expect(
+        f.db.transaction().execute(async (tx) => {
+          await notifyGatewayChange(tx);
+          throw new Error('rollback notification fixture');
+        }),
+      ).rejects.toThrow('rollback notification fixture');
+      await notifyGatewayChange(other.db);
+      await notifyJobOutbox(f.db);
+      // Receipt of the later commit on this schema provides an ordering barrier.
+      await vi.waitFor(() => expect(jobChanged).toHaveBeenCalledOnce());
+      expect(changed).not.toHaveBeenCalled();
+      await notifyGatewayChange(f.db);
+      await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+      expect(jobChanged).toHaveBeenCalledOnce();
+    } finally {
+      subscription.close();
+      jobs.close();
+      await other.destroy();
+    }
+  });
+  it('retains affirmative idle proof when a fresh observation races the prepared sleep handoff', async () => {
+    const fixture = await started();
+    await report(fixture);
+    advance(10000);
+    const pending = await report(fixture);
+    fixture.lifecycle.checkpoint = async (point) => {
+      if (point !== 'prepared') return;
+      advance(1);
+      expect(await report(fixture, { quiescenceUntil: undefined })).toMatchObject({
+        state: 'blocked',
+        sleepJobId: pending.sleepJobId,
+      });
+    };
+    expect(await fixture.process(pending.sleepJobId ?? '')).toBe('succeeded');
+    expect(fixture.stop).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    { playerCount: undefined },
+    { playerCount: 1 },
+    { activeSessions: 1 },
+    { idle: false },
+    { ready: false },
+    { processStartedAt: null },
+    { processStartedAt: '2026-01-01T00:00:00.000Z' },
+  ])('revokes a prepared sleep on ambiguous or changed observation %j', async (patch) => {
+    const fixture = await started();
+    await report(fixture);
+    advance(10000);
+    const pending = await report(fixture);
+    fixture.lifecycle.checkpoint = async (point) => {
+      if (point !== 'prepared') return;
+      advance(1);
+      await report(fixture, { ...patch, quiescenceUntil: undefined });
+    };
+    expect(await fixture.process(pending.sleepJobId ?? '')).toBe('failed');
+    expect(fixture.stop).not.toHaveBeenCalled();
+    expect(
+      (
+        await f.db
+          .selectFrom('gateway_server_states')
+          .select('idle_since')
+          .where('server_id', '=', serverId)
+          .executeTakeFirstOrThrow()
+      ).idle_since,
+    ).toBeNull();
+  });
+  it.each(['gap', 'disabled-policy', 'terminal-job', 'terminal-operation'])(
+    'does not retain prepared sleep proof after %s',
+    async (condition) => {
+      const fixture = await started();
+      await report(fixture);
+      advance(10000);
+      const pending = await report(fixture);
+      let observationChecked = false;
+      fixture.lifecycle.checkpoint = async (point) => {
+        if (point !== 'prepared') return;
+        advance(condition === 'gap' ? 15001 : 1);
+        if (condition === 'disabled-policy')
+          await f.db
+            .updateTable('gateway_server_states')
+            .set({ enabled: false })
+            .where('server_id', '=', serverId)
+            .execute();
+        if (condition === 'terminal-job')
+          await f.db
+            .updateTable('operation_jobs')
+            .set({ state: 'failed', completed_at: clock })
+            .where('id', '=', pending.sleepJobId ?? '')
+            .execute();
+        if (condition === 'terminal-operation')
+          await f.db
+            .updateTable('server_operations')
+            .set({ phase: 'failed' })
+            .where('job_id', '=', pending.sleepJobId ?? '')
+            .execute();
+        await report(fixture, { quiescenceUntil: undefined });
+        expect(
+          (
+            await f.db
+              .selectFrom('gateway_server_states')
+              .select('idle_since')
+              .where('server_id', '=', serverId)
+              .executeTakeFirstOrThrow()
+          ).idle_since,
+        ).toBeNull();
+        observationChecked = true;
+      };
+      expect(await fixture.process(pending.sleepJobId ?? '')).toBe('failed');
+      expect(observationChecked).toBe(true);
+      expect(fixture.stop).not.toHaveBeenCalled();
+    },
+  );
+  async function rejectedSleep(paused = false) {
+    const fixture = await started();
+    if (paused) await consent(false);
+    await report(fixture);
+    advance(10000);
+    const pending = await report(fixture);
+    fixture.lifecycle.checkpoint = async (point) => {
+      if (point !== 'prepared') return;
+      advance(1);
+      await report(fixture, { playerCount: undefined, quiescenceUntil: undefined });
+    };
+    expect(await fixture.process(pending.sleepJobId ?? '')).toBe('failed');
+    expect(fixture.stop).not.toHaveBeenCalled();
+    const operation = await f.db
+      .selectFrom('server_operations')
+      .selectAll()
+      .where('job_id', '=', pending.sleepJobId ?? '')
+      .executeTakeFirstOrThrow();
+    expect(operation).toMatchObject({
+      effect_state: 'none',
+      phase: 'failed',
+      plan: {
+        rejected: true,
+        powerEffectPrepared: false,
+        acknowledged: false,
+        effectAttempts: { power: 1 },
+      },
+    });
+    expect(operation.effect_started_at).not.toBeNull();
+    return { fixture, pending, operation };
+  }
+  it.each([false, true])(
+    'retires a revoked scheduled stop only under its exact generation (changed=%s)',
+    async (changed) => {
+      const fixture = await started();
+      await report(fixture);
+      const at = new Date(clock.getTime() + 1000);
+      const schedule = await createSchedule(f.db, f.context, serverId, {
+        name: 'Scheduled stop',
+        action: 'stop',
+        timing: { kind: 'once', at: at.toISOString() },
+        timeZone: 'UTC',
+        enabled: true,
+      });
+      advance(1000);
+      expect(await runDueSchedules(f.db, {}, { now: clock })).toMatchObject({ dispatched: 1 });
+      const pending = await getGatewayState(f.db, serverId, options);
+      expect(pending.sleepJobId).toBeTruthy();
+      await deleteSchedule(f.db, f.context, serverId, schedule.id, { revision: schedule.revision });
+      expect(await fixture.process(pending.sleepJobId ?? '')).toBe('failed');
+      expect(fixture.stop).not.toHaveBeenCalled();
+      if (changed) {
+        await f.db
+          .updateTable('gateway_server_states')
+          .set({ generation: randomUUID() })
+          .where('server_id', '=', serverId)
+          .execute();
+      }
+      expect(await reconcileGatewayState(f.db, serverId, options)).toMatchObject({
+        state: 'blocked',
+        sleepJobId: changed ? pending.sleepJobId : null,
+      });
+      if (!changed) {
+        advance(1);
+        expect(await report(fixture, { quiescenceUntil: undefined })).toMatchObject({
+          state: 'online',
+          sleepJobId: null,
+        });
+      }
+      expect((await row()).runtime_state).toBe('running');
+      expect(
+        await f.db
+          .selectFrom('resource_reservations')
+          .select('server_id')
+          .where('server_id', '=', serverId)
+          .execute(),
+      ).toHaveLength(1);
+    },
+  );
+  it.each([false, true])(
+    'retires only a rejected pre-handoff sleep journal and establishes a new idle interval (automatic starts paused=%s)',
+    async (paused) => {
+      const { fixture, pending, operation } = await rejectedSleep(paused);
+      const reservations = await f.db
+        .selectFrom('resource_reservations')
+        .selectAll()
+        .where('server_id', '=', serverId)
+        .execute();
+      expect(await reconcileGatewayState(f.db, serverId, options)).toMatchObject({
+        state: 'blocked',
+        sleepJobId: null,
+      });
+      advance(1);
+      const online = await report(fixture, { quiescenceUntil: undefined });
+      expect(online).toMatchObject({ state: 'online', sleepJobId: null });
+      expect(online.sleepEligibleAt).toBe(new Date(clock.getTime() + 10000).toISOString());
+      expect((await row()).automatic_starts_paused).toBe(paused);
+      expect((await getAutomationConsent(f.db, f.context, serverId)).allowed).toBe(!paused);
+      for (let i = 0; i < 2; i++) {
+        advance(1);
+        expect((await reconcileGatewayState(f.db, serverId, options)).state).toBe('online');
+        expect((await report(fixture, { quiescenceUntil: undefined })).state).toBe('online');
+      }
+      expect(
+        await f.db
+          .selectFrom('server_operations')
+          .selectAll()
+          .where('job_id', '=', pending.sleepJobId ?? '')
+          .executeTakeFirstOrThrow(),
+      ).toEqual(operation);
+      expect(
+        await f.db
+          .selectFrom('resource_reservations')
+          .selectAll()
+          .where('server_id', '=', serverId)
+          .execute(),
+      ).toEqual(reservations);
+      expect(
+        await f.db
+          .selectFrom('server_operations')
+          .select('job_id')
+          .where('server_id', '=', serverId)
+          .where('action', '=', 'stop')
+          .execute(),
+      ).toHaveLength(1);
+    },
+  );
+  it.each([
+    'prepared',
+    'uncertain',
+    'confirmed',
+    'power-prepared',
+    'unproven-none',
+    'handoff',
+    'acknowledged',
+    'stop-confirmed',
+    'stop-confirmed-at',
+    'generation',
+    'other-active-job',
+  ])('keeps an unresolved %s sleep blocked despite repeated positive probes', async (condition) => {
+    const { fixture, pending, operation } = await rejectedSleep();
+    if (['prepared', 'uncertain', 'confirmed'].includes(condition)) {
+      await f.db
+        .updateTable('server_operations')
+        .set({ effect_state: condition as 'prepared' | 'uncertain' | 'confirmed' })
+        .where('job_id', '=', operation.job_id)
+        .execute();
+    } else if (condition === 'other-active-job') {
+      await f.db
+        .updateTable('managed_servers')
+        .set({ active_operation_id: fixture.state.wakeJobId })
+        .where('id', '=', serverId)
+        .execute();
+    } else {
+      const plan = { ...operation.plan };
+      if (condition === 'power-prepared') plan.powerEffectPrepared = true;
+      if (condition === 'unproven-none') delete plan.rejected;
+      if (condition === 'handoff') plan.gatewaySleepHandoffAt = clock.toISOString();
+      if (condition === 'acknowledged') plan.acknowledged = true;
+      if (condition === 'stop-confirmed') plan.stopConfirmed = true;
+      if (condition === 'stop-confirmed-at') plan.stopConfirmedAt = clock.toISOString();
+      if (condition === 'generation')
+        plan.gatewayAutomation = {
+          ...(plan.gatewayAutomation as object),
+          generation: randomUUID(),
+        };
+      await f.db
+        .updateTable('server_operations')
+        .set({ plan: JSON.stringify(plan) })
+        .where('job_id', '=', operation.job_id)
+        .execute();
+    }
+    for (let i = 0; i < 2; i++) {
+      advance(1);
+      expect(await report(fixture, { quiescenceUntil: undefined })).toMatchObject({
+        state: 'blocked',
+        sleepJobId: pending.sleepJobId,
+      });
+      expect(await reconcileGatewayState(f.db, serverId, options)).toMatchObject({
+        state: 'blocked',
+        sleepJobId: pending.sleepJobId,
+      });
+    }
+    expect(
+      await f.db
+        .selectFrom('resource_reservations')
+        .select('server_id')
+        .where('server_id', '=', serverId)
+        .execute(),
+    ).toHaveLength(1);
+    expect(fixture.stop).not.toHaveBeenCalled();
   });
   it('measures ordinary idle without stopping until a current ingress fence is supplied', async () => {
     const fixture = await started();
@@ -1007,6 +2098,41 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
     expect(await report(fixture)).toMatchObject({ state: 'online', sleepJobId: null });
     expect((await getGatewayState(f.db, serverId, options)).state).toBe('online');
   });
+  it('keeps a ready game routable during an additive world import without scheduling sleep', async () => {
+    const fixture = await started();
+    await report(fixture);
+    const queued = await enqueueServerOperation(f.db, f.context, serverId, {
+      action: 'backup',
+      idempotencyKey: randomUUID(),
+    });
+    // Persist a trusted prepared content operation; identity/admission enqueue is
+    // covered separately by the Minecraft integration suite.
+    await f.db
+      .updateTable('server_operations')
+      .set({
+        action: 'minecraft-content',
+        plan: JSON.stringify({
+          minecraftContent: {
+            command: { kind: 'world-import', archiveRef: randomUUID(), targetWorld: 'new_world' },
+            world: { existing: false, dataVersion: 3955 },
+            backupBefore: false,
+            deletePaths: [],
+          },
+        }),
+      })
+      .where('job_id', '=', queued.jobId)
+      .execute();
+    advance(10000);
+    expect(await report(fixture)).toMatchObject({ state: 'online', sleepJobId: null });
+    expect((await getGatewayState(f.db, serverId, options)).state).toBe('online');
+    expect(
+      await f.db
+        .selectFrom('resource_reservations')
+        .select('server_id')
+        .where('server_id', '=', serverId)
+        .executeTakeFirst(),
+    ).toBeTruthy();
+  });
   it('reconstructs the same durable wake state through a fresh database connection', async () => {
     await configure();
     const pending = await wake();
@@ -1033,20 +2159,32 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
   it('uses only recent same-profile measured cycles for reliable startup estimates', async () => {
     await configure();
     const fixture = await lifecycleFixture();
-    for (let index = 0; index < 5; index++) {
+    for (let index = 0; index < 11; index++) {
+      // Production refreshes host admission evidence before each wake. Eleven
+      // real DB-backed cycles can outlive the strict four-second sample age.
+      await f.observe();
       const state = await wake();
+      expect({
+        index,
+        state: state.state,
+        code: state.errorCode,
+        hasJob: Boolean(state.wakeJobId),
+      }).toEqual({ index, state: 'waking', code: null, hasJob: true });
       expect(await fixture.process(state.wakeJobId ?? '')).toBe('waiting');
       advance(1000 + index * 100);
       expect(await fixture.process(state.wakeJobId ?? '')).toBe('succeeded');
       const current = { ...fixture, state };
       const ready = await report(current);
       if (index < 4) expect(ready.startupEstimate).toBeNull();
-      else expect(ready.startupEstimate).toEqual({ sampleCount: 5, p50Ms: 1200, p90Ms: 1400 });
+      else if (index === 4)
+        expect(ready.startupEstimate).toEqual({ sampleCount: 5, p50Ms: 1200, p90Ms: 1400 });
+      else if (index === 10)
+        expect(ready.startupEstimate).toEqual({ sampleCount: 10, p50Ms: 1500, p90Ms: 1900 });
       advance(10000);
       const stopping = await report(current);
-      expect(await fixture.process(stopping.sleepJobId ?? '')).toBe('waiting');
-      advance(1);
       expect(await fixture.process(stopping.sleepJobId ?? '')).toBe('succeeded');
+      advance(1);
+      expect(await fixture.process(stopping.sleepJobId ?? '')).toBe('duplicate');
       await reconcileGatewayState(f.db, serverId, options);
     }
     expect((await configure({ gameVersion: '2' })).startupEstimate).toBeNull();
@@ -1054,4 +2192,48 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
     advance(61000);
     expect((await getGatewayState(f.db, serverId, options)).startupEstimate).toBeNull();
   });
+});
+
+it('rebinds Gateway readiness to the admitted process after an offline backup', async () => {
+  const running = await started();
+  expect((await report(running)).state).toBe('online');
+  const previous = await getGatewayState(f.db, serverId, options);
+  const snapshots: Array<import('@nickhosting/pterodactyl-adapter').Backup> = [];
+  running.lifecycle.adapter = {
+    ...running.lifecycle.adapter,
+    createBackup: async (_id, input) => {
+      const snapshot = {
+        uuid: randomUUID(),
+        name: input.name,
+        is_successful: true,
+        is_locked: false,
+        ignored_files: [],
+        checksum: 'sha256:fixture',
+        bytes: 1,
+        created_at: clock.toISOString(),
+        completed_at: clock.toISOString(),
+      };
+      snapshots.push(snapshot);
+      return snapshot;
+    },
+    getBackup: async (_id, id) => {
+      const snapshot = snapshots.find((backup) => backup.uuid === id);
+      if (!snapshot) throw new Error('Unknown fixture backup');
+      return snapshot;
+    },
+  };
+  running.lifecycle.backupPolicy = async () => ({ offline: 'required' });
+  const operation = await enqueueServerOperation(f.db, f.context, serverId, {
+    action: 'backup',
+    idempotencyKey: randomUUID(),
+  });
+  expect(await running.process(operation.jobId)).toBe('waiting');
+  const offline = await getGatewayState(f.db, serverId, options);
+  expect(offline.processStartedAt).toBeNull();
+  expect(offline.generation).toBe(previous.generation);
+  advance(1000);
+  expect(await running.process(operation.jobId)).toBe('succeeded');
+  const resumed = await getGatewayState(f.db, serverId, options);
+  expect(resumed.wakeJobId).toBe(operation.jobId);
+  expect((await report(running, { wakeJobId: operation.jobId })).state).toBe('online');
 });

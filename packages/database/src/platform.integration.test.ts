@@ -77,6 +77,7 @@ describe('PostgreSQL platform authority', () => {
       }),
     ).toBe('explicit-override');
     expect(JSON.stringify(await secretStatus(database.db))).not.toContain(value);
+    expect(await secretStatus(database.db)).not.toHaveProperty('pterodactylClientKey');
     expect(
       JSON.stringify((await database.pool.query('SELECT * FROM encrypted_secrets')).rows),
     ).not.toContain(value);

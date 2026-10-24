@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { safeContentPath } from '@nickhosting/content-providers';
 import { DomainError } from '@nickhosting/core';
+import type { FilemanJobServices } from '@nickhosting/game-sdk';
+import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import { describe, expect, it, vi } from 'vitest';
 import {
   planMinecraftPlayerList,
@@ -10,6 +12,7 @@ import type { GameLifecycleContext } from './lifecycle.js';
 import {
   applyMinecraftStoredPlayerChange,
   applyMinecraftTextChange,
+  applyMinecraftWorldRemoval,
   assertMinecraftContentTarget,
   assertMinecraftModpackTransition,
   assertMinecraftRuntimePathsPreserved,
@@ -18,9 +21,13 @@ import {
   minecraftConfigurationSchema,
   minecraftContentCommandSchema,
   minecraftContentWipePreview,
+  resolveMinecraftPlayerChangeIdentity,
   resolveMinecraftStoredPlayers,
 } from './minecraft-content.js';
-import { minecraftStoredConfigurationSchema } from './minecraft-content-contracts.js';
+import {
+  minecraftContentChangesOnlyMetadata,
+  minecraftStoredConfigurationSchema,
+} from './minecraft-content-contracts.js';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 function fixture(initial: Record<string, string> = {}) {
@@ -75,6 +82,10 @@ function fixture(initial: Record<string, string> = {}) {
       return [...entries.values()];
     }),
     readFile: vi.fn(async (_id: string, path: string) => Buffer.from(files.get(path) ?? '')),
+    readFileForEditor: vi.fn(async (_id: string, path: string) =>
+      Buffer.from(files.get(path) ?? ''),
+    ),
+    prefetchDownloads: vi.fn(async () => {}),
     downloadFile: vi.fn(
       async (
         _id: string,
@@ -94,6 +105,10 @@ function fixture(initial: Record<string, string> = {}) {
     ),
     writeFile: vi.fn(async (_id: string, path: string, value: string) => {
       files.set(path, value);
+    }),
+    deleteFiles: vi.fn(async (_id: string, _root: string, paths: string[]) => {
+      for (const key of files.keys())
+        if (paths.some((path) => key === path || key.startsWith(`${path}/`))) files.delete(key);
     }),
   };
   const authorize = vi.fn(async () => {});
@@ -121,6 +136,23 @@ const change = (before = 'motd=Old\n', after = 'motd=New\n') => ({
   beforeSha256: hash(before),
   afterSha256: hash(after),
 });
+
+function guardedRemovalFixture(configured = 'world') {
+  const f = fixture({ 'server.properties': `level-name=${configured}\n`, 'spare/a': 'bytes' });
+  const capabilities = vi.fn(async () => ({
+    inspection: true,
+    guardedDelete: true,
+    archiveCommit: true,
+  }));
+  Object.assign(f.adapter, { getFileOperationCapabilities: capabilities });
+  const removeDirectory = vi.fn<NonNullable<FilemanJobServices['removeDirectory']>>(
+    async (input) => {
+      input.validateGuard(f.files.get(input.guardFile) ?? '');
+    },
+  );
+  f.context.fileman = { removeDirectory, uploadStaged: vi.fn() };
+  return { ...f, capabilities, removeDirectory };
+}
 
 describe('Minecraft durable content safety', () => {
   it('keeps every permitted pack path inside the previewed content roots', () => {
@@ -380,6 +412,22 @@ describe('Minecraft durable content safety', () => {
     expect(f.assertStopped).toHaveBeenCalledOnce();
     expect(f.authorize).toHaveBeenCalled();
     expect(f.adapter.writeFile).toHaveBeenCalledOnce();
+    expect(f.adapter.readFileForEditor).toHaveBeenCalledTimes(1);
+    expect(f.adapter.listFiles).toHaveBeenCalledTimes(1);
+    expect(f.adapter.downloadFile).not.toHaveBeenCalled();
+  });
+  it('delegates stopped proof only to an explicitly guarded lifecycle effect', async () => {
+    const f = fixture({ 'server.properties': 'motd=Old\n' });
+    f.context.effectVerifiesStopped = true;
+    f.context.effect = async () => {
+      throw new DomainError('operation_uncertain');
+    };
+    await expect(applyMinecraftTextChange(f.context, change())).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    expect(f.assertStopped).not.toHaveBeenCalled();
+    expect(f.adapter.readFileForEditor).toHaveBeenCalledTimes(1);
+    expect(f.adapter.writeFile).not.toHaveBeenCalled();
   });
   it('rejects edits to unrelated externally changed data without overwriting it', async () => {
     const f = fixture({ 'server.properties': 'motd=Owner changed this\n' });
@@ -475,4 +523,400 @@ describe('Minecraft durable content safety', () => {
     ]);
     expect(f.adapter.writeFile).not.toHaveBeenCalled();
   });
+});
+
+describe('UUID-bound existing Minecraft player changes', () => {
+  const old = {
+    uuid: '11111111-1111-1111-1111-111111111111',
+    name: 'Original',
+    level: 1,
+    bypassesPlayerLimit: false,
+  };
+  const currentOwner = { id: '22222222222222222222222222222222', name: 'Original' };
+  const command = {
+    kind: 'player' as const,
+    list: 'operators' as const,
+    action: 'add' as const,
+    name: old.name,
+    expectedUuid: old.uuid,
+    operatorLevel: 2,
+  };
+  function provider() {
+    return {
+      lookupName: vi.fn(async () => currentOwner),
+      lookupUuid: vi.fn(async () => currentOwner),
+    };
+  }
+  it.each(['add', 'remove'] as const)(
+    'preserves selected UUID on %s even when the name is reclaimed',
+    async (action) => {
+      const lookup = provider();
+      const identity = await resolveMinecraftPlayerChangeIdentity(
+        { ...command, action },
+        JSON.stringify([old]),
+        lookup,
+      );
+      expect(identity).toMatchObject({ uuid: old.uuid, name: old.name, source: 'server-file' });
+      expect(lookup.lookupName).not.toHaveBeenCalled();
+      const result = planMinecraftPlayerList(JSON.stringify([old]), 'operators', action, identity, {
+        operatorLevel: 2,
+      });
+      expect(JSON.parse(result.content)).toEqual(action === 'remove' ? [] : [{ ...old, level: 2 }]);
+    },
+  );
+  it('rejects a stale UUID/name row instead of granting the newly named account', async () => {
+    const lookup = provider();
+    await expect(
+      resolveMinecraftPlayerChangeIdentity(
+        command,
+        JSON.stringify([{ ...old, name: 'Renamed' }]),
+        lookup,
+      ),
+    ).rejects.toThrow('conflict');
+    expect(lookup.lookupName).not.toHaveBeenCalled();
+  });
+  it('requires independent matching identity when adding selected UUID to a different list', async () => {
+    const lookup = provider();
+    await expect(resolveMinecraftPlayerChangeIdentity(command, '[]', lookup)).rejects.toThrow(
+      'conflict',
+    );
+    expect(lookup.lookupName).toHaveBeenCalledOnce();
+  });
+  it('allows a cross-list addition only when both provider directions confirm the selected UUID', async () => {
+    const lookup = {
+      lookupName: vi.fn(async () => ({ id: old.uuid, name: old.name })),
+      lookupUuid: vi.fn(async () => ({ id: old.uuid, name: old.name })),
+    };
+    expect(await resolveMinecraftPlayerChangeIdentity(command, '[]', lookup)).toMatchObject({
+      uuid: old.uuid,
+      source: 'mojang',
+    });
+    expect(lookup.lookupName).toHaveBeenCalledOnce();
+    expect(lookup.lookupUuid).toHaveBeenCalledOnce();
+  });
+  it('still independently verifies newly entered additions with no selected UUID', async () => {
+    const lookup = provider();
+    const { expectedUuid: _expectedUuid, ...fresh } = command;
+    expect(await resolveMinecraftPlayerChangeIdentity(fresh, '[]', lookup)).toMatchObject({
+      uuid: '22222222-2222-2222-2222-222222222222',
+      source: 'mojang',
+    });
+    expect(lookup.lookupName).toHaveBeenCalledOnce();
+    expect(lookup.lookupUuid).toHaveBeenCalledOnce();
+  });
+  it('removes an inactive world with one root snapshot, one properties read and one recursive delete', async () => {
+    const f = fixture({
+      'server.properties': 'level-name=world\n',
+      'spare/region/r.0.0.mca': 'region',
+    });
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
+      true,
+    );
+    expect(f.adapter.listFiles).toHaveBeenCalledTimes(1);
+    expect(f.adapter.readFileForEditor).toHaveBeenCalledExactlyOnceWith(
+      'fixture',
+      'server.properties',
+      1048576,
+    );
+    expect(f.adapter.deleteFiles).toHaveBeenCalledExactlyOnceWith('fixture', '', ['spare']);
+    expect(f.adapter.downloadFile).not.toHaveBeenCalled();
+    expect(f.assertStopped).not.toHaveBeenCalled();
+    expect(f.files.has('spare/region/r.0.0.mca')).toBe(false);
+  });
+  it('delegates a supported removal to Fileman without legacy metadata or delete requests', async () => {
+    const f = guardedRemovalFixture();
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
+      true,
+    );
+    expect(f.removeDirectory).toHaveBeenCalledExactlyOnceWith({
+      target: 'spare',
+      guardFile: 'server.properties',
+      validateGuard: expect.any(Function),
+    });
+    expect(f.capabilities).toHaveBeenCalledExactlyOnceWith('fixture');
+    expect(f.adapter.listFiles).not.toHaveBeenCalled();
+    expect(f.adapter.readFileForEditor).not.toHaveBeenCalled();
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+    expect(f.assertStopped).not.toHaveBeenCalled();
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
+      true,
+    );
+    expect(f.removeDirectory).toHaveBeenCalledOnce();
+  });
+  it.each([
+    ['spare', 'validation_failed'],
+    ['SPARE', 'validation_failed'],
+    ['./spare/', 'validation_failed'],
+    ['spare/selected', 'validation_failed'],
+    ['../outside', 'conflict'],
+  ])(
+    'validates the inspected selection %s before accepting guarded removal',
+    async (configured, code) => {
+      const f = guardedRemovalFixture(configured);
+      await expect(
+        applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+      ).rejects.toMatchObject({ code });
+      expect(f.steps.size).toBe(0);
+      expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+    },
+  );
+  it('uses the legacy safety checks only when capability discovery proves the bridge unavailable', async () => {
+    const f = guardedRemovalFixture();
+    f.capabilities.mockRejectedValueOnce(
+      new PterodactylError('not_found', 'client', 'rejected', 404),
+    );
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
+      true,
+    );
+    expect(f.removeDirectory).not.toHaveBeenCalled();
+    expect(f.adapter.listFiles).toHaveBeenCalledOnce();
+    expect(f.adapter.readFileForEditor).toHaveBeenCalledOnce();
+    expect(f.adapter.deleteFiles).toHaveBeenCalledExactlyOnceWith('fixture', '', ['spare']);
+  });
+  it('propagates denied capability discovery without a legacy fallback', async () => {
+    const f = guardedRemovalFixture();
+    f.capabilities.mockRejectedValueOnce(
+      new PterodactylError('permission_denied', 'client', 'rejected', 403),
+    );
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toMatchObject({ upstreamStatus: 403 });
+    expect(f.removeDirectory).not.toHaveBeenCalled();
+    expect(f.adapter.listFiles).not.toHaveBeenCalled();
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+  });
+  it('keeps a pinned request on the bridge path even when that request returns 404', async () => {
+    const f = guardedRemovalFixture();
+    f.operation.plan = {
+      fileDirectoryRemoval: { request: { operationId: 'fixture' }, completed: false },
+    };
+    f.capabilities.mockRejectedValue(new PterodactylError('not_found', 'client', 'rejected', 404));
+    f.removeDirectory.mockRejectedValue(
+      new PterodactylError('not_found', 'client', 'rejected', 404),
+    );
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toMatchObject({ upstreamStatus: 404 });
+    expect(f.capabilities).not.toHaveBeenCalled();
+    expect(f.removeDirectory).toHaveBeenCalledOnce();
+    expect(f.adapter.listFiles).not.toHaveBeenCalled();
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+    expect(f.steps.size).toBe(0);
+  });
+  it('fails closed when recovery cannot execute its pinned Fileman request', async () => {
+    const f = guardedRemovalFixture();
+    f.operation.plan = {
+      fileDirectoryRemoval: { request: { operationId: 'fixture' }, completed: false },
+    };
+    f.context.fileman = undefined;
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toMatchObject({ code: 'operation_uncertain' });
+    expect(f.adapter.listFiles).not.toHaveBeenCalled();
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+  });
+  it('retains the backup and offline workflow even when the guarded bridge is available', async () => {
+    const f = guardedRemovalFixture();
+    f.context.backup = vi.fn(async () => false);
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: true })).toBe(
+      false,
+    );
+    expect(f.assertStopped).toHaveBeenCalledOnce();
+    expect(f.context.backup).toHaveBeenCalledOnce();
+    expect(f.removeDirectory).not.toHaveBeenCalled();
+    expect(f.capabilities).not.toHaveBeenCalled();
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+  });
+  it('prepares the properties ticket during root discovery without reading a symlink', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
+    const listed = Promise.withResolvers<void>();
+    const prepared = Promise.withResolvers<void>();
+    const list = f.adapter.listFiles.getMockImplementation();
+    if (!list) throw new Error('Missing listing fixture');
+    f.symlinks.add('server.properties');
+    f.adapter.listFiles.mockImplementation(async (...args) => {
+      await listed.promise;
+      return list(...args);
+    });
+    f.adapter.prefetchDownloads.mockImplementation(async () => {
+      prepared.resolve();
+    });
+    const removing = applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false });
+    const rejected = expect(removing).rejects.toMatchObject({ code: 'conflict' });
+    await prepared.promise;
+    expect(f.adapter.readFileForEditor).not.toHaveBeenCalled();
+    listed.resolve();
+    await rejected;
+    expect(f.adapter.readFileForEditor).not.toHaveBeenCalled();
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+  });
+  it.each(['world', 'world_nether', 'world_the_end', 'WORLD'])(
+    'does not remove configured world or its runtime dimensions: %s',
+    async (target) => {
+      const f = fixture({
+        'server.properties': 'level-name=World\n',
+        [`${target}/region/r.0.0.mca`]: 'region',
+      });
+      await expect(
+        applyMinecraftWorldRemoval(f.context, target, { backupBefore: false }),
+      ).rejects.toMatchObject({ code: 'validation_failed' });
+      expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+      expect(f.operation.effect_state).toBe('none');
+    },
+  );
+  it.each([
+    { configured: 'worlds/main', target: 'worlds', code: 'validation_failed' },
+    { configured: './world', target: 'world', code: 'validation_failed' },
+    { configured: './world/', target: 'world_nether', code: 'validation_failed' },
+    { configured: '../outside', target: 'spare', code: 'conflict' },
+    { configured: '/absolute/world', target: 'spare', code: 'conflict' },
+  ])(
+    'protects configured relative paths and fails closed for unsafe paths: $configured',
+    async ({ configured, target, code }) => {
+      const f = fixture({
+        'server.properties': `level-name=${configured}\n`,
+        [`${target}/a`]: 'bytes',
+      });
+      await expect(
+        applyMinecraftWorldRemoval(f.context, target, { backupBefore: false }),
+      ).rejects.toMatchObject({ code });
+      expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+      expect(f.operation.effect_state).toBe('none');
+    },
+  );
+  it('refuses a changed symlink target and missing target before preparing a destructive effect', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
+    f.symlinks.add('spare');
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'missing', { backupBefore: false }),
+    ).rejects.toMatchObject({ code: 'not_found' });
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+    expect(f.operation.effect_state).toBe('none');
+  });
+  it('finalizes an acknowledged removal without touching a folder recreated afterwards', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
+    f.context.effect = async (phase, action) => {
+      f.operation.phase = phase;
+      f.operation.effect_state = 'prepared';
+      await action();
+      f.operation.effect_state = 'confirmed';
+      throw new Error('crash after acknowledgement');
+    };
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toThrow('crash after acknowledgement');
+    f.files.set('spare/recreated', 'new data');
+    f.adapter.listFiles.mockClear();
+    f.adapter.readFileForEditor.mockClear();
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
+      true,
+    );
+    expect(f.files.get('spare/recreated')).toBe('new data');
+    expect(f.adapter.deleteFiles).toHaveBeenCalledOnce();
+    expect(f.adapter.listFiles).not.toHaveBeenCalled();
+    expect(f.adapter.readFileForEditor).not.toHaveBeenCalled();
+  });
+  it('reconciles an ambiguous deletion with one absence check and never replays it', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
+    f.adapter.deleteFiles.mockImplementationOnce(async () => {
+      f.files.delete('spare/a');
+      throw new Error('lost response');
+    });
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toThrow('lost response');
+    f.adapter.listFiles.mockClear();
+    f.adapter.readFileForEditor.mockClear();
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
+      true,
+    );
+    expect(f.adapter.listFiles).toHaveBeenCalledTimes(1);
+    expect(f.adapter.readFileForEditor).not.toHaveBeenCalled();
+    expect(f.adapter.deleteFiles).toHaveBeenCalledOnce();
+    f.files.set('spare/recreated', 'new data');
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
+      true,
+    );
+    expect(f.files.get('spare/recreated')).toBe('new data');
+  });
+  it('keeps an ambiguous removal blocked when the folder still exists', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
+    f.adapter.deleteFiles.mockRejectedValueOnce(new Error('lost response'));
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toThrow('lost response');
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toMatchObject({ code: 'operation_uncertain' });
+    expect(f.adapter.deleteFiles).toHaveBeenCalledOnce();
+  });
+  it('waits for a requested backup and retains the offline requirement', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
+    const backup = vi.fn(async () => false);
+    f.context.backup = backup;
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: true })).toBe(
+      false,
+    );
+    expect(f.assertStopped).toHaveBeenCalledOnce();
+    expect(backup).toHaveBeenCalledOnce();
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+    f.operation.plan = { backupComplete: true };
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: true })).toBe(true);
+    expect(f.assertStopped).toHaveBeenCalledTimes(2);
+    expect(f.adapter.deleteFiles).toHaveBeenCalledOnce();
+  });
+  it('does not dispatch when authorization is lost after the fresh preflight', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
+    f.context.effect = async () => {
+      throw new DomainError('forbidden');
+    };
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+  });
+  it('discards the pre-backup world snapshot before deciding whether deletion remains safe', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
+    f.context.backup = vi.fn(async () => {
+      f.operation.plan = { backupComplete: true };
+      f.files.set('server.properties', 'level-name=spare\n');
+      return true;
+    });
+    await expect(
+      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: true }),
+    ).rejects.toMatchObject({ details: { reason: 'minecraft_world_selected' } });
+    expect(f.adapter.listFiles).toHaveBeenCalledTimes(2);
+    expect(f.adapter.readFileForEditor).toHaveBeenCalledTimes(2);
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+  });
+});
+
+describe('metadata-only content completion', () => {
+  it.each([
+    { kind: 'properties', changes: { motd: 'updated' } },
+    { kind: 'player', list: 'operators', action: 'add', name: 'Player' },
+  ])('accepts valid $kind edits and rejects backup or malformed plans', (command) => {
+    const plan = { combinationId: randomUUID(), command, backupBefore: false };
+    expect(minecraftContentChangesOnlyMetadata(plan)).toBe(true);
+    expect(minecraftContentChangesOnlyMetadata({ ...plan, backupBefore: true })).toBe(false);
+    expect(minecraftContentChangesOnlyMetadata({ ...plan, combinationId: 'invalid' })).toBe(false);
+    expect(
+      minecraftContentChangesOnlyMetadata({ ...plan, command: { ...command, extra: true } }),
+    ).toBe(false);
+  });
+  it.each(['verify', 'world-remove', 'world-import', 'install', 'modpack'])(
+    'does not classify %s as metadata completion',
+    (kind) => {
+      expect(
+        minecraftContentChangesOnlyMetadata({
+          combinationId: randomUUID(),
+          command: { kind },
+          backupBefore: false,
+        }),
+      ).toBe(false);
+    },
+  );
 });

@@ -1,14 +1,54 @@
+export * from './activity.js';
 export * from './admission.js';
 export * from './allocation-pool.js';
+export * from './backup-policy.js';
 export * from './configuration.js';
+export * from './content-admission.js';
+export { createDirectoryIdentityCache } from './directory-identity.js';
+export { consumeDnsWizardReservation } from './dns-reservations.js';
 export * from './external.js';
+export * from './fabric-catalog.js';
+export * from './fabric-registration.js';
+export * from './file-upload-urls.js';
+export * from './fileman-read.js';
+export * from './fileman-transfers.js';
+export * from './forge-catalog.js';
+export * from './game-modules.js';
+export * from './gateway-messages.js';
 export * from './gateway-orchestration.js';
 export * from './gateway-registry.js';
+export * from './health.js';
+export * from './host-observations.js';
+export * from './installation-collector.js';
+export * from './integration-settings.js';
 export * from './lifecycle.js';
+export * from './minecraft-catalog.js';
 export * from './minecraft-content.js';
+export * from './minecraft-metadata.js';
 export * from './minecraft-registry.js';
 export * from './minecraft-sources.js';
+export * from './paper-catalog.js';
+export * from './platform-queries.js';
+export { ensureProviderAccounts, resolveProviderCredential } from './provider-accounts.js';
+export * from './provider-backup-events.js';
+export * from './provider-change-feed.js';
+export {
+  ensureInstallationFeedLink,
+  refreshProviderFeeds,
+  startProviderFeedLoop,
+} from './provider-feed-worker.js';
+export * from './provider-installation-events.js';
+export * from './provisioning.js';
 export * from './registry.js';
 export * from './runtime.js';
+export * from './schedules.js';
+export * from './sleep-policy.js';
+export * from './storage-capacity.js';
+export * from './storage-observations.js';
+export * from './storage-policy.js';
+export * from './subusers.js';
 export * from './upload-admission.js';
+export * from './upload-batches.js';
 export * from './upload-policy.js';
+export * from './upload-timing.js';
+export * from './wake-policy.js';

@@ -1,0 +1,265 @@
+.ve-body:has(> .ve-wave) {
+  min-height: min(50vh, 26rem);
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+.ve-wave {
+  display: grid;
+  align-items: center;
+  min-height: min(50vh, 26rem);
+  padding: clamp(1.25rem, 4vw, 3.5rem);
+}
+.ve-audio-player {
+  width: min(100%, 40rem);
+  min-width: 0;
+  margin: auto;
+}
+.wave-heading {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+.wave-mark {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  flex: 0 0 auto;
+  color: #345c65;
+  background: #eaf0f1;
+  border-radius: 0.7rem;
+}
+.wave-file {
+  min-width: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+.wave-file strong {
+  font-size: 1.05rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.wave-file > span,
+.wave-times,
+.wave-feedback {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.wave-timeline {
+  margin-bottom: 0.75rem;
+}
+.wave-times {
+  display: flex;
+  justify-content: space-between;
+  font-variant-numeric: tabular-nums;
+}
+.ve-audio-player .wave-range {
+  --wave-progress: 0%;
+  --wave-rail: #aebdc3;
+  --wave-fill: #345c65;
+  appearance: none;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  min-height: 28px;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  accent-color: var(--wave-fill);
+}
+.wave-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    var(--wave-fill) var(--wave-progress),
+    var(--wave-rail) var(--wave-progress)
+  );
+}
+.wave-range::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    var(--wave-fill) var(--wave-progress),
+    var(--wave-rail) var(--wave-progress)
+  );
+}
+.wave-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--wave-fill);
+}
+.wave-range::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--wave-fill);
+}
+.wave-range:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.wave-controls,
+.wave-transport,
+.wave-repeat,
+.wave-speed,
+.wave-volume {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.wave-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 1rem;
+  max-width: 24rem;
+  margin: 1rem auto 0;
+}
+.wave-transport {
+  grid-column: 2;
+  grid-row: 1;
+  justify-content: center;
+  gap: 1rem;
+}
+.wave-repeat {
+  justify-self: end;
+  grid-column: 1;
+  grid-row: 1;
+}
+.wave-speed {
+  justify-self: start;
+  grid-column: 3;
+  grid-row: 1;
+}
+.wave-volume {
+  grid-column: 1 / -1;
+  justify-self: center;
+  width: 9rem;
+}
+.ve-audio-player .wave-button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0.4rem;
+  border: 0;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: inherit;
+}
+.ve-audio-player .wave-button:hover:not(:disabled),
+.ve-audio-player .ve-select-trigger:hover:not(:disabled) {
+  background: var(--surface-hover, #f1f2f4);
+}
+.ve-audio-player .wave-button[aria-pressed="true"] {
+  background: #e1ebed;
+  color: #274c55;
+}
+.ve-audio-player .wave-play {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: #345c65;
+  color: #fff;
+}
+.ve-audio-player .wave-play:hover:not(:disabled) {
+  background: #294b53;
+}
+.wave-button:disabled {
+  opacity: 0.45;
+}
+.ve-audio-player .ve-select-trigger {
+  min-width: 4rem;
+}
+.wave-feedback {
+  min-height: 1.5rem;
+  padding-top: 0.75rem;
+}
+.wave-error {
+  display: grid;
+  gap: 0.5rem;
+}
+.wave-error > .notice {
+  margin: 0;
+}
+.wave-error > button {
+  justify-self: start;
+}
+@media (max-width: 480px) {
+  .wave-transport {
+    gap: 0.25rem;
+  }
+  .wave-controls {
+    column-gap: 0.25rem;
+  }
+
+  .wave-volume {
+    width: 100%;
+    max-width: 9rem;
+  }
+  .wave-volume .wave-range {
+    max-width: 9rem;
+  }
+  .wave-heading {
+    gap: 0.75rem;
+  }
+  .wave-mark {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+.wave-seek {
+  position: relative;
+}
+.ve-audio-player .wave-seek-input {
+  position: absolute;
+  inset: 0;
+  height: 128px;
+  min-height: 128px;
+  z-index: 1;
+  transition: none;
+}
+.wave-seek-input::-webkit-slider-runnable-track {
+  height: 128px;
+  background: transparent;
+}
+.wave-seek-input::-moz-range-track {
+  height: 128px;
+  background: transparent;
+}
+.wave-seek-input::-webkit-slider-thumb {
+  height: 128px;
+  width: 2px;
+  margin: 0;
+  border-radius: 1px;
+  background: #345c65;
+}
+.wave-seek-input::-moz-range-thumb {
+  height: 128px;
+  width: 2px;
+  border-radius: 1px;
+  background: #345c65;
+}
+
+@media (max-width: 480px) {
+  .wave-speed .ve-select-trigger {
+    min-width: 0;
+    padding-inline: 0;
+    gap: 0.2rem;
+    font-size: 0.8rem;
+  }
+}

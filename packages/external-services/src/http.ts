@@ -18,6 +18,22 @@ export function endpoint(value: string): URL {
   }
 }
 
+export class ProviderRateLimitError extends DomainError {
+  constructor(readonly retryAfterMs: number) {
+    super('rate_limited');
+  }
+}
+function retryAfter(value: string | null): number {
+  const seconds =
+    value && /^\d+(?:\.\d+)?$/.test(value)
+      ? Number(value)
+      : value
+        ? (Date.parse(value) - Date.now()) / 1000
+        : NaN;
+  return Number.isFinite(seconds)
+    ? Math.min(3_600_000, Math.max(1_000, Math.ceil(seconds * 1000)))
+    : 300_000;
+}
 export class ProviderHttp {
   readonly #base: URL;
   readonly #headers: Readonly<Record<string, string>>;
@@ -57,6 +73,8 @@ export class ProviderHttp {
       });
       if (!response.ok) {
         await response.body?.cancel();
+        if (response.status === 429)
+          throw new ProviderRateLimitError(retryAfter(response.headers.get('retry-after')));
         if (response.status === 404 || response.status === 409)
           return { status: response.status, data: null };
         throw new DomainError(

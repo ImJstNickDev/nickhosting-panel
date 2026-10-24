@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -6,12 +6,15 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { gzipSync } from 'node:zlib';
+import * as contentProviders from '@nickhosting/content-providers';
+import { DomainError } from '@nickhosting/core';
 import { type NBT, writeUncompressed } from 'prismarine-nbt';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ZipFile } from 'yazl';
 import {
   discoverMinecraftWorlds,
   inspectMinecraftLevelDat,
+  inspectMinecraftWorldTransfer,
   planMinecraftWorldReplacement,
   recoverMinecraftWorldStageLock,
   stageMinecraftWorld,
@@ -41,13 +44,21 @@ function levelDat(version = 5000, release = '26.1', gzip = true): Buffer {
   const bytes = writeUncompressed(nbt, 'big');
   return gzip ? gzipSync(bytes) : bytes;
 }
+function metadata(data: NBT['value']): Buffer {
+  return gzipSync(
+    writeUncompressed(
+      { type: 'compound', name: '', value: { Data: { type: 'compound', value: data } } },
+      'big',
+    ),
+  );
+}
 it('observes an actual bounded DataVersion without guessing while exact validation still rejects mismatches', () => {
   expect(
     inspectMinecraftLevelDat(levelDat(12345, 'future-release'), { release: 'future-release' }),
   ).toMatchObject({ dataVersion: 12345, versionName: 'future-release' });
   expect(() => validateMinecraftLevelDat(levelDat(12345), 5000)).toThrow();
   expect(() => inspectMinecraftLevelDat(levelDat(-1))).toThrow();
-  expect(() => inspectMinecraftLevelDat(levelDat(), { release: '1.21.1' })).toThrow();
+  expect(inspectMinecraftLevelDat(levelDat(), { release: '1.21.1' }).versionName).toBe('26.1');
   expect(() =>
     inspectMinecraftLevelDat(levelDat(), { limits: { maxUncompressedBytes: 16 } }),
   ).toThrow();
@@ -114,6 +125,121 @@ function rootWith(dataPayload: Buffer): Buffer {
 }
 
 describe('bounded Java level.dat validation', () => {
+  it.each([19132, 19133])(
+    'recognizes legacy storage %s without inventing an exact release',
+    (storage) => {
+      const bytes = metadata({
+        version: { type: 'int', value: storage },
+        LevelName: { type: 'string', value: 'Old map' },
+      });
+      const observation = inspectMinecraftLevelDat(bytes);
+      expect(observation).toMatchObject({ storageVersion: storage });
+      expect(observation.dataVersion).toBeUndefined();
+      expect(observation.versionName).toBeUndefined();
+      expect(observation.detectedRelease).toBeUndefined();
+      expect(() => validateMinecraftLevelDat(bytes, 4786, { release: '26.1' })).toThrow();
+    },
+  );
+  it('recognizes markerless Alpha/Beta metadata using its typed core fields', () => {
+    const legacy = {
+      RandomSeed: { type: 'long' as const, value: [0, 123] as [number, number] },
+      Time: { type: 'long' as const, value: [0, 0] as [number, number] },
+      SpawnX: { type: 'int' as const, value: 0 },
+      SpawnY: { type: 'int' as const, value: 64 },
+      SpawnZ: { type: 'int' as const, value: 0 },
+    };
+    expect(inspectMinecraftLevelDat(metadata(legacy)).dataVersion).toBeUndefined();
+    const { RandomSeed: _seed, ...insufficient } = legacy;
+    expect(() => inspectMinecraftLevelDat(metadata(insufficient))).toThrow();
+    expect(() => inspectMinecraftLevelDat(metadata({}))).toThrow();
+  });
+  it('preserves Series, Snapshot and 26.3 version history while resolving a known display alias', () => {
+    const bytes = metadata({
+      version: { type: 'int', value: 19133 },
+      DataVersion: { type: 'int', value: 4764 },
+      Version: {
+        type: 'compound',
+        value: {
+          Id: { type: 'int', value: 4764 },
+          Name: { type: 'string', value: '26.1 Snapshot 1' },
+          Series: { type: 'string', value: 'main' },
+          Snapshot: { type: 'byte', value: 1 },
+        },
+      },
+      version_history: { type: 'list', value: { type: 'int', value: [3700, 4764] } },
+    });
+    expect(validateMinecraftLevelDat(bytes, 4764, { release: '26.1-snapshot-1' })).toMatchObject({
+      dataVersion: 4764,
+      versionName: '26.1 Snapshot 1',
+      detectedRelease: '26.1-snapshot-1',
+      storageVersion: 19133,
+      versionSeries: 'main',
+      snapshot: true,
+      versionHistory: [3700, 4764],
+    });
+    expect(
+      inspectMinecraftLevelDat(
+        metadata({
+          DataVersion: { type: 'int', value: 5023 },
+          version_history: { type: 'list', value: { type: 'int', value: [] } },
+        }),
+      ),
+    ).toMatchObject({ dataVersion: 5023, detectedRelease: '26.3', versionHistory: [] });
+  });
+  it('rejects malformed version metadata rather than converting it to an unknown version', () => {
+    for (const extra of [
+      { version: { type: 'string', value: '19133' } },
+      { version: { type: 'int', value: 19132 } },
+      { Version: { type: 'compound', value: { Id: { type: 'int', value: 1 } } } },
+      { Version: { type: 'compound', value: { Snapshot: { type: 'byte', value: 2 } } } },
+      { Version: { type: 'compound', value: { Series: { type: 'int', value: 1 } } } },
+      { version_history: { type: 'intArray', value: [4786] } },
+      { version_history: { type: 'list', value: { type: 'int', value: [0] } } },
+      {
+        version_history: {
+          type: 'list',
+          value: { type: 'int', value: new Array(4097).fill(4786) },
+        },
+      },
+    ] as NBT['value'][])
+      expect(() =>
+        inspectMinecraftLevelDat(
+          metadata({
+            DataVersion: { type: 'int', value: 4786 },
+            ...extra,
+          }),
+        ),
+      ).toThrow();
+  });
+  it('accepts the empty TAG_End list representation of version history', () => {
+    const version = Buffer.alloc(4);
+    version.writeInt32BE(5023);
+    const bytes = rootWith(
+      namedTag(
+        10,
+        'Data',
+        Buffer.concat([
+          namedTag(3, 'DataVersion', version),
+          namedTag(9, 'version_history', Buffer.from([0, 0, 0, 0, 0])),
+          Buffer.from([0]),
+        ]),
+      ),
+    );
+    expect(inspectMinecraftLevelDat(bytes).versionHistory).toEqual([]);
+  });
+  it('does not infer a mainline release from a nameless experimental-series save', () => {
+    const observed = inspectMinecraftLevelDat(
+      metadata({
+        DataVersion: { type: 'int', value: 4786 },
+        Version: {
+          type: 'compound',
+          value: { Series: { type: 'string', value: 'custom-series' } },
+        },
+      }),
+    );
+    expect(observed.versionSeries).toBe('custom-series');
+    expect(observed.detectedRelease).toBeUndefined();
+  });
   it('validates gzip and raw big-endian NBT against exact trusted DataVersion, never release semver', () => {
     for (const gzip of [true, false]) {
       const bytes = levelDat(5000, '26.1', gzip);
@@ -186,6 +312,254 @@ describe('bounded Java level.dat validation', () => {
   });
 });
 describe('streamed isolated world staging', () => {
+  it('selects the same wrapped world for compressed transfer and staging, excluding package companions', async () => {
+    const { root } = await environment();
+    const sourceRoot = 'Package/DIVERSITY 3 v1.6.6 - for 1.14.4';
+    const level = levelDat(1976, '1.14.4');
+    const region = Buffer.from('region fixture');
+    const archive = await makeZip(root, {
+      'D3_screen_1600x900.png': Buffer.from('cover fixture'),
+      'Package/Instructions.txt': Buffer.from('instructions'),
+      [`${sourceRoot}/level.dat`]: level,
+      [`${sourceRoot}/region/r.0.0.mca`]: region,
+      [`${sourceRoot}/session.lock`]: Buffer.from('ephemeral lock'),
+      [`${sourceRoot}-extras/readme.txt`]: Buffer.from('not part of the world'),
+      'tools/install.sh': Buffer.from('not imported'),
+    });
+    const verifiedArchive = {
+      path: archive.path,
+      sha256: archive.sha256,
+      identity: await lstat(archive.path, { bigint: true }),
+    };
+    const transfer = await inspectMinecraftWorldTransfer(archive.path, {
+      targetWorld: 'imported',
+      verifiedArchive,
+    });
+    expect(transfer.mappings).toEqual([
+      { source: `${sourceRoot}/level.dat`, target: 'imported/level.dat' },
+      { source: `${sourceRoot}/region/r.0.0.mca`, target: 'imported/region/r.0.0.mca' },
+    ]);
+    expect(transfer.validation).toMatchObject({ dataVersion: 1976, versionName: '1.14.4' });
+    const reserve = vi.fn(async (_bytes: number) => {});
+    const staged = await stageMinecraftWorld(archive.path, {
+      ...options(root, archive.sha256),
+      verifiedArchive,
+      reserve,
+    });
+    expect(reserve).toHaveBeenCalledExactlyOnceWith(level.length + region.length);
+    expect(staged.manifest.map((file) => file.path)).toEqual(
+      transfer.mappings.map((mapping) => mapping.target),
+    );
+    expect(await readFile(join(staged.directory, 'imported/level.dat'))).toEqual(level);
+    expect(await readFile(join(staged.directory, 'imported/region/r.0.0.mca'))).toEqual(region);
+    expect(staged.validation).toMatchObject(transfer.validation);
+    for (const path of ['D3_screen_1600x900.png', 'Instructions.txt', 'session.lock', 'install.sh'])
+      await expect(lstat(join(staged.directory, 'imported', path))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+  });
+  it.each([
+    { extra: 'other/level.dat', reason: 'minecraft_world_level_data' },
+    { extra: 'source/start.sh', reason: 'minecraft_world_protected_file' },
+  ])('rejects $extra in both import paths', async ({ extra, reason }) => {
+    const { root } = await environment();
+    const archive = await makeZip(root, {
+      'cover.png': Buffer.from('cover'),
+      'source/level.dat': levelDat(),
+      [extra]: levelDat(),
+    });
+    const verifiedArchive = {
+      path: archive.path,
+      sha256: archive.sha256,
+      identity: await lstat(archive.path, { bigint: true }),
+    };
+    await expect(
+      inspectMinecraftWorldTransfer(archive.path, { targetWorld: 'imported', verifiedArchive }),
+    ).rejects.toMatchObject({ details: { reason } });
+    await expect(
+      stageMinecraftWorld(archive.path, { ...options(root, archive.sha256), verifiedArchive }),
+    ).rejects.toMatchObject({ details: { reason } });
+    await expect(lstat(join(root, 'world-staging/job-one/files'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+  it('reuses a trusted current source hash while inflating exact world bytes', async () => {
+    const { root } = await environment();
+    const region = randomBytes(2 * 1024 ** 2);
+    const archive = await makeZip(
+      root,
+      {
+        'source/level.dat': levelDat(),
+        'source/region/r.0.0.mca': region,
+      },
+      { compress: true },
+    );
+    const verifiedArchive = {
+      path: archive.path,
+      sha256: archive.sha256,
+      identity: await lstat(archive.path, { bigint: true }),
+    };
+    const staged = await stageMinecraftWorld(archive.path, {
+      ...options(root, archive.sha256),
+      verifiedArchive,
+    });
+    expect(staged.manifest).toHaveLength(2);
+    expect(await readFile(join(staged.directory, 'imported/region/r.0.0.mca'))).toEqual(region);
+    expect(staged.manifest.find((file) => file.path.endsWith('.mca'))?.sha256).toBe(
+      createHash('sha256').update(region).digest('hex'),
+    );
+    for (const invalid of [
+      { ...verifiedArchive, path: join(root, 'other.zip') },
+      { ...verifiedArchive, sha256: 'a'.repeat(64) },
+    ]) {
+      await expect(
+        stageMinecraftWorld(archive.path, {
+          ...options(root, archive.sha256),
+          verifiedArchive: invalid,
+        }),
+      ).rejects.toMatchObject({ details: { reason: 'minecraft_world_archive_changed' } });
+    }
+    await expect(
+      stageMinecraftWorld(archive.path, {
+        ...options(root, archive.sha256),
+        verifiedArchive,
+        limits: { maxArchiveBytes: 1024 },
+      }),
+    ).rejects.toMatchObject({ details: { reason: 'minecraft_world_archive_changed' } });
+    await writeFile(archive.path, await readFile(archive.path));
+    await expect(
+      stageMinecraftWorld(archive.path, {
+        ...options(root, archive.sha256),
+        verifiedArchive,
+      }),
+    ).rejects.toMatchObject({ details: { reason: 'minecraft_world_archive_changed' } });
+  });
+  it('reserves only the validated world bytes before extraction and checks disk space in batches', async () => {
+    const { root } = await environment();
+    const level = levelDat();
+    const entries: Record<string, Buffer> = {
+      'source/level.dat': level,
+      'source/session.lock': Buffer.from('ignored lock'),
+    };
+    for (let index = 0; index < 70; index++)
+      entries[`source/region/r.${index}.mca`] = Buffer.from('region');
+    const archive = await makeZip(root, entries);
+    const reserve = vi.fn(async (bytes: number) => {
+      expect(bytes).toBe(level.length + 70 * 6);
+      await expect(lstat(join(root, 'world-staging/job-one/files'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+    const disk = vi.spyOn(contentProviders, 'assertContentDiskSpace');
+    try {
+      const staged = await stageMinecraftWorld(archive.path, {
+        ...options(root, archive.sha256),
+        reserve,
+      });
+      expect(staged.manifest).toHaveLength(71);
+      expect(reserve).toHaveBeenCalledOnce();
+      // One full-budget check and bounded refreshes, never a syscall for every small file.
+      expect(disk.mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect(disk.mock.calls.length).toBeLessThan(10);
+      expect(disk.mock.calls[0]?.[1]).toBe(level.length + 70 * 6);
+    } finally {
+      disk.mockRestore();
+    }
+  });
+  it('does not extract when reservation is denied or the verified source changes', async () => {
+    const { root } = await environment();
+    const archive = await makeZip(root, { 'source/level.dat': levelDat() });
+    const denied = new Error('staging capacity unavailable');
+    await expect(
+      stageMinecraftWorld(archive.path, {
+        ...options(root, archive.sha256),
+        reserve: async () => {
+          throw denied;
+        },
+      }),
+    ).rejects.toBe(denied);
+    await expect(lstat(join(root, 'world-staging/job-one/files'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(
+      stageMinecraftWorld(archive.path, {
+        ...options(root, archive.sha256),
+        reserve: async () => {
+          const bytes = await readFile(archive.path);
+          await rm(archive.path);
+          await writeFile(archive.path, bytes);
+        },
+      }),
+    ).rejects.toMatchObject({ details: { reason: 'minecraft_world_archive_changed' } });
+    await expect(lstat(join(root, 'world-staging/job-one/files'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+  it('rejects corrupt entry bytes even when the outer archive hash matches', async () => {
+    const { root } = await environment();
+    const payload = Buffer.from('unchanged-region-fixture');
+    const archive = await makeZip(root, {
+      'source/level.dat': levelDat(),
+      'source/region/r.0.0.mca': payload,
+    });
+    const bytes = await readFile(archive.path);
+    const index = bytes.indexOf(payload);
+    expect(index).toBeGreaterThan(0);
+    bytes[index] = (bytes[index] ?? 0) ^ 1;
+    await writeFile(archive.path, bytes);
+    await expect(
+      stageMinecraftWorld(
+        archive.path,
+        options(root, createHash('sha256').update(bytes).digest('hex')),
+      ),
+    ).rejects.toMatchObject({ details: { reason: 'minecraft_world_archive_integrity' } });
+    await expect(lstat(join(root, 'world-staging/job-one/manifest.json'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+  it('does not publish a manifest if the source is edited during extraction', async () => {
+    const { root } = await environment();
+    const entries: Record<string, Buffer> = { 'source/level.dat': levelDat() };
+    for (let index = 0; index < 40; index++)
+      entries[`source/region/r.${index}.mca`] = Buffer.from('region');
+    const archive = await makeZip(root, entries);
+    const checkDisk = contentProviders.assertContentDiskSpace;
+    let checks = 0;
+    const disk = vi
+      .spyOn(contentProviders, 'assertContentDiskSpace')
+      .mockImplementation(async (...args) => {
+        await checkDisk(...args);
+        if (++checks !== 2) return;
+        // Same bytes and size still constitute a concurrent source edit; CRC alone cannot see it.
+        await writeFile(archive.path, await readFile(archive.path));
+      });
+    try {
+      await expect(
+        stageMinecraftWorld(archive.path, options(root, archive.sha256)),
+      ).rejects.toMatchObject({ details: { reason: 'minecraft_world_archive_changed' } });
+      await expect(lstat(join(root, 'world-staging/job-one/manifest.json'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      disk.mockRestore();
+    }
+  });
+  it('rejects pre-existing symlinks below the cached staging directory boundary', async () => {
+    const { root, parent } = await environment();
+    const archive = await makeZip(root, {
+      'source/level.dat': levelDat(),
+      'source/region/r.0.0.mca': Buffer.from('region'),
+    });
+    const stagedWorld = join(root, 'world-staging/job-one/files/imported');
+    const outside = join(parent, 'outside');
+    await mkdir(stagedWorld, { recursive: true });
+    await mkdir(outside);
+    await symlink(outside, join(stagedWorld, 'region'));
+    await expect(
+      stageMinecraftWorld(archive.path, options(root, archive.sha256)),
+    ).rejects.toMatchObject({ details: { reason: 'minecraft_world_stage_symlink' } });
+    await expect(lstat(join(outside, 'r.0.0.mca'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
   it('streams a 16MiB region file, preserves dimensions, discards ephemeral locks and verifies recovery', async () => {
     const { root } = await environment();
     const archive = await makeZip(
@@ -213,7 +587,7 @@ describe('streamed isolated world staging', () => {
       stageMinecraftWorld(archive.path, options(root, archive.sha256)),
     ).rejects.toMatchObject({ details: { reason: 'minecraft_world_stage_existing_mismatch' } });
   });
-  it('checks archive digest, exact DataVersion, plan identity and cancellation', async () => {
+  it('checks archive digest, preserves mismatched source metadata, plan identity and cancellation', async () => {
     const { root } = await environment();
     const archive = await makeZip(root, { 'level.dat': levelDat() });
     await expect(
@@ -224,7 +598,7 @@ describe('streamed isolated world staging', () => {
         ...options(root, archive.sha256),
         expectedDataVersion: 5001,
       }),
-    ).rejects.toThrow();
+    ).resolves.toMatchObject({ validation: { dataVersion: 5000, targetRelease: '26.1' } });
     await expect(
       stageMinecraftWorld(archive.path, options(root, archive.sha256)),
     ).rejects.toMatchObject({ details: { reason: 'minecraft_world_stage_plan_conflict' } });
@@ -237,6 +611,52 @@ describe('streamed isolated world staging', () => {
         signal: controller.signal,
       }),
     ).rejects.toThrow();
+  });
+  it('supports an explicit migrated storage boundary for world sources, staging and recovery', async () => {
+    const { parent } = await environment();
+    const boundary = join(parent, 'external-storage');
+    const sources = join(boundary, 'sources');
+    const work = join(boundary, 'work');
+    await mkdir(sources, { recursive: true });
+    const archive = await makeZip(sources, { 'level.dat': levelDat() });
+    const settings = {
+      ...options(work, archive.sha256),
+      storageBoundary: boundary,
+      sourceRoot: sources,
+    };
+    const staged = await stageMinecraftWorld(archive.path, settings);
+    expect(staged.manifest).toHaveLength(1);
+    await recoverMinecraftWorldStageLock({
+      ...settings,
+      expectedPlanDigest: staged.planDigest,
+      assertExclusiveJob: async () => {},
+    });
+    await expect(
+      stageMinecraftWorld(archive.path, { ...settings, storageBoundary: `${boundary}-other` }),
+    ).rejects.toMatchObject({ details: { reason: 'minecraft_world_stage_root' } });
+    await expect(
+      stageMinecraftWorld(archive.path, { ...settings, sourceRoot: join(parent, 'mountdata') }),
+    ).rejects.toMatchObject({ details: { reason: 'minecraft_world_source' } });
+  });
+  it('stages a wrapped legacy world and unknown target without converting its bytes', async () => {
+    const { root } = await environment();
+    const original = metadata({ version: { type: 'int', value: 19133 } });
+    const archive = await makeZip(root, {
+      'FCTN/level.dat': original,
+      'FCTN/region/r.0.0.mca': Buffer.from('opaque chunk bytes'),
+    });
+    const staged = await stageMinecraftWorld(archive.path, {
+      ...options(root, archive.sha256),
+      expectedDataVersion: undefined,
+      release: 'unknown-future-server',
+    });
+    expect(staged.validation).toMatchObject({
+      storageVersion: 19133,
+      targetRelease: 'unknown-future-server',
+    });
+    expect(staged.validation.dataVersion).toBeUndefined();
+    expect(staged.validation.versionName).toBeUndefined();
+    expect(await readFile(join(staged.directory, 'imported/level.dat'))).toEqual(original);
   });
   it('does not follow staging/source symlinks or accept browser-like paths outside mountdata', async () => {
     const { root, parent } = await environment();
@@ -348,6 +768,11 @@ describe('world operation consent and discovery', () => {
         backupBefore: true,
       }),
     ).toMatchObject({ deletePaths: ['existing'], backupBefore: true, requiresStoppedServer: true });
+    expect(planMinecraftWorldReplacement('new_world', false)).toMatchObject({
+      deletePaths: [],
+      backupBefore: false,
+      requiresStoppedServer: false,
+    });
     expect(() =>
       planMinecraftWorldReplacement('new', false, {
         wipeConsent: true,
@@ -381,5 +806,117 @@ describe('world operation consent and discovery', () => {
     ]);
     expect(reads).not.toContain('plugins');
     expect(reads).not.toContain('../bad');
+  });
+});
+
+describe('world inventory observations', () => {
+  it('retains actual version metadata without granting compatibility when evidence is unavailable', async () => {
+    const worlds = await discoverMinecraftWorlds(
+      {
+        listRoot: async () => [{ name: 'legacy', isDirectory: true }],
+        readLevelDat: async () => levelDat(1234, '1.9'),
+      },
+      { release: '26.1' },
+    );
+    expect(worlds).toEqual([
+      expect.objectContaining({
+        name: 'legacy',
+        status: 'unknown',
+        validation: expect.objectContaining({ dataVersion: 1234, versionName: '1.9' }),
+      }),
+    ]);
+    const known = await discoverMinecraftWorlds(
+      {
+        listRoot: async () => [{ name: 'legacy', isDirectory: true }],
+        readLevelDat: async () => levelDat(1234, '1.9'),
+      },
+      { release: '26.1', expectedDataVersion: 5000 },
+    );
+    expect(known[0]).toMatchObject({ status: 'incompatible', validation: { versionName: '1.9' } });
+  });
+  it('distinguishes unknown legacy/future identity, malformed metadata and unavailable reads', async () => {
+    const worlds = await discoverMinecraftWorlds(
+      {
+        listRoot: async () =>
+          ['legacy', 'future', 'ambiguous', 'invalid', 'offline'].map((name) => ({
+            name,
+            isDirectory: true,
+          })),
+        readLevelDat: async (name) => {
+          if (name === 'offline') throw new Error('unavailable');
+          if (name === 'invalid') return metadata({});
+          if (name === 'legacy') return metadata({ version: { type: 'int', value: 19133 } });
+          if (name === 'ambiguous') return metadata({ DataVersion: { type: 'int', value: 111 } });
+          return levelDat(77777, 'future-custom');
+        },
+      },
+      { release: 'unknown-server' },
+    );
+    expect(worlds.map(({ name, status }) => ({ name, status }))).toEqual([
+      { name: 'legacy', status: 'unknown' },
+      { name: 'future', status: 'unknown' },
+      { name: 'ambiguous', status: 'unknown' },
+      { name: 'invalid', status: 'invalid' },
+      { name: 'offline', status: 'unavailable' },
+    ]);
+  });
+
+  it('uses at most two readers, scans each candidate once and preserves provider order', async () => {
+    let active = 0;
+    let maximum = 0;
+    const names = ['one', 'two', 'three', 'four', 'five'];
+    const root = vi.fn(async () => names.map((name) => ({ name, isDirectory: true })));
+    const read = vi.fn(async () => {
+      active++;
+      maximum = Math.max(maximum, active);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      active--;
+      return levelDat();
+    });
+    const worlds = await discoverMinecraftWorlds(
+      { listRoot: root, readLevelDat: read },
+      {
+        release: '26.1',
+        expectedDataVersion: 5000,
+      },
+    );
+    expect(worlds.map((world) => world.name)).toEqual(names);
+    expect(maximum).toBe(2);
+    expect(active).toBe(0);
+    expect(root).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledTimes(names.length);
+  });
+
+  it('propagates revoked authorization instead of returning a misleading partial inventory', async () => {
+    await expect(
+      discoverMinecraftWorlds(
+        {
+          listRoot: async () => [{ name: 'world', isDirectory: true }],
+          readLevelDat: async () => {
+            throw new DomainError('forbidden');
+          },
+        },
+        { release: '26.1' },
+      ),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+  });
+
+  it('rejects excessive candidates and case aliases before starting remote metadata reads', async () => {
+    const read = vi.fn();
+    for (const names of [
+      ['one', 'two'],
+      ['one', 'ONE'],
+    ]) {
+      await expect(
+        discoverMinecraftWorlds(
+          {
+            listRoot: async () => names.map((name) => ({ name, isDirectory: true })),
+            readLevelDat: read,
+          },
+          { release: '26.1', maxWorlds: names[1] === 'two' ? 1 : 2 },
+        ),
+      ).rejects.toThrow();
+    }
+    expect(read).not.toHaveBeenCalled();
   });
 });

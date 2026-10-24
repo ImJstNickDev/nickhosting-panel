@@ -1,0 +1,64 @@
+dialog.confirmation-dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100svh - 32px);
+  overflow: auto;
+  padding: 2rem;
+  border-radius: 10px;
+  text-align: center;
+}
+.confirmation-dialog .section-heading {
+  position: relative;
+  justify-content: center;
+  padding-inline: 2rem;
+  margin-bottom: 1.25rem;
+}
+.confirmation-dialog h2 {
+  font-size: 1.65rem;
+  line-height: 1.25;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+.confirmation-dialog .dialog-close-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  position: absolute;
+  right: -0.5rem;
+  top: -0.5rem;
+}
+.confirmation-dialog .dialog-close-icon:hover:not(:disabled) {
+  background: #edf1f5;
+  color: var(--text);
+}
+.confirmation-dialog p {
+  line-height: 1.55;
+  margin-block: 0;
+}
+.confirmation-dialog .form-footer {
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+.confirmation-dialog .form-footer button {
+  min-width: 9rem;
+  min-height: 48px;
+  padding: 0.75rem 1.25rem;
+}
+@media (max-width: 480px) {
+  dialog.confirmation-dialog {
+    padding: 1.5rem 1.25rem;
+  }
+  .confirmation-dialog .form-footer button {
+    flex: 1 1 0;
+    min-width: 0;
+    padding-inline: 0.75rem;
+  }
+}
