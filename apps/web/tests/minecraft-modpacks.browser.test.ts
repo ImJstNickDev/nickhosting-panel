@@ -433,10 +433,41 @@ describe('Minecraft Modpacks full-page experience', () => {
     await page.getByRole('button', { name: 'Back to Discover' }).click();
     await page.getByRole('combobox', { name: 'Catalog', exact: true }).click();
     await check(page.getByRole('option')).toHaveCount(6);
+    await check(page.getByRole('option').locator('img')).toHaveCount(6);
+    await check
+      .poll(() =>
+        page
+          .getByRole('option')
+          .locator('img')
+          .evaluateAll((images) =>
+            images.every(
+              (image) =>
+                (image as HTMLImageElement).complete &&
+                (image as HTMLImageElement).naturalWidth > 0,
+            ),
+          ),
+      )
+      .toBe(true);
+    expect(
+      await page
+        .getByRole('option')
+        .evaluateAll((options) =>
+          options.every((option) => getComputedStyle(option).justifyContent === 'flex-start'),
+        ),
+    ).toBe(true);
     await page.screenshot({
       path: '.codex/local/m5-browser/screenshots/modpacks-providers-desktop-en.png',
       fullPage: true,
     });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/modpacks-providers-mobile-en.png',
+      fullPage: true,
+    });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(
+      false,
+    );
+
     expect(
       (await new AxeBuilder({ page }).analyze()).violations.filter((item) =>
         ['serious', 'critical'].includes(item.impact ?? ''),

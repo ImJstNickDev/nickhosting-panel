@@ -556,3 +556,20 @@
 .modpacks-details .mods-details-header h3 {
   font-size: 1.15rem;
 }
+
+.modpacks-provider-select.ve-select-options button {
+  justify-content: flex-start;
+  text-align: left;
+}
+.modpacks-provider-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  text-align: left;
+}
+.modpacks-provider-label img {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  object-fit: contain;
+}

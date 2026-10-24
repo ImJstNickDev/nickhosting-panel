@@ -469,3 +469,12 @@ on a new attempt whose initial archive download exhausted three deadlines.
 Completed stage timings remain usable individually; total installation time
 includes manual recovery and repeated work and must not be compared as a normal
 successful installation.
+
+### Provider selector presentation
+
+The Modpacks catalog dropdown aligns every provider to the left and displays its
+identification mark beside its name, including the selected trigger. All six
+marks are served locally; official sources and ownership are recorded in
+`apps/web/src/integrations/minecraft/provider-logos/README.md`. Existing catalog availability, keyboard
+selection, accessible names and search behavior are unchanged. The provider-only
+CSS class leaves other selectors unchanged.

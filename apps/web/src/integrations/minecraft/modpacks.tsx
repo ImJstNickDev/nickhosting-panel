@@ -16,6 +16,7 @@ import { Pagination, SearchField } from '../../components/workspace-controls.js'
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { gameUiClient } from '../../features/integrations.js';
 import { ViewerSelect } from '../../features/viewer-engine/viewer-select.js';
+import { ModpackProviderLabel } from './modpack-provider-label.js';
 import {
   modpackKey as k,
   modpackIdentity,
@@ -610,8 +611,13 @@ function ModpackDiscover(props: {
         <ViewerSelect
           label={t(k('provider'))}
           value={provider}
-          className="mods-select"
-          options={Object.entries(modpackProviders).map(([value, label]) => ({ value, label }))}
+          className="mods-select modpacks-provider-select"
+          triggerContent={<ModpackProviderLabel provider={provider} />}
+          options={Object.entries(modpackProviders).map(([value, label]) => ({
+            value,
+            label,
+            content: <ModpackProviderLabel provider={value as ModpackProvider} />,
+          }))}
           onChange={(value) => {
             setProvider(value as ModpackProvider);
             setOffset(0);
