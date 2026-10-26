@@ -97,7 +97,11 @@ function owner(context: AuthContext) {
 async function visibleServers(db: DB, context: AuthContext) {
   const directAvailable = await serverSubusersAvailable(db);
   assertAuthContext(context);
-  let query = db.selectFrom('managed_servers').selectAll().where('deleted_at', 'is', null);
+  let query = db
+    .selectFrom('managed_servers')
+    .selectAll()
+    .select(installedServerVersion.as('installed_version'))
+    .where('deleted_at', 'is', null);
   if (!owner(context))
     query = query.where((e) =>
       e.or([
@@ -260,7 +264,7 @@ async function configuredGatewayWake(db: DB, env: Environment) {
 async function describeServer(
   db: DB,
   context: AuthContext,
-  row: Awaited<ReturnType<typeof authorizeServer>>,
+  row: Awaited<ReturnType<typeof scopedServer>>,
   gatewayEnabled = false,
 ) {
   const [mapping, member, policy, initialDenied, upload, reservation, activeStop] =
@@ -348,6 +352,11 @@ async function describeServer(
     ...publicServer(row),
     gameId: mapping.game_id,
     runtimeId: mapping.runtime_id,
+    runtimeNameKey: manifest.success
+      ? (manifest.data.runtimes.find((runtime) => runtime.id === mapping.runtime_id)?.nameKey ??
+        null)
+      : null,
+    version: row.installed_version,
     gameNameKey: manifest.success ? manifest.data.nameKey : null,
     connectionMode: row.connection_mode,
     readiness: capabilities?.readiness === false ? ('unknown' as const) : row.readiness,

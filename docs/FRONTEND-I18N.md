@@ -266,6 +266,12 @@ The server root replaces history with `/console` when console capability or oper
 permission is available. An operator without console capability retains lifecycle
 controls without an unsupported stream; a viewer with neither falls back to Status.
 Focused tabs scroll into view in the horizontal navigation on keyboard traversal.
+The Console summary starts with a value-only runtime card above Address, such as
+`Fabric 1.21.11`. It uses the mapped runtime's translated name and the installed
+Minecraft profile's release; it never substitutes the integration version or a
+planned installation target. If no current installed release is known, only the
+runtime name is shown. The card has no visible label or icon.
+
 Console connection state uses a compact clickable dot (green connected, yellow
 connecting, red disconnected). The 40px button reconnects the stream and exposes
 localized state/action text to assistive technology and its tooltip; it has no

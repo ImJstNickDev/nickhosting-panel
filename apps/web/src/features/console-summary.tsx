@@ -25,28 +25,37 @@ function SummaryCard({
   offline = false,
   muted = false,
   action,
+  labelHidden = false,
 }: {
-  icon: keyof typeof iconPaths;
+  icon?: keyof typeof iconPaths;
   label: string;
   children: ReactNode;
   offline?: boolean;
   muted?: boolean;
   action?: ReactNode;
+  labelHidden?: boolean;
 }) {
   return (
-    <div className="console-summary-card">
-      <dt>
-        <span className={`console-summary-icon${offline ? ' is-offline' : ''}`} aria-hidden="true">
-          <svg
+    <div
+      className={`console-summary-card${labelHidden ? ' console-summary-card--value-only' : ''}`}
+    >
+      <dt className={labelHidden ? 'visually-hidden' : undefined}>
+        {icon && (
+          <span
+            className={`console-summary-icon${offline ? ' is-offline' : ''}`}
             aria-hidden="true"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.7"
           >
-            <path d={iconPaths[icon]} strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </span>
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.7"
+            >
+              <path d={iconPaths[icon]} strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </span>
+        )}
         {label}
         {action}
       </dt>
@@ -182,6 +191,16 @@ export function ConsoleSummary({
 
   return (
     <dl className="console-summary" aria-label={t('service.summary.title')}>
+      {server.data && (
+        <SummaryCard label={t('platform.runtime')} labelHidden>
+          {[
+            server.data.runtimeNameKey ? t(server.data.runtimeNameKey) : server.data.runtimeId,
+            server.data.version,
+          ]
+            .filter(Boolean)
+            .join(' ')}
+        </SummaryCard>
+      )}
       {canReadNetwork && (
         <SummaryCard
           icon="address"

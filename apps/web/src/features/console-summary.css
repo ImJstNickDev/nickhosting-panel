@@ -17,6 +17,12 @@
     border-radius: 5px;
     background: var(--surface);
   }
+  .console-summary-card--value-only {
+    padding-inline: 0.8rem;
+  }
+  .console-summary-card--value-only dd {
+    margin: 0;
+  }
   .console-summary-icon {
     position: absolute;
     left: 0.8rem;
@@ -92,7 +98,7 @@
     justify-content: center;
     width: 24px;
     height: 24px;
-    margin: -0.35rem -0.25rem -0.35rem auto;
+    margin: 0 -0.25rem 0 auto;
     border-radius: 3px;
     color: var(--muted);
     text-decoration: none;

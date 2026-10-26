@@ -574,6 +574,64 @@ describe('M5 platform browser queries and metadata', () => {
       .execute();
     expect((await listPlatformServers(f.db, other.context)).filterOptions.versions).toEqual([]);
   });
+  it('describes the installed runtime and release without presenting uninstalled or mismatched profiles', async () => {
+    const { id, choiceId, combination } = await installedMinecraft();
+    const expected = {
+      runtimeId: 'vanilla',
+      runtimeNameKey: 'games.minecraft.runtimes.vanilla',
+      version: '26.1',
+    };
+    expect(await getPlatformServer(f.db, f.context, id)).toMatchObject(expected);
+    expect(
+      (await listPlatformServers(f.db, f.context)).items.find((server) => server.id === id),
+    ).toMatchObject(expected);
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ runtime_id: 'fabric' })
+      .where('id', '=', f.mappingId)
+      .execute();
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({
+        combination: JSON.stringify({ ...combination, release: '1.21.11', profile: 'fabric' }),
+      })
+      .where('id', '=', choiceId)
+      .execute();
+    const replacement = {
+      runtimeId: 'fabric',
+      runtimeNameKey: 'games.minecraft.runtimes.fabric',
+      version: '1.21.11',
+    };
+    expect(await getPlatformServer(f.db, f.context, id)).toMatchObject(replacement);
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({ installed: false })
+      .where('server_id', '=', id)
+      .execute();
+    expect(await getPlatformServer(f.db, f.context, id)).toMatchObject({
+      ...replacement,
+      version: null,
+    });
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({ installed: true })
+      .where('server_id', '=', id)
+      .execute();
+    const other = await peer();
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({ mapping_id: other.mappingId })
+      .where('id', '=', choiceId)
+      .execute();
+    expect(await getPlatformServer(f.db, f.context, id)).toMatchObject({
+      ...replacement,
+      version: null,
+    });
+    const unrelated = await other.server();
+    expect(await getPlatformServer(f.db, other.context, unrelated)).toMatchObject({
+      version: null,
+    });
+  });
   it('exposes configured wake without claiming live readiness or ignoring disabled scopes', async () => {
     const { id } = await installedMinecraft();
     const env = {

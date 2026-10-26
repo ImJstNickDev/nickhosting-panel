@@ -3,6 +3,7 @@ import { AxeBuilder } from '@axe-core/playwright';
 import type { ConsoleRelayOptions } from '@nickhosting/pterodactyl-adapter';
 import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { confirmConsoleFixtureAddress } from './console-fixture.js';
 import { browserHarness } from './harness.js';
 import { prepareJourneyIdentities } from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
@@ -27,6 +28,7 @@ describe('M5 Console bounded output', () => {
       fixture.env,
       fixture.codec,
     );
+    await confirmConsoleFixtureAddress(fixture.database.db, provider.ids.serverId);
     fixture.setManagement(provider.management);
     const original = provider.adapter.relayConsole;
     provider.adapter.relayConsole = async (id, input) => {
@@ -90,7 +92,7 @@ describe('M5 Console bounded output', () => {
       await user.goto(base);
       const output = user.locator('.console');
       await browserExpect(output).toContainText('Browser provider fixture attached');
-      await browserExpect(user.locator('.console-summary-card')).toHaveCount(7);
+      await browserExpect(user.locator('.console-summary-card')).toHaveCount(8);
       await browserExpect(user.locator('.console-summary-address')).toBeVisible();
       await browserExpect(user.locator('.metric-chart')).toHaveCount(3);
       const before = await geometry();

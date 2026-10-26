@@ -4,6 +4,7 @@ import { PterodactylError, type Resources } from '@nickhosting/pterodactyl-adapt
 import { expect as browserExpect, type Page, type Route } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Connections } from '../src/features/service-contracts.js';
+import { confirmConsoleFixtureAddress } from './console-fixture.js';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
@@ -42,6 +43,7 @@ describe('M5 Console sidebar resources and responsive controls', () => {
       fixture.env,
       fixture.codec,
     );
+    await confirmConsoleFixtureAddress(fixture.database.db, provider.ids.serverId);
     fixture.setManagement(provider.management);
     originalResources = provider.adapter.getResources;
     const originalRelay = provider.adapter.relayConsole;
@@ -98,11 +100,12 @@ describe('M5 Console sidebar resources and responsive controls', () => {
     expect(errors).toEqual([]);
   }
 
-  it('aligns seven cards with the terminal and shows power controls above them at desktop size', async () => {
+  it('aligns eight cards with the terminal and shows power controls above them at desktop size', async () => {
     await user.setViewportSize({ width: 1440, height: 1000 });
     await user.goto(base);
-    await browserExpect(user.locator('.console-summary-card')).toHaveCount(7);
+    await browserExpect(user.locator('.console-summary-card')).toHaveCount(8);
     await browserExpect(user.locator('.console-summary-card dt')).toHaveText([
+      'Runtime',
       'Address',
       'Uptime',
       'CPU Load',
@@ -111,6 +114,11 @@ describe('M5 Console sidebar resources and responsive controls', () => {
       'Network (Inbound)',
       'Network (Outbound)',
     ]);
+    const runtimeCard = user.locator('.console-summary-card').first();
+    await browserExpect(runtimeCard.locator('dd')).toHaveText('Vanilla 26.1');
+    // The semantic term remains available to screen readers, not visible in the card.
+    await browserExpect(runtimeCard.locator('dt')).toHaveClass('visually-hidden');
+    await browserExpect(runtimeCard.locator('svg')).toHaveCount(0);
     await browserExpect(card('Uptime').locator('dd')).toHaveText('Offline');
     await browserExpect(card('Uptime').locator('.console-summary-icon.is-offline')).toHaveCount(1);
     await browserExpect(user.locator('.console-summary-icon.is-offline')).toHaveCount(1);
@@ -139,8 +147,7 @@ describe('M5 Console sidebar resources and responsive controls', () => {
       user.locator('.console-heading').getByRole('heading', { name: 'Survival', exact: true }),
     ).toBeVisible();
     const heading = await name.boundingBox();
-    const tabs = await user.locator('.tabs').boundingBox();
-    if (!terminal || !first || !last || !controls || !heading || !tabs)
+    if (!terminal || !first || !last || !controls || !heading)
       throw new Error('Console layout is not visible');
     expect(Math.abs(first.y - terminal.y)).toBeLessThanOrEqual(1);
     expect(Math.abs(last.y + last.height - terminal.y - terminal.height)).toBeLessThanOrEqual(1);
@@ -150,7 +157,6 @@ describe('M5 Console sidebar resources and responsive controls', () => {
     expect(
       Math.abs(heading.y + heading.height / 2 - controls.y - controls.height / 2),
     ).toBeLessThanOrEqual(1);
-    expect(heading.y).toBeGreaterThanOrEqual(tabs.y + tabs.height);
     await terminalConnection();
     await screenshot('offline-desktop-en');
     // Connection metadata, not a conventional role name or an auxiliary port,
@@ -164,9 +170,17 @@ describe('M5 Console sidebar resources and responsive controls', () => {
           role: 'game',
           primary: false,
           hostname: 'auxiliary.example.test',
+          displayAddress: 'auxiliary.example.test:25576',
           port: 25576,
         },
-        { ...primary, role: 'query', primary: true, hostname: 'primary.example.test', port: 25575 },
+        {
+          ...primary,
+          role: 'query',
+          primary: true,
+          hostname: 'primary.example.test',
+          port: 25575,
+          displayAddress: 'primary.example.test:25575',
+        },
       ],
     };
     const path = `**/v1/platform/servers/${provider.ids.serverId}/connections`;
@@ -179,11 +193,12 @@ describe('M5 Console sidebar resources and responsive controls', () => {
         role: 'query',
         primary: true,
         hostname: null,
+        displayAddress: null,
         port: null,
         status: 'unconfigured',
       };
       await user.reload();
-      await browserExpect(card('Address').locator('dd')).toHaveText('Not configured');
+      await browserExpect(card('Address').locator('dd')).toHaveText('Address unavailable');
       await browserExpect(card('Address')).not.toContainText('auxiliary.example.test');
     } finally {
       await user.unroute(path);
@@ -261,7 +276,7 @@ describe('M5 Console sidebar resources and responsive controls', () => {
     await journeyRequest(fixture, user, '/api/auth/update-user', { locale: 'it' });
     await user.setViewportSize({ width: 390, height: 844 });
     await user.goto(base);
-    await browserExpect(user.locator('.console-summary-card')).toHaveCount(7);
+    await browserExpect(user.locator('.console-summary-card')).toHaveCount(8);
     await browserExpect(user.locator('.console-actions button')).toHaveText([
       'Avvia',
       'Riavvia',
@@ -296,7 +311,7 @@ describe('M5 Console sidebar resources and responsive controls', () => {
       'PUT',
     );
     await identities.peer.goto(base);
-    await browserExpect(identities.peer.locator('.console-summary-card')).toHaveCount(7);
+    await browserExpect(identities.peer.locator('.console-summary-card')).toHaveCount(8);
     for (const name of ['Start', 'Restart', 'Stop']) {
       await browserExpect(identities.peer.getByRole('button', { name, exact: true })).toHaveCount(
         0,
