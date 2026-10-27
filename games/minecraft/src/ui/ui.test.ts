@@ -343,8 +343,18 @@ describe('Minecraft browser module and exact API contracts', () => {
       ],
     });
     expect(await minecraftUiModule.handlers.runtimes?.(client, { values: {} })).toEqual([
-      { value: 'vanilla', labelKey: 'games.minecraft.runtimes.vanilla', disabled: false },
-      { value: 'paper', labelKey: 'games.minecraft.runtimes.paper', disabled: false },
+      {
+        value: 'vanilla',
+        labelKey: 'games.minecraft.runtimes.vanilla',
+        disabled: false,
+        artwork: { assetId: 'runtime-vanilla', presentation: 'icon', tone: 'light' },
+      },
+      {
+        value: 'paper',
+        labelKey: 'games.minecraft.runtimes.paper',
+        disabled: false,
+        artwork: { assetId: 'runtime-paper', presentation: 'icon', tone: 'light' },
+      },
     ]);
     expect(
       await minecraftUiModule.handlers.choices?.(client, { values: { runtime: 'vanilla' } }),
@@ -360,7 +370,12 @@ describe('Minecraft browser module and exact API contracts', () => {
     ).rejects.toThrow('integration_unavailable');
     client.request.mockResolvedValue([release]);
     expect(await minecraftUiModule.handlers.runtimes?.(client, { values: {} })).toEqual([
-      { value: 'vanilla', labelKey: 'games.minecraft.runtimes.vanilla', disabled: false },
+      {
+        value: 'vanilla',
+        labelKey: 'games.minecraft.runtimes.vanilla',
+        disabled: false,
+        artwork: { assetId: 'runtime-vanilla', presentation: 'icon', tone: 'light' },
+      },
     ]);
   });
   it('retains legacy direct capability flags and clears unsupported player fields in preparation', async () => {

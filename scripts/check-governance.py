@@ -30,8 +30,21 @@ PROVIDER_MARKS = {
 }
 
 
+# Owner-supplied Minecraft runtime logos, pinned after image inspection.
+RUNTIME_MARKS = {
+    "games/minecraft/src/ui/assets/runtime-logos/arclight.jpeg": "1a2d8daacb07511f33b95b7c312460fc7dafde1c201367c1a72ca387b6c1d971",
+    "games/minecraft/src/ui/assets/runtime-logos/fabric.png": "a41878c3c4c5790cfc920eabf98d3404103a74a6f3df69d632ceb220c9ec9dc7",
+    "games/minecraft/src/ui/assets/runtime-logos/folia.png": "3d1756e0cd952d067826de6e38de073a01b83a9b23791917d87fbaea6ad46180",
+    "games/minecraft/src/ui/assets/runtime-logos/forge.png": "fe0d6e109bbc2437c269d3b5f8f329b19a9193be935c380a466f24631cfbe1bb",
+    "games/minecraft/src/ui/assets/runtime-logos/neoforge.png": "3d1b1c1ed65721672c3bcf36a9b8fa0bfc7ff0890ca886961e1009f9a2574bd1",
+    "games/minecraft/src/ui/assets/runtime-logos/paper.png": "6eff7892a29d00b698a952388777d42233c154ba836f4d73617e66adba542241",
+    "games/minecraft/src/ui/assets/runtime-logos/purpur.png": "2df195e596dbc11778fd40b4703f311b48793f4a73f6ed61586cb5538a7706d9",
+    "games/minecraft/src/ui/assets/runtime-logos/vanilla.png": "c50baf7daa929eaf5e7d3c5322059e23319e0e76f6114dfe7e4c8be2b75b9b4b",
+}
+
+
 def safe_provider_mark(path, blob):
-    return PROVIDER_MARKS.get(path) == hashlib.sha256(blob).hexdigest()
+    return (PROVIDER_MARKS | RUNTIME_MARKS).get(path) == hashlib.sha256(blob).hexdigest()
 
 
 def safe_review_png(path, blob):
@@ -201,7 +214,7 @@ def main():
     whitespace = git("diff", "--cached", "--check", cwd=root)
     if whitespace.returncode:
         failures.append("git diff --cached --check failed; inspect locally before publishing")
-    print(f"Checked {len(files)} indexed text files, {len(images)} review PNGs, {len(marks)} pinned provider marks, {links} relative links, "
+    print(f"Checked {len(files)} indexed text files, {len(images)} review PNGs, {len(marks)} pinned brand marks, {links} relative links, "
           f"{len(tomls)} TOML files and {len(excluded) + len(allowed)} ignore cases.")
     for failure in failures:
         print(f"FAIL: {failure}")

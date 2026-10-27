@@ -12,6 +12,7 @@ import {
   minecraftPlayerDetailActionSchema,
   minecraftPlayerDetailSchema,
 } from '../player-details-contracts.js';
+import { minecraftRuntimeArtwork } from './runtime-artwork.js';
 
 export type {
   MinecraftKnownPlayer,
@@ -394,7 +395,7 @@ export function minecraftCatalogOptions(
     return [...new Set(choices.map((choice) => choice.runtime))].map((runtime) => ({
       value: runtime,
       labelKey: `games.minecraft.runtimes.${runtime}`,
-      ...(runtime === 'fabric' ? { artwork: { assetId: 'fabric' } } : {}),
+      artwork: minecraftRuntimeArtwork(runtime),
       disabled: false,
     }));
   if (handler !== 'choices') throw new MinecraftUiError('integration_unavailable');

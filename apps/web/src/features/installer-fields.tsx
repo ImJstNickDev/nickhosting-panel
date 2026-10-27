@@ -144,14 +144,17 @@ export function VersionList({
         >
           {visible.map((o) => {
             const optionArtwork = o.artwork ? module.assets?.[o.artwork.assetId] : artwork;
+            const iconArtwork = o.artwork?.presentation === 'icon';
             return (
               <label
                 key={o.value}
+                data-artwork={iconArtwork ? 'icon' : undefined}
+                data-artwork-tone={iconArtwork ? o.artwork?.tone : undefined}
                 className={presentation === 'cards' ? 'installer-choice-card' : 'installer-version'}
               >
                 {presentation === 'cards' && optionArtwork && (
                   <img
-                    className="installer-choice-art"
+                    className={iconArtwork ? 'installer-choice-icon' : 'installer-choice-art'}
                     src={optionArtwork}
                     alt=""
                     aria-hidden="true"

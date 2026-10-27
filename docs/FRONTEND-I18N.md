@@ -345,8 +345,12 @@ and 85% opacity on other enabled cards, without a checkmark. Transitions take
 160 ms; reduced-motion preference removes both movement and animation. Version
 rows retain their decorative check in a compact scrollable list.
 Runtime options may reference a bundled `artwork.assetId` from the trusted module;
-the shared renderer falls back to game artwork when omitted. Fabric uses its own
-integration-owned workshop illustration, distinct from Vanilla's landscape.
+the shared renderer falls back to game artwork when omitted. The generic
+`artwork.presentation: icon` option contains a logo without cropping or fading;
+`artwork.tone: dark` provides contrast for white marks. Minecraft owns the runtime
+asset registry and supplied logo files under its UI assets. Its available runtime
+cards use these marks; stored artwork for future runtimes does not enable their
+creation or change rollout/capability checks.
 Decorative art/checks do not duplicate accessible labels. Keyboard focus uses a
 restrained high-contrast outline, always available without an opt-in; programmatic
 heading focus has no decorative ring. Forced-colors mode retains selection cues.

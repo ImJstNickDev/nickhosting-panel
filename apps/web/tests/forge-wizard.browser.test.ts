@@ -175,10 +175,20 @@ describe('Forge independent catalog wizard', () => {
     await page.goto(`${origin}domains-fixture?view=wizard`);
     await page.getByRole('button', { name: 'Minecraft', exact: true }).click();
     await next(locale);
-    await page
+    const forgeCard = page
       .locator('.installer-choice-card')
-      .filter({ has: page.getByRole('radio', { name: 'Forge', exact: true }) })
-      .click();
+      .filter({ has: page.getByRole('radio', { name: 'Forge', exact: true }) });
+    await check(forgeCard).toHaveAttribute('data-artwork-tone', 'dark');
+    await check
+      .poll(() =>
+        forgeCard.locator('img').evaluate((img) => (img as HTMLImageElement).naturalWidth),
+      )
+      .toBeGreaterThan(0);
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/forge-wizard-runtimes.png',
+      fullPage: true,
+    });
+    await forgeCard.click();
     await next(locale);
     await page
       .getByLabel(locale === 'it' ? 'Nome del server' : 'Server name', { exact: true })

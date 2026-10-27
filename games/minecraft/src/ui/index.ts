@@ -24,6 +24,7 @@ import { createMinecraftModsController } from './mods-controller.js';
 import { minecraftPermissionMessages } from './permissions-catalog.js';
 import { minecraftPlayersMessages } from './players-catalog.js';
 import { minecraftPluginsMessages } from './plugins-catalog.js';
+import { minecraftRuntimeLogos } from './runtime-artwork.js';
 import { minecraftWorldsMessages } from './worlds-catalog.js';
 
 export { minecraftFormattingTokens } from '../message-formatting.js';
@@ -584,7 +585,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
     gatewayPing: new URL('./assets/local-26.1/ping.png', import.meta.url).href,
     gatewayButton: new URL('./assets/local-26.1/button.png', import.meta.url).href,
     landscape: new URL('./assets/minecraft-landscape.svg', import.meta.url).href,
-    fabric: new URL('./assets/fabric-workshop.svg', import.meta.url).href,
+    ...minecraftRuntimeLogos,
     properties: new URL('./assets/minecraft-properties.svg', import.meta.url).href,
   },
   playerAppearance: {

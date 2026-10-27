@@ -168,6 +168,16 @@ describe('Fabric independent catalog wizard', () => {
     });
     await check(fabricCard.locator('img')).toBeVisible();
     await check(fabricCard.locator('img')).toHaveJSProperty('complete', true);
+    await check(fabricCard).toHaveAttribute('data-artwork', 'icon');
+    await check(fabricCard.locator('img')).toHaveAttribute('src', /runtime-logos\/fabric\.png/);
+    await check
+      .poll(() =>
+        fabricCard.locator('img').evaluate((img) => (img as HTMLImageElement).naturalWidth),
+      )
+      .toBeGreaterThan(0);
+    expect(await fabricCard.locator('img').evaluate((img) => getComputedStyle(img).objectFit)).toBe(
+      'contain',
+    );
     expect(await fabricCard.locator('img').getAttribute('src')).not.toBe(
       await page
         .locator('.installer-choice-card')

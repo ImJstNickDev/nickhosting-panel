@@ -124,6 +124,23 @@
   pointer-events: none;
   mask-image: linear-gradient(to bottom, #000 0%, transparent 100%);
 }
+.installer-choice-card:where([data-artwork="icon"]) {
+  background: var(--surface);
+  color: var(--text);
+}
+.installer-choice-card:where([data-artwork="icon"][data-artwork-tone="dark"]) {
+  background: #15272e;
+  color: #fff;
+}
+.installer-choice-icon {
+  position: absolute;
+  top: 12%;
+  left: 19%;
+  width: 62%;
+  height: 55%;
+  object-fit: contain;
+  pointer-events: none;
+}
 .installer-choice-input {
   position: absolute;
   width: 1px;
@@ -166,7 +183,8 @@
   cursor: not-allowed;
 }
 @media (forced-colors: active) {
-  .installer-choice-art {
+  .installer-choice-art,
+  .installer-choice-icon {
     display: none;
   }
   .installer-choice-card {
