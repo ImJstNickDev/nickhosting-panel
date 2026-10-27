@@ -388,6 +388,7 @@ export interface FilemanListingProps<T extends FilemanEntry> {
   listRef?: Ref<HTMLDivElement>;
   gameId?: string;
   isArchive?: (name: string) => boolean;
+  entryIcon?: (entry: T, fallback: ReactNode) => ReactNode;
   rowProps?: (entry: T) => HTMLAttributes<HTMLLIElement> & { 'data-directory-path'?: string };
   parent?: ReactNode;
   empty?: ReactNode;
@@ -414,6 +415,7 @@ export function FilemanListing<T extends FilemanEntry>({
   listRef,
   gameId,
   isArchive,
+  entryIcon,
   rowProps,
   parent,
   empty,
@@ -426,6 +428,14 @@ export function FilemanListing<T extends FilemanEntry>({
   const itemCount = entries.length + hiddenEntries.length;
   function renderEntry(entry: T) {
     const props = rowProps?.(entry);
+    const fallbackIcon = (
+      <FileIcon
+        folder={!entry.is_file}
+        name={entry.name}
+        gameId={gameId}
+        archive={isArchive?.(entry.name)}
+      />
+    );
     const entryContext = {
       entry: { name: entry.name, directory: !entry.is_file, size: entry.size },
     };
@@ -475,12 +485,7 @@ export function FilemanListing<T extends FilemanEntry>({
           }
         >
           <FilemanSlot name="entry.icon" context={entryContext}>
-            <FileIcon
-              folder={!entry.is_file}
-              name={entry.name}
-              gameId={gameId}
-              archive={isArchive?.(entry.name)}
-            />
+            {entryIcon ? entryIcon(entry, fallbackIcon) : fallbackIcon}
           </FilemanSlot>
           <FilemanSlot name="entry.name" context={entryContext}>
             <span>

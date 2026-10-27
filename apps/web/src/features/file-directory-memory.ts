@@ -47,7 +47,7 @@ export class FileDirectoryMemory {
     });
   }
 
-  private trim(extraBytes = 0, extraDirectories = 0) {
+  private trim(extraBytes = 0, extraDirectories = 0, replacing?: string) {
     if (this.trimming) return false;
     this.trimming = true;
     try {
@@ -58,7 +58,11 @@ export class FileDirectoryMemory {
           this.entries.size + extraDirectories <= this.limits.directories
         )
           return true;
-        if (entry.query.getObserversCount() > 0 || entry.query.state.fetchStatus !== 'idle')
+        if (
+          entry.query.queryHash === replacing ||
+          entry.query.getObserversCount() > 0 ||
+          entry.query.state.fetchStatus !== 'idle'
+        )
           continue;
         bytes -= entry.bytes;
         this.client.removeQueries({ queryKey: entry.query.queryKey, exact: true });
@@ -73,6 +77,7 @@ export class FileDirectoryMemory {
   }
 
   read(key: QueryKey) {
+    if (this.client.getQueryState(key)?.isInvalidated) return undefined;
     const entry = this.entries.get(hashKey(key));
     if (entry) entry.used = ++this.clock;
     return this.client.getQueryData<ServerFile[]>(key);
@@ -88,13 +93,15 @@ export class FileDirectoryMemory {
     if (
       before.invalidation !== this.invalidation ||
       current !== before.state ||
-      current?.fetchStatus === 'fetching' ||
-      current?.data !== undefined
+      (current !== undefined && current.fetchStatus !== 'idle') ||
+      (current?.data !== undefined && !current.isInvalidated)
     )
       return false;
     const bytes = new TextEncoder().encode(JSON.stringify(files)).length;
     if (bytes > this.limits.bytes) return false;
-    if (!this.trim(bytes, 1)) return false;
+    const hash = hashKey(key);
+    const replaced = this.entries.get(hash);
+    if (!this.trim(bytes - (replaced?.bytes ?? 0), replaced ? 0 : 1, hash)) return false;
     this.client.setQueryData(key, files);
     return true;
   }

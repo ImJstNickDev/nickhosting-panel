@@ -655,6 +655,12 @@ export interface TrustedGameUiModule {
     readonly runtimeId: string;
     readonly entry: FilemanPathEntry;
   }): 'hidden' | undefined;
+  /** Optional direct-child PNG name from observed directory metadata; Fileman owns authorized reads. */
+  fileDirectoryIcon?(context: {
+    readonly path: string;
+    readonly runtimeId: string;
+    readonly entries: readonly (FilemanPathEntry & { readonly size: number })[];
+  }): string | undefined;
   /** Trusted integration owns avatar provider and bundled fallback; never API-supplied URLs. */
   playerAppearance?: {
     fallback: string;
@@ -756,6 +762,7 @@ export function defineTrustedGameUiModule(module: TrustedGameUiModule): TrustedG
     assets: Object.freeze({ ...module.assets }),
     ...(module.runtimeArtwork ? { runtimeArtwork: module.runtimeArtwork } : {}),
     ...(module.fileEntryGroup ? { fileEntryGroup: module.fileEntryGroup } : {}),
+    ...(module.fileDirectoryIcon ? { fileDirectoryIcon: module.fileDirectoryIcon } : {}),
     ...(module.creationCatalog
       ? {
           creationCatalog: Object.freeze({

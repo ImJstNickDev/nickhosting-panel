@@ -862,6 +862,17 @@ collapsing removes hidden selections and menus. Counts include both groups; a
 folder containing only hidden entries is not presented as empty. No provider
 listing, file contents, access checks or permissions are changed.
 
+Minecraft also supplies a trusted directory-icon rule: a real folder containing
+regular `level.dat` and `icon.png` files may display that PNG instead of the folder
+icon, regardless of its name or nesting. Fileman reuses its bounded directory
+prefetch and reads artwork only for visible entries through the authenticated
+file viewer. PNGs are limited to 256 KiB and 512 × 512 pixels; missing, unsafe,
+unreadable or invalid artwork retains the normal folder icon. Images are decorative
+and preserve list/grid sizing, selection, navigation and context menus. Other games
+and virtual archives keep their existing icons. Refresh invalidates cached directory
+metadata so newly added, replaced or removed icons can be rediscovered. No new
+permissions, endpoints or game-file mutations are introduced.
+
 Initial and uncached-directory loads use noninteractive skeleton rows/tiles for
 the selected view, without a visible Loading paragraph. The listing and count
 footer reserve the same bounded height across loading, loaded, empty and error

@@ -47,6 +47,15 @@ export function getFileEntryGroup(
   if (!gameId || !runtimeId) return undefined;
   return gameUiRegistry.get(gameId)?.fileEntryGroup?.({ path, runtimeId, entry });
 }
+/** Directory artwork is selected from existing metadata by the compiled integration. */
+export function getFileDirectoryIcon(
+  gameId: string,
+  runtimeId: string,
+  path: string,
+  entries: readonly (FilemanPathEntry & { readonly size: number })[],
+) {
+  return gameUiRegistry.get(gameId)?.fileDirectoryIcon?.({ path, runtimeId, entries });
+}
 export function getRuntimeArtwork(gameId: string, runtimeId: string) {
   const module = gameUiRegistry.get(gameId);
   const artwork = module?.runtimeArtwork?.(runtimeId);

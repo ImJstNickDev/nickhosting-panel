@@ -76,6 +76,7 @@ import {
   updateFileSaveDraft,
   useFileSaveRecords,
 } from './file-background-save.js';
+import { FileDirectoryIcon } from './file-directory-icon.js';
 import { FileIcon } from './file-icon.js';
 import { clearFileListing, readFileListing, writeFileListing } from './file-listing-cache.js';
 import { FilePathPicker } from './file-path-picker.js';
@@ -98,7 +99,7 @@ import {
 import { FolderUploadError, planFolderUpload, prepareFolderUpload } from './folder-upload.js';
 import { InlineFileRename } from './inline-file-rename.js';
 import { validFilename } from './inline-file-rename-model.js';
-import { getFileEntryGroup } from './integrations.js';
+import { gameUiRegistry, getFileEntryGroup } from './integrations.js';
 import { useDirectoryPrefetch } from './use-directory-prefetch.js';
 import { useViewerEscape } from './use-viewer-escape.js';
 import { isSingleCompressed } from './viewer-engine/core/compressed.js';
@@ -628,6 +629,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     serverId,
     directory,
     identity: JSON.stringify(directoryQuery.queryKey[3]),
+    revision: files.dataUpdatedAt,
     container: managerRef,
     rows,
     enabled: Boolean(saveScope && files.data && !files.error && !displaying),
@@ -2130,7 +2132,13 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     className="fm-tool"
                     aria-label={t('file.refresh')}
                     disabled={files.isFetching}
-                    onClick={() => void files.refetch()}
+                    onClick={async () => {
+                      await queryClient.invalidateQueries({
+                        queryKey: ['files', serverId],
+                        refetchType: 'none',
+                      });
+                      await files.refetch();
+                    }}
                   >
                     <ToolbarIcon kind="refresh" />
                   </button>
@@ -2668,6 +2676,29 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
             busy={fileActionsBusy}
             gameId={server.data?.gameId}
             isArchive={isArchive}
+            entryIcon={(entry, fallback) =>
+              !entry.is_file &&
+              !entry.is_symlink &&
+              server.data &&
+              gameUiRegistry.get(server.data.gameId)?.fileDirectoryIcon ? (
+                <FileDirectoryIcon
+                  key={JSON.stringify([
+                    directoryQuery.queryKey[3],
+                    serverId,
+                    directory,
+                    entry.name,
+                  ])}
+                  serverId={serverId}
+                  gameId={server.data.gameId}
+                  runtimeId={server.data.runtimeId}
+                  path={join(directory, entry.name)}
+                >
+                  {fallback}
+                </FileDirectoryIcon>
+              ) : (
+                fallback
+              )
+            }
             parent={
               directory ? (
                 <FilemanParent

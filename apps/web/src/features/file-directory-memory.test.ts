@@ -68,3 +68,57 @@ it('does not replace or evict foreground data while its request is still in flig
   await request;
   expect(memory.read(key('active'))).toEqual(files);
 });
+
+it('refills invalidated metadata within the existing directory and byte budget', async () => {
+  const bytes = new TextEncoder().encode(JSON.stringify(files)).length;
+  memory = new FileDirectoryMemory(client, { directories: 1, bytes });
+  client.setQueryData(key('world'), files);
+  await client.invalidateQueries({ queryKey: key('world'), refetchType: 'none' });
+  expect(memory.read(key('world'))).toBeUndefined();
+  const refreshed = [{ ...file, size: 200 }];
+  expect(memory.write(key('world'), refreshed, memory.capture(key('world')))).toBe(true);
+  expect(memory.read(key('world'))).toEqual(refreshed);
+  expect(client.getQueryState(key('world'))?.isInvalidated).toBe(false);
+});
+
+it('charges only replacement growth and retains the replacement while trimming other entries', async () => {
+  const bytes = new TextEncoder().encode(JSON.stringify(files)).length;
+  memory = new FileDirectoryMemory(client, { directories: 2, bytes: bytes * 2 });
+  client.setQueryData(key('world'), files);
+  client.setQueryData(key('other'), files);
+  await client.invalidateQueries({ queryKey: key('world'), refetchType: 'none' });
+  const refreshed = [{ ...file, name: 'larger-name.json' }];
+  expect(memory.write(key('world'), refreshed, memory.capture(key('world')))).toBe(true);
+  expect(memory.read(key('world'))).toEqual(refreshed);
+  expect(memory.read(key('other'))).toBeUndefined();
+});
+
+it('rejects an invalidated refill after a newer global invalidation or foreground result', async () => {
+  memory = new FileDirectoryMemory(client);
+  client.setQueryData(key('world'), files);
+  client.setQueryData(key('other'), files);
+  await client.invalidateQueries({ queryKey: key('world'), refetchType: 'none' });
+  const before = memory.capture(key('world'));
+  await client.invalidateQueries({ queryKey: key('other'), refetchType: 'none' });
+  expect(memory.write(key('world'), files, before)).toBe(false);
+  const next = memory.capture(key('world'));
+  const foreground = [{ ...file, size: 300 }];
+  client.setQueryData(key('world'), foreground);
+  expect(memory.write(key('world'), files, next)).toBe(false);
+  expect(memory.read(key('world'))).toEqual(foreground);
+});
+
+it('does not replace invalidated metadata once a foreground refetch is pending', async () => {
+  memory = new FileDirectoryMemory(client);
+  client.setQueryData(key('world'), files);
+  await client.invalidateQueries({ queryKey: key('world'), refetchType: 'none' });
+  const before = memory.capture(key('world'));
+  const deferred = Promise.withResolvers<ServerFile[]>();
+  const request = client.fetchQuery({ queryKey: key('world'), queryFn: () => deferred.promise });
+  expect(memory.write(key('world'), files, before)).toBe(false);
+  expect(memory.write(key('world'), files, memory.capture(key('world')))).toBe(false);
+  const foreground = [{ ...file, size: 400 }];
+  deferred.resolve(foreground);
+  await request;
+  expect(memory.read(key('world'))).toEqual(foreground);
+});

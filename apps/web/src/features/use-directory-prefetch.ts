@@ -9,6 +9,7 @@ export function useDirectoryPrefetch({
   serverId,
   directory,
   identity,
+  revision,
   container,
   rows,
   enabled,
@@ -16,6 +17,7 @@ export function useDirectoryPrefetch({
   serverId: string;
   directory: string;
   identity: string;
+  revision: number;
   container: RefObject<HTMLElement | null>;
   rows: ServerFile[];
   enabled: boolean;
@@ -26,6 +28,7 @@ export function useDirectoryPrefetch({
         serverId: string;
         directory: string;
         identity: string;
+        revision: number;
       }
     | undefined
   >(undefined);
@@ -60,12 +63,12 @@ export function useDirectoryPrefetch({
         return current() && before !== undefined && memory.write(key(path), files, before);
       },
     });
-    scheduler.current = { runner, serverId, directory, identity };
+    scheduler.current = { runner, serverId, directory, identity, revision };
     return () => {
       runner.stop();
       if (scheduler.current?.runner === runner) scheduler.current = undefined;
     };
-  }, [serverId, directory, identity, enabled]);
+  }, [serverId, directory, identity, revision, enabled]);
 
   useEffect(() => {
     const current = scheduler.current;
@@ -75,7 +78,8 @@ export function useDirectoryPrefetch({
       !container.current ||
       current.serverId !== serverId ||
       current.directory !== directory ||
-      current.identity !== identity
+      current.identity !== identity ||
+      current.revision !== revision
     )
       return;
     const runner = current.runner;
@@ -97,5 +101,5 @@ export function useDirectoryPrefetch({
       observer.disconnect();
       runner.setVisible([]);
     };
-  }, [container, rows, serverId, directory, identity, enabled]);
+  }, [container, rows, serverId, directory, identity, revision, enabled]);
 }

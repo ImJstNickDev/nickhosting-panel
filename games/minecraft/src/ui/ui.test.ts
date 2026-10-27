@@ -48,6 +48,46 @@ function clientFixture() {
   return { request };
 }
 describe('Minecraft browser module and exact API contracts', () => {
+  it('retains world icon discovery for every runtime and directory through the trusted registry', () => {
+    const registry = createTrustedGameUiRegistry([minecraftUiModule]);
+    const icon = registry.get('minecraft')?.fileDirectoryIcon;
+    expect(icon).toBeTypeOf('function');
+    const entries = ['level.dat', 'icon.png'].map((name) => ({
+      name,
+      is_file: true,
+      is_symlink: false,
+      size: 1024,
+    }));
+    for (const runtimeId of ['vanilla', 'fabric', 'forge', 'paper', 'folia', 'future-runtime'])
+      for (const path of ['world', 'Custom map', 'backups/imported/world', '.world'])
+        expect(icon?.({ path, runtimeId, entries })).toBe('icon.png');
+    expect(registry.get('other-game')?.fileDirectoryIcon).toBeUndefined();
+  });
+  it('keeps ordinary folder icons when world metadata or bounded regular PNG metadata is missing', () => {
+    const icon = minecraftUiModule.fileDirectoryIcon;
+    const file = (name: string) => ({ name, is_file: true, is_symlink: false, size: 1024 });
+    const detect = (entries: ReturnType<typeof file>[]) =>
+      icon?.({ path: 'anywhere', runtimeId: 'fabric', entries });
+    expect(detect([])).toBeUndefined();
+    expect(detect([file('icon.png')])).toBeUndefined();
+    expect(detect([file('level.dat')])).toBeUndefined();
+    for (const name of ['Level.dat', 'level.dat.old', 'icon.png/level.dat'])
+      expect(detect([file(name), file('icon.png')])).toBeUndefined();
+    for (const name of ['Icon.png', 'icon.png.bak', 'nested/icon.png'])
+      expect(detect([file('level.dat'), file(name)])).toBeUndefined();
+    for (const name of ['level.dat', 'icon.png'])
+      for (const change of [{ is_file: false }, { is_symlink: true }])
+        expect(
+          detect(
+            [file('level.dat'), file('icon.png')].map((entry) =>
+              entry.name === name ? { ...entry, ...change } : entry,
+            ),
+          ),
+        ).toBeUndefined();
+    for (const size of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 256 * 1024 + 1])
+      expect(detect([file('level.dat'), { ...file('icon.png'), size }])).toBeUndefined();
+    expect(detect([file('level.dat'), { ...file('icon.png'), size: 256 * 1024 }])).toBe('icon.png');
+  });
   it('groups only Minecraft root housekeeping entries through the trusted registry', () => {
     const registry = createTrustedGameUiRegistry([minecraftUiModule]);
     const grouping = registry.get('minecraft')?.fileEntryGroup;
