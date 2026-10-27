@@ -5,6 +5,7 @@ import {
   type ReactNode,
   type Ref,
   useCallback,
+  useId,
   useLayoutEffect,
   useState,
 } from 'react';
@@ -368,6 +369,9 @@ export function FilemanParent(
 
 export interface FilemanListingProps<T extends FilemanEntry> {
   entries: readonly T[];
+  hiddenEntries?: readonly T[];
+  hiddenExpanded?: boolean;
+  onHiddenToggle?: (expanded: boolean) => void;
   view: FilemanView;
   selected: ReadonlySet<string>;
   order: FileOrder;
@@ -391,6 +395,9 @@ export interface FilemanListingProps<T extends FilemanEntry> {
 
 export function FilemanListing<T extends FilemanEntry>({
   entries,
+  hiddenEntries = [],
+  hiddenExpanded = false,
+  onHiddenToggle,
   view,
   selected,
   order,
@@ -413,7 +420,99 @@ export function FilemanListing<T extends FilemanEntry>({
 }: FilemanListingProps<T>) {
   const t = useT(),
     format = useFormat();
-  const selectable = entries.filter((entry) => !entry.is_symlink);
+  const hiddenId = useId();
+  const renderedEntries = hiddenExpanded ? [...entries, ...hiddenEntries] : entries;
+  const selectable = renderedEntries.filter((entry) => !entry.is_symlink);
+  const itemCount = entries.length + hiddenEntries.length;
+  function renderEntry(entry: T) {
+    const props = rowProps?.(entry);
+    const entryContext = {
+      entry: { name: entry.name, directory: !entry.is_file, size: entry.size },
+    };
+    return (
+      <li
+        key={entry.name}
+        {...props}
+        className={`fm-entry ${selected.has(entry.name) ? 'fm-selected' : ''} ${props?.className ?? ''}`}
+        onContextMenu={
+          onMenu
+            ? (event) => {
+                event.preventDefault();
+                onMenu(
+                  entry,
+                  event.currentTarget.querySelector<HTMLButtonElement>('.fm-menu-trigger') ??
+                    event.currentTarget,
+                  event.clientX,
+                  event.clientY,
+                );
+              }
+            : props?.onContextMenu
+        }
+      >
+        <input
+          type="checkbox"
+          aria-label={t('file.select', { name: entry.name })}
+          disabled={entry.is_symlink || busy}
+          checked={selected.has(entry.name)}
+          onChange={() => {}}
+          onClick={(event) => onSelect(entry, event)}
+        />
+        <button
+          type="button"
+          className="fm-filename"
+          data-file-name={entry.name}
+          disabled={entry.is_symlink || busy}
+          onClick={(event) => onOpen(entry, event)}
+          onKeyDown={
+            onMenu
+              ? (event) => {
+                  if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+                    event.preventDefault();
+                    onMenu(entry, event.currentTarget);
+                  }
+                }
+              : undefined
+          }
+        >
+          <FilemanSlot name="entry.icon" context={entryContext}>
+            <FileIcon
+              folder={!entry.is_file}
+              name={entry.name}
+              gameId={gameId}
+              archive={isArchive?.(entry.name)}
+            />
+          </FilemanSlot>
+          <FilemanSlot name="entry.name" context={entryContext}>
+            <span>
+              {entry.name}
+              {entry.is_symlink && <small> · {t('service.symlink')}</small>}
+            </span>
+          </FilemanSlot>
+        </button>
+        <FilemanSlot name="entry.metadata" context={entryContext}>
+          <span className="fm-size">{entry.is_file ? format.bytes(entry.size) : '—'}</span>
+          <span className="fm-date">
+            <Time value={entry.modified_at} />
+          </span>
+        </FilemanSlot>
+        <FilemanSlot name="entry.actions" context={entryContext}>
+          {onMenu && (
+            <button
+              type="button"
+              className="secondary fm-icon-button fm-menu-trigger"
+              aria-haspopup="menu"
+              aria-expanded={menuEntry === entry.name}
+              aria-label={t('file.actionsFor', { name: entry.name })}
+              onClick={(event) => onMenu(entry, event.currentTarget)}
+            >
+              ⋯
+            </button>
+          )}
+        </FilemanSlot>
+      </li>
+    );
+  }
+
   return (
     <FilemanSlot name="listing">
       <div className={`fm-list fm-${view}`} ref={listRef} aria-busy={fetching || undefined}>
@@ -472,103 +571,43 @@ export function FilemanListing<T extends FilemanEntry>({
           <span className="sr-only">{t('web.actions')}</span>
         </div>
         {parent}
-        <ul aria-label={t('file.entries')}>
-          {entries.map((entry) => {
-            const props = rowProps?.(entry);
-            const entryContext = {
-              entry: { name: entry.name, directory: !entry.is_file, size: entry.size },
-            };
-            return (
-              <li
-                key={entry.name}
-                {...props}
-                className={`fm-entry ${selected.has(entry.name) ? 'fm-selected' : ''} ${props?.className ?? ''}`}
-                onContextMenu={
-                  onMenu
-                    ? (event) => {
-                        event.preventDefault();
-                        onMenu(
-                          entry,
-                          event.currentTarget.querySelector<HTMLButtonElement>(
-                            '.fm-menu-trigger',
-                          ) ?? event.currentTarget,
-                          event.clientX,
-                          event.clientY,
-                        );
-                      }
-                    : props?.onContextMenu
-                }
+        <ul aria-label={t('file.entries')}>{entries.map(renderEntry)}</ul>
+        {hiddenEntries.length > 0 && (
+          <section className="fm-hidden-group">
+            <button
+              type="button"
+              className="fm-hidden-toggle"
+              aria-expanded={hiddenExpanded}
+              aria-controls={hiddenId}
+              disabled={!onHiddenToggle}
+              onClick={() => onHiddenToggle?.(!hiddenExpanded)}
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                aria-hidden="true"
               >
-                <input
-                  type="checkbox"
-                  aria-label={t('file.select', { name: entry.name })}
-                  disabled={entry.is_symlink || busy}
-                  checked={selected.has(entry.name)}
-                  onChange={() => {}}
-                  onClick={(event) => onSelect(entry, event)}
-                />
-                <button
-                  type="button"
-                  className="fm-filename"
-                  data-file-name={entry.name}
-                  disabled={entry.is_symlink || busy}
-                  onClick={(event) => onOpen(entry, event)}
-                  onKeyDown={
-                    onMenu
-                      ? (event) => {
-                          if (
-                            event.key === 'ContextMenu' ||
-                            (event.shiftKey && event.key === 'F10')
-                          ) {
-                            event.preventDefault();
-                            onMenu(entry, event.currentTarget);
-                          }
-                        }
-                      : undefined
-                  }
-                >
-                  <FilemanSlot name="entry.icon" context={entryContext}>
-                    <FileIcon
-                      folder={!entry.is_file}
-                      name={entry.name}
-                      gameId={gameId}
-                      archive={isArchive?.(entry.name)}
-                    />
-                  </FilemanSlot>
-                  <FilemanSlot name="entry.name" context={entryContext}>
-                    <span>
-                      {entry.name}
-                      {entry.is_symlink && <small> · {t('service.symlink')}</small>}
-                    </span>
-                  </FilemanSlot>
-                </button>
-                <FilemanSlot name="entry.metadata" context={entryContext}>
-                  <span className="fm-size">{entry.is_file ? format.bytes(entry.size) : '—'}</span>
-                  <span className="fm-date">
-                    <Time value={entry.modified_at} />
-                  </span>
-                </FilemanSlot>
-                <FilemanSlot name="entry.actions" context={entryContext}>
-                  {onMenu && (
-                    <button
-                      type="button"
-                      className="secondary fm-icon-button fm-menu-trigger"
-                      aria-haspopup="menu"
-                      aria-expanded={menuEntry === entry.name}
-                      aria-label={t('file.actionsFor', { name: entry.name })}
-                      onClick={(event) => onMenu(entry, event.currentTarget)}
-                    >
-                      ⋯
-                    </button>
-                  )}
-                </FilemanSlot>
-              </li>
-            );
-          })}
-        </ul>
-        {!entries.length && empty}
+                <path d={hiddenExpanded ? 'm3 6 5 5 5-5' : 'm6 3 5 5-5 5'} />
+              </svg>
+              <span>{t('file.hiddenEntries')}</span>
+              <span className="fm-hidden-count">({hiddenEntries.length})</span>
+            </button>
+            <div id={hiddenId} hidden={!hiddenExpanded}>
+              {hiddenExpanded && (
+                <ul className="fm-hidden-entries" aria-label={t('file.hiddenEntries')}>
+                  {hiddenEntries.map(renderEntry)}
+                </ul>
+              )}
+            </div>
+          </section>
+        )}
+        {!itemCount && empty}
       </div>
-      <div className="fm-count">{t('file.items', { count: totalCount ?? entries.length })}</div>
+      <div className="fm-count">{t('file.items', { count: totalCount ?? itemCount })}</div>
     </FilemanSlot>
   );
 }

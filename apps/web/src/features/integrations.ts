@@ -1,6 +1,7 @@
 import {
   availableGameUiSections,
   createTrustedGameUiRegistry,
+  type FilemanPathEntry,
   type GameUiClient,
 } from '@nickhosting/game-sdk/ui';
 import { minecraftUiModule } from '@nickhosting/minecraft/ui';
@@ -36,6 +37,16 @@ export const gameUiClient: GameUiClient = {
       staleTime: 60_000,
     }),
 };
+/** Presentation-only grouping from the server's compiled integration. */
+export function getFileEntryGroup(
+  gameId: string | undefined,
+  runtimeId: string | undefined,
+  path: string,
+  entry: FilemanPathEntry,
+) {
+  if (!gameId || !runtimeId) return undefined;
+  return gameUiRegistry.get(gameId)?.fileEntryGroup?.({ path, runtimeId, entry });
+}
 export function getRuntimeArtwork(gameId: string, runtimeId: string) {
   const module = gameUiRegistry.get(gameId);
   const artwork = module?.runtimeArtwork?.(runtimeId);

@@ -17,6 +17,7 @@ import {
   minecraftContentCapabilities,
 } from './controller.js';
 import { minecraftDatapacksMessages } from './datapacks-catalog.js';
+import { minecraftFileEntryGroup } from './file-entry-group.js';
 import { minecraftModpacksMessages } from './modpacks-catalog.js';
 import { createMinecraftModpacksController } from './modpacks-controller.js';
 import { minecraftModsMessages } from './mods-catalog.js';
@@ -573,6 +574,7 @@ export function minecraftPropertyValues(
 export const minecraftUiModule = defineTrustedGameUiModule({
   descriptor: minecraftUiDescriptor,
   runtimeArtwork: minecraftRuntimeArtwork,
+  fileEntryGroup: minecraftFileEntryGroup,
   gatewayMessageEditor: 'minecraft-26.1',
   catalogs: minecraftUiCatalogs,
   assets: {

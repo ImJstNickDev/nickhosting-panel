@@ -1,5 +1,6 @@
 /** Browser-safe first-party UI contracts. Do not import the server SDK root here. */
 import { z } from 'zod';
+import type { FilemanPathEntry } from './fileman.js';
 
 const id = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
 const fieldId = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_.-]{0,79}$/);
@@ -648,6 +649,12 @@ export interface TrustedGameUiModule {
   assets?: Readonly<Record<string, string>>;
   /** Optional runtime mark from the same bundled asset registry used by creation. */
   runtimeArtwork?(runtimeId: string): UiOption['artwork'];
+  /** Presentation grouping only; entries remain accessible and keep existing filesystem permissions. */
+  fileEntryGroup?(context: {
+    readonly path: string;
+    readonly runtimeId: string;
+    readonly entry: FilemanPathEntry;
+  }): 'hidden' | undefined;
   /** Trusted integration owns avatar provider and bundled fallback; never API-supplied URLs. */
   playerAppearance?: {
     fallback: string;
@@ -748,6 +755,7 @@ export function defineTrustedGameUiModule(module: TrustedGameUiModule): TrustedG
     ...(module.gatewayMessageEditor ? { gatewayMessageEditor: module.gatewayMessageEditor } : {}),
     assets: Object.freeze({ ...module.assets }),
     ...(module.runtimeArtwork ? { runtimeArtwork: module.runtimeArtwork } : {}),
+    ...(module.fileEntryGroup ? { fileEntryGroup: module.fileEntryGroup } : {}),
     ...(module.creationCatalog
       ? {
           creationCatalog: Object.freeze({

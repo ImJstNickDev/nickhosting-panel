@@ -1,4 +1,8 @@
-import { availableGameUiSections, type GameUiClient } from '@nickhosting/game-sdk/ui';
+import {
+  availableGameUiSections,
+  createTrustedGameUiRegistry,
+  type GameUiClient,
+} from '@nickhosting/game-sdk/ui';
 import { describe, expect, it, vi } from 'vitest';
 import {
   createMinecraftUiController,
@@ -44,6 +48,26 @@ function clientFixture() {
   return { request };
 }
 describe('Minecraft browser module and exact API contracts', () => {
+  it('groups only Minecraft root housekeeping entries through the trusted registry', () => {
+    const registry = createTrustedGameUiRegistry([minecraftUiModule]);
+    const grouping = registry.get('minecraft')?.fileEntryGroup;
+    expect(grouping).toBeTypeOf('function');
+    const group = (name: string, is_file: boolean, path = '', runtimeId = 'fabric') =>
+      grouping?.({ path, runtimeId, entry: { name, is_file, is_symlink: false } });
+    for (const runtime of ['vanilla', 'fabric', 'paper', 'forge', 'folia', 'future-runtime']) {
+      for (const name of ['libraries', 'versions', 'eula.txt', 'usercache.json']) {
+        expect(group(name, true, '', runtime)).toBe('hidden');
+        expect(group(name, false, '/', runtime)).toBe('hidden');
+        expect(group(name, true, 'world', runtime)).toBeUndefined();
+      }
+      expect(group('.cache', false, '', runtime)).toBe('hidden');
+      expect(group('.cache', true, '', runtime)).toBeUndefined();
+      expect(group('.cache', false, 'world', runtime)).toBeUndefined();
+    }
+    for (const name of ['world', 'mods', 'server.properties', 'Libraries', 'eula.txt.bak'])
+      expect(group(name, true)).toBeUndefined();
+    expect(registry.get('other-game')?.fileEntryGroup).toBeUndefined();
+  });
   it('retains bundled runtime artwork through the trusted module factory', () => {
     const artwork = minecraftUiModule.runtimeArtwork?.('forge');
     expect(artwork).toEqual({ assetId: 'runtime-forge', presentation: 'icon', tone: 'dark' });

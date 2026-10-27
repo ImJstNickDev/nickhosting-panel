@@ -2085,6 +2085,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     remote.set(paths[1], Buffer.from('Another file'));
     try {
       await openRoot(user);
+      await user.locator('.fm-hidden-toggle').click();
       await browserExpect(row('libraries')).toBeVisible();
       await user.keyboard.press('Alt+g');
       const path = user.getByRole('combobox', { name: 'Path', exact: true });

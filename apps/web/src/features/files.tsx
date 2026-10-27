@@ -98,6 +98,7 @@ import {
 import { FolderUploadError, planFolderUpload, prepareFolderUpload } from './folder-upload.js';
 import { InlineFileRename } from './inline-file-rename.js';
 import { validFilename } from './inline-file-rename-model.js';
+import { getFileEntryGroup } from './integrations.js';
 import { useDirectoryPrefetch } from './use-directory-prefetch.js';
 import { useViewerEscape } from './use-viewer-escape.js';
 import { isSingleCompressed } from './viewer-engine/core/compressed.js';
@@ -247,6 +248,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     };
   }, [directoryKey, directory]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [hiddenGroupState, setHiddenGroupState] = useState<{ scope: string; open: boolean }>();
   const [anchor, setAnchor] = useState<string>();
   const [clipboard, setClipboard] = useState<FileClipboard>();
   const clipboardIdentity = saveIdentity.current;
@@ -547,10 +549,81 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         void queryClient.cancelQueries({ queryKey, exact: true });
     };
   }, [directory, files.refetch, serverId, uploadIdentity]);
+  const groupedRows = useMemo(() => {
+    const normal: ServerFile[] = [];
+    const hidden: ServerFile[] = [];
+    for (const entry of visibleFiles(files.data ?? [], search, order, descending)) {
+      const group = getFileEntryGroup(
+        server.data?.gameId,
+        server.data?.runtimeId,
+        directory,
+        entry,
+      );
+      (group === 'hidden' ? hidden : normal).push(entry);
+    }
+    return { normal, hidden };
+  }, [
+    files.data,
+    search,
+    order,
+    descending,
+    server.data?.gameId,
+    server.data?.runtimeId,
+    directory,
+  ]);
+  const hiddenScope = JSON.stringify([
+    saveScope,
+    serverId,
+    server.data?.gameId,
+    server.data?.runtimeId,
+    directory,
+    search,
+  ]);
+  // Search exposes matching grouped entries; a manual toggle applies only to that search/scope.
+  const hiddenExpanded =
+    hiddenGroupState?.scope === hiddenScope ? hiddenGroupState.open : Boolean(search.trim());
   const rows = useMemo(
-    () => visibleFiles(files.data ?? [], search, order, descending),
-    [files.data, search, order, descending],
+    () => (hiddenExpanded ? [...groupedRows.normal, ...groupedRows.hidden] : groupedRows.normal),
+    [groupedRows, hiddenExpanded],
   );
+  const collapsedNames = useMemo(
+    () =>
+      new Set(
+        hiddenExpanded
+          ? []
+          : (files.data ?? [])
+              .filter(
+                (entry) =>
+                  getFileEntryGroup(
+                    server.data?.gameId,
+                    server.data?.runtimeId,
+                    directory,
+                    entry,
+                  ) === 'hidden',
+              )
+              .map((entry) => entry.name),
+      ),
+    [hiddenExpanded, files.data, server.data?.gameId, server.data?.runtimeId, directory],
+  );
+  useEffect(() => {
+    if (!collapsedNames.size) return;
+    setSelected((current) =>
+      [...current].some((name) => collapsedNames.has(name))
+        ? new Set([...current].filter((name) => !collapsedNames.has(name)))
+        : current,
+    );
+    setAnchor((current) => (current && collapsedNames.has(current) ? undefined : current));
+    setMenu((current) => (current && collapsedNames.has(current.entry.name) ? undefined : current));
+  }, [collapsedNames]);
+  function toggleHiddenGroup(open: boolean) {
+    setHiddenGroupState({ scope: hiddenScope, open });
+    if (!open) {
+      const hiddenNames = new Set(groupedRows.hidden.map((entry) => entry.name));
+      setSelected((current) => new Set([...current].filter((name) => !hiddenNames.has(name))));
+      setAnchor(undefined);
+      setMenu(undefined);
+    }
+  }
   useDirectoryPrefetch({
     serverId,
     directory,
@@ -2554,7 +2627,10 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           </>
         ) : (
           <FilemanListing
-            entries={rows}
+            entries={groupedRows.normal}
+            hiddenEntries={groupedRows.hidden}
+            hiddenExpanded={hiddenExpanded}
+            onHiddenToggle={toggleHiddenGroup}
             view={view}
             selected={selected}
             order={order}

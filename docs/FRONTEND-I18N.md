@@ -850,6 +850,18 @@ Folder entries request the API's no-overwrite preflight rather than fetching
 their parent directory separately before each file. Errors and uncertain outcomes
 retain the existing admission/recovery rules above.
 
+Minecraft contributes a presentation-only Fileman entry grouping rule through its
+trusted UI module. In the real server root only, dot-prefixed directories and the
+exact names `libraries`, `versions`, `eula.txt` and `usercache.json` appear in a
+collapsed Hidden section below the ordinary entries. Dotfiles with other names,
+nested directories, other games and virtual archive listings are unchanged.
+Expanding reuses the same list/grid rows, menus, navigation and operations.
+Search automatically exposes matching hidden entries; the user may collapse the
+section again. Select-all and range selection follow the displayed order, and
+collapsing removes hidden selections and menus. Counts include both groups; a
+folder containing only hidden entries is not presented as empty. No provider
+listing, file contents, access checks or permissions are changed.
+
 Initial and uncached-directory loads use noninteractive skeleton rows/tiles for
 the selected view, without a visible Loading paragraph. The listing and count
 footer reserve the same bounded height across loading, loaded, empty and error

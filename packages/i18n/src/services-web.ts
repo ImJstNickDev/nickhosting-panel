@@ -273,6 +273,7 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
   'file.selectAll': ['Select all files', 'Seleziona tutti i file'],
   'file.select': ['Select {name}', 'Seleziona {name}'],
   'file.clearSelection': ['Clear selection', 'Deseleziona'],
+  'file.hiddenEntries': ['Hidden', 'Nascosti'],
   'file.entries': ['Files and folders', 'File e cartelle'],
   'file.actionsFor': ['Actions for {name}', 'Azioni per {name}'],
   'file.downloadZip': ['Download ZIP', 'Scarica ZIP'],
