@@ -36,6 +36,12 @@ export const gameUiClient: GameUiClient = {
       staleTime: 60_000,
     }),
 };
+export function getRuntimeArtwork(gameId: string, runtimeId: string) {
+  const module = gameUiRegistry.get(gameId);
+  const artwork = module?.runtimeArtwork?.(runtimeId);
+  const src = artwork && module?.assets?.[artwork.assetId];
+  return src ? { src, tone: artwork?.tone } : undefined;
+}
 export function getGameArtwork(gameId: string): string | undefined {
   const module = gameUiRegistry.get(gameId);
   const asset = module?.descriptor.artwork;

@@ -270,7 +270,9 @@ The Console summary starts with a value-only runtime card above Address, such as
 `Fabric 1.21.11`. It uses the mapped runtime's translated name and the installed
 Minecraft profile's release; it never substitutes the integration version or a
 planned installation target. If no current installed release is known, only the
-runtime name is shown. The card has no visible label or icon.
+runtime name is shown. Its integration-owned logo appears to the left, resolved
+from the same bundled runtime artwork used by the wizard. The card has no visible
+heading; integrations without a runtime mark retain the text-only layout.
 
 Console connection state uses a compact clickable dot (green connected, yellow
 connecting, red disconnected). The 40px button reconnects the stream and exposes

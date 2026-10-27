@@ -24,7 +24,7 @@ import { createMinecraftModsController } from './mods-controller.js';
 import { minecraftPermissionMessages } from './permissions-catalog.js';
 import { minecraftPlayersMessages } from './players-catalog.js';
 import { minecraftPluginsMessages } from './plugins-catalog.js';
-import { minecraftRuntimeLogos } from './runtime-artwork.js';
+import { minecraftRuntimeArtwork, minecraftRuntimeLogos } from './runtime-artwork.js';
 import { minecraftWorldsMessages } from './worlds-catalog.js';
 
 export { minecraftFormattingTokens } from '../message-formatting.js';
@@ -572,6 +572,7 @@ export function minecraftPropertyValues(
 }
 export const minecraftUiModule = defineTrustedGameUiModule({
   descriptor: minecraftUiDescriptor,
+  runtimeArtwork: minecraftRuntimeArtwork,
   gatewayMessageEditor: 'minecraft-26.1',
   catalogs: minecraftUiCatalogs,
   assets: {

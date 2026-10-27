@@ -118,7 +118,15 @@ describe('M5 Console sidebar resources and responsive controls', () => {
     await browserExpect(runtimeCard.locator('dd')).toHaveText('Vanilla 26.1');
     // The semantic term remains available to screen readers, not visible in the card.
     await browserExpect(runtimeCard.locator('dt')).toHaveClass('visually-hidden');
-    await browserExpect(runtimeCard.locator('svg')).toHaveCount(0);
+    await browserExpect(runtimeCard.locator('img')).toHaveAttribute(
+      'src',
+      /runtime-logos\/vanilla\.png/,
+    );
+    await browserExpect
+      .poll(() =>
+        runtimeCard.locator('img').evaluate((image) => (image as HTMLImageElement).naturalWidth),
+      )
+      .toBeGreaterThan(0);
     await browserExpect(card('Uptime').locator('dd')).toHaveText('Offline');
     await browserExpect(card('Uptime').locator('.console-summary-icon.is-offline')).toHaveCount(1);
     await browserExpect(user.locator('.console-summary-icon.is-offline')).toHaveCount(1);

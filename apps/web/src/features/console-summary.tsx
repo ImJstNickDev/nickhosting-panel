@@ -5,6 +5,7 @@ import { api } from '../api/client.js';
 import { useFormat, useLocale, useT } from '../app/i18n.js';
 import { Tooltip } from '../components/tooltip.js';
 import type { DisplayResources } from './console-resources.js';
+import { getRuntimeArtwork } from './integrations.js';
 import { type Connections, platformPath, useServer } from './service-contracts.js';
 import './console-summary.css';
 
@@ -155,6 +156,9 @@ export function ConsoleSummary({
     format = useFormat(),
     { locale } = useLocale();
   const server = useServer(serverId);
+  const runtimeArtwork = server.data
+    ? getRuntimeArtwork(server.data.gameId, server.data.runtimeId)
+    : undefined;
   const canReadNetwork = server.data?.permissionKeys.includes('network.read') === true;
   const connections = useQuery({
     enabled: canReadNetwork,
@@ -193,12 +197,21 @@ export function ConsoleSummary({
     <dl className="console-summary" aria-label={t('service.summary.title')}>
       {server.data && (
         <SummaryCard label={t('platform.runtime')} labelHidden>
-          {[
-            server.data.runtimeNameKey ? t(server.data.runtimeNameKey) : server.data.runtimeId,
-            server.data.version,
-          ]
-            .filter(Boolean)
-            .join(' ')}
+          <span className="console-runtime-value">
+            {runtimeArtwork && (
+              <span className="console-runtime-mark" data-tone={runtimeArtwork.tone}>
+                <img src={runtimeArtwork.src} alt="" width={28} height={28} />
+              </span>
+            )}
+            <span>
+              {[
+                server.data.runtimeNameKey ? t(server.data.runtimeNameKey) : server.data.runtimeId,
+                server.data.version,
+              ]
+                .filter(Boolean)
+                .join(' ')}
+            </span>
+          </span>
         </SummaryCard>
       )}
       {canReadNetwork && (

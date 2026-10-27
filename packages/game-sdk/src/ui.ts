@@ -646,6 +646,8 @@ export interface TrustedGameUiModule {
   };
   /** Bundled first-party assets only; never supplied by the API descriptor. */
   assets?: Readonly<Record<string, string>>;
+  /** Optional runtime mark from the same bundled asset registry used by creation. */
+  runtimeArtwork?(runtimeId: string): UiOption['artwork'];
   /** Trusted integration owns avatar provider and bundled fallback; never API-supplied URLs. */
   playerAppearance?: {
     fallback: string;
@@ -745,6 +747,7 @@ export function defineTrustedGameUiModule(module: TrustedGameUiModule): TrustedG
     handlers: Object.freeze({ ...module.handlers }),
     ...(module.gatewayMessageEditor ? { gatewayMessageEditor: module.gatewayMessageEditor } : {}),
     assets: Object.freeze({ ...module.assets }),
+    ...(module.runtimeArtwork ? { runtimeArtwork: module.runtimeArtwork } : {}),
     ...(module.creationCatalog
       ? {
           creationCatalog: Object.freeze({

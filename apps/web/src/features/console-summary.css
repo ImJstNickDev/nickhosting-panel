@@ -23,6 +23,27 @@
   .console-summary-card--value-only dd {
     margin: 0;
   }
+  .console-runtime-value {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+  }
+  .console-runtime-mark {
+    display: grid;
+    place-items: center;
+    flex: 0 0 32px;
+    width: 32px;
+    height: 32px;
+    border-radius: 5px;
+  }
+  .console-runtime-mark[data-tone="dark"] {
+    background: #15272e;
+  }
+  .console-runtime-mark img {
+    width: 28px;
+    height: 28px;
+    object-fit: contain;
+  }
   .console-summary-icon {
     position: absolute;
     left: 0.8rem;

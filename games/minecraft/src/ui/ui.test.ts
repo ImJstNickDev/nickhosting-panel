@@ -44,6 +44,12 @@ function clientFixture() {
   return { request };
 }
 describe('Minecraft browser module and exact API contracts', () => {
+  it('retains bundled runtime artwork through the trusted module factory', () => {
+    const artwork = minecraftUiModule.runtimeArtwork?.('forge');
+    expect(artwork).toEqual({ assetId: 'runtime-forge', presentation: 'icon', tone: 'dark' });
+    expect(minecraftUiModule.assets?.[artwork?.assetId ?? '']).toContain('runtime-logos/forge.png');
+    expect(minecraftUiModule.runtimeArtwork?.('unknown')).toBeUndefined();
+  });
   it('contains complete EN/IT catalogs and browser-safe module metadata', () => {
     expect(minecraftUiModule.descriptor.gameId).toBe('minecraft');
     expect(Object.keys(minecraftUiCatalogs.en).sort()).toEqual(
