@@ -655,12 +655,12 @@ export interface TrustedGameUiModule {
     readonly runtimeId: string;
     readonly entry: FilemanPathEntry;
   }): 'hidden' | undefined;
-  /** Optional direct-child PNG name from observed directory metadata; Fileman owns authorized reads. */
+  /** Bundled directory mark, optionally overridden by a direct-child PNG; Fileman owns authorized reads. */
   fileDirectoryIcon?(context: {
     readonly path: string;
     readonly runtimeId: string;
     readonly entries: readonly (FilemanPathEntry & { readonly size: number })[];
-  }): string | undefined;
+  }): { readonly file?: string; readonly assetId?: string } | undefined;
   /** Trusted integration owns avatar provider and bundled fallback; never API-supplied URLs. */
   playerAppearance?: {
     fallback: string;

@@ -591,6 +591,11 @@ export const minecraftUiModule = defineTrustedGameUiModule({
     gatewayButton: new URL('./assets/local-26.1/button.png', import.meta.url).href,
     landscape: new URL('./assets/minecraft-landscape.svg', import.meta.url).href,
     ...minecraftRuntimeLogos,
+    'directory-logs': new URL('./assets/file-icons/logs.svg', import.meta.url).href,
+    'directory-mods': new URL('./assets/file-icons/mods.svg', import.meta.url).href,
+    'directory-plugins': new URL('./assets/file-icons/plugins.svg', import.meta.url).href,
+    'directory-config': new URL('./assets/file-icons/config.svg', import.meta.url).href,
+    'directory-world': new URL('./assets/file-icons/world.svg', import.meta.url).href,
     properties: new URL('./assets/minecraft-properties.svg', import.meta.url).href,
   },
   playerAppearance: {

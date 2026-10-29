@@ -35,10 +35,33 @@ interface DirectoryIconProps {
   children: ReactNode;
 }
 
+function DirectoryAsset({
+  icon,
+  children,
+}: {
+  icon: ReturnType<typeof getFileDirectoryIcon>;
+  children: ReactNode;
+}) {
+  const [failed, setFailed] = useState(false);
+  return icon?.src && !failed ? (
+    <img
+      className="fm-icon fm-type-directory-asset"
+      data-directory-asset={icon.assetId}
+      src={icon.src}
+      alt=""
+      draggable={false}
+      onError={() => setFailed(true)}
+    />
+  ) : (
+    children
+  );
+}
+
 /** Only visible rows retain metadata observers or fetch optional artwork. */
 export function FileDirectoryIcon(props: DirectoryIconProps) {
   const element = useRef<HTMLSpanElement>(null);
   const [visible, setVisible] = useState(false);
+  const icon = getFileDirectoryIcon(props.gameId, props.runtimeId, props.path, []);
   useEffect(() => {
     if (!element.current || typeof IntersectionObserver === 'undefined') return;
     const observer = new IntersectionObserver((entries) => {
@@ -49,7 +72,13 @@ export function FileDirectoryIcon(props: DirectoryIconProps) {
   }, []);
   return (
     <span ref={element} className="fm-icon fm-directory-icon-shell" aria-hidden="true">
-      {visible ? <VisibleDirectoryIcon {...props} /> : props.children}
+      {visible ? (
+        <VisibleDirectoryIcon {...props} />
+      ) : (
+        <DirectoryAsset key={icon?.src} icon={icon}>
+          {props.children}
+        </DirectoryAsset>
+      )}
     </span>
   );
 }
@@ -72,12 +101,11 @@ function VisibleDirectoryIcon({ serverId, gameId, runtimeId, path, children }: D
     () => undefined,
   );
   const valid = Boolean(listing?.data && !listing.isInvalidated && listing.status === 'success');
-  const name =
-    valid && listing?.data
-      ? getFileDirectoryIcon(gameId, runtimeId, path, listing.data)
-      : undefined;
+  const icon = getFileDirectoryIcon(gameId, runtimeId, path, valid ? (listing?.data ?? []) : []);
+  const name = icon?.file;
   const entry = name ? listing?.data?.find((item) => item.name === name) : undefined;
   const safe =
+    valid &&
     typeof name === 'string' &&
     validFilename(name) &&
     entry?.is_file &&
@@ -112,7 +140,7 @@ function VisibleDirectoryIcon({ serverId, gameId, runtimeId, path, children }: D
         await decoded.decode();
         if (!controller.signal.aborted) setImage({ revision, url });
       } catch {
-        // Missing, denied and malformed optional artwork all retain the ordinary folder icon.
+        // Optional artwork failure retains the integration's bundled icon or ordinary folder.
         if (url) URL.revokeObjectURL(url);
       }
     })();
@@ -130,6 +158,8 @@ function VisibleDirectoryIcon({ serverId, gameId, runtimeId, path, children }: D
       onError={() => setImage(undefined)}
     />
   ) : (
-    children
+    <DirectoryAsset key={icon?.src} icon={icon}>
+      {children}
+    </DirectoryAsset>
   );
 }

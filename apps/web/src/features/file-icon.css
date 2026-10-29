@@ -19,7 +19,8 @@
 .fm-icon.fm-type-binary {
   color: #65748a;
 }
-.fm-icon.fm-type-game {
+.fm-icon.fm-type-game,
+.fm-icon.fm-type-directory-asset {
   object-fit: contain;
 }
 .fm-icon.fm-directory-icon-shell {

@@ -8,7 +8,7 @@ import { installBrowserFixtures } from './provider-fixture.js';
 
 /** Real Fileman, integration policy and listing handlers; PNG transport uses isolated bytes.
  * Viewer authorization/containment is covered by the viewer API's own tests. */
-describe('Minecraft world directory icons', () => {
+describe('Minecraft directory icons', () => {
   let harness: Awaited<ReturnType<typeof browserHarness>>;
   let provider: Awaited<ReturnType<typeof installBrowserFixtures>>;
   let page: Page;
@@ -18,6 +18,7 @@ describe('Minecraft world directory icons', () => {
   let icon: Buffer;
   const errors: string[] = [];
   const reads: string[] = [];
+  const namedDirectories = ['logs', 'mods', 'plugins', 'config'] as const;
   let holdIcon: Promise<void> | undefined;
   let releaseIcon: (() => void) | undefined;
 
@@ -63,13 +64,15 @@ describe('Minecraft world directory icons', () => {
       'Oversized',
       'Pictures',
       'Symlink',
+      ...namedDirectories,
     ])
       await journeyRequest(harness, page, endpoint, { action: 'mkdir', root: '', name });
-    await journeyRequest(harness, page, endpoint, {
-      action: 'mkdir',
-      root: 'Collection',
-      name: 'custom-world',
-    });
+    for (const name of ['custom-world', 'default-world', ...namedDirectories])
+      await journeyRequest(harness, page, endpoint, {
+        action: 'mkdir',
+        root: 'Collection',
+        name,
+      });
     files = await provider.files();
     for (const world of [
       'Alpine',
@@ -83,6 +86,8 @@ describe('Minecraft world directory icons', () => {
       files.set(`${world}/level.dat`, Buffer.from('Isolated world metadata marker'));
       if (world !== 'Missing') files.set(`${world}/icon.png`, icon);
     }
+    files.set('Collection/default-world/level.dat', Buffer.from('Isolated world metadata marker'));
+    for (const name of namedDirectories) files.set(`Alpine/${name}`, Buffer.from('Ordinary file'));
     files.set('Broken/icon.png', Buffer.from('Invalid PNG fixture'));
     files.set('Oversized/icon.png', Buffer.alloc(256 * 1024 + 1));
     files.set('Pictures/icon.png', icon);
@@ -140,8 +145,14 @@ describe('Minecraft world directory icons', () => {
     page.locator('.fm-entry').filter({ has: page.getByRole('button', { name, exact: true }) });
   const artwork = (name: string) => row(name).locator('img.fm-type-directory-artwork');
   const folder = (name: string) => row(name).locator('svg.fm-icon-folder');
+  const bundled = (name: string) => row(name).locator('img.fm-type-directory-asset');
+  async function expectWorldIcon(name: string) {
+    await check(bundled(name)).toHaveAttribute('data-directory-asset', 'directory-world');
+    await check(bundled(name)).toBeVisible();
+    await check(folder(name)).toHaveCount(0);
+  }
   async function open() {
-    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.setViewportSize({ width: 1440, height: 1200 });
     await page.goto(base);
     await check(row('Alpine')).toBeVisible();
   }
@@ -175,6 +186,7 @@ describe('Minecraft world directory icons', () => {
     await row('Alpine').getByRole('button', { name: 'Actions for Alpine', exact: true }).click();
     await check(page.getByRole('menuitem', { name: 'Rename', exact: true })).toBeVisible();
     await page.keyboard.press('Escape');
+    for (const name of namedDirectories) await check(bundled(name)).toBeVisible();
     await screenshot('desktop-en');
     await row('Alpine').getByRole('button', { name: 'Alpine', exact: true }).click();
     await check(row('level.dat')).toBeVisible();
@@ -186,24 +198,48 @@ describe('Minecraft world directory icons', () => {
     expect(reads).toContain('Collection/custom-world/icon.png');
   });
 
-  it('retains ordinary folder icons while loading and when artwork cannot be used', async () => {
+  it('uses the default world icon while loading and when world artwork cannot be used', async () => {
     holdIcon = new Promise<void>((resolve) => {
       releaseIcon = resolve;
     });
     await open();
     await check.poll(() => reads.includes('Alpine/icon.png')).toBe(true);
-    await check(folder('Alpine')).toBeVisible();
+    await expectWorldIcon('Alpine');
     releaseIcon?.();
     await check(artwork('Alpine')).toBeVisible();
     await check.poll(() => reads.includes('Forbidden/icon.png')).toBe(true);
     await check.poll(() => reads.includes('Broken/icon.png')).toBe(true);
-    for (const name of ['Broken', 'Forbidden', 'Missing', 'Oversized', 'Pictures', 'Symlink']) {
-      await check(folder(name)).toBeVisible();
+    for (const name of ['Broken', 'Forbidden', 'Missing', 'Oversized', 'Symlink']) {
+      await expectWorldIcon(name);
       await check(artwork(name)).toHaveCount(0);
     }
+    await check(folder('Pictures')).toBeVisible();
+    await check(bundled('Pictures')).toHaveCount(0);
     for (const name of ['Missing', 'Oversized', 'Pictures', 'Symlink'])
       expect(reads).not.toContain(`${name}/icon.png`);
     expect(reads.every((path) => path.endsWith('/icon.png'))).toBe(true);
+  });
+
+  it('uses bundled icons for named folders at root and below it but not for same-name files', async () => {
+    await open();
+    for (const name of namedDirectories) {
+      await check(bundled(name)).toHaveAttribute('data-directory-asset', `directory-${name}`);
+      expect(
+        await bundled(name).evaluate((image: HTMLImageElement) => image.naturalWidth),
+      ).toBeGreaterThan(0);
+    }
+    await row('Collection').getByRole('button', { name: 'Collection', exact: true }).click();
+    for (const name of namedDirectories)
+      await check(bundled(name)).toHaveAttribute('data-directory-asset', `directory-${name}`);
+    await expectWorldIcon('default-world');
+    await page.getByRole('button', { name: 'root', exact: true }).click();
+    await row('Alpine').getByRole('button', { name: 'Alpine', exact: true }).click();
+    for (const name of namedDirectories) {
+      await check(row(name)).toBeVisible();
+      await check(bundled(name)).toHaveCount(0);
+      await check(row(name).locator('.fm-type-text')).toBeVisible();
+    }
+    for (const name of namedDirectories) expect(reads).not.toContain(`${name}/icon.png`);
   });
 
   it('preserves artwork in the grid and compact mobile layout', async () => {
@@ -212,13 +248,16 @@ describe('Minecraft world directory icons', () => {
     await page.getByRole('button', { name: 'Grid', exact: true }).click();
     await check(page.locator('.fm-list.fm-grid')).toBeVisible();
     await check(artwork('Alpine')).toBeVisible();
-    await page.setViewportSize({ width: 390, height: 844 });
+    await page.setViewportSize({ width: 390, height: 1000 });
     await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'it' });
     await page.reload();
+    await row('Collection').getByRole('button', { name: 'Collection', exact: true }).click();
     await page.getByRole('button', { name: 'Griglia', exact: true }).click();
     await check(page.locator('.fm-list.fm-grid')).toBeVisible();
-    await row('Alpine').scrollIntoViewIfNeeded();
-    await check(artwork('Alpine')).toBeVisible();
+    await row('custom-world').scrollIntoViewIfNeeded();
+    await check(artwork('custom-world')).toBeVisible();
+    await expectWorldIcon('default-world');
+    for (const name of namedDirectories) await check(bundled(name)).toBeVisible();
     await screenshot('mobile-it');
   });
 
@@ -229,7 +268,7 @@ describe('Minecraft world directory icons', () => {
     try {
       files.delete('Alpine/icon.png');
       await page.getByRole('button', { name: 'Refresh files', exact: true }).click();
-      await check(folder('Alpine')).toBeVisible();
+      await expectWorldIcon('Alpine');
       await check(artwork('Alpine')).toHaveCount(0);
       files.set('Alpine/icon.png', Buffer.from(icon));
       await page.getByRole('button', { name: 'Refresh files', exact: true }).click();
@@ -240,7 +279,7 @@ describe('Minecraft world directory icons', () => {
     }
   });
 
-  it('does not request Minecraft world artwork for a different game', async () => {
+  it('keeps all directory icons generic for a different game', async () => {
     await page.route(`**/v1/platform/servers/${provider.ids.serverId}`, async (route) => {
       const response = await route.fetch();
       await route.fulfill({
@@ -250,6 +289,8 @@ describe('Minecraft world directory icons', () => {
     await open();
     await check(folder('Alpine')).toBeVisible();
     await check(page.locator('img.fm-type-directory-artwork')).toHaveCount(0);
+    await check(page.locator('img.fm-type-directory-asset')).toHaveCount(0);
+    for (const name of namedDirectories) await check(folder(name)).toBeVisible();
     // Completing an ordinary navigation also allows any accidental icon request to surface.
     await row('Collection').getByRole('button', { name: 'Collection', exact: true }).click();
     await check(folder('custom-world')).toBeVisible();

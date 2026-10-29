@@ -54,7 +54,14 @@ export function getFileDirectoryIcon(
   path: string,
   entries: readonly (FilemanPathEntry & { readonly size: number })[],
 ) {
-  return gameUiRegistry.get(gameId)?.fileDirectoryIcon?.({ path, runtimeId, entries });
+  const module = gameUiRegistry.get(gameId);
+  const icon = module?.fileDirectoryIcon?.({ path, runtimeId, entries });
+  if (!icon) return undefined;
+  return {
+    file: icon.file,
+    assetId: icon.assetId,
+    src: icon.assetId ? module?.assets?.[icon.assetId] : undefined,
+  };
 }
 export function getRuntimeArtwork(gameId: string, runtimeId: string) {
   const module = gameUiRegistry.get(gameId);
