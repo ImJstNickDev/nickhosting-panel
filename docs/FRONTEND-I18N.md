@@ -52,6 +52,9 @@ Players, Worlds, Mods, Plugins, Datapacks, Modpacks, Backups and Schedules), and
 Config (Network, Settings, Subusers). Capabilities, runtime and effective granular
 permissions filter entries. The compact rail and mobile drawer preserve the same
 routes and accessible names. Native and game top-level tabs are removed.
+Minecraft distinguishes its content destinations with a puzzle for Mods, a plug
+for Plugins, a code document for Datapacks and stacked layers for Modpacks. The
+integration selects shared monochrome icons with the sidebar's existing sizing.
 
 Settings has local route navigation for General, game properties, Sleep/Wake and
 Gateway messages when available. Existing automation sleep/message URLs redirect

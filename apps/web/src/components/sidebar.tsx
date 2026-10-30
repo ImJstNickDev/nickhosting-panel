@@ -31,6 +31,10 @@ export type SidebarIconName =
   | 'files'
   | 'world'
   | 'package'
+  | 'plug'
+  | 'puzzle'
+  | 'file-code'
+  | 'layers'
   | 'backups'
   | 'schedules'
   | 'network';
@@ -55,6 +59,20 @@ const icons: Record<SidebarIconName, ReactNode> = {
       <path d="m12 3 9 5v9l-9 5-9-5V8Zm0 10v9M3 8l9 5 9-5M8 5l9 5" />
     </>
   ),
+  plug: <path d="M8 3v5m8-5v5M5 8h14M6 8v3a6 6 0 0 0 12 0V8m-6 9v4" />,
+  puzzle: (
+    <path
+      d="M4 4h5V3a3 3 0 0 1 6 0v1h5v5h1a3 3 0 0 1 0 6h-1v5h-5v-1a3 3 0 0 0-6 0v1H4v-5h1a3 3 0 0 0 0-6H4Z"
+      transform="translate(1.5 1.5) scale(.875)"
+    />
+  ),
+  'file-code': (
+    <>
+      <path d="M5 3h9l5 5v13H5ZM14 3v5h5" />
+      <path d="m10 12-3 3 3 3m4-6 3 3-3 3" />
+    </>
+  ),
+  layers: <path d="m12 3 9 5-9 5-9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5" />,
   backups: (
     <>
       <path d="M4 7h16v14H4ZM3 3h18v4H3Zm6 8h6" />

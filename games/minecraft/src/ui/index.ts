@@ -484,7 +484,7 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
     },
     {
       id: 'mods',
-      navigation: { group: 'tools', order: 30, icon: 'package', placement: 'sidebar' },
+      navigation: { group: 'tools', order: 30, icon: 'puzzle', placement: 'sidebar' },
       titleKey: k('sections.mods'),
       loader: 'mods',
       renderer: 'minecraft-mods',
@@ -496,7 +496,7 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
     },
     {
       id: 'plugins',
-      navigation: { group: 'tools', order: 40, icon: 'package', placement: 'sidebar' },
+      navigation: { group: 'tools', order: 40, icon: 'plug', placement: 'sidebar' },
       titleKey: k('sections.plugins'),
       loader: 'plugins',
       renderer: 'minecraft-plugins',
@@ -508,7 +508,7 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
     },
     {
       id: 'datapacks',
-      navigation: { group: 'tools', order: 50, icon: 'package', placement: 'sidebar' },
+      navigation: { group: 'tools', order: 50, icon: 'file-code', placement: 'sidebar' },
       titleKey: k('sections.datapacks'),
       renderer: 'minecraft-datapacks',
       loader: 'datapacks',
@@ -522,7 +522,7 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
     },
     {
       id: 'modpacks',
-      navigation: { group: 'tools', order: 60, icon: 'package', placement: 'sidebar' },
+      navigation: { group: 'tools', order: 60, icon: 'layers', placement: 'sidebar' },
       aliases: ['content'],
       titleKey: k('sections.modpacks'),
       loader: 'modpacks',
