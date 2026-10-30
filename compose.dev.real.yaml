@@ -1,0 +1,22 @@
+# Explicit opt-in overlay for the existing development project, never production.
+# Keys and Panel URL are entered through protected Owner settings, not this file.
+services:
+  api:
+    environment: { NH_DEV_PROVIDER_MODE: real }
+    networks: [egress]
+    dns: ["${NH_DEV_PROVIDER_DNS:?Owner-specified provider DNS resolver required}"]
+    depends_on:
+      provider: !reset null
+  worker:
+    environment: { NH_DEV_PROVIDER_MODE: real }
+    networks: [egress]
+    dns: ["${NH_DEV_PROVIDER_DNS:?Owner-specified provider DNS resolver required}"]
+  migrate:
+    # Shares the private environment (including optional evidence key), but needs
+    # only the existing data network. No provider connectivity or automatic SQL.
+    environment: { NH_DEV_PROVIDER_MODE: real }
+  provider:
+    # Kept available for an explicit return to sandbox; not started in real mode.
+    profiles: [sandbox]
+networks:
+  egress: { name: nickhosting-dev-egress }

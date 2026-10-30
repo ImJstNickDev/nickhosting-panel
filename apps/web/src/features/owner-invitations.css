@@ -1,0 +1,85 @@
+.invitation-back {
+  display: inline-block;
+  margin-bottom: 1rem;
+}
+.invitation-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 40px;
+}
+.invitation-action {
+  width: 40px;
+  height: 40px;
+  padding: 9px;
+  background: transparent;
+  border: 0;
+  color: #36556a;
+}
+.invitation-action:hover {
+  background: #e9eff3;
+  filter: none;
+}
+.invitation-action svg {
+  width: 22px;
+  height: 22px;
+}
+.invitation-revoke {
+  color: #a32121;
+}
+.invitations-table td:last-child {
+  width: 1%;
+  white-space: nowrap;
+}
+@media (max-width: 760px) {
+  .invitation-list {
+    overflow: visible;
+  }
+  .invitations-table,
+  .invitations-table tbody,
+  .invitations-table tr {
+    display: block;
+    width: 100%;
+  }
+  .invitations-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .invitations-table tr {
+    padding: 12px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .invitations-table tr:first-child {
+    padding-top: 0;
+  }
+  .invitations-table tr:last-child {
+    border-bottom: 0;
+    padding-bottom: 0;
+  }
+  .invitations-table td,
+  .invitations-table td:last-child {
+    display: grid;
+    grid-template-columns: 78px minmax(0, 1fr);
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 6px 0;
+    border: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .invitations-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 0.86rem;
+    font-weight: 600;
+  }
+  .invitations-table .badge {
+    justify-self: start;
+  }
+}

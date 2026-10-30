@@ -6,6 +6,7 @@ import { lstat, readFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { parseEnv } from 'node:util';
+import { storagePath } from '../deploy/storage-root.mjs';
 import { type AuthContext, authSessionId } from '../packages/core/src/index.js';
 import { createDatabase, recordAudit } from '../packages/database/src/index.js';
 import {
@@ -52,7 +53,7 @@ async function main() {
       plan.approval.externalExposureAcknowledged,
   );
   const path = resolve(option('--ledger') ?? '');
-  assert.equal(dirname(path), resolve('mountdata/test-assets'));
+  assert.equal(dirname(path), storagePath('test-assets'));
   assert.match(basename(path), /^m4-live-[a-f0-9-]{36}\.json$/);
   const info = await lstat(path);
   assert(info.isFile() && !info.isSymbolicLink() && (info.mode & 0o077) === 0);

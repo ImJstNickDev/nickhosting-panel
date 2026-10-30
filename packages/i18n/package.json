@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./catalogs": "./src/catalogs.ts",
+    "./auth-errors": "./src/auth-errors.ts"
+  },
   "dependencies": {
     "@nickhosting/core": "workspace:*"
   }

@@ -1,0 +1,813 @@
+/** Browser-safe first-party UI contracts. Do not import the server SDK root here. */
+import { z } from 'zod';
+import type { FilemanPathEntry } from './fileman.js';
+
+const id = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
+const fieldId = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_.-]{0,79}$/);
+const key = z.string().regex(/^games\.[a-z][a-z0-9-]*\.[a-zA-Z0-9_.-]{1,100}$/);
+const scalar = z.union([z.string().max(1024), z.number().finite(), z.boolean()]);
+export const uiConditionSchema = z
+  .object({
+    field: fieldId,
+    operator: z.enum(['equals', 'not-equals', 'one-of', 'present']),
+    values: z.array(scalar).max(32).default([]),
+  })
+  .strict()
+  .refine((v) =>
+    v.operator === 'present'
+      ? v.values.length === 0
+      : v.operator === 'one-of'
+        ? v.values.length > 0
+        : v.values.length === 1,
+  );
+export const uiOptionSchema = z
+  .object({
+    value: z.string().min(1).max(256),
+    label: z.string().min(1).max(256).optional(),
+    labelKey: key.optional(),
+    artwork: z
+      .object({
+        assetId: id,
+        presentation: z.enum(['background', 'icon']).optional(),
+        tone: z.enum(['light', 'dark']).optional(),
+      })
+      .strict()
+      .optional(),
+    disabled: z.boolean().default(false),
+    reasonKey: key.optional(),
+    recommended: z.boolean().optional(),
+    releaseType: z.enum(['release', 'snapshot', 'old_alpha', 'old_beta']).optional(),
+    capabilities: z.record(fieldId, z.boolean()).optional(),
+  })
+  .strict()
+  .refine((v) => Boolean(v.label) !== Boolean(v.labelKey));
+export type UiOption = z.infer<typeof uiOptionSchema>;
+const base = {
+  id: fieldId,
+  labelKey: key,
+  helpKey: key.optional(),
+  documentation: z
+    .object({ url: z.url().refine((value) => value.startsWith('https://')), labelKey: key })
+    .strict()
+    .optional(),
+  required: z.boolean().default(false),
+  when: z.array(uiConditionSchema).max(8).default([]),
+};
+export const uiFieldSchema = z.discriminatedUnion('type', [
+  z
+    .object({
+      ...base,
+      type: z.enum(['text', 'textarea']),
+      minLength: z.number().int().min(0).max(65536).default(0),
+      maxLength: z.number().int().min(1).max(65536),
+      format: z.enum(['plain', 'player-name', 'world-name', 'uuid']).default('plain'),
+      lookupHandler: id.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal('number'),
+      min: z.number().finite(),
+      max: z.number().finite(),
+      integer: z.boolean().default(true),
+    })
+    .strict(),
+  z
+    .object({ ...base, type: z.literal('boolean'), mustBeTrue: z.boolean().default(false) })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal('choice'),
+      options: z.array(uiOptionSchema).max(1000).default([]),
+      source: z
+        .object({ handler: id, dependsOn: z.array(fieldId).max(16).default([]) })
+        .strict()
+        .optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal('multi-text'),
+      maxItems: z.number().int().min(1).max(1000),
+      maxLength: z.number().int().min(1).max(1024),
+      format: z.enum(['plain', 'player-name']).default('plain'),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal('preview'),
+      handler: id,
+      maxItems: z.number().int().min(0).max(10000),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal('archive'),
+      accept: z
+        .array(z.string().regex(/^\.[a-z0-9]{1,12}$/))
+        .min(1)
+        .max(12),
+      handler: id,
+      catalog: z
+        .object({ searchHandler: id, versionsHandler: id, acquireHandler: id })
+        .strict()
+        .optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal('file'),
+      accept: z
+        .array(z.string().regex(/^\.[a-z0-9]{1,12}$/))
+        .min(1)
+        .max(12),
+      purpose: id,
+    })
+    .strict(),
+]);
+export type UiField = z.infer<typeof uiFieldSchema>;
+export type UiValues = Readonly<Record<string, unknown>>;
+export const uiActionSchema = z
+  .object({
+    id,
+    labelKey: key,
+    handler: id,
+    requiredPermissions: z
+      .array(
+        z
+          .string()
+          .regex(/^(?:server:(?:read|operate|manage)|platform:manage|[a-z][a-z0-9.-]{0,126})$/),
+      )
+      .min(1)
+      .max(4),
+    requiredCapabilities: z.array(id).max(16),
+    requiresStopped: z.boolean().default(false),
+    confirmationKey: key.optional(),
+    destructive: z.boolean().default(false),
+  })
+  .strict()
+  .refine((a) => !a.destructive || Boolean(a.confirmationKey));
+export type UiAction = z.infer<typeof uiActionSchema>;
+export const uiFormSchema = z
+  .object({
+    id,
+    titleKey: key,
+    /** Domain-owned explanation when the runtime exposes none of this form's fields. */
+    emptyMessageKey: key.optional(),
+    fields: z.array(uiFieldSchema).max(64),
+    /** Optional presentation key resolved against bundled first-party views only. */
+    renderer: id.optional(),
+    /** For patch-style handlers; action forms otherwise submit all visible fields. */
+    submitChangedOnly: z.boolean().optional(),
+    action: uiActionSchema.optional(),
+  })
+  .strict();
+export type UiForm = z.infer<typeof uiFormSchema>;
+export const gameUiDescriptorSchema = z
+  .object({
+    gameId: id,
+    schemaVersion: z.literal(1),
+    nameKey: key,
+    artwork: z.object({ assetId: id, altKey: key.optional() }).strict().optional(),
+    fileIcons: z
+      .array(
+        z
+          .object({
+            extensions: z
+              .array(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,15}$/))
+              .min(1)
+              .max(16),
+            assetId: id,
+          })
+          .strict(),
+      )
+      .max(32)
+      .optional(),
+    /** Owner sections are metadata only; the app resolves bundled first-party renderers. */
+    administration: z
+      .array(
+        z
+          .object({
+            id: id.refine(
+              (value) => !['general', 'runtime', 'connection', 'sleep', 'content'].includes(value),
+              'reserved_owner_section',
+            ),
+            titleKey: key,
+            component: id,
+          })
+          .strict(),
+      )
+      .max(16)
+      .default([]),
+    creation: z
+      .object({
+        fields: z.array(uiFieldSchema).max(64),
+        pages: z
+          .array(
+            z
+              .object({
+                id,
+                titleKey: key,
+                field: fieldId.default('connection'),
+                kind: z.enum([
+                  'choice-list',
+                  'version-list',
+                  'players',
+                  'toggle-players',
+                  'address',
+                ]),
+                position: z.enum(['before-name', 'configuration']).default('configuration'),
+                resetFields: z.array(fieldId).max(64).default([]),
+                lookupHandler: id.optional(),
+                toggleField: fieldId.optional(),
+                seedField: fieldId.optional(),
+                requiredCapability: fieldId.optional(),
+              })
+              .strict(),
+          )
+          .max(16)
+          .default([]),
+        agreement: z
+          .object({
+            field: fieldId,
+            textKey: key,
+            linkKey: key,
+            url: z.url().refine((v) => v.startsWith('https://')),
+          })
+          .strict()
+          .optional(),
+        resourcePresets: z
+          .array(
+            z
+              .object({
+                id,
+                labelKey: key,
+                memoryMiB: z.number().int().min(32),
+                cpuPercent: z.number().int().min(1),
+              })
+              .strict(),
+          )
+          .max(8)
+          .default([]),
+        choicesHandler: id,
+        createHandler: id,
+        prepareHandler: id.optional(),
+        defaults: z
+          .record(fieldId, z.union([scalar, z.array(z.string().max(1024)).max(1000)]))
+          .refine((value) => Object.keys(value).length <= 64)
+          .default({}),
+      })
+      .strict(),
+    sections: z
+      .array(
+        z
+          .object({
+            id,
+            titleKey: key,
+            loader: id,
+            /** Integration-owned placement in the contextual server navigation. */
+            navigation: z
+              .object({
+                group: z.enum(['server', 'tools', 'config']),
+                order: z.number().int().min(0).max(1000),
+                icon: z.enum([
+                  'console',
+                  'files',
+                  'activity',
+                  'settings',
+                  'users',
+                  'world',
+                  'package',
+                  'plug',
+                  'puzzle',
+                  'file-code',
+                  'layers',
+                  'backups',
+                  'schedules',
+                  'network',
+                ]),
+                placement: z.enum(['sidebar', 'settings']).default('sidebar'),
+              })
+              .strict()
+              .optional(),
+            /** Optional runtime allowlist; omitted sections apply to every runtime. */
+            runtimeIds: z.array(id).min(1).max(32).optional(),
+            /** Previous route identifiers, redirected to this canonical section. */
+            aliases: z.array(id).max(16).default([]),
+            /** Bundled first-party section view; never executable code from metadata. */
+            renderer: id.optional(),
+            requiredPermissions: z
+              .array(
+                z
+                  .string()
+                  .regex(
+                    /^(?:server:(?:read|operate|manage)|platform:manage|[a-z][a-z0-9.-]{0,126})$/,
+                  ),
+              )
+              .min(1)
+              .max(4),
+            requiredCapabilities: z.array(id).max(16),
+            forms: z.array(uiFormSchema).max(32),
+            columns: z
+              .array(
+                z
+                  .object({
+                    id: fieldId,
+                    labelKey: key,
+                    format: z.enum(['text', 'message', 'date']).default('text'),
+                  })
+                  .strict(),
+              )
+              .max(16)
+              .default([]),
+          })
+          .strict(),
+      )
+      .max(32),
+    ports: z
+      .array(
+        z
+          .object({
+            role: id,
+            labelKey: key,
+            transports: z
+              .array(z.enum(['tcp', 'udp']))
+              .min(1)
+              .max(2),
+            required: z.boolean(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(16),
+    connectionModes: z
+      .array(
+        z.discriminatedUnion('mode', [
+          z.object({ mode: z.literal('static-host-port'), showPort: z.literal(true) }).strict(),
+          z
+            .object({
+              mode: z.literal('custom-subdomain'),
+              srv: z
+                .object({
+                  service: z.string().regex(/^_[a-z0-9-]+$/),
+                  transport: z.enum(['tcp', 'udp']),
+                })
+                .strict()
+                .optional(),
+            })
+            .strict(),
+        ]),
+      )
+      .min(1)
+      .max(2),
+  })
+  .strict()
+  .superRefine((d, context) => {
+    const unique = (values: string[], path: (string | number)[]) => {
+      if (new Set(values).size !== values.length)
+        context.addIssue({ code: 'custom', path, message: 'duplicate_identifier' });
+    };
+    unique(
+      d.administration.map((section) => section.id),
+      ['administration'],
+    );
+    unique(
+      d.sections.flatMap((s) => [s.id, ...s.aliases]),
+      ['sections'],
+    );
+    for (const [index, section] of d.sections.entries())
+      if (section.runtimeIds) unique(section.runtimeIds, ['sections', index, 'runtimeIds']);
+    unique(
+      d.ports.map((p) => p.role),
+      ['ports'],
+    );
+    unique(
+      d.connectionModes.map((m) => m.mode),
+      ['connectionModes'],
+    );
+    for (const [index, p] of d.ports.entries())
+      unique(p.transports, ['ports', index, 'transports']);
+    const creationFields = new Set(d.creation.fields.map((f) => f.id));
+    unique(
+      d.creation.pages.map((p) => p.id),
+      ['creation', 'pages'],
+    );
+    unique(
+      d.creation.resourcePresets.map((p) => p.id),
+      ['creation', 'resourcePresets'],
+    );
+    if (d.creation.pages.filter((page) => page.kind === 'address').length > 1)
+      context.addIssue({ code: 'custom', message: 'duplicate_address_page' });
+    for (const page of d.creation.pages) {
+      if (page.kind === 'address') {
+        if (
+          page.field !== 'connection' ||
+          page.position !== 'configuration' ||
+          page.lookupHandler ||
+          page.toggleField ||
+          page.seedField ||
+          page.resetFields.length
+        )
+          context.addIssue({ code: 'custom', message: 'invalid_address_page' });
+        continue;
+      }
+      const field = d.creation.fields.find((f) => f.id === page.field);
+      const toggle = d.creation.fields.find((f) => f.id === page.toggleField);
+      const seed = d.creation.fields.find((f) => f.id === page.seedField);
+      if (
+        (['choice-list', 'version-list'].includes(page.kind) && field?.type !== 'choice') ||
+        (!['choice-list', 'version-list'].includes(page.kind) &&
+          (field?.type !== 'multi-text' || field.format !== 'player-name')) ||
+        (page.kind === 'toggle-players' && toggle?.type !== 'boolean') ||
+        (page.seedField && (seed?.type !== 'multi-text' || seed.format !== 'player-name'))
+      )
+        context.addIssue({ code: 'custom', message: 'invalid_page_field_type' });
+      if (
+        ![
+          page.field,
+          ...page.resetFields,
+          ...[page.toggleField, page.seedField].filter((v): v is string => !!v),
+        ].every((f) => creationFields.has(f))
+      )
+        context.addIssue({ code: 'custom', message: 'invalid_page_field' });
+      if (
+        (!['choice-list', 'version-list'].includes(page.kind) && !page.lookupHandler) ||
+        (page.kind === 'toggle-players' && !page.toggleField)
+      )
+        context.addIssue({ code: 'custom', message: 'invalid_page_contract' });
+    }
+    if (d.creation.agreement && !creationFields.has(d.creation.agreement.field))
+      context.addIssue({ code: 'custom', message: 'invalid_agreement_field' });
+    const forms = [d.creation, ...d.sections.flatMap((s) => s.forms)];
+    for (const [index, form] of forms.entries()) {
+      unique(
+        form.fields.map((f) => f.id),
+        ['forms', index],
+      );
+      const fields = new Set(form.fields.map((f) => f.id));
+      for (const field of form.fields) {
+        const dependencies = [
+          ...field.when.map((c) => c.field),
+          ...(field.type === 'choice' ? (field.source?.dependsOn ?? []) : []),
+        ];
+        if (dependencies.some((ref) => ref === field.id || !fields.has(ref)))
+          context.addIssue({ code: 'custom', message: 'invalid_field_dependency' });
+        if (
+          (field.type === 'number' && field.min > field.max) ||
+          ((field.type === 'text' || field.type === 'textarea') &&
+            field.minLength > field.maxLength)
+        )
+          context.addIssue({ code: 'custom', message: 'invalid_field_bounds' });
+        if (field.type === 'choice')
+          unique(
+            field.options.map((o) => o.value),
+            ['forms', index, field.id],
+          );
+      }
+    }
+    for (const section of d.sections)
+      unique(
+        section.forms.map((f) => f.id),
+        ['sections', section.id],
+      );
+    const walk = (v: unknown, field?: string): void => {
+      if (typeof v === 'string' && field?.endsWith('Key') && !v.startsWith(`games.${d.gameId}.`))
+        context.addIssue({ code: 'custom', message: 'invalid_translation_namespace' });
+      else if (Array.isArray(v))
+        v.forEach((item) => {
+          walk(item);
+        });
+      else if (v && typeof v === 'object')
+        Object.entries(v).forEach(([k, value]) => {
+          walk(value, k);
+        });
+    };
+    walk(d);
+  });
+export type GameUiDescriptor = z.infer<typeof gameUiDescriptorSchema>;
+
+export function fieldVisible(field: UiField, values: UiValues): boolean {
+  return field.when.every((c) => {
+    const value = Object.hasOwn(values, c.field) ? values[c.field] : undefined;
+    if (c.operator === 'present') return value !== undefined && value !== null && value !== '';
+    if (c.operator === 'not-equals') return value !== undefined && value !== c.values[0];
+    return c.values.some((expected) => expected === value);
+  });
+}
+export function visibleFields(fields: readonly UiField[], values: UiValues): UiField[] {
+  return fields.filter((field) => fieldVisible(field, values));
+}
+export interface UiFieldError {
+  field: string;
+  code: 'required' | 'invalid' | 'unavailable';
+}
+/** Choices are evidence-filtered server results, not locally invented runtime support. */
+export function validateUiValues(
+  fields: readonly UiField[],
+  values: UiValues,
+  choices: Readonly<Record<string, readonly UiOption[]>> = {},
+): UiFieldError[] {
+  const errors: UiFieldError[] = [];
+  for (const field of visibleFields(fields, values)) {
+    const value = Object.hasOwn(values, field.id) ? values[field.id] : undefined;
+    if (
+      value === undefined ||
+      value === null ||
+      value === '' ||
+      (Array.isArray(value) && !value.length && field.type !== 'preview')
+    ) {
+      if (field.required) errors.push({ field: field.id, code: 'required' });
+      continue;
+    }
+    let valid = true;
+    const textValid = (text: unknown, maximum: number, format: string) =>
+      typeof text === 'string' &&
+      text.length <= maximum &&
+      !text.includes('\0') &&
+      (format !== 'player-name' || /^[A-Za-z0-9_]{3,16}$/.test(text)) &&
+      (format !== 'world-name' || /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(text)) &&
+      (format !== 'uuid' || z.uuid().safeParse(text).success);
+    switch (field.type) {
+      case 'text':
+      case 'textarea':
+        valid =
+          textValid(value, field.maxLength, field.format) &&
+          (value as string).length >= field.minLength;
+        break;
+      case 'multi-text':
+        valid =
+          Array.isArray(value) &&
+          value.length <= field.maxItems &&
+          value.every((v) => textValid(v, field.maxLength, field.format));
+        break;
+      case 'number':
+        valid =
+          typeof value === 'number' &&
+          Number.isFinite(value) &&
+          (!field.integer || Number.isSafeInteger(value)) &&
+          value >= field.min &&
+          value <= field.max;
+        break;
+      case 'boolean':
+        valid = typeof value === 'boolean' && (!field.mustBeTrue || value);
+        break;
+      case 'choice': {
+        const options = field.source ? choices[field.id] : field.options;
+        if (!options?.some((o) => o.value === value && !o.disabled)) {
+          errors.push({ field: field.id, code: 'unavailable' });
+          continue;
+        }
+        break;
+      }
+      case 'preview':
+        valid =
+          Array.isArray(value) &&
+          value.length <= field.maxItems &&
+          value.every((v) => typeof v === 'string' && v.length <= 1024);
+        break;
+      case 'archive':
+        valid = typeof value === 'string' && z.uuid().safeParse(value).success;
+        break;
+      case 'file':
+        valid = typeof Blob !== 'undefined' && value instanceof Blob && value.size > 0;
+        break;
+    }
+    if (!valid) errors.push({ field: field.id, code: 'invalid' });
+  }
+  return errors;
+}
+export interface UiAccessContext {
+  /** Effective authority supplied by the authorized server API. Never inferred from capabilities. */
+  permissions: readonly string[];
+  capabilities: readonly string[];
+  rolloutAllowed: boolean;
+  runtimeVerified: boolean;
+  providerConfigured: boolean;
+  state: string;
+}
+export type UiAvailability =
+  | { enabled: true }
+  | { enabled: false; reason: 'forbidden' | 'unsupported' | 'unavailable' | 'requires-stopped' };
+export function actionAvailability(
+  action: Pick<UiAction, 'requiredPermissions' | 'requiredCapabilities'> & {
+    requiresStopped?: boolean;
+  },
+  context: UiAccessContext,
+): UiAvailability {
+  if (!action.requiredPermissions.every((p) => context.permissions.includes(p)))
+    return { enabled: false, reason: 'forbidden' };
+  if (!action.requiredCapabilities.every((c) => context.capabilities.includes(c)))
+    return { enabled: false, reason: 'unsupported' };
+  if (!context.rolloutAllowed || !context.runtimeVerified || !context.providerConfigured)
+    return { enabled: false, reason: 'unavailable' };
+  if (action.requiresStopped && context.state !== 'offline')
+    return { enabled: false, reason: 'requires-stopped' };
+  return { enabled: true };
+}
+export interface GameUiClient {
+  /** Optional application-owned, identity-cleared cache for authorized creation GETs. */
+  catalogRequest?(path: string, signal?: AbortSignal): Promise<unknown>;
+  /** Same-origin application client owns cookies, CSRF, support context, errors and cancellation. */
+  request(
+    path: string,
+    options?: { method?: 'GET' | 'POST' | 'PUT' | 'DELETE'; body?: unknown; signal?: AbortSignal },
+  ): Promise<unknown>;
+  /** Returns the application's acknowledged JSON response (or undefined for 204). */
+  upload?(
+    path: string,
+    body: Blob,
+    options: {
+      bytes: number;
+      signal?: AbortSignal;
+      onProgress?: (sent: number, total: number) => void;
+    },
+  ): Promise<unknown>;
+}
+export interface GameUiContext {
+  serverId?: string;
+  signal?: AbortSignal;
+  values: UiValues;
+  idempotencyKey?: string;
+}
+export type GameUiHandler = (client: GameUiClient, context: GameUiContext) => Promise<unknown>;
+export interface TrustedGameUiModule {
+  descriptor: GameUiDescriptor;
+  catalogs: { en: Readonly<Record<string, string>>; it: Readonly<Record<string, string>> };
+  handlers: Readonly<Record<string, GameUiHandler>>;
+  /** Optional bundled editor key. Resolved only by the application's trusted UI registry. */
+  gatewayMessageEditor?: string;
+  /** Trusted code only: one authorized catalog, synchronous field projections. */
+  creationCatalog?: {
+    handlers: readonly string[];
+    applies?(handler: string, values: UiValues): boolean;
+    load(client: GameUiClient, signal?: AbortSignal): Promise<unknown>;
+    options(data: unknown, handler: string, values: UiValues): UiOption[];
+  };
+  /** Bundled first-party assets only; never supplied by the API descriptor. */
+  assets?: Readonly<Record<string, string>>;
+  /** Optional runtime mark from the same bundled asset registry used by creation. */
+  runtimeArtwork?(runtimeId: string): UiOption['artwork'];
+  /** Presentation grouping only; entries remain accessible and keep existing filesystem permissions. */
+  fileEntryGroup?(context: {
+    readonly path: string;
+    readonly runtimeId: string;
+    readonly entry: FilemanPathEntry;
+  }): 'hidden' | undefined;
+  /** Bundled directory mark, optionally overridden by a direct-child PNG; Fileman owns authorized reads. */
+  fileDirectoryIcon?(context: {
+    readonly path: string;
+    readonly runtimeId: string;
+    readonly entries: readonly (FilemanPathEntry & { readonly size: number })[];
+  }): { readonly file?: string; readonly assetId?: string } | undefined;
+  /** Trusted integration owns avatar provider and bundled fallback; never API-supplied URLs. */
+  playerAppearance?: {
+    fallback: string;
+    avatarUrl(name: string): string;
+    bodyFallback?: string;
+    bodyUrl?(uuid: string): string;
+    skinUrl?(uuid: string): string;
+  };
+}
+/** Presentation guards only; API handlers remain authoritative for authorization. */
+export function availableGameUiSections(
+  module: TrustedGameUiModule,
+  context: {
+    runtimeId: string;
+    permissions: readonly string[];
+    capabilities: Readonly<Record<string, unknown>> | null;
+  },
+) {
+  return module.descriptor.sections.filter(
+    (section) =>
+      (!section.runtimeIds || section.runtimeIds.includes(context.runtimeId)) &&
+      section.requiredPermissions.every((permission) => context.permissions.includes(permission)) &&
+      section.requiredCapabilities.every(
+        (capability) => context.capabilities?.[capability] === true,
+      ),
+  );
+}
+/** Call only with imports compiled into the application. API JSON cannot register executable modules. */
+export function defineTrustedGameUiModule(module: TrustedGameUiModule): TrustedGameUiModule {
+  const descriptor = gameUiDescriptorSchema.parse(module.descriptor);
+  if (
+    module.gatewayMessageEditor !== undefined &&
+    !/^[a-z][a-z0-9.-]{0,63}$/.test(module.gatewayMessageEditor)
+  )
+    throw new Error('game_ui_gateway_editor_invalid');
+  if (descriptor.artwork && !module.assets?.[descriptor.artwork.assetId])
+    throw new Error('game_ui_asset_missing');
+  for (const icon of descriptor.fileIcons ?? [])
+    if (!module.assets?.[icon.assetId]) throw new Error('game_ui_asset_missing');
+  const handlerIds = [
+    ...descriptor.creation.pages.flatMap((p) => (p.lookupHandler ? [p.lookupHandler] : [])),
+    ...[descriptor.creation, ...descriptor.sections.flatMap((s) => s.forms)].flatMap((f) =>
+      f.fields.flatMap((v) =>
+        v.type === 'archive'
+          ? [v.handler, ...(v.catalog ? Object.values(v.catalog) : [])]
+          : v.type === 'preview'
+            ? [v.handler]
+            : [],
+      ),
+    ),
+    ...[descriptor.creation, ...descriptor.sections.flatMap((s) => s.forms)].flatMap((f) =>
+      f.fields.flatMap((v) =>
+        (v.type === 'text' || v.type === 'textarea') && v.lookupHandler ? [v.lookupHandler] : [],
+      ),
+    ),
+    descriptor.creation.choicesHandler,
+    descriptor.creation.createHandler,
+    ...(descriptor.creation.prepareHandler ? [descriptor.creation.prepareHandler] : []),
+    ...descriptor.sections.flatMap((s) => [
+      s.loader,
+      ...s.forms.flatMap((f) => (f.action ? [f.action.handler] : [])),
+    ]),
+    ...[descriptor.creation, ...descriptor.sections.flatMap((s) => s.forms)].flatMap((f) =>
+      f.fields.flatMap((v) => (v.type === 'choice' && v.source ? [v.source.handler] : [])),
+    ),
+  ];
+  for (const handler of handlerIds)
+    if (!Object.hasOwn(module.handlers, handler) || typeof module.handlers[handler] !== 'function')
+      throw new Error('game_ui_handler_missing');
+  if (
+    module.creationCatalog &&
+    (!module.creationCatalog.handlers.length ||
+      module.creationCatalog.handlers.some((handler) => !handlerIds.includes(handler)) ||
+      typeof module.creationCatalog.load !== 'function' ||
+      typeof module.creationCatalog.options !== 'function')
+  )
+    throw new Error('game_ui_catalog_invalid');
+  const keys = new Set<string>();
+  const walk = (value: unknown, name?: string): void => {
+    if (typeof value === 'string' && name?.endsWith('Key')) keys.add(value);
+    else if (Array.isArray(value))
+      value.forEach((v) => {
+        walk(v);
+      });
+    else if (value && typeof value === 'object')
+      Object.entries(value).forEach(([k, v]) => {
+        walk(v, k);
+      });
+  };
+  walk(descriptor);
+  for (const locale of ['en', 'it'] as const)
+    for (const k of keys)
+      if (!module.catalogs[locale][k]?.trim()) throw new Error('game_ui_translation_missing');
+  return Object.freeze({
+    descriptor: deepFreeze(descriptor),
+    catalogs: deepFreeze({ en: { ...module.catalogs.en }, it: { ...module.catalogs.it } }),
+    handlers: Object.freeze({ ...module.handlers }),
+    ...(module.gatewayMessageEditor ? { gatewayMessageEditor: module.gatewayMessageEditor } : {}),
+    assets: Object.freeze({ ...module.assets }),
+    ...(module.runtimeArtwork ? { runtimeArtwork: module.runtimeArtwork } : {}),
+    ...(module.fileEntryGroup ? { fileEntryGroup: module.fileEntryGroup } : {}),
+    ...(module.fileDirectoryIcon ? { fileDirectoryIcon: module.fileDirectoryIcon } : {}),
+    ...(module.creationCatalog
+      ? {
+          creationCatalog: Object.freeze({
+            ...module.creationCatalog,
+            handlers: Object.freeze([...module.creationCatalog.handlers]),
+          }),
+        }
+      : {}),
+    ...(module.playerAppearance
+      ? { playerAppearance: Object.freeze({ ...module.playerAppearance }) }
+      : {}),
+  });
+}
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object') {
+    Object.values(value).forEach(deepFreeze);
+    Object.freeze(value);
+  }
+  return value;
+}
+export function createTrustedGameUiRegistry(modules: readonly TrustedGameUiModule[]) {
+  const registry = new Map<string, TrustedGameUiModule>();
+  for (const raw of modules) {
+    const module = defineTrustedGameUiModule(raw);
+    if (registry.has(module.descriptor.gameId)) throw new Error('game_ui_duplicate_module');
+    registry.set(module.descriptor.gameId, module);
+  }
+  return Object.freeze({
+    get: (gameId: string) => registry.get(gameId),
+    list: () => [...registry.values()],
+  });
+}
+
+export interface UiSectionData {
+  values: UiValues;
+  rows: Readonly<Record<string, unknown>>[];
+  fieldChoices?: Readonly<Record<string, readonly UiOption[]>>;
+  /** When supplied, only these field IDs may be edited (e.g. a verified game-property schema). */
+  editableFields?: readonly string[];
+  metadata?: Readonly<Record<string, unknown>>;
+}
+export type * from './datagrid.js';
+export * from './fileman.js';
+export * from './viewers.js';

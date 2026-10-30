@@ -2,16 +2,19 @@ import { randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import type { Identity } from '@nickhosting/auth';
+import type { ContentHttp } from '@nickhosting/content-providers';
 import {
   type AuthContext,
   assertPermission,
+  type createLogger,
   DomainError,
+  normalizeLegacyContentSettings,
+  platformConfigSchema,
   type SecretCodec,
   safeError,
 } from '@nickhosting/core';
 import {
   type createDatabase,
-  gameCatalog,
   getSettings,
   recordAudit,
   registerGame,
@@ -22,22 +25,35 @@ import {
 } from '@nickhosting/database';
 import { localizeAuthError, localizeError, resolveLocale } from '@nickhosting/i18n';
 import { enqueueCommand, getJobStatus } from '@nickhosting/jobs';
-import { type ManagementRuntime, minecraftCatalog } from '@nickhosting/server-management';
+import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
+import type { ManagementRuntime } from '@nickhosting/server-management';
 import { type Context, Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { cors } from 'hono/cors';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { z } from 'zod';
+import { registerFileViewerRoutes } from './file-viewers.js';
+import { availableGameCatalog, registerGameModuleRoutes } from './game-modules.js';
 import { registerGatewayRoutes } from './gateway.js';
+import { registerGatewayMessageRoutes } from './gateway-messages.js';
+import { registerHealthRoutes } from './health.js';
 import { registerMinecraftRoutes } from './minecraft.js';
 import { registerMinecraftSourceRoutes } from './minecraft-sources.js';
+import { registerMinecraftWorldCatalogRoutes } from './minecraft-world-catalog.js';
+import { registerPlatformRoutes } from './platform.js';
+import { registerProfilePhotoRoutes } from './profile-photo.js';
+import { PROVIDER_EVENTS_PATH, receiveProviderEvent } from './provider-events.js';
+import { registerScheduleRoutes } from './schedules.js';
 import { registerServerRoutes } from './servers.js';
+import { receiveSftpEvent, SFTP_EVENTS_PATH } from './sftp-events.js';
+import { registerWebSessionRoutes, supportToken } from './web-session.js';
 
 type Store = ReturnType<typeof createDatabase>;
 // Shared by every application/runtime using this pool; uploads cannot consume
 // the connections needed for logout, role changes and ordinary reads.
 const uploadSlots = new WeakMap<Store['pool'], { active: number }>();
 interface Options {
+  logger?: ReturnType<typeof createLogger>;
   database: Store;
   identity: () => Promise<Identity>;
   codec: SecretCodec;
@@ -45,13 +61,17 @@ interface Options {
   env?: Readonly<Record<string, string | undefined>>;
   defaultLocale?: () => Promise<'en' | 'it'>;
   log?: (event: Record<string, unknown>) => void;
+  provisioningCache?: import('@nickhosting/pterodactyl-adapter').PrivateTransferCache;
   management?: () => Promise<ManagementRuntime>;
+  /** Isolated tests only: substitute public content HTTP without provider credentials. */
+  minecraftContentHttp?: ContentHttp;
 }
 export type Variables = {
   identity: Identity;
   requestId: string;
   authHeaders: Headers;
   locale?: 'en' | 'it';
+  gatewayAuthenticated?: boolean;
 };
 
 async function body(c: Context): Promise<unknown> {
@@ -120,7 +140,42 @@ export function createApp(options: Options) {
       throw new DomainError('validation_failed', 413);
     },
   });
+  // Explicit Owner pools can contain thousands of pins. Other JSON endpoints
+  // retain their small limit; this route still enforces regular Owner + Origin.
+  const nodePoolBodyLimit = bodyLimit({
+    maxSize: 4 * 1024 * 1024,
+    onError: () => {
+      throw new DomainError('validation_failed', 413);
+    },
+  });
+  const editorBodyLimit = bodyLimit({
+    maxSize: 6 * 1048576 + 8192,
+    onError: () => {
+      throw new DomainError('validation_failed', 413);
+    },
+  });
+  // File selections travel in bounded bodies rather than long download URLs.
+  // Provider mutation batches and recursive archive/copy budgets are enforced
+  // separately by their handlers; unrelated JSON routes keep the small limit.
+  const fileSelectionBodyLimit = bodyLimit({
+    maxSize: 4 * 1024 * 1024,
+    onError: () => {
+      throw new DomainError('validation_failed', 413);
+    },
+  });
   app.use('*', async (c, next) => {
+    // This route authenticates before reading and bounds actual bytes itself,
+    // including requests without Content-Length or with an incorrect value.
+    if (c.req.method === 'PUT' && c.req.path === '/v1/web/profile-photo') return next();
+    if (
+      c.req.method === 'POST' &&
+      /^\/v1\/servers\/[^/]+\/files(?:\/(?:copy|archive|extract|viewer\/archive\/download))?$/.test(
+        c.req.path,
+      )
+    )
+      return fileSelectionBodyLimit(c, next);
+    if (c.req.method === 'PUT' && /^\/v1\/servers\/[^/]+\/files\/editor$/.test(c.req.path))
+      return editorBodyLimit(c, next);
     // Only this authenticated binary route streams its body. Its handler checks
     // exact declared size, server storage, live authorization and actual bytes.
     if (
@@ -128,6 +183,8 @@ export function createApp(options: Options) {
       /^\/v1\/(?:servers\/[^/]+\/files|minecraft\/sources\/[^/]+)\/upload$/.test(c.req.path)
     )
       return next();
+    if (c.req.method === 'PUT' && c.req.path === '/v1/owner/nodes')
+      return nodePoolBodyLimit(c, next);
     return jsonBodyLimit(c, next);
   });
   app.use('*', async (c, next) => {
@@ -135,6 +192,8 @@ export function createApp(options: Options) {
       // Dedicated machine endpoints authenticate their own scoped bearer secret.
       // This exception grants no browser/session authority or generic CSRF bypass.
       if (/^\/internal\/gateway\/[0-9a-f-]{36}\/[a-z-]+$/.test(c.req.path)) return next();
+      if (c.req.method === 'POST' && [PROVIDER_EVENTS_PATH, SFTP_EVENTS_PATH].includes(c.req.path))
+        return next();
       const origin = c.req.header('origin');
       if (!origin || !(await origins()).includes(origin)) throw new DomainError('forbidden');
     }
@@ -149,12 +208,53 @@ export function createApp(options: Options) {
       requestId: c.get('requestId'),
       code: normalized.code,
       status: normalized.status,
+      route: c.req.routePath,
+      ...(failure instanceof PterodactylError
+        ? {
+            provider: 'pterodactyl',
+            scope: failure.scope,
+            reason: failure.reason,
+            upstreamStatus: failure.upstreamStatus,
+          }
+        : {}),
     });
+    // Protected handlers already obtain the locale while authenticating. Public
+    // identity routes and failures before principal() need it only on error;
+    // don't read the same Better Auth session twice on every successful request.
+    if (c.get('locale') === undefined && c.get('identity')) {
+      try {
+        const session = await c.get('identity').auth.api.getSession({
+          headers: c.get('authHeaders'),
+        });
+        if (session) c.set('locale', session.user.locale === 'it' ? 'it' : 'en');
+      } catch {
+        // A locale lookup must not mask the original authentication/storage error.
+      }
+    }
     const locale = resolveLocale(
       c.get('locale'),
       c.req.header('accept-language'),
       await options.defaultLocale?.().catch(() => 'en' as const),
     );
+    if (
+      c.get('gatewayAuthenticated') &&
+      failure instanceof PterodactylError &&
+      failure.reason === 'rate_limited'
+    ) {
+      const retryAfterMs = Math.min(300000, Math.max(1, failure.retryAfterMs ?? 60000));
+      c.header('Retry-After', String(Math.ceil(retryAfterMs / 1000)));
+      return c.json(
+        {
+          error: {
+            code: 'integration_unavailable',
+            messageKey: 'errors.integration_unavailable',
+            details: { gatewayControlReason: 'provider_rate_limited', retryAfterMs },
+          },
+          requestId: c.get('requestId'),
+        },
+        503,
+      );
+    }
     return c.json(
       { error: localizeError(failure, locale), requestId: c.get('requestId') },
       normalized.status as ContentfulStatusCode,
@@ -162,6 +262,32 @@ export function createApp(options: Options) {
   });
   app.notFound(() => {
     throw new DomainError('not_found');
+  });
+  app.post(PROVIDER_EVENTS_PATH, async (c) => {
+    if (!c.req.header('content-type')?.startsWith('application/json'))
+      throw new DomainError('validation_failed');
+    return c.json(
+      await receiveProviderEvent({
+        db,
+        codec: options.codec,
+        env,
+        raw: await c.req.text(),
+        headers: c.req.raw.headers,
+      }),
+    );
+  });
+  app.post(SFTP_EVENTS_PATH, async (c) => {
+    if (!c.req.header('content-type')?.startsWith('application/json'))
+      throw new DomainError('validation_failed');
+    return c.json(
+      await receiveSftpEvent({
+        db,
+        codec: options.codec,
+        env,
+        raw: await c.req.text(),
+        headers: c.req.raw.headers,
+      }),
+    );
   });
   app.get('/healthz', (c) => c.json({ status: 'ok' }));
   app.get('/readyz', async (c) => {
@@ -180,15 +306,15 @@ export function createApp(options: Options) {
     await next();
   });
   app.use('/v1/*', async (c, next) => {
+    if (c.req.method === 'POST' && [PROVIDER_EVENTS_PATH, SFTP_EVENTS_PATH].includes(c.req.path))
+      return next();
     const identity = await options.identity();
     c.set('identity', identity);
-    const session = await identity.auth.api.getSession({ headers: c.get('authHeaders') });
-    if (session) c.set('locale', session.user.locale === 'it' ? 'it' : 'en');
     await next();
   });
 
-  const noSupport = (c: Context) => {
-    if (c.req.header('x-nh-support-token')) throw new DomainError('forbidden');
+  const noSupport = (c: Context<{ Variables: Variables }>) => {
+    if (supportToken(c)) throw new DomainError('forbidden');
   };
   const principal = async (
     c: Context<{ Variables: Variables }>,
@@ -197,7 +323,7 @@ export function createApp(options: Options) {
     if (regularOnly) noSupport(c);
     const { context, locale } = await c
       .get('identity')
-      .authenticate(c.get('authHeaders'), c.req.header('x-nh-support-token'));
+      .authenticate(c.get('authHeaders'), supportToken(c));
     c.set('locale', locale);
     if (context.sessionType === 'support')
       await recordAudit(db, context, 'support.request', {
@@ -243,7 +369,10 @@ export function createApp(options: Options) {
     headers.set('cache-control', 'no-store');
     return new Response(
       JSON.stringify({
-        error: localizeAuthError(payload.code ?? 'UNKNOWN', locale),
+        error: localizeAuthError(
+          payload.code ?? (response.status === 429 ? 'TOO_MANY_REQUESTS' : 'UNKNOWN'),
+          locale,
+        ),
         requestId: c.get('requestId'),
       }),
       { status: response.status, headers },
@@ -299,6 +428,20 @@ export function createApp(options: Options) {
       201,
     );
   });
+  app.get('/v1/owner/invitations/:id/link', async (c) => {
+    noSupport(c);
+    return c.json(
+      await c.get('identity').getInvitationLink(c.get('authHeaders'), c.req.param('id')),
+    );
+  });
+  app.patch('/v1/owner/invitations/:id', async (c) => {
+    noSupport(c);
+    return c.json(
+      await c
+        .get('identity')
+        .updateInvitation(c.get('authHeaders'), c.req.param('id'), await body(c)),
+    );
+  });
   app.delete('/v1/owner/invitations/:id', async (c) => {
     noSupport(c);
     await c.get('identity').revokeInvitation(c.get('authHeaders'), c.req.param('id'));
@@ -318,9 +461,20 @@ export function createApp(options: Options) {
     assertPermission(context, 'settings:read');
     return c.json({ config: await getSettings(db, env), secrets: await secretStatus(db, env) });
   });
+  app.get('/v1/owner/settings/schema', async (c) => {
+    const context = await principal(c, true);
+    assertPermission(context, 'settings:read');
+    // The form describes accepted inputs, before configuration normalization.
+    return c.json(z.toJSONSchema(platformConfigSchema, { io: 'input' }));
+  });
   app.patch('/v1/owner/settings', async (c) =>
     c.json(await updateSettings(db, await principal(c, true), await body(c), env)),
   );
+  app.delete('/v1/owner/settings/:key', async (c) => {
+    const normalized = normalizeLegacyContentSettings({ [c.req.param('key')]: undefined });
+    const key = validate(platformConfigSchema.keyof(), Object.keys(normalized as object)[0]);
+    return c.json(await updateSettings(db, await principal(c, true), { [key]: undefined }, env));
+  });
   app.put('/v1/owner/secrets/:name', async (c) => {
     const name = validate(z.enum(secretNames), c.req.param('name'));
     const input = validate(
@@ -338,41 +492,10 @@ export function createApp(options: Options) {
     await registerGame(db, await principal(c, true), input.manifest, input.rollout);
     return c.body(null, 204);
   });
-  app.get('/v1/games', async (c) => {
-    const context = await principal(c);
-    const games = await gameCatalog(db, context);
-    const choices = games.some((game) => game.id === 'minecraft-java')
-      ? await minecraftCatalog(db, context, env)
-      : [];
-    return c.json(
-      games.map((game) => {
-        if (game.id !== 'minecraft-java') return game;
-        // Only eligible releases reach ordinary game discovery, even if an Owner
-        // registered a broader descriptive manifest. Technical evidence is separate.
-        const manifest = game.manifest as {
-          runtimes: Array<{ id: string; supportedGameVersions: string[] }>;
-        };
-        return {
-          ...game,
-          manifest: {
-            ...manifest,
-            runtimes: manifest.runtimes
-              .filter((runtime) => choices.some((choice) => choice.runtime === runtime.id))
-              .map((runtime) => ({
-                ...runtime,
-                supportedGameVersions: [
-                  ...new Set(
-                    choices
-                      .filter((choice) => choice.runtime === runtime.id)
-                      .map((choice) => choice.version),
-                  ),
-                ],
-              })),
-          },
-        };
-      }),
-    );
-  });
+  registerGameModuleRoutes(app, { principal });
+  app.get('/v1/games', async (c) =>
+    c.json(await availableGameCatalog(db, await principal(c), env)),
+  );
   app.post('/v1/jobs', async (c) => {
     const context = await principal(c);
     const input = validate(
@@ -395,7 +518,8 @@ export function createApp(options: Options) {
     }
     const poolSize = pool.options.max ?? 10;
     const capacity = Math.max(0, poolSize - (poolSize > 2 ? 2 : 1));
-    if (slots.active >= capacity) throw new DomainError('conflict');
+    // Admission failed before the transfer callback or any provider effect.
+    if (slots.active >= capacity) throw new DomainError('operation_busy');
     slots.active++;
     let released = false;
     return () => {
@@ -405,8 +529,53 @@ export function createApp(options: Options) {
       }
     };
   };
-  registerServerRoutes(app, {
+  registerWebSessionRoutes(app, { db, env, codec: options.codec, principal, body });
+  registerProfilePhotoRoutes(app, { db, principal });
+  registerHealthRoutes(app, {
     db,
+    env,
+    principal,
+    management:
+      options.management ??
+      (async () => {
+        throw new DomainError('integration_unavailable');
+      }),
+  });
+  registerGatewayMessageRoutes(app, {
+    db,
+    env,
+    principal,
+    management:
+      options.management ??
+      (async () => {
+        throw new DomainError('integration_unavailable');
+      }),
+  });
+  registerScheduleRoutes(app, {
+    db,
+    env,
+    principal,
+    management:
+      options.management ??
+      (async () => {
+        throw new DomainError('integration_unavailable');
+      }),
+  });
+  registerPlatformRoutes(app, {
+    db,
+    env,
+    principal,
+    management:
+      options.management ??
+      (async () => {
+        throw new DomainError('integration_unavailable');
+      }),
+  });
+  registerServerRoutes(app, {
+    provisioningCache: options.provisioningCache,
+    logger: options.logger,
+    db,
+    pool: options.database.pool,
     env,
     principal,
     acquireUploadSlot,
@@ -416,8 +585,23 @@ export function createApp(options: Options) {
         throw new DomainError('integration_unavailable');
       }),
   });
-  registerGatewayRoutes(app, {
+  registerFileViewerRoutes(app, {
+    logger: options.logger,
     db,
+    env,
+    codec: options.codec,
+    principal,
+    acquireUploadSlot,
+    management:
+      options.management ??
+      (async () => {
+        throw new DomainError('integration_unavailable');
+      }),
+  });
+  registerGatewayRoutes(app, {
+    logger: options.logger,
+    db,
+    pool,
     env,
     codec: options.codec,
     principal,
@@ -429,9 +613,19 @@ export function createApp(options: Options) {
       }),
   });
   registerMinecraftSourceRoutes(app, { db, env, principal, acquireUploadSlot });
+  registerMinecraftWorldCatalogRoutes(app, {
+    db,
+    env,
+    codec: options.codec,
+    principal,
+    acquireUploadSlot,
+    http: options.minecraftContentHttp,
+  });
   registerMinecraftRoutes(app, {
     db,
     env,
+    codec: options.codec,
+    contentHttp: options.minecraftContentHttp,
     principal,
     body,
     management:

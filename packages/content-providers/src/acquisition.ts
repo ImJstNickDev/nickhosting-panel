@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, open, rename, rm } from 'node:fs/promises';
-import { isAbsolute, join, resolve, sep } from 'node:path';
+import { join, resolve } from 'node:path';
 import { type ContentHttp, type ContentLimits, type ContentPlan, fail } from './contracts.js';
 import { assertContentDiskSpace, type ContentDiskPolicy } from './disk.js';
 import { inspectModpack } from './modpack.js';
 import type { ModrinthProvider } from './modrinth.js';
-import { contentStageDirectory } from './staging.js';
+import { contentStageDirectory, contentStagingRootAllowed } from './staging.js';
 
 /** Acquisition is staging, not server installation; callers still verify runtime and durable job authorization. */
 export async function acquireModrinthModpack(
@@ -15,6 +15,7 @@ export async function acquireModrinthModpack(
   versionId: string,
   options: {
     mountdataRoot: string;
+    storageBoundary?: string;
     jobId: string;
     http: ContentHttp;
     signal?: AbortSignal;
@@ -24,8 +25,7 @@ export async function acquireModrinthModpack(
   },
 ): Promise<{ archivePath: string; plan: ContentPlan }> {
   if (
-    !isAbsolute(options.mountdataRoot) ||
-    !resolve(options.mountdataRoot).split(sep).includes('mountdata') ||
+    !contentStagingRootAllowed(options.mountdataRoot, options.storageBoundary) ||
     !/^[A-Za-z0-9_-]{1,128}$/.test(options.jobId)
   )
     fail('stage_job');

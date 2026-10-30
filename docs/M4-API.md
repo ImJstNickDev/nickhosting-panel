@@ -167,16 +167,20 @@ against that immutable configuration. An omitted default is not inferred later
 from a potentially changed egg. Image identity and release labels alone do not
 establish which launch inputs actually execute.
 
-Before each admitted start, Core rehashes the actual runtime launch inputs. The
-first playable proof for a new process/evidence epoch repeats that verification
-and confirms the process did not change during observation. Fabric generated
-launchers use exact canonical entry hashes to tolerate only ZIP timestamp
-differences; their external Java-properties target still binds the independently
-verified Mojang server. Java CR/LF/CRLF and syntactic whitespace rules apply.
+The Owner-approved M5 amendment (2026-10-10) removes JAR downloads/hashing from
+ordinary starts, stops and periodic process/readiness observations. Integrity checks
+remain in installation, content changes and restoration. Expected hashes come from
+persisted resolved metadata; ordinary startup does not call Mojang for a hash.
+Confirmed installation, current provider identity, launch configuration, actual image,
+resource admission and an unchanged observed process remain required. Game readiness
+still requires a reachable valid protocol response. Fabric generated-launcher checks
+in installation use canonical entry hashes to tolerate only ZIP timestamp differences;
+the external Java-properties target binds the independently verified Mojang server.
+Java CR/LF/CRLF and syntactic whitespace rules apply.
 
 Browser binary uploads and write/delete/rename/mkdir operations cannot overwrite
 verified runtime files, their ancestors, bound launch paths or protected launcher
 configuration. Mods, plugins and worlds retain their separate management paths.
-Out-of-band filesystem changes are not assumed impossible: prestart/process
-verification fails closed when the attested launch inputs no longer match. This
-is separate from the unchanged SFTPGo transport-revocation exception.
+Out-of-band JAR changes through SFTP/provider access are no longer detected by
+rehashing on startup; this is the explicitly accepted policy boundary. It does not
+waive the separate SFTPGo transport-revocation production-release gate.

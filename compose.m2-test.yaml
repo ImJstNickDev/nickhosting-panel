@@ -9,7 +9,8 @@ services:
       POSTGRES_DB: nickhosting_test
       POSTGRES_PASSWORD: ${NH_TEST_POSTGRES_PASSWORD:?Isolated password required}
     ports: ["127.0.0.1::5432"]
-    volumes: [./mountdata/m2-tests/postgres:/var/lib/postgresql]
+    volumes:
+      - { type: bind, source: "${NH_MOUNTDATA_ROOT:-./mountdata}/m2-tests/postgres", target: /var/lib/postgresql, bind: { create_host_path: false } }
     mem_limit: 384m
     cpus: 1
     restart: "no"
@@ -24,7 +25,8 @@ services:
       REDIS_PASSWORD: ${NH_TEST_REDIS_PASSWORD:?Isolated password required}
     command: [/bin/sh, -c, 'exec redis-server --appendonly yes --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"']
     ports: ["127.0.0.1::6379"]
-    volumes: [./mountdata/m2-tests/redis:/data]
+    volumes:
+      - { type: bind, source: "${NH_MOUNTDATA_ROOT:-./mountdata}/m2-tests/redis", target: /data, bind: { create_host_path: false } }
     mem_limit: 192m
     cpus: 1
     restart: "no"
@@ -46,8 +48,8 @@ services:
       SFTPGO_SFTPD__ENABLED_SSH_COMMANDS: ""
     ports: ["127.0.0.1::8080", "127.0.0.1::2022"]
     volumes:
-      - ./mountdata/m2-tests/sftpgo/state:/var/lib/sftpgo
-      - ./mountdata/m2-tests/sftpgo/data:/srv/sftpgo/data
+      - { type: bind, source: "${NH_MOUNTDATA_ROOT:-./mountdata}/m2-tests/sftpgo/state", target: /var/lib/sftpgo, bind: { create_host_path: false } }
+      - { type: bind, source: "${NH_MOUNTDATA_ROOT:-./mountdata}/m2-tests/sftpgo/data", target: /srv/sftpgo/data, bind: { create_host_path: false } }
     mem_limit: 256m
     cpus: 1
     restart: "no"

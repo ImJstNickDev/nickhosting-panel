@@ -18,7 +18,7 @@ SSE and binary download routes are the exceptions to JSON response bodies.
 `:id` is a NickHosting server UUID, never an arbitrary Pterodactyl identifier.
 Only the managed registry can resolve it into a remote identity. Ordinary users
 can read their own servers and project memberships; project viewers can read,
-operators can operate, and managers can manage. `start`, `stop`, `restart` and
+operators can operate, and managers can manage. `start`, `stop`, `kill`, `restart` and
 `backup` require `server:operate`; configuration, destructive operations, file
 mutations, console commands, SFTP and DNS changes require `server:manage`.
 Platform operator status alone grants no access to somebody else's server.
@@ -69,9 +69,23 @@ POST `/v1/servers/:id/operations` returns `202 {serverId,jobId}`. Accepted bodie
 | Action | Fields in addition to `action` and `idempotencyKey` |
 | --- | --- |
 | `start`, `stop`, `restart`, `backup` | None. |
+| `kill` | `confirm:true`, `operationId` UUID of the active stop job. Escalates that stop; returns the same job ID. |
 | `reinstall`, `wipe`, `delete` | `confirm:true`, optional `backupBefore` (default `false`). |
 | `restore` | `confirm:true`, `backupId` UUID, optional `truncate` (default `true`). |
 | `configure` | Complete `limits` object. Disk shrinking is rejected. |
+
+Kill is a confirmed escalation of an active stop in its power phase, not a second
+lifecycle job or an unrestricted force-stop endpoint. The browser offers it only
+on a current `stopping` observation; the worker independently checks current
+managed identity, requester permissions/session and provider state before using
+Client API `POST /api/client/servers/{identifier}/power` with `{signal:"kill"}`.
+The stop permission also covers Kill in Pterodactyl. Kill request keys are scoped
+to the actor and exact parent stop operation. A safely rejected pre-effect request
+can be replaced explicitly; prior keys do not revive it. The original stop keeps its
+reservation and operation lock until physical stopped confirmation. A provider
+acknowledgement alone never releases resources. Prepared/unknown force-stop
+requests are never automatically replayed. No Kill escalation is offered for
+unrelated start/install/restore work or a stop initiated only outside NickHosting.
 
 Only one active lifecycle operation is allowed per server. Destructive/configure
 operations require an offline server; the worker verifies remote state as well.
@@ -87,15 +101,32 @@ external ID supports provisioning recovery. Ambiguous start/restart, reinstall
 and restore outcomes remain uncertain instead of being blindly replayed.
 Uncertainty must retain compute reservations: a stop request, cached `offline`
 sample or timeout is not proof that all delayed process starts have finished.
-Safe automatic stop completion is restricted to effective egg stop configuration
-with a nonempty command not beginning with `^`, or the native Docker stop value
-`^C` (case-insensitive). It requires a fresh, ordered `stopping` → `offline`
+Runtime mapping admission validates supported egg stop configuration (a nonempty
+command not beginning with `^`, or native Docker stop `^C`, case-insensitive).
+The stop operation does not fetch or reinterpret the egg again: Wings executes
+its configured stop semantics. Live completion uses a fresh, ordered `stopping` → `offline`
 transition from the authenticated backend WebSocket, an independent exact-container
 Docker observation proving the process is no longer running, and no earlier
 unresolved power effect. Wings can emit offline after a failed output stream while
 the process still runs; the WebSocket transition alone cannot release capacity.
-Other caret signal modes or unknown stop semantics are unsupported for automatic
-release and fail closed. Restart completion requires a verified running Docker
+After that durable stop receipt, a fresh host-bound check of the exact container
+can complete the stop without waiting for the provider's resource cache to expire.
+If the live receipt is lost, recovery uses the same host/identity verification and
+Docker's terminal process record: its exact start timestamp must match the process
+recorded before dispatch, and its finish must follow durable effect preparation.
+This recovers in the same delivery when possible, or the existing outbox retry,
+without reading cached resources, waiting for cache expiry or sending Stop again.
+Missing baseline, absent/created/running/replaced containers and unavailable evidence
+cannot manufacture completion. Recovery persists its `terminal_process` source;
+subsequent deliveries use the ordinary durable receipt path.
+Offline state, job completion and reservation release commit together. Running or
+unverifiable container evidence retains the reservation; this path never
+issues another power request. The conservative cached-resource path remains when
+independent confirmation is unavailable.
+Mapping admission continues to reject unsupported caret signal profiles. At
+execution time, a signal or changed egg which leaves the process running cannot
+confirm a stop or release its reservation; missing terminal evidence remains
+uncertain. Restart completion requires a verified running Docker
 process whose start
 timestamp is after the durable effect intent, differs from the recorded prior
 process when present, and is not in the future. Cached uptime may miss a fast
@@ -103,6 +134,22 @@ restart; the worker recovers from physical evidence without replaying power.
 Missing or invalid physical evidence cannot fall back to cached telemetry. These
 capability gates do not change egg or Wings configuration. Their actual
 implementation and test status are recorded in the [validation report](M2-VALIDATION.md).
+
+An interactive stop/kill performed directly in the provider can also be reconciled
+without sending another power command. This requires the latest authenticated Panel
+power activity to be an interactive stop/kill (no later or tied start/restart), plus
+two matching fresh observations of the exact exited Docker process and managed
+provider identity. An interrupted pending start/restart must additionally prove
+that this process started after that operation's effect intent. The operation ends
+as failed with an external-stop receipt, the server becomes manually stopped, and
+capacity is released atomically. An already-online server uses the same corroborated
+stop evidence; stale resource-cache samples cannot recreate its reservation.
+
+This does not infer Owner intent from a crash, an absent container, a preboot state
+or an API-origin power action. Missing activity permission, hidden/incomplete
+history, ambiguous event ordering or changed process identity retain conservative
+uncertainty. Existing external-start accounting does not revoke manual-stop
+suppression. A new explicit NickHosting start is needed to resume automatic wake.
 
 A stop requested for an already-offline server may complete without sending power
 only when the backend verifies its current host/provider identity and exact
@@ -132,22 +179,112 @@ project clients should use the authorized per-server operation view above.
 
 | Method/path | Contract |
 | --- | --- |
-| GET `/v1/servers/:id/console` | SSE relay of allowlisted console/status/stat events. Backend obtains and refreshes the privileged WebSocket token; authorization is rechecked during the stream. |
+| GET `/v1/servers/:id/console` | SSE relay of allowlisted console/daemon/status/stat events. Backend obtains and refreshes the privileged WebSocket token; authorization is rechecked during the stream. Requests bounded provider log replay on an empty console; `history=0` skips replay when retaining a browser buffer. Errors use a typed, sanitized SSE envelope. A bounded `heartbeat` every 10 seconds keeps an otherwise silent stream alive without polling the provider; it never replaces authorization checks. |
 | POST `/v1/servers/:id/console` | `{command}` (1–4,096 characters) → `204`. Audit records the request, not raw command text. |
 | GET `/v1/servers/:id/files?path=` | Directory listing under the server root. |
-| GET `/v1/servers/:id/files/content?path=...` | Backend-streamed binary attachment; no fixed total byte limit, signed URL remains private. |
-| PUT `/v1/servers/:id/files/upload?path=...` | Raw `application/octet-stream` body and exact `X-NH-Upload-Length` header; `204` only after a complete provider upload. |
-| POST `/v1/servers/:id/files` | `write`: `{action,path,content}` (text ≤60,000 characters); `mkdir`: `{action,root,name}`; `rename`: `{action,root,files:[{from,to}]}`; `delete`: `{action,root,files:[name],confirm:true}`. Rename/delete batches contain 1–100 entries. Returns `204`. |
+| GET `/v1/servers/:id/files/content?path=...` | Backend-streamed binary attachment; `Content-Disposition` provides the validated basename via an ASCII fallback and UTF-8 `filename*`. No fixed total byte limit; signed URL remains private. |
+| PUT `/v1/servers/:id/files/upload?path=...` | Raw `application/octet-stream` body and exact `X-NH-Upload-Length` header; optional `overwrite=false` refuses an existing destination name during preflight (`409 file_exists`); default `true`. `204` only after a complete provider upload. |
+| POST `/v1/servers/:id/files` | `write`: `{action,path,content}` (text ≤60,000 characters); `mkdir`: `{action,root,name}`; `rename`: `{action,root,files:[{from,to}]}`; `delete`: `{action,root,files:[name],confirm:true}`. Nonempty rename/delete selections are bounded by the 4 MiB request body, fully validated before dispatch and sent in sequential provider batches of up to 1,000 entries. No automatic replay after uncertain/partial failure. Returns `204` only after every batch succeeds. |
 | GET `/v1/servers/:id/backups` | Provider backup metadata. Create and restore use durable lifecycle operations. |
 | DELETE `/v1/servers/:id/backups/:backupId` | `{confirm:true}` → `204`. |
 | GET `/v1/servers/:id/backups/:backupId/download` | Backend-streamed attachment with no fixed total byte limit; no signed provider URL is returned. |
 
-Paths are validated and scoped through the adapter. File/command/backup-delete
-mutations share the lifecycle server lock and reject an active lifecycle job.
-Contending interactive writes return `409` instead of waiting with a database
-connection. A shared per-pool upload gate leaves connections available for
-authentication, authorization refresh and logout; a one-connection pool cannot
-accept uploads. Saturated upload slots also return `409`.
+Directory listing continues through the authenticated per-user Client API to
+Wings. Directory/editor GET, binary upload PUT, streamed copy and ordinary file
+mutations reuse a successful Application API identity verification:
+an API-process cache holds at most 1,024 proofs, with a fixed 60-second lifetime.
+A background renewal starts at 55 seconds; the old proof remains usable until
+its original deadline while the replacement is checked. Expired proofs never
+authorize access. A failed background request does not extend that deadline;
+the next request after expiry retries verification, or waits for a renewal still
+in progress. An unused renewed proof does not keep polling. Timers stop on API
+shutdown. Directory requests release DB connections between queries; upload
+admission reserves pool capacity for renewal while holding its write connection.
+
+Every directory request still checks the current session, role, project access
+and managed registry, and performs a fresh Client API listing. The proof is
+bound to provider URL/Application credentials, server/owner/provider identity,
+node and allocation claims, current provider-account/key revision, and local
+Blueprint projection identity/revision. Changes invalidate reuse; an explicit
+identity-invalidated event rejects access. Failures never fall back to stale
+proofs. Without a received event or changed local binding, out-of-band provider
+identity changes may take up to the 60-second lifetime to be detected. Client API
+authorization remains authoritative on each request. No directory contents,
+permission decisions or credentials are returned from this cache. Uploads retain
+fresh session/manage authorization, lifecycle/pending-claim checks, server locks,
+path validation and storage admission for each file. Editor GET reads reuse the
+same identity proof with fresh local session/read authorization and no pinned DB
+connection while waiting for renewal. File writes, directory creation, renames,
+deletes and streamed copies retain exclusive lifecycle locking, pending-upload
+fences and fresh local authorization, while reusing the same identity proof.
+The shared admission gate reserves DB pool capacity for proof renewal. Other
+service operations retain their existing identity policies. Editor reads request contents directly:
+Wings enforces path containment at open time; no ancestor directory listing is
+made. Missing files remain errors, and the editor byte/text limits still apply.
+
+Paths are validated and scoped through the adapter. Minecraft's file-mutation
+preflight reads each distinct ancestor directory once per guard invocation and
+reuses that listing for all selected paths. Independent listings run with at most
+four requests in flight. All reads settle before validation returns; validation
+retains original path order, so an unsafe ancestor takes precedence over a
+speculative descendant failure. Every path still receives the protected
+runtime, case-ambiguity and symlink checks; observations are discarded afterward
+and never used as confirmation of a mutation. For one bulk request selecting 49
+files directly inside a top-level folder, guard listings fall from 98 to 2.
+Delete remains one provider request
+containing the selected names; no deletion is dispatched until preflight passes.
+Copy and move share one fresh, request-local directory plan across selection,
+ancestor/runtime protection and collision checks. Distinct directories are read
+once through Blueprint batches of up to 48 (further split for a lower Owner
+extension limit); only a missing extension endpoint (404/405) falls back to two
+concurrent Client API reads. Authorization, transient and individual path errors
+never trigger a fallback. The plan is bounded to 20,000 directories and 32 MiB
+of retained metadata, with an 8 MiB response budget per batch. It contains no file
+contents, signed URLs or browser-cached observations. Primed reads settle before
+a failed operation releases its access context.
+
+Copy validates the whole selection before effects instead of relisting each
+source/destination at each stage. Wings opens the source and enforces filesystem
+containment; a returned source content length that differs from the planned size
+rejects the copy before upload. Upload streaming remains bounded. This preflight
+is not an atomic no-clobber operation: direct Panel, SFTP or game writes after the
+snapshot can race it. Successful earlier effects are not rolled back or replayed
+on a later failure, and uncertain outcomes remain explicit.
+
+For copy quota preflight, authenticated disk statistics from the existing console
+relay may be reused for at most 30 seconds. The process-local cache holds at most
+1,024 samples scoped to the managed identity and provider credential binding;
+unknown/offline status cannot establish a zero-usage sample. Actual file/restore/
+reinstall mutations invalidate observations before and after their effects, and
+samples received during writes are ignored. Missing/stale observations fall back
+to the existing resources API. There is no extra WebSocket or polling loop. Wings
+still enforces its quota, and NickHosting retains physical upload/staging capacity
+reservations independently of this observation.
+
+Native Wings 1.11.13 copy accepts only a source location, duplicates one regular
+file in the same directory with a generated suffix, and returns no chosen name.
+It cannot implement arbitrary-folder paste, recursive copy or explicit overwrite
+consent. The existing backend-streamed relay remains for these operations; no
+file contents pass through the browser during copy. See the verified
+[Wings copy implementation](https://github.com/pterodactyl/wings/blob/v1.11.13/server/filesystem/filesystem.go)
+and [Panel adapter](https://github.com/pterodactyl/panel/blob/v1.11.11/app/Repositories/Wings/DaemonFileRepository.php).
+
+File/command/backup-delete mutations share the lifecycle server lock and reject
+an active lifecycle job.
+Background reconciliation collects provider/host observations without holding
+that lock. Only its brief database apply takes the lock, rejecting superseded
+observations before any state/metric/reservation update. Collection does not
+extend the previous observation's validity. Reconciliation waiting on resource
+admission does not monopolize the server lock.
+Initial server-lock contention returns `409 operation_busy` before the callback or
+any provider effect, instead of waiting with a database connection. A shared
+per-pool upload gate leaves connections available for authentication, authorization
+refresh and logout; a one-connection pool cannot accept uploads. Saturated upload
+slots also return `409 operation_busy` before dispatch. This explicit code is proof
+that this attempt did not start an effect; generic `conflict`, lifecycle conflicts,
+existing ingestion claims and unknown provider outcomes do not carry that proof.
+The browser upload queue alone retries `operation_busy` with a bounded backoff;
+there is no second retry/wait layer in the API.
 Provider failures stay failures; no synthetic success response is produced.
 The JSON text-edit action remains bounded; binary transfers use the separate raw
 upload endpoint. `path` is a relative server path, with traversal, control
@@ -158,6 +295,31 @@ files are supported. The API validates the server's configured disk allowance
 and observed usage, accounting for an existing regular file when overwriting.
 Native provider filesystem quotas remain authoritative against concurrent game
 writes. Uploading onto a directory or symlink is refused.
+
+The legacy non-batch upload preflight shares request-local directory observations between the game
+guard and destination checks; it does not list the destination twice. Resource
+usage is read concurrently with independent path checks. All started branches
+settle before the server lock/database connection can be released on failure.
+The optional `overwrite` query accepts only `true` or `false`; `false` rejects
+case-insensitive name collisions before obtaining an upload URL or creating an
+ingestion claim. Folder uploads use this server-side preflight instead of a
+separate browser listing before each file. This is not an atomic no-clobber
+filesystem operation: concurrent game/SFTP/provider writes can still race it.
+Existing locking, storage admission and uncertain-outcome recovery are unchanged.
+
+The WebPanel uses the [M5 prepared upload group contract](M5-API-CONTRACTS.md#transfer-network-telemetry-and-sleep-descriptors):
+`POST /v1/servers/:id/files/upload-batches`, independent binary PUTs with
+`batchId`/`entryId`, per-entry cancellation and group close. Common path/quota
+preflight runs once for the bounded group; external filesystem changes may race
+that observation. Per-file authorization and durable admission still apply.
+`uploadConcurrency` defaults to 2 (Owner setting or `NH_UPLOAD_CONCURRENCY`, 1–6).
+Group entries hold shared lifecycle and ingestion locks; generic writes keep
+exclusive locks. The existing single host claim stores the group ledger and full
+conservative reservation, with multipart overhead for every concurrent slot.
+Uncertain entries retain space and a slot; already-admitted siblings may continue
+in remaining slots. Other groups remain excluded until the claim is resolved.
+There is no database migration or provider configuration change. Legacy single
+uploads below retain their original behavior.
 
 Uploads stream one generated multipart `files` part to the private Wings signed
 upload URL; the body is never accumulated in `FormData` or a full-file buffer.
@@ -190,9 +352,13 @@ no overwrite credit. The multipart tempfile can coexist with the destination
 copy. The temporary budget and both free-space observations minus headroom must
 cover this conservative peak; destination headroom is at least the host disk
 headroom. Known RAM-backed staging/data filesystems are rejected. Sibling
-nodes share the host claim. Provider success after complete transfer releases it;
-abort, timeout, crash or uncertain completion retains it without a timer-based
-expiry. Further uploads on that host and mutations of the affected server fail
+nodes share the host claim. Provider success after complete transfer releases it.
+The direct upload route also releases its exact claim when the adapter proves the
+Wings POST was never invoked (including cancellation during signed-URL lookup),
+auditing `server.upload.not_dispatched` rather than success. The proof is internal
+to the adapter, not inferred from HTTP status or browser cancellation. Once POST
+is invoked, abort, timeout, crash or uncertain completion retains the claim without
+a timer-based expiry. Further uploads on that host and mutations of the affected server fail
 closed. Existing game/provider writes can still consume space concurrently;
 the Owner's staging budget and headroom must account for these workloads.
 
@@ -237,6 +403,24 @@ separate deployment settings and are not changed by the application.
 | GET/PUT `/v1/owner/runtime-mappings` | Owner runtime mappings, or mapping request described below. |
 | PUT `/v1/owner/user-limits` | `{userId,memoryMiB,cpuPercent,storageMiB,expiresAt?,reason}`; explicit audited limits, optional future expiry. Returns `204`. |
 
+Allocation discovery uses one complete, bounded provider response rather than
+combining unordered OFFSET pages. Installed Panel 1.x allocation pagination has
+no guaranteed ordering: a multi-page read was observed to duplicate allocations
+and omit others even when its row count matched the reported total. The adapter
+requires consistent total/count/page metadata and unique allocation IDs, including
+assigned allocations. It rejects truncated inventories, missing metadata, more
+than 10,000 allocations per node, or responses over the existing 4 MiB transport
+limit with `integration_unavailable`; it never deduplicates and accepts a partial
+inventory. This applies to Owner discovery, provisioning and Gateway collision
+checks alike. Nodes exceeding this explicit safety bound need an independently
+verified complete-inventory strategy before use; no provider configuration is
+changed by discovery.
+
+`PUT /v1/owner/nodes` accepts at most 4 MiB of JSON so an explicit pool of thousands
+of pins can be saved. The regular Owner/session and Origin checks, per-pin identity
+validation and retained-claim protections still apply. Other ordinary JSON routes
+retain their 64 KiB limit; this is not a general request-size increase.
+
 Host policy fields are `{id?,name,memoryLimitMiB,cpuLimitPercent,storagePoolMiB,
 memoryHeadroomMiB,cpuHeadroomPercent,diskHeadroomMiB,localDiskPath,observerId,
 uploadPolicy?,enabled?}`. RAM/disk headroom must each be at least 256 MiB and less than their
@@ -257,7 +441,7 @@ override refuses conflicting Owner overhead edits while allowing unrelated node
 fields to be changed.
 
 Provisioning requires an explicitly configured `backendAllocationPool` on the
-managed node. Its shape is `{allocations:[{allocationId,address,backendAddress?,port}],
+managed node. Its shape is `{allocations:[{allocationId,address,backendAddress?,port,delivery?,directEndpoint?}],
 gatewayBindAddresses:[address,...],loopbackRemap?}`. There is **no inferred/default
 pool**. `address` identifies the exact canonical Pterodactyl allocation IP;
 `backendAddress` identifies the effective Wings/Docker binding for future Gateway
@@ -296,9 +480,17 @@ IDs, provider addresses and ports are checked against fresh inventory on the
 selected provider node, both at reservation and before new remote creation.
 Assigned inventory collisions are checked after effective binding translation;
 unknown same-port loopback semantics fail closed. Gateway declarations must be
-exact, non-wildcard and disjoint from effective backend bindings. Other managed
-nodes on the same physical host cannot overlap effective backend/gateway
-namespaces, including durable claims in disabled pools. Wings publishes both
+exact, non-wildcard and disjoint from effective **Gateway backend** bindings.
+Explicit `delivery:'direct'` pins with a `directEndpoint:{hostname,port}` may share
+a Gateway ingress IP on different ports. This allows one provider node to serve
+both delivery modes; an IP alone does not reserve every port. Backend-only pins
+still require a different IP, and existing claims retain their immutable connection
+mode. On the same physical host, pool edits and route registration reject actual
+overlapping address/port endpoints, including sibling nodes, environment overrides,
+disabled routes/pools and retained allocation claims. Public route ports need not
+equal backend ports, so collision checks use the actual registered public port.
+Existing routes can still be disabled after a conflicting environment override;
+creating or enabling a conflicting route remains blocked. Wings publishes both
 TCP and UDP for each allocation, so a different SDK transport is not collision
 protection. Migration 009 stores provider `address` and `backend_address`
 separately, backfills existing direct claims and prevents identity retargeting.
@@ -430,9 +622,10 @@ optional overrides; do not seed its example values into PostgreSQL.
 | `defaultUserStorageMiB` | `NH_DEFAULT_USER_STORAGE_MIB` | `32768` |
 | `maxServersPerUser` | `NH_MAX_SERVERS_PER_USER` | `null` (no total-count cap); positive integer enables it, literal `null` overrides a stored cap |
 | `maxConcurrentProvisionsPerUser` | `NH_MAX_CONCURRENT_PROVISIONS_PER_USER` | `4`; limits pending provisioning only, range 1–100 |
-| `observationMaxAgeSeconds` | `NH_OBSERVATION_MAX_AGE_SECONDS` | `15` (maximum `30`) |
+| `observationMaxAgeSeconds` | `NH_OBSERVATION_MAX_AGE_SECONDS` | `4`; admission caps effective age at `4` seconds (smaller configured values still apply) |
 | `pterodactylWebSocketOrigins` | `NH_PTERODACTYL_WEBSOCKET_ORIGINS` | `[]`, JSON array of exact `ws`/`wss` origins |
 | `pterodactylDownloadOrigins` | `NH_PTERODACTYL_DOWNLOAD_ORIGINS` | `[]`, JSON array of exact HTTP(S) origins |
+| `uploadConcurrency` | `NH_UPLOAD_CONCURRENCY` | `2`, integer 1–6; bounded concurrent entries in a prepared upload group |
 | `pterodactylUploadOrigins` | `NH_PTERODACTYL_UPLOAD_ORIGINS` | `[]`, separate exact HTTP(S) Wings upload origins |
 | `sftpgoBaseUrl`, `sftpgoDataRoot`, `sftpgoInstanceId` | `NH_SFTPGO_BASE_URL`, `NH_SFTPGO_DATA_ROOT`, `NH_SFTPGO_INSTANCE_ID` | Unset; absolute provider-visible root, instance UUID |
 | `sftpCredentialTtlSeconds` | `NH_SFTP_CREDENTIAL_TTL_SECONDS` | `3600`, range 60–86400 |
@@ -480,6 +673,33 @@ Wings volume mapping is implied by running local tests. Preserve PostgreSQL,
 ignored provenance ledgers and encryption keys during recovery; dropping Redis
 delivery state is not equivalent to cancelling a business operation.
 
+Temporary delivery deferrals (for example a busy per-server advisory lock) re-arm
+the existing PostgreSQL outbox entry after 500 ms, respecting the job's later
+`next_attempt_at` and an already earlier valid dispatch deadline. This is distinct
+from the unchanged 30-second lost-delivery recovery fallback. A consumer first
+locks the outbox row by job ID, waiting for a concurrent publication to commit,
+then checks the exact delivery generation; stale deliveries cannot reschedule a
+new generation or recreate a removed outbox row. Terminal jobs are not rearmed.
+Server operations that no longer own their server's active-operation slot or whose
+server is deleted return internal `inactive`, rather than requesting prompt retries.
+No job attempt, permission, provider effect or reservation is replayed by rearming;
+the regular processor retains all authorization, locks and idempotency checks.
+Worker delivery logs include processor/rearm `durationMs` and, on deferral,
+`deferredRetryScheduled`. This duration is not pure queue latency. Polling and
+external checks still add elapsed time; 500 ms is a retry delay, not an end-to-end
+latency guarantee.
+
+Provider failures before any durable effect preparation use a separate persistent
+`plan.providerPreflightFailures` budget, bounded by the job's `max_attempts`.
+Historical observation polls do not consume that budget. Missing credentials,
+permission denials, missing resources and invalid provider requests/responses
+terminate immediately at this boundary; transient unavailable responses retry
+within the budget. A 429 observes `Retry-After` (60 seconds if absent) without
+consuming mutation or preflight attempts. Jobs with prepared, uncertain or
+confirmed effects retain their existing recovery path: an observation error must
+not authorize replay or discard an unresolved mutation. No database migration
+or manual reset of queued jobs is needed.
+
 ## Installer admission and completion
 
 Managed node configuration accepts `installerMemoryMiB` and `installerCpuPercent`
@@ -491,10 +711,24 @@ creation or reinstall. Installer reservations share host capacity with running
 servers, but never count against the user's active-game budget. Reservations
 survive unknown remote outcomes and missed completion evidence.
 
-An installation is reported complete only after a fresh backend `install completed`
+The generic installation confirmation path requires a fresh backend `install completed`
 notification followed by successful current Panel installation state on the same
 connection, plus independent observation that the exact installer container has
 terminated. The notification occurs on failure too, and a daemon reset can clear
 Panel status; neither signal alone is sufficient. A disconnected/missed event is
-an uncertain result requiring review, not an automatic retry. Game readiness and
-artifact validation are separate plugin capabilities in later milestones.
+an uncertain result, not permission to repeat the remote installation.
+
+**M5 initial-install recovery amendment:** a trusted game module may instead verify
+the required outputs of the original provisioning operation. This is a separate
+`required_outputs_verified` receipt, not a claim that a missed completion event was
+observed. The initial Vanilla implementation verifies the resolved server artifact's
+size and hashes, immutable runtime/egg/launch binding and observed runtime image.
+The lifecycle also checks the original creation effect and managed identity, current
+successful provider state, an offline game process, proof that the exact installer
+is no longer running,
+and authorization before and after verification. Only then can it release the
+installation reservation and continue the existing game-configuration workflow.
+Reinstall and wipe cannot use this recovery: old valid files cannot prove a new
+installation succeeded. Unsupported modules retain the generic confirmation path.
+Game readiness remains a separate requirement; successful output verification does
+not prove the game has started or that Gateway traffic is ready.

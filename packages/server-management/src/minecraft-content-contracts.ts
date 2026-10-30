@@ -26,7 +26,8 @@ export const minecraftStoredPlayerSchema = z
   .object({
     uuid: z.string().regex(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/),
     name: playerName,
-    source: z.literal('mojang'),
+    // Server-file provenance preserves observed UUID authority without claiming Mojang verification.
+    source: z.enum(['mojang', 'server-file']),
     verifiedAt: z.iso.datetime({ offset: true }),
     level: z.number().int().min(1).max(4).optional(),
     bypassesPlayerLimit: z.boolean().optional(),
@@ -94,6 +95,7 @@ export const minecraftContentCommandSchema = z.discriminatedUnion('kind', [
       list: z.enum(['operators', 'whitelist']),
       action: z.enum(['add', 'remove']),
       name: playerName,
+      expectedUuid: minecraftStoredPlayerSchema.shape.uuid.optional(),
       operatorLevel: z.number().int().min(1).max(4).optional(),
       bypassesPlayerLimit: z.boolean().optional(),
     })
@@ -146,5 +148,77 @@ export interface MinecraftPreparedContent {
   archiveSha256?: string;
   planDigest?: string;
   deletePaths?: string[];
-  world?: { archiveSha256?: string; dataVersion: number; existing: boolean };
+  /** Target runtime data version, when known; imported metadata is observed separately. */
+  world?: {
+    archiveSha256?: string;
+    dataVersion?: number;
+    existing: boolean;
+    /** Internal observation from Worlds inspection, never accepted in a public command. */
+    observation?: { name: string; dataVersion: number; sha256: string };
+  };
+}
+
+/** Removing an inactive world is a file operation, independent of process state.
+ * Its current selected-world/path checks run at dispatch, under the server lock.
+ * A requested whole-server backup retains the existing stopped-state workflow. */
+export function minecraftContentRemovesInactiveWorld(input: unknown): boolean {
+  if (!input || typeof input !== 'object') return false;
+  const plan = input as Partial<MinecraftPreparedContent>;
+  const command = minecraftContentCommandSchema.safeParse(plan.command);
+  return (
+    command.success &&
+    command.data.kind === 'world-remove' &&
+    command.data.backupBefore === false &&
+    plan.backupBefore === false &&
+    plan.world?.existing === true
+  );
+}
+
+/** Selection changes only level-name, but always requires a live stopped proof.
+ * This is deliberately separate from operations allowed while online. */
+export function minecraftContentSelectsWorld(input: unknown): boolean {
+  if (!input || typeof input !== 'object') return false;
+  const plan = input as Partial<MinecraftPreparedContent>;
+  const command = minecraftContentCommandSchema.safeParse(plan.command);
+  return (
+    command.success &&
+    command.data.kind === 'world-select' &&
+    plan.backupBefore === false &&
+    plan.world?.existing === true &&
+    Number.isSafeInteger(plan.world.dataVersion) &&
+    (plan.world.dataVersion ?? 0) > 0
+  );
+}
+
+/** These prepared edits neither allocate nor release compute. Their lifecycle
+ * uses local claim checks and atomic metadata journals, while retaining the
+ * appropriate final stopped proof; this never grants online editing. */
+export function minecraftContentChangesOnlyMetadata(input: unknown): boolean {
+  if (minecraftContentSelectsWorld(input)) return true;
+  if (!input || typeof input !== 'object') return false;
+  const plan = input as Partial<MinecraftPreparedContent>;
+  const command = minecraftContentCommandSchema.safeParse(plan.command);
+  return (
+    command.success &&
+    (command.data.kind === 'properties' || command.data.kind === 'player') &&
+    z.uuid().safeParse(plan.combinationId).success &&
+    plan.backupBefore === false
+  );
+}
+
+/** Derived from a trusted prepared plan, never a client-controlled online flag. */
+export function minecraftContentAllowsOnline(input: unknown): boolean {
+  if (minecraftContentRemovesInactiveWorld(input)) return true;
+  if (!input || typeof input !== 'object') return false;
+  const plan = input as Partial<MinecraftPreparedContent>;
+  const command = minecraftContentCommandSchema.safeParse(plan.command);
+  return (
+    command.success &&
+    command.data.kind === 'world-import' &&
+    command.data.replace === undefined &&
+    plan.world?.existing === false &&
+    plan.backupBefore === false &&
+    Array.isArray(plan.deletePaths) &&
+    plan.deletePaths.length === 0
+  );
 }

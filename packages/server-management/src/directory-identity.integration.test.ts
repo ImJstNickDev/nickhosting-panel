@@ -1,0 +1,1340 @@
+import { randomBytes, randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
+import { authSessionId, SecretCodec } from '@nickhosting/core';
+import { createDatabase } from '@nickhosting/database';
+import { createTestDatabase } from '@nickhosting/database/testing';
+import {
+  type ApplicationServer,
+  type PrivateTransferCache,
+  type PterodactylAdapter,
+  PterodactylError,
+} from '@nickhosting/pterodactyl-adapter';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createDirectoryIdentityCache } from './directory-identity.js';
+import { assertManagedIdentity, readManagedIdentity } from './managed-identity.js';
+import { createProject, setProjectMember } from './registry.js';
+import { createManagementRuntime } from './runtime.js';
+import { managementFixture, pendingUploadFixture } from './test-fixtures.js';
+import { createUploadTiming } from './upload-timing.js';
+
+describe('directory browsing identity proof reuse', () => {
+  let database: Awaited<ReturnType<typeof createTestDatabase>>;
+  let f: Awaited<ReturnType<typeof managementFixture>>;
+  let serverId: string;
+  let clock: number;
+  let deferredProofs: Array<ReturnType<typeof Promise.withResolvers<ApplicationServer>>>;
+  function deferredProof() {
+    const value = Promise.withResolvers<ApplicationServer>();
+    deferredProofs.push(value);
+    return value;
+  }
+  let cache: ReturnType<typeof createDirectoryIdentityCache>;
+  let sharedCaches: ReturnType<typeof createDirectoryIdentityCache>[];
+  let restoreWallClock: (() => void) | undefined;
+  const codec = new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } });
+  const remote = vi.fn<() => Promise<ApplicationServer>>();
+  const listing = vi.fn<PterodactylAdapter['listFiles']>(async () => []);
+  const uploaded = vi.fn(async () => 'isolated upload');
+  const read = vi.fn(async () => 'isolated file contents');
+
+  async function identity(): Promise<ApplicationServer> {
+    const server = await f.db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const node = await f.db
+      .selectFrom('managed_nodes')
+      .selectAll()
+      .where('id', '=', server.node_id)
+      .executeTakeFirstOrThrow();
+    const allocations = await f.db
+      .selectFrom('server_allocations')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .execute();
+    return {
+      id: server.pterodactyl_id,
+      uuid: server.pterodactyl_uuid,
+      identifier: server.pterodactyl_identifier,
+      external_id: server.external_id,
+      node: node.pterodactyl_node_id,
+      user: server.provider_user_id,
+      allocation: allocations.find((row) => row.is_primary)?.pterodactyl_allocation_id,
+      relationships: {
+        allocations: {
+          data: allocations.map((row) => ({
+            attributes: {
+              id: row.pterodactyl_allocation_id,
+              ip: row.address,
+              port: row.port,
+              assigned: true,
+            },
+          })),
+        },
+      },
+    } as ApplicationServer;
+  }
+  const runtime = (adapter = f.adapter) =>
+    createManagementRuntime({ db: f.db, codec, adapter, directoryIdentityCache: cache });
+  const browse = async (path = '') => (await runtime()).listFiles(f.context, serverId, path);
+  const upload = async () => (await runtime()).uploadAccess(f.context, serverId, uploaded);
+  const mutateFiles = async (timing = createUploadTiming()) =>
+    (await runtime()).fileMutationAccess(f.context, serverId, uploaded, timing);
+  const readFile = async (timing = createUploadTiming()) =>
+    (await runtime()).fileReadAccess(f.context, serverId, read, timing);
+  const batchUpload = async (
+    beforeTransfer: () => Promise<void> = async () => {},
+    timing = createUploadTiming(),
+  ) => {
+    const service = await runtime();
+    return service.uploadBatchAccess(
+      f.context,
+      serverId,
+      async (_identifier, connection, current, server) => {
+        await beforeTransfer();
+        await service.authorizeTransfer(current, serverId, true, connection, timing, server);
+        return uploaded();
+      },
+      false,
+      timing,
+      true,
+    );
+  };
+
+  beforeEach(async () => {
+    database = await createTestDatabase();
+    f = await managementFixture(database.db, { interactive: true });
+    serverId = await f.server();
+    clock = 0;
+    deferredProofs = [];
+    sharedCaches = [];
+    cache = createDirectoryIdentityCache(() => clock);
+    remote.mockReset().mockImplementation(identity);
+    listing.mockReset().mockResolvedValue([]);
+    uploaded.mockReset().mockResolvedValue('isolated upload');
+    read.mockClear();
+    f.adapter.getApplicationServer = remote;
+    f.adapter.listFiles = listing;
+  });
+  afterEach(async () => {
+    cache?.close();
+    for (const instance of sharedCaches) instance.close();
+    restoreWallClock?.();
+    restoreWallClock = undefined;
+    vi.useRealTimers();
+    for (const proof of deferredProofs ?? []) proof.resolve(await identity());
+    if (deferredProofs?.length) await delay(30);
+    await database?.destroy();
+  });
+
+  async function sharedFixture() {
+    const wallClock = vi.spyOn(Date, 'now').mockImplementation(() => 1_800_000_000_000 + clock);
+    restoreWallClock = () => wallClock.mockRestore();
+    const values = new Map<string, string>();
+    const shared: PrivateTransferCache = {
+      get: vi.fn(async (key) => values.get(key)),
+      take: vi.fn(async (key) => {
+        const value = values.get(key);
+        values.delete(key);
+        return value;
+      }),
+      put: vi.fn(async (key, value) => {
+        values.set(key, value);
+      }),
+      delete: vi.fn(async (key) => {
+        values.delete(key);
+      }),
+    };
+    const base = await identity();
+    const complete: ApplicationServer = {
+      ...base,
+      name: 'identity fixture',
+      description: null,
+      suspended: false,
+      limits: { memory: 256, disk: 1024, cpu: 100, swap: 0, io: 500, threads: null },
+      feature_limits: { databases: 0, allocations: 1, backups: 0 },
+      nest: 1,
+      egg: 1,
+      container: {
+        startup_command: 'run',
+        image: 'fixture/game',
+        installed: true,
+        environment: { SECRET: 'do-not-serialize' },
+      },
+      relationships: {
+        allocations: { object: 'list', data: base.relationships?.allocations?.data ?? [] },
+      },
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    };
+    remote.mockResolvedValue(complete);
+    cache.close();
+    cache = createDirectoryIdentityCache(() => clock, shared);
+    const next = () => {
+      const instance = createDirectoryIdentityCache(() => clock + 100_000, shared);
+      sharedCaches.push(instance);
+      return instance;
+    };
+    const server = () =>
+      f.db
+        .selectFrom('managed_servers')
+        .selectAll()
+        .where('id', '=', serverId)
+        .executeTakeFirstOrThrow();
+    const verify = async (instance = cache, binding = 'private-provider-scope') =>
+      instance.verify(f.db, await server(), binding, remote);
+    return { shared, values, next, verify, complete };
+  }
+
+  it('shares a schema-validated remote proof across instances without extending its original expiry', async () => {
+    const shared = await sharedFixture();
+    expect(await shared.verify()).toEqual(shared.complete);
+    const first = vi.mocked(shared.shared.put).mock.calls[0];
+    expect(first?.[0]).toMatch(/^fileman\.identity\.v1:[a-f0-9]{64}$/);
+    expect(first?.[0]).not.toContain('private-provider-scope');
+    expect(first?.[1]).not.toContain('do-not-serialize');
+    expect(first?.[2]).toBe(60_000);
+    clock = 20_000;
+    expect((await shared.verify(shared.next())).uuid).toBe(shared.complete.uuid);
+    expect(remote).toHaveBeenCalledOnce();
+    expect(shared.shared.put).toHaveBeenCalledOnce();
+    clock = 60_000;
+    await shared.verify(shared.next());
+    expect(remote).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses only the two scope queries for cold and shared proofs, and one for a warm local proof', async () => {
+    const shared = await sharedFixture();
+    const server = await f.db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    let queries = 0;
+    const measured = f.db.withPlugin({
+      transformQuery(args) {
+        queries++;
+        return args.node;
+      },
+      async transformResult(args) {
+        return args.result;
+      },
+    });
+    const snapshot = await readManagedIdentity(measured, server);
+    expect(queries).toBe(1);
+    expect(() => assertManagedIdentity(server, shared.complete, snapshot)).not.toThrow();
+    queries = 0;
+    await cache.verify(measured, server, 'scope-query-fixture', remote);
+    expect(queries).toBe(2);
+    queries = 0;
+    await cache.verify(measured, server, 'scope-query-fixture', remote);
+    expect(queries).toBe(1);
+    queries = 0;
+    await shared.next().verify(measured, server, 'scope-query-fixture', remote);
+    expect(queries).toBe(2);
+    expect(remote).toHaveBeenCalledOnce();
+  });
+
+  it('obtains a new shared proof after scope changes or explicit local invalidation', async () => {
+    const shared = await sharedFixture();
+    await shared.verify();
+    await shared.verify(shared.next(), 'different-provider');
+    expect(remote).toHaveBeenCalledTimes(2);
+    cache.invalidate(serverId);
+    await shared.verify();
+    expect(remote).toHaveBeenCalledTimes(3);
+    await f.db
+      .updateTable('managed_servers')
+      .set({ pterodactyl_identifier: 'different-server' })
+      .where('id', '=', serverId)
+      .execute();
+    await expect(shared.verify(shared.next())).rejects.toThrow('provenance_mismatch');
+    expect(remote).toHaveBeenCalledTimes(4);
+  });
+
+  it('uses the provider when shared data is corrupt, unrelated, unavailable, or cannot be written', async () => {
+    const shared = await sharedFixture();
+    await shared.verify();
+    const original = [...shared.values.values()][0];
+    if (!original) throw new Error('Missing shared fixture');
+    const parsed = JSON.parse(original);
+    for (const value of [
+      '{',
+      JSON.stringify({ ...parsed, scope: 'a'.repeat(64) }),
+      JSON.stringify({ ...parsed, remote: { ...parsed.remote, uuid: randomUUID() } }),
+      JSON.stringify({ ...parsed, expiresAt: Date.now() + 61_000 }),
+    ]) {
+      vi.mocked(shared.shared.get).mockResolvedValueOnce(value);
+      expect((await shared.verify(shared.next())).uuid).toBe(shared.complete.uuid);
+    }
+    vi.mocked(shared.shared.get).mockRejectedValueOnce(new Error('cache private failure'));
+    vi.mocked(shared.shared.put).mockRejectedValueOnce(new Error('cache private failure'));
+    expect((await shared.verify(shared.next())).uuid).toBe(shared.complete.uuid);
+    expect(remote).toHaveBeenCalledTimes(6);
+  });
+
+  it('does not reuse interactive authority when another runtime has a shared proof', async () => {
+    const shared = await sharedFixture();
+    await browse();
+    expect(remote).toHaveBeenCalledOnce();
+    const service = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      directoryIdentityCache: shared.next(),
+    });
+    await f.db
+      .updateTable('session')
+      .set({ expiresAt: new Date(0) })
+      .where('id', '=', f.context[authSessionId] as string)
+      .execute();
+    await expect(service.listFiles(f.context, serverId, '')).rejects.toMatchObject({
+      code: 'unauthenticated',
+    });
+    expect(remote).toHaveBeenCalledOnce();
+    expect(listing).toHaveBeenCalledOnce();
+  });
+
+  it('rejects an identity-invalidated change feed before restoring a shared proof', async () => {
+    const shared = await sharedFixture();
+    await shared.verify();
+    const account = await f.db
+      .selectFrom('provider_accounts')
+      .selectAll()
+      .where('user_id', '=', f.context.subjectUserId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .insertInto('provider_server_projections')
+      .values({
+        server_id: serverId,
+        instance_id: account.instance_id as string,
+        revision: '1',
+        payload: {},
+        valid: true,
+        synchronized_at: new Date(),
+        identity_invalidated: true,
+      })
+      .execute();
+    await expect(shared.verify(shared.next())).rejects.toThrow('provenance_mismatch');
+    expect(shared.shared.get).toHaveBeenCalledOnce();
+    expect(remote).toHaveBeenCalledOnce();
+  });
+
+  it('reuses identity across newly constructed runtimes and folders without caching their listing', async () => {
+    for (const path of ['', 'world', 'world/playerdata']) await browse(path);
+    expect(remote).toHaveBeenCalledTimes(1);
+    expect(listing.mock.calls.map((call) => call[1])).toEqual(['', 'world', 'world/playerdata']);
+  });
+
+  it('batches only directory metadata with one identity proof and sequential Owner-limited chunks', async () => {
+    const settings = vi.fn(async () => ({
+      directoryBatchLimit: 2,
+      directoryConcurrency: 2,
+      directoryTimeoutSeconds: 8,
+    }));
+    let active = 0;
+    const batch = vi.fn<PterodactylAdapter['listDirectoriesBatch']>(async (_id, paths) => {
+      expect(active++).toBe(0);
+      await delay(1);
+      active--;
+      return paths.map((directory) =>
+        directory === 'missing'
+          ? { directory, error: 'not_found' as const }
+          : { directory, files: [] },
+      );
+    });
+    const downloads = vi.fn(async () => {});
+    Object.assign(f.adapter, {
+      getDirectoryBatchSettings: settings,
+      listDirectoriesBatch: batch,
+      prefetchDownloads: downloads,
+    });
+    const directories = ['', 'world', 'world/region', 'logs', 'missing'];
+    for (let count = 0; count < 2; count++) {
+      expect(await (await runtime()).listDirectories(f.context, serverId, directories)).toEqual(
+        directories.map((directory) =>
+          directory === 'missing' ? { directory, error: 'not_found' } : { directory, files: [] },
+        ),
+      );
+    }
+    expect(remote).toHaveBeenCalledTimes(1);
+    expect(settings).toHaveBeenCalledTimes(1);
+    expect(batch.mock.calls.map(([, paths]) => paths)).toEqual([
+      ['', 'world'],
+      ['world/region', 'logs'],
+      ['missing'],
+      ['', 'world'],
+      ['world/region', 'logs'],
+      ['missing'],
+    ]);
+    expect(listing).not.toHaveBeenCalled();
+    expect(downloads).not.toHaveBeenCalled();
+  });
+
+  it('does not fan out to native listings when the optional directory extension is absent', async () => {
+    const settings = vi.fn(async () => {
+      throw new PterodactylError('unavailable', 'client', 'rejected', 404);
+    });
+    const batch = vi.fn();
+    Object.assign(f.adapter, { getDirectoryBatchSettings: settings, listDirectoriesBatch: batch });
+    for (let count = 0; count < 2; count++)
+      await expect(
+        (await runtime()).listDirectories(f.context, serverId, ['world']),
+      ).rejects.toMatchObject({ upstreamStatus: 404 });
+    expect(settings).toHaveBeenCalledTimes(1);
+    expect(batch).not.toHaveBeenCalled();
+    expect(listing).not.toHaveBeenCalled();
+    await browse('world');
+    expect(listing).toHaveBeenCalledTimes(1);
+    expect(remote).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([401, 403, 409])(
+    'invalidates identity after contradictory directory batch access status %s',
+    async (status) => {
+      const settings = vi.fn(async () => ({
+        directoryBatchLimit: 48,
+        directoryConcurrency: 2,
+        directoryTimeoutSeconds: 8,
+      }));
+      const batch = vi.fn(async () => {
+        throw new PterodactylError('unavailable', 'client', 'rejected', status);
+      });
+      Object.assign(f.adapter, {
+        getDirectoryBatchSettings: settings,
+        listDirectoriesBatch: batch,
+      });
+      await browse('world');
+      expect(remote).toHaveBeenCalledTimes(1);
+      await expect(
+        (await runtime()).listDirectories(f.context, serverId, ['world']),
+      ).rejects.toMatchObject({ upstreamStatus: status });
+      await browse('world');
+      expect(remote).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('retries transient directory settings failures and refreshes their bounded cache after expiry', async () => {
+    const settings = vi.fn(async () => ({
+      directoryBatchLimit: 48,
+      directoryConcurrency: 2,
+      directoryTimeoutSeconds: 8,
+    }));
+    settings.mockRejectedValueOnce(new PterodactylError('unavailable', 'client', 'rejected', 503));
+    const batch = vi.fn<PterodactylAdapter['listDirectoriesBatch']>(async (_id, paths) =>
+      paths.map((directory) => ({ directory, files: [] })),
+    );
+    Object.assign(f.adapter, { getDirectoryBatchSettings: settings, listDirectoriesBatch: batch });
+    await expect(
+      (await runtime()).listDirectories(f.context, serverId, ['world']),
+    ).rejects.toMatchObject({ upstreamStatus: 503 });
+    await (await runtime()).listDirectories(f.context, serverId, ['world']);
+    await (await runtime()).listDirectories(f.context, serverId, ['world']);
+    expect(settings).toHaveBeenCalledTimes(2);
+    const now = performance.now();
+    const time = vi.spyOn(performance, 'now').mockReturnValue(now + 60_001);
+    try {
+      await (await runtime()).listDirectories(f.context, serverId, ['world']);
+      expect(settings).toHaveBeenCalledTimes(3);
+      expect(remote).toHaveBeenCalledTimes(1);
+    } finally {
+      time.mockRestore();
+    }
+  });
+
+  it.each(['abort', 'deadline'] as const)(
+    'stops dispatching directory batches after %s',
+    async (reason) => {
+      const settings = vi.fn(async () => ({
+        directoryBatchLimit: 1,
+        directoryConcurrency: 2,
+        directoryTimeoutSeconds: 8,
+      }));
+      const controller = new AbortController();
+      const now = performance.now();
+      const time = vi.spyOn(performance, 'now').mockReturnValue(now);
+      const batch = vi.fn<PterodactylAdapter['listDirectoriesBatch']>(async (_id, paths) => {
+        if (reason === 'abort') controller.abort();
+        else time.mockReturnValue(now + 8_001);
+        return paths.map((directory) => ({ directory, files: [] }));
+      });
+      Object.assign(f.adapter, {
+        getDirectoryBatchSettings: settings,
+        listDirectoriesBatch: batch,
+      });
+      try {
+        const result = (await runtime()).listDirectories(
+          f.context,
+          serverId,
+          ['world', 'logs', 'plugins'],
+          controller.signal,
+        );
+        if (reason === 'abort') await expect(result).rejects.toMatchObject({ name: 'AbortError' });
+        else
+          expect(await result).toEqual([
+            { directory: 'world', files: [] },
+            { directory: 'logs', error: 'deadline_exceeded' },
+            { directory: 'plugins', error: 'deadline_exceeded' },
+          ]);
+        expect(batch).toHaveBeenCalledTimes(1);
+        expect(listing).not.toHaveBeenCalled();
+      } finally {
+        time.mockRestore();
+      }
+    },
+  );
+
+  it('retains one total response budget when directory batches are split for a lower Owner limit', async () => {
+    const settings = vi.fn(async () => ({
+      directoryBatchLimit: 1,
+      directoryConcurrency: 2,
+      directoryTimeoutSeconds: 8,
+    }));
+    const files = Array.from({ length: 1024 }, () => ({
+      name: 'x'.repeat(4096),
+      size: 0,
+      is_file: true,
+      is_symlink: false,
+      mode: '0644',
+      mimetype: 'text/plain',
+      created_at: '',
+      modified_at: '',
+    }));
+    const batch = vi.fn<PterodactylAdapter['listDirectoriesBatch']>(async (_id, paths) =>
+      paths.map((directory) => ({ directory, files })),
+    );
+    Object.assign(f.adapter, { getDirectoryBatchSettings: settings, listDirectoriesBatch: batch });
+    await expect(
+      (await runtime()).listDirectories(f.context, serverId, ['world', 'logs', 'plugins']),
+    ).rejects.toMatchObject({ code: 'integration_unavailable' });
+    expect(batch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(
+    [
+      [],
+      ['world', 'world'],
+      ['../world'],
+      ['/world'],
+      ['world/'],
+      ['world\u200b'],
+      Array.from({ length: 49 }, (_, index) => `folder-${index}`),
+    ].map((directories) => ({ directories })),
+  )(
+    'rejects invalid directory batches before provider calls: $directories',
+    async ({ directories }) => {
+      const settings = vi.fn();
+      Object.assign(f.adapter, { getDirectoryBatchSettings: settings });
+      await expect(
+        (await runtime()).listDirectories(f.context, serverId, directories),
+      ).rejects.toMatchObject({ code: 'validation_failed' });
+      expect(remote).not.toHaveBeenCalled();
+      expect(settings).not.toHaveBeenCalled();
+    },
+  );
+
+  it('path and tree navigation can request a listing without preparing downloads', async () => {
+    listing.mockResolvedValue([
+      {
+        name: 'a.json',
+        is_file: true,
+        is_symlink: false,
+        size: 1,
+        mode: '0644',
+        mimetype: 'application/json',
+        created_at: '',
+        modified_at: '',
+      },
+    ]);
+    const downloads = vi.fn(async () => {});
+    f.adapter.prefetchDownloads = downloads;
+    expect(await (await runtime()).listFiles(f.context, serverId, 'world', false)).toHaveLength(1);
+    expect(downloads).not.toHaveBeenCalled();
+    await browse('world');
+    expect(downloads).toHaveBeenCalledExactlyOnceWith(expect.any(String), ['world/a.json']);
+  });
+
+  it('prefetches only listed regular files without delaying the directory for issuance', async () => {
+    const file = {
+      name: 'a.json',
+      is_file: true,
+      is_symlink: false,
+      size: 10,
+      mode: '0644',
+      mimetype: 'application/json',
+      created_at: '',
+      modified_at: '',
+    };
+    const files = [
+      ...Array.from({ length: 600 }, (_, i) => ({ ...file, name: `file-${i}.json` })),
+      { ...file, name: 'folder', is_file: false },
+      { ...file, name: 'link', is_symlink: true },
+    ];
+    listing.mockResolvedValue(files);
+    const pending = Promise.withResolvers<void>();
+    f.adapter.prefetchDownloads = vi.fn(() => pending.promise);
+    try {
+      expect(await browse('world')).toEqual(files);
+      expect(listing).toHaveBeenCalledTimes(1);
+      expect(f.adapter.prefetchDownloads).toHaveBeenCalledExactlyOnceWith(
+        expect.any(String),
+        Array.from({ length: 600 }, (_, i) => `world/file-${i}.json`),
+      );
+    } finally {
+      pending.resolve();
+    }
+  });
+
+  it('does not replace successful listings with optional prefetch failures or prefetch after denied access', async () => {
+    const files = [
+      {
+        name: 'a.txt',
+        is_file: true,
+        is_symlink: false,
+        size: 10,
+        mode: '0644',
+        mimetype: 'text/plain',
+        created_at: '',
+        modified_at: '',
+      },
+    ];
+    listing.mockResolvedValue(files);
+    f.adapter.prefetchDownloads = vi.fn(async () => {
+      throw new Error('unavailable');
+    });
+    expect(await browse()).toEqual(files);
+    await f.db.deleteFrom('session').where('userId', '=', f.context.subjectUserId).execute();
+    await expect(browse()).rejects.toThrow();
+    expect(f.adapter.prefetchDownloads).toHaveBeenCalledTimes(1);
+    expect(listing).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses a browsed identity across 49 uploads without reusing upload callbacks', async () => {
+    await browse();
+    for (let index = 0; index < 49; index++) await upload();
+    expect(remote).toHaveBeenCalledTimes(1);
+    expect(uploaded).toHaveBeenCalledTimes(49);
+    expect(listing).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses browsing identity for file mutations while retaining authorization and exclusive locks', async () => {
+    await browse();
+    const timing = createUploadTiming();
+    await mutateFiles(timing);
+    expect(remote).toHaveBeenCalledTimes(1);
+    expect(uploaded).toHaveBeenCalledTimes(1);
+    for (const phase of [
+      'access.identityProof',
+      'access.sessionSecond',
+      'access.permissionSecond',
+      'access.serverLock',
+      'access.serverUnlock',
+    ])
+      expect(timing.snapshot()[phase]?.count).toBe(1);
+    clock = 60_000;
+    await mutateFiles();
+    expect(remote).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares Owner batch settings between browsing and already-authorized file operations', async () => {
+    const settings = vi.fn(async () => ({
+      directoryBatchLimit: 1,
+      directoryConcurrency: 2,
+      directoryTimeoutSeconds: 8,
+    }));
+    const batch = vi.fn<PterodactylAdapter['listDirectoriesBatch']>(async (_id, paths) =>
+      paths.map((directory) => ({ directory, files: [] })),
+    );
+    Object.assign(f.adapter, { getDirectoryBatchSettings: settings, listDirectoriesBatch: batch });
+    await (await runtime()).listDirectories(f.context, serverId, ['world']);
+    const service = await runtime();
+    await service.fileMutationAccess(f.context, serverId, (id, _connection, _current, server) =>
+      service.fileDirectoryBatch(id, server, ['', 'world']),
+    );
+    expect(settings).toHaveBeenCalledTimes(1);
+    expect(batch.mock.calls.map((call) => call[1])).toEqual([['world'], [''], ['world']]);
+    expect(remote).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses recent Wings disk samples across runtimes with REST fallback after writes or identity drift', async () => {
+    const getResources = vi.fn(async () => ({ resources: { disk_bytes: 500 } }));
+    f.adapter.getResources = getResources as unknown as PterodactylAdapter['getResources'];
+    f.adapter.writeFile = vi.fn(async () => {});
+    const server = await f.db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const service = await runtime();
+    const id = server.pterodactyl_identifier as string;
+    const observe = service.observeConsoleDisk(
+      server,
+      await service.consoleBindingForServer(serverId),
+    );
+    observe({ type: 'status', data: 'running' });
+    observe({ type: 'stats', data: { disk_bytes: 100, memory_bytes: 0, cpu_absolute: 0 } });
+    expect(await (await runtime()).fileDiskUsage(server, id)).toBe(100);
+    expect(getResources).not.toHaveBeenCalled();
+    expect(await service.fileDiskUsage({ ...server, owner_id: randomUUID() }, id)).toBe(500);
+    const changedProvider = await runtime({ ...f.adapter });
+    expect(await changedProvider.fileDiskUsage(server, id)).toBe(500);
+    await service.adapter.writeFile(id, 'test.txt', 'fixture');
+    expect(await (await runtime()).fileDiskUsage(server, id)).toBe(500);
+    expect(getResources).toHaveBeenCalledTimes(3);
+  });
+
+  it('reuses browsing proof for file reads while retaining fresh authorization and timing', async () => {
+    await browse();
+    const timing = createUploadTiming();
+    expect(await readFile(timing)).toBe('isolated file contents');
+    expect(await readFile()).toBe('isolated file contents');
+    expect(remote).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(timing.snapshot()['access.identityProof']?.count).toBe(1);
+    expect(timing.snapshot()['access.sessionFirst']?.count).toBe(1);
+    expect(timing.snapshot()['access.permissionFirst']?.count).toBe(1);
+    expect(timing.snapshot()['access.sessionSecond']?.count).toBe(1);
+    expect(timing.snapshot()['access.permissionSecond']?.count).toBe(1);
+    expect(timing.snapshot()['access.connectionAcquire']).toBeUndefined();
+  });
+
+  it('fetches a cold file-read proof and refreshes at expiry without extending its TTL', async () => {
+    await readFile();
+    clock = 54_999;
+    await readFile();
+    expect(remote).toHaveBeenCalledTimes(1);
+    clock = 60_000;
+    await readFile();
+    expect(remote).toHaveBeenCalledTimes(2);
+    expect(read).toHaveBeenCalledTimes(3);
+  });
+
+  it('also prepares a cold upload identity once and expires it without extending TTL', async () => {
+    await upload();
+    clock = 54_999;
+    await upload();
+    expect(remote).toHaveBeenCalledTimes(1);
+    clock = 60_000;
+    await upload();
+    expect(remote).toHaveBeenCalledTimes(2);
+    expect(uploaded).toHaveBeenCalledTimes(3);
+  });
+
+  it('coalesces binary batch authorization into its fresh pre-transfer check only', async () => {
+    const timing = createUploadTiming();
+    await batchUpload(undefined, timing);
+    expect(uploaded).toHaveBeenCalledTimes(1);
+    expect(timing.snapshot()['access.sessionFirst']?.count).toBe(1);
+    expect(timing.snapshot()['access.permissionFirst']?.count).toBe(1);
+    expect(timing.snapshot()['access.sessionSecond']).toBeUndefined();
+    expect(timing.snapshot()['access.permissionSecond']).toBeUndefined();
+    expect(timing.snapshot()['transfer.sessionRead']?.count).toBe(1);
+    expect(timing.snapshot()['transfer.serverPermission']?.count).toBe(1);
+  });
+
+  it.each(['session', 'identity'] as const)(
+    'rejects %s drift during cold binary batch identity proof before any upload',
+    async (change) => {
+      const snapshot = await identity();
+      const proof = deferredProof();
+      remote.mockReturnValueOnce(proof.promise);
+      const rejected = expect(batchUpload()).rejects.toThrow(
+        change === 'session' ? 'unauthenticated' : 'conflict',
+      );
+      await vi.waitFor(() => expect(remote).toHaveBeenCalledTimes(1));
+      if (change === 'session')
+        await f.db
+          .updateTable('session')
+          .set({ expiresAt: new Date(0) })
+          .where('id', '=', f.context[authSessionId] as string)
+          .execute();
+      else
+        await f.db
+          .updateTable('managed_servers')
+          .set({ pterodactyl_identifier: 'changed-during-proof' })
+          .where('id', '=', serverId)
+          .execute();
+      proof.resolve(snapshot);
+      await rejected;
+      expect(uploaded).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects project permission revoked after binary batch admission before any upload', async () => {
+    const project = await createProject(f.db, f.owner, { name: 'Shared upload fixture' });
+    await f.db
+      .updateTable('managed_servers')
+      .set({ owner_id: f.owner.subjectUserId, project_id: project.id })
+      .where('id', '=', serverId)
+      .execute();
+    await setProjectMember(f.db, f.owner, project.id, {
+      userId: f.context.subjectUserId,
+      role: 'manager',
+    });
+    await expect(
+      batchUpload(async () => {
+        await setProjectMember(f.db, f.owner, project.id, {
+          userId: f.context.subjectUserId,
+          role: null,
+        });
+      }),
+    ).rejects.toThrow('forbidden');
+    expect(uploaded).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'pterodactyl_id',
+    'pterodactyl_uuid',
+    'pterodactyl_identifier',
+    'external_id',
+    'provider_user_id',
+    'limits',
+    'active_operation_id',
+  ] as const)('rejects %s drift after binary batch admission before any upload', async (field) => {
+    await expect(
+      batchUpload(async () => {
+        const row = await f.db
+          .selectFrom('managed_servers')
+          .selectAll()
+          .where('id', '=', serverId)
+          .executeTakeFirstOrThrow();
+        const value =
+          field === 'limits'
+            ? { ...row.limits, memory: row.limits.memory + 1 }
+            : field === 'pterodactyl_id' || field === 'provider_user_id'
+              ? (row[field] as number) + 10000
+              : randomUUID();
+        await f.db
+          .updateTable('managed_servers')
+          .set({ [field]: value })
+          .where('id', '=', serverId)
+          .execute();
+      }),
+    ).rejects.toThrow('conflict');
+    expect(uploaded).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'retains the immediate second authorization for batch bookkeeping (prepare=%s)',
+    async (prepare) => {
+      const service = await runtime();
+      const proof = deferredProof();
+      const snapshot = await identity();
+      const timing = createUploadTiming();
+      remote.mockReturnValueOnce(proof.promise);
+      const rejected = expect(
+        service.uploadBatchAccess(f.context, serverId, uploaded, prepare, timing),
+      ).rejects.toThrow('unauthenticated');
+      await vi.waitFor(() => expect(remote).toHaveBeenCalledTimes(1));
+      await f.db
+        .updateTable('session')
+        .set({ expiresAt: new Date(0) })
+        .where('id', '=', f.context[authSessionId] as string)
+        .execute();
+      proof.resolve(snapshot);
+      await rejected;
+      expect(timing.snapshot()['access.sessionSecond']?.count).toBe(1);
+      expect(uploaded).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps proof across non-identity metadata, telemetry and feed heartbeat updates', async () => {
+    await browse();
+    await f.db
+      .updateTable('managed_servers')
+      .set({
+        name: 'Renamed fixture',
+        runtime_state: 'running',
+        last_observed_at: new Date(),
+        updated_at: new Date(),
+      })
+      .where('id', '=', serverId)
+      .execute();
+    await f.db
+      .updateTable('provider_change_feeds')
+      .set({ healthy_at: new Date(), generation: '2' })
+      .execute();
+    await browse('world');
+    expect(remote).toHaveBeenCalledTimes(1);
+    expect(listing).toHaveBeenCalledTimes(2);
+  });
+
+  it('expires at sixty seconds without extending TTL on hits', async () => {
+    await browse();
+    clock = 54_999;
+    await browse('world');
+    expect(remote).toHaveBeenCalledTimes(1);
+    clock = 60_000;
+    await browse('logs');
+    expect(remote).toHaveBeenCalledTimes(2);
+  });
+
+  it('renews at fifty-five seconds without blocking fresh listings and waits after expiry', async () => {
+    await browse();
+    const proof = deferredProof();
+    remote.mockReturnValueOnce(proof.promise);
+    clock = 55_000;
+    await browse('world');
+    await vi.waitFor(() => expect(remote).toHaveBeenCalledTimes(2));
+    expect(listing).toHaveBeenCalledTimes(2);
+    clock = 59_999;
+    await browse('logs');
+    expect(remote).toHaveBeenCalledTimes(2);
+    clock = 60_000;
+    const expired = browse('world/playerdata');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(listing).toHaveBeenCalledTimes(3);
+    proof.resolve(await identity());
+    await expired;
+    expect(remote).toHaveBeenCalledTimes(2);
+    expect(listing).toHaveBeenCalledTimes(4);
+  });
+
+  it('does not extend the sixty-second deadline when a background renewal fails', async () => {
+    await browse();
+    const renewal = deferredProof();
+    remote.mockReturnValueOnce(renewal.promise);
+    clock = 55_000;
+    await browse('world');
+    await vi.waitFor(() => expect(remote).toHaveBeenCalledTimes(2));
+    renewal.reject(new Error('isolated renewal failure'));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    clock = 60_000;
+    remote.mockRejectedValueOnce(new Error('isolated expired proof failure'));
+    await expect(browse('logs')).rejects.toThrow('isolated expired proof failure');
+    expect(listing).toHaveBeenCalledTimes(2);
+    await browse('logs');
+    expect(listing).toHaveBeenCalledTimes(3);
+    expect(remote).toHaveBeenCalledTimes(4);
+  });
+
+  it('automatically renews once at fifty-five seconds without polling unused replacements', async () => {
+    // Observe and invoke only the cache's scheduled callbacks. Global fake timers
+    // would also replace pg socket/pool timers and obscure disposal behavior.
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const renewals = () => timers.mock.calls.filter((call) => call[1] === 55_000);
+    try {
+      await browse();
+      expect(renewals()).toHaveLength(1);
+      clock = 55_000;
+      renewals()[0]?.[0]();
+      await vi.waitFor(() => expect(renewals()).toHaveLength(2));
+      expect(remote).toHaveBeenCalledTimes(2);
+      clock = 110_000;
+      renewals()[1]?.[0]();
+      await delay(20);
+      expect(remote).toHaveBeenCalledTimes(2);
+      await browse('world');
+      await vi.waitFor(() => expect(renewals()).toHaveLength(3));
+      expect(remote).toHaveBeenCalledTimes(3);
+    } finally {
+      cache.close();
+      timers.mockRestore();
+    }
+  });
+
+  it('does not resurrect an invalidated entry when its older renewal finishes', async () => {
+    await browse();
+    const renewal = deferredProof();
+    remote.mockReturnValueOnce(renewal.promise);
+    clock = 55_000;
+    await browse('world');
+    await vi.waitFor(() => expect(remote).toHaveBeenCalledTimes(2));
+    cache.invalidate(serverId);
+    renewal.resolve(await identity());
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await browse('logs');
+    expect(remote).toHaveBeenCalledTimes(3);
+  });
+
+  it('renews expired directory proofs without deadlocking a single-connection pool', async () => {
+    const small = createDatabase(process.env.NH_TEST_DATABASE_URL as string, {
+      max: 1,
+      options: `-c search_path=${database.schema}`,
+    });
+    try {
+      const service = await createManagementRuntime({
+        db: small.db,
+        codec,
+        adapter: f.adapter,
+        directoryIdentityCache: cache,
+      });
+      await service.listFiles(f.context, serverId, '');
+      clock = 60_000;
+      await Promise.all([
+        ...['world', 'logs', 'plugins'].map((path) => service.listFiles(f.context, serverId, path)),
+        service.fileReadAccess(f.context, serverId, read, createUploadTiming()),
+      ]);
+      expect(remote).toHaveBeenCalledTimes(2);
+      expect(listing).toHaveBeenCalledTimes(4);
+      expect(read).toHaveBeenCalledTimes(1);
+    } finally {
+      cache.close();
+      await small.db.destroy();
+    }
+  });
+
+  it('waits for expired background proof renewal with the upload gate minimum two-connection pool', async () => {
+    const small = createDatabase(process.env.NH_TEST_DATABASE_URL as string, {
+      max: 2,
+      options: `-c search_path=${database.schema}`,
+    });
+    const renewal = deferredProof();
+    let request: Promise<unknown> | undefined;
+    try {
+      const service = await createManagementRuntime({
+        db: small.db,
+        codec,
+        adapter: f.adapter,
+        directoryIdentityCache: cache,
+      });
+      await service.uploadAccess(f.context, serverId, uploaded);
+      clock = 55_000;
+      remote.mockReturnValueOnce(renewal.promise);
+      await service.uploadAccess(f.context, serverId, uploaded);
+      await vi.waitFor(() => expect(remote).toHaveBeenCalledTimes(2));
+      clock = 60_000;
+      request = service.uploadAccess(f.context, serverId, uploaded);
+      await delay(30);
+      expect(uploaded).toHaveBeenCalledTimes(2);
+      renewal.resolve(await identity());
+      await request;
+      expect(uploaded).toHaveBeenCalledTimes(3);
+      expect(remote).toHaveBeenCalledTimes(2);
+    } finally {
+      renewal.resolve(await identity());
+      await request?.catch(() => {});
+      cache.close();
+      await small.db.destroy();
+    }
+  });
+
+  it('closing the cache rejects an in-flight proof without listing or resurrection', async () => {
+    const proof = deferredProof();
+    remote.mockReturnValueOnce(proof.promise);
+    const request = browse();
+    const rejected = expect(request).rejects.toThrow('conflict');
+    await vi.waitFor(() => expect(remote).toHaveBeenCalledTimes(1));
+    cache.close();
+    proof.resolve(await identity());
+    await rejected;
+    await expect(browse()).rejects.toThrow('integration_unavailable');
+    expect(remote).toHaveBeenCalledTimes(1);
+    expect(listing).not.toHaveBeenCalled();
+  });
+
+  it('joins concurrent cold proofs across distinct runtimes', async () => {
+    const proof = deferredProof();
+    remote.mockReturnValueOnce(proof.promise);
+    const requests = ['', 'world', 'logs'].map(browse);
+    await vi.waitFor(() => expect(remote).toHaveBeenCalledTimes(1));
+    proof.resolve(await identity());
+    await Promise.all(requests);
+    expect(remote).toHaveBeenCalledTimes(1);
+    expect(listing).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not reuse proof with another provider adapter binding', async () => {
+    await browse();
+    const replacement = await runtime({ ...f.adapter });
+    await replacement.listFiles(f.context, serverId, 'world');
+    expect(remote).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(
+    [
+      'identity',
+      'node',
+      'claim',
+      'credential',
+      'account-status',
+      'feed-enabled',
+      'projection-revision',
+      'projection-valid',
+    ].flatMap((change) => ['directory', 'upload'].map((mode) => ({ change, mode }))),
+  )('invalidates a warm $mode proof after $change changes', async ({ change, mode }) => {
+    const account = await f.db
+      .selectFrom('provider_accounts')
+      .selectAll()
+      .where('user_id', '=', f.context.subjectUserId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .insertInto('provider_server_projections')
+      .values({
+        server_id: serverId,
+        instance_id: account.instance_id as string,
+        revision: '1',
+        payload: {},
+        valid: true,
+        identity_invalidated: false,
+        synchronized_at: new Date(),
+      })
+      .execute();
+    await browse();
+    if (change === 'identity')
+      await f.db
+        .updateTable('managed_servers')
+        .set({ pterodactyl_uuid: randomUUID() })
+        .where('id', '=', serverId)
+        .execute();
+    if (change === 'node')
+      await f.db
+        .updateTable('managed_nodes')
+        .set({ pterodactyl_node_id: f.providerNodeId + 10000 })
+        .where('id', '=', f.nodeId)
+        .execute();
+    if (change === 'claim') {
+      const existing = await f.db
+        .selectFrom('server_allocations')
+        .selectAll()
+        .where('server_id', '=', serverId)
+        .executeTakeFirstOrThrow();
+      // Existing allocation identities are immutable; an additional independently
+      // claimed endpoint changes the proof without bypassing that DB invariant.
+      await f.db
+        .insertInto('server_allocations')
+        .values({
+          ...existing,
+          direct_endpoint: existing.direct_endpoint
+            ? JSON.stringify(existing.direct_endpoint)
+            : null,
+          id: randomUUID(),
+          pterodactyl_allocation_id: existing.pterodactyl_allocation_id + 10000,
+          port: 29999,
+          role: 'query',
+          is_primary: false,
+        })
+        .execute();
+    }
+    if (change === 'credential')
+      await f.db
+        .updateTable('provider_accounts')
+        .set({ key_operation_id: randomUUID() })
+        .where('user_id', '=', f.context.subjectUserId)
+        .execute();
+    if (change === 'account-status')
+      await f.db
+        .updateTable('provider_accounts')
+        .set({ status: 'pending' })
+        .where('user_id', '=', f.context.subjectUserId)
+        .execute();
+    if (change === 'feed-enabled')
+      await f.db
+        .updateTable('provider_change_feeds')
+        .set({ enabled: false })
+        .where('instance_id', '=', account.instance_id as string)
+        .execute();
+    if (change === 'projection-revision')
+      await f.db
+        .updateTable('provider_server_projections')
+        .set({ revision: '2' })
+        .where('server_id', '=', serverId)
+        .execute();
+    if (change === 'projection-valid')
+      await f.db
+        .updateTable('provider_server_projections')
+        .set({ valid: false })
+        .where('server_id', '=', serverId)
+        .execute();
+    // The injected adapter isolates proof invalidation; credential resolution itself
+    // remains covered by provider-account/scoped-adapter integration tests.
+    if (mode === 'upload') await upload();
+    else await browse('world');
+    expect(remote).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails closed on explicit projection identity invalidation', async () => {
+    await browse();
+    const account = await f.db
+      .selectFrom('provider_accounts')
+      .selectAll()
+      .where('user_id', '=', f.context.subjectUserId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .insertInto('provider_server_projections')
+      .values({
+        server_id: serverId,
+        instance_id: account.instance_id as string,
+        revision: '1',
+        payload: {},
+        valid: true,
+        synchronized_at: new Date(),
+        identity_invalidated: true,
+      })
+      .execute();
+    await expect(browse('world')).rejects.toThrow('provenance_mismatch');
+    await expect(upload()).rejects.toThrow('provenance_mismatch');
+    await expect(readFile()).rejects.toThrow('provenance_mismatch');
+    expect(listing).toHaveBeenCalledTimes(1);
+    expect(uploaded).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('does not cache failed remote identity reads or serve expired proofs on error', async () => {
+    await browse();
+    clock = 60_000;
+    remote.mockRejectedValueOnce(new Error('isolated provider unavailable'));
+    await expect(browse('world')).rejects.toThrow('isolated provider unavailable');
+    expect(listing).toHaveBeenCalledTimes(1);
+    await browse('world');
+    await vi.waitFor(() => expect(remote).toHaveBeenCalledTimes(3));
+    await delay(20);
+  });
+
+  it('invalidates proof after a directory provider failure', async () => {
+    await browse();
+    listing.mockRejectedValueOnce(new Error('isolated listing unavailable'));
+    await expect(browse('world')).rejects.toThrow('isolated listing unavailable');
+    await browse('world');
+    expect(remote).toHaveBeenCalledTimes(2);
+  });
+
+  it('denies a revoked session before consulting a warm proof or listing', async () => {
+    await browse();
+    await f.db
+      .updateTable('session')
+      .set({ expiresAt: new Date(0) })
+      .where('id', '=', f.context[authSessionId] as string)
+      .execute();
+    await expect(browse('world')).rejects.toThrow('unauthenticated');
+    await expect(upload()).rejects.toThrow('unauthenticated');
+    await expect(readFile()).rejects.toThrow('unauthenticated');
+    expect(remote).toHaveBeenCalledTimes(1);
+    expect(listing).toHaveBeenCalledTimes(1);
+    expect(uploaded).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('denies revoked project membership even with a warm proof', async () => {
+    const project = await createProject(f.db, f.owner, { name: 'Shared fixture' });
+    await f.db
+      .updateTable('managed_servers')
+      .set({ owner_id: f.owner.subjectUserId, project_id: project.id })
+      .where('id', '=', serverId)
+      .execute();
+    await setProjectMember(f.db, f.owner, project.id, {
+      userId: f.context.subjectUserId,
+      role: 'manager',
+    });
+    await browse();
+    await upload();
+    await setProjectMember(f.db, f.owner, project.id, {
+      userId: f.context.subjectUserId,
+      role: null,
+    });
+    await expect(browse('world')).rejects.toThrow('forbidden');
+    await expect(upload()).rejects.toThrow('forbidden');
+    await expect(readFile()).rejects.toThrow('forbidden');
+    await expect(mutateFiles()).rejects.toThrow('forbidden');
+    expect(remote).toHaveBeenCalledTimes(1);
+    expect(listing).toHaveBeenCalledTimes(1);
+    expect(uploaded).toHaveBeenCalledTimes(1);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it.each(['active-operation', 'pending-upload'] as const)(
+    'rejects uploads with %s even with a warm identity proof',
+    async (blocker) => {
+      await browse();
+      if (blocker === 'pending-upload') await pendingUploadFixture(f.db, serverId);
+      else
+        await f.db
+          .updateTable('managed_servers')
+          .set({ active_operation_id: randomUUID() })
+          .where('id', '=', serverId)
+          .execute();
+      await expect(upload()).rejects.toThrow(
+        blocker === 'pending-upload' ? 'operation_uncertain' : 'conflict',
+      );
+      await expect(mutateFiles()).rejects.toThrow(
+        blocker === 'pending-upload' ? 'operation_uncertain' : 'conflict',
+      );
+      expect(uploaded).not.toHaveBeenCalled();
+      expect(remote).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('invalidates reused identity after an unknown upload failure without replaying it', async () => {
+    await browse();
+    uploaded.mockRejectedValueOnce(new Error('isolated uncertain upload'));
+    await expect(upload()).rejects.toThrow('isolated uncertain upload');
+    expect(uploaded).toHaveBeenCalledTimes(1);
+    await browse();
+    expect(remote).toHaveBeenCalledTimes(2);
+    expect(uploaded).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps upload lock contention fail-fast despite a warm identity proof', async () => {
+    await browse();
+    const held = Promise.withResolvers<void>();
+    const entered = vi.fn(async () => held.promise);
+    const request = (await runtime()).uploadAccess(f.context, serverId, entered);
+    try {
+      await vi.waitFor(() => expect(entered).toHaveBeenCalledTimes(1));
+      await expect(upload()).rejects.toThrow('operation_busy');
+      await expect(mutateFiles()).rejects.toThrow('operation_busy');
+      expect(uploaded).not.toHaveBeenCalled();
+      expect(remote).toHaveBeenCalledTimes(1);
+    } finally {
+      held.resolve();
+      await request;
+    }
+    await upload();
+    expect(uploaded).toHaveBeenCalledTimes(1);
+    expect(remote).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])(
+    'keeps fresh remote corroboration for ordinary access(write=%s)',
+    async (write) => {
+      await browse();
+      const effect = vi.fn(async () => 'isolated effect');
+      await (await runtime()).access(f.context, serverId, write, effect);
+      await (await runtime()).access(f.context, serverId, write, effect);
+      expect(remote).toHaveBeenCalledTimes(3);
+      expect(effect).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each(
+    ['identity', 'credential', 'session'].flatMap((change) =>
+      ['directory', 'upload', 'file-read'].map((mode) => ({ change, mode })),
+    ),
+  )(
+    'rejects $change changes while the remote $mode proof is in flight',
+    async ({ change, mode }) => {
+      const snapshot = await identity();
+      const proof = deferredProof();
+      remote.mockReturnValueOnce(proof.promise);
+      const request = mode === 'upload' ? upload() : mode === 'file-read' ? readFile() : browse();
+      const rejected = expect(request).rejects.toThrow(
+        change === 'session' ? 'unauthenticated' : 'conflict',
+      );
+      await vi.waitFor(() => expect(remote).toHaveBeenCalledTimes(1));
+      if (change === 'identity')
+        await f.db
+          .updateTable('managed_servers')
+          .set({ pterodactyl_identifier: 'newfixtureidentifier' })
+          .where('id', '=', serverId)
+          .execute();
+      if (change === 'credential')
+        await f.db
+          .updateTable('provider_accounts')
+          .set({ key_operation_id: randomUUID() })
+          .where('user_id', '=', f.context.subjectUserId)
+          .execute();
+      if (change === 'session')
+        await f.db
+          .updateTable('session')
+          .set({ expiresAt: new Date(0) })
+          .where('id', '=', f.context[authSessionId] as string)
+          .execute();
+      proof.resolve(snapshot);
+      await rejected;
+      expect(listing).not.toHaveBeenCalled();
+      expect(uploaded).not.toHaveBeenCalled();
+      expect(read).not.toHaveBeenCalled();
+    },
+  );
+});

@@ -3,6 +3,7 @@ import {
   assertMinecraftChoice,
   type MinecraftCombination,
   type MinecraftEvidence,
+  minecraftDeclaredCapabilities,
   minecraftDigest,
   minecraftSupport,
   minecraftVerificationChecks,
@@ -14,7 +15,7 @@ const combination: MinecraftCombination = {
   releaseType: 'release',
   protocolId: 777,
   family: 'netty',
-  profile: 'vanilla',
+  profile: 'folia',
   javaMajor: 25,
   runtimeDigest: 'a'.repeat(64),
   protocolSource: { url: 'https://example.com/metadata', sha256: 'b'.repeat(64) },
@@ -42,6 +43,67 @@ const evidence: MinecraftEvidence = {
 };
 const now = new Date('2026-10-09T13:00:00Z');
 describe('Minecraft compatibility evidence', () => {
+  it('declares Forge installation and transparent Gateway support only for Enhanced supported families', () => {
+    for (const release of ['1.7.2', '1.12.2', '1.16.5', '1.17.1', '1.21.11']) {
+      const choice = { ...combination, profile: 'forge' as const, release };
+      expect(minecraftDeclaredCapabilities(choice)).toMatchObject({
+        installation: true,
+        gateway: true,
+        wake: true,
+        playerIdle: true,
+      });
+      expect(() =>
+        assertMinecraftChoice({
+          combination: choice,
+          enabled: true,
+          mappingDigest: 'a'.repeat(64),
+          choiceDigest: 'b'.repeat(64),
+          evidence: [],
+          privateTester: false,
+        }),
+      ).not.toThrow();
+    }
+    for (const release of ['1.6.4', '26.1'])
+      expect(
+        minecraftDeclaredCapabilities({ ...combination, profile: 'forge', release }),
+      ).toMatchObject({ installation: false, gateway: false });
+  });
+  it.each(['fabric', 'paper'] as const)(
+    'declares %s installation and Gateway sleep/wake for known modern protocols',
+    (profile) => {
+      const fabric = { ...combination, profile };
+      expect(minecraftDeclaredCapabilities(fabric)).toMatchObject({
+        installation: true,
+        directConnection: true,
+        playerManagement: true,
+        gateway: true,
+        wake: true,
+        sleepWake: true,
+      });
+      for (const unsupported of [
+        { ...fabric, family: 'unknown' as const },
+        { ...fabric, protocolId: null },
+        { ...fabric, family: 'legacy' as const, release: '1.6.4' },
+        ...(['folia', 'forge'] as const).map((profile) => ({ ...fabric, profile })),
+      ]) {
+        expect(minecraftDeclaredCapabilities(unsupported)).toMatchObject({
+          gateway: false,
+          wake: false,
+          sleepWake: false,
+        });
+      }
+      expect(() =>
+        assertMinecraftChoice({
+          combination: fabric,
+          enabled: true,
+          mappingDigest: 'a'.repeat(64),
+          choiceDigest: 'b'.repeat(64),
+          evidence: [],
+          privateTester: false,
+        }),
+      ).not.toThrow();
+    },
+  );
   it('real installation bootstrap enables only explicit private testing and cannot claim verification', () => {
     const bootstrap: MinecraftEvidence = {
       ...evidence,
@@ -200,8 +262,10 @@ describe('Minecraft compatibility evidence', () => {
     expect(() => assertMinecraftChoice({ ...input, privateTester: true }, now)).not.toThrow();
     expect(publicMinecraftChoice('choice', combination)).toEqual({
       id: 'choice',
-      runtime: 'vanilla',
+      runtime: 'folia',
+      capabilities: minecraftDeclaredCapabilities(combination),
       version: '26.3',
+      releaseType: 'release',
     });
   });
   it('never guesses unknown or pre-Netty compatibility', () => {
@@ -223,5 +287,101 @@ describe('Minecraft compatibility evidence', () => {
         now,
       ),
     ).toBe('unsupported');
+  });
+});
+
+describe('compiled Vanilla capabilities', () => {
+  it('separates ancient wake/forwarding from unavailable player counts', () => {
+    for (const release of ['a1.0.15', 'a1.0.16', 'b1.4', 'b1.7.3'])
+      expect(
+        minecraftDeclaredCapabilities({
+          ...combination,
+          profile: 'vanilla',
+          release,
+          family: 'legacy',
+          protocolId: 13,
+        }),
+      ).toMatchObject({
+        gateway: true,
+        wake: true,
+        readiness: true,
+        playerIdle: false,
+        sleepWake: false,
+      });
+    expect(
+      minecraftDeclaredCapabilities({
+        ...combination,
+        profile: 'vanilla',
+        release: 'a1.0.14',
+        family: 'legacy',
+        protocolId: 12,
+      }).gateway,
+    ).toBe(false);
+  });
+  it('allows installable Vanilla independently of signed reports while preserving Owner availability', () => {
+    for (const version of [
+      { release: '1.6.4', family: 'legacy', protocolId: 78, releaseType: 'release' },
+      { release: '26.3', family: 'unknown', protocolId: null, releaseType: 'release' },
+      { release: '25w03a', family: 'netty', protocolId: 1073742084, releaseType: 'snapshot' },
+    ] as const) {
+      const selected = { ...combination, ...version, profile: 'vanilla' as const };
+      expect(minecraftDeclaredCapabilities(selected)).toEqual({
+        installation: true,
+        directConnection: true,
+        playerManagement: version.release === '26.3',
+        gateway: version.family !== 'unknown',
+        readiness: version.family !== 'unknown',
+        playerIdle: version.family !== 'unknown',
+        wake: version.family !== 'unknown',
+        sleepWake: version.family !== 'unknown',
+      });
+      const input = {
+        combination: selected,
+        enabled: true,
+        mappingDigest: 'a'.repeat(64),
+        choiceDigest: 'b'.repeat(64),
+        evidence: [],
+        privateTester: false,
+      };
+      expect(() => assertMinecraftChoice(input, now)).not.toThrow();
+      expect(() => assertMinecraftChoice({ ...input, enabled: false }, now)).toThrow();
+    }
+  });
+  it('separates modern player-file management from direct installation', () => {
+    for (const [release, expected] of [
+      ['1.7.5', false],
+      ['1.7.6', true],
+      ['1.20.4', true],
+    ] as const) {
+      expect(
+        minecraftDeclaredCapabilities({ ...combination, profile: 'vanilla', release })
+          .playerManagement,
+      ).toBe(expected);
+    }
+  });
+  it('declares supported families without pretending every release has a real-client report', () => {
+    expect(
+      minecraftDeclaredCapabilities({
+        ...combination,
+        profile: 'vanilla',
+        release: '1.21.4',
+        protocolId: 769,
+      }).gateway,
+    ).toBe(true);
+    for (const [release, protocolId] of [
+      ['26.1', 775],
+      ['26.3', 777],
+      ['1.7.2', 4],
+    ] as const) {
+      const selected = { ...combination, profile: 'vanilla' as const, release, protocolId };
+      expect(minecraftDeclaredCapabilities(selected).sleepWake).toBe(true);
+      expect(minecraftDeclaredCapabilities({ ...selected, protocolId: 999 }).gateway).toBe(true);
+      expect(minecraftDeclaredCapabilities({ ...selected, releaseType: 'snapshot' }).gateway).toBe(
+        true,
+      );
+      expect(minecraftDeclaredCapabilities({ ...selected, profile: 'folia' }).installation).toBe(
+        false,
+      );
+    }
   });
 });

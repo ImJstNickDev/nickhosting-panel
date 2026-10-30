@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
+import { minecraftPropertyEnumValue } from './property-enums.js';
 
 function invalid(reason: string): never {
   throw new DomainError('validation_failed', 400, { reason });
@@ -76,6 +77,31 @@ export function parseMinecraftProperties(source: string): Readonly<Record<string
     ),
   );
 }
+/** Internal text serializer. Callers authorize and validate the property keys/values. */
+function mergedPropertyLines(
+  parsed: PropertyLine[],
+  changes: Readonly<Record<string, string>>,
+): string {
+  const replacement = new Map(Object.entries(changes));
+  if ([...replacement].some(([key, value]) => !key || key.includes('\0') || value.includes('\0')))
+    return invalid('minecraft_properties_invalid');
+  const lines = parsed.map((line) => {
+    if (!line.key || !replacement.has(line.key)) return line.raw;
+    const value = replacement.get(line.key) ?? '';
+    replacement.delete(line.key);
+    return `${escapeProperty(line.key)}=${escapeProperty(value)}`;
+  });
+  if (lines.at(-1) === '') lines.pop();
+  for (const [key, value] of replacement)
+    lines.push(`${escapeProperty(key)}=${escapeProperty(value)}`);
+  return `${lines.join('\n')}\n`;
+}
+export function mergeMinecraftPropertiesText(
+  source: string,
+  changes: Readonly<Record<string, string>>,
+): string {
+  return mergedPropertyLines(propertyLines(source), changes);
+}
 const booleans = new Set([
   'pvp',
   'white-list',
@@ -94,6 +120,14 @@ const numeric: Record<string, [number, number]> = {
   'spawn-protection': [0, 29_999_984],
   'player-idle-timeout': [0, 2_147_483_647],
 };
+export const minecraftEditablePropertyKeys: readonly string[] = Object.freeze([
+  ...booleans,
+  ...Object.keys(numeric),
+  'difficulty',
+  'gamemode',
+  'motd',
+]);
+
 /** Product fields exclude bind addresses, ports, RCON, online-mode and service credentials. */
 export function editMinecraftProperties(
   source: string,
@@ -129,24 +163,19 @@ export function editMinecraftProperties(
       if (
         value.length > 256 ||
         [...value].some(
-          (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+          (character) =>
+            (character.charCodeAt(0) < 32 && character !== '\n') || character.charCodeAt(0) === 127,
         )
       )
         return invalid('minecraft_property_motd');
     } else return invalid('minecraft_property_protected');
     // Release-specific support comes from a verified generated-property schema, not semver guesses.
-    replacement.set(key, value);
+    replacement.set(
+      key,
+      minecraftPropertyEnumValue(key, value, parsed.find((line) => line.key === key)?.value),
+    );
   }
-  const lines = parsed.map((line) => {
-    if (!line.key || !replacement.has(line.key)) return line.raw;
-    const value = replacement.get(line.key) ?? '';
-    replacement.delete(line.key);
-    return `${escapeProperty(line.key)}=${escapeProperty(value)}`;
-  });
-  if (lines.at(-1) === '') lines.pop();
-  for (const [key, value] of replacement)
-    lines.push(`${escapeProperty(key)}=${escapeProperty(value)}`);
-  const content = `${lines.join('\n')}\n`;
+  const content = mergedPropertyLines(parsed, Object.fromEntries(replacement));
   return {
     content,
     beforeSha256: createHash('sha256').update(source).digest('hex'),
@@ -222,7 +251,7 @@ export function planMinecraftPlayerList(
   source: string,
   kind: 'whitelist' | 'operators',
   action: 'add' | 'remove',
-  player: MinecraftVerifiedPlayer,
+  player: Omit<MinecraftVerifiedPlayer, 'source'> & { readonly source: 'mojang' | 'server-file' },
   options: { operatorLevel?: number; bypassesPlayerLimit?: boolean } = {},
 ): {
   path: 'whitelist.json' | 'ops.json';
@@ -233,7 +262,7 @@ export function planMinecraftPlayerList(
 } {
   if (
     Buffer.byteLength(source) > 4 * 1024 * 1024 ||
-    player.source !== 'mojang' ||
+    !['mojang', 'server-file'].includes(player.source) ||
     !Number.isFinite(Date.parse(player.verifiedAt))
   )
     return invalid('minecraft_player_list');
@@ -410,10 +439,12 @@ export function planMinecraftWorldImport(
     .map((entry) => entry.path.slice(0, -'level.dat'.length));
   if (roots.length !== 1 || roots[0] === undefined) return invalid('minecraft_world_level_data');
   const sourceRoot = roots[0];
+  // Download packages may include artwork and instructions beside the world.
+  // Validate the whole inventory above, then promote only the unique level.dat root.
+  // sourceRoot includes its trailing slash (or is empty for a root-level world).
   const files = entries
-    .filter((entry) => entry.type === 'file')
+    .filter((entry) => entry.type === 'file' && entry.path.startsWith(sourceRoot))
     .map((entry) => {
-      if (!entry.path.startsWith(sourceRoot)) return invalid('minecraft_world_multiple_roots');
       const relative = entry.path.slice(sourceRoot.length);
       // Never promote runnable code, properties, symlinks or files outside the isolated world root.
       if (
@@ -426,7 +457,7 @@ export function planMinecraftWorldImport(
   return {
     targetWorld,
     sourceRoot,
-    totalBytes,
+    totalBytes: files.reduce((sum, file) => sum + file.size, 0),
     files,
     requiresStoppedServer: true,
     requiresNbtValidation: true,

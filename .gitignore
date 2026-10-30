@@ -1,6 +1,9 @@
 # Machine-specific notes retained for local Codex sessions
 /.codex/local/
 
+# Optional locally prepared Minecraft UI assets; Mojang resources are not redistributed
+/games/minecraft/src/ui/assets/local-26.1/
+
 # Local persistent bind mounts and test ownership ledger
 mountdata/
 

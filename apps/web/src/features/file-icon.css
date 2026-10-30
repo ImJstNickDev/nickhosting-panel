@@ -1,0 +1,35 @@
+.fm-icon.fm-type-json {
+  color: #91620c;
+}
+.fm-icon.fm-type-jar {
+  color: #a65232;
+}
+.fm-icon.fm-type-config {
+  color: #726090;
+}
+.fm-icon.fm-type-yaml {
+  color: #397c74;
+}
+.fm-icon.fm-type-code {
+  color: #3a7095;
+}
+.fm-icon.fm-type-image {
+  color: #946288;
+}
+.fm-icon.fm-type-binary {
+  color: #65748a;
+}
+.fm-icon.fm-type-game,
+.fm-icon.fm-type-directory-asset {
+  object-fit: contain;
+}
+.fm-icon.fm-directory-icon-shell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+.fm-icon.fm-type-directory-artwork {
+  object-fit: cover;
+  border-radius: 3px;
+}

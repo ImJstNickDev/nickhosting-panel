@@ -1,0 +1,44 @@
+export const sftpWebMessages: Record<string, readonly [string, string]> = {
+  'sftp.retrieveAgain': [
+    'Use Show password to retrieve this access password.',
+    'Usa Mostra password per recuperare la password di questo accesso.',
+  ],
+  'sftp.showRevoked': ['Show revoked', 'Mostra revocati'],
+  'sftp.primaryPending': [
+    'Your personal SFTP access is not ready yet. This page checks automatically.',
+    'Il tuo accesso SFTP personale non è ancora pronto. Questa pagina controlla automaticamente.',
+  ],
+  'sftp.passwordGenerated': ['Generated · 16 characters', 'Generata · 16 caratteri'],
+  'sftp.additional': ['Additional accesses', 'Accessi aggiuntivi'],
+  'sftp.addAccess': ['Add access', 'Aggiungi accesso'],
+  'sftp.noAdditional': ['No additional accesses.', 'Nessun accesso aggiuntivo.'],
+  'sftp.legacyAccess': ['Existing access', 'Accesso esistente'],
+  'sftp.accessExample': ['For example, backup script', 'Ad esempio, script backup'],
+  'sftp.connection': ['Connection', 'Connessione'],
+  'sftp.credentials': ['Credentials', 'Credenziali'],
+  'sftp.empty': ['No SFTP credentials yet.', 'Nessuna credenziale SFTP.'],
+  'sftp.copyHost': ['Copy hostname', 'Copia nome host'],
+  'sftp.copyPort': ['Copy port', 'Copia porta'],
+  'sftp.copyUsername': ['Copy username', 'Copia nome utente'],
+  'sftp.copyPassword': ['Copy password', 'Copia password'],
+  'sftp.copyFailed': [
+    'Could not copy. Select and copy the value manually.',
+    'Copia non riuscita. Seleziona e copia il valore manualmente.',
+  ],
+  'sftp.showPassword': ['Show password', 'Mostra password'],
+  'sftp.hidePassword': ['Hide password', 'Nascondi password'],
+  'sftp.newPassword': ['Your SFTP password', 'La tua password SFTP'],
+  'sftp.limitation': ['About revocation', 'Informazioni sulla revoca'],
+  'sftp.rotateConfirm': [
+    'The current password will no longer work for new sign-ins. Existing SSH connections may remain usable.',
+    'La password attuale non consentirà nuovi accessi. Le connessioni SSH già aperte potrebbero restare utilizzabili.',
+  ],
+  'sftp.revokeConfirm': [
+    'New sign-ins with this credential will be blocked. Existing SSH connections may remain usable. Server files will not be deleted.',
+    'I nuovi accessi con questa credenziale saranno bloccati. Le connessioni SSH già aperte potrebbero restare utilizzabili. I file del server non verranno eliminati.',
+  ],
+  'sftp.permission': [
+    'You do not have permission to create SFTP credentials.',
+    'Non hai i permessi per creare credenziali SFTP.',
+  ],
+};

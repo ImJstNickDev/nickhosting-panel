@@ -1,22 +1,23 @@
 import { DomainError } from '@nickhosting/core';
 import WebSocket from 'ws';
 import { z } from 'zod';
+import { type ConsoleCredentialOptions, createConsoleCredentials } from './console-credentials.js';
+import { createConsoleOutboundBudget, encodeConsoleFrame } from './console-limits.js';
 import { allowedOrigin } from './downloads.js';
 import {
   PterodactylError,
   parseInput,
   segment,
   type Transport,
-  type TransportOptions,
   validatedBaseURL,
 } from './transport.js';
 
 export type ConsoleEvent =
-  | { type: 'console'; data: string }
+  | { type: 'console'; data: string; source?: 'installation' }
   | { type: 'status'; data: 'offline' | 'starting' | 'running' | 'stopping' }
   | { type: 'stats'; data: ConsoleStats }
-  | { type: 'installation'; phase: 'completed' }
-  | { type: 'error'; code: 'integration_unavailable' }
+  | { type: 'installation'; phase: 'started' | 'completed' }
+  | { type: 'error'; code: 'integration_unavailable'; reason?: 'rate_limited' }
   | { type: 'closed' };
 const statsSchema = z.object({
   memory_bytes: z.number().nonnegative(),
@@ -33,10 +34,14 @@ export interface ConsoleRelayOptions {
   /** The API must recheck the current NickHosting session/server authorization. */
   authorize(): Promise<boolean>;
   canSendCommands?: boolean;
+  /** Separate current write permission, in addition to stream read authorization. */
+  authorizeCommand?(): Promise<boolean>;
   signal?: AbortSignal;
   maxDurationMs?: number;
 }
 export interface ConsoleRelay {
+  /** Resolves after socket dispatch, not a Wings command acknowledgement (none
+   * exists). A later upstream throttle is reported as a stream error, never replayed. */
   sendCommand(command: string): Promise<void>;
   requestLogs(): Promise<void>;
   requestStats(): Promise<void>;
@@ -45,10 +50,11 @@ export interface ConsoleRelay {
 /** Connects/authenticates upstream on the backend. The handle contains no token or URL. */
 export async function createConsoleRelay(
   transport: Transport,
-  options: TransportOptions & { webSocketOrigins?: string[] },
+  options: ConsoleCredentialOptions,
   identifier: string,
   serverUUID: string,
   input: ConsoleRelayOptions,
+  mode: 'console' | 'installation' = 'console',
 ): Promise<ConsoleRelay> {
   const duration = parseInput(
     z.number().int().min(1000).max(3600000),
@@ -61,17 +67,19 @@ export async function createConsoleRelay(
     panelWSOrigin,
     ...(options.webSocketOrigins ?? []).map((origin) => allowedOrigin(origin, ['ws:', 'wss:'])),
   ]);
-  const tokenSchema = z.object({
-    data: z.object({ token: z.string().min(1).max(16384), socket: z.string().max(4096) }),
+  const credentialSchema = z.object({
+    token: z.string().min(1).max(16384),
+    socket: z.string().max(4096),
   });
-  async function credentials() {
-    const response = await transport.json(
-      'client',
-      `servers/${segment(identifier)}/websocket`,
-      tokenSchema,
-    );
+  const credentialPath =
+    mode === 'installation'
+      ? `extensions/nickhosting/servers/${segment(identifier)}/installation-websocket`
+      : `servers/${segment(identifier)}/websocket`;
+  function validateCredentials(value: unknown) {
     try {
-      const url = new URL(response.data.socket);
+      const data = credentialSchema.parse(value);
+      encodeConsoleFrame('auth', [data.token]);
+      const url = new URL(data.socket);
       if (
         !origins.has(url.origin) ||
         !['ws:', 'wss:'].includes(url.protocol) ||
@@ -82,12 +90,21 @@ export async function createConsoleRelay(
         url.pathname !== `/api/servers/${serverUUID}/ws`
       )
         throw new Error('invalid_destination');
+      return data;
     } catch {
       throw new PterodactylError('invalid_response', 'client', 'rejected');
     }
-    return response.data;
   }
-  const first = await credentials();
+  const credentials = createConsoleCredentials(
+    transport,
+    options,
+    credentialPath,
+    serverUUID,
+    async () =>
+      (await transport.json('client', credentialPath, z.object({ data: credentialSchema }))).data,
+    validateCredentials,
+  );
+  const first = await credentials.read();
   if (input.signal?.aborted || !(await input.authorize())) throw new DomainError('forbidden');
   const hidden = new Set([
     first.token,
@@ -98,6 +115,7 @@ export async function createConsoleRelay(
     origin: base.origin,
     handshakeTimeout: options.timeoutMs ?? 10000,
     maxPayload: 65536,
+    perMessageDeflate: false,
     followRedirects: false,
   });
   let closed = false;
@@ -106,6 +124,10 @@ export async function createConsoleRelay(
   let refreshPending = false;
   let rateWindow = Date.now();
   let rateBytes = 0;
+  let currentToken = first.token;
+  let terminalError: PterodactylError | undefined;
+  const outbound = createConsoleOutboundBudget();
+  const pendingWrites = new Set<(error: Error) => void>();
   let authResolve: () => void;
   let authReject: (error: Error) => void;
   const ready = new Promise<void>((resolve, reject) => {
@@ -127,19 +149,40 @@ export async function createConsoleRelay(
     clearTimeout(authenticationTimer);
     input.signal?.removeEventListener('abort', close);
     socket.terminate();
-    authReject(new PterodactylError('unavailable', 'client', 'rejected'));
+    authReject(terminalError ?? new PterodactylError('unavailable', 'client', 'rejected'));
+    for (const reject of pendingWrites)
+      reject(terminalError ?? new PterodactylError('unavailable', 'client', 'unknown'));
+    pendingWrites.clear();
     emit({ type: 'closed' });
   }
-  function fail() {
-    emit({ type: 'error', code: 'integration_unavailable' });
+  function fail(reason?: 'rate_limited') {
+    if (closed) return;
+    terminalError = new PterodactylError(reason ?? 'unavailable', 'client', 'unknown');
+    emit({ type: 'error', code: 'integration_unavailable', ...(reason ? { reason } : {}) });
     close();
   }
-  function send(event: string, args: string[] = []) {
+  async function send(event: string, args: string[] = []) {
+    if (terminalError) throw terminalError;
     if (closed || socket.readyState !== WebSocket.OPEN || socket.bufferedAmount > 65536)
       throw new PterodactylError('unavailable', 'client', 'rejected');
-    socket.send(JSON.stringify({ event, args }));
+    const wire = outbound(event, args);
+    await new Promise<void>((resolve, reject) => {
+      pendingWrites.add(reject);
+      const complete = (error?: Error) => {
+        pendingWrites.delete(reject);
+        if (error) reject(new PterodactylError('unavailable', 'client', 'unknown'));
+        else if (terminalError) reject(terminalError);
+        else resolve();
+      };
+      try {
+        socket.send(wire, complete);
+      } catch {
+        complete(new Error('socket_write_failed'));
+      }
+    });
   }
   async function assertAuthorized() {
+    if (terminalError) throw terminalError;
     if (closed || !(await input.authorize())) {
       close();
       throw new DomainError('forbidden');
@@ -150,23 +193,27 @@ export async function createConsoleRelay(
     refreshPending = true;
     try {
       await assertAuthorized();
-      const next = await credentials();
+      const next = await credentials.read(currentToken);
       if (next.socket !== first.socket) throw new Error('changed_destination');
       hidden.add(next.token);
-      send('auth', [next.token]);
+      currentToken = next.token;
+      await send('auth', [next.token]);
     } catch {
       fail();
     } finally {
       refreshPending = false;
     }
   }
-  const authenticationTimer = setTimeout(fail, options.timeoutMs ?? 10000);
+  const authenticationTimer = setTimeout(() => {
+    credentials.invalidate(currentToken);
+    fail();
+  }, options.timeoutMs ?? 10000);
   const durationTimer = setTimeout(close, duration);
   const authorizationTimer = setInterval(() => {
     if (authorizationCheck || closed) return;
     authorizationCheck = true;
     void assertAuthorized()
-      .catch(fail)
+      .catch(() => fail())
       .finally(() => {
         authorizationCheck = false;
       });
@@ -176,18 +223,18 @@ export async function createConsoleRelay(
   authorizationTimer.unref();
   input.signal?.addEventListener('abort', close, { once: true });
   socket.on('open', () => {
-    try {
-      send('auth', [first.token]);
-    } catch {
-      fail();
-    }
+    void send('auth', [first.token]).catch(() => fail());
   });
-  socket.on('error', fail);
+  socket.on('error', () => fail());
   socket.on('close', close);
   if (input.signal?.aborted) close();
-  socket.on('message', (raw) => {
+  socket.on('message', (raw, isBinary) => {
     if (closed) return;
     try {
+      if (isBinary) {
+        fail();
+        return;
+      }
       const text = raw.toString();
       if (Date.now() - rateWindow >= 1000) {
         rateWindow = Date.now();
@@ -199,8 +246,14 @@ export async function createConsoleRelay(
         return;
       }
       const event = z
-        .object({ event: z.string(), args: z.array(z.unknown()).max(32).default([]) })
+        .object({ event: z.string().max(128), args: z.array(z.unknown()).max(32).default([]) })
         .parse(JSON.parse(text));
+      if (event.event === 'throttled') {
+        // Wings supplies an event name or "global", but no command ID/ACK.
+        // Do not claim acceptance or replay a possibly dispatched command.
+        fail('rate_limited');
+        return;
+      }
       if (event.event === 'auth success') {
         authenticated = true;
         clearTimeout(authenticationTimer);
@@ -216,19 +269,35 @@ export async function createConsoleRelay(
         event.event === 'jwt error' ||
         event.event === 'daemon error'
       ) {
+        credentials.invalidate(currentToken);
         fail();
         return;
       }
       if (!authenticated) return;
-      if (event.event === 'console output' || event.event === 'install output') {
+      if (
+        mode === 'installation' &&
+        !['install output', 'install started', 'install completed'].includes(event.event)
+      )
+        return;
+      if (
+        event.event === 'console output' ||
+        event.event === 'install output' ||
+        event.event === 'daemon message'
+      ) {
         let line = parseInput(z.string().max(32768), event.args[0]);
         for (const secret of hidden) line = line.replaceAll(secret, '[redacted]');
-        emit({ type: 'console', data: line });
+        emit({
+          type: 'console',
+          data: line,
+          ...(event.event === 'install output' ? { source: 'installation' as const } : {}),
+        });
       } else if (event.event === 'status') {
         emit({
           type: 'status',
           data: parseInput(z.enum(['offline', 'starting', 'running', 'stopping']), event.args[0]),
         });
+      } else if (event.event === 'install started') {
+        emit({ type: 'installation', phase: 'started' });
       } else if (event.event === 'install completed') {
         // This is a completion notification, never an installation-success claim.
         emit({ type: 'installation', phase: 'completed' });
@@ -249,7 +318,7 @@ export async function createConsoleRelay(
   }
   return {
     async sendCommand(command) {
-      if (!input.canSendCommands) throw new DomainError('forbidden');
+      if (mode === 'installation' || !input.canSendCommands) throw new DomainError('forbidden');
       const value = parseInput(
         z
           .string()
@@ -259,15 +328,19 @@ export async function createConsoleRelay(
         command,
       );
       await assertAuthorized();
-      send('send command', [value]);
+      if (input.authorizeCommand && !(await input.authorizeCommand()))
+        throw new DomainError('forbidden');
+      await send('send command', [value]);
     },
     async requestLogs() {
+      if (mode === 'installation') throw new DomainError('forbidden');
       await assertAuthorized();
-      send('send logs');
+      await send('send logs');
     },
     async requestStats() {
+      if (mode === 'installation') throw new DomainError('forbidden');
       await assertAuthorized();
-      send('send stats');
+      await send('send stats');
     },
     close,
   };

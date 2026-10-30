@@ -1,8 +1,14 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
+import {
+  type AuthContext,
+  type createLogger,
+  DomainError,
+  type SecretCodec,
+} from '@nickhosting/core';
 import { type createDatabase, getSecret, getSettings } from '@nickhosting/database';
 import { gatewayObservationSchema, gatewayWakeRequestSchema } from '@nickhosting/game-sdk';
 import { gatewayReachabilityProofSchema } from '@nickhosting/gateway-safety';
+import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
 import {
   authorizeServer,
   gatewayConfiguration,
@@ -11,25 +17,50 @@ import {
   getGatewayState,
   listGatewayRoutes,
   type ManagementRuntime,
+  recordGatewayContact,
   reportGatewayObservation,
   requestGatewayWake,
   requireGatewayRoute,
   setGatewayPolicy,
   setGatewayRoute,
+  trustedGameModules,
   verifyManagedIdentity,
 } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import type { Variables } from './app.js';
+import { gatewayClientFeatures, gatewayPresentationForClient } from './gateway-presentation.js';
+import { registerGatewaySleepRoutes } from './gateway-sleep.js';
+import { registerGatewayStartupRoutes } from './gateway-startup.js';
 
 const routeRequest = z
   .object({ routeId: z.uuid(), routeRevision: z.number().int().positive().optional() })
   .strict();
 const hash = (text: string) => createHash('sha256').update(text).digest();
+const safetyServer = (remote: ApplicationServer) => ({
+  id: remote.id,
+  uuid: remote.uuid,
+  external_id: remote.external_id,
+  user: remote.user,
+  node: remote.node,
+  nest: remote.nest,
+  egg: remote.egg,
+  suspended: remote.suspended,
+  relationships: {
+    allocations: {
+      object: 'list' as const,
+      data: (remote.relationships?.allocations?.data ?? []).map(({ attributes: a }) => ({
+        attributes: { id: a.id, ip: a.ip, port: a.port, assigned: a.assigned },
+      })),
+    },
+  },
+});
 export function registerGatewayRoutes(
   app: Hono<{ Variables: Variables }>,
   options: {
+    logger?: ReturnType<typeof createLogger>;
     db: ReturnType<typeof createDatabase>['db'];
+    pool?: ReturnType<typeof createDatabase>['pool'];
     env: Readonly<Record<string, string | undefined>>;
     codec: SecretCodec;
     principal: (
@@ -41,6 +72,13 @@ export function registerGatewayRoutes(
   },
 ) {
   const { db, env, codec } = options;
+  const log = (event: string, data: Record<string, unknown>) => {
+    try {
+      options.logger?.log('info', event, data);
+    } catch {
+      // A diagnostic sink cannot change the control-plane result.
+    }
+  };
   const route = async (input: unknown) => {
     const value = routeRequest.safeParse(input);
     if (!value.success) throw new DomainError('validation_failed');
@@ -48,7 +86,7 @@ export function registerGatewayRoutes(
       revisionPrecondition: true,
     });
   };
-  app.use('/internal/gateway/*', async (c, next) => {
+  const authenticateGateway = async (c: Context<{ Variables: Variables }>) => {
     // Browser sessions/support tokens are never service authentication. Constant
     // length digests avoid leaking the dedicated secret; no provider key is used.
     const config = await getSettings(db, env),
@@ -66,8 +104,20 @@ export function registerGatewayRoutes(
       c.req.header('x-nh-support-token')
     )
       throw new DomainError('unauthenticated');
+    c.set('gatewayAuthenticated', true);
+    return match[1] ?? '';
+  };
+  app.use('/internal/gateway/*', async (c, next) => {
+    const gatewayId = await authenticateGateway(c);
     await next();
+    if (c.res.status < 400) {
+      // Diagnostic contact only; absence of a receipt must never invalidate a
+      // completed control-plane action or manufacture listener readiness.
+      await recordGatewayContact(db, gatewayId).catch(() => {});
+    }
   });
+  registerGatewayStartupRoutes(app, options);
+  registerGatewaySleepRoutes(app, { ...options, authenticate: authenticateGateway });
   const prefix = '/internal/gateway/:gatewayId';
   app.get(`${prefix}/configuration`, async (c) => {
     const values = await gatewayConfiguration(db, env);
@@ -75,31 +125,78 @@ export function registerGatewayRoutes(
       Object.fromEntries(Object.entries(values).filter(([key]) => key.startsWith('gateway'))),
     );
   });
-  app.get(`${prefix}/snapshot`, async (c) => c.json(await getGatewaySnapshot(db, env)));
+  app.get(`${prefix}/snapshot`, async (c) => {
+    const features = c.req.header('X-NickHosting-Gateway-Features');
+    const snapshot = gatewayPresentationForClient(await getGatewaySnapshot(db, env), features);
+    // Old Gateways use strict route decoding. Negotiate the additive terminal
+    // proof so a Core-first rolling update cannot interrupt their listeners.
+    if (!gatewayClientFeatures(features).has('completed-sleep-v1')) {
+      return c.json({
+        ...snapshot,
+        routes: snapshot.routes.map(({ completedSleep: _proof, ...route }) => route),
+      });
+    }
+    return c.json(snapshot);
+  });
   app.post(`${prefix}/wake`, async (c) => {
-    const value = gatewayWakeRequestSchema.safeParse(await options.body(c));
-    if (!value.success) throw new DomainError('validation_failed');
-    const selected = await requireGatewayRoute(
-      db,
-      value.data.routeId,
-      value.data.routeRevision,
-      env,
-    );
-    const management = await options.management();
-    await management.refreshObservations();
-    const state = await requestGatewayWake(
-      db,
-      selected.serverId,
-      { generation: selected.generation, intent: 'join' },
-      { env },
-    );
-    return c.json({
-      mode: state.state,
-      ...(state.wakeJobId ? { operationId: state.wakeJobId } : {}),
-      ...(state.errorCode ? { reasonKey: `errors.${state.errorCode}` } : {}),
-    });
+    // Timing begins after service authentication; requestId connects the early
+    // phases to the operation ID that exists only after the durable enqueue.
+    const started = performance.now();
+    const metadata: Record<string, unknown> = { requestId: c.get('requestId') };
+    const stage = async <T>(name: string, work: () => Promise<T>): Promise<T> => {
+      const phaseStarted = performance.now();
+      let outcome = 'failed';
+      try {
+        const result = await work();
+        outcome = 'succeeded';
+        return result;
+      } finally {
+        log('gateway.wake_stage', {
+          ...metadata,
+          stage: name,
+          durationMs: Math.round((performance.now() - phaseStarted) * 1000) / 1000,
+          outcome,
+        });
+      }
+    };
+    let outcome = 'failed';
+    try {
+      const value = gatewayWakeRequestSchema.safeParse(await options.body(c));
+      if (!value.success) throw new DomainError('validation_failed');
+      metadata.routeId = value.data.routeId;
+      metadata.wakeRequestId = value.data.requestId;
+      const selected = await stage('route_validation', () =>
+        requireGatewayRoute(db, value.data.routeId, value.data.routeRevision, env),
+      );
+      metadata.serverId = selected.serverId;
+      const management = await stage('management_configuration', options.management);
+      await stage('host_sampling', () => management.refreshObservations(db, selected.serverId));
+      const state = await stage('admission_and_enqueue', () =>
+        requestGatewayWake(
+          db,
+          selected.serverId,
+          { generation: selected.generation, intent: 'join' },
+          { env },
+        ),
+      );
+      if (state.wakeJobId) metadata.jobId = state.wakeJobId;
+      metadata.mode = state.state;
+      outcome = 'succeeded';
+      return c.json({
+        mode: state.state,
+        ...(state.wakeJobId ? { operationId: state.wakeJobId } : {}),
+        ...(state.errorCode ? { reasonKey: `errors.${state.errorCode}` } : {}),
+      });
+    } finally {
+      log('gateway.wake_completed', {
+        ...metadata,
+        durationMs: Math.round((performance.now() - started) * 1000) / 1000,
+        outcome,
+      });
+    }
   });
   app.post(`${prefix}/observations`, async (c) => {
+    const requestStarted = performance.now();
     const parsed = gatewayObservationSchema.safeParse(await options.body(c));
     if (!parsed.success) throw new DomainError('validation_failed');
     const value = parsed.data;
@@ -122,9 +219,24 @@ export function registerGatewayRoutes(
         ),
       );
     if (!matches(expected)) throw new DomainError('conflict');
+    const validationCompleted = performance.now();
     const management = await options.management();
-    const started = await management.lifecycle.observeProcessStart(selected.serverId, db);
-    await reportGatewayObservation(
+    const configured = performance.now();
+    const managed = await db
+      .selectFrom('managed_servers as server')
+      .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
+      .select('mapping.game_id')
+      .where('server.id', '=', selected.serverId)
+      .where('server.deleted_at', 'is', null)
+      .executeTakeFirstOrThrow();
+    const providerReady =
+      selected.mode === 'online' &&
+      trustedGameModules.get(managed.game_id)?.readinessSource === 'provider_running';
+    const started = await (providerReady && management.lifecycle.observeProviderProcessStart
+      ? management.lifecycle.observeProviderProcessStart(selected.serverId, db)
+      : management.lifecycle.observeProcessStart(selected.serverId, db));
+    const processVerified = performance.now();
+    const result = await reportGatewayObservation(
       db,
       selected.serverId,
       {
@@ -166,6 +278,41 @@ export function registerGatewayRoutes(
         },
       },
     );
+    // A snapshot-to-result change is diagnostic, not a second state authority.
+    // Regular identical idle/readiness samples deliberately emit no log records.
+    if (result.state !== selected.mode) {
+      const completed = performance.now();
+      const ms = (duration: number) => Math.round(duration * 1000) / 1000;
+      log('gateway.observation_state_changed', {
+        requestId: c.get('requestId'),
+        serverId: selected.serverId,
+        routeId: selected.id,
+        jobId: result.wakeJobId,
+        from: selected.mode,
+        to: result.state,
+        observedAt: value.observedAt,
+        completedAt: new Date().toISOString(),
+        durationMs: ms(completed - requestStarted),
+        validationMs: ms(validationCompleted - requestStarted),
+        managementConfigurationMs: ms(configured - validationCompleted),
+        processVerificationMs: ms(processVerified - configured),
+        observationCommitMs: ms(completed - processVerified),
+      });
+    }
+    if (
+      selected.mode === 'waking' &&
+      value.ready &&
+      result.state === 'online' &&
+      gatewayClientFeatures(c.req.header('X-NickHosting-Gateway-Features')).has(
+        'readiness-receipt-v1',
+      )
+    )
+      return c.json(
+        gatewayPresentationForClient(
+          await getGatewaySnapshot(db, env),
+          c.req.header('X-NickHosting-Gateway-Features'),
+        ),
+      );
     return c.body(null, 204);
   });
   app.post(`${prefix}/context`, async (c) =>
@@ -179,6 +326,16 @@ export function registerGatewayRoutes(
           .object({ operation: z.literal('allocations'), nodeId: z.number().int().positive() })
           .strict(),
         z.object({ operation: z.literal('server'), routeId: z.uuid() }).strict(),
+        z
+          .object({
+            operation: z.literal('servers'),
+            routeIds: z
+              .array(z.uuid())
+              .min(1)
+              .max(1000)
+              .refine((ids) => new Set(ids).size === ids.length),
+          })
+          .strict(),
       ])
       .safeParse(await options.body(c));
     if (!parsed.success) throw new DomainError('validation_failed');
@@ -189,7 +346,10 @@ export function registerGatewayRoutes(
         (await management.adapter.listNodes()).map((n) => ({ id: n.id, uuid: n.uuid })),
       );
     if (value.operation === 'allocations') {
-      if (!(await management.adapter.listNodes()).some((n) => n.id === value.nodeId))
+      // The validator independently reads fresh provider nodes for every inspection.
+      // Scope discovery here to Owner-configured nodes without repeating that API call.
+      const config = await gatewayConfiguration(db, env);
+      if (!config.gatewayNetworkPolicy?.nodes.some((n) => n.nodeId === value.nodeId))
         throw new DomainError('not_found');
       return c.json(
         (await management.adapter.listAllocations(value.nodeId)).map((a) => ({
@@ -200,6 +360,74 @@ export function registerGatewayRoutes(
         })),
       );
     }
+    if (value.operation === 'servers') {
+      // Resolve every selector through the current enabled Gateway membership;
+      // the service cannot use this facade to enumerate unrelated provider servers.
+      const snapshot = await getGatewaySnapshot(db, env);
+      const current = new Map(snapshot.routes.map((route) => [route.id, route]));
+      const identities = new Map<string, Awaited<ReturnType<typeof gatewaySafetyContext>>>();
+      const membershipChanged = () =>
+        c.json(
+          {
+            error: {
+              code: 'conflict',
+              messageKey: 'errors.conflict',
+              details: { gatewayControlReason: 'snapshot_membership_changed' },
+            },
+            requestId: c.get('requestId'),
+          },
+          412,
+        );
+      for (const routeId of value.routeIds) {
+        const selected = current.get(routeId);
+        if (!selected) return membershipChanged();
+        let context: Awaited<ReturnType<typeof gatewaySafetyContext>>;
+        try {
+          context = await gatewaySafetyContext(db, selected);
+        } catch (error) {
+          // Membership can change after the snapshot read and before its route
+          // context is resolved. Only absence permits the bounded snapshot retry.
+          if (error instanceof DomainError && error.code === 'not_found')
+            return membershipChanged();
+          throw error;
+        }
+        const previous = identities.get(selected.serverId);
+        if (
+          previous &&
+          (previous.providerServerId !== context.providerServerId ||
+            previous.providerServerUuid !== context.providerServerUuid)
+        )
+          throw new DomainError('provenance_mismatch');
+        identities.set(selected.serverId, context);
+      }
+      const servers = await db
+        .selectFrom('managed_servers')
+        .selectAll()
+        .where('id', 'in', [...identities.keys()])
+        .execute();
+      const expected = new Set(
+        [...identities.values()].map((context) => context.providerServerUuid),
+      );
+      if (servers.length !== identities.size || expected.size !== identities.size)
+        throw new DomainError('provenance_mismatch');
+      const remotes = await management.adapter.getApplicationServers([...expected]);
+      const byUuid = new Map<string, ApplicationServer>();
+      const providerIds = new Set<number>();
+      for (const remote of remotes) {
+        if (!expected.has(remote.uuid) || byUuid.has(remote.uuid) || providerIds.has(remote.id))
+          throw new DomainError('provenance_mismatch');
+        byUuid.set(remote.uuid, remote);
+        providerIds.add(remote.id);
+      }
+      if (byUuid.size !== expected.size) throw new DomainError('provenance_mismatch');
+      for (const server of servers) {
+        const context = identities.get(server.id);
+        const remote = context && byUuid.get(context.providerServerUuid);
+        if (!remote) throw new DomainError('provenance_mismatch');
+        await verifyManagedIdentity(db, server, remote);
+      }
+      return c.json(remotes.map(safetyServer));
+    }
     const selected = await requireGatewayRoute(db, value.routeId, undefined, env);
     const context = await gatewaySafetyContext(db, selected);
     const server = await db
@@ -209,24 +437,7 @@ export function registerGatewayRoutes(
       .executeTakeFirstOrThrow();
     const remote = await management.adapter.getApplicationServer(context.providerServerId);
     await verifyManagedIdentity(db, server, remote);
-    return c.json({
-      id: remote.id,
-      uuid: remote.uuid,
-      external_id: remote.external_id,
-      user: remote.user,
-      node: remote.node,
-      nest: remote.nest,
-      egg: remote.egg,
-      suspended: remote.suspended,
-      relationships: {
-        allocations: {
-          object: 'list' as const,
-          data: (remote.relationships?.allocations?.data ?? []).map(({ attributes: a }) => ({
-            attributes: { id: a.id, ip: a.ip, port: a.port, assigned: a.assigned },
-          })),
-        },
-      },
-    });
+    return c.json(safetyServer(remote));
   });
   app.post(`${prefix}/proof-read`, async (c) => {
     const selected = await route(await options.body(c));
@@ -286,7 +497,7 @@ export function registerGatewayRoutes(
         await options.principal(c, true),
         c.req.param('id'),
         await options.body(c),
-        { env },
+        { env, initializeOnly: c.req.header('if-none-match') === '*' },
       ),
     ),
   );

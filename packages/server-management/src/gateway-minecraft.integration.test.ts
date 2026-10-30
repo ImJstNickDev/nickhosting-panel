@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { minecraftDigest, minecraftVerificationChecks } from '@nickhosting/minecraft';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { getGatewayState, requestGatewayWake, setGatewayPolicy } from './gateway-orchestration.js';
+import { lockResources } from './admission.js';
+import { getServerGatewayMessages } from './gateway-messages.js';
+import { getGatewayState, setGatewayPolicy } from './gateway-orchestration.js';
+import { activateProvisionGateway, planProvisionGateway } from './gateway-provision.js';
 import {
   getGatewaySnapshot,
   requireMinecraftGatewayProtocol,
@@ -13,6 +16,7 @@ import {
   minecraftMappingDigest,
   signMinecraftEvidence,
 } from './minecraft-registry.js';
+import { createSchedule, runDueSchedules } from './schedules.js';
 import { managementFixture } from './test-fixtures.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -22,20 +26,20 @@ let choiceId: string;
 let allocationId: string;
 let env: Record<string, string>;
 const combination = {
-  release: '1.21.1',
+  release: '26.1',
   releaseType: 'release',
-  protocolId: 767,
+  protocolId: 775,
   family: 'netty',
   transfer: true,
   profile: 'vanilla',
-  javaMajor: 21,
+  javaMajor: 25,
   runtimeDigest: 'a'.repeat(64),
   protocolSource: { url: 'https://example.test/protocols', sha256: 'b'.repeat(64) },
 };
 const policy = {
   enabled: true,
   protocolId: 'minecraft-java',
-  gameVersion: '1.21.1',
+  gameVersion: '26.1',
   idleTimeoutSeconds: 10,
   readinessTimeoutSeconds: 60,
   readinessMaxAgeSeconds: 15,
@@ -59,17 +63,17 @@ beforeEach(async () => {
   };
   await f.db
     .insertInto('game_integrations')
-    .values({ id: 'minecraft-java', version: '1.0.0', manifest: {} })
+    .values({ id: 'minecraft', version: '1.0.0', manifest: {} })
     .onConflict((c) => c.column('id').doNothing())
     .execute();
   await f.db
     .insertInto('game_rollouts')
-    .values({ integration_id: 'minecraft-java', state: 'public', allowlist: [] })
+    .values({ integration_id: 'minecraft', state: 'public', allowlist: [] })
     .onConflict((c) => c.column('integration_id').doUpdateSet({ state: 'public', allowlist: [] }))
     .execute();
   await f.db
     .updateTable('runtime_egg_mappings')
-    .set({ game_id: 'minecraft-java', runtime_id: 'vanilla' })
+    .set({ game_id: 'minecraft', runtime_id: 'vanilla' })
     .where('id', '=', f.mappingId)
     .execute();
   const mapping = await f.db
@@ -133,9 +137,9 @@ async function evidence(
       externalId: 'isolated-nbt-test',
       artifactSha256: 'e'.repeat(64),
       imageDigest: `sha256:${'f'.repeat(64)}`,
-      javaMajor: 21,
+      javaMajor: 25,
     },
-    client: { implementation: 'test-fixture', version: '1', protocolId: 767 },
+    client: { implementation: 'test-fixture', version: '1', protocolId: 775 },
   };
   await f.db
     .insertInto('minecraft_verification_evidence')
@@ -164,13 +168,174 @@ async function register() {
     env,
   );
 }
-describe('Minecraft evidence-backed Gateway registration', () => {
-  it('mints exact service-only metadata after installed profile and signed evidence, even when new creations are disabled', async () => {
-    const report = await evidence();
+describe('Minecraft declared-capability Gateway registration', () => {
+  it.each(['fabric', 'paper'])(
+    'activates %s routes and automation without reports while retaining mapping identity checks',
+    async (profile) => {
+      await f.db
+        .updateTable('runtime_egg_mappings')
+        .set({ runtime_id: profile })
+        .where('id', '=', f.mappingId)
+        .execute();
+      const mapping = await f.db
+        .selectFrom('runtime_egg_mappings')
+        .selectAll()
+        .where('id', '=', f.mappingId)
+        .executeTakeFirstOrThrow();
+      await f.db
+        .updateTable('minecraft_combinations')
+        .set({
+          combination: JSON.stringify({
+            ...combination,
+            profile,
+            loaderVersion: '0.19.5',
+            installerVersion: '1.1.2',
+          }),
+          mapping_digest: minecraftMappingDigest(mapping),
+        })
+        .where('id', '=', choiceId)
+        .execute();
+      await register();
+      const snapshot = await getGatewaySnapshot(f.db, env);
+      expect(snapshot.routes[0]?.protocol?.minecraft).toMatchObject({
+        supportSource: 'integration',
+        declarationId: `minecraft/${profile}`,
+        declarationVersion: 1,
+        release: '26.1',
+        protocolId: 775,
+      });
+      expect(await getGatewayState(f.db, serverId, { env })).toMatchObject({
+        enabled: true,
+      });
+      await f.db
+        .updateTable('runtime_egg_mappings')
+        .set({ docker_image: 'changed/image:25' })
+        .where('id', '=', f.mappingId)
+        .execute();
+      expect((await getGatewaySnapshot(f.db, env)).routes).toEqual([]);
+    },
+  );
+  it('shares locally bound message variables with editor previews and never exposes listener addresses', async () => {
+    await register();
+    const values = { version: '26.1', runtime: 'Vanilla', address: '' };
+    const snapshot = await getGatewaySnapshot(f.db, env);
+    expect(snapshot.routes[0]?.presentation?.variables).toEqual({ ...values, runtime: 'vanilla' });
+    expect(
+      (await getServerGatewayMessages(f.db, f.context, serverId, env)).definition?.states[0]
+        ?.previewVariables.en,
+    ).toMatchObject(values);
+    const assignmentId = randomUUID();
+    const connection = {
+      hostname: 'world.example.test',
+      port: 27001,
+      records: [{ type: 'SRV', data: { port: 27001 } }],
+    };
+    await f.db
+      .insertInto('dns_assignments')
+      .values({
+        id: assignmentId,
+        server_id: serverId,
+        hostname: connection.hostname,
+        ownership_token: randomUUID(),
+        plan: JSON.stringify({ connection }),
+        ledger: JSON.stringify([]),
+        state: 'pending',
+      })
+      .execute();
+    expect((await getGatewaySnapshot(f.db, env)).routes[0]?.presentation?.variables?.address).toBe(
+      '',
+    );
+    await f.db
+      .updateTable('dns_assignments')
+      .set({ state: 'active' })
+      .where('id', '=', assignmentId)
+      .execute();
+    expect((await getGatewaySnapshot(f.db, env)).routes[0]?.presentation?.variables?.address).toBe(
+      'world.example.test',
+    );
+    expect(
+      (await getServerGatewayMessages(f.db, f.context, serverId, env)).definition?.states[0]
+        ?.previewVariables.it.address,
+    ).toBe('world.example.test');
+    await f.db
+      .updateTable('dns_assignments')
+      .set({
+        state: 'uncertain',
+        plan: JSON.stringify({
+          connection: { ...connection, hostname: 'pending.example.test' },
+          confirmedConnection: connection,
+        }),
+      })
+      .where('id', '=', assignmentId)
+      .execute();
+    expect((await getGatewaySnapshot(f.db, env)).routes[0]?.presentation?.variables?.address).toBe(
+      'world.example.test',
+    );
+    await f.db
+      .updateTable('dns_assignments')
+      .set({
+        state: 'active',
+        plan: JSON.stringify({ connection: { ...connection, records: [] } }),
+      })
+      .where('id', '=', assignmentId)
+      .execute();
+    expect((await getGatewaySnapshot(f.db, env)).routes[0]?.presentation?.variables?.address).toBe(
+      'world.example.test:27001',
+    );
+    await f.db
+      .updateTable('dns_assignments')
+      .set({ plan: JSON.stringify({ connection: { ...connection, port: 27002 } }) })
+      .where('id', '=', assignmentId)
+      .execute();
+    expect((await getGatewaySnapshot(f.db, env)).routes[0]?.presentation?.variables?.address).toBe(
+      '',
+    );
+  });
+  it('publishes stopping presentation for an active scheduled stop without granting forwarding', async () => {
+    await register();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ runtime_state: 'running', intent: 'auto_wake_enabled' })
+      .where('id', '=', serverId)
+      .execute();
+    const at = new Date(Date.now() + 1000);
+    await createSchedule(
+      f.db,
+      f.context,
+      serverId,
+      {
+        name: 'Stop for night',
+        action: 'stop',
+        timing: { kind: 'once', at: at.toISOString() },
+        timeZone: 'UTC',
+        enabled: true,
+      },
+      env,
+    );
+    expect(await runDueSchedules(f.db, env, { now: at })).toMatchObject({ dispatched: 1 });
+    const snapshot = await getGatewaySnapshot(f.db, env);
+    expect(snapshot.routes).toHaveLength(1);
+    expect(snapshot.routes[0]).toMatchObject({ mode: 'blocked', presentation: { stopping: true } });
+    const server = await f.db
+      .selectFrom('managed_servers')
+      .select('active_operation_id')
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    expect(server.active_operation_id).toBeTruthy();
+    // A nonterminal orphaned stop is not presentation authority for the server.
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: null })
+      .where('id', '=', serverId)
+      .execute();
+    expect((await getGatewaySnapshot(f.db, env)).routes[0]?.presentation?.stopping).toBeUndefined();
+  });
+
+  it('mints declared service-only metadata for installed profiles without requiring signed evidence', async () => {
     await f.db
       .updateTable('game_rollouts')
       .set({ state: 'disabled-for-new-servers' })
-      .where('integration_id', '=', 'minecraft-java')
+      .where('integration_id', '=', 'minecraft')
       .execute();
     await f.db
       .updateTable('runtime_egg_mappings')
@@ -180,11 +345,13 @@ describe('Minecraft evidence-backed Gateway registration', () => {
     await register();
     const snapshot = await getGatewaySnapshot(f.db, env);
     expect(snapshot.routes[0]?.protocol?.minecraft).toMatchObject({
-      release: '1.21.1',
-      protocolId: 767,
+      release: '26.1',
+      protocolId: 775,
       family: 'netty',
       choiceId,
-      evidenceRunId: report.runId,
+      supportSource: 'integration',
+      declarationId: 'minecraft/vanilla',
+      declarationVersion: 2,
       acceptsTransfers: false,
     });
     expect(await getGatewayState(f.db, serverId, { env })).toMatchObject({
@@ -192,24 +359,17 @@ describe('Minecraft evidence-backed Gateway registration', () => {
       state: 'sleeping',
     });
   });
-  it('rejects absent/tampered/expired evidence, wrong policy versions and uninstalled profiles', async () => {
-    await expect(setGatewayPolicy(f.db, f.context, serverId, policy, { env })).rejects.toThrow(
-      'integration_unavailable',
-    );
+  it('keeps test reports diagnostic and rejects wrong policy versions or uninstalled profiles', async () => {
     await evidence({ validSignature: false });
-    await expect(setGatewayPolicy(f.db, f.context, serverId, policy, { env })).rejects.toThrow(
-      'integration_unavailable',
-    );
     await evidence({ recordedAt: new Date(Date.now() - 181 * 86400000) });
-    await expect(setGatewayPolicy(f.db, f.context, serverId, policy, { env })).rejects.toThrow(
-      'integration_unavailable',
-    );
-    await evidence();
+    await expect(
+      setGatewayPolicy(f.db, f.context, serverId, policy, { env: {} }),
+    ).resolves.toMatchObject({ enabled: true });
     await expect(
       setGatewayPolicy(f.db, f.context, serverId, { ...policy, protocolId: 'generic' }, { env }),
     ).rejects.toThrow('integration_unavailable');
     await expect(
-      setGatewayPolicy(f.db, f.context, serverId, { ...policy, gameVersion: '26.1' }, { env }),
+      setGatewayPolicy(f.db, f.context, serverId, { ...policy, gameVersion: '1.21.1' }, { env }),
     ).rejects.toThrow('integration_unavailable');
     await f.db
       .updateTable('minecraft_server_profiles')
@@ -283,31 +443,27 @@ describe('Minecraft evidence-backed Gateway registration', () => {
       setGatewayPolicy(f.db, f.context, serverId, { ...policy, enabled: false }, { env }),
     ).resolves.toMatchObject({ enabled: false });
   });
-  it('checks experimental eligibility against the server owner, not the platform Owner making the request', async () => {
-    await evidence({ kind: 'protocol-fixture' });
+  it('does not promote an undeclared protocol through signed reports or Owner allowlisting', async () => {
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({
+        combination: JSON.stringify({
+          ...combination,
+          release: '1.21.1',
+          family: 'unknown',
+          protocolId: null,
+        }),
+      })
+      .where('id', '=', choiceId)
+      .execute();
+    await evidence();
     await f.db
       .updateTable('game_rollouts')
-      .set({ state: 'private-testing', allowlist: [] })
-      .where('integration_id', '=', 'minecraft-java')
+      .set({ state: 'private-testing', allowlist: [f.context.subjectUserId] })
+      .where('integration_id', '=', 'minecraft')
       .execute();
-    await expect(setGatewayPolicy(f.db, f.owner, serverId, policy, { env })).rejects.toThrow(
-      'integration_unavailable',
-    );
-    await f.db
-      .updateTable('game_rollouts')
-      .set({ allowlist: [f.context.subjectUserId] })
-      .where('integration_id', '=', 'minecraft-java')
-      .execute();
-    await register();
-    const state = await getGatewayState(f.db, serverId, { env });
-    await f.db
-      .updateTable('game_rollouts')
-      .set({ allowlist: [] })
-      .where('integration_id', '=', 'minecraft-java')
-      .execute();
-    expect((await getGatewaySnapshot(f.db, env)).routes).toEqual([]);
     await expect(
-      requestGatewayWake(f.db, serverId, { generation: state.generation, intent: 'join' }, { env }),
+      setGatewayPolicy(f.db, f.owner, serverId, { ...policy, gameVersion: '1.21.1' }, { env }),
     ).rejects.toThrow('integration_unavailable');
     expect(
       await f.db
@@ -338,17 +494,134 @@ describe('Minecraft evidence-backed Gateway registration', () => {
       requireMinecraftGatewayProtocol(
         f.db,
         otherServer,
-        { handlerId: 'minecraft-java', gameVersion: '1.21.1' },
+        { handlerId: 'minecraft-java', gameVersion: '26.1' },
         env,
       ),
     ).rejects.toThrow('configuration_invalid');
   });
-  it('caps the route snapshot lease at attestation expiry', async () => {
-    const report = await evidence({ recordedAt: new Date(Date.now() - 180 * 86400000 + 10_000) });
+  it('keeps bounded route leases independent of diagnostic report expiry', async () => {
+    await evidence({ recordedAt: new Date(Date.now() - 180 * 86400000 + 10_000) });
     await register();
     const snapshot = await getGatewaySnapshot(f.db, env);
-    expect(Date.parse(snapshot.expiresAt)).toBeLessThanOrEqual(
-      Date.parse(report.recordedAt) + 180 * 86400000,
+    expect(Date.parse(snapshot.expiresAt) - Date.parse(snapshot.issuedAt)).toBeLessThanOrEqual(
+      120_000,
     );
+    expect(snapshot.routes[0]?.protocol?.minecraft).toMatchObject({ supportSource: 'integration' });
+    expect(snapshot.routes[0]?.protocol?.minecraft).not.toHaveProperty('evidenceRunId');
   });
 });
+
+it.each([
+  {
+    profile: 'fabric',
+    release: '26.1',
+    protocolId: 775,
+    family: 'netty',
+    releaseType: 'release',
+    javaMajor: 25,
+    sleepWake: true,
+  },
+  {
+    release: '26.1',
+    protocolId: 775,
+    family: 'netty',
+    releaseType: 'release',
+    javaMajor: 25,
+    sleepWake: true,
+  },
+  {
+    release: '1.5.2',
+    protocolId: 61,
+    family: 'legacy',
+    releaseType: 'release',
+    javaMajor: 8,
+    sleepWake: true,
+  },
+  {
+    release: 'a1.2.6',
+    protocolId: 6,
+    family: 'legacy',
+    releaseType: 'old_alpha',
+    javaMajor: 8,
+    sleepWake: false,
+  },
+])(
+  'initializes inherited automation for compiled runtime $profile $release without diagnostic evidence',
+  async (variant) => {
+    const profile = variant.profile ?? 'vanilla';
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ runtime_id: profile })
+      .where('id', '=', f.mappingId)
+      .execute();
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    const selected = { ...combination, ...variant, profile, transfer: variant.family === 'netty' };
+    const { sleepWake: expectedSleepWake, ...identity } = selected;
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({
+        mapping_digest: minecraftMappingDigest(mapping),
+        combination: JSON.stringify(identity),
+        identity_digest: minecraftDigest({ combination: identity, mappingId: f.mappingId }),
+      })
+      .where('id', '=', choiceId)
+      .execute();
+    expect((await inspectMinecraftCombination(f.db, choiceId, env)).capabilities).toMatchObject({
+      gateway: true,
+      wake: true,
+      sleepWake: expectedSleepWake,
+    });
+    await f.db
+      .updateTable('server_allocations')
+      .set({ protocols: ['tcp'] })
+      .where('id', '=', allocationId)
+      .execute();
+    const operation = await f.db
+      .selectFrom('server_operations')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .where('action', '=', 'provision')
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: operation.job_id })
+      .where('id', '=', serverId)
+      .execute();
+    await f.db.transaction().execute(async (tx) => {
+      await lockResources(tx);
+      const server = await tx
+        .selectFrom('managed_servers')
+        .selectAll()
+        .where('id', '=', serverId)
+        .executeTakeFirstOrThrow();
+      const plan = await planProvisionGateway(tx, server, 'minecraft', env);
+      expect(plan?.routes).toHaveLength(1);
+      await tx
+        .updateTable('server_operations')
+        .set({ plan: JSON.stringify({ ...operation.plan, gatewayProvision: plan }) })
+        .where('job_id', '=', operation.job_id)
+        .execute();
+    });
+    await activateProvisionGateway(f.db, serverId, operation.job_id, env);
+    const state = await getGatewayState(f.db, serverId, { env });
+    expect(state).toMatchObject({
+      protocolId: 'minecraft-java',
+      gameVersion: variant.release,
+      enabled: true,
+      state: 'manually_stopped',
+    });
+    const snapshot = await getGatewaySnapshot(f.db, env);
+    expect(snapshot.routes).toHaveLength(1);
+    expect(snapshot.routes[0]).toMatchObject({
+      protocol: {
+        handlerId: 'minecraft-java',
+        gameVersion: variant.release,
+        minecraft: { protocolId: variant.protocolId, supportSource: 'integration' },
+      },
+    });
+  },
+);

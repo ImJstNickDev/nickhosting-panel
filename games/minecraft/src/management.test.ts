@@ -20,6 +20,33 @@ const player = {
   verifiedAt: '2026-10-10T00:00:00.000Z',
 };
 describe('Minecraft properties plans', () => {
+  it('preserves installed numeric or named enum representation when applying UI choices', () => {
+    for (const [release, original, expected] of [
+      ['1.5.2', 'difficulty=1\ngamemode=0\n', { difficulty: '3', gamemode: '2' }],
+      [
+        '26.1',
+        'difficulty=easy\ngamemode=survival\n',
+        { difficulty: 'hard', gamemode: 'adventure' },
+      ],
+    ] as const) {
+      const result = editMinecraftProperties(
+        `${original}motd=Unchanged\n`,
+        { difficulty: 'hard', gamemode: 'adventure' },
+        { release, supportedKeys: ['difficulty', 'gamemode', 'motd'] },
+      );
+      expect(parseMinecraftProperties(result.content)).toEqual({ ...expected, motd: 'Unchanged' });
+      expect(
+        editMinecraftProperties(
+          result.content,
+          { difficulty: 'hard', gamemode: 'adventure' },
+          {
+            release,
+            supportedKeys: ['difficulty', 'gamemode', 'motd'],
+          },
+        ).content,
+      ).toBe(result.content);
+    }
+  });
   it.each(['\r', '\n', '\r\n'])(
     'recognizes Java line endings %j before launcher redirects',
     (ending) => {
@@ -74,13 +101,43 @@ describe('Minecraft properties plans', () => {
     expect(() => parseMinecraftProperties('motd=one\nmot\\u0064=two')).toThrow();
     expect(() => parseMinecraftProperties('motd=bad\\u0xx0')).toThrow();
   });
-  it('rejects exposure settings, invalid ranges and injected newlines even if declared supported', () => {
+  it('stores multiline MOTDs as one escaped property without changing protected settings', () => {
+    const motd = '§aCittà 雪 😀\\folder\nserver-ip=0.0.0.0';
+    const input = '#keep\nmotd=Before\nserver-ip=127.0.0.1\nonline-mode=true\n';
+    const context = { release: '26.1', supportedKeys: ['motd'] };
+    const result = editMinecraftProperties(input, { motd }, context);
+    expect(result.content.split('\n')).toHaveLength(input.split('\n').length);
+    expect(result.content).toContain('\\nserver-ip\\=0.0.0.0');
+    expect(parseMinecraftProperties(result.content)).toEqual({
+      motd,
+      'server-ip': '127.0.0.1',
+      'online-mode': 'true',
+    });
+    expect(editMinecraftProperties(result.content, { motd }, context).content).toBe(result.content);
+    const literalEscape = '§bLiteral \\n and \\u000a';
+    expect(
+      parseMinecraftProperties(
+        editMinecraftProperties(input, { motd: literalEscape }, context).content,
+      ).motd,
+    ).toBe(literalEscape);
+  });
+  it('keeps the 256-character MOTD limit and rejects controls other than LF', () => {
+    const context = { release: '26.1', supportedKeys: ['motd'] };
+    expect(() =>
+      editMinecraftProperties('motd=Before\n', { motd: 'a'.repeat(256) }, context),
+    ).not.toThrow();
+    for (const motd of [
+      'a'.repeat(257),
+      ...['\r', '\0', '\t', '\b', '\f', '\x7f'].map((control) => `first${control}second`),
+    ])
+      expect(() => editMinecraftProperties('motd=Before\n', { motd }, context)).toThrow();
+  });
+  it('rejects exposure settings and invalid ranges even if declared supported', () => {
     for (const changes of [
       { 'server-ip': '0.0.0.0' },
       { 'online-mode': false },
       { 'rcon.password': 'bad' },
       { 'view-distance': 33 },
-      { motd: 'hello\nserver-ip=0.0.0.0' },
     ] as Record<string, string | number | boolean>[])
       expect(() =>
         editMinecraftProperties('', changes, {
@@ -176,6 +233,75 @@ describe('Minecraft isolated world plans', () => {
     expect(plan.requiresNbtValidation).toBe(true);
     expect(plan.totalBytes).toBe(1200);
   });
+  it.each(['source/', 'Map package/DIVERSITY 3 v1.6.6 - for 1.14.4/'])(
+    'selects only the unique world root %s and ignores package companions',
+    (root) => {
+      const plan = planMinecraftWorldImport(
+        [
+          ...world.map((entry) => ({ ...entry, path: `${root}${entry.path.slice(7)}` })),
+          { path: 'cover.png', size: 250, compressedSize: 250, type: 'file' },
+          { path: 'Map package/Instructions.txt', size: 50, compressedSize: 50, type: 'file' },
+          {
+            path: `${root.slice(0, -1)}-extras/readme.txt`,
+            size: 25,
+            compressedSize: 25,
+            type: 'file',
+          },
+          { path: 'tools/install.sh', size: 10, compressedSize: 10, type: 'file' },
+        ],
+        { targetWorld: 'survival', maxBytes: 10_000 },
+      );
+      expect(plan.sourceRoot).toBe(root);
+      expect(plan.files).toEqual([
+        { source: `${root}level.dat`, target: 'survival/level.dat', size: 100 },
+        { source: `${root}region/r.0.0.mca`, target: 'survival/region/r.0.0.mca', size: 1000 },
+      ]);
+      expect(plan.totalBytes).toBe(1100);
+    },
+  );
+  it('preserves a world stored directly at the archive root', () => {
+    const plan = planMinecraftWorldImport(
+      world.map((entry) => ({ ...entry, path: entry.path.slice('source/'.length) })),
+      { targetWorld: 'survival', maxBytes: 10_000 },
+    );
+    expect(plan.sourceRoot).toBe('');
+    expect(plan.files).toEqual([
+      { source: 'level.dat', target: 'survival/level.dat', size: 100 },
+      { source: 'region/r.0.0.mca', target: 'survival/region/r.0.0.mca', size: 1000 },
+    ]);
+    expect(plan.totalBytes).toBe(1100);
+  });
+  it('still validates skipped package entries before selecting the world', () => {
+    for (const addition of [
+      { path: '../outside.txt', size: 1, compressedSize: 1, type: 'file' as const },
+      { path: 'outside/link', size: 1, compressedSize: 1, type: 'symlink' as const },
+      { path: 'outside/bomb.png', size: 1000, compressedSize: 1, type: 'file' as const },
+      { path: 'outside/large.png', size: 10000, compressedSize: 10000, type: 'file' as const },
+    ])
+      expect(() =>
+        planMinecraftWorldImport([...world, addition], { targetWorld: 'safe', maxBytes: 10000 }),
+      ).toThrow();
+    const companion = { path: 'cover.png', size: 1, compressedSize: 1, type: 'file' as const };
+    expect(() =>
+      planMinecraftWorldImport([...world, companion, { ...companion, path: 'COVER.PNG' }], {
+        targetWorld: 'safe',
+        maxBytes: 10000,
+      }),
+    ).toThrow();
+    expect(() =>
+      planMinecraftWorldImport([...world, companion, { ...companion, path: 'cover.png/child' }], {
+        targetWorld: 'safe',
+        maxBytes: 10000,
+      }),
+    ).toThrow();
+    expect(() =>
+      planMinecraftWorldImport([...world, companion], {
+        targetWorld: 'safe',
+        maxBytes: 10000,
+        maxEntries: 2,
+      }),
+    ).toThrow();
+  });
   it.each([
     '../other/level.dat',
     '/level.dat',
@@ -232,7 +358,7 @@ describe('Minecraft four-step public wizard', () => {
       id: 'choice1',
       release: '26.1',
       runtime: 'fabric' as const,
-      nameKey: 'games.minecraft-java.runtime.fabric',
+      nameKey: 'games.minecraft.runtime.fabric',
       protocol: 9999,
       status: 'verified',
     },

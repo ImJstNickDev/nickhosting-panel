@@ -1,0 +1,431 @@
+.mc-modscope {
+  color: inherit;
+  padding: 16px;
+  min-height: 460px;
+  max-width: none;
+  margin-inline: auto;
+  overflow-wrap: anywhere;
+}
+.mc-modscope svg {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+}
+.mc-modscope-header {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding-bottom: 18px;
+}
+.mc-modscope-art {
+  width: 56px;
+  height: 56px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: var(--surface-alt, #f0f2f5);
+  color: var(--muted);
+  overflow: hidden;
+}
+.mc-modscope-art > svg {
+  width: 28px;
+  height: 28px;
+}
+.mc-modscope-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.mc-modscope-heading {
+  min-width: 0;
+  flex: 1;
+}
+.mc-modscope h2 {
+  font-size: 1.25rem;
+  line-height: 1.2;
+  margin: 6px 0;
+  letter-spacing: -0.025em;
+}
+.mc-modscope-heading > code {
+  color: var(--muted);
+  font-size: 12px;
+}
+.mc-modscope-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 14px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.mc-modscope-version {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.mc-modscope button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: transparent;
+  color: inherit;
+  border: 0;
+  border-radius: 8px;
+  padding: 9px 12px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+.mc-modscope button:hover,
+.mc-modscope-facts a:hover {
+  background: var(--surface-alt, #f0f2f5);
+}
+.mc-modscope-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 240px;
+  gap: 24px;
+}
+.mc-modscope-main,
+.mc-modscope-facts {
+  min-width: 0;
+}
+.mc-modscope-description {
+  margin: 0 0 18px;
+  font-size: 14px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+}
+.mc-modscope h3 {
+  font-size: 13px;
+  margin: 0 0 12px;
+  font-weight: 650;
+}
+.mc-modscope-dependencies ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 420px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.mc-modscope-dependencies li {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.mc-modscope-dependencies li > div:first-child {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  min-width: 0;
+}
+.mc-modscope-version-range,
+.mc-modscope-requirement {
+  color: var(--muted);
+}
+.mc-modscope-requirement {
+  display: flex;
+  flex-direction: column;
+  align-items: end;
+  text-align: right;
+  flex: 0 0 auto;
+}
+.mc-modscope-requirement [data-kind="incompatible"] {
+  color: var(--danger, #b32632);
+}
+.mc-modscope-dependency-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.mc-modscope-dependency-group > span:not(:first-child) {
+  padding-left: 10px;
+}
+.mc-modscope-facts dl,
+.mc-modscope-source dl {
+  margin: 0;
+  font-size: 13px;
+}
+.mc-modscope-facts :where(dl) > div {
+  margin-bottom: 22px;
+}
+.mc-modscope dt {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.mc-modscope dd {
+  margin: 0;
+}
+.mc-modscope-facts nav {
+  display: grid;
+  gap: 2px;
+  margin-inline: -10px;
+}
+.mc-modscope-facts a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-radius: 8px;
+  gap: 8px;
+  padding: 9px 10px;
+  color: inherit;
+  text-decoration: none;
+  font-size: 13px;
+}
+.mc-modscope-facts :where(a) svg {
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+}
+.mc-modscope-source {
+  margin-top: 32px;
+  border-top: 1px solid var(--line);
+  padding-top: 15px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.mc-modscope-source summary {
+  cursor: pointer;
+  padding-block: 4px;
+}
+.mc-modscope-source summary > span {
+  margin-left: 18px;
+}
+.mc-modscope-source dl {
+  margin-top: 16px;
+}
+.mc-modscope-source dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+.mc-modscope-source ul {
+  padding-left: 0;
+  list-style: none;
+}
+.mc-modscope-source li {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-block: 8px;
+}
+.mc-modscope-bundled {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  margin-bottom: 28px;
+  padding-bottom: 4px;
+}
+.mc-modscope-bundled button {
+  flex-direction: column;
+  align-items: start;
+  flex-shrink: 0;
+  border: 1px solid transparent;
+}
+.mc-modscope-bundled button small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.mc-modscope-bundled button[aria-pressed="true"] {
+  border-color: var(--blue);
+  background: var(--surface-alt, #f0f2f5);
+}
+.mc-modscope-empty {
+  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 12px;
+}
+.mc-modscope-empty > svg {
+  width: 28px;
+  height: 28px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.mc-modscope-empty h2 {
+  font-size: 19px;
+}
+.mc-modscope-empty p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.mc-modscope-empty > div {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+}
+.mc-modscope-skeleton {
+  display: grid;
+  gap: 18px;
+}
+.mc-modscope-skeleton i {
+  display: block;
+  background: var(--surface-alt, #eef0f3);
+  border-radius: 6px;
+  height: 14px;
+  width: 80%;
+  animation: mc-modscope-pulse 1.4s ease-in-out infinite alternate;
+}
+.mc-modscope-skeleton-head {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 28px;
+}
+.mc-modscope-skeleton-head > i {
+  height: 56px;
+  width: 56px;
+  border-radius: 8px;
+}
+.mc-modscope-skeleton-head > div {
+  flex: 1;
+  display: grid;
+  align-content: center;
+  gap: 16px;
+}
+.mc-modscope-skeleton-head > div i:first-child {
+  height: 30px;
+  width: 50%;
+}
+.mc-modscope-skeleton-head > div i:last-child {
+  width: 25%;
+}
+@keyframes mc-modscope-pulse {
+  to {
+    opacity: 0.45;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mc-modscope-skeleton i {
+    animation: none;
+  }
+}
+@media (max-width: 680px) {
+  .mc-modscope {
+    padding: 20px 16px;
+  }
+  .mc-modscope-header {
+    display: grid;
+    grid-template-columns: 68px minmax(0, 1fr);
+    gap: 16px;
+    padding-bottom: 22px;
+  }
+  .mc-modscope-art {
+    width: 68px;
+    height: 68px;
+    border-radius: 12px;
+  }
+  .mc-modscope-archive {
+    grid-column: 1 / -1;
+    justify-self: end;
+  }
+  .mc-modscope-columns {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 28px;
+  }
+  .mc-modscope-facts {
+    border-top: 1px solid var(--line);
+    padding-top: 22px;
+  }
+  .mc-modscope-facts dl {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+  .mc-modscope-facts :where(dl) > div {
+    margin: 0;
+  }
+  .mc-modscope-facts nav {
+    margin-top: 16px;
+  }
+}
+
+/* Plugscope contributes descriptor-specific content to the shared JAR viewer shell. */
+.mc-plugscope-art {
+  color: var(--blue);
+}
+.mc-plugscope-dependency {
+  flex-direction: column;
+}
+.mc-plugscope-dependency-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.mc-plugscope-inventory,
+.mc-plugscope-technical {
+  margin-top: 24px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+  font-size: 13px;
+}
+.mc-plugscope-inventory > summary,
+.mc-plugscope-technical > summary {
+  cursor: pointer;
+  padding-block: 4px;
+  font-weight: 650;
+}
+.mc-plugscope-inventory > summary > span {
+  margin-left: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+}
+.mc-plugscope-inventory-body {
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-top: 12px;
+  padding-right: 8px;
+}
+.mc-plugscope-entry {
+  border-bottom: 1px solid var(--line);
+  padding-block: 11px;
+  font-size: 12px;
+}
+.mc-plugscope-entry summary {
+  cursor: pointer;
+  line-height: 1.6;
+}
+.mc-plugscope-entry summary > span {
+  display: block;
+  color: var(--muted);
+  margin: 5px 0 0 15px;
+}
+.mc-plugscope-entry dl,
+.mc-plugscope-technical dl {
+  margin: 16px 0 0 15px;
+  display: grid;
+  gap: 14px;
+}
+.mc-plugscope-entry p {
+  margin: 12px 0 0 15px;
+  line-height: 1.7;
+}
+.mc-plugscope-technical dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+.mc-plugscope-default {
+  color: var(--muted);
+  margin-block: 0 12px;
+  font-size: 12px;
+}
+@media (max-width: 680px) {
+  .mc-plugscope .mc-modscope-requirement {
+    flex: 0 1 38%;
+  }
+}

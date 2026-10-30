@@ -1,0 +1,20 @@
+.document-view {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.document-view > .dg-delimited {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+}
+.document-view[hidden] {
+  display: none;
+}
+.document-view-switch svg {
+  width: 20px;
+  height: 20px;
+}

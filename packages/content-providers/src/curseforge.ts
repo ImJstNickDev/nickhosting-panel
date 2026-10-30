@@ -1,14 +1,35 @@
 import { z } from 'zod';
 import {
+  type ContentArtifact,
   type ContentHttp,
   type ContentLimits,
   type ContentPlan,
   type ContentTarget,
   contentLimits,
   fail,
+  safeArchivePath,
   unavailable,
   validateContentPlan,
 } from './contracts.js';
+import { type DatapackCatalogFiles, datapackCatalogFilesSchema } from './datapack-catalog.js';
+import {
+  type DatapackCandidate,
+  dependencyMemo,
+  resolveDatapackGraph,
+} from './datapack-resolution.js';
+import type { ModSelection } from './mod-catalog.js';
+import { CurseForgeModCatalog } from './mod-provider-adapters.js';
+import type {
+  ModCatalogSearchInput,
+  ModCatalogVersionsInput,
+  ResolveModsOptions,
+} from './mod-resolution.js';
+import {
+  type WorldCatalogFiles,
+  type WorldCatalogProjects,
+  worldCatalogFilesSchema,
+  worldCatalogProjectsSchema,
+} from './world-catalog.js';
 
 const numeric = z.number().int().positive();
 const fileSchema = z.object({
@@ -27,6 +48,74 @@ const projectSchema = z.object({
   name: z.string(),
   allowModDistribution: z.boolean().nullable().optional(),
 });
+const worldProjectSchema = projectSchema.extend({
+  gameId: numeric,
+  classId: numeric,
+  slug: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,255}$/),
+  summary: z.string(),
+  downloadCount: z.number().nonnegative(),
+  authors: z.array(z.object({ name: z.string() })),
+  logo: z.object({ thumbnailUrl: z.string() }).nullable().optional(),
+  isAvailable: z.boolean(),
+});
+const worldFileSchema = fileSchema.extend({
+  gameId: numeric,
+  displayName: z.string(),
+  fileDate: z.iso.datetime({ offset: true }),
+});
+const paginationSchema = z.object({
+  index: z.number().int().nonnegative(),
+  pageSize: z.literal(20),
+  resultCount: z.number().int().min(0).max(20),
+  totalCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+});
+const responseSchema = z.object({ data: z.unknown(), pagination: z.unknown().optional() });
+const minecraftGameId = 432;
+const worldPageSize = 20 as const;
+
+function worldOffset(offset: number): void {
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset + worldPageSize > 10000) fail('search');
+}
+function worldId(value: string): number {
+  if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value)))
+    fail('curseforge_identity');
+  return Number(value);
+}
+function worldPagination(raw: unknown, offset: number, count: number) {
+  const page = paginationSchema.parse(raw);
+  if (page.index !== offset || page.resultCount !== count || page.totalCount < count)
+    fail('curseforge_pagination');
+  return { offset, limit: worldPageSize, total: page.totalCount };
+}
+function httpsUrl(value: string | null | undefined): URL | undefined {
+  if (!value || value.length > 2048) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password && !url.hash
+      ? url
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+function worldFileIntegrity(file: z.infer<typeof worldFileSchema>): string | undefined {
+  const sha1 = file.hashes.find((hash) => hash.algo === 1)?.value.toLowerCase();
+  if (
+    !sha1 ||
+    !/^[a-f0-9]{40}$/.test(sha1) ||
+    !/\.zip$/i.test(file.fileName) ||
+    file.fileName.includes('/') ||
+    !httpsUrl(file.downloadUrl) ||
+    !Number.isSafeInteger(file.fileLength)
+  )
+    return undefined;
+  try {
+    safeArchivePath(file.fileName);
+    return sha1;
+  } catch {
+    return undefined;
+  }
+}
 export type CurseForgeFile = z.infer<typeof fileSchema>;
 const loaderNames: Record<ContentTarget['loader'], string> = {
   vanilla: '',
@@ -48,6 +137,9 @@ export class CurseForgeProvider {
   readonly #key: string;
   private readonly base: string;
   private readonly limits: ContentLimits;
+  private readonly modCatalog: CurseForgeModCatalog;
+  private readonly pluginCatalog: CurseForgeModCatalog;
+  private readonly catalogClasses = new Map<string, Promise<number>>();
   constructor(
     readonly http: ContentHttp,
     options: { apiKey: string; apiBase?: string; limits?: Partial<ContentLimits> },
@@ -56,12 +148,402 @@ export class CurseForgeProvider {
     this.#key = options.apiKey;
     this.base = options.apiBase ?? 'https://api.curseforge.com/v1';
     this.limits = contentLimits(options.limits);
+    this.modCatalog = new CurseForgeModCatalog(
+      (path, signal) => this.request(path, signal),
+      this.limits,
+    );
+    this.pluginCatalog = new CurseForgeModCatalog(
+      (path, signal) => this.request(path, signal),
+      this.limits,
+      'plugin',
+      (signal) => this.getCatalogClass('bukkit-plugins', signal),
+    );
   }
-  private async get(path: string): Promise<unknown> {
-    const result = z
-      .object({ data: z.unknown() })
-      .parse(await this.http.json(`${this.base}${path}`, { headers: { 'x-api-key': this.#key } }));
-    return result.data;
+  private async request(path: string, signal?: AbortSignal) {
+    return responseSchema.parse(
+      await this.http.json(`${this.base}${path}`, {
+        headers: { 'x-api-key': this.#key },
+        ...(signal ? { signal } : {}),
+      }),
+    );
+  }
+  private async get(path: string, signal?: AbortSignal): Promise<unknown> {
+    return (await this.request(path, signal)).data;
+  }
+  /** Read-only catalog boundary shared with the modpack adapter; the API key never leaves this class. */
+  async modpackMetadata(path: string, signal?: AbortSignal): Promise<unknown> {
+    if (
+      !/^\/(?:categories\?gameId=432&(?:classesOnly=true|classId=[1-9][0-9]*)|mods\/search\?[^#\r\n]*|mods\/[1-9][0-9]*(?:\/description|\/files(?:\/[1-9][0-9]*|\?[^#\r\n]*)?)?)$/.test(
+        path,
+      )
+    )
+      fail('modpack_metadata_path');
+    return this.request(path, signal);
+  }
+  /** Exact pinned records only: never expands dependency relations or substitutes latest files. */
+  async modpackBulk(
+    kind: 'files' | 'projects',
+    ids: readonly number[],
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    if (!ids.length || ids.length > 50 || ids.some((id) => !Number.isSafeInteger(id) || id < 1))
+      fail('modpack_bulk_ids');
+    if (!this.http.jsonPost) unavailable('modpack_bulk_transport');
+    return responseSchema.parse(
+      await this.http.jsonPost(
+        `${this.base}${kind === 'files' ? '/mods/files' : '/mods'}`,
+        kind === 'files' ? { fileIds: ids } : { modIds: ids, filterPcOnly: false },
+        { headers: { 'x-api-key': this.#key }, signal },
+      ),
+    ).data;
+  }
+  private getCatalogClass(
+    kind: 'worlds' | 'data-packs' | 'bukkit-plugins',
+    signal?: AbortSignal,
+  ): Promise<number> {
+    signal?.throwIfAborted();
+    const cached = this.catalogClasses.get(kind);
+    if (cached) return cached;
+    // Provider classes are discovered, not guessed from historical numeric IDs.
+    const pending = this.get('/categories?gameId=432&classesOnly=true', signal)
+      .then((data) => {
+        const classes = z
+          .array(
+            z.object({
+              id: numeric,
+              gameId: numeric,
+              slug: z.string(),
+              isClass: z.boolean().nullable(),
+            }),
+          )
+          .max(1000)
+          .parse(data)
+          .filter(
+            (category) =>
+              category.gameId === minecraftGameId &&
+              category.isClass === true &&
+              category.slug === kind,
+          );
+        if (classes.length !== 1 || !classes[0]) unavailable(`curseforge_${kind}_class`);
+        return classes[0].id;
+      })
+      .catch((error) => {
+        this.catalogClasses.delete(kind);
+        throw error;
+      });
+    this.catalogClasses.set(kind, pending);
+    return pending;
+  }
+  private async catalogProject(
+    kind: 'worlds' | 'data-packs',
+    projectId: number,
+    signal?: AbortSignal,
+  ) {
+    const [classId, raw] = await Promise.all([
+      this.getCatalogClass(kind, signal),
+      this.get(`/mods/${projectId}`, signal),
+    ]);
+    const project = worldProjectSchema.parse(raw);
+    if (
+      project.id !== projectId ||
+      project.gameId !== minecraftGameId ||
+      project.classId !== classId
+    )
+      fail('curseforge_world_identity');
+    return project;
+  }
+  private async searchCatalog(
+    kind: 'worlds' | 'data-packs',
+    query: string,
+    offset = 0,
+    gameVersion?: string,
+    signal?: AbortSignal,
+  ): Promise<WorldCatalogProjects> {
+    worldOffset(offset);
+    if (
+      query.length > 256 ||
+      (gameVersion !== undefined && (!gameVersion || gameVersion.length > 80))
+    )
+      fail('search');
+    const classId = await this.getCatalogClass(kind, signal);
+    const params = new URLSearchParams({
+      gameId: String(minecraftGameId),
+      classId: String(classId),
+      searchFilter: query,
+      index: String(offset),
+      pageSize: String(worldPageSize),
+      sortField: '6',
+      sortOrder: 'desc',
+    });
+    if (gameVersion) params.set('gameVersion', gameVersion);
+    const response = await this.request(`/mods/search?${params}`, signal);
+    const projects = z.array(worldProjectSchema).max(worldPageSize).parse(response.data);
+    if (
+      projects.some((project) => project.gameId !== minecraftGameId || project.classId !== classId)
+    )
+      fail('curseforge_world_identity');
+    return worldCatalogProjectsSchema.parse({
+      ...worldPagination(response.pagination, offset, projects.length),
+      items: projects.map((project) => {
+        const image = httpsUrl(project.logo?.thumbnailUrl);
+        return {
+          id: String(project.id),
+          name: project.name,
+          summary: project.summary,
+          websiteUrl: `https://www.curseforge.com/minecraft/${kind}/${project.slug}`,
+          ...(image && ['media.forgecdn.net', 'mediafilez.forgecdn.net'].includes(image.hostname)
+            ? { imageUrl: image.href }
+            : {}),
+          authors: project.authors.map((author) => author.name),
+          downloads: project.downloadCount,
+        };
+      }),
+    });
+  }
+  private async catalogFiles(
+    kind: 'worlds' | 'data-packs',
+    projectId: string,
+    offset = 0,
+    signal?: AbortSignal,
+  ): Promise<DatapackCatalogFiles> {
+    worldOffset(offset);
+    const pid = worldId(projectId);
+    const [project, response] = await Promise.all([
+      this.catalogProject(kind, pid, signal),
+      this.request(`/mods/${pid}/files?index=${offset}&pageSize=${worldPageSize}`, signal),
+    ]);
+    const files = z.array(worldFileSchema).max(worldPageSize).parse(response.data);
+    if (files.some((file) => file.gameId !== minecraftGameId || file.modId !== pid))
+      fail('curseforge_world_identity');
+    return (kind === 'data-packs' ? datapackCatalogFilesSchema : worldCatalogFilesSchema).parse({
+      ...worldPagination(response.pagination, offset, files.length),
+      items: files.map((file) => ({
+        id: String(file.id),
+        projectId,
+        name: file.displayName,
+        filename: file.fileName,
+        gameVersions: file.gameVersions,
+        publishedAt: file.fileDate,
+        bytes: file.fileLength,
+        available:
+          project.isAvailable &&
+          project.allowModDistribution !== false &&
+          file.isAvailable &&
+          Boolean(worldFileIntegrity(file)),
+        ...(kind === 'data-packs'
+          ? {
+              unavailableReason:
+                !project.isAvailable ||
+                project.allowModDistribution === false ||
+                !file.isAvailable ||
+                !file.downloadUrl
+                  ? 'distribution'
+                  : !worldFileIntegrity(file)
+                    ? 'archive'
+                    : undefined,
+            }
+          : {}),
+      })),
+    });
+  }
+  private async catalogArchive(
+    kind: 'worlds' | 'data-packs',
+    projectId: string,
+    fileId: string,
+    signal?: AbortSignal,
+  ): Promise<ContentArtifact> {
+    const pid = worldId(projectId);
+    const fid = worldId(fileId);
+    const [project, raw] = await Promise.all([
+      this.catalogProject(kind, pid, signal),
+      this.get(`/mods/${pid}/files/${fid}`, signal),
+    ]);
+    const file = worldFileSchema.parse(raw);
+    if (file.gameId !== minecraftGameId || file.modId !== pid || file.id !== fid)
+      fail('curseforge_world_identity');
+    if (
+      !project.isAvailable ||
+      project.allowModDistribution === false ||
+      !file.isAvailable ||
+      !file.downloadUrl
+    )
+      unavailable('distribution_unavailable');
+    const sha1 = worldFileIntegrity(file);
+    if (!sha1) fail('curseforge_integrity');
+    return {
+      path: 'config/input.zip',
+      urls: [file.downloadUrl],
+      size: file.fileLength,
+      hashes: { sha1 },
+      projectId,
+      versionId: fileId,
+      kind: 'override',
+      serverSide: 'required',
+    };
+  }
+  searchWorlds(
+    query: string,
+    offset = 0,
+    gameVersion?: string,
+    signal?: AbortSignal,
+  ): Promise<WorldCatalogProjects> {
+    return this.searchCatalog('worlds', query, offset, gameVersion, signal);
+  }
+  worldFiles(projectId: string, offset = 0, signal?: AbortSignal): Promise<WorldCatalogFiles> {
+    return this.catalogFiles('worlds', projectId, offset, signal);
+  }
+  worldArchive(
+    projectId: string,
+    versionId: string,
+    signal?: AbortSignal,
+  ): Promise<ContentArtifact> {
+    return this.catalogArchive('worlds', projectId, versionId, signal);
+  }
+  searchDatapacks(
+    query: string,
+    offset = 0,
+    gameVersion?: string,
+    signal?: AbortSignal,
+  ): Promise<WorldCatalogProjects> {
+    return this.searchCatalog('data-packs', query, offset, gameVersion, signal);
+  }
+  datapackFiles(
+    projectId: string,
+    offset = 0,
+    signal?: AbortSignal,
+  ): Promise<DatapackCatalogFiles> {
+    return this.catalogFiles('data-packs', projectId, offset, signal);
+  }
+  datapackArchive(
+    projectId: string,
+    versionId: string,
+    signal?: AbortSignal,
+  ): Promise<ContentArtifact> {
+    return this.catalogArchive('data-packs', projectId, versionId, signal);
+  }
+  async resolveDatapackPlan(
+    projectId: string,
+    versionId: string,
+    gameVersion: string,
+    signal?: AbortSignal,
+    optionalProjectIds: string[] = [],
+    installedVersions: ReadonlyMap<string, string> = new Map(),
+  ) {
+    worldId(projectId);
+    worldId(versionId);
+    for (const value of optionalProjectIds) worldId(value);
+    const memo = dependencyMemo(this.limits.maxDependencies);
+    const classId = await this.getCatalogClass('data-packs', signal);
+    return resolveDatapackGraph({
+      provider: 'curseforge',
+      projectId,
+      versionId,
+      gameVersion,
+      signal,
+      optionalProjectIds,
+      maxDependencies: this.limits.maxDependencies,
+      load: (pid, vid) =>
+        memo(`candidate:${pid}:${vid ?? ''}`, async (): Promise<DatapackCandidate> => {
+          if (!pid) fail('dependency_identity');
+          worldId(pid);
+          if (vid) worldId(vid);
+          const metadata = await memo(`project:${pid}`, async () =>
+            worldProjectSchema.parse(await this.get(`/mods/${pid}`, signal)),
+          );
+          if (String(metadata.id) !== pid || metadata.gameId !== minecraftGameId)
+            fail('dependency_identity');
+          const isDatapack = metadata.classId === classId;
+          let file: z.infer<typeof worldFileSchema> | undefined;
+          if (vid)
+            file = await memo(`file:${pid}:${vid}`, async () =>
+              worldFileSchema.parse(await this.get(`/mods/${pid}/files/${vid}`, signal)),
+            );
+          else {
+            const preferredId = installedVersions.get(pid);
+            if (preferredId) {
+              worldId(preferredId);
+              const preferred = await memo(`file:${pid}:${preferredId}`, async () =>
+                worldFileSchema.parse(await this.get(`/mods/${pid}/files/${preferredId}`, signal)),
+              );
+              if (
+                String(preferred.modId) !== pid ||
+                String(preferred.id) !== preferredId ||
+                preferred.gameId !== minecraftGameId
+              )
+                fail('dependency_identity');
+              if (preferred.gameVersions.includes(gameVersion)) file = preferred;
+              // Preserve incompatible installed mod evidence so it cannot satisfy a requirement.
+              else if (!isDatapack) file = preferred;
+            }
+          }
+          if (!file && isDatapack && !vid)
+            file = await memo(`versions:${pid}`, async () => {
+              const params = new URLSearchParams({ gameVersion, pageSize: '50', index: '0' });
+              const files = z
+                .array(worldFileSchema)
+                .max(50)
+                .parse(await this.get(`/mods/${pid}/files?${params}`, signal));
+              if (
+                files.some(
+                  (entry) => String(entry.modId) !== pid || entry.gameId !== minecraftGameId,
+                )
+              )
+                fail('dependency_identity');
+              return files
+                .filter((entry) => entry.gameVersions.includes(gameVersion))
+                .sort((a, b) => b.fileDate.localeCompare(a.fileDate) || b.id - a.id)[0];
+            });
+          if (
+            file &&
+            (String(file.modId) !== pid ||
+              file.gameId !== minecraftGameId ||
+              (vid && String(file.id) !== vid))
+          )
+            fail('dependency_identity');
+          const sha1 = file ? worldFileIntegrity(file) : undefined;
+          const allowed =
+            metadata.isAvailable &&
+            metadata.allowModDistribution !== false &&
+            file?.isAvailable &&
+            file.downloadUrl;
+          return {
+            projectId: pid,
+            ...(file ? { versionId: String(file.id), filename: file.fileName } : {}),
+            name: metadata.name,
+            kind: isDatapack ? 'datapack' : metadata.classId === 6 ? 'mod' : 'unknown',
+            compatible: Boolean(file?.gameVersions.includes(gameVersion)),
+            dependencies:
+              file?.dependencies.map((dependency) => {
+                const relation = (
+                  {
+                    1: 'embedded',
+                    2: 'optional',
+                    3: 'required',
+                    4: 'optional',
+                    5: 'incompatible',
+                    6: 'embedded',
+                  } as const
+                )[dependency.relationType as 1 | 2 | 3 | 4 | 5 | 6];
+                if (!relation) fail('dependency_relation');
+                return { projectId: String(dependency.modId), relation };
+              }) ?? [],
+            ...(isDatapack && allowed && sha1 && file?.downloadUrl
+              ? {
+                  artifact: {
+                    path: 'config/input.zip',
+                    urls: [file.downloadUrl],
+                    size: file.fileLength,
+                    hashes: { sha1 },
+                    projectId: pid,
+                    versionId: String(file.id),
+                    kind: 'override' as const,
+                    serverSide: 'required' as const,
+                  },
+                }
+              : {}),
+          };
+        }),
+    });
   }
   async search(query: string, target: ContentTarget): Promise<unknown> {
     if (query.length > 256) fail('search');
@@ -182,5 +664,47 @@ export class CurseForgeProvider {
     for (const root of roots) await visit(root.projectID, root.fileID);
     if ([...conflicts].some((pid) => selected.has(pid))) fail('dependency_incompatible');
     return validateContentPlan(plan);
+  }
+  searchMods(input: ModCatalogSearchInput) {
+    return this.modCatalog.search(input);
+  }
+  modDetails(projectId: string, signal?: AbortSignal) {
+    return this.modCatalog.details(projectId, signal);
+  }
+  modVersions(projectId: string, input: ModCatalogVersionsInput) {
+    return this.modCatalog.listVersions(projectId, input);
+  }
+  modVersion(
+    projectId: string,
+    versionId: string,
+    target: ContentTarget,
+    signal?: AbortSignal,
+    metadataMemo?: ResolveModsOptions['metadataMemo'],
+  ) {
+    return this.modCatalog.getVersion(projectId, versionId, target, signal, metadataMemo);
+  }
+  resolveMods(roots: ModSelection[], target: ContentTarget, options: ResolveModsOptions = {}) {
+    return this.modCatalog.resolve(roots, target, options);
+  }
+  searchPlugins(input: ModCatalogSearchInput) {
+    return this.pluginCatalog.search(input);
+  }
+  pluginDetails(projectId: string, signal?: AbortSignal) {
+    return this.pluginCatalog.details(projectId, signal);
+  }
+  pluginVersions(projectId: string, input: ModCatalogVersionsInput) {
+    return this.pluginCatalog.listVersions(projectId, input);
+  }
+  pluginVersion(
+    projectId: string,
+    versionId: string,
+    target: ContentTarget,
+    signal?: AbortSignal,
+    metadataMemo?: ResolveModsOptions['metadataMemo'],
+  ) {
+    return this.pluginCatalog.getVersion(projectId, versionId, target, signal, metadataMemo);
+  }
+  resolvePlugins(roots: ModSelection[], target: ContentTarget, options: ResolveModsOptions = {}) {
+    return this.pluginCatalog.resolve(roots, target, options);
   }
 }

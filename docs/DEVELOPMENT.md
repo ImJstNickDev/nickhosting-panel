@@ -110,6 +110,46 @@ No lint, type or integration check depends on GitHub Actions. The API and worker
 have no import-time network side effects. Production deployment packaging and
 all graphical flows remain outside this milestone.
 
+### Minecraft integration identity migration
+
+Migration `031_minecraft_identity.sql` changes the active integration ID from
+`minecraft-java` to `minecraft`. Its displayed name in English and Italian is
+**Minecraft**. Java remains the only implemented edition; the Java wire handler
+and persisted Gateway protocol IDs remain `minecraft-java`.
+
+For an authorized development upgrade, stop the old NickHosting API and worker,
+retain a recoverable database backup, run `scripts/dev.sh pnpm db:migrate`, then
+start the updated application build. Do not run old and new application builds
+concurrently during this migration. The migration runner applies the entire SQL
+transactionally and serializes migration attempts. A conflicting integration,
+sleep policy or per-user viewer preference aborts the transaction for explicit
+resolution; no policy is silently merged or discarded. This procedure grants no
+permission to change other stacks or production services.
+
+The migration updates `game_integrations` and its mutable manifest localization
+keys, `game_rollouts.integration_id`, `runtime_egg_mappings.game_id`, the
+`platform_settings.value.gameIdleTimeouts` key and game-scoped
+`file_viewer_preferences.scope_id`. Existing mapping/server/profile UUIDs and
+rollout/allowlist settings remain intact. Use `minecraft` in new API requests,
+integration URLs and `NH_GAME_IDLE_TIMEOUTS`. The latter accepts a sole legacy
+`minecraft-java` key as an explicit compatibility alias, but rejects both keys
+together.
+
+Signed evidence reports/signatures, combination and choice digests, historical
+audit/activity records, queued job commands/hashes and installation receipts are
+not rewritten. Jobs resolve their unchanged server/mapping IDs against the
+migrated registry. `minecraftMappingDigest` explicitly retains the legacy
+`minecraft-java` preimage for the renamed integration so existing signatures keep
+their identity; every other mapping field remains part of the digest. Java
+Gateway protocol IDs are deliberately unchanged. Historical docs and evidence
+may therefore still contain the legacy integration name.
+
+Rollback requires stopping the updated application and restoring the pre-upgrade
+database backup together with its matching application build; do not reverse IDs
+blindly after new writes. The migration integration suite exercises successful
+rekeying, unchanged signed evidence/history and transactional conflict rollback
+using isolated test schemas only.
+
 ## M3 standalone Gateway
 
 Read [M3 API/configuration](M3-API.md) before supplying a protected, ignored
