@@ -93,7 +93,13 @@ Reviewed browser evidence (isolated fixture data):
 - [Mobile keyboard version selection, Italian](screenshots/m5/purpur-wizard-versions-it-mobile.png)
 
 Activation evidence: guarded read-only preflight verified all 54 prior migration
-checksums. Migration 055 remains pending Owner approval. The development Gateway
+checksums. The Owner explicitly approved migration 055; the guarded transaction applied only
+that migration and preserved every prior checksum. The worker synchronized all
+41 versions without an error. The development Gateway
 was restarted under standing Owner authorization after verifying Compose identity;
-its image, mounts, networks and host configuration are unchanged. No Panel/Wings
+its image, mounts, networks and host configuration are unchanged and it returned
+to healthy. No Panel/Wings
 or game-server changes were performed.
+
+Four existing Paper catalog browser tests also passed, checking the shared
+Owner component for regressions.
