@@ -125,3 +125,13 @@ Future “Presets” versus “Create your Own”, Owner resource/property/versi
 and evidence-backed modpack/custom-map installation are tracked separately in
 [issue #24](https://github.com/ImJstNickDev/nickhosting-panel/issues/24).
 Neither future feature is implemented by this wizard revision.
+## NeoForge follow-up — 2026-10-31
+
+Owner journey: Minecraft Versions → NeoForge → sync the local catalog → inspect
+Minecraft/loader choices → configure and enable a NeoForge egg mapping. Existing
+node, image and rollout validation still applies. User journey: select an eligible
+NeoForge mapping → Minecraft version → exact compatible NeoForge loader → resources
+and creation. Modpacks resolve their exact required pair through the same mapping.
+Loading, failed/empty catalogs and unavailable mappings must not permit a guessed
+loader or a silent fallback to Forge. Existing worlds/mods/player management uses
+the integration's runtime capabilities. Gateway availability is separately gated.

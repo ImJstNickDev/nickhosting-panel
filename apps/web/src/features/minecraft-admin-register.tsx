@@ -142,7 +142,7 @@ export function RegisterCombination({ refresh }: { refresh: () => void }) {
                     required
                   />
                 )}
-                {(profile === 'fabric' || profile === 'forge') && (
+                {(profile === 'fabric' || profile === 'forge' || profile === 'neoforge') && (
                   <Input
                     label={t('gameAdmin.loader')}
                     name="loaderVersion"
@@ -179,12 +179,15 @@ export function RegisterCombination({ refresh }: { refresh: () => void }) {
                       ? 'fabric-installer'
                       : profile === 'forge'
                         ? 'forge-installer'
-                        : 'server-jar'
+                        : profile === 'neoforge'
+                          ? 'neoforge-installer'
+                          : 'server-jar'
                   }
                 >
                   <option value="server-jar">{t('gameAdmin.serverJar')}</option>
                   <option value="fabric-installer">Fabric</option>
                   <option value="forge-installer">Forge</option>
+                  <option value="neoforge-installer">NeoForge</option>
                 </Select>
                 <Input
                   label={t('gameAdmin.serverPath')}

@@ -1,5 +1,15 @@
 export const minecraftAdminWebMessages: Record<string, readonly [string, string]> = {
   'versions.minecraftVersions': ['Minecraft versions', 'Versioni Minecraft'],
+  'neoforgeCatalog.title': ['NeoForge versions', 'Versioni NeoForge'],
+  'neoforgeCatalog.build': ['NeoForge build', 'Build NeoForge'],
+  'neoforgeCatalog.buildPolicy': [
+    'The latest available build is selected by default.',
+    'La build più recente disponibile è selezionata come predefinita.',
+  ],
+  'neoforgeCatalog.notSynced': [
+    'The NeoForge catalog has not been synced yet.',
+    'Il catalogo NeoForge non è ancora stato sincronizzato.',
+  ],
   'forgeCatalog.title': ['Forge versions', 'Versioni Forge'],
   'forgeCatalog.build': ['Forge build', 'Build Forge'],
   'forgeCatalog.recommended': ['Recommended', 'Consigliata'],

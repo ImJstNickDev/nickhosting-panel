@@ -152,10 +152,12 @@ export const minecraftBootstrapManifest = gameManifestSchema.parse({
     showPort: true,
   },
   ports: [{ role: 'game', transport: 'tcp', required: true }],
-  runtimes: minecraftManifest.runtimes.map((runtime) => ({
-    ...runtime,
-    nameKey: `games.m4-bootstrap.runtimes.${runtime.id}`,
-  })),
+  runtimes: minecraftManifest.runtimes
+    .filter((runtime) => runtime.id !== 'neoforge')
+    .map((runtime) => ({
+      ...runtime,
+      nameKey: `games.m4-bootstrap.runtimes.${runtime.id}`,
+    })),
   wizard: { steps: [] },
   management: [],
   contentProviders: [],
@@ -510,6 +512,11 @@ function mappingBinding(
   };
   const binding = ((): MinecraftRuntimeMapping => {
     switch (runtime.profile) {
+      case 'neoforge':
+        // This historical live certification runner has no NeoForge client contract.
+        throw new DomainError('configuration_invalid', 400, {
+          reason: 'minecraft_live_profile_unsupported',
+        });
       case 'vanilla':
         return {
           ...common,

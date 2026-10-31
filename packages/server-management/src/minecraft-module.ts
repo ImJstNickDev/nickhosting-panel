@@ -310,7 +310,7 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
       (path): path is string => typeof path === 'string',
     );
     if (binding.profile === 'fabric') additional.push('fabric-server-launcher.properties');
-    if (binding.profile === 'forge') additional.push('user_jvm_args.txt');
+    if (['forge', 'neoforge'].includes(binding.profile)) additional.push('user_jvm_args.txt');
     assertMinecraftRuntimePathsPreserved(paths, [
       ...(profile.installed_manifest as { path: string }[]),
       ...additional.map((path) => ({ path })),

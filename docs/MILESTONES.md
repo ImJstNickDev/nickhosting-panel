@@ -146,6 +146,12 @@ from the former frontend milestone. It is neither an implicit M5 implementation
 requirement nor permission to defer the defect to M6. This document records the
 approved tracking plan; GitHub metadata must be verified separately.
 
+**Scoped M5 follow-up, 2026-10-31:** the Owner requested NeoForge runtime
+integration using the supplied egg. Implement its exact catalog/version/egg and
+management contracts on the current M5 review baseline. This does not begin M6,
+authorize deployment or certify NeoForge Gateway behavior. See
+[NeoForge policy](M5-COMMON-INTEGRATION.md#neoforge-runtime-follow-up--2026-10-31).
+
 ## M6 — Satisfactory & Game Integration Expansion (PR)
 
 **Scope**

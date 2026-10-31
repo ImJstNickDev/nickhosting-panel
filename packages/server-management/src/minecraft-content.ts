@@ -25,9 +25,12 @@ import { type AuthContext, DomainError } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
 import {
   assertForgeServerArguments,
+  assertNeoForgeServerArguments,
   getForgeInstalledTarget,
+  getNeoForgeInstalledTarget,
   isFabricUpdatedBinding,
   isForgeEnhancedBinding,
+  isNeoForgeBinding,
   minecraftCombinationSchema,
   minecraftDigest,
   minecraftManifest,
@@ -813,14 +816,14 @@ async function verifyMinecraftInitialConfiguration(context: GameLifecycleContext
     .execute();
 }
 type InstalledRuntimeFile = { path: string; sha256: string; size: number };
-function forgeInstallationReceipt(
+function loaderInstallationReceipt(
   choice: Awaited<ReturnType<typeof inspectMinecraftCombination>>,
   files: readonly InstalledRuntimeFile[],
 ): string | null {
   const binding = minecraftRuntimeMappingSchema.parse(choice.row.binding);
-  return isForgeEnhancedBinding(binding)
+  return isForgeEnhancedBinding(binding) || isNeoForgeBinding(binding)
     ? stepId(
-        'forge-installation',
+        isNeoForgeBinding(binding) ? 'neoforge-installation' : 'forge-installation',
         minecraftDigest({
           combinationId: choice.row.id,
           mappingDigest: choice.mappingDigest,
@@ -925,11 +928,16 @@ async function verifyInstalledRuntime(
         size,
       })),
     );
-  } else if (runtime.profile === 'forge' && isForgeEnhancedBinding(binding)) {
-    // Forge Enhanced removes installer.jar. Verify its installed launch target,
-    // not the deleted input or root unix_args.txt symlink. These receipts are
+  } else if (
+    (runtime.profile === 'forge' && isForgeEnhancedBinding(binding)) ||
+    (runtime.profile === 'neoforge' && isNeoForgeBinding(binding))
+  ) {
+    // Verify the loader-generated launch target. Forge Enhanced removes its
+    // installer; NeoForge retains it, but neither trusts the root args symlink. These receipts are
     // installation/restore work; ordinary starts never fetch runtime files.
-    const target = getForgeInstalledTarget(runtime, binding);
+    const target = (
+      isNeoForgeBinding(binding) ? getNeoForgeInstalledTarget : getForgeInstalledTarget
+    )(runtime, binding);
     const prior = z
       .array(
         z
@@ -944,7 +952,7 @@ async function verifyInstalledRuntime(
       .safeParse(profile.installed_manifest);
     const receipt =
       prior.success && prior.data[0]?.path === target.path
-        ? forgeInstallationReceipt(choice, prior.data)
+        ? loaderInstallationReceipt(choice, prior.data)
         : null;
     if (installationContext && receipt && (await completed(installationContext, receipt))) {
       verified.push(...(prior.success ? prior.data : []));
@@ -959,7 +967,11 @@ async function verifyInstalledRuntime(
     });
     if (!actual) throw new DomainError('conflict');
     const bytes = Buffer.concat(chunks);
-    if (target.kind === 'forge') assertForgeServerArguments(bytes.toString('utf8'), runtime);
+    if (target.kind === 'forge')
+      (isNeoForgeBinding(binding) ? assertNeoForgeServerArguments : assertForgeServerArguments)(
+        bytes.toString('utf8'),
+        runtime,
+      );
     else await verifyForgeInstalledJar(bytes, runtime);
     verified.push({ path: target.path, sha256: actual.sha256, size: actual.size });
   } else {
@@ -1313,7 +1325,7 @@ export async function configureMinecraftProvision(
     .set({ installed_manifest: JSON.stringify(verified.verified), updated_at: new Date() })
     .where('server_id', '=', context.server.id)
     .execute();
-  const receipt = forgeInstallationReceipt(verified.choice, verified.verified);
+  const receipt = loaderInstallationReceipt(verified.choice, verified.verified);
   if (receipt) await complete(context, receipt);
   const identities =
     options.identityProvider ?? createMinecraftIdentityProvider({ userAgent: options.userAgent });

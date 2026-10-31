@@ -3,12 +3,14 @@ import { getSettings } from '@nickhosting/database';
 import {
   refreshFabricCatalog,
   refreshMinecraftMetadata,
+  refreshNeoForgeCatalog,
   refreshPaperCatalog,
 } from '@nickhosting/server-management';
 import { beforeEach, expect, it, vi } from 'vitest';
 import {
   pollFabricMetadata,
   pollMinecraftMetadata,
+  pollNeoForgeMetadata,
   pollPaperMetadata,
 } from './minecraft-metadata.js';
 
@@ -17,6 +19,7 @@ vi.mock('@nickhosting/server-management', () => ({
   refreshMinecraftMetadata: vi.fn(),
   refreshFabricCatalog: vi.fn(),
   refreshPaperCatalog: vi.fn(),
+  refreshNeoForgeCatalog: vi.fn(),
 }));
 const db = {} as Parameters<typeof pollMinecraftMetadata>[0];
 const get = vi.mocked(getSettings);
@@ -118,4 +121,19 @@ it('does not block Mojang or Fabric while Paper discovery is pending', async () 
   expect(refreshPaperCatalog).toHaveBeenCalledOnce();
   finish?.();
   await paper;
+});
+
+it('refreshes NeoForge independently and contains provider failures', async () => {
+  refresh.mockRejectedValue(new Error('unavailable'));
+  vi.mocked(refreshNeoForgeCatalog).mockResolvedValue({ state: 'updated', changed: 2 });
+  await Promise.all([pollMinecraftMetadata(db, {}, logger), pollNeoForgeMetadata(db, {}, logger)]);
+  expect(refreshNeoForgeCatalog).toHaveBeenCalledWith(db, {
+    userAgent: 'Fixture https://example.test',
+  });
+  expect(JSON.stringify(records)).toContain('neoforge.metadata_refreshed');
+  records.length = 0;
+  vi.mocked(refreshNeoForgeCatalog).mockRejectedValue(new Error('secret://provider-detail'));
+  await pollNeoForgeMetadata(db, {}, logger);
+  expect(JSON.stringify(records)).toContain('neoforge.metadata_refresh_unavailable');
+  expect(JSON.stringify(records)).not.toContain('secret');
 });

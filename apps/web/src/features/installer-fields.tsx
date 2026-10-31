@@ -89,7 +89,9 @@ export function VersionList({
   useEffect(() => {
     if (!options.data || options.isPending || options.isPlaceholderData) return;
     if (options.data.some((option) => option.value === value && !option.disabled)) return;
-    const recommended = options.data?.find((option) => option.recommended && !option.disabled);
+    const recommended =
+      options.data?.find((option) => option.recommended && !option.disabled) ??
+      options.data?.find((option) => option.latest && !option.disabled);
     if (recommended) onChange(recommended.value);
   }, [options.data, options.isPending, options.isPlaceholderData, value, onChange]);
   const visible =
@@ -102,7 +104,9 @@ export function VersionList({
       return;
     }
     if (entryFocusAttempted.current) return;
-    const recommended = options.data?.find((option) => option.recommended && !option.disabled);
+    const recommended =
+      options.data?.find((option) => option.recommended && !option.disabled) ??
+      options.data?.find((option) => option.latest && !option.disabled);
     const inputs = Array.from(
       choicesElement.current?.querySelectorAll<HTMLInputElement>('input:not(:disabled)') ?? [],
     );
@@ -188,8 +192,10 @@ export function VersionList({
                 <span className={presentation === 'cards' ? 'installer-choice-title' : undefined}>
                   {o.label ?? t(o.labelKey ?? '')}
                 </span>
-                {o.recommended && (
-                  <span className="installer-recommended muted">{t('gameUi.recommended')}</span>
+                {(o.recommended || o.latest) && (
+                  <span className="installer-recommended muted">
+                    {t(o.recommended ? 'gameUi.recommended' : 'gameUi.latest')}
+                  </span>
                 )}
               </label>
             );

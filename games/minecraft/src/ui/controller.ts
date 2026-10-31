@@ -164,7 +164,7 @@ export const minecraftChoiceSchema = z
   .object({
     id: z.string().min(1).max(256),
     version: z.string().min(1).max(80),
-    runtime: z.enum(['vanilla', 'paper', 'folia', 'fabric', 'forge']),
+    runtime: z.enum(['vanilla', 'paper', 'folia', 'fabric', 'forge', 'neoforge']),
     releaseTime: z.iso.datetime({ offset: true }).nullable().optional(),
     releaseType: z.enum(['release', 'snapshot', 'old_alpha', 'old_beta']).optional(),
     capabilities: z.record(z.string(), z.boolean()).optional(),
@@ -359,18 +359,24 @@ export function minecraftCatalogOptions(
             .object({ loaders: z.array(z.object({ version: z.string(), stable: z.boolean() })) })
             .optional(),
           forge: forgeUiCatalogSchema.optional(),
+          neoforge: forgeUiCatalogSchema.optional(),
         })
         .parse(raw);
   const choices = z.array(minecraftChoiceSchema).max(10000).parse(catalog.choices);
   if (handler === 'loaders') {
-    if (values.runtime === 'forge') {
+    if (values.runtime === 'forge' || values.runtime === 'neoforge') {
       const selected = choices.find(
-        (choice) => choice.id === values.choiceId && choice.runtime === 'forge',
+        (choice) => choice.id === values.choiceId && choice.runtime === values.runtime,
       );
       const loaders =
-        ('forge' in catalog ? catalog.forge?.versions : [])?.find(
-          (entry) => entry.minecraftVersion === selected?.version,
-        )?.loaders ?? [];
+        (values.runtime === 'neoforge'
+          ? 'neoforge' in catalog
+            ? catalog.neoforge?.versions
+            : []
+          : 'forge' in catalog
+            ? catalog.forge?.versions
+            : []
+        )?.find((entry) => entry.minecraftVersion === selected?.version)?.loaders ?? [];
       const recommended =
         loaders.find((loader) => loader.recommended) ??
         loaders.find((loader) => loader.latest) ??
@@ -379,7 +385,9 @@ export function minecraftCatalogOptions(
         value: loader.version,
         label: loader.version,
         disabled: false,
-        recommended: loader.version === recommended?.version,
+        ...(values.runtime === 'neoforge'
+          ? { recommended: false, latest: loader.latest }
+          : { recommended: loader.version === recommended?.version }),
       }));
     }
     const loaders = 'fabric' in catalog ? (catalog.fabric?.loaders ?? []) : [];
@@ -447,8 +455,8 @@ export function createMinecraftUiController(client: GameUiClient) {
       client.catalogRequest
         ? client.catalogRequest(path, signal)
         : request(path, 'GET', undefined, signal);
-    // Both runtime catalogs are local snapshots; load independent snapshots together.
-    const [fabric, forge] = await Promise.all([
+    // Runtime catalogs are local snapshots; load independent snapshots together.
+    const [fabric, forge, neoforge] = await Promise.all([
       available.some((choice) => choice.runtime === 'fabric')
         ? load('/v1/minecraft/fabric/catalog').then((raw) =>
             z
@@ -464,8 +472,16 @@ export function createMinecraftUiController(client: GameUiClient) {
       available.some((choice) => choice.runtime === 'forge')
         ? load('/v1/minecraft/forge/catalog').then((raw) => forgeUiCatalogSchema.parse(raw))
         : undefined,
+      available.some((choice) => choice.runtime === 'neoforge')
+        ? load('/v1/minecraft/neoforge/catalog').then((raw) => forgeUiCatalogSchema.parse(raw))
+        : undefined,
     ]);
-    return { choices: available, ...(fabric ? { fabric } : {}), ...(forge ? { forge } : {}) };
+    return {
+      choices: available,
+      ...(fabric ? { fabric } : {}),
+      ...(forge ? { forge } : {}),
+      ...(neoforge ? { neoforge } : {}),
+    };
   };
   const operate = async (
     serverId: string,
@@ -793,7 +809,11 @@ export function createMinecraftUiController(client: GameUiClient) {
       // Never forward caller-controlled mapping IDs or manufacture an eligible combination.
       const selected = (await choices(signal)).find((c) => c.id === input.minecraft.choiceId);
       if (!selected) throw new MinecraftUiError('integration_unavailable');
-      if (selected.id.startsWith('fabric:') || selected.id.startsWith('forge:')) {
+      if (
+        selected.id.startsWith('fabric:') ||
+        selected.id.startsWith('forge:') ||
+        selected.id.startsWith('neoforge:')
+      ) {
         const loaders = minecraftCatalogOptions(await creationCatalog(signal), 'loaders', {
           runtime: selected.runtime,
           choiceId: selected.id,

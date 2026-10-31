@@ -50,14 +50,27 @@ export const minecraftForgeImagePolicy = runtimeImagePolicySchema.parse({
   })),
 });
 
+/** NeoForge uses the standard Java runtime images; discovered egg images and
+ * Owner overrides remain authoritative at binding time. */
+export const minecraftNeoForgeImagePolicy = runtimeImagePolicySchema.parse({
+  mode: 'rules',
+  rules: [17, 21, 25].map((major) => ({
+    id: `java-${major}`,
+    requirements: { javaMajor: String(major) },
+    image: `ghcr.io/pterodactyl/yolks:java_${major}`,
+  })),
+});
+
 export function minecraftRuntimeImagePolicy(profile: ResolvedMinecraftRuntime['profile']) {
-  return profile === 'forge'
-    ? minecraftForgeImagePolicy
-    : profile === 'fabric'
-      ? minecraftFabricImagePolicy
-      : profile === 'paper'
-        ? minecraftPaperImagePolicy
-        : minecraftImagePolicy;
+  return profile === 'neoforge'
+    ? minecraftNeoForgeImagePolicy
+    : profile === 'forge'
+      ? minecraftForgeImagePolicy
+      : profile === 'fabric'
+        ? minecraftFabricImagePolicy
+        : profile === 'paper'
+          ? minecraftPaperImagePolicy
+          : minecraftImagePolicy;
 }
 
 /** Runtime resolution already validates the exact release/build/loader against

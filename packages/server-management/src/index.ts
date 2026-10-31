@@ -27,6 +27,7 @@ export * from './minecraft-content.js';
 export * from './minecraft-metadata.js';
 export * from './minecraft-registry.js';
 export * from './minecraft-sources.js';
+export * from './neoforge-catalog.js';
 export * from './paper-catalog.js';
 export * from './platform-queries.js';
 export { ensureProviderAccounts, resolveProviderCredential } from './provider-accounts.js';

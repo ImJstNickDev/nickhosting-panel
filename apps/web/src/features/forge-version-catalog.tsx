@@ -7,12 +7,19 @@ import { ErrorNotice, Loading, Select, Time } from '../components/ui.js';
 import { MinecraftAdminIcon } from './minecraft-admin-presentation.js';
 import { VersionCatalogFrame } from './version-catalog-frame.js';
 
-const endpoint = '/v1/owner/minecraft/forge/catalog';
-const queryKey = ['owner-forge-catalog'];
 const pageSize = 25;
 
 /** Discovery reads a local snapshot and never creates an egg mapping. */
-export function ForgeVersionCatalog({ navigation }: { navigation: ReactNode }) {
+export function ForgeVersionCatalog({
+  navigation,
+  runtime = 'forge',
+}: {
+  navigation: ReactNode;
+  runtime?: 'forge' | 'neoforge';
+}) {
+  const endpoint = `/v1/owner/minecraft/${runtime}/catalog`;
+  const queryKey = [`owner-${runtime}-catalog`];
+  const messages = runtime === 'neoforge' ? 'neoforgeCatalog' : 'forgeCatalog';
   const t = useT();
   const catalog = useQuery({
     queryKey,
@@ -59,8 +66,8 @@ export function ForgeVersionCatalog({ navigation }: { navigation: ReactNode }) {
   const current = Math.min(page, pages);
   return (
     <section
-      className="forge-version-catalog paper-version-catalog"
-      aria-label={t('forgeCatalog.title')}
+      className={`${runtime}-version-catalog paper-version-catalog`}
+      aria-label={t(`${messages}.title`)}
     >
       <VersionCatalogFrame
         navigation={navigation}
@@ -148,7 +155,7 @@ export function ForgeVersionCatalog({ navigation }: { navigation: ReactNode }) {
         }
         status={
           <div className="paper-catalog-status muted" role="status">
-            <span>{t('forgeCatalog.buildPolicy')}</span>
+            <span>{t(`${messages}.buildPolicy`)}</span>
             {data?.status.lastSuccessAt && (
               <span>
                 {t('fabricCatalog.lastSync')} <Time value={data.status.lastSuccessAt} />
@@ -174,9 +181,9 @@ export function ForgeVersionCatalog({ navigation }: { navigation: ReactNode }) {
         )}
         <section
           ref={table}
-          className="minecraft-versions-table paper-catalog-table forge-catalog-table"
+          className={`minecraft-versions-table paper-catalog-table ${runtime}-catalog-table`}
           aria-busy={catalog.isPending}
-          aria-label={t('forgeCatalog.title')}
+          aria-label={t(`${messages}.title`)}
           // biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard users need to scroll the catalog.
           tabIndex={0}
         >
@@ -184,10 +191,10 @@ export function ForgeVersionCatalog({ navigation }: { navigation: ReactNode }) {
             <Loading />
           ) : (
             <table>
-              <caption className="visually-hidden">{t('forgeCatalog.title')}</caption>
+              <caption className="visually-hidden">{t(`${messages}.title`)}</caption>
               <thead>
                 <tr>
-                  <th scope="col">{t('forgeCatalog.build')}</th>
+                  <th scope="col">{t(`${messages}.build`)}</th>
                   <th scope="col">{t('fabricCatalog.channel')}</th>
                   <th scope="col">{t('versions.java')}</th>
                 </tr>
@@ -219,7 +226,7 @@ export function ForgeVersionCatalog({ navigation }: { navigation: ReactNode }) {
                         data
                           ? data.synced
                             ? 'fabricCatalog.noMatches'
-                            : 'forgeCatalog.notSynced'
+                            : `${messages}.notSynced`
                           : 'web.unavailable',
                       )}
                     </td>

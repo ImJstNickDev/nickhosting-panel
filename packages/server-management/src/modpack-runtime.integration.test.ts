@@ -7,6 +7,7 @@ import {
   requireMinecraftChoice,
   resolveFabricCreationChoice,
   resolveForgeCreationChoice,
+  resolveNeoForgeCreationChoice,
 } from './minecraft-registry.js';
 import {
   assertModpackRuntimeResumable,
@@ -24,6 +25,7 @@ vi.mock('./minecraft-registry.js', async (original) => ({
   requireMinecraftChoice: vi.fn(),
   resolveFabricCreationChoice: vi.fn(),
   resolveForgeCreationChoice: vi.fn(),
+  resolveNeoForgeCreationChoice: vi.fn(),
 }));
 vi.mock('./minecraft-runtime-evidence.js', async (original) => ({
   ...(await original<typeof import('./minecraft-runtime-evidence.js')>()),
@@ -281,7 +283,7 @@ describe('Modpacks exact supported runtime transition', () => {
     expect(resolveFabricCreationChoice).not.toHaveBeenCalled();
     expect(requireMinecraftChoice).toHaveBeenCalledTimes(2);
   });
-  it('blocks unmapped Forge and undeclared NeoForge without resolving any combination', async () => {
+  it('blocks unmapped Forge and NeoForge without resolving any combination', async () => {
     const f = await fixture();
     for (const loader of ['forge', 'neoforge'] as const)
       expect(
@@ -387,6 +389,56 @@ describe('Modpacks exact supported runtime transition', () => {
       {},
     );
     expect(resolveFabricCreationChoice).not.toHaveBeenCalled();
+  });
+  it('materializes an exact NeoForge loader only for an eligible direct connection', async () => {
+    const f = await fixture();
+    const target = {
+      minecraftVersion: '1.21.1',
+      loader: 'neoforge' as const,
+      loaderVersion: '21.1.72',
+    };
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ runtime_id: 'neoforge' })
+      .where('id', '=', f.mapping.id)
+      .execute();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'direct' })
+      .where('id', '=', f.serverId)
+      .execute();
+    const choice = {
+      ...f.choice,
+      combination: {
+        ...f.choice.combination,
+        profile: target.loader,
+        loaderVersion: target.loaderVersion,
+      },
+      capabilities: {
+        ...f.choice.capabilities,
+        installation: true,
+        gateway: false,
+        sleepWake: false,
+      },
+      mapping: { ...f.choice.mapping, runtime_id: 'neoforge' },
+    };
+    vi.mocked(resolveNeoForgeCreationChoice).mockResolvedValue(choice);
+    vi.mocked(requireMinecraftChoice).mockResolvedValue(choice);
+    expect(await resolveModpackRuntime({ ...f.options, target })).toEqual({ ...f.binding, target });
+    expect(resolveNeoForgeCreationChoice).toHaveBeenCalledWith(
+      f.db,
+      f.adapter,
+      f.context,
+      { choiceId: `neoforge:${f.mapping.id}:1.21.1`, loaderVersion: '21.1.72' },
+      {},
+    );
+    expect(resolveForgeCreationChoice).not.toHaveBeenCalled();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'gateway' })
+      .where('id', '=', f.serverId)
+      .execute();
+    expect(await resolveModpackRuntime({ ...f.options, target })).toBeNull();
   });
   it('rejects mappings that would change the node, port roles, protocols, or allocation limits', async () => {
     const f = await fixture();

@@ -2,12 +2,20 @@ import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 import { forgeEnhancedSupportedRelease } from './forge-policy.js';
+import { neoforgeSupportedRelease } from './neoforge-policy.js';
 import {
   minecraftLegacyGatewaySupported,
   minecraftLegacyStatusVariant,
 } from './protocol-profiles.js';
 
-export const minecraftProfiles = ['vanilla', 'paper', 'folia', 'fabric', 'forge'] as const;
+export const minecraftProfiles = [
+  'vanilla',
+  'paper',
+  'folia',
+  'fabric',
+  'forge',
+  'neoforge',
+] as const;
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const identifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/);
 export const minecraftCombinationSchema = z
@@ -224,7 +232,10 @@ export function minecraftDeclaredCapabilities(
 ) {
   const installation =
     ['vanilla', 'fabric', 'paper'].includes(combination.profile) ||
-    (combination.profile === 'forge' && forgeEnhancedSupportedRelease(combination.release));
+    (combination.profile === 'forge' && forgeEnhancedSupportedRelease(combination.release)) ||
+    (combination.profile === 'neoforge' &&
+      combination.releaseType === 'release' &&
+      neoforgeSupportedRelease(combination.release));
   const gateway = minecraftGatewaySupported(combination);
   const playerIdle =
     gateway &&

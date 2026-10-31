@@ -36,6 +36,7 @@ export const uiOptionSchema = z
     disabled: z.boolean().default(false),
     reasonKey: key.optional(),
     recommended: z.boolean().optional(),
+    latest: z.boolean().optional(),
     releaseType: z.enum(['release', 'snapshot', 'old_alpha', 'old_beta']).optional(),
     capabilities: z.record(fieldId, z.boolean()).optional(),
   })

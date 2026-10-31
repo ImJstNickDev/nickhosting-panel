@@ -399,6 +399,8 @@ it('seals a SpiGet download once and rejects edited cached bytes on recovery', a
   const options = {
     mountdataRoot: join(root, 'mountdata'),
     jobId: 'plugin-test',
+    // This fixture checks receipt integrity; capacity policy has its own tests.
+    diskPolicy: { minimumFreePercent: 0, minimumFreeBytes: 0 },
     http: { json: vi.fn(), download } as ContentHttp,
   };
   const staged = await stageContent(validateContentPlan(plan), options);

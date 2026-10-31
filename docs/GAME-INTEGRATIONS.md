@@ -930,3 +930,45 @@ References: [official Maven catalog](https://files.minecraftforge.net/net/minecr
 [promotions](https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json),
 [Forge 1.17 Java requirement](https://docs.minecraftforge.net/en/1.17.x/gettingstarted/),
 [Forge 1.20.1 Java requirement](https://docs.minecraftforge.net/en/1.20.1/gettingstarted/).
+
+### NeoForge catalog and creation
+
+NeoForge uses the existing local catalog refresh, exact creation and Owner mapping
+contracts. The worker reads two aggregate official Maven XML manifests:
+[modern NeoForge](https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml)
+and [the Minecraft 1.20.1 artifact](https://maven.neoforged.net/releases/net/neoforged/forge/maven-metadata.xml).
+Browsing uses the last successful local snapshot. Creation validates the exact
+Minecraft/loader pair and freezes the installer checksum and Mojang metadata.
+The application never runs or duplicates the Pterodactyl installer.
+
+The Owner configures an enabled NeoForge egg mapping; the wizard selects Minecraft
+and a compatible exact loader. `MC_VERSION` receives the Minecraft identifier and
+`NEOFORGE_VERSION` receives the unchanged published Maven version, including the
+`1.20.1-` prefix for the original artifact. Modpacks use the same exact resolution
+and cannot substitute Forge or a newer loader. Existing mapping, rollout, node,
+resource, access and direct-endpoint checks remain in force.
+
+Supported version schemes are Minecraft 1.20.1, modern 1.20.2–1.21.x and documented
+26.x releases/betas. Java requirements are 17 through 1.20.4, 21 for subsequent
+1.x releases and 25 for 26.x, with authoritative Mojang requirements respected.
+The runtime image must be advertised by the actual egg; the egg's installation
+container remains separate Owner/provider configuration. Official versioning maps
+`21.0.*` to Minecraft `1.21`, and `26.1.0.*` to `26.1`, preserving nonzero patches.
+Unknown naming schemes are not guessed.
+
+Snapshot coordinates such as `26.1.0.0-alpha.1+snapshot-1` are withheld because the
+supplied egg inserts the raw version into `grep -E`: `+` becomes a regex operator
+and the actual installer filename does not match. The universal fallback has the
+same defect. Supporting these requires a separately reviewed egg correction and
+snapshot contract validation; NickHosting does not patch the production egg.
+
+Startup uses the exact installed argument-file path under
+`libraries/net/neoforged/{forge|neoforge}/{loaderVersion}/unix_args.txt`.
+Installed-output validation checks the selected runtime identity and records a
+receipt after Pterodactyl reports installation complete. Installation capability
+does not certify real gameplay or grant NeoForge Forge's Gateway declaration.
+Gateway capability retains its independent evidence requirements.
+
+References: [official numbering](https://docs.neoforged.net/docs/gettingstarted/versioning/),
+[26.1 requirements](https://docs.neoforged.net/docs/gettingstarted/),
+[26.1 announcement](https://neoforged.net/news/26.1release/).

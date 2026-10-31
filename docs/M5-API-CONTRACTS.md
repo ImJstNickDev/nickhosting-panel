@@ -1750,3 +1750,17 @@ Trusted UI options may include `artwork: {assetId}`. This references an existing
 bundled module asset; it cannot introduce a remote URL or executable module.
 Omission preserves the generic game-art fallback. Fabric declares its distinct
 placeholder through this contract. No database migration or new endpoint.
+## NeoForge catalog follow-up — 2026-10-31
+
+- `GET /v1/owner/minecraft/neoforge/catalog` reads the local catalog and refresh
+  status; `POST` queues the existing background refresh under Owner authorization.
+- `GET /v1/minecraft/neoforge/catalog` exposes the same public version projection
+  under normal user authorization. Raw upstream documents remain server-side.
+- Catalog entries contain `minecraftVersion`, `javaMajor` and exact `loaders`;
+  each loader retains `version`, `coordinate`, `latest` and `recommended` fields.
+  NeoForge has no Forge promotions feed, so `recommended` is always false.
+- Minecraft creation choices use `neoforge:<mapping UUID>:<Minecraft version>`
+  with a required exact `loaderVersion`. Creation and modpack replacement validate
+  local catalog membership and all existing mapping/access/admission contracts.
+- Migration `054_neoforge_catalog.sql` adds the NeoForge metadata-sync row and
+  widens its provider constraint; existing servers and mappings are not rewritten.

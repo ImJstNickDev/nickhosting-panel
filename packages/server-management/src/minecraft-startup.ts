@@ -1,7 +1,9 @@
 import {
   forgeEggStartup,
   isForgeEnhancedBinding,
+  isNeoForgeBinding,
   minecraftRuntimeMappingSchema,
+  neoforgeEggStartup,
   type ResolvedMinecraftRuntime,
 } from '@nickhosting/minecraft';
 import type { inspectMinecraftCombination } from './minecraft-registry.js';
@@ -14,6 +16,11 @@ export function minecraftProvisionStartup(
   choice: Pick<MinecraftChoice, 'row' | 'mapping'>,
 ): string {
   const binding = minecraftRuntimeMappingSchema.parse(choice.row.binding);
+  if (isNeoForgeBinding(binding))
+    return neoforgeEggStartup({
+      runtime: choice.row.resolved_runtime as ResolvedMinecraftRuntime,
+      startup: choice.mapping.startup,
+    });
   if (!isForgeEnhancedBinding(binding)) return choice.mapping.startup;
   return forgeEggStartup({
     runtime: choice.row.resolved_runtime as ResolvedMinecraftRuntime,

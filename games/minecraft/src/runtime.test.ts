@@ -401,3 +401,46 @@ describe('Minecraft exact runtime metadata', () => {
       expect(() => validateMinecraftRuntimeMapping(runtime, { ...mapping, ...update })).toThrow();
   });
 });
+
+it.each([
+  ['1.20.1', '1.20.1-47.1.106', 'forge', 17],
+  ['1.21.1', '21.1.72', 'neoforge', 21],
+  ['26.1', '26.1.0.1-beta', 'neoforge', 25],
+] as const)(
+  'resolves an exact NeoForge %s pair through trusted metadata only',
+  async (release, loaderVersion, artifact, java) => {
+    const base = `https://maven.neoforged.net/releases/net/neoforged/${artifact}`;
+    const installer = `${base}/${loaderVersion}/${artifact}-${loaderVersion}-installer.jar`;
+    const metadata = `<metadata><groupId>net.neoforged</groupId><artifactId>${artifact}</artifactId><versioning><versions><version>${loaderVersion}</version></versions></versioning></metadata>`;
+    const { client, requests } = fixture(
+      { [`${base}/maven-metadata.xml`]: metadata, [`${installer}.sha1`]: 'b'.repeat(40) },
+      { release, java },
+    );
+    const resolved = await resolveMinecraftRuntime(
+      { profile: 'neoforge', release, loaderVersion },
+      client,
+    );
+    expect(resolved).toMatchObject({
+      profile: 'neoforge',
+      loaderVersion,
+      javaMajor: java,
+      installation: { kind: 'neoforge-installer', args: ['--installServer'] },
+    });
+    expect(resolved.artifacts[1]).toEqual({
+      role: 'installer',
+      url: installer,
+      sha1: 'b'.repeat(40),
+    });
+    expect(requests).not.toContain(installer);
+    expect(resolveMinecraftImage(resolved).image).toContain(`java_${java}`);
+    await expect(
+      resolveMinecraftRuntime({ profile: 'neoforge', release, loaderVersion: '21.9.1' }, client),
+    ).rejects.toThrow();
+    await expect(
+      resolveMinecraftRuntime(
+        { profile: 'neoforge', release, loaderVersion, installerVersion: 'latest' },
+        client,
+      ),
+    ).rejects.toThrow();
+  },
+);

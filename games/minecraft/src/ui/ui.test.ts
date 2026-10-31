@@ -170,7 +170,7 @@ describe('Minecraft browser module and exact API contracts', () => {
       'datapacks',
       'modpacks',
     ]);
-    for (const runtime of ['fabric', 'forge']) {
+    for (const runtime of ['fabric', 'forge', 'neoforge']) {
       expect(sections(runtime)).toContain('mods');
       expect(sections(runtime)).not.toContain('plugins');
     }
@@ -653,6 +653,103 @@ describe('Minecraft browser module and exact API contracts', () => {
       }),
     );
     for (const loaderVersion of ['47.4.0', undefined]) {
+      await expect(
+        createMinecraftUiController(client).create({
+          ...input,
+          minecraft: { ...input.minecraft, loaderVersion },
+        }),
+      ).rejects.toThrow('validation_failed');
+    }
+    expect(request.mock.calls.every(([path]) => !path.includes('fabric/catalog'))).toBe(true);
+  });
+  it('filters NeoForge loaders by the selected Minecraft release and preserves the legacy full Maven version', async () => {
+    const oldId = `neoforge:${choiceId}:1.20.1`;
+    const modernId = `neoforge:${choiceId}:26.1`;
+    const request = vi.fn<GameUiClient['request']>(async (path) => {
+      if (path === '/v1/minecraft/choices')
+        return [
+          { id: oldId, version: '1.20.1', runtime: 'neoforge' },
+          { id: modernId, version: '26.1', runtime: 'neoforge' },
+        ];
+      if (path === '/v1/minecraft/neoforge/catalog')
+        return {
+          versions: [
+            {
+              minecraftVersion: '26.1',
+              loaders: [
+                {
+                  version: '26.1.0.10',
+                  coordinate: '26.1.0.10',
+                  recommended: false,
+                  latest: true,
+                },
+                {
+                  version: '26.1.0.8',
+                  coordinate: '26.1.0.8',
+                  recommended: false,
+                  latest: false,
+                },
+              ],
+            },
+            {
+              minecraftVersion: '1.20.1',
+              loaders: [
+                {
+                  version: '1.20.1-47.1.106',
+                  coordinate: '1.20.1-47.1.106',
+                  recommended: false,
+                  latest: true,
+                },
+              ],
+            },
+          ],
+        };
+      return { serverId, jobId };
+    });
+    const client = { request };
+    const catalog = await minecraftUiModule.creationCatalog?.load(client);
+    const options = (id: string) =>
+      minecraftUiModule.creationCatalog?.options(catalog, 'loaders', {
+        runtime: 'neoforge',
+        choiceId: id,
+      });
+    expect(options(modernId)).toEqual([
+      { value: '26.1.0.10', label: '26.1.0.10', disabled: false, recommended: false, latest: true },
+      { value: '26.1.0.8', label: '26.1.0.8', disabled: false, recommended: false, latest: false },
+    ]);
+    expect(options(oldId)).toEqual([
+      {
+        value: '1.20.1-47.1.106',
+        label: '1.20.1-47.1.106',
+        disabled: false,
+        recommended: false,
+        latest: true,
+      },
+    ]);
+    expect(options('missing')).toEqual([]);
+    const input = {
+      idempotencyKey: 'neoforge-create',
+      name: 'NeoForge server',
+      limits: { memory: 2048, cpu: 100 },
+      minecraft: {
+        choiceId: oldId,
+        loaderVersion: '1.20.1-47.1.106',
+        configuration: { eula: true },
+      },
+    };
+    expect(await createMinecraftUiController(client).create(input)).toEqual({ serverId, jobId });
+    expect(request).toHaveBeenLastCalledWith(
+      '/v1/minecraft/servers',
+      expect.objectContaining({
+        body: expect.objectContaining({
+          minecraft: expect.objectContaining({
+            choiceId: oldId,
+            loaderVersion: '1.20.1-47.1.106',
+          }),
+        }),
+      }),
+    );
+    for (const loaderVersion of ['26.1.0.8', undefined]) {
       await expect(
         createMinecraftUiController(client).create({
           ...input,

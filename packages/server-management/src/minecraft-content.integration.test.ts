@@ -12,9 +12,11 @@ import { createTestDatabase } from '@nickhosting/database/testing';
 import {
   forgeEggBinding,
   getForgeInstalledTarget,
+  getNeoForgeInstalledTarget,
   minecraftDigest,
   minecraftVerificationChecks,
   minecraftWorldDataVersion,
+  neoforgeEggBinding,
   type ResolvedMinecraftRuntime,
 } from '@nickhosting/minecraft';
 import {
@@ -596,6 +598,126 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
         ),
       );
     if (target.kind === 'jar') f.files.set(target.path, universal);
+    f.options.env = {};
+    f.options.observedImageDigest = async () => null;
+    const download = vi.spyOn(f.context.adapter, 'downloadFile');
+    return { ...f, target, runtime, binding, remote, download };
+  }
+
+  async function neoforgeFixture(
+    release = '1.20.1',
+    loaderVersion = '1.20.1-47.1.106',
+    javaMajor = 17,
+  ) {
+    const f = await minecraftFixture();
+    await f.f.db
+      .deleteFrom('minecraft_verification_evidence')
+      .where('combination_id', '=', f.combinationId)
+      .execute();
+    const variables = ['MC_VERSION', 'NEOFORGE_VERSION'];
+    const runtime: ResolvedMinecraftRuntime = {
+      profile: 'neoforge',
+      release,
+      releaseType: 'release',
+      loaderVersion,
+      javaMajor,
+      installation: {
+        kind: 'neoforge-installer',
+        args: ['--installServer'],
+      },
+      artifacts: [],
+      evidence: [],
+    };
+    const binding = neoforgeEggBinding({
+      runtime,
+      variables: variables.map((env_variable) => ({
+        env_variable,
+      })),
+      environment: {},
+      staticImage: `fixture-java:${javaMajor}`,
+    });
+    const startup = 'java -Xms128M -Xmx{{SERVER_MEMORY}}M @unix_args.txt';
+    await f.f.db
+      .updateTable('runtime_egg_mappings')
+      .set({
+        runtime_id: 'neoforge',
+        startup,
+        docker_image: binding.image,
+      })
+      .where('id', '=', f.f.mappingId)
+      .execute();
+    const mapping = await f.f.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', f.f.mappingId)
+      .executeTakeFirstOrThrow();
+    await f.f.db
+      .updateTable('minecraft_combinations')
+      .set({
+        combination: JSON.stringify({
+          profile: 'neoforge',
+          release,
+          releaseType: 'release',
+          loaderVersion,
+          javaMajor,
+          family: 'netty',
+          protocolId: 763,
+          runtimeDigest: 'a'.repeat(64),
+          protocolSource: { url: 'https://example.test/protocols', sha256: 'b'.repeat(64) },
+        }),
+        resolved_runtime: JSON.stringify(runtime),
+        binding: JSON.stringify(binding),
+        mapping_digest: minecraftMappingDigest(mapping),
+      })
+      .where('id', '=', f.combinationId)
+      .execute();
+    const choice = await inspectMinecraftCombination(f.f.db, f.combinationId);
+    const environment = {
+      MC_VERSION: release,
+      NEOFORGE_VERSION: loaderVersion,
+    };
+    f.context.adapter.getEgg = vi.fn(
+      async () =>
+        ({
+          id: mapping.egg_id,
+          nest: mapping.nest_id,
+          relationships: {
+            variables: {
+              object: 'list',
+              data: variables.map((env_variable) => ({ attributes: { env_variable } })),
+            },
+          },
+        }) as unknown as Awaited<ReturnType<PterodactylAdapter['getEgg']>>,
+    );
+    const remote = {
+      egg: mapping.egg_id,
+      uuid: f.context.server.pterodactyl_uuid,
+      limits: f.context.server.limits,
+      container: {
+        image: binding.image,
+        startup_command: minecraftProvisionStartup(choice),
+        environment,
+      },
+    } as unknown as ApplicationServer;
+    f.context.adapter.getApplicationServer = vi.fn(async () => remote);
+    const target = getNeoForgeInstalledTarget(runtime, binding);
+    f.files.delete('server.jar');
+    const legacy = release === '1.20.1';
+    f.files.set(
+      target.path,
+      Buffer.from(
+        [
+          `-DlegacyClassPath=libraries/net/neoforged/${legacy ? 'forge' : 'neoforge'}/${loaderVersion}/${legacy ? 'forge' : 'neoforge'}-${loaderVersion}-universal.jar`,
+          ...(release.startsWith('26.')
+            ? ['net.neoforged.fml.startup.Server']
+            : ['cpw.mods.bootstraplauncher.BootstrapLauncher', '--launchTarget', 'forgeserver']),
+          legacy ? '--fml.forgeVersion' : '--fml.neoForgeVersion',
+          legacy ? loaderVersion.replace('1.20.1-', '') : loaderVersion,
+          '--fml.mcVersion',
+          release,
+        ].join('\n'),
+      ),
+    );
     f.options.env = {};
     f.options.observedImageDigest = async () => null;
     const download = vi.spyOn(f.context.adapter, 'downloadFile');
@@ -2675,6 +2797,89 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
 
   it('rejects Forge target mismatches before writing configuration', async () => {
     const f = await forgeFixture();
+    const write = vi.spyOn(f.context.adapter, 'writeFile');
+    f.remote.container.startup_command = 'java @unix_args.txt';
+    await expect(configureMinecraftProvision(f.context, f.options)).rejects.toMatchObject({
+      code: 'provenance_mismatch',
+    });
+    expect(f.download).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['1.20.1', '1.20.1-47.1.106', 17],
+    ['1.21.1', '21.1.72', 21],
+    ['26.1', '26.1.0.1-beta', 25],
+  ] as const)(
+    'attests NeoForge %s generated launch target without trusting the installer or root symlink',
+    async (release, loader, java) => {
+      const f = await neoforgeFixture(release, loader, java);
+      expect(await configureMinecraftProvision(f.context, f.options)).toBe(true);
+      const profile = await f.f.db
+        .selectFrom('minecraft_server_profiles')
+        .selectAll()
+        .where('server_id', '=', f.serverId)
+        .executeTakeFirstOrThrow();
+      expect(profile.installed).toBe(true);
+      expect(profile.installed_manifest).toEqual([
+        {
+          path: f.target.path,
+          sha256: createHash('sha256')
+            .update(f.files.get(f.target.path) as Buffer)
+            .digest('hex'),
+          size: f.files.get(f.target.path)?.length,
+        },
+      ]);
+      expect(f.download.mock.calls.filter(([, path]) => path === f.target.path)).toHaveLength(1);
+      expect(
+        f.download.mock.calls.some(([, path]) => ['installer.jar', 'unix_args.txt'].includes(path)),
+      ).toBe(false);
+      f.download.mockClear();
+      await assertMinecraftRemoteLaunch(f.f.db, f.serverId, f.remote, {}, f.context.adapter, false);
+      expect(f.download).not.toHaveBeenCalled();
+      expect(await configureMinecraftProvision(f.context, f.options)).toBe(true);
+      expect(f.download).not.toHaveBeenCalled();
+      f.files.set(f.target.path, Buffer.from('wrong installation'));
+      await expect(verifyMinecraftRestore(f.context, f.options)).rejects.toThrow();
+    },
+  );
+
+  it('reuses a NeoForge installation receipt when later configuration is retried', async () => {
+    const f = await neoforgeFixture();
+    const write = f.context.adapter.writeFile;
+    const event = vi
+      .spyOn(f.context.adapter, 'writeFile')
+      .mockImplementationOnce(async (...args) => {
+        await write(...args);
+        throw new Error('fixture interruption after runtime receipt');
+      });
+    f.files.delete('eula.txt');
+    await expect(configureMinecraftProvision(f.context, f.options)).rejects.toThrow(
+      'fixture interruption',
+    );
+    expect(f.download.mock.calls.filter(([, path]) => path === f.target.path)).toHaveLength(1);
+    event.mockRestore();
+    expect(await configureMinecraftProvision(f.context, f.options)).toBe(true);
+    expect(f.download.mock.calls.filter(([, path]) => path === f.target.path)).toHaveLength(1);
+  });
+
+  it('does not reuse a NeoForge receipt for a new reinstall operation', async () => {
+    const f = await neoforgeFixture();
+    expect(await configureMinecraftProvision(f.context, f.options)).toBe(true);
+    await f.f.db
+      .updateTable('minecraft_server_profiles')
+      .set({ installed: false })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    // Existing operation steps cannot authorize another installation generation.
+    f.operation.job_id = randomUUID();
+    f.operation.action = 'reinstall';
+    f.files.set(f.target.path, Buffer.from('corrupt target'));
+    await expect(configureMinecraftProvision(f.context, f.options)).rejects.toThrow();
+  });
+
+  it('rejects NeoForge target mismatches before writing configuration', async () => {
+    const f = await neoforgeFixture();
     const write = vi.spyOn(f.context.adapter, 'writeFile');
     f.remote.container.startup_command = 'java @unix_args.txt';
     await expect(configureMinecraftProvision(f.context, f.options)).rejects.toMatchObject({

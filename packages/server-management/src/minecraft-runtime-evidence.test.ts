@@ -1,3 +1,4 @@
+import { neoforgeEggBinding, type ResolvedMinecraftRuntime } from '@nickhosting/minecraft';
 import { describe, expect, it } from 'vitest';
 import { assertMinecraftDeclaredEnvironment } from './minecraft-registry.js';
 import {
@@ -215,4 +216,51 @@ describe('Forge Enhanced resolved launch plan', () => {
       assertMinecraftVerifiedLaunch(`java @${path}`, {}, 'forge', undefined, null),
     ).toThrow();
   });
+});
+
+describe('NeoForge resolved launch plan', () => {
+  it.each([
+    ['1.20.1', '1.20.1-47.1.106', 17, 'forge'],
+    ['1.21.1', '21.1.72', 21, 'neoforge'],
+    ['26.1', '26.1.0.1-beta', 25, 'neoforge'],
+  ] as const)(
+    'pins %s startup to its exact generated argument file',
+    (release, loaderVersion, javaMajor, artifact) => {
+      const runtime: ResolvedMinecraftRuntime = {
+        profile: 'neoforge',
+        release,
+        releaseType: 'release',
+        loaderVersion,
+        javaMajor,
+        installation: { kind: 'neoforge-installer', args: ['--installServer'] },
+        artifacts: [],
+        evidence: [],
+      };
+      const binding = neoforgeEggBinding({
+        runtime,
+        variables: ['MC_VERSION', 'NEOFORGE_VERSION'].map((env_variable) => ({ env_variable })),
+        environment: {},
+        staticImage: `fixture-java:${javaMajor}`,
+      });
+      const choice = {
+        row: { binding, resolved_runtime: runtime },
+        mapping: { startup: 'java -Xmx{{SERVER_MEMORY}}M @unix_args.txt nogui' },
+      } as unknown as Parameters<typeof minecraftProvisionStartup>[0];
+      const resolved = minecraftProvisionStartup(choice);
+      expect(resolved).toBe(
+        `java -Xmx{{SERVER_MEMORY}}M @libraries/net/neoforged/${artifact}/${loaderVersion}/unix_args.txt nogui`,
+      );
+      expect(() =>
+        assertMinecraftVerifiedLaunch(resolved, environment, 'neoforge', undefined, null, choice),
+      ).not.toThrow();
+      for (const startup of [
+        'java @unix_args.txt',
+        'java -jar server.jar',
+        'java @libraries/net/neoforged/neoforge/wrong/unix_args.txt',
+      ])
+        expect(() =>
+          assertMinecraftVerifiedLaunch(startup, environment, 'neoforge', undefined, null, choice),
+        ).toThrow();
+    },
+  );
 });

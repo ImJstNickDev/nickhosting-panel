@@ -14,6 +14,8 @@ import {
   minecraftEvidenceSchema,
   minecraftManifestUrl,
   minecraftSupport,
+  neoforgeCatalogMetadataClient,
+  neoforgeEggBinding,
   paperCatalogMetadataClient,
   paperEggBinding,
   publicMinecraftChoice,
@@ -36,6 +38,7 @@ import { getFabricCatalog } from './fabric-catalog.js';
 import { getForgeCatalog, getForgeCatalogSnapshot } from './forge-catalog.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { cachedMinecraftManifest, getMinecraftMetadataStatus } from './minecraft-metadata.js';
+import { getNeoForgeCatalog, getNeoForgeCatalogSnapshot } from './neoforge-catalog.js';
 import { getPaperCatalog, getPaperCatalogSnapshot } from './paper-catalog.js';
 import { ownerOnly, parse } from './registry.js';
 
@@ -152,11 +155,13 @@ async function registerCombination(
     value.binding ??
     (runtime.profile === 'fabric'
       ? fabricEggBinding
-      : runtime.profile === 'forge'
-        ? forgeEggBinding
-        : runtime.profile === 'paper'
-          ? paperEggBinding
-          : vanillaEggBinding)({
+      : runtime.profile === 'neoforge'
+        ? neoforgeEggBinding
+        : runtime.profile === 'forge'
+          ? forgeEggBinding
+          : runtime.profile === 'paper'
+            ? paperEggBinding
+            : vanillaEggBinding)({
       runtime,
       variables: egg.relationships?.variables?.data.map((entry) => entry.attributes) ?? [],
       environment: mapping.environment,
@@ -302,7 +307,7 @@ async function assertCatalogCreationAccess(
     !mapping.nodeEnabled ||
     mapping.game_id !== 'minecraft' ||
     mapping.runtime_id !== profile ||
-    !['fabric', 'paper', 'forge'].includes(profile)
+    !['fabric', 'paper', 'forge', 'neoforge'].includes(profile)
   )
     throw new DomainError('integration_unavailable');
   const { nodeEnabled: _nodeEnabled, ...identity } = mapping;
@@ -310,16 +315,17 @@ async function assertCatalogCreationAccess(
 }
 
 async function runtimeCreationCatalog(db: DB) {
-  const [catalog, paper, forge, mappings, releases, protocols] = await Promise.all([
+  const [catalog, paper, forge, neoforge, mappings, releases, protocols] = await Promise.all([
     getFabricCatalog(db),
     getPaperCatalog(db),
     getForgeCatalog(db),
+    getNeoForgeCatalog(db),
     db
       .selectFrom('runtime_egg_mappings as mapping')
       .innerJoin('managed_nodes as node', 'node.id', 'mapping.node_id')
       .select(['mapping.id', 'mapping.runtime_id'])
       .where('mapping.game_id', '=', 'minecraft')
-      .where('mapping.runtime_id', 'in', ['fabric', 'paper', 'forge'])
+      .where('mapping.runtime_id', 'in', ['fabric', 'paper', 'forge', 'neoforge'])
       .where('mapping.enabled', '=', true)
       .where('node.enabled', '=', true)
       .orderBy('mapping.id')
@@ -356,9 +362,12 @@ async function runtimeCreationCatalog(db: DB) {
       ? catalog.synced && catalog.latestInstallerVersion && catalog.loaders.length
         ? catalog.games
         : []
-      : mapping.runtime_id === 'forge'
-        ? forge.synced
-          ? forge.versions.map((entry) => ({ version: entry.minecraftVersion, stable: true }))
+      : ['forge', 'neoforge'].includes(mapping.runtime_id)
+        ? (mapping.runtime_id === 'neoforge' ? neoforge : forge).synced
+          ? (mapping.runtime_id === 'neoforge' ? neoforge : forge).versions.map((entry) => ({
+              version: entry.minecraftVersion,
+              stable: true,
+            }))
           : []
         : paper.synced
           ? paper.versions.map((entry) => ({
@@ -372,11 +381,11 @@ async function runtimeCreationCatalog(db: DB) {
     ).map((game) => ({
       id: `${mapping.runtime_id}:${mapping.id}:${game.version}`,
       version: game.version,
-      runtime: mapping.runtime_id as 'fabric' | 'paper' | 'forge',
+      runtime: mapping.runtime_id as 'fabric' | 'paper' | 'forge' | 'neoforge',
       releaseType: game.stable ? ('release' as const) : ('snapshot' as const),
       releaseTime: dates.get(game.version) ?? null,
       capabilities: minecraftDeclaredCapabilities({
-        profile: mapping.runtime_id as 'fabric' | 'paper' | 'forge',
+        profile: mapping.runtime_id as 'fabric' | 'paper' | 'forge' | 'neoforge',
         release: game.version,
         releaseType: game.stable ? 'release' : 'snapshot',
         family: knownProtocols.get(game.version)?.family ?? 'unknown',
@@ -566,6 +575,64 @@ export async function resolveForgeCreationChoice(
   return requireMinecraftChoice(db, current, registered.id, env);
 }
 
+export async function resolveNeoForgeCreationChoice(
+  db: Kysely<Database>,
+  adapter: PterodactylAdapter,
+  context: AuthContext,
+  input: { choiceId: string; loaderVersion: string },
+  env: Environment = {},
+  options: { metadata?: RuntimeMetadataClient; protocols?: typeof fetchMinecraftProtocols } = {},
+) {
+  const match = /^neoforge:([a-f0-9-]{36}):(.+)$/.exec(input.choiceId);
+  if (!match) throw new DomainError('validation_failed');
+  const mappingId = parse(z.uuid(), match[1]);
+  const [snapshot, current] = await Promise.all([
+    getNeoForgeCatalogSnapshot(db),
+    currentInteractiveContext(db, context, env),
+  ]);
+  const mapping = await assertCatalogCreationAccess(db, current, mappingId, 'neoforge');
+  if (!snapshot) throw new DomainError('integration_unavailable');
+  const version = snapshot.versions.find((entry) => entry.minecraftVersion === match[2]);
+  const loader = version?.loaders.find((entry) => entry.version === input.loaderVersion);
+  if (!version || !loader) throw new DomainError('validation_failed');
+  const runtime = parse(minecraftRuntimeRequestSchema, {
+    profile: 'neoforge',
+    release: version.minecraftVersion,
+    loaderVersion: loader.version,
+  });
+  const existing = await db
+    .selectFrom('minecraft_combinations')
+    .select('id')
+    .where('mapping_id', '=', mappingId)
+    .where('mapping_digest', '=', minecraftMappingDigest(mapping))
+    .where(sql<string>`combination->>'profile'`, '=', 'neoforge')
+    .where(sql<string>`combination->>'release'`, '=', runtime.release)
+    .where(sql<string>`combination->>'loaderVersion'`, '=', loader.version)
+    .orderBy('created_at', 'desc')
+    .executeTakeFirst();
+  if (existing) return requireMinecraftChoice(db, current, existing.id, env);
+  const { values } = await getSettings(db, env);
+  const upstream =
+    options.metadata ??
+    createRuntimeMetadataClient({ userAgent: values.contentMetadataUserAgent ?? '' });
+  const fallback: RuntimeMetadataClient = {
+    read: (url) =>
+      !options.metadata && url === minecraftManifestUrl
+        ? cachedMinecraftManifest(db)
+        : upstream.read(url),
+  };
+  const registered = await registerCombination(
+    db,
+    adapter,
+    current,
+    { mappingId, runtime },
+    env,
+    { ...options, metadata: neoforgeCatalogMetadataClient(snapshot, fallback) },
+    true,
+  );
+  return requireMinecraftChoice(db, current, registered.id, env);
+}
+
 export async function inspectMinecraftCombination(db: DB, id: string, env: Environment = {}) {
   const row = await db
     .selectFrom('minecraft_combinations')
@@ -709,7 +776,10 @@ function minecraftChoiceBlockReason(
   choice: ReturnType<typeof inspectLoadedCombination>,
   privateTester: boolean,
 ): 'choice-disabled' | 'mapping-disabled' | 'mapping-changed' | 'evidence-required' | null {
-  if (!choice.row.enabled && !['fabric', 'paper', 'forge'].includes(choice.combination.profile))
+  if (
+    !choice.row.enabled &&
+    !['fabric', 'paper', 'forge', 'neoforge'].includes(choice.combination.profile)
+  )
     return 'choice-disabled';
   if (!choice.mapping.enabled) return 'mapping-disabled';
   if (choice.row.mapping_digest !== choice.mappingDigest) return 'mapping-changed';
@@ -783,7 +853,7 @@ export async function minecraftCatalog(db: DB, context: AuthContext, env: Enviro
   const loaded = await inspectMinecraftCombinations(db, rows, env, false);
   const choices = [];
   for (const choice of loaded) {
-    if (['fabric', 'paper', 'forge'].includes(choice.combination.profile)) continue;
+    if (['fabric', 'paper', 'forge', 'neoforge'].includes(choice.combination.profile)) continue;
     try {
       assertLoadedMinecraftChoice(choice, rollout, context);
       choices.push({

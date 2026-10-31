@@ -258,3 +258,16 @@ capabilities reuse the existing lifecycle; real-client gameplay certification is
 not claimed by metadata or fixture tests. Modpacks may resolve the same exact
 Forge runtime. NeoForge remains outside this change. See the Forge catalog section
 in [game integrations](GAME-INTEGRATIONS.md#forge-catalog-and-creation).
+
+## NeoForge runtime follow-up — 2026-10-31
+
+The Owner requested NeoForge as an additional Minecraft runtime using the supplied
+Pterodactyl egg. This scoped M5 follow-up adds catalog-backed exact version
+selection, egg contracts and the existing management flows; it does not start M6
+or authorize deployment. Installation is declared for official Minecraft
+1.20.1–1.21.x and documented 26.x release/beta pairs with an enabled Owner mapping
+and normal rollout controls.
+NeoForge does not inherit Forge's Gateway declaration: that capability remains
+subject to its own evidence. Snapshot coordinates containing `+` remain unavailable
+because the supplied egg interpolates that character unescaped into `grep -E`.
+See [NeoForge contracts](GAME-INTEGRATIONS.md#neoforge-catalog-and-creation).

@@ -2,10 +2,23 @@ import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 import { forgeJavaMajor } from './forge-policy.js';
+import { neoforgeCatalogUrls, parseNeoForgeVersions } from './neoforge-catalog.js';
+import {
+  neoforgeArtifact,
+  neoforgeJavaMajor,
+  neoforgeMinecraftVersion,
+} from './neoforge-policy.js';
 import { paperJavaMajor } from './paper-policy.js';
 import { vanillaJavaMajor } from './vanilla-policy.js';
 
-export const minecraftRuntimeProfiles = ['vanilla', 'paper', 'folia', 'fabric', 'forge'] as const;
+export const minecraftRuntimeProfiles = [
+  'vanilla',
+  'paper',
+  'folia',
+  'fabric',
+  'forge',
+  'neoforge',
+] as const;
 export type MinecraftRuntimeProfile = (typeof minecraftRuntimeProfiles)[number];
 const exactVersion = z
   .string()
@@ -31,6 +44,7 @@ const origins = new Set([
   'https://maven.fabricmc.net',
   'https://files.minecraftforge.net',
   'https://maven.minecraftforge.net',
+  'https://maven.neoforged.net',
 ]);
 
 function fail(reason: string): never {
@@ -75,7 +89,7 @@ export interface ResolvedMinecraftRuntime {
   readonly upstreamChannel?: string;
   readonly artifacts: readonly RuntimeArtifact[];
   readonly installation: {
-    readonly kind: 'server-jar' | 'fabric-installer' | 'forge-installer';
+    readonly kind: 'server-jar' | 'fabric-installer' | 'forge-installer' | 'neoforge-installer';
     readonly args: readonly string[];
     /** Exact renamed universal JAR receipt for pre-1.13 Forge only. */
     readonly serverJarSha1?: string;
@@ -193,7 +207,8 @@ export async function resolveMinecraftRuntime(
   const request = parse(minecraftRuntimeRequestSchema, input);
   if (
     ['paper', 'folia'].includes(request.profile) !== (request.buildId !== undefined) ||
-    ['fabric', 'forge'].includes(request.profile) !== (request.loaderVersion !== undefined) ||
+    ['fabric', 'forge', 'neoforge'].includes(request.profile) !==
+      (request.loaderVersion !== undefined) ||
     (request.profile === 'fabric') !== (request.installerVersion !== undefined)
   )
     throw new DomainError('validation_failed');
@@ -240,11 +255,13 @@ export async function resolveMinecraftRuntime(
   let javaMajor =
     request.profile === 'vanilla' || request.profile === 'fabric'
       ? vanillaJavaMajor(request.release, entry.type, release.javaVersion?.majorVersion)
-      : request.profile === 'forge'
-        ? forgeJavaMajor(request.release, release.javaVersion?.majorVersion)
-        : request.profile === 'paper'
-          ? (release.javaVersion?.majorVersion ?? 8)
-          : (release.javaVersion?.majorVersion ?? fail('minecraft_java_unknown'));
+      : request.profile === 'neoforge'
+        ? neoforgeJavaMajor(request.release, release.javaVersion?.majorVersion)
+        : request.profile === 'forge'
+          ? forgeJavaMajor(request.release, release.javaVersion?.majorVersion)
+          : request.profile === 'paper'
+            ? (release.javaVersion?.majorVersion ?? 8)
+            : (release.javaVersion?.majorVersion ?? fail('minecraft_java_unknown'));
   let upstreamSupport: string | undefined;
   let upstreamChannel: string | undefined;
   let artifacts: RuntimeArtifact[] = [
@@ -371,6 +388,24 @@ export async function resolveMinecraftRuntime(
         '-downloadMinecraft',
       ],
     };
+  } else if (request.profile === 'neoforge') {
+    const artifact = neoforgeArtifact(request.release);
+    if (
+      !request.loaderVersion ||
+      neoforgeMinecraftVersion(request.loaderVersion) !== request.release
+    )
+      return fail('minecraft_loader_mismatch');
+    const metadataUrl =
+      artifact === 'forge' ? neoforgeCatalogUrls.legacy : neoforgeCatalogUrls.versions;
+    const versions = parseNeoForgeVersions(
+      new TextDecoder('utf-8', { fatal: true }).decode((await read(metadataUrl)).bytes),
+      artifact,
+    );
+    if (!versions.includes(request.loaderVersion)) return fail('minecraft_loader_unavailable');
+    const url = `https://maven.neoforged.net/releases/net/neoforged/${artifact}/${request.loaderVersion}/${artifact}-${request.loaderVersion}-installer.jar`;
+    const hash = parse(sha1, new TextDecoder().decode((await read(`${url}.sha1`)).bytes).trim());
+    artifacts.push({ role: 'installer', url, sha1: hash.toLowerCase() });
+    installation = { kind: 'neoforge-installer', args: ['--installServer'] };
   } else if (request.profile === 'forge') {
     const versions = parse(
       z.record(z.string(), z.array(exactVersion).max(100_000)),
@@ -455,7 +490,12 @@ export const minecraftRuntimeMappingSchema = z
       z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/),
       z.string().max(4096),
     ),
-    installationKind: z.enum(['server-jar', 'fabric-installer', 'forge-installer']),
+    installationKind: z.enum([
+      'server-jar',
+      'fabric-installer',
+      'forge-installer',
+      'neoforge-installer',
+    ]),
     artifactPaths: z
       .object({ server: artifactPath.optional(), installer: artifactPath.optional() })
       .strict(),

@@ -84,7 +84,7 @@ export function OwnerMinecraftPage() {
     runtimes.find((r) => r.id === params.get('runtime'))?.id ?? runtimes[0]?.id ?? 'vanilla';
   const fabricDiscovery = runtime === 'fabric';
   const paperDiscovery = runtime === 'paper';
-  const forgeDiscovery = runtime === 'forge';
+  const forgeDiscovery = runtime === 'forge' || runtime === 'neoforge';
   const runtimeNavigation = useRef<HTMLFieldSetElement>(null);
   useEffect(() => {
     const navigation = runtimeNavigation.current;
@@ -275,7 +275,7 @@ export function OwnerMinecraftPage() {
         ))}
       </fieldset>
     ) : (
-      <h2>{t(forgeDiscovery ? 'forgeCatalog.title' : 'versions.minecraftVersions')}</h2>
+      <h2>{t(forgeDiscovery ? `${runtime}Catalog.title` : 'versions.minecraftVersions')}</h2>
     );
   const mappingContext = (
     <div className="minecraft-versions-context">
@@ -453,7 +453,11 @@ export function OwnerMinecraftPage() {
       {fabricDiscovery ? (
         <FabricVersionCatalog kind={fabricKind} navigation={catalogNavigation} />
       ) : forgeDiscovery ? (
-        <ForgeVersionCatalog navigation={catalogNavigation} />
+        <ForgeVersionCatalog
+          key={runtime}
+          runtime={runtime === 'neoforge' ? 'neoforge' : 'forge'}
+          navigation={catalogNavigation}
+        />
       ) : paperDiscovery ? (
         <PaperVersionCatalog navigation={catalogNavigation} />
       ) : (

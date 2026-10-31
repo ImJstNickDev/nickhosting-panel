@@ -1,8 +1,10 @@
 import { DomainError } from '@nickhosting/core';
 import {
   getForgeInstalledTarget,
+  getNeoForgeInstalledTarget,
   isFabricUpdatedBinding,
   isForgeEnhancedBinding,
+  isNeoForgeBinding,
   type MinecraftEvidence,
   minecraftDigest,
   minecraftRuntimeMappingSchema,
@@ -164,11 +166,10 @@ export function assertMinecraftVerifiedLaunch(
   choice?: Pick<MinecraftChoice, 'row'>,
 ): void {
   const binding = choice && minecraftRuntimeMappingSchema.parse(choice.row.binding);
-  if (choice && binding && isForgeEnhancedBinding(binding)) {
-    const target = getForgeInstalledTarget(
-      choice.row.resolved_runtime as ResolvedMinecraftRuntime,
-      binding,
-    );
+  if (choice && binding && (isForgeEnhancedBinding(binding) || isNeoForgeBinding(binding))) {
+    const target = (
+      isNeoForgeBinding(binding) ? getNeoForgeInstalledTarget : getForgeInstalledTarget
+    )(choice.row.resolved_runtime as ResolvedMinecraftRuntime, binding);
     assertMinecraftJavaLaunch(
       startup,
       environment,
@@ -341,6 +342,8 @@ export async function requireMinecraftRuntimeImageEvidence(
     choice.capabilities.installation &&
     (choice.combination.profile !== 'fabric' ||
       isFabricUpdatedBinding(minecraftRuntimeMappingSchema.parse(choice.row.binding))) &&
+    (choice.combination.profile !== 'neoforge' ||
+      isNeoForgeBinding(minecraftRuntimeMappingSchema.parse(choice.row.binding))) &&
     (choice.combination.profile !== 'forge' ||
       isForgeEnhancedBinding(minecraftRuntimeMappingSchema.parse(choice.row.binding)))
   ) {

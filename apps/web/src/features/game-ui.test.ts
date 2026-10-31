@@ -65,7 +65,7 @@ describe('trusted game frontend rendering', () => {
   it('renders distinct bundled runtime artwork from integration-provided choices', () => {
     const cache = new QueryClient();
     cache.setQueryData(['creation', 'catalog', 'minecraft'], {
-      choices: ['vanilla', 'fabric'].map((runtime, index) => ({
+      choices: ['vanilla', 'fabric', 'neoforge'].map((runtime, index) => ({
         id: `10000000-0000-4000-8000-00000000000${index + 1}`,
         runtime,
         version: '26.1',
@@ -84,8 +84,9 @@ describe('trusted game frontend rendering', () => {
       }),
       cache,
     );
-    expect(markup).toContain('minecraft-landscape.svg');
-    expect(markup).toContain('fabric-workshop.svg');
+    expect(markup).toContain('runtime-logos/vanilla.png');
+    expect(markup).toContain('runtime-logos/fabric.png');
+    expect(markup).toContain('runtime-logos/neoforge.png');
     expect(markup).toContain('alt=""');
   });
   it('keeps creation runtime-first and delegates pack replacement to its bundled workspace', () => {

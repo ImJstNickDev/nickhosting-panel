@@ -23,6 +23,7 @@ import {
   pollFabricMetadata,
   pollForgeMetadata,
   pollMinecraftMetadata,
+  pollNeoForgeMetadata,
   pollPaperMetadata,
 } from './minecraft-metadata.js';
 import { startMinecraftModpackLoop } from './minecraft-modpacks.js';
@@ -273,6 +274,16 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         }, 5000);
     };
     forgePoll = refreshForge();
+    let neoforgeTimer: ReturnType<typeof setTimeout> | undefined;
+    let neoforgePoll: Promise<void> | undefined;
+    const refreshNeoForge = async () => {
+      await pollNeoForgeMetadata(db, env, logger);
+      if (!stopping)
+        neoforgeTimer = setTimeout(() => {
+          neoforgePoll = refreshNeoForge();
+        }, 5000);
+    };
+    neoforgePoll = refreshNeoForge();
     reconciliation = poll();
     logger.log('info', 'worker.started');
     let closed: Promise<void> | undefined;
@@ -284,6 +295,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         if (fabricTimer) clearTimeout(fabricTimer);
         if (paperTimer) clearTimeout(paperTimer);
         if (forgeTimer) clearTimeout(forgeTimer);
+        if (neoforgeTimer) clearTimeout(neoforgeTimer);
         if (scheduleTimer) clearTimeout(scheduleTimer);
         await Promise.all([
           reconciliation,
@@ -291,6 +303,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           fabricPoll,
           paperPoll,
           forgePoll,
+          neoforgePoll,
           schedulePoll,
           observations.close(),
           providerFeeds.close(),

@@ -106,6 +106,7 @@ const translated: Record<string, [string, string]> = {
   'runtimes.folia': ['Folia', 'Folia'],
   'runtimes.fabric': ['Fabric', 'Fabric'],
   'runtimes.forge': ['Forge', 'Forge'],
+  'runtimes.neoforge': ['NeoForge', 'NeoForge'],
   'installer.address': ['Choose an address', 'Scegli un indirizzo'],
   'installer.version': ['Choose a version', 'Scegli una versione'],
   'installer.loader': ['Choose a loader', 'Scegli un loader'],
@@ -412,7 +413,7 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
       field('loaderVersion', {
         type: 'choice',
         required: true,
-        when: [{ field: 'runtime', operator: 'one-of', values: ['fabric', 'forge'] }],
+        when: [{ field: 'runtime', operator: 'one-of', values: ['fabric', 'forge', 'neoforge'] }],
         source: { handler: 'loaders', dependsOn: ['runtime', 'choiceId'] },
       }),
       field('operators', {
@@ -646,7 +647,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
         summary: [
           { labelKey: k('fields.runtime'), value: choice.runtime },
           { labelKey: k('fields.choiceId'), value: choice.version },
-          ...(['fabric', 'forge'].includes(choice.runtime)
+          ...(['fabric', 'forge', 'neoforge'].includes(choice.runtime)
             ? [
                 {
                   labelKey: k('fields.loaderVersion'),
@@ -726,7 +727,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
           connection: v.connection,
           minecraft: {
             choiceId,
-            ...(['fabric', 'forge'].includes(String(v.runtime))
+            ...(['fabric', 'forge', 'neoforge'].includes(String(v.runtime))
               ? { loaderVersion: v.loaderVersion }
               : {}),
             configuration: {
@@ -961,3 +962,5 @@ export type {
 } from '../fabric-catalog.js';
 
 export type { ForgeCatalogResponse } from '../forge-catalog.js';
+
+export type { NeoForgeCatalogResponse } from '../neoforge-catalog.js';
