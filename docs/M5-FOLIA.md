@@ -56,7 +56,9 @@ rather than removing installation evidence or game data.
 
 Read-only public discovery validated 13 Minecraft versions and 27 documents,
 including 26.3 build6, 26.2 build7 and 26.1.2 build8. The guarded database preflight
-verified all 55 prior migration checksums; migration056 is pending approval.
+verified all 55 prior migration checksums. The Owner subsequently approved and
+applied migration056; all prior checksums remained unchanged and the worker
+synchronized all 13 Folia versions without error.
 No real game server was created, reinstalled, started or deleted.
 
 Focused runtime/capability/image suites passed 114 tests; player parser/API suites
@@ -78,11 +80,13 @@ info, and the build retains its chunk-size advisory. Isolated queued provision
 (52 cases), installed content (101 cases), and Folia catalog (7 cases) passed.
 
 The development Gateway was restarted under standing Owner authorization with
-unchanged image, host configuration, mounts and network membership. Its health
-is currently blocked by the API watcher waiting for a previous process to finish
-graceful shutdown. Restart of the existing development API is pending separate
-Owner approval; no other container was manually restarted. This operational
-blocker and migration056 must be resolved before claiming development activation.
+unchanged image, host configuration, mounts and network membership. The API watcher was waiting for a previous process to finish graceful shutdown.
+The Owner explicitly approved the restart of the existing development API and
+migration056. The API restarted with the same image, host configuration, mounts
+and network membership. API, Gateway and worker are healthy; the catalog contains
+13 versions with no refresh error. No other container was manually restarted.
+Owner egg mapping remains a separate UI action; no real game installation was
+performed as part of this validation.
 
 The final API/registry rerun passed 44/44 after correcting stale fixture
 expectations. Together, the affected integration suites pass 204/204 cases
