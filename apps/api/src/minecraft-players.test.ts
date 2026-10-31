@@ -35,7 +35,7 @@ vi.mock('@nickhosting/minecraft', async (original) => ({
 vi.mock('@nickhosting/server-management', async (original) => ({
   ...(await original<typeof import('@nickhosting/server-management')>()),
   inspectMinecraftCombination: vi.fn(async () => ({
-    combination: { release: '26.1' },
+    combination: { release: '26.1', profile: 'vanilla' },
     capabilities: { playerManagement: true },
   })),
 }));
@@ -549,6 +549,19 @@ describe('Minecraft player HTTP handlers with isolated boundaries', () => {
     f.state('offline');
     expect(await (await f.app.request(path)).json()).toMatchObject({ state: 'offline' });
     expect(f.service.adapter.getResources).toHaveBeenCalledTimes(4);
+  });
+  it('uses the inspected Folia runtime to parse its terminal roster', async () => {
+    const f = fixture();
+    vi.mocked(inspectMinecraftCombination).mockResolvedValueOnce({
+      combination: { release: '26.1', profile: 'folia' },
+      capabilities: { playerManagement: true },
+    } as Awaited<ReturnType<typeof inspectMinecraftCombination>>);
+    f.receipt('[12:34:56 INFO]: There are 1 of a max of 20 players online: PlayerOne');
+    expect(
+      await (await f.app.request('/v1/servers/server/minecraft/players/online')).json(),
+    ).toMatchObject({ state: 'available', players: [{ name: 'PlayerOne' }] });
+    expect(f.requestLogs).not.toHaveBeenCalled();
+    expect(f.relayClose).toHaveBeenCalledOnce();
   });
   it('does not request a roster for a stopped server', async () => {
     const f = fixture();

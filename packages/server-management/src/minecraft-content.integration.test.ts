@@ -266,7 +266,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       semantic?: boolean;
     },
     interactive = false,
-    serverJarProfile: 'vanilla' | 'paper' | 'purpur' = 'vanilla',
+    serverJarProfile: 'vanilla' | 'paper' | 'purpur' | 'folia' = 'vanilla',
   ) {
     const profile = launcher ? 'fabric' : serverJarProfile;
     const image = 'fixture-java:21';
@@ -3102,7 +3102,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       await expect(verifyMinecraftInitialInstallation(context, options)).rejects.toThrow();
     },
   );
-  it.each(['vanilla', 'paper', 'purpur'] as const)(
+  it.each(['vanilla', 'paper', 'purpur', 'folia'] as const)(
     'verifies a declaration-backed %s installation without signatures and still rejects changed artifacts',
     async (runtimeProfile) => {
       const { f, serverId, files, context, options } = await minecraftFixture(

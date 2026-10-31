@@ -1,5 +1,6 @@
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import type { MinecraftCombination } from './compatibility.js';
 import { minecraftUuid, parseMinecraftProperties } from './management.js';
 
 const name = z.string().regex(/^[A-Za-z0-9_]{3,16}$/);
@@ -92,15 +93,25 @@ export function parseMinecraftPlayerFiles(files: {
     ...parseMinecraftWhitelistProperties(files.properties),
   };
 }
-/** Accept only vanilla server-thread output, never chat, plugin-prefixed lines or history.
- * `commands.list.players` is the vanilla English translation receipt. Unknown formats
- * deliberately report unavailable instead of guessing from a status sample. */
-export function parseMinecraftOnlinePlayers(line: string): { name: string }[] | undefined {
+/** Accept only known runtime console layouts, never chat or plugin-prefixed lines.
+ * Paper's terminal layout omits the thread; Folia's file layout names region threads.
+ * Unknown formats deliberately report unavailable instead of using status samples. */
+export function parseMinecraftOnlinePlayers(
+  line: string,
+  runtime: MinecraftCombination['profile'] = 'vanilla',
+): { name: string }[] | undefined {
   if (Buffer.byteLength(line) > 32768 || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(line)) return;
-  const match =
-    /^\[\d{2}:\d{2}:\d{2}\] \[Server thread\/INFO\]: There are (\d{1,5}) of a max of (\d{1,5}) players online: ?(.*)$/.exec(
-      line,
-    );
+  const paperFamily = runtime === 'paper' || runtime === 'purpur' || runtime === 'folia';
+  const prefix =
+    /^\[\d{2}:\d{2}:\d{2}\] \[Server thread\/INFO\]: /.exec(line) ??
+    (paperFamily ? /^\[\d{2}:\d{2}:\d{2} INFO\]: /.exec(line) : null) ??
+    (runtime === 'folia'
+      ? /^\[\d{2}:\d{2}:\d{2}\] \[(?:Folia )?Region Scheduler Thread #\d{1,5}\/INFO\]: /.exec(line)
+      : null);
+  if (!prefix) return;
+  const match = /^There are (\d{1,5}) of a max of (\d{1,5}) players online: ?(.*)$/.exec(
+    line.slice(prefix[0].length),
+  );
   if (!match) return;
   const count = Number(match[1]);
   if (count > 1000 || count > Number(match[2])) return;

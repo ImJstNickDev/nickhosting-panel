@@ -68,7 +68,7 @@ export function minecraftRuntimeImagePolicy(profile: ResolvedMinecraftRuntime['p
       ? minecraftForgeImagePolicy
       : profile === 'fabric'
         ? minecraftFabricImagePolicy
-        : profile === 'paper' || profile === 'purpur'
+        : profile === 'paper' || profile === 'purpur' || profile === 'folia'
           ? minecraftPaperImagePolicy
           : minecraftImagePolicy;
 }

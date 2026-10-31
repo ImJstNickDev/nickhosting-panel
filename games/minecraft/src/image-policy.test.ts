@@ -78,7 +78,7 @@ describe('Minecraft integration-owned images', () => {
       expect(profile.supportedGameVersions).toEqual([]);
     }
   });
-  it.each(['paper', 'purpur'] as const)(
+  it.each(['paper', 'purpur', 'folia'] as const)(
     'uses the advertised %s image family and majors',
     (profile) => {
       for (const major of [8, 11, 16, 17, 21, 22, 25])

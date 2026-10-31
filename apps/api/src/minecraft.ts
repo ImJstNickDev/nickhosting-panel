@@ -21,6 +21,7 @@ import {
   enqueueServerOperation,
   findManagedCreationRequest,
   getFabricCatalog,
+  getFoliaCatalog,
   getForgeCatalog,
   getNeoForgeCatalog,
   getPaperCatalog,
@@ -43,12 +44,14 @@ import {
   registerFabricCatalogCombination,
   registerMinecraftCombination,
   requestFabricCatalogRefresh,
+  requestFoliaCatalogRefresh,
   requestForgeCatalogRefresh,
   requestNeoForgeCatalogRefresh,
   requestPaperCatalogRefresh,
   requestPurpurCatalogRefresh,
   requireMinecraftChoice,
   resolveFabricCreationChoice,
+  resolveFoliaCreationChoice,
   resolveForgeCreationChoice,
   resolveNeoForgeCreationChoice,
   resolvePaperCreationChoice,
@@ -139,6 +142,17 @@ export function registerMinecraftRoutes(
     parse(z.object({}).strict(), await body(c));
     c.header('Cache-Control', 'no-store');
     return c.json(await requestPaperCatalogRefresh(db), 202);
+  });
+  app.get('/v1/owner/minecraft/folia/catalog', async (c) => {
+    await owner(c);
+    c.header('Cache-Control', 'no-store');
+    return c.json(await getFoliaCatalog(db));
+  });
+  app.post('/v1/owner/minecraft/folia/catalog', async (c) => {
+    await owner(c);
+    parse(z.object({}).strict(), await body(c));
+    c.header('Cache-Control', 'no-store');
+    return c.json(await requestFoliaCatalogRefresh(db), 202);
   });
   app.get('/v1/owner/minecraft/purpur/catalog', async (c) => {
     await owner(c);
@@ -491,11 +505,12 @@ export function registerMinecraftRoutes(
     const context = await principal(c);
     const input = parse(minecraftCreateSchema, await body(c));
     const fabric = input.minecraft.choiceId.startsWith('fabric:');
+    const folia = input.minecraft.choiceId.startsWith('folia:');
     const paper = input.minecraft.choiceId.startsWith('paper:');
     const purpur = input.minecraft.choiceId.startsWith('purpur:');
     const forge = input.minecraft.choiceId.startsWith('forge:');
     const neoforge = input.minecraft.choiceId.startsWith('neoforge:');
-    const catalogChoice = fabric || paper || purpur || forge || neoforge;
+    const catalogChoice = fabric || paper || purpur || folia || forge || neoforge;
     if ((fabric || forge || neoforge) !== (input.minecraft.loaderVersion !== undefined))
       throw new DomainError('validation_failed');
     if (catalogChoice) {
@@ -524,8 +539,12 @@ export function registerMinecraftRoutes(
             },
             env,
           )
-        : paper || purpur
-          ? await (purpur ? resolvePurpurCreationChoice : resolvePaperCreationChoice)(
+        : paper || purpur || folia
+          ? await (folia
+              ? resolveFoliaCreationChoice
+              : purpur
+                ? resolvePurpurCreationChoice
+                : resolvePaperCreationChoice)(
               db,
               (await management()).adapter,
               context,

@@ -93,6 +93,54 @@ describe('Minecraft player boundaries', () => {
       ),
     ).toEqual([]);
   });
+  it.each(['paper', 'purpur', 'folia'] as const)('accepts %s terminal receipts', (runtime) => {
+    expect(
+      parseMinecraftOnlinePlayers(
+        '[12:34:56 INFO]: There are 1 of a max of 20 players online: PlayerOne',
+        runtime,
+      ),
+    ).toEqual([{ name: 'PlayerOne' }]);
+    expect(
+      parseMinecraftOnlinePlayers(
+        '[12:34:56 INFO]: There are 0 of a max of 20 players online: ',
+        runtime,
+      ),
+    ).toEqual([]);
+    for (const message of [
+      '<PlayerOne> There are 1 of a max of 20 players online: PlayerOne',
+      '[Plugin] There are 1 of a max of 20 players online: PlayerOne',
+      'There are 2 of a max of 20 players online: PlayerOne',
+      'There are 2 of a max of 20 players online: PlayerOne, PlayerOne',
+    ]) {
+      expect(parseMinecraftOnlinePlayers(`[12:34:56 INFO]: ${message}`, runtime)).toBeUndefined();
+    }
+  });
+  it.each(['Region Scheduler Thread #0', 'Folia Region Scheduler Thread #12'])(
+    'accepts %s only for Folia',
+    (thread) => {
+      const line = `[12:34:56] [${thread}/INFO]: There are 1 of a max of 20 players online: PlayerOne`;
+      expect(parseMinecraftOnlinePlayers(line, 'folia')).toEqual([{ name: 'PlayerOne' }]);
+      expect(parseMinecraftOnlinePlayers(line, 'paper')).toBeUndefined();
+      expect(parseMinecraftOnlinePlayers(line)).toBeUndefined();
+      expect(
+        parseMinecraftOnlinePlayers(line.replace('There are', '[Plugin] There are'), 'folia'),
+      ).toBeUndefined();
+    },
+  );
+  it('keeps terminal formats scoped and rejects arbitrary Folia threads', () => {
+    expect(
+      parseMinecraftOnlinePlayers(
+        '[12:34:56 INFO]: There are 0 of a max of 20 players online: ',
+        'vanilla',
+      ),
+    ).toBeUndefined();
+    expect(
+      parseMinecraftOnlinePlayers(
+        '[12:34:56] [Async Chat Thread/INFO]: There are 0 of a max of 20 players online: ',
+        'folia',
+      ),
+    ).toBeUndefined();
+  });
   it.each([
     '[12:34:56] [Server thread/INFO]: <PlayerOne> There are 1 of a max of 20 players online: PlayerOne',
     '[12:34:56] [Async Chat Thread/INFO]: There are 1 of a max of 20 players online: PlayerOne',

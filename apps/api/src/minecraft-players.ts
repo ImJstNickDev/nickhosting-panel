@@ -5,6 +5,7 @@ import { type createDatabase, getSettings, recordAudit } from '@nickhosting/data
 import type { FilemanReadService } from '@nickhosting/game-sdk';
 import {
   createMinecraftIdentityProvider,
+  type MinecraftCombination,
   minecraftPlayerPermission,
   verifyMinecraftPlayer,
 } from '@nickhosting/minecraft';
@@ -107,6 +108,7 @@ export async function observeMinecraftPlayers(
   service: Pick<ManagementRuntime, 'adapter'>,
   identifier: string,
   authorize: () => Promise<boolean>,
+  runtime: MinecraftCombination['profile'] = 'vanilla',
 ): Promise<Online> {
   let relay: ConsoleRelay | undefined;
   let accepting = false;
@@ -142,7 +144,7 @@ export async function observeMinecraftPlayers(
           complete(unavailable());
           return;
         }
-        const players = parseMinecraftOnlinePlayers(event.data);
+        const players = parseMinecraftOnlinePlayers(event.data, runtime);
         if (players)
           complete({ state: 'available', players, observedAt: new Date().toISOString() });
       },
@@ -174,7 +176,11 @@ export function registerMinecraftPlayerRoutes(
       .executeTakeFirst();
     if (!value) throw new DomainError('not_found');
     const choice = await inspectMinecraftCombination(connection, value.combination_id, env);
-    return { value, supported: choice.capabilities.playerManagement };
+    return {
+      value,
+      supported: choice.capabilities.playerManagement,
+      runtime: choice.combination.profile,
+    };
   }
   app.get('/v1/servers/:id/minecraft/players', async (c) => {
     const context = await principal(c),
@@ -246,6 +252,7 @@ export function registerMinecraftPlayerRoutes(
         server.runtime_state,
         server.active_operation_id,
         binding,
+        state.runtime,
       ]);
       const cached = online.get(key);
       let pending = cached && cached.expires > Date.now() ? cached.result : undefined;
@@ -256,14 +263,19 @@ export function registerMinecraftPlayerRoutes(
           const resources = await service.adapter.getResources(id);
           if (resources.current_state !== 'running')
             return { state: 'offline' as const, players: [], observedAt: null };
-          return observeMinecraftPlayers(service, id, async () => {
-            try {
-              await service.authorizeTransfer(context, serverId, false, db, undefined, server);
-              return (await service.consoleBindingForServer(serverId)) === binding;
-            } catch {
-              return false;
-            }
-          });
+          return observeMinecraftPlayers(
+            service,
+            id,
+            async () => {
+              try {
+                await service.authorizeTransfer(context, serverId, false, db, undefined, server);
+                return (await service.consoleBindingForServer(serverId)) === binding;
+              } catch {
+                return false;
+              }
+            },
+            state.runtime,
+          );
         })();
         online.set(key, { expires: Date.now() + 5000, result: pending });
       }

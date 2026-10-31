@@ -30,6 +30,15 @@ export const minecraftAdminWebMessages: Record<string, readonly [string, string]
     'Purpur versions have not been detected yet.',
     'Le versioni Purpur non sono ancora state rilevate.',
   ],
+  'foliaCatalog.title': ['Folia versions', 'Versioni Folia'],
+  'foliaCatalog.buildPolicy': [
+    'New servers use the latest catalogued build for the selected Minecraft version. Existing servers keep their build.',
+    'I nuovi server usano l’ultima build catalogata per la versione Minecraft selezionata. I server esistenti mantengono la propria build.',
+  ],
+  'foliaCatalog.notSynced': [
+    'Folia versions have not been detected yet.',
+    'Le versioni Folia non sono ancora state rilevate.',
+  ],
   'paperCatalog.title': ['Paper versions', 'Versioni Paper'],
   'paperCatalog.latestBuild': ['Latest build', 'Ultima build'],
   'paperCatalog.buildPolicy': [

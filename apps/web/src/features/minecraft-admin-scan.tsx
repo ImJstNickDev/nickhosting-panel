@@ -42,7 +42,7 @@ export function MinecraftCatalogScan() {
   const currentScope = useRef(scope);
   currentScope.current = scope;
   const runScope = useRef('');
-  const independentDiscovery = runtime === 'fabric' || runtime === 'paper' || runtime === 'purpur';
+  const independentDiscovery = ['fabric', 'paper', 'purpur', 'folia'].includes(runtime);
   useLayoutEffect(() => {
     if (independentDiscovery) {
       setTargets(null);

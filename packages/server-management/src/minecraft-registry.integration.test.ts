@@ -104,7 +104,7 @@ async function attest(kind: 'protocol-fixture' | 'real-server' = 'real-server') 
   );
 }
 describe('Minecraft Owner evidence and user eligibility', () => {
-  it('loads more than 1000 declared choices in eight bounded queries and orders all families by local dates', async () => {
+  it('loads more than 1000 declared choices in twelve bounded queries and orders all families by local dates', async () => {
     const source = await f.db
       .selectFrom('minecraft_combinations')
       .selectAll()
@@ -156,7 +156,8 @@ describe('Minecraft Owner evidence and user eligibility', () => {
       },
     });
     const choices = await minecraftCatalog(measured, f.context, env);
-    expect(count).toBe(8);
+    // Rollout, choices, bulk mappings; six provider caches; catalog mappings, dates, protocols.
+    expect(count).toBe(12);
     expect(choices.filter((choice) => entries.some((row) => row.id === choice.id))).toHaveLength(
       1001,
     );
@@ -173,15 +174,21 @@ describe('Minecraft Owner evidence and user eligibility', () => {
       ),
     ).toBe(false);
   });
-  it('bulk choices retain undeclared runtime signatures, private testing and availability gates', async () => {
-    const paper = { ...combination, profile: 'folia' };
+  it('explicit choices retain undeclared runtime signatures, private testing and availability gates', async () => {
+    const paper = { ...combination, profile: 'forge', release: '26.3' };
     await f.db
       .updateTable('minecraft_combinations')
       .set({ combination: JSON.stringify(paper), enabled: true })
       .where('id', '=', choiceId)
       .execute();
-    const present = async () =>
-      (await minecraftCatalog(f.db, f.context, env)).some((row) => row.id === choiceId);
+    const present = async (settings = env) => {
+      try {
+        await requireMinecraftChoice(f.db, f.context, choiceId, settings);
+        return true;
+      } catch {
+        return false;
+      }
+    };
     expect(await present()).toBe(false);
     const value = {
       ...(await report('protocol-fixture')),
@@ -201,9 +208,7 @@ describe('Minecraft Owner evidence and user eligibility', () => {
       .where('integration_id', '=', 'minecraft')
       .execute();
     expect(await present()).toBe(true);
-    expect((await minecraftCatalog(f.db, f.context, {})).some((row) => row.id === choiceId)).toBe(
-      false,
-    );
+    expect(await present({} as typeof env)).toBe(false);
     await f.db
       .updateTable('game_rollouts')
       .set({ allowlist: [] })

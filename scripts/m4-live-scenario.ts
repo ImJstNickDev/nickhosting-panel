@@ -153,7 +153,7 @@ export const minecraftBootstrapManifest = gameManifestSchema.parse({
   },
   ports: [{ role: 'game', transport: 'tcp', required: true }],
   runtimes: minecraftManifest.runtimes
-    .filter((runtime) => runtime.id !== 'neoforge')
+    .filter((runtime) => !['neoforge', 'purpur'].includes(runtime.id))
     .map((runtime) => ({
       ...runtime,
       nameKey: `games.m4-bootstrap.runtimes.${runtime.id}`,

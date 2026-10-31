@@ -21,6 +21,7 @@ import { createMinecraftModpackBridge } from '../../../packages/server-managemen
 import { startHostObservationLoop } from './host-observations.js';
 import {
   pollFabricMetadata,
+  pollFoliaMetadata,
   pollForgeMetadata,
   pollMinecraftMetadata,
   pollNeoForgeMetadata,
@@ -265,6 +266,16 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         }, 5000);
     };
     paperPoll = refreshPaper();
+    let foliaTimer: ReturnType<typeof setTimeout> | undefined;
+    let foliaPoll: Promise<void> | undefined;
+    const refreshFolia = async () => {
+      await pollFoliaMetadata(db, env, logger);
+      if (!stopping)
+        foliaTimer = setTimeout(() => {
+          foliaPoll = refreshFolia();
+        }, 5000);
+    };
+    foliaPoll = refreshFolia();
     let purpurTimer: ReturnType<typeof setTimeout> | undefined;
     let purpurPoll: Promise<void> | undefined;
     const refreshPurpur = async () => {
@@ -304,6 +315,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         if (timer) clearTimeout(timer);
         if (metadataTimer) clearTimeout(metadataTimer);
         if (fabricTimer) clearTimeout(fabricTimer);
+        if (foliaTimer) clearTimeout(foliaTimer);
         if (paperTimer) clearTimeout(paperTimer);
         if (purpurTimer) clearTimeout(purpurTimer);
         if (forgeTimer) clearTimeout(forgeTimer);
@@ -313,6 +325,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           reconciliation,
           metadataPoll,
           fabricPoll,
+          foliaPoll,
           paperPoll,
           purpurPoll,
           forgePoll,

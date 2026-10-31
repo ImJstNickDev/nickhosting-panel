@@ -431,6 +431,148 @@ describe('queued Minecraft provisioning evidence revalidation', () => {
     },
   );
 
+  it.each(['valid', 'changed-download'])(
+    'reauthorizes a queued Folia egg startup with download %s before provider creation',
+    async (downloadCase) => {
+      const selectedImage = 'ghcr.io/ptero-eggs/yolks:java_25';
+      const startup =
+        'java -Xms128M -XX:MaxRAMPercentage=95.0 -Dterminal.jline=false -Dterminal.ansi=true -jar {{SERVER_JARFILE}}';
+      await f.db
+        .updateTable('runtime_egg_mappings')
+        .set({
+          runtime_id: 'folia',
+          image_mode: 'integration',
+          docker_image: '',
+          startup,
+          environment: JSON.stringify({}),
+        })
+        .where('id', '=', f.mappingId)
+        .execute();
+      const mapping = await f.db
+        .selectFrom('runtime_egg_mappings')
+        .selectAll()
+        .where('id', '=', f.mappingId)
+        .executeTakeFirstOrThrow();
+      const foliaCombination = {
+        ...combination,
+        profile: 'folia',
+        release: '26.3',
+        javaMajor: 25,
+        buildId: '2655',
+        protocolId: 776,
+      };
+      const foliaRuntime = {
+        ...runtime,
+        profile: 'folia',
+        release: '26.3',
+        javaMajor: 25,
+        buildId: 2655,
+        artifacts: [
+          {
+            role: 'server',
+            url: 'https://fill-data.papermc.io/v1/objects/pinned/folia.jar',
+            sha256: createHash('sha256').update(serverJar).digest('hex'),
+          },
+        ],
+      };
+      const foliaBinding = {
+        ...binding,
+        profile: 'folia',
+        release: '26.3',
+        imageJavaMajor: 25,
+        image: selectedImage,
+        declaredEggVariables: ['MINECRAFT_VERSION', 'BUILD_NUMBER', 'SERVER_JARFILE', 'DL_PATH'],
+        bindings: {
+          release: 'MINECRAFT_VERSION',
+          buildId: 'BUILD_NUMBER',
+          serverArtifactUrl: 'DL_PATH',
+        },
+        fixedVariables: {
+          SERVER_JARFILE: 'server.jar',
+        },
+      };
+      await f.db
+        .updateTable('minecraft_combinations')
+        .set({
+          combination: JSON.stringify(foliaCombination),
+          resolved_runtime: JSON.stringify(foliaRuntime),
+          binding: JSON.stringify(foliaBinding),
+          mapping_digest: minecraftMappingDigest(mapping),
+          identity_digest: minecraftDigest({
+            combination: foliaCombination,
+            binding: foliaBinding,
+          }),
+        })
+        .where('id', '=', choiceId)
+        .execute();
+      await f.db
+        .deleteFrom('minecraft_verification_evidence')
+        .where('combination_id', '=', choiceId)
+        .execute();
+      const createServer = vi.fn();
+      Object.assign(f.adapter, {
+        createServer,
+        getEgg: vi.fn(async () => ({
+          id: mapping.egg_id,
+          nest: mapping.nest_id,
+          docker_image: selectedImage,
+          relationships: {
+            variables: {
+              object: 'list',
+              data: foliaBinding.declaredEggVariables.map((env_variable) => ({
+                attributes: { env_variable },
+              })),
+            },
+          },
+        })),
+      });
+      const operation = await queued();
+      const queuedOperation = await f.db
+        .selectFrom('server_operations')
+        .select('plan')
+        .where('job_id', '=', operation.jobId)
+        .executeTakeFirstOrThrow();
+      expect(queuedOperation.plan.provision).toMatchObject({
+        startup,
+        dockerImage: selectedImage,
+        eggId: mapping.egg_id,
+        environment: {
+          MINECRAFT_VERSION: '26.3',
+          BUILD_NUMBER: '2655',
+          SERVER_JARFILE: 'server.jar',
+          DL_PATH: 'https://fill-data.papermc.io/v1/objects/pinned/folia.jar',
+        },
+      });
+      if (downloadCase === 'changed-download') {
+        const plan = structuredClone(queuedOperation.plan);
+        if (!plan.provision) throw new Error('missing provision');
+        (plan.provision as { environment: Record<string, string> }).environment.DL_PATH =
+          'https://fill-data.papermc.io/v1/objects/changed/folia.jar';
+        await f.db
+          .updateTable('server_operations')
+          .set({ plan: JSON.stringify(plan) })
+          .where('job_id', '=', operation.jobId)
+          .execute();
+      }
+      const authorization = authorizeQueuedEffect(
+        f.db,
+        operation.jobId,
+        operation.serverId,
+        env,
+        f.adapter,
+      );
+      if (downloadCase === 'valid') await expect(authorization).resolves.toBeDefined();
+      else await expect(authorization).rejects.toThrow('configuration_invalid');
+      expect(createServer).not.toHaveBeenCalled();
+      const server = await f.db
+        .selectFrom('managed_servers')
+        .select('pterodactyl_uuid')
+        .where('id', '=', operation.serverId)
+        .executeTakeFirstOrThrow();
+      expect(server.pterodactyl_uuid).toBeNull();
+    },
+  );
+
   it('persists the integration image in the durable plan and refuses image substitution', async () => {
     const selectedImage = 'ghcr.io/pterodactyl/yolks:java_21';
     await f.db

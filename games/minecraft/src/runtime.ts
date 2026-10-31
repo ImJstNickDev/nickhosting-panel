@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import { foliaJavaMajor } from './folia-policy.js';
 import { forgeJavaMajor } from './forge-policy.js';
 import { neoforgeCatalogUrls, parseNeoForgeVersions } from './neoforge-catalog.js';
 import {
@@ -264,7 +265,9 @@ export async function resolveMinecraftRuntime(
         ? neoforgeJavaMajor(request.release, release.javaVersion?.majorVersion)
         : request.profile === 'forge'
           ? forgeJavaMajor(request.release, release.javaVersion?.majorVersion)
-          : request.profile === 'paper' || request.profile === 'purpur'
+          : request.profile === 'paper' ||
+              request.profile === 'folia' ||
+              request.profile === 'purpur'
             ? (release.javaVersion?.majorVersion ?? 8)
             : (release.javaVersion?.majorVersion ?? fail('minecraft_java_unknown'));
   let upstreamSupport: string | undefined;
@@ -287,7 +290,7 @@ export async function resolveMinecraftRuntime(
           support: z.object({ status: z.string().max(100) }).optional(),
           java: z.object({
             version: z.object({
-              minimum: request.profile === 'paper' ? z.number().int().min(6).max(100) : javaVersion,
+              minimum: z.number().int().min(6).max(100),
             }),
           }),
         }),
@@ -315,14 +318,11 @@ export async function resolveMinecraftRuntime(
     upstreamSupport = version.version.support?.status;
     upstreamChannel = build.channel;
     const artifact = build.downloads['server:default'];
-    javaMajor =
-      request.profile === 'paper'
-        ? paperJavaMajor(
-            request.release,
-            version.version.java.version.minimum,
-            release.javaVersion?.majorVersion,
-          )
-        : Math.max(javaMajor, version.version.java.version.minimum);
+    javaMajor = (request.profile === 'folia' ? foliaJavaMajor : paperJavaMajor)(
+      request.release,
+      version.version.java.version.minimum,
+      release.javaVersion?.majorVersion,
+    );
     artifacts = [
       {
         role: 'server',

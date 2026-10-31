@@ -32,11 +32,11 @@ export function PaperVersionCatalog({
   runtime = 'paper',
 }: {
   navigation: ReactNode;
-  runtime?: 'paper' | 'purpur';
+  runtime?: 'paper' | 'purpur' | 'folia';
 }) {
   const endpoint = `/v1/owner/minecraft/${runtime}/catalog`;
   const queryKey = [`owner-${runtime}-catalog`];
-  const messages = runtime === 'purpur' ? 'purpurCatalog' : 'paperCatalog';
+  const messages = `${runtime}Catalog`;
   const t = useT();
   const catalog = useQuery({
     queryKey,

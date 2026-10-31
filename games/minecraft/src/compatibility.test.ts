@@ -15,7 +15,7 @@ const combination: MinecraftCombination = {
   releaseType: 'release',
   protocolId: 777,
   family: 'netty',
-  profile: 'folia',
+  profile: 'forge',
   javaMajor: 25,
   runtimeDigest: 'a'.repeat(64),
   protocolSource: { url: 'https://example.com/metadata', sha256: 'b'.repeat(64) },
@@ -94,7 +94,7 @@ describe('Minecraft compatibility evidence', () => {
         minecraftDeclaredCapabilities({ ...combination, profile: 'forge', release }),
       ).toMatchObject({ installation: false, gateway: false });
   });
-  it.each(['fabric', 'paper', 'purpur'] as const)(
+  it.each(['fabric', 'paper', 'purpur', 'folia'] as const)(
     'declares %s installation and Gateway sleep/wake for known modern protocols',
     (profile) => {
       const fabric = { ...combination, profile };
@@ -110,7 +110,7 @@ describe('Minecraft compatibility evidence', () => {
         { ...fabric, family: 'unknown' as const },
         { ...fabric, protocolId: null },
         { ...fabric, family: 'legacy' as const, release: '1.6.4' },
-        ...(['folia', 'forge'] as const).map((profile) => ({ ...fabric, profile })),
+        ...(['forge'] as const).map((profile) => ({ ...fabric, profile })),
       ]) {
         expect(minecraftDeclaredCapabilities(unsupported)).toMatchObject({
           gateway: false,
@@ -288,7 +288,7 @@ describe('Minecraft compatibility evidence', () => {
     expect(() => assertMinecraftChoice({ ...input, privateTester: true }, now)).not.toThrow();
     expect(publicMinecraftChoice('choice', combination)).toEqual({
       id: 'choice',
-      runtime: 'folia',
+      runtime: 'forge',
       capabilities: minecraftDeclaredCapabilities(combination),
       version: '26.3',
       releaseType: 'release',
@@ -405,9 +405,10 @@ describe('compiled Vanilla capabilities', () => {
       expect(minecraftDeclaredCapabilities({ ...selected, releaseType: 'snapshot' }).gateway).toBe(
         true,
       );
-      expect(minecraftDeclaredCapabilities({ ...selected, profile: 'folia' }).installation).toBe(
-        false,
-      );
+      expect(
+        minecraftDeclaredCapabilities({ ...selected, profile: 'forge', release: '26.3' })
+          .installation,
+      ).toBe(false);
     }
   });
 });

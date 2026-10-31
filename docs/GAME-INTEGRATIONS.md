@@ -162,7 +162,7 @@ Top-level steps always `Choose a game → Configure → Resources → Create`; `
 
 Minecraft example:
 
-- Show Owner-enabled runtime/version choices supported by the compiled integration and locally validated against the selected egg. Vanilla installation/direct access does not require a signed test for each mapping. Gateway/sleep/wake are separate declared capabilities. Fabric, Paper and Forge use their separately documented declarations; Folia and undeclared runtimes retain their evidence/private-testing controls.
+- Show Owner-enabled runtime/version choices supported by the compiled integration and locally validated against the selected egg. Vanilla installation/direct access does not require a signed test for each mapping. Gateway/sleep/wake are separate declared capabilities. Fabric, Paper, Forge, NeoForge, Purpur and Folia use their separately documented declarations; undeclared runtimes retain their evidence/private-testing controls.
 - If user **selects a modpack**, detect loader and Minecraft version from modpack metadata and skip redundant runtime/version selection. Still ask operators/whitelist and relevant gameplay options.
 - Players/OP UI may use MCHeads renders via `https://api.mcheads.org/head/{player}/{size}` but must verify account UUID/identity separately and handle cache/errors.
 - Existing-server modpack install triggers explicit wipe warning and pre-wipe verified backup option, never a silent merge.
@@ -994,3 +994,9 @@ server-JAR workflow and plugin compatibility. Its published MD5 is checked only 
 Purpur; installed receipts retain independently computed SHA-256. See the
 [Purpur integration contract](M5-PURPUR.md) for catalog, image, Gateway, activation
 and rollback details. Existing server versions do not change on refresh.
+
+### Folia runtime — 2026-10-31
+
+Folia uses the official Fill v3 catalog and exact build/SHA-256 binding through
+the egg’s declared `DL_PATH`. It shares the modern Gateway declaration and
+requires explicitly Folia-compatible plugins. See [Folia scope and validation](M5-FOLIA.md).

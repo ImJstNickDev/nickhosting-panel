@@ -83,7 +83,7 @@ export function OwnerMinecraftPage() {
   const runtime =
     runtimes.find((r) => r.id === params.get('runtime'))?.id ?? runtimes[0]?.id ?? 'vanilla';
   const fabricDiscovery = runtime === 'fabric';
-  const paperDiscovery = runtime === 'paper' || runtime === 'purpur';
+  const paperDiscovery = runtime === 'paper' || runtime === 'purpur' || runtime === 'folia';
   const forgeDiscovery = runtime === 'forge' || runtime === 'neoforge';
   const runtimeNavigation = useRef<HTMLFieldSetElement>(null);
   useEffect(() => {
@@ -461,7 +461,7 @@ export function OwnerMinecraftPage() {
       ) : paperDiscovery ? (
         <PaperVersionCatalog
           key={runtime}
-          runtime={runtime === 'purpur' ? 'purpur' : 'paper'}
+          runtime={runtime === 'folia' ? 'folia' : runtime === 'purpur' ? 'purpur' : 'paper'}
           navigation={catalogNavigation}
         />
       ) : (
