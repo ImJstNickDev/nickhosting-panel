@@ -14,6 +14,12 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
   ],
   'provisioning.unavailable': ['Progress unavailable', 'Avanzamento non disponibile'],
   'provisioning.title': ['Server setup', 'Preparazione server'],
+  'provisioning.retryInstallation': ['Retry installation', 'Riprova installazione'],
+  'provisioning.beforeCreationFailed': [
+    'Server creation did not start. You can retry installation.',
+    'La creazione del server non è iniziata. Puoi riprovare l’installazione.',
+  ],
+  'provisioning.retrying': ['Requesting installation…', 'Richiesta installazione…'],
   'provisioning.reinstall': ['Reinstallation', 'Reinstallazione'],
   'provisioning.preparing': ['Preparing your server', 'Preparazione in corso'],
   'provisioning.installing': ['Installing', 'Installazione in corso'],

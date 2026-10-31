@@ -124,3 +124,50 @@ three-variable egg environment, accepting the Vector token and rejecting
 ALL-MODULE-PATH before provider creation. Typecheck and lint passed with existing
 repository advisories. API and worker are healthy; their source watchers loaded
 the correction without a manual restart.
+
+## Recovery before provider creation
+
+A provisioning failure before Pterodactyl creation cannot use the existing
+reinstall action: no provider server exists yet. The Console now exposes
+`canRetryProvision` separately from `canReinstall`, with English/Italian
+“Retry installation” copy and request/error feedback.
+
+The operations endpoint accepts `action: "retry-provision"`, the exact
+`failedJobId`, and an idempotency key. The request supplies no installation plan.
+Under the existing request/resource locks, it reuses the same managed server,
+external ID, claimed allocations and frozen provision/content/Gateway plan in a
+new normal `provision` job. Current management permission and concurrent
+provisioning limits remain required. The worker repeats current authorization,
+resource admission, provider-absence and allocation checks before creation.
+
+Eligibility requires the latest operation to be a completed failed provision,
+with durable `noExternalEffect: true`, no effect timestamp or lease, no provider
+identifiers, no active operation and no compute/installation reservations.
+Pending uploads and modpack publication block recovery. Ambiguous outcomes and
+modpack-managed workflows are not automatically retried. Stale failed-job IDs
+and concurrent requests cannot enqueue another creation. Reinstall behavior for
+existing provider servers remains unchanged.
+
+Readers of provision history use the newest attempt for deletion and Gateway
+recovery proofs; an older safe failure cannot mask a newer uncertain effect.
+No database migration is needed. The reported failed server was checked
+read-only and is eligible; no retry or other mutation was performed for it.
+
+Rollback can disable the new UI/action. Retain deterministic latest-attempt
+proof selection if retry history already exists; preserve all job history,
+identity and allocation records rather than deleting failed attempts.
+
+Recovery UI validation: all 17 provisioning Firefox tests passed, including five
+new recovery cases. The new cases were rerun after the copy refinement. Tests
+cover permission/uncertain-state hiding, stale-job payloads, single-flight requests,
+idempotency after rejected responses, accepted-request lockout and Italian mobile.
+Axe and overflow checks passed in the tested views; screenshots were reviewed.
+
+- [Recovery action, desktop](screenshots/m5/provisioning-retry-before-provider-en-desktop.png)
+- [Recovery action, Italian mobile](screenshots/m5/provisioning-retry-before-provider-it-mobile.png)
+- [Rejected request](screenshots/m5/provisioning-retry-rejected-en-desktop.png)
+
+Fourteen isolated backend integration cases passed, including full worker retry
+with reservation reacquisition, external-ID collision rejection, Gateway route
+reuse/activation and deletion refusing obsolete safe-attempt proof. Independent
+code and UX review found no remaining blocker. Typecheck and web build passed.

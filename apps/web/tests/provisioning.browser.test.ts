@@ -27,6 +27,10 @@ describe('post-create installation journey', () => {
   let operationId: string | null | undefined;
   let runtimeState: string | undefined;
   let hideProvisioning = false;
+  let holdOperation = false;
+  let rejectOperation = false;
+  let suppressOperationProgress = false;
+  let releaseOperation: (() => void) | undefined;
   let reads: string[];
   let writes: Array<{ path: string; body: Record<string, unknown> }>;
   let errors: string[];
@@ -196,11 +200,28 @@ describe('post-create installation journey', () => {
               if (path.endsWith('/operations')) {
                 let body = '';
                 for await (const chunk of req) body += chunk;
-                writes.push({ path, body: JSON.parse(body) });
-                snapshot = { ...snapshot, canReinstall: false, logs: [] };
+                const input = JSON.parse(body) as Record<string, unknown>;
+                writes.push({ path, body: input });
+                if (holdOperation)
+                  await new Promise<void>((resolve) => {
+                    releaseOperation = resolve;
+                  });
+                if (rejectOperation) {
+                  res.statusCode = 503;
+                  return json({ code: 'integration_unavailable' });
+                }
+                const retryJobId = '10000000-0000-4000-8000-000000000004';
+                if (suppressOperationProgress) return json({ jobId: retryJobId, serverId: id });
+                snapshot = {
+                  ...snapshot,
+                  canReinstall: false,
+                  canRetryProvision: false,
+                  logs: [],
+                  ...(input.action === 'retry-provision' ? { jobId: retryJobId } : {}),
+                };
                 advance('preparing');
                 installState = 'installing';
-                return json({ jobId: id, serverId: id });
+                return json({ jobId: snapshot.jobId, serverId: id });
               }
               errors.push(`Unexpected endpoint: ${path}`);
               res.statusCode = 404;
@@ -233,6 +254,10 @@ describe('post-create installation journey', () => {
     operationId = undefined;
     runtimeState = undefined;
     hideProvisioning = false;
+    holdOperation = false;
+    rejectOperation = false;
+    suppressOperationProgress = false;
+    releaseOperation = undefined;
     snapshot = {
       jobId: id,
       action: 'provision',
@@ -263,6 +288,7 @@ describe('post-create installation journey', () => {
     });
   });
   afterEach(async () => {
+    releaseOperation?.();
     await page.screenshot({
       path: '.codex/local/m5-browser/screenshots/provisioning-last.png',
       fullPage: true,
@@ -382,6 +408,144 @@ describe('post-create installation journey', () => {
     ).toBeVisible();
     expect(writes).toHaveLength(1);
     expect(writes[0]?.body).toMatchObject({ action: 'reinstall', confirm: true });
+  });
+  it('retries failed preparation without reinstall or confirmation and resumes the new job', async () => {
+    snapshot = {
+      ...snapshot,
+      canRetryProvision: true,
+      canReinstall: false,
+      errorCode: 'integration_unavailable',
+      logs: [],
+      logsAvailable: false,
+    };
+    advance('preparing', 'failed');
+    await page.goto(`${origin}provisioning-fixture`);
+    const button = page.getByRole('button', { name: 'Retry installation', exact: true });
+    await check(button).toBeVisible();
+    await check(page.getByRole('button', { name: 'Reinstall', exact: true })).toHaveCount(0);
+    await check(
+      page.getByText('Server creation did not start. You can retry installation.', { exact: true }),
+    ).toBeVisible();
+    await screenshot('provisioning-retry-before-provider-en-desktop');
+    await button.focus();
+    await page.keyboard.press('Enter');
+    await check(
+      page.getByRole('heading', { name: 'Preparing your server', exact: true }),
+    ).toBeVisible();
+    await check(page.getByRole('dialog')).toHaveCount(0);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.body).toEqual({
+      action: 'retry-provision',
+      failedJobId: id,
+      idempotencyKey: expect.any(String),
+    });
+    expect(snapshot.jobId).not.toBe(id);
+    await check(button).toHaveCount(0);
+    expect(reads.filter((path) => path.endsWith('/console'))).toEqual([]);
+  });
+  it.each(['uncertain', 'failed'] as const)(
+    'does not offer unauthorized retry for %s preparation',
+    async (state) => {
+      snapshot = {
+        ...snapshot,
+        canRetryProvision: state === 'uncertain',
+        canReinstall: false,
+        errorCode: state === 'uncertain' ? 'operation_uncertain' : 'integration_unavailable',
+      };
+      advance('preparing', state);
+      await page.goto(`${origin}provisioning-fixture`);
+      await check(
+        page.getByRole('heading', {
+          name: state === 'uncertain' ? 'Checking the outcome' : 'Installation failed',
+          exact: true,
+        }),
+      ).toBeVisible();
+      await check(
+        page.getByRole('button', { name: 'Retry installation', exact: true }),
+      ).toHaveCount(0);
+      expect(writes).toEqual([]);
+    },
+  );
+  it('shows rejected retry, blocks duplicate submits and reuses its idempotency key', async () => {
+    snapshot = {
+      ...snapshot,
+      canRetryProvision: true,
+      canReinstall: false,
+      errorCode: 'integration_unavailable',
+    };
+    advance('preparing', 'failed');
+    holdOperation = true;
+    rejectOperation = true;
+    await page.goto(`${origin}provisioning-fixture`);
+    await page
+      .getByRole('button', { name: 'Retry installation', exact: true })
+      .evaluate((element) => {
+        (element as HTMLButtonElement).click();
+        (element as HTMLButtonElement).click();
+      });
+    await check.poll(() => writes.length).toBe(1);
+    await check(
+      page.getByRole('button', { name: 'Requesting installation…', exact: true }),
+    ).toBeDisabled();
+    releaseOperation?.();
+    await check(page.getByRole('alert')).toBeVisible();
+    await check(
+      page.getByRole('button', { name: 'Retry installation', exact: true }),
+    ).toBeEnabled();
+    await screenshot('provisioning-retry-rejected-en-desktop');
+    holdOperation = false;
+    rejectOperation = false;
+    suppressOperationProgress = true;
+    await page.getByRole('button', { name: 'Retry installation', exact: true }).click();
+    await check.poll(() => writes.length).toBe(2);
+    expect(writes[1]?.body).toEqual(writes[0]?.body);
+    await check(page.getByRole('alert')).toHaveCount(0);
+    await check(
+      page.getByRole('button', { name: 'Retry installation', exact: true }),
+    ).toBeDisabled();
+    snapshot = {
+      ...snapshot,
+      jobId: '10000000-0000-4000-8000-000000000004',
+      canRetryProvision: false,
+    };
+    installState = 'installing';
+    operationId = snapshot.jobId;
+    advance('preparing');
+    // The terminal snapshot has no active stream. The accepted operation's next
+    // authoritative server refresh discovers the new installation journey.
+    await page.evaluate(
+      "void import('/src/api/client.ts').then(({ queryClient }) => queryClient.invalidateQueries({ queryKey: ['server'] }))",
+    );
+    await check(
+      page.getByRole('heading', { name: 'Preparing your server', exact: true }),
+    ).toBeVisible();
+  });
+  it('offers the same non-destructive retry in Italian on mobile', async () => {
+    snapshot = {
+      ...snapshot,
+      canRetryProvision: true,
+      canReinstall: false,
+      errorCode: 'integration_unavailable',
+      logs: [],
+      logsAvailable: false,
+    };
+    advance('preparing', 'failed');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.addInitScript(() => localStorage.setItem('nh.locale', 'it'));
+    await page.goto(`${origin}provisioning-fixture`);
+    const button = page.getByRole('button', { name: 'Riprova installazione', exact: true });
+    await check(button).toBeVisible();
+    await check(page.getByRole('button', { name: 'Reinstalla', exact: true })).toHaveCount(0);
+    await check(
+      page.getByText('La creazione del server non è iniziata. Puoi riprovare l’installazione.', {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await screenshot('provisioning-retry-before-provider-it-mobile');
+    await button.click();
+    await check(page.locator('.provisioning-panel')).toHaveAttribute('data-state', 'active');
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.body).toMatchObject({ action: 'retry-provision', failedJobId: id });
   });
   it('discovers durable modpack preparation on direct Console entry and refresh before an apply job exists', async () => {
     advance('preparing');

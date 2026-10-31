@@ -9,6 +9,7 @@ export interface ProvisioningSnapshot {
   completedAt: string | null;
   errorCode: string | null;
   canReinstall: boolean;
+  canRetryProvision?: boolean;
   stages: Array<{
     id: ProvisioningStage;
     state: 'pending' | 'active' | 'completed' | 'failed';

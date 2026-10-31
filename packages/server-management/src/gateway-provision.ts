@@ -179,15 +179,16 @@ export async function recoverProvisionGateway(
     .selectFrom('server_operations as operation')
     .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
     .selectAll('operation')
-    .select('job.completed_at')
+    .select(['job.completed_at', 'job.state as jobState'])
     .where('operation.server_id', '=', serverId)
     .where('operation.action', '=', 'provision')
-    .where('operation.phase', '=', 'failed')
-    .where('job.state', '=', 'failed')
-    .where('job.completed_at', 'is not', null)
+    .orderBy('job.created_at', 'desc')
+    .orderBy('operation.job_id', 'desc')
     .executeTakeFirst();
   if (
     !provision?.completed_at ||
+    provision.phase !== 'failed' ||
+    provision.jobState !== 'failed' ||
     provision.plan.gatewayProvision === undefined ||
     provision.plan.gatewayRoutesActivated !== undefined
   )
@@ -352,6 +353,8 @@ export async function reconcileProvisionGatewayAutomation(
     .where('action', '=', 'provision')
     .where(sql<boolean>`plan->>'gatewayRoutesActivated' = 'true'
       and plan->>'gatewayAutomationInitialized' is distinct from 'true'`)
+    .orderBy('updated_at', 'desc')
+    .orderBy('job_id', 'desc')
     .executeTakeFirst();
   if (
     !operation ||

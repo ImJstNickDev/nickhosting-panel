@@ -28,7 +28,7 @@ import {
   processServerOperation,
   reconcileManagedServer,
 } from './lifecycle.js';
-import { createManagedServer } from './registry.js';
+import { createManagedServer, enqueueServerOperation } from './registry.js';
 import { getAutomationConsent, setAutomationConsent } from './schedules.js';
 import { managementFixture } from './test-fixtures.js';
 
@@ -111,6 +111,54 @@ async function activation(created: { serverId: string; jobId: string }) {
 }
 
 describe('automatic provision Gateway routes', () => {
+  it('retains reserved Gateway route identities through a pre-provider retry', async () => {
+    const created = await createManagedServer(f.db, f.adapter, f.context, f.input(), env);
+    const originalRoutes = await rows(created.serverId);
+    expect(originalRoutes.length).toBeGreaterThan(0);
+    const original = await f.db
+      .selectFrom('server_operations')
+      .select('plan')
+      .where('job_id', '=', created.jobId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('server_operations')
+      .set({ phase: 'failed', plan: JSON.stringify({ ...original.plan, noExternalEffect: true }) })
+      .where('job_id', '=', created.jobId)
+      .execute();
+    await f.db
+      .updateTable('operation_jobs')
+      .set({ state: 'failed', completed_at: new Date() })
+      .where('id', '=', created.jobId)
+      .execute();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ installation_state: 'failed', active_operation_id: null })
+      .where('id', '=', created.serverId)
+      .execute();
+    const retry = await enqueueServerOperation(
+      f.db,
+      f.context,
+      created.serverId,
+      { action: 'retry-provision', failedJobId: created.jobId, idempotencyKey: randomUUID() },
+      env,
+    );
+    expect((await rows(created.serverId)).map((r) => r.id)).toEqual(
+      originalRoutes.map((r) => r.id),
+    );
+    await installed(retry);
+    await activation(retry);
+    const routes = await rows(created.serverId);
+    expect(routes.map((r) => r.id)).toEqual(originalRoutes.map((r) => r.id));
+    expect(routes.every((r) => r.enabled)).toBe(true);
+    expect(
+      await f.db
+        .selectFrom('server_operations')
+        .select('plan')
+        .where('job_id', '=', created.jobId)
+        .executeTakeFirst(),
+    ).toEqual({ plan: { ...original.plan, noExternalEffect: true } });
+  });
+
   it('reserves stable same-number TCP/UDP multiport routes once and activates atomically', async () => {
     await f.db
       .updateTable('runtime_egg_mappings')

@@ -65,6 +65,7 @@ import { requireMinecraftChoice } from './minecraft-registry.js';
 import { bindMinecraftSource } from './minecraft-sources.js';
 import { minecraftProvisionStartup } from './minecraft-startup.js';
 import { backupSchemaAvailable } from './provider-backup-events.js';
+import { retryableProvision } from './provision-retry.js';
 import { integrationImageCandidates, mappingProvisionImage } from './runtime-images.js';
 import { killRequestSchema, requestStopEscalation } from './stop-escalation.js';
 import { storageCommitments } from './storage-accounting.js';
@@ -106,6 +107,9 @@ export const createServerSchema = z
   })
   .strict();
 export const operationSchema = z.discriminatedUnion('action', [
+  z
+    .object({ action: z.literal('retry-provision'), failedJobId: id, idempotencyKey: keySchema })
+    .strict(),
   killRequestSchema,
   backupOptionsSchema.extend({ action: z.literal('backup'), idempotencyKey: keySchema }),
   z
@@ -990,6 +994,62 @@ export async function enqueueLockedServerOperation(
     await authorizeServer(tx, context, serverId, 'backups.create');
   if (server.active_operation_id) throw new DomainError('conflict');
   await assertNoModpackPublication(tx, serverId);
+  if (value.action === 'retry-provision') {
+    if (automation) throw new DomainError('forbidden');
+    await assertNoPendingUpload(tx, serverId);
+    const failed = await retryableProvision(tx, server);
+    if (!failed || failed.jobId !== value.failedJobId) throw new DomainError('conflict');
+    const { values: config } = await getSettings(tx, env);
+    const pending = await tx
+      .selectFrom('managed_servers as candidate')
+      .select(tx.fn.countAll<string>().as('n'))
+      .where('candidate.owner_id', '=', server.owner_id)
+      .where('candidate.deleted_at', 'is', null)
+      .where((eb) =>
+        eb.or([
+          eb.exists(
+            eb
+              .selectFrom('server_operations as operation')
+              .select('operation.job_id')
+              .whereRef('operation.job_id', '=', 'candidate.active_operation_id')
+              .where('operation.action', '=', 'provision'),
+          ),
+          eb.exists(
+            eb
+              .selectFrom('installation_reservations as installation')
+              .innerJoin(
+                'server_operations as operation',
+                'operation.job_id',
+                'installation.operation_id',
+              )
+              .select('installation.server_id')
+              .whereRef('installation.server_id', '=', 'candidate.id')
+              .where('operation.action', '=', 'provision'),
+          ),
+        ]),
+      )
+      .executeTakeFirstOrThrow();
+    if (Number(pending.n) >= config.maxConcurrentProvisionsPerUser)
+      throw new DomainError('resources_unavailable');
+    // Reuse the exact identity, allocation, runtime and content plan. No new
+    // registration or provider effect occurs in this request transaction.
+    const result = await insertOperation(
+      tx,
+      context,
+      server,
+      randomUUID(),
+      value.idempotencyKey,
+      hash,
+      'provision',
+      failed.plan,
+    );
+    await tx
+      .updateTable('managed_servers')
+      .set({ installation_state: 'pending', readiness: 'unknown' })
+      .where('id', '=', serverId)
+      .execute();
+    return result;
+  }
   if (value.action === 'start' || value.action === 'restart') {
     const mapping = await tx
       .selectFrom('runtime_egg_mappings')

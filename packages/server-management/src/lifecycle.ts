@@ -2438,6 +2438,8 @@ export async function processServerOperation(
           .select(['operation.effect_state', 'operation.plan', 'job.state'])
           .where('operation.server_id', '=', server.id)
           .where('operation.action', '=', 'provision')
+          .orderBy('job.created_at', 'desc')
+          .orderBy('operation.job_id', 'desc')
           .executeTakeFirst();
         if (
           rejected?.state !== 'failed' ||

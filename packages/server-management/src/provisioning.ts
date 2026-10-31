@@ -2,12 +2,15 @@ import { type AuthContext, DomainError } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
 import type { PrivateTransferCache } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
+import { assertNoModpackPublication } from './minecraft-modpack-schema.js';
 import {
   loadModpackProvisioning,
   type ModpackProvisioning,
   modpackProvisioningPresentation,
 } from './modpack-provisioning.js';
+import { retryableProvision } from './provision-retry.js';
 import { authorizeServer, getServerPermissionKeys } from './registry.js';
+import { assertNoPendingUpload } from './upload-admission.js';
 
 export const provisioningStages = [
   'preparing',
@@ -182,6 +185,7 @@ export async function getServerProvisioning(
     .where('operation.server_id', '=', serverId)
     .where('operation.action', 'in', ['provision', 'reinstall'])
     .orderBy('job.created_at', 'desc')
+    .orderBy('operation.job_id', 'desc')
     .limit(1)
     .executeTakeFirst();
   // One-click installation starts before a provider job exists. Keep that durable
@@ -212,6 +216,7 @@ export async function getServerProvisioning(
       logs: [],
       logsAvailable: false,
       canReinstall: false,
+      canRetryProvision: false,
     };
   }
   if (!row) return null;
@@ -254,11 +259,24 @@ export async function getServerProvisioning(
       if (!(error instanceof DomainError)) throw error;
     }
   }
+  let canRetryProvision = false;
+  if (row.state === 'failed' && row.action === 'provision') {
+    try {
+      await authorizeServer(db, context, serverId, 'server:manage');
+      await assertNoPendingUpload(db, serverId);
+      await assertNoModpackPublication(db, serverId);
+      const failed = await retryableProvision(db, server);
+      canRetryProvision = failed?.jobId === row.job_id;
+    } catch (error) {
+      if (!(error instanceof DomainError)) throw error;
+    }
+  }
   const modpacks = await loadModpackProvisioning(db, [
     { jobId: row.job_id, serverId, plan: row.plan },
   ]);
   return {
     ...provisioningPresentation(row, transcript, modpacks.get(row.job_id)),
     canReinstall: row.plan.modpackOperationId ? false : canReinstall,
+    canRetryProvision,
   };
 }

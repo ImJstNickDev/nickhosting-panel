@@ -286,6 +286,10 @@ export function ProvisioningPanel({
   const { locale } = useLocale();
   const [now, setNow] = useState(Date.now);
   const [reinstall, setReinstall] = useState(false);
+  const [retryingProvision, setRetryingProvision] = useState(false);
+  const [retryProvisionError, setRetryProvisionError] = useState<unknown>();
+  const retryProvisionLock = useRef(false);
+  const [acceptedRetry, setAcceptedRetry] = useState<string>();
   const request = useRequestOperation(serverId);
   const active = value?.state === 'active';
   useEffect(() => {
@@ -407,7 +411,9 @@ export function ProvisioningPanel({
         <p className="provisioning-context">
           {t(
             value.errorCode === 'integration_unavailable'
-              ? 'provisioning.checkOutput'
+              ? value.canRetryProvision
+                ? 'provisioning.beforeCreationFailed'
+                : 'provisioning.checkOutput'
               : `errors.${value.errorCode}`,
           )}
         </p>
@@ -430,6 +436,30 @@ export function ProvisioningPanel({
             {t(value.workflow.review.labelKey)} <span aria-hidden="true">↗</span>
           </Link>
         )}
+        {value?.canRetryProvision && value.state === 'failed' && (
+          <button
+            type="button"
+            disabled={retryingProvision || acceptedRetry === `${serverId}:${value.jobId}`}
+            onClick={async () => {
+              if (retryProvisionLock.current) return;
+              retryProvisionLock.current = true;
+              setRetryingProvision(true);
+              setRetryProvisionError(undefined);
+              try {
+                await request({ action: 'retry-provision', failedJobId: value.jobId });
+                setAcceptedRetry(`${serverId}:${value.jobId}`);
+                retry();
+              } catch (failure) {
+                setRetryProvisionError(failure);
+              } finally {
+                retryProvisionLock.current = false;
+                setRetryingProvision(false);
+              }
+            }}
+          >
+            {t(retryingProvision ? 'provisioning.retrying' : 'provisioning.retryInstallation')}
+          </button>
+        )}
         {value?.canReinstall && value.state === 'failed' && (
           <button type="button" onClick={() => setReinstall(true)}>
             {t('platform.reinstall')}
@@ -441,6 +471,7 @@ export function ProvisioningPanel({
           </Link>
         )}
       </div>
+      {Boolean(retryProvisionError) && <ErrorNotice error={retryProvisionError} />}
       <ConfirmDialog
         open={reinstall}
         title={t('platform.reinstall')}

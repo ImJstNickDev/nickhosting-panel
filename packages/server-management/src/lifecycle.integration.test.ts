@@ -3123,6 +3123,96 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
       expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(preEffectDenied ? 0 : 1);
     }
   });
+  it.each([false, true])(
+    'retries only a proven pre-effect failure and rechecks provider absence: foreign=%s',
+    async (foreign) => {
+      const f = await fixture('provision', { autoStart: false });
+      f.options.authorizeEffect = async () => {
+        throw new DomainError('configuration_invalid');
+      };
+      expect(await f.run()).toBe('failed');
+      expect((await f.operation()).plan.noExternalEffect).toBe(true);
+      const context = {
+        actorUserId: f.ownerId,
+        subjectUserId: f.ownerId,
+        role: 'user' as const,
+        sessionType: 'regular' as const,
+        ownerElevation: false,
+      };
+      const retry = await enqueueServerOperation(f.db, context, f.serverId, {
+        action: 'retry-provision',
+        failedJobId: f.jobId,
+        idempotencyKey: randomUUID(),
+      });
+      f.options.authorizeEffect = async () => {};
+      const reserve = f.options.reserveInstallation;
+      f.options.reserveInstallation = vi.fn<NonNullable<LifecycleOptions['reserveInstallation']>>(
+        async (serverId, jobId, connection) => {
+          if (!reserve) throw new Error('missing reserve');
+          await reserve(serverId, jobId, connection);
+          await connection
+            .updateTable('installation_reservations')
+            .set({ operation_id: jobId })
+            .where('server_id', '=', serverId)
+            .execute();
+        },
+      );
+      f.setExists(foreign);
+      f.tick();
+      if (!foreign) f.remote.created_at = f.now().toISOString();
+      const outcome = await processServerOperation(f.db, retry.jobId, f.options);
+
+      expect(outcome).toBe(foreign ? 'failed' : 'succeeded');
+      expect(f.adapter.createServer).toHaveBeenCalledTimes(foreign ? 0 : 1);
+      expect(f.options.reserveInstallation).toHaveBeenCalledTimes(foreign ? 0 : 1);
+      expect(await f.installationReservation()).toBeUndefined();
+      if (!foreign) expect((await f.server()).pterodactyl_id).toBe(f.remote.id);
+    },
+  );
+  it('uses the latest provision proof when deleting after a failed retry', async () => {
+    const f = await fixture('provision', { autoStart: false });
+    f.options.authorizeEffect = async () => {
+      throw new DomainError('configuration_invalid');
+    };
+    expect(await f.run()).toBe('failed');
+    const context = {
+      actorUserId: f.ownerId,
+      subjectUserId: f.ownerId,
+      role: 'user' as const,
+      sessionType: 'regular' as const,
+      ownerElevation: false,
+    };
+    const retry = await enqueueServerOperation(f.db, context, f.serverId, {
+      action: 'retry-provision',
+      failedJobId: f.jobId,
+      idempotencyKey: randomUUID(),
+    });
+    await f.db
+      .updateTable('operation_jobs')
+      .set({ state: 'failed', completed_at: new Date() })
+      .where('id', '=', retry.jobId)
+      .execute();
+    await f.db
+      .updateTable('server_operations')
+      .set({ phase: 'failed', effect_state: 'uncertain' })
+      .where('job_id', '=', retry.jobId)
+      .execute();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: null, installation_state: 'failed' })
+      .where('id', '=', f.serverId)
+      .execute();
+    const deletion = await enqueueServerOperation(f.db, context, f.serverId, {
+      action: 'delete',
+      confirm: true,
+      idempotencyKey: randomUUID(),
+    });
+    f.options.authorizeEffect = async () => {};
+    f.tick();
+    expect(await processServerOperation(f.db, deletion.jobId, f.options)).toBe('waiting');
+    expect((await f.server()).deleted_at).toBeNull();
+    expect(f.adapter.deleteServer).not.toHaveBeenCalled();
+  });
   it('deletes a never-created local registry record only using durable no-effect evidence and provider absence', async () => {
     for (const foreignRemoteAppears of [false, true]) {
       const f = await fixture('provision');
