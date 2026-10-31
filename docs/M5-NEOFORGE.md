@@ -143,8 +143,10 @@ error, actual egg metadata confirmed the image family, and the app database stil
 had 53 migrations without the NeoForge catalog row. Migration 054 is a separate
 activation prerequisite. Its prepared guarded operation verifies every previous
 migration checksum, applies only 054 in one transaction, and uses bounded lock and
-statement timeouts. Application requires scoped Owner approval; no egg, existing
-mapping, rollout or server is changed by this correction. No test servers created.
+statement timeouts. The Owner approved and migration 054 was applied successfully;
+all 53 previous checksums remained unchanged. The existing worker then synced 23
+Minecraft versions without errors. No egg, existing mapping, rollout or server was
+changed, and no container restart was needed. No test servers created.
 
 Rollback of this correction is source revert; it restores the previous mapping
 rejection. Retain any applied additive migration and existing server data.
