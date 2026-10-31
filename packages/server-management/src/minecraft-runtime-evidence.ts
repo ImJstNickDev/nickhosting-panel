@@ -140,6 +140,9 @@ export function assertMinecraftJavaLaunch(
   )
     throw new DomainError('configuration_invalid');
   for (const token of tokens.slice(1, jar)) {
+    // Purpur's egg enables the JDK Vector API. Permit this exact built-in module,
+    // never arbitrary modules, module paths or module patching.
+    if (token === '--add-modules=jdk.incubator.vector') continue;
     // Exact harmless property names avoid Java/Fabric bootstrapping, alternate
     // class loaders, agent injection and property-based game target overrides.
     if (

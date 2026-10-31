@@ -71,6 +71,46 @@ describe('attested Fabric launch shape', () => {
   });
 });
 
+describe('Purpur Vector API startup', () => {
+  const purpurStartup =
+    'java --add-modules=jdk.incubator.vector -XX:MaxRAMPercentage=95.0 -Dterminal.jline=false -Dterminal.ansi=true -jar {{SERVER_JARFILE}}';
+  it('accepts the exact advertised egg command before installation and after launch', () => {
+    expect(() =>
+      assertMinecraftVerifiedLaunch(purpurStartup, environment, 'purpur', 'server.jar', null),
+    ).not.toThrow();
+    expect(() =>
+      assertMinecraftJavaLaunch(
+        purpurStartup.replace('{{SERVER_JARFILE}}', 'server.jar'),
+        {},
+        {
+          kind: 'jar',
+          path: 'server.jar',
+        },
+      ),
+    ).not.toThrow();
+  });
+  it.each([
+    '--add-modules=ALL-MODULE-PATH',
+    '--add-modules=other.module',
+    '--add-modules=jdk.incubator.vector,other.module',
+    '--add-modules=jdk.incubator.vector.extra',
+    '--add-modules jdk.incubator.vector',
+    '--add-modules=jdk.incubator.vector --module-path=other.jar',
+    '--add-modules=jdk.incubator.vector --patch-module=jdk.incubator.vector=other.jar',
+    '--add-modules=jdk.incubator.vector -javaagent:other.jar',
+  ])('keeps unsupported module/agent option blocked: %s', (option) => {
+    expect(() =>
+      assertMinecraftVerifiedLaunch(
+        `java ${option} -jar {{SERVER_JARFILE}}`,
+        environment,
+        'purpur',
+        'server.jar',
+        null,
+      ),
+    ).toThrow('configuration_invalid');
+  });
+});
+
 describe('frozen complete Minecraft egg environment', () => {
   it('requires the exact actual set with every default captured explicitly', () => {
     expect(() =>

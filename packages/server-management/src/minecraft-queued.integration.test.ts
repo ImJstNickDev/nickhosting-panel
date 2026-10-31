@@ -305,6 +305,132 @@ function lifecycleFixture() {
   return { options, adapter, createServer, findServerByExternalId };
 }
 describe('queued Minecraft provisioning evidence revalidation', () => {
+  it.each(['jdk.incubator.vector', 'ALL-MODULE-PATH'])(
+    'reauthorizes a queued Purpur egg startup with module %s before provider creation',
+    async (moduleName) => {
+      const selectedImage = 'ghcr.io/ptero-eggs/yolks:java_25';
+      const startup = `java --add-modules=${moduleName} -XX:MaxRAMPercentage=95.0 -Dterminal.jline=false -Dterminal.ansi=true -jar {{SERVER_JARFILE}}`;
+      await f.db
+        .updateTable('runtime_egg_mappings')
+        .set({
+          runtime_id: 'purpur',
+          image_mode: 'integration',
+          docker_image: '',
+          startup,
+          environment: JSON.stringify({}),
+        })
+        .where('id', '=', f.mappingId)
+        .execute();
+      const mapping = await f.db
+        .selectFrom('runtime_egg_mappings')
+        .selectAll()
+        .where('id', '=', f.mappingId)
+        .executeTakeFirstOrThrow();
+      const purpurCombination = {
+        ...combination,
+        profile: 'purpur',
+        release: '26.3',
+        javaMajor: 25,
+        buildId: '2655',
+        protocolId: 776,
+      };
+      const purpurRuntime = {
+        ...runtime,
+        profile: 'purpur',
+        release: '26.3',
+        javaMajor: 25,
+        buildId: 2655,
+        artifacts: [
+          {
+            role: 'server',
+            url: 'https://api.purpurmc.org/v2/purpur/26.3/2655/download',
+            md5: createHash('md5').update(serverJar).digest('hex'),
+          },
+        ],
+      };
+      const purpurBinding = {
+        ...binding,
+        profile: 'purpur',
+        release: '26.3',
+        imageJavaMajor: 25,
+        image: selectedImage,
+        declaredEggVariables: ['MINECRAFT_VERSION', 'BUILD_NUMBER', 'SERVER_JARFILE'],
+        bindings: {
+          release: 'MINECRAFT_VERSION',
+          buildId: 'BUILD_NUMBER',
+        },
+        fixedVariables: { SERVER_JARFILE: 'server.jar' },
+      };
+      await f.db
+        .updateTable('minecraft_combinations')
+        .set({
+          combination: JSON.stringify(purpurCombination),
+          resolved_runtime: JSON.stringify(purpurRuntime),
+          binding: JSON.stringify(purpurBinding),
+          mapping_digest: minecraftMappingDigest(mapping),
+          identity_digest: minecraftDigest({
+            combination: purpurCombination,
+            binding: purpurBinding,
+          }),
+        })
+        .where('id', '=', choiceId)
+        .execute();
+      await f.db
+        .deleteFrom('minecraft_verification_evidence')
+        .where('combination_id', '=', choiceId)
+        .execute();
+      const createServer = vi.fn();
+      Object.assign(f.adapter, {
+        createServer,
+        getEgg: vi.fn(async () => ({
+          id: mapping.egg_id,
+          nest: mapping.nest_id,
+          docker_image: selectedImage,
+          relationships: {
+            variables: {
+              object: 'list',
+              data: purpurBinding.declaredEggVariables.map((env_variable) => ({
+                attributes: { env_variable },
+              })),
+            },
+          },
+        })),
+      });
+      const operation = await queued();
+      const queuedOperation = await f.db
+        .selectFrom('server_operations')
+        .select('plan')
+        .where('job_id', '=', operation.jobId)
+        .executeTakeFirstOrThrow();
+      expect(queuedOperation.plan.provision).toMatchObject({
+        startup,
+        dockerImage: selectedImage,
+        eggId: mapping.egg_id,
+        environment: {
+          MINECRAFT_VERSION: '26.3',
+          BUILD_NUMBER: '2655',
+          SERVER_JARFILE: 'server.jar',
+        },
+      });
+      const authorization = authorizeQueuedEffect(
+        f.db,
+        operation.jobId,
+        operation.serverId,
+        env,
+        f.adapter,
+      );
+      if (moduleName === 'jdk.incubator.vector') await expect(authorization).resolves.toBeDefined();
+      else await expect(authorization).rejects.toThrow('configuration_invalid');
+      expect(createServer).not.toHaveBeenCalled();
+      const server = await f.db
+        .selectFrom('managed_servers')
+        .select('pterodactyl_uuid')
+        .where('id', '=', operation.serverId)
+        .executeTakeFirstOrThrow();
+      expect(server.pterodactyl_uuid).toBeNull();
+    },
+  );
+
   it('persists the integration image in the durable plan and refuses image substitution', async () => {
     const selectedImage = 'ghcr.io/pterodactyl/yolks:java_21';
     await f.db

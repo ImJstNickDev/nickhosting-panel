@@ -103,3 +103,24 @@ or game-server changes were performed.
 
 Four existing Paper catalog browser tests also passed, checking the shared
 Owner component for regressions.
+
+## Provision authorization correction
+
+The first Owner provisioning attempt failed before any provider creation effect.
+The real egg startup includes `--add-modules=jdk.incubator.vector`; NickHosting's
+strict Java command validator had not included this exact option. The initial
+integration fixtures used a simpler startup and missed that authorization path.
+The validator now permits only this built-in Vector API module token. Arbitrary
+modules, module paths/patches, agents and executable overrides remain rejected.
+See the [JDK Vector module documentation](https://docs.oracle.com/en/java/javase/25/docs/api/jdk.incubator.vector/jdk/incubator/vector/package-summary.html).
+
+The failed server was inspected read-only and was not retried, reinstalled or
+otherwise mutated. The correction changes NickHosting code only; no egg, database
+or infrastructure change is needed.
+
+Validation: 57 launch-validator tests and all 50 queued-provision integration
+tests passed. The regression uses Minecraft 26.3/build 2655/Java 25 and the exact
+three-variable egg environment, accepting the Vector token and rejecting
+ALL-MODULE-PATH before provider creation. Typecheck and lint passed with existing
+repository advisories. API and worker are healthy; their source watchers loaded
+the correction without a manual restart.
