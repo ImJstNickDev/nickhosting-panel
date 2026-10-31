@@ -91,6 +91,8 @@ export const en = {
     'The preparation plan has expired. Check the selection again to continue.',
   'errors.operation_uncertain': 'The result is being checked. Do not repeat the operation.',
   'errors.allocation_unavailable': 'The required ports are unavailable.',
+  'errors.direct_connection_unavailable':
+    'Direct connections are not configured for this node. Ask the Owner to configure an endpoint.',
   'errors.provenance_mismatch': 'The server identity could not be verified.',
   'errors.internal_error': 'Something went wrong. Try again later.',
   'auth.invalid_credentials': 'The email address or password is incorrect.',
@@ -229,6 +231,8 @@ export const it: Record<MessageKey, string> = {
     'Il piano di preparazione è scaduto. Verifica di nuovo la selezione per continuare.',
   'errors.operation_uncertain': "L'esito è in verifica. Non ripetere l'operazione.",
   'errors.allocation_unavailable': 'Le porte richieste non sono disponibili.',
+  'errors.direct_connection_unavailable':
+    'Le connessioni dirette non sono configurate per questo nodo. Chiedi al proprietario di configurare un endpoint.',
   'errors.provenance_mismatch': "Impossibile verificare l'identità del server.",
   'errors.internal_error': 'Si è verificato un errore. Riprova più tardi.',
   'auth.invalid_credentials': "L'indirizzo email o la password non sono corretti.",

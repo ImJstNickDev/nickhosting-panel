@@ -29,6 +29,7 @@ export const domainErrorCodes = [
   'storage_exhausted',
   'operation_uncertain',
   'allocation_unavailable',
+  'direct_connection_unavailable',
   'provenance_mismatch',
   'internal_error',
 ] as const;
@@ -65,6 +66,7 @@ const defaultStatuses: Record<DomainErrorCode, number> = {
   storage_exhausted: 409,
   operation_uncertain: 409,
   allocation_unavailable: 409,
+  direct_connection_unavailable: 409,
   provenance_mismatch: 409,
   internal_error: 500,
 };

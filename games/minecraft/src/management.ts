@@ -489,7 +489,9 @@ export function planMinecraftWorldSelection(
   };
 }
 
-/** Fixed Mojang origins only; no avatar data, third-party mirrors or redirects establish identity. */
+/** Fixed first-party origins only; no avatar data, third-party mirrors or redirects
+ * establish identity. Each lookup has one budget for at most two attempts; name
+ * fallback uses Minecraft Services for the same lookup direction (name or UUID). */
 export function createMinecraftIdentityProvider(options: {
   userAgent: string;
   fetch?: typeof fetch;
@@ -500,60 +502,119 @@ export function createMinecraftIdentityProvider(options: {
   const timeout = options.timeoutMs ?? 10_000;
   if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 30_000)
     throw new DomainError('configuration_invalid');
-  const request = async (url: string): Promise<{ id: string; name: string }> => {
-    let response: Response;
-    try {
-      response = await (options.fetch ?? fetch)(url, {
-        redirect: 'error',
-        credentials: 'omit',
-        headers: { 'User-Agent': options.userAgent, Accept: 'application/json' },
-        signal: AbortSignal.timeout(timeout),
-      });
-    } catch {
-      throw new DomainError('integration_unavailable');
-    }
-    if (!response.ok || !response.body) {
-      await response.body?.cancel();
-      throw new DomainError('integration_unavailable');
-    }
-    const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let bytes = 0;
-    try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        bytes += value.byteLength;
-        if (bytes > 64 * 1024) throw new DomainError('integration_unavailable');
-        chunks.push(value);
+  const unavailable = (reason: string) =>
+    new DomainError('integration_unavailable', 503, { reason });
+  const request = async (url: string, budget: number): Promise<{ id: string; name: string }> => {
+    const controller = new AbortController();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(unavailable('minecraft_identity_transport'));
+      }, budget);
+    });
+    const work = async () => {
+      let response: Response;
+      try {
+        response = await (options.fetch ?? fetch)(url, {
+          redirect: 'error',
+          credentials: 'omit',
+          headers: { 'User-Agent': options.userAgent, Accept: 'application/json' },
+          signal: controller.signal,
+        });
+      } catch {
+        throw unavailable('minecraft_identity_transport');
       }
-    } finally {
-      await reader.cancel().catch(() => {});
-      reader.releaseLock();
-    }
-    let result: unknown;
+      if (controller.signal.aborted) {
+        void response.body?.cancel().catch(() => {});
+        throw unavailable('minecraft_identity_transport');
+      }
+      if (response.status === 404 || response.status === 204) {
+        void response.body?.cancel().catch(() => {});
+        throw new DomainError('not_found', 404, { reason: 'minecraft_player_not_found' });
+      }
+      if (!response.ok || !response.body) {
+        void response.body?.cancel().catch(() => {});
+        throw unavailable(
+          response.status === 429 || response.status >= 500
+            ? 'minecraft_identity_upstream_retryable'
+            : 'minecraft_identity_response',
+        );
+      }
+      reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let bytes = 0;
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          bytes += value.byteLength;
+          if (bytes > 64 * 1024) throw unavailable('minecraft_identity_response');
+          chunks.push(value);
+        }
+      } catch (error) {
+        if (error instanceof DomainError) throw error;
+        throw unavailable('minecraft_identity_transport');
+      }
+      try {
+        const result: unknown = JSON.parse(Buffer.concat(chunks, bytes).toString('utf8'));
+        if (
+          !result ||
+          typeof result !== 'object' ||
+          !('id' in result) ||
+          !('name' in result) ||
+          typeof result.id !== 'string' ||
+          typeof result.name !== 'string'
+        )
+          throw unavailable('minecraft_identity_response');
+        return { id: minecraftUuid(result.id), name: minecraftPlayerName(result.name) };
+      } catch {
+        throw unavailable('minecraft_identity_response');
+      }
+    };
     try {
-      result = JSON.parse(Buffer.concat(chunks, bytes).toString('utf8'));
-    } catch {
-      throw new DomainError('integration_unavailable');
+      // Fetch normally aborts its stream too; the explicit race also bounds a
+      // stalled body or a transport implementation that does not honor abort.
+      return await Promise.race([work(), deadline]);
+    } finally {
+      clearTimeout(timer);
+      controller.abort();
+      if (reader) {
+        void reader.cancel().catch(() => {});
+        reader.releaseLock();
+      }
     }
-    if (
-      !result ||
-      typeof result !== 'object' ||
-      !('id' in result) ||
-      !('name' in result) ||
-      typeof result.id !== 'string' ||
-      typeof result.name !== 'string'
-    )
-      throw new DomainError('integration_unavailable');
-    return { id: minecraftUuid(result.id), name: minecraftPlayerName(result.name) };
+  };
+  const requestWithRetry = (url: string, retryUrl = url) => {
+    const started = performance.now();
+    return request(url, Math.max(1, Math.floor(timeout / 2))).catch((error: unknown) => {
+      const remaining = Math.floor(timeout - (performance.now() - started));
+      if (
+        !(error instanceof DomainError) ||
+        !['minecraft_identity_transport', 'minecraft_identity_upstream_retryable'].includes(
+          String(error.details?.reason),
+        ) ||
+        remaining < 1
+      )
+        throw error;
+      return request(retryUrl, remaining);
+    });
   };
   return {
-    lookupName: (name: string) =>
-      request(`https://api.mojang.com/users/profiles/minecraft/${minecraftPlayerName(name)}`),
-    lookupUuid: (uuid: string) =>
-      request(
-        `https://sessionserver.mojang.com/session/minecraft/profile/${minecraftUuid(uuid).replaceAll('-', '')}`,
-      ),
+    lookupName: (name: string) => {
+      const selected = minecraftPlayerName(name);
+      return requestWithRetry(
+        `https://api.mojang.com/users/profiles/minecraft/${selected}`,
+        `https://api.minecraftservices.com/minecraft/profile/lookup/name/${selected}`,
+      );
+    },
+    lookupUuid: (uuid: string) => {
+      const selected = minecraftUuid(uuid).replaceAll('-', '');
+      return requestWithRetry(
+        `https://sessionserver.mojang.com/session/minecraft/profile/${selected}`,
+        `https://api.minecraftservices.com/minecraft/profile/lookup/${selected}`,
+      );
+    },
   };
 }

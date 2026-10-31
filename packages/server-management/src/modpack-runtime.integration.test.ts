@@ -390,7 +390,7 @@ describe('Modpacks exact supported runtime transition', () => {
     );
     expect(resolveFabricCreationChoice).not.toHaveBeenCalled();
   });
-  it('materializes an exact NeoForge loader only for an eligible direct connection', async () => {
+  it('materializes an exact NeoForge loader for direct and declared Gateway connections', async () => {
     const f = await fixture();
     const target = {
       minecraftVersion: '1.21.1',
@@ -417,8 +417,8 @@ describe('Modpacks exact supported runtime transition', () => {
       capabilities: {
         ...f.choice.capabilities,
         installation: true,
-        gateway: false,
-        sleepWake: false,
+        gateway: true,
+        sleepWake: true,
       },
       mapping: { ...f.choice.mapping, runtime_id: 'neoforge' },
     };
@@ -438,6 +438,8 @@ describe('Modpacks exact supported runtime transition', () => {
       .set({ connection_mode: 'gateway' })
       .where('id', '=', f.serverId)
       .execute();
+    expect(await resolveModpackRuntime({ ...f.options, target })).toEqual({ ...f.binding, target });
+    choice.capabilities.gateway = false;
     expect(await resolveModpackRuntime({ ...f.options, target })).toBeNull();
   });
   it('rejects mappings that would change the node, port roles, protocols, or allocation limits', async () => {

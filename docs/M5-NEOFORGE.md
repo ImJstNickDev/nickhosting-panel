@@ -15,8 +15,9 @@ Owner administration and the creation wizard before implementation.
   Java requirements and actual egg image availability remain validated.
 - Creation and modpacks share exact pair resolution, mapping revisions and normal
   authorization, node/resource and rollout checks. NeoForge receives installation
-  and mod-management capabilities, without inheriting Forge's Gateway declaration.
-  Direct connections still require explicit Owner endpoints.
+  and mod-management capabilities. The subsequent Owner-requested Gateway follow-up
+  below adds shared modern protocol support. Direct connections still require
+  explicit Owner endpoints.
 - Startup pins the concrete installed argument file; output validation checks the
   runtime identity and persists the usual installation receipt.
 - Owner catalog and user wizard ship English/Italian text, the existing NeoForge
@@ -150,3 +151,49 @@ changed, and no container restart was needed. No test servers created.
 
 Rollback of this correction is source revert; it restores the previous mapping
 rejection. Retain any applied additive migration and existing server data.
+
+## Wizard identity lookup and Gateway follow-up — 2026-10-31
+
+The Owner reported slow player lookup and a port error at creation. Read-only
+diagnostics reproduced a timeout from the legacy Mojang name endpoint while
+Minecraft Services returned the matching profile. Sessionserver also exhibited
+intermittent transport timeouts. The shared identity provider now permits one
+first-party Minecraft Services fallbacks for both name and UUID lookups on transport failures,
+429 or 5xx, each within the original shared ten-second lookup budget (two bounded attempts). Missing users return
+404, malformed responses do not trigger retries, and name/UUID agreement remains
+mandatory. Fetch and body reads are bounded and cancelled; unavailable upstreams
+still fail rather than admitting an unverified player.
+
+The allocation pool had free backend ports but no direct endpoints. NeoForge's
+initial direct-only capability forced a connection mode incompatible with that
+pool. The Owner explicitly selected the permanent Gateway. NeoForge now declares
+its own shared modern Minecraft Gateway support only for supported release
+versions, a Netty protocol family and a known protocol ID. It uses the existing
+transparent forwarding/status/readiness/idle/wake implementations; there is no new
+network listener policy or bypass of allocation, identity or admission checks.
+Snapshot/unknown/future version restrictions remain, and fixtures do not certify
+every real client or modpack.
+
+When direct mode is selected without configured endpoints, the API now returns
+localized `direct_connection_unavailable` (409), explaining the missing Owner
+configuration. Busy/configured allocations still return `allocation_unavailable`.
+Both rejection paths leave server/allocation records unchanged.
+
+Validation: 46 identity tests, 97 core/protocol tests, five targeted Gateway/
+registration/modpack integration cases and two direct-error integration cases
+passed. A final overlapping four-file unit batch passed 81 cases. The three-case
+NeoForge browser suite now adds a verified fixture player in the Operators step
+and checks that the selected name reaches the exact server-creation payload.
+Root/web/browser types, lint, build and independent review passed; existing
+lint/bundle advisories remain. English/Italian wizard screenshots were refreshed.
+
+Read-only verification from the running API container reproduced legacy endpoint
+timeouts and then verified the supplied player's name/UUID end-to-end using the
+fallback (about 9.7 seconds in that check). Upstream response time remains variable;
+this is a bounded recovery mechanism, not a guarantee of provider availability.
+The actual registered NeoForge choice now declares Gateway support with the global
+Gateway enabled. Only the existing development Gateway was restarted under the
+standing Owner authorization to load the new compiled declaration. Its identity,
+image, mounts, networks and host configuration stayed unchanged and health passed.
+No server was created, no existing allocation or game state was changed, and no
+additional migration was required. Real client gameplay remains untested here.

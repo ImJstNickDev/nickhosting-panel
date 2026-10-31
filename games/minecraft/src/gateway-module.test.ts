@@ -76,7 +76,7 @@ describe('production Minecraft Gateway module', () => {
     }
   });
 
-  it.each(['fabric', 'paper'])(
+  it.each(['fabric', 'paper', 'neoforge'])(
     'routes %s through the shared protocol with an exact runtime declaration',
     (profile) => {
       const adapter = createMinecraftGatewayModuleAdapter();

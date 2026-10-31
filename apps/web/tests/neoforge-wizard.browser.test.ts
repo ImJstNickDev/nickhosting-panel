@@ -116,8 +116,8 @@ describe('NeoForge independent catalog wizard', () => {
             releaseType: 'release',
             capabilities: {
               installation: true,
-              gateway: false,
-              sleepWake: false,
+              gateway: true,
+              sleepWake: true,
               playerManagement: true,
             },
           },
@@ -127,8 +127,8 @@ describe('NeoForge independent catalog wizard', () => {
             runtime: 'neoforge',
             capabilities: {
               installation: true,
-              gateway: false,
-              sleepWake: false,
+              gateway: true,
+              sleepWake: true,
               playerManagement: true,
             },
             releaseType: 'release',
@@ -174,6 +174,13 @@ describe('NeoForge independent catalog wizard', () => {
               ],
             },
           ],
+        });
+      if (path === '/v1/minecraft/players/FixturePlayer')
+        return response({
+          uuid: id,
+          name: 'FixturePlayer',
+          source: 'mojang',
+          verifiedAt: new Date().toISOString(),
         });
       if (path === '/v1/minecraft/servers') return response({ serverId: id, jobId: id });
       errors.push(`Unexpected ${path}`);
@@ -246,6 +253,9 @@ describe('NeoForge independent catalog wizard', () => {
       .click();
     await next(); // address
     await next(); // operators
+    await page.getByLabel('Player name', { exact: true }).fill('FixturePlayer');
+    await page.getByRole('button', { name: 'Add', exact: true }).click();
+    await check(page.locator('.player-list')).toContainText('FixturePlayer');
     await next(); // whitelist
     await next(); // resources
     await next(); // review
@@ -260,7 +270,11 @@ describe('NeoForge independent catalog wizard', () => {
     expect(writes.at(-1)).toMatchObject({
       path: '/v1/minecraft/servers',
       body: {
-        minecraft: { choiceId: neoforgeId, loaderVersion: '21.1.3', configuration: { eula: true } },
+        minecraft: {
+          choiceId: neoforgeId,
+          loaderVersion: '21.1.3',
+          configuration: { eula: true, operators: ['FixturePlayer'] },
+        },
       },
     });
     expect(reads.filter((path) => path === '/v1/minecraft/choices')).toHaveLength(1);

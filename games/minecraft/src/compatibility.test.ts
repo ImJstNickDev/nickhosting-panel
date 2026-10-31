@@ -43,6 +43,32 @@ const evidence: MinecraftEvidence = {
 };
 const now = new Date('2026-10-09T13:00:00Z');
 describe('Minecraft compatibility evidence', () => {
+  it('declares NeoForge Gateway only for reviewed releases with a known modern protocol', () => {
+    for (const release of ['1.20.1', '1.20.2', '1.21', '1.21.1', '26.1', '26.3']) {
+      const selected = { ...combination, profile: 'neoforge' as const, release };
+      expect(minecraftDeclaredCapabilities(selected)).toMatchObject({
+        installation: true,
+        gateway: true,
+        readiness: true,
+        wake: true,
+        sleepWake: true,
+      });
+      for (const unsupported of [
+        { ...selected, release: '1.19.4' },
+        { ...selected, release: '27.1' },
+        { ...selected, release: '26.1-snapshot-1', releaseType: 'snapshot' as const },
+        { ...selected, releaseType: 'snapshot' as const },
+        { ...selected, protocolId: null },
+        { ...selected, family: 'legacy' as const },
+        { ...selected, family: 'unknown' as const },
+      ])
+        expect(minecraftDeclaredCapabilities(unsupported)).toMatchObject({
+          gateway: false,
+          wake: false,
+          sleepWake: false,
+        });
+    }
+  });
   it('declares Forge installation and transparent Gateway support only for Enhanced supported families', () => {
     for (const release of ['1.7.2', '1.12.2', '1.16.5', '1.17.1', '1.21.11']) {
       const choice = { ...combination, profile: 'forge' as const, release };

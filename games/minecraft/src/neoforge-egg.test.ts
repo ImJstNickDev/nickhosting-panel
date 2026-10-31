@@ -81,7 +81,7 @@ it('rejects wrong pairs, missing or duplicate egg variables', () => {
     neoforgeEggBinding({ runtime: runtime('1.21.1', '21.0.1'), variables, environment: {} }),
   ).toThrow();
 });
-it('declares installation without claiming untested Gateway behavior', () => {
+it('declares installation and shared modern Gateway capabilities', () => {
   expect(
     minecraftDeclaredCapabilities({
       profile: 'neoforge',
@@ -93,8 +93,8 @@ it('declares installation without claiming untested Gateway behavior', () => {
   ).toMatchObject({
     installation: true,
     directConnection: true,
-    gateway: false,
-    readiness: false,
-    wake: false,
+    gateway: true,
+    readiness: true,
+    wake: true,
   });
 });

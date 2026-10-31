@@ -197,10 +197,15 @@ export const minecraftGatewayDeclarations = {
   fabric: { id: 'minecraft/fabric', version: 1 },
   paper: { id: 'minecraft/paper', version: 1 },
   forge: { id: 'minecraft/forge', version: 1 },
+  neoforge: { id: 'minecraft/neoforge', version: 1 },
 } as const;
 
 export function minecraftGatewayDeclaration(profile: MinecraftCombination['profile']) {
-  return profile === 'vanilla' || profile === 'fabric' || profile === 'paper' || profile === 'forge'
+  return profile === 'vanilla' ||
+    profile === 'fabric' ||
+    profile === 'paper' ||
+    profile === 'forge' ||
+    profile === 'neoforge'
     ? minecraftGatewayDeclarations[profile]
     : undefined;
 }
@@ -214,6 +219,10 @@ export function minecraftGatewaySupported(
   return (
     minecraftGatewayDeclaration(combination.profile) !== undefined &&
     (combination.profile !== 'forge' || forgeEnhancedSupportedRelease(combination.release)) &&
+    (combination.profile !== 'neoforge' ||
+      (combination.releaseType === 'release' &&
+        combination.family === 'netty' &&
+        neoforgeSupportedRelease(combination.release))) &&
     combination.protocolId !== null &&
     (combination.family === 'netty' ||
       (combination.profile === 'vanilla' &&

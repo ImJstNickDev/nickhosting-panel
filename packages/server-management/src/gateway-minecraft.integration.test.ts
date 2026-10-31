@@ -513,6 +513,15 @@ describe('Minecraft declared-capability Gateway registration', () => {
 
 it.each([
   {
+    profile: 'neoforge',
+    release: '1.21.1',
+    protocolId: 767,
+    family: 'netty',
+    releaseType: 'release',
+    javaMajor: 21,
+    sleepWake: true,
+  },
+  {
     profile: 'fabric',
     release: '26.1',
     protocolId: 775,
@@ -620,7 +629,11 @@ it.each([
       protocol: {
         handlerId: 'minecraft-java',
         gameVersion: variant.release,
-        minecraft: { protocolId: variant.protocolId, supportSource: 'integration' },
+        minecraft: {
+          protocolId: variant.protocolId,
+          supportSource: 'integration',
+          declarationId: `minecraft/${profile}`,
+        },
       },
     });
   },

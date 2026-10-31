@@ -149,7 +149,9 @@ approved tracking plan; GitHub metadata must be verified separately.
 **Scoped M5 follow-up, 2026-10-31:** the Owner requested NeoForge runtime
 integration using the supplied egg. Implement its exact catalog/version/egg and
 management contracts on the current M5 review baseline. This does not begin M6,
-authorize deployment or certify NeoForge Gateway behavior. See
+authorize deployment or certify real NeoForge client/modpack behavior. A subsequent
+explicit Owner choice enables the shared modern Gateway declaration with protocol
+and version guards. See
 [NeoForge policy](M5-COMMON-INTEGRATION.md#neoforge-runtime-follow-up--2026-10-31).
 
 ## M6 — Satisfactory & Game Integration Expansion (PR)

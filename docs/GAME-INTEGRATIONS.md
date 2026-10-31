@@ -966,8 +966,11 @@ Startup uses the exact installed argument-file path under
 `libraries/net/neoforged/{forge|neoforge}/{loaderVersion}/unix_args.txt`.
 Installed-output validation checks the selected runtime identity and records a
 receipt after Pterodactyl reports installation complete. Installation capability
-does not certify real gameplay or grant NeoForge Forge's Gateway declaration.
-Gateway capability retains its independent evidence requirements.
+does not certify real gameplay. Following the Owner's explicit Gateway selection,
+NeoForge has its own shared-modern declaration for supported release versions with
+a known Netty protocol ID. It reuses transparent forwarding, status/join separation
+and readiness/idle/wake handlers; unknown protocol metadata and unsupported version
+families retain their restrictions. Direct fallback requires explicit endpoints.
 
 References: [official numbering](https://docs.neoforged.net/docs/gettingstarted/versioning/),
 [26.1 requirements](https://docs.neoforged.net/docs/gettingstarted/),

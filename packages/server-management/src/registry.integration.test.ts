@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { AuthContext } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
+import { minecraftManifest } from '@nickhosting/minecraft';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setManagedNode } from './configuration.js';
+import { minecraftMappingDigest } from './minecraft-registry.js';
 import {
   authorizeServer,
   createManagedServer,
@@ -405,6 +407,102 @@ describe('managed registry, projects, runtime mapping and allocation ownership',
       .where('server_id', '=', next.serverId)
       .execute();
     expect(others.every((row) => rows.every((old) => old.port !== row.port))).toBe(true);
+  });
+  it('distinguishes missing direct connection configuration from occupied configured ports', async () => {
+    f = await managementFixture(database.db, { interactive: true });
+    await f.db
+      .insertInto('game_integrations')
+      .values({
+        id: 'minecraft',
+        version: minecraftManifest.version,
+        manifest: minecraftManifest,
+      })
+      .onConflict((c) => c.column('id').doNothing())
+      .execute();
+    await f.db
+      .insertInto('game_rollouts')
+      .values({
+        integration_id: 'minecraft',
+        state: 'public',
+        allowlist: [],
+      })
+      .onConflict((c) => c.column('integration_id').doUpdateSet({ state: 'public', allowlist: [] }))
+      .execute();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'minecraft', runtime_id: 'vanilla' })
+      .where('id', '=', f.mappingId)
+      .execute();
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    const choiceId = randomUUID();
+    await f.db
+      .insertInto('minecraft_combinations')
+      .values({
+        id: choiceId,
+        mapping_id: f.mappingId,
+        combination: JSON.stringify({
+          profile: 'vanilla',
+          release: '1.21.1',
+          releaseType: 'release',
+          protocolId: 767,
+          family: 'netty',
+          javaMajor: 21,
+          runtimeDigest: 'a'.repeat(64),
+          protocolSource: { url: 'https://example.test/protocols', sha256: 'b'.repeat(64) },
+        }),
+        resolved_runtime: '{}',
+        binding: '{}',
+        mapping_digest: minecraftMappingDigest(mapping),
+        identity_digest: 'c'.repeat(64),
+        enabled: true,
+      })
+      .execute();
+    const input = f.input({ minecraft: { choiceId, configuration: { eula: true } } });
+    const env = { NH_GATEWAY_ENABLED: 'false' };
+    await expect(createManagedServer(f.db, f.adapter, f.context, input, env)).rejects.toMatchObject(
+      {
+        code: 'direct_connection_unavailable',
+        messageKey: 'errors.direct_connection_unavailable',
+        status: 409,
+      },
+    );
+    await f.db
+      .updateTable('managed_nodes')
+      .set({
+        backend_allocation_pool: JSON.stringify({
+          ...f.backendAllocationPool,
+          allocations: f.backendAllocationPool.allocations.map((pin) => ({
+            ...pin,
+            directEndpoint: { hostname: 'direct.example.test', port: pin.port },
+          })),
+        }),
+      })
+      .where('id', '=', f.nodeId)
+      .execute();
+    for (const allocation of f.inventory) allocation.assigned = true;
+    await expect(createManagedServer(f.db, f.adapter, f.context, input, env)).rejects.toMatchObject(
+      {
+        code: 'allocation_unavailable',
+      },
+    );
+    expect(
+      await f.db
+        .selectFrom('managed_servers')
+        .select('id')
+        .where('owner_id', '=', f.context.subjectUserId)
+        .execute(),
+    ).toHaveLength(0);
+    expect(
+      await f.db
+        .selectFrom('server_allocations')
+        .select('id')
+        .where('node_id', '=', f.nodeId)
+        .execute(),
+    ).toHaveLength(0);
   });
   it('never selects provider-assigned allocations and reports exhaustion transactionally', async () => {
     for (const allocation of f.inventory) allocation.assigned = true;

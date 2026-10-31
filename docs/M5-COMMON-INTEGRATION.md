@@ -267,7 +267,8 @@ selection, egg contracts and the existing management flows; it does not start M6
 or authorize deployment. Installation is declared for official Minecraft
 1.20.1–1.21.x and documented 26.x release/beta pairs with an enabled Owner mapping
 and normal rollout controls.
-NeoForge does not inherit Forge's Gateway declaration: that capability remains
-subject to its own evidence. Snapshot coordinates containing `+` remain unavailable
+The subsequent Owner-requested Gateway follow-up adds NeoForge's own shared-modern
+declaration for supported releases with known Netty protocol metadata. This does
+not certify every client/modpack or external reachability. Snapshot coordinates containing `+` remain unavailable
 because the supplied egg interpolates that character unescaped into `grep -E`.
 See [NeoForge contracts](GAME-INTEGRATIONS.md#neoforge-catalog-and-creation).

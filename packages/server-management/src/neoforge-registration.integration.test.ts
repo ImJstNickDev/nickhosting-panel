@@ -1,14 +1,16 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { authSessionId } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import {
   fetchNeoForgeCatalog,
+  minecraftManifest,
   minecraftManifestUrl,
   type RuntimeMetadataClient,
 } from '@nickhosting/minecraft';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { minecraftCatalog, resolveNeoForgeCreationChoice } from './minecraft-registry.js';
+import { createManagedServer } from './registry.js';
 import { managementFixture } from './test-fixtures.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -155,6 +157,57 @@ beforeEach(async () => {
   protocols.mockClear();
   await catalog();
 });
+it('creates a NeoForge Gateway server from a backend-only pool without requiring a direct endpoint', async () => {
+  await f.db
+    .updateTable('game_integrations')
+    .set({ manifest: minecraftManifest })
+    .where('id', '=', 'minecraft')
+    .execute();
+  await f.db
+    .updateTable('runtime_egg_mappings')
+    .set({ port_roles: JSON.stringify([{ role: 'game', protocols: ['tcp'], primary: true }]) })
+    .where('id', '=', f.mappingId)
+    .execute();
+  const choice = await resolve();
+  expect(f.backendAllocationPool.allocations.every((pin) => !('directEndpoint' in pin))).toBe(true);
+  const created = await createManagedServer(
+    f.db,
+    f.adapter,
+    f.context,
+    f.input({
+      minecraft: { choiceId: choice.row.id, configuration: { eula: true } },
+    }),
+    {
+      NH_GATEWAY_ENABLED: 'true',
+      NH_GATEWAY_ID: randomUUID(),
+      NH_GATEWAY_PHYSICAL_HOST_ID: f.hostId,
+    },
+  );
+  const server = await f.db
+    .selectFrom('managed_servers')
+    .selectAll()
+    .where('id', '=', created.serverId)
+    .executeTakeFirstOrThrow();
+  expect(server.connection_mode).toBe('gateway');
+  const allocations = await f.db
+    .selectFrom('server_allocations')
+    .selectAll()
+    .where('server_id', '=', server.id)
+    .execute();
+  expect(allocations).toHaveLength(1);
+  expect(allocations[0]?.direct_endpoint).toBeNull();
+  const routes = await f.db
+    .selectFrom('gateway_routes')
+    .selectAll()
+    .where('server_id', '=', server.id)
+    .execute();
+  expect(routes).toHaveLength(1);
+  expect(routes[0]).toMatchObject({
+    enabled: false,
+    public_port: allocations[0]?.port,
+    transport: 'tcp',
+  });
+});
 it('browses local versions then freezes the exact loader once, without downloading a matrix', async () => {
   const choices = await minecraftCatalog(f.db, f.context);
   expect(choices.filter((c) => c.runtime === 'neoforge' && c.version === release)).toEqual([
@@ -170,8 +223,8 @@ it('browses local versions then freezes the exact loader once, without downloadi
   });
   expect(choice.capabilities).toMatchObject({
     installation: true,
-    gateway: false,
-    sleepWake: false,
+    gateway: true,
+    sleepWake: true,
   });
   expect(choice.row.binding).toMatchObject({
     bindings: { release: 'MC_VERSION', loaderVersion: 'NEOFORGE_VERSION' },

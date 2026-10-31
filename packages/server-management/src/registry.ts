@@ -669,6 +669,8 @@ export async function createManagedServer(
       minecraft && (!minecraft.capabilities.gateway || !config.gatewayEnabled)
         ? 'direct'
         : 'gateway';
+    if (connectionMode === 'direct' && !inventory.some((allocation) => allocation.directEndpoint))
+      throw new DomainError('direct_connection_unavailable');
     const directClaims = await tx
       .selectFrom('server_allocations')
       .select('direct_endpoint')
