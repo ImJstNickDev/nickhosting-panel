@@ -99,3 +99,9 @@ configured routes prolong sequential validation; this is not a Quilt catalog or
 binding error. No routing/lease checks were weakened and no game servers were
 changed to hide the condition. This requires a separate Gateway timing follow-up;
 do not claim working live Gateway connectivity from this integration's fixtures.
+
+All 243 affected backend integration cases passed across six suites: catalog11,
+API38, queued54, content107, registry8 and module25. Together with the separate
+26-case modpack runtime suite this gives 269 passing integration cases. Worker
+11/11 passed. Lint passed with 30 pre-existing warnings and one info. No additional
+runtime or infrastructure changes were needed to pass the tests.
