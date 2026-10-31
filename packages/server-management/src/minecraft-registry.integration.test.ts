@@ -156,8 +156,8 @@ describe('Minecraft Owner evidence and user eligibility', () => {
       },
     });
     const choices = await minecraftCatalog(measured, f.context, env);
-    // Rollout, choices, bulk mappings; six provider caches; catalog mappings, dates, protocols.
-    expect(count).toBe(12);
+    // Rollout, choices, bulk mappings; seven provider caches; catalog mappings, dates, protocols.
+    expect(count).toBe(13);
     expect(choices.filter((choice) => entries.some((row) => row.id === choice.id))).toHaveLength(
       1001,
     );

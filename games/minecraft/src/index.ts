@@ -25,6 +25,8 @@ export * from './protocol.js';
 export * from './purpur-catalog.js';
 export * from './purpur-egg.js';
 export * from './purpur-policy.js';
+export * from './quilt-catalog.js';
+export * from './quilt-egg.js';
 export * from './releases.js';
 export * from './runtime.js';
 export * from './server-permissions.js';

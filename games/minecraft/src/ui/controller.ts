@@ -164,7 +164,16 @@ export const minecraftChoiceSchema = z
   .object({
     id: z.string().min(1).max(256),
     version: z.string().min(1).max(80),
-    runtime: z.enum(['vanilla', 'paper', 'purpur', 'folia', 'fabric', 'forge', 'neoforge']),
+    runtime: z.enum([
+      'vanilla',
+      'paper',
+      'purpur',
+      'folia',
+      'fabric',
+      'quilt',
+      'forge',
+      'neoforge',
+    ]),
     releaseTime: z.iso.datetime({ offset: true }).nullable().optional(),
     releaseType: z.enum(['release', 'snapshot', 'old_alpha', 'old_beta']).optional(),
     capabilities: z.record(z.string(), z.boolean()).optional(),
@@ -325,6 +334,12 @@ export class MinecraftUiError extends Error {
     super(code);
   }
 }
+const independentLoaderCatalogSchema = z.object({
+  loaders: z
+    .array(z.object({ version: z.string().min(1).max(80), stable: z.boolean() }))
+    .max(10000),
+  latestInstallerVersion: z.string().nullable(),
+});
 const forgeUiCatalogSchema = z.object({
   versions: z
     .array(
@@ -356,6 +371,9 @@ export function minecraftCatalogOptions(
         .object({
           choices: z.array(minecraftChoiceSchema).max(10000),
           fabric: z
+            .object({ loaders: z.array(z.object({ version: z.string(), stable: z.boolean() })) })
+            .optional(),
+          quilt: z
             .object({ loaders: z.array(z.object({ version: z.string(), stable: z.boolean() })) })
             .optional(),
           forge: forgeUiCatalogSchema.optional(),
@@ -390,7 +408,14 @@ export function minecraftCatalogOptions(
           : { recommended: loader.version === recommended?.version }),
       }));
     }
-    const loaders = 'fabric' in catalog ? (catalog.fabric?.loaders ?? []) : [];
+    const loaders =
+      values.runtime === 'quilt'
+        ? 'quilt' in catalog
+          ? (catalog.quilt?.loaders ?? [])
+          : []
+        : 'fabric' in catalog
+          ? (catalog.fabric?.loaders ?? [])
+          : [];
     const recommended = loaders.find((loader) => loader.stable) ?? loaders[0];
     return loaders.map((loader) => ({
       value: loader.version,
@@ -456,17 +481,15 @@ export function createMinecraftUiController(client: GameUiClient) {
         ? client.catalogRequest(path, signal)
         : request(path, 'GET', undefined, signal);
     // Runtime catalogs are local snapshots; load independent snapshots together.
-    const [fabric, forge, neoforge] = await Promise.all([
+    const [fabric, quilt, forge, neoforge] = await Promise.all([
       available.some((choice) => choice.runtime === 'fabric')
         ? load('/v1/minecraft/fabric/catalog').then((raw) =>
-            z
-              .object({
-                loaders: z
-                  .array(z.object({ version: z.string().min(1).max(80), stable: z.boolean() }))
-                  .max(10000),
-                latestInstallerVersion: z.string().nullable(),
-              })
-              .parse(raw),
+            independentLoaderCatalogSchema.parse(raw),
+          )
+        : undefined,
+      available.some((choice) => choice.runtime === 'quilt')
+        ? load('/v1/minecraft/quilt/catalog').then((raw) =>
+            independentLoaderCatalogSchema.parse(raw),
           )
         : undefined,
       available.some((choice) => choice.runtime === 'forge')
@@ -479,6 +502,7 @@ export function createMinecraftUiController(client: GameUiClient) {
     return {
       choices: available,
       ...(fabric ? { fabric } : {}),
+      ...(quilt ? { quilt } : {}),
       ...(forge ? { forge } : {}),
       ...(neoforge ? { neoforge } : {}),
     };
@@ -811,6 +835,7 @@ export function createMinecraftUiController(client: GameUiClient) {
       if (!selected) throw new MinecraftUiError('integration_unavailable');
       if (
         selected.id.startsWith('fabric:') ||
+        selected.id.startsWith('quilt:') ||
         selected.id.startsWith('forge:') ||
         selected.id.startsWith('neoforge:')
       ) {

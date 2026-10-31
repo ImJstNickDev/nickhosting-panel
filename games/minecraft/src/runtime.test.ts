@@ -550,3 +550,120 @@ it.each([
     ).rejects.toThrow();
   },
 );
+
+describe('Quilt exact runtime provenance', () => {
+  function quiltFixture(release = '26.3', changes: Record<string, unknown> = {}) {
+    const loader = '0.31.0-beta.5';
+    const base = `https://meta.quiltmc.org/v3/versions/loader/${release}/${loader}`;
+    const libraryUrl = 'https://maven.fabricmc.net/org/ow2/asm/asm/9.10.1/asm-9.10.1.jar.sha1';
+    const installerUrl =
+      'https://maven.quiltmc.org/repository/release/org/quiltmc/quilt-installer/0.15.1/quilt-installer-0.15.1.jar';
+    const pair = {
+      loader: {
+        version: loader,
+        maven: `org.quiltmc:quilt-loader:${loader}`,
+        hashes: { sha256: 'b'.repeat(64) },
+      },
+    };
+    const profile = {
+      id: `quilt-loader-${loader}-${release}`,
+      inheritsFrom: release,
+      mainClass: 'org.quiltmc.loader.impl.launch.knot.KnotServer',
+      launcherMainClass: 'org.quiltmc.loader.impl.launch.server.QuiltServerLauncher',
+      libraries: [
+        {
+          name: `org.quiltmc:quilt-loader:${loader}`,
+          url: 'https://maven.quiltmc.org/repository/release/',
+        },
+        { name: 'org.ow2.asm:asm:9.10.1', url: 'https://maven.fabricmc.net/' },
+      ],
+    };
+    const f = fixture(
+      {
+        [base]: pair,
+        [`${base}/server/json`]: profile,
+        [libraryUrl]: 'c'.repeat(40),
+        'https://meta.quiltmc.org/v3/versions/installer': [
+          {
+            version: '0.15.1',
+            maven: 'org.quiltmc:quilt-installer:0.15.1',
+            url: installerUrl,
+            hashes: { sha256: 'd'.repeat(64) },
+            file_size: 500,
+          },
+        ],
+        ...changes,
+      },
+      { release, releaseType: release.includes('snapshot') ? 'snapshot' : 'release' },
+    );
+    return {
+      ...f,
+      base,
+      pair,
+      profile,
+      installerUrl,
+      request: {
+        profile: 'quilt' as const,
+        release,
+        loaderVersion: loader,
+        installerVersion: '0.15.1',
+      },
+    };
+  }
+  it.each(['26.3', '26.4-snapshot-6'])(
+    'resolves %s without requiring obsolete mappings and pins all launcher libraries',
+    async (release) => {
+      const f = quiltFixture(release);
+      const runtime = await resolveMinecraftRuntime(f.request, f.client);
+      expect(runtime.javaMajor).toBe(25);
+      expect(runtime.installation).toEqual({
+        kind: 'quilt-installer',
+        args: ['install', 'server', release, '0.31.0-beta.5', '--download-server'],
+        quiltLauncherMainClass: 'org.quiltmc.loader.impl.launch.server.QuiltServerLauncher',
+        quiltLibraries: [
+          {
+            path: 'libraries/org/quiltmc/quilt-loader/0.31.0-beta.5/quilt-loader-0.31.0-beta.5.jar',
+            sha256: 'b'.repeat(64),
+          },
+          { path: 'libraries/org/ow2/asm/asm/9.10.1/asm-9.10.1.jar', sha1: 'c'.repeat(40) },
+        ],
+      });
+      expect(runtime.artifacts[1]).toMatchObject({
+        role: 'installer',
+        url: f.installerUrl,
+        sha256: 'd'.repeat(64),
+        size: 500,
+      });
+      expect(runtime.evidence).toHaveLength(6);
+    },
+  );
+  it.each([
+    { inheritsFrom: '1.21.1' },
+    { mainClass: 'evil.Main' },
+    { id: 'other' },
+    {
+      libraries: [{ name: 'org.quiltmc:quilt-loader:0.31.0-beta.5', url: 'https://example.com/' }],
+    },
+    { libraries: [{ name: '..:evil:1', url: 'https://maven.fabricmc.net/' }] },
+  ])('rejects mismatched profiles and unsafe classpaths %j', async (change) => {
+    const f = quiltFixture();
+    const changed = quiltFixture('26.3', {
+      [`${f.base}/server/json`]: { ...f.profile, ...change },
+    });
+    await expect(resolveMinecraftRuntime(changed.request, changed.client)).rejects.toThrow();
+  });
+  it('rejects missing explicit versions, wrong loader identity and bad library hashes', async () => {
+    const f = quiltFixture();
+    await expect(
+      resolveMinecraftRuntime({ ...f.request, installerVersion: undefined }, f.client),
+    ).rejects.toThrow();
+    const mismatch = quiltFixture('26.3', {
+      [f.base]: { loader: { ...f.pair.loader, version: '0.30.2' } },
+    });
+    await expect(resolveMinecraftRuntime(mismatch.request, mismatch.client)).rejects.toThrow();
+    const hash = quiltFixture('26.3', {
+      'https://maven.fabricmc.net/org/ow2/asm/asm/9.10.1/asm-9.10.1.jar.sha1': 'bad',
+    });
+    await expect(resolveMinecraftRuntime(hash.request, hash.client)).rejects.toThrow();
+  });
+});

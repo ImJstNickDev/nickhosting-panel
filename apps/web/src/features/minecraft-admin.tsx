@@ -82,7 +82,7 @@ export function OwnerMinecraftPage() {
   const runtimes = modules.data?.find((m) => m.id === 'minecraft')?.manifest.runtimes ?? [];
   const runtime =
     runtimes.find((r) => r.id === params.get('runtime'))?.id ?? runtimes[0]?.id ?? 'vanilla';
-  const fabricDiscovery = runtime === 'fabric';
+  const fabricDiscovery = runtime === 'fabric' || runtime === 'quilt';
   const paperDiscovery = runtime === 'paper' || runtime === 'purpur' || runtime === 'folia';
   const forgeDiscovery = runtime === 'forge' || runtime === 'neoforge';
   const runtimeNavigation = useRef<HTMLFieldSetElement>(null);
@@ -260,23 +260,25 @@ export function OwnerMinecraftPage() {
     );
   };
   const pages = Math.max(1, Math.ceil((catalog.data?.total ?? 0) / 25));
-  const catalogNavigation =
-    runtime === 'fabric' ? (
-      <fieldset className="version-catalog-datasets" aria-label={t('fabricCatalog.view')}>
-        {(['games', 'loaders', 'installers'] as const).map((view) => (
-          <button
-            type="button"
-            key={view}
-            aria-pressed={fabricKind === view}
-            onClick={() => update({ fabricKind: view, fabricView: '', combination: '' })}
-          >
-            {t(`fabricCatalog.${view}`)}
-          </button>
-        ))}
-      </fieldset>
-    ) : (
-      <h2>{t(forgeDiscovery ? `${runtime}Catalog.title` : 'versions.minecraftVersions')}</h2>
-    );
+  const catalogNavigation = fabricDiscovery ? (
+    <fieldset
+      className="version-catalog-datasets"
+      aria-label={t(runtime === 'quilt' ? 'quiltCatalog.view' : 'fabricCatalog.view')}
+    >
+      {(['games', 'loaders', 'installers'] as const).map((view) => (
+        <button
+          type="button"
+          key={view}
+          aria-pressed={fabricKind === view}
+          onClick={() => update({ fabricKind: view, fabricView: '', combination: '' })}
+        >
+          {t(`fabricCatalog.${view}`)}
+        </button>
+      ))}
+    </fieldset>
+  ) : (
+    <h2>{t(forgeDiscovery ? `${runtime}Catalog.title` : 'versions.minecraftVersions')}</h2>
+  );
   const mappingContext = (
     <div className="minecraft-versions-context">
       <div className="minecraft-versions-mapping">
@@ -451,7 +453,12 @@ export function OwnerMinecraftPage() {
         ))}
       </fieldset>
       {fabricDiscovery ? (
-        <FabricVersionCatalog kind={fabricKind} navigation={catalogNavigation} />
+        <FabricVersionCatalog
+          key={runtime}
+          runtime={runtime === 'quilt' ? 'quilt' : 'fabric'}
+          kind={fabricKind}
+          navigation={catalogNavigation}
+        />
       ) : forgeDiscovery ? (
         <ForgeVersionCatalog
           key={runtime}

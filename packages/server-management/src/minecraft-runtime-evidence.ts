@@ -5,6 +5,7 @@ import {
   isFabricUpdatedBinding,
   isForgeEnhancedBinding,
   isNeoForgeBinding,
+  isQuiltBinding,
   type MinecraftEvidence,
   minecraftDigest,
   minecraftRuntimeMappingSchema,
@@ -343,6 +344,8 @@ export async function requireMinecraftRuntimeImageEvidence(
   if (
     choice.supportAuthority === 'integration' &&
     choice.capabilities.installation &&
+    (choice.combination.profile !== 'quilt' ||
+      isQuiltBinding(minecraftRuntimeMappingSchema.parse(choice.row.binding))) &&
     (choice.combination.profile !== 'fabric' ||
       isFabricUpdatedBinding(minecraftRuntimeMappingSchema.parse(choice.row.binding))) &&
     (choice.combination.profile !== 'neoforge' ||

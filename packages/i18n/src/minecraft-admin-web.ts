@@ -55,6 +55,11 @@ export const minecraftAdminWebMessages: Record<string, readonly [string, string]
   'paperCatalog.channel.ALPHA': ['Alpha', 'Alpha'],
   'paperCatalog.channel.BETA': ['Beta', 'Beta'],
   'fabricCatalog.queued': ['Queued…', 'In coda…'],
+  'quiltCatalog.view': ['Quilt version view', 'Vista versioni Quilt'],
+  'quiltCatalog.notSynced': [
+    'The Quilt catalog has not been synced yet.',
+    'Il catalogo Quilt non è ancora stato sincronizzato.',
+  ],
   'fabricCatalog.view': ['Fabric version view', 'Vista versioni Fabric'],
   'fabricCatalog.discovery': ['Discovery', 'Catalogo'],
   'fabricCatalog.kind': ['Version catalog', 'Catalogo versioni'],

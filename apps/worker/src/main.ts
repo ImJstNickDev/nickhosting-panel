@@ -27,6 +27,7 @@ import {
   pollNeoForgeMetadata,
   pollPaperMetadata,
   pollPurpurMetadata,
+  pollQuiltMetadata,
 } from './minecraft-metadata.js';
 import { startMinecraftModpackLoop } from './minecraft-modpacks.js';
 import { refreshProviderFeeds, startProviderFeedLoop } from './provider-feed.js';
@@ -256,6 +257,16 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         }, 5000);
     };
     fabricPoll = refreshFabric();
+    let quiltTimer: ReturnType<typeof setTimeout> | undefined;
+    let quiltPoll: Promise<void> | undefined;
+    const refreshQuilt = async () => {
+      await pollQuiltMetadata(db, env, logger);
+      if (!stopping)
+        quiltTimer = setTimeout(() => {
+          quiltPoll = refreshQuilt();
+        }, 5000);
+    };
+    quiltPoll = refreshQuilt();
     let paperTimer: ReturnType<typeof setTimeout> | undefined;
     let paperPoll: Promise<void> | undefined;
     const refreshPaper = async () => {
@@ -315,6 +326,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         if (timer) clearTimeout(timer);
         if (metadataTimer) clearTimeout(metadataTimer);
         if (fabricTimer) clearTimeout(fabricTimer);
+        if (quiltTimer) clearTimeout(quiltTimer);
         if (foliaTimer) clearTimeout(foliaTimer);
         if (paperTimer) clearTimeout(paperTimer);
         if (purpurTimer) clearTimeout(purpurTimer);
@@ -325,6 +337,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           reconciliation,
           metadataPoll,
           fabricPoll,
+          quiltPoll,
           foliaPoll,
           paperPoll,
           purpurPoll,

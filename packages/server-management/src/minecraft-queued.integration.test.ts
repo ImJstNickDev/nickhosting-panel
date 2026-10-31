@@ -573,6 +573,167 @@ describe('queued Minecraft provisioning evidence revalidation', () => {
     },
   );
 
+  it.each(['valid', 'changed-loader'])(
+    'reauthorizes a queued Quilt egg startup with loader %s before provider creation',
+    async (downloadCase) => {
+      const selectedImage = 'ghcr.io/ptero-eggs/yolks:java_25';
+      const startup = 'java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}} nogui';
+      await f.db
+        .updateTable('runtime_egg_mappings')
+        .set({
+          runtime_id: 'quilt',
+          image_mode: 'integration',
+          docker_image: '',
+          startup,
+          environment: JSON.stringify({}),
+        })
+        .where('id', '=', f.mappingId)
+        .execute();
+      const mapping = await f.db
+        .selectFrom('runtime_egg_mappings')
+        .selectAll()
+        .where('id', '=', f.mappingId)
+        .executeTakeFirstOrThrow();
+      const quiltCombination = {
+        ...combination,
+        profile: 'quilt',
+        release: '26.3',
+        javaMajor: 25,
+        loaderVersion: '0.31.0-beta.5',
+        installerVersion: '0.15.1',
+        protocolId: 776,
+      };
+      const quiltRuntime = {
+        ...runtime,
+        profile: 'quilt',
+        release: '26.3',
+        javaMajor: 25,
+        loaderVersion: '0.31.0-beta.5',
+        installerVersion: '0.15.1',
+        installation: {
+          kind: 'quilt-installer',
+          args: ['install', 'server', '26.3', '0.31.0-beta.5', '--download-server'],
+          quiltLauncherMainClass: 'org.quiltmc.loader.impl.launch.server.QuiltServerLauncher',
+          quiltLibraries: [
+            {
+              path: 'libraries/org/quiltmc/quilt-loader/0.31.0-beta.5/quilt-loader-0.31.0-beta.5.jar',
+              sha256: 'a'.repeat(64),
+            },
+          ],
+        },
+        artifacts: [
+          {
+            role: 'server',
+            url: 'https://piston-data.mojang.com/v1/objects/pinned/server.jar',
+            sha256: createHash('sha256').update(serverJar).digest('hex'),
+          },
+        ],
+      };
+      const quiltBinding = {
+        ...binding,
+        profile: 'quilt',
+        release: '26.3',
+        imageJavaMajor: 25,
+        image: selectedImage,
+        installationKind: 'quilt-installer',
+        declaredEggVariables: [
+          'MC_VERSION',
+          'QUILT_LOADER_VERSION',
+          'QUILT_INSTALLER_VERSION',
+          'SERVER_JARFILE',
+        ],
+        bindings: {
+          release: 'MC_VERSION',
+          loaderVersion: 'QUILT_LOADER_VERSION',
+          installerVersion: 'QUILT_INSTALLER_VERSION',
+        },
+        fixedVariables: {
+          SERVER_JARFILE: 'server.jar',
+        },
+      };
+      await f.db
+        .updateTable('minecraft_combinations')
+        .set({
+          combination: JSON.stringify(quiltCombination),
+          resolved_runtime: JSON.stringify(quiltRuntime),
+          binding: JSON.stringify(quiltBinding),
+          mapping_digest: minecraftMappingDigest(mapping),
+          identity_digest: minecraftDigest({
+            combination: quiltCombination,
+            binding: quiltBinding,
+          }),
+        })
+        .where('id', '=', choiceId)
+        .execute();
+      await f.db
+        .deleteFrom('minecraft_verification_evidence')
+        .where('combination_id', '=', choiceId)
+        .execute();
+      const createServer = vi.fn();
+      Object.assign(f.adapter, {
+        createServer,
+        getEgg: vi.fn(async () => ({
+          id: mapping.egg_id,
+          nest: mapping.nest_id,
+          docker_image: selectedImage,
+          relationships: {
+            variables: {
+              object: 'list',
+              data: quiltBinding.declaredEggVariables.map((env_variable) => ({
+                attributes: { env_variable },
+              })),
+            },
+          },
+        })),
+      });
+      const operation = await queued();
+      const queuedOperation = await f.db
+        .selectFrom('server_operations')
+        .select('plan')
+        .where('job_id', '=', operation.jobId)
+        .executeTakeFirstOrThrow();
+      expect(queuedOperation.plan.provision).toMatchObject({
+        startup,
+        dockerImage: selectedImage,
+        eggId: mapping.egg_id,
+        environment: {
+          MC_VERSION: '26.3',
+          QUILT_LOADER_VERSION: '0.31.0-beta.5',
+          QUILT_INSTALLER_VERSION: '0.15.1',
+          SERVER_JARFILE: 'server.jar',
+        },
+      });
+      if (downloadCase === 'changed-loader') {
+        const plan = structuredClone(queuedOperation.plan);
+        if (!plan.provision) throw new Error('missing provision');
+        (
+          plan.provision as { environment: Record<string, string> }
+        ).environment.QUILT_LOADER_VERSION = '0.30.2';
+        await f.db
+          .updateTable('server_operations')
+          .set({ plan: JSON.stringify(plan) })
+          .where('job_id', '=', operation.jobId)
+          .execute();
+      }
+      const authorization = authorizeQueuedEffect(
+        f.db,
+        operation.jobId,
+        operation.serverId,
+        env,
+        f.adapter,
+      );
+      if (downloadCase === 'valid') await expect(authorization).resolves.toBeDefined();
+      else await expect(authorization).rejects.toThrow('configuration_invalid');
+      expect(createServer).not.toHaveBeenCalled();
+      const server = await f.db
+        .selectFrom('managed_servers')
+        .select('pterodactyl_uuid')
+        .where('id', '=', operation.serverId)
+        .executeTakeFirstOrThrow();
+      expect(server.pterodactyl_uuid).toBeNull();
+    },
+  );
+
   it('persists the integration image in the durable plan and refuses image substitution', async () => {
     const selectedImage = 'ghcr.io/pterodactyl/yolks:java_21';
     await f.db

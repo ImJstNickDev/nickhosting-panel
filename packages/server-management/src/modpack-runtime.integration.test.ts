@@ -8,6 +8,7 @@ import {
   resolveFabricCreationChoice,
   resolveForgeCreationChoice,
   resolveNeoForgeCreationChoice,
+  resolveQuiltCreationChoice,
 } from './minecraft-registry.js';
 import {
   assertModpackRuntimeResumable,
@@ -24,6 +25,7 @@ vi.mock('./minecraft-registry.js', async (original) => ({
   ...(await original<typeof import('./minecraft-registry.js')>()),
   requireMinecraftChoice: vi.fn(),
   resolveFabricCreationChoice: vi.fn(),
+  resolveQuiltCreationChoice: vi.fn(),
   resolveForgeCreationChoice: vi.fn(),
   resolveNeoForgeCreationChoice: vi.fn(),
 }));
@@ -430,6 +432,58 @@ describe('Modpacks exact supported runtime transition', () => {
       f.adapter,
       f.context,
       { choiceId: `neoforge:${f.mapping.id}:1.21.1`, loaderVersion: '21.1.72' },
+      {},
+    );
+    expect(resolveForgeCreationChoice).not.toHaveBeenCalled();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'gateway' })
+      .where('id', '=', f.serverId)
+      .execute();
+    expect(await resolveModpackRuntime({ ...f.options, target })).toEqual({ ...f.binding, target });
+    choice.capabilities.gateway = false;
+    expect(await resolveModpackRuntime({ ...f.options, target })).toBeNull();
+  });
+  it('materializes an exact Quilt loader for direct and declared Gateway connections', async () => {
+    const f = await fixture();
+    const target = {
+      minecraftVersion: '1.21.1',
+      loader: 'quilt' as const,
+      loaderVersion: '0.30.2',
+    };
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ runtime_id: 'quilt' })
+      .where('id', '=', f.mapping.id)
+      .execute();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'direct' })
+      .where('id', '=', f.serverId)
+      .execute();
+    const choice = {
+      ...f.choice,
+      combination: {
+        ...f.choice.combination,
+        profile: target.loader,
+        loaderVersion: target.loaderVersion,
+      },
+      capabilities: {
+        ...f.choice.capabilities,
+        installation: true,
+        gateway: true,
+        sleepWake: true,
+      },
+      mapping: { ...f.choice.mapping, runtime_id: 'quilt' },
+    };
+    vi.mocked(resolveQuiltCreationChoice).mockResolvedValue(choice);
+    vi.mocked(requireMinecraftChoice).mockResolvedValue(choice);
+    expect(await resolveModpackRuntime({ ...f.options, target })).toEqual({ ...f.binding, target });
+    expect(resolveQuiltCreationChoice).toHaveBeenCalledWith(
+      f.db,
+      f.adapter,
+      f.context,
+      { choiceId: `quilt:${f.mapping.id}:1.21.1`, loaderVersion: '0.30.2' },
       {},
     );
     expect(resolveForgeCreationChoice).not.toHaveBeenCalled();

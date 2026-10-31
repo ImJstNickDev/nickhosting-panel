@@ -2897,6 +2897,170 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     expect(write).not.toHaveBeenCalled();
   });
 
+  it.each(['valid', 'loader', 'library', 'launcher', 'properties', 'minecraft'])(
+    'verifies Quilt generated launcher and upstream libraries before installation acknowledgement (%s)',
+    async (variant) => {
+      const f = await minecraftFixture();
+      await f.f.db
+        .deleteFrom('minecraft_verification_evidence')
+        .where('combination_id', '=', f.combinationId)
+        .execute();
+      const row = await f.f.db
+        .selectFrom('minecraft_combinations')
+        .selectAll()
+        .where('id', '=', f.combinationId)
+        .executeTakeFirstOrThrow();
+      const variables = [
+        'MC_VERSION',
+        'QUILT_LOADER_VERSION',
+        'QUILT_INSTALLER_VERSION',
+        'SERVER_JARFILE',
+      ];
+      const libraryPaths = [
+        'libraries/org/quiltmc/quilt-loader/0.30.2/quilt-loader-0.30.2.jar',
+        'libraries/org/ow2/asm/asm/9.8/asm-9.8.jar',
+      ];
+      const libraries = libraryPaths.map((path) => {
+        const bytes = Buffer.from(`verified ${path}`);
+        f.files.set(path, bytes);
+        return { path, sha256: createHash('sha256').update(bytes).digest('hex') };
+      });
+      const binding = {
+        ...(row.binding as Record<string, unknown>),
+        profile: 'quilt',
+        installationKind: 'quilt-installer',
+        declaredEggVariables: variables,
+        bindings: {
+          release: 'MC_VERSION',
+          loaderVersion: 'QUILT_LOADER_VERSION',
+          installerVersion: 'QUILT_INSTALLER_VERSION',
+        },
+        fixedVariables: { SERVER_JARFILE: 'server.jar' },
+        artifactPaths: { server: 'server.jar' },
+      };
+      const runtime = {
+        ...(row.resolved_runtime as Record<string, unknown>),
+        profile: 'quilt',
+        loaderVersion: '0.30.2',
+        installerVersion: '0.15.1',
+        installation: {
+          kind: 'quilt-installer',
+          args: [],
+          quiltLibraries: libraries,
+          quiltLauncherMainClass: 'org.quiltmc.loader.impl.launch.server.QuiltServerLauncher',
+        },
+      };
+      await f.f.db
+        .updateTable('runtime_egg_mappings')
+        .set({ runtime_id: 'quilt' })
+        .where('id', '=', f.f.mappingId)
+        .execute();
+      const mapping = await f.f.db
+        .selectFrom('runtime_egg_mappings')
+        .selectAll()
+        .where('id', '=', f.f.mappingId)
+        .executeTakeFirstOrThrow();
+      await f.f.db
+        .updateTable('minecraft_combinations')
+        .set({
+          combination: JSON.stringify({
+            ...(row.combination as Record<string, unknown>),
+            profile: 'quilt',
+            loaderVersion: '0.30.2',
+            installerVersion: '0.15.1',
+          }),
+          resolved_runtime: JSON.stringify(runtime),
+          binding: JSON.stringify(binding),
+          mapping_digest: minecraftMappingDigest(mapping),
+        })
+        .where('id', '=', f.combinationId)
+        .execute();
+      const remote = await f.context.adapter.getApplicationServer(1);
+      remote.container.environment = {
+        MC_VERSION: '1.21.1',
+        QUILT_LOADER_VERSION: '0.30.2',
+        QUILT_INSTALLER_VERSION: '0.15.1',
+        SERVER_JARFILE: 'server.jar',
+      };
+      f.context.adapter.getApplicationServer = vi.fn(async () => remote);
+      f.context.adapter.getEgg = vi.fn(async () => ({
+        id: mapping.egg_id,
+        uuid: randomUUID(),
+        name: 'Quilt fixture',
+        description: null,
+        nest: mapping.nest_id,
+        docker_image: mapping.docker_image,
+        startup: mapping.startup,
+        relationships: {
+          variables: {
+            object: 'list' as const,
+            data: variables.map((env_variable, index) => ({
+              attributes: {
+                id: index + 1,
+                name: env_variable,
+                description: '',
+                env_variable,
+                default_value: '',
+                user_viewable: true,
+                user_editable: true,
+                rules: 'required|string',
+              },
+            })),
+          },
+        },
+      }));
+      const zip = new ZipFile();
+      zip.addBuffer(
+        Buffer.from(
+          `Manifest-Version: 1.0\r\nMain-Class: org.quiltmc.loader.impl.launch.server.QuiltServerLauncher\r\nClass-Path: ${libraryPaths.join(' ')}\r\n\r\n`,
+        ),
+        'META-INF/MANIFEST.MF',
+      );
+      zip.end();
+      const chunks: Buffer[] = [];
+      await pipeline(
+        zip.outputStream,
+        new Writable({
+          write(chunk, _encoding, done) {
+            chunks.push(Buffer.from(chunk));
+            done();
+          },
+        }),
+      );
+      f.files.set('minecraft.jar', f.files.get('server.jar') as Buffer);
+      f.files.set('server.jar', Buffer.concat(chunks));
+      f.files.set('quilt-server-launcher.properties', Buffer.from('serverJar=minecraft.jar\n'));
+      if (variant === 'loader') f.files.set(libraryPaths[0] as string, Buffer.from('wrong loader'));
+      if (variant === 'library')
+        f.files.set(libraryPaths[1] as string, Buffer.from('wrong library'));
+      if (variant === 'launcher') f.files.set('server.jar', Buffer.from('wrong launcher'));
+      if (variant === 'properties')
+        f.files.set('quilt-server-launcher.properties', Buffer.from('serverJar=other.jar\n'));
+      if (variant === 'minecraft') f.files.set('minecraft.jar', Buffer.from('wrong Minecraft'));
+      f.options.env = {};
+      f.options.observedImageDigest = async () => null;
+      if (variant !== 'valid') {
+        await expect(configureMinecraftProvision(f.context, f.options)).rejects.toThrow();
+        return;
+      }
+      expect(await configureMinecraftProvision(f.context, f.options)).toBe(true);
+      const profile = await f.f.db
+        .selectFrom('minecraft_server_profiles')
+        .select(['installed', 'installed_manifest'])
+        .where('server_id', '=', f.serverId)
+        .executeTakeFirstOrThrow();
+      expect(profile.installed).toBe(true);
+      expect(profile.installed_manifest).toEqual(
+        expect.arrayContaining(
+          ['server.jar', 'minecraft.jar', 'quilt-server-launcher.properties', ...libraryPaths].map(
+            (path) => expect.objectContaining({ path }),
+          ),
+        ),
+      );
+      expect(profile.installed_manifest).toHaveLength(5);
+    },
+  );
+
   it('accepts FabricUpdated outputs without signed reports and rejects corrupt installation files', async () => {
     const installed = await launcherJar('2026-01-02T00:00:00Z');
     const f = await minecraftFixture({

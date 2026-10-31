@@ -5,6 +5,7 @@ import {
   fetchFoliaCatalog,
   fetchPaperCatalog,
   fetchPurpurCatalog,
+  fetchQuiltCatalog,
   minecraftDigest,
   minecraftManifest,
   minecraftVerificationChecks,
@@ -1465,6 +1466,199 @@ describe('Minecraft backend API authorization and user projection', () => {
         await post('/v1/minecraft/servers', {
           ...input,
           minecraft: { ...input.minecraft, loaderVersion: '0.16.9' },
+        })
+      ).status,
+    ).toBe(400);
+  });
+  it('restricts Quilt discovery refresh to Owners and queues without contacting providers', async () => {
+    const endpoint = '/v1/owner/minecraft/quilt/catalog';
+    expect((await app.request(endpoint)).status).toBe(403);
+    actor = fixture.owner;
+    expect((await app.request(endpoint)).status).toBe(200);
+    expect((await post(endpoint, {})).status).toBe(202);
+    expect(management).not.toHaveBeenCalled();
+    expect(
+      (
+        await fixture.db
+          .selectFrom('minecraft_metadata_sync')
+          .select('requested_at')
+          .where('id', '=', 'quilt')
+          .executeTakeFirstOrThrow()
+      ).requested_at,
+    ).not.toBeNull();
+  });
+  it('creates Quilt with exact cached versions and preserves retry identity across installer updates', async () => {
+    const id = await eligibleChoice(false);
+    Object.assign(routeEnv, {
+      NH_GATEWAY_ENABLED: 'true',
+      NH_GATEWAY_ID: randomUUID(),
+      NH_GATEWAY_PHYSICAL_HOST_ID: fixture.hostId,
+    });
+    // Match a Gateway-only deployment: no public direct endpoint is configured.
+    await fixture.db
+      .updateTable('managed_nodes')
+      .set({
+        backend_allocation_pool: JSON.stringify(fixture.backendAllocationPool),
+      })
+      .where('id', '=', fixture.nodeId)
+      .execute();
+    await fixture.db
+      .updateTable('runtime_egg_mappings')
+      .set({
+        runtime_id: 'quilt',
+        port_roles: JSON.stringify([{ role: 'game', protocols: ['tcp'], primary: true }]),
+      })
+      .where('id', '=', fixture.mappingId)
+      .execute();
+    const mapping = await fixture.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', fixture.mappingId)
+      .executeTakeFirstOrThrow();
+    const old = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirstOrThrow();
+    const combination = {
+      ...(old.combination as Record<string, unknown>),
+      profile: 'quilt',
+      loaderVersion: '0.30.2',
+      installerVersion: '0.15.1',
+    };
+    const runtime = {
+      ...(old.resolved_runtime as Record<string, unknown>),
+      profile: 'quilt',
+      loaderVersion: '0.30.2',
+      installerVersion: '0.15.1',
+      installation: { kind: 'quilt-installer', args: [] },
+    };
+    const binding = {
+      ...(old.binding as Record<string, unknown>),
+      profile: 'quilt',
+      installationKind: 'quilt-installer',
+      declaredEggVariables: [
+        'MC_VERSION',
+        'QUILT_LOADER_VERSION',
+        'QUILT_INSTALLER_VERSION',
+        'SERVER_JARFILE',
+      ],
+      bindings: {
+        release: 'MC_VERSION',
+        loaderVersion: 'QUILT_LOADER_VERSION',
+        installerVersion: 'QUILT_INSTALLER_VERSION',
+      },
+      fixedVariables: { SERVER_JARFILE: 'server.jar' },
+    };
+    await fixture.db
+      .updateTable('minecraft_combinations')
+      .set({
+        combination: JSON.stringify(combination),
+        resolved_runtime: JSON.stringify(runtime),
+        binding: JSON.stringify(binding),
+        mapping_digest: minecraftMappingDigest(mapping),
+        enabled: false,
+      })
+      .where('id', '=', id)
+      .execute();
+    const makeSnapshot = (version: string) =>
+      fetchQuiltCatalog({
+        read: async (url) => {
+          const value = url.endsWith('/game')
+            ? [{ version: '1.21.1', stable: true }]
+            : url.endsWith('/loader')
+              ? [
+                  {
+                    version: '0.30.2',
+                    maven: 'org.quiltmc:quilt-loader:0.30.2',
+                    file_size: 123,
+                    hashes: { sha256: 'b'.repeat(64) },
+                  },
+                ]
+              : [
+                  {
+                    version,
+                    maven: `org.quiltmc:quilt-installer:${version}`,
+                    url: `https://maven.quiltmc.org/repository/release/org/quiltmc/quilt-installer/${version}/quilt-installer-${version}.jar`,
+                    file_size: 123,
+                    hashes: { sha256: 'a'.repeat(64) },
+                  },
+                ];
+          const bytes = Buffer.from(JSON.stringify(value));
+          return {
+            bytes,
+            evidence: {
+              url,
+              sha256: createHash('sha256').update(bytes).digest('hex'),
+              retrievedAt: new Date().toISOString(),
+            },
+          };
+        },
+      });
+    const snapshot = await makeSnapshot('0.15.1');
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({ manifest_json: JSON.stringify(snapshot), last_success_at: new Date() })
+      .where('id', '=', 'quilt')
+      .execute();
+    const publicCatalog = await app.request('/v1/minecraft/quilt/catalog');
+    expect(publicCatalog.status).toBe(200);
+    const publicPayload = await publicCatalog.json();
+    expect(publicPayload).toMatchObject({ synced: true, latestInstallerVersion: '0.15.1' });
+    expect(publicPayload).not.toHaveProperty('documents');
+    const choiceId = `quilt:${fixture.mappingId}:1.21.1`;
+    const choices = await (await app.request('/v1/minecraft/choices')).json();
+    expect(choices.find((choice: { id: string }) => choice.id === choiceId)).toMatchObject({
+      capabilities: { gateway: true, sleepWake: true },
+    });
+    const input = {
+      ...createInput(choiceId),
+      minecraft: { ...createInput(choiceId).minecraft, loaderVersion: '0.30.2' },
+    };
+    const response = await post('/v1/minecraft/servers', input);
+    expect(await response.clone().json()).not.toHaveProperty('code');
+    expect(response.status).toBe(202);
+    const created = await response.json();
+    const profile = await fixture.db
+      .selectFrom('minecraft_server_profiles')
+      .select('combination_id')
+      .where('server_id', '=', created.serverId)
+      .executeTakeFirstOrThrow();
+    expect(profile.combination_id).toBe(id);
+    expect(
+      await fixture.db
+        .selectFrom('managed_servers')
+        .select('connection_mode')
+        .where('id', '=', created.serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ connection_mode: 'gateway' });
+    expect(
+      await fixture.db
+        .selectFrom('gateway_routes')
+        .select(['enabled', 'transport'])
+        .where('server_id', '=', created.serverId)
+        .execute(),
+    ).toEqual([{ enabled: false, transport: 'tcp' }]);
+
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({
+        manifest_json: JSON.stringify(await makeSnapshot('0.15.2')),
+      })
+      .where('id', '=', 'quilt')
+      .execute();
+    management.mockClear();
+    expect(await (await post('/v1/minecraft/servers', input)).json()).toEqual(created);
+    expect(management).not.toHaveBeenCalled();
+    expect((await post('/v1/minecraft/servers', { ...input, name: 'Changed replay' })).status).toBe(
+      409,
+    );
+    expect(
+      (
+        await post('/v1/minecraft/servers', {
+          ...input,
+          idempotencyKey: randomUUID(),
+          minecraft: { choiceId },
         })
       ).status,
     ).toBe(400);

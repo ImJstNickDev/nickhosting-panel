@@ -581,6 +581,83 @@ describe('Minecraft browser module and exact API contracts', () => {
     ).rejects.toThrow('validation_failed');
     expect(request.mock.calls.every(([path]) => !path.includes('/combinations'))).toBe(true);
   });
+  it('offers independent Quilt loader choices and submits only the chosen loader', async () => {
+    const quiltId = `quilt:${choiceId}:26.1`;
+    const request = vi.fn<GameUiClient['request']>(async (path) => {
+      if (path === '/v1/minecraft/choices')
+        return [{ id: quiltId, version: '26.1', runtime: 'quilt' }];
+      if (path === '/v1/minecraft/quilt/catalog')
+        return {
+          loaders: [
+            { version: '0.31.0-beta.5', stable: false },
+            { version: '0.30.2', stable: true },
+            { version: '0.29.2', stable: true },
+          ],
+          latestInstallerVersion: '0.15.1',
+        };
+      return { serverId, jobId };
+    });
+    const client = { request };
+    const catalog = await minecraftUiModule.creationCatalog?.load(client);
+    const options = minecraftUiModule.creationCatalog?.options(catalog, 'loaders', {
+      runtime: 'quilt',
+    });
+    expect(options?.map((option) => option.value)).toEqual(['0.31.0-beta.5', '0.30.2', '0.29.2']);
+    expect(options?.filter((option) => option.recommended).map((option) => option.value)).toEqual([
+      '0.30.2',
+    ]);
+    const input = {
+      idempotencyKey: 'quilt-create',
+      name: 'Quilt server',
+      limits: { memory: 2048, cpu: 100 },
+      minecraft: { choiceId: quiltId, loaderVersion: '0.29.2', configuration: { eula: true } },
+    };
+    expect(await createMinecraftUiController(client).create(input)).toEqual({ serverId, jobId });
+    expect(request).toHaveBeenLastCalledWith(
+      '/v1/minecraft/servers',
+      expect.objectContaining({
+        body: expect.objectContaining({
+          minecraft: expect.objectContaining({ choiceId: quiltId, loaderVersion: '0.29.2' }),
+        }),
+      }),
+    );
+    await expect(
+      createMinecraftUiController(client).create({
+        ...input,
+        minecraft: { ...input.minecraft, loaderVersion: 'missing' },
+      }),
+    ).rejects.toThrow('validation_failed');
+    await expect(
+      createMinecraftUiController(client).create({
+        ...input,
+        minecraft: { choiceId: quiltId, configuration: { eula: true } },
+      }),
+    ).rejects.toThrow('validation_failed');
+    expect(request.mock.calls.every(([path]) => !path.includes('/combinations'))).toBe(true);
+  });
+  it('keeps Quilt and Fabric loader catalogs separate when both runtimes are available', async () => {
+    const request = vi.fn<GameUiClient['request']>(async (path) => {
+      if (path === '/v1/minecraft/choices')
+        return [
+          { id: `quilt:${choiceId}:1.21.1`, version: '1.21.1', runtime: 'quilt' },
+          { id: `fabric:${choiceId}:1.21.1`, version: '1.21.1', runtime: 'fabric' },
+        ];
+      return {
+        loaders: [{ version: path.includes('/quilt/') ? '0.30.2' : '0.19.5', stable: true }],
+        latestInstallerVersion: path.includes('/quilt/') ? '0.15.1' : '1.1.2',
+      };
+    });
+    const catalog = await minecraftUiModule.creationCatalog?.load({ request });
+    const options = (runtime: string) =>
+      minecraftUiModule.creationCatalog?.options(catalog, 'loaders', { runtime });
+    expect(options('quilt')?.map((option) => option.value)).toEqual(['0.30.2']);
+    expect(options('fabric')?.map((option) => option.value)).toEqual(['0.19.5']);
+    expect(request.mock.calls.map(([path]) => path)).toEqual([
+      '/v1/minecraft/choices',
+      '/v1/minecraft/fabric/catalog',
+      '/v1/minecraft/quilt/catalog',
+    ]);
+  });
   it('filters Forge loaders by the selected Minecraft release and preserves historical coordinate suffixes', async () => {
     const oldId = `forge:${choiceId}:1.7.10`;
     const modernId = `forge:${choiceId}:1.20.1`;

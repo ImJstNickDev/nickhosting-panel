@@ -213,7 +213,10 @@ describe('Minecraft file mutation preflight', () => {
     );
     return { listings, paths: names.map((name) => [root, name].filter(Boolean).join('/')) };
   }
-  async function guardFixture(listings: Map<string, ServerFile[]>) {
+  async function guardFixture(
+    listings: Map<string, ServerFile[]>,
+    profile: 'fabric' | 'quilt' = 'fabric',
+  ) {
     const serverId = await f.server();
     const choiceId = randomUUID();
     await f.db
@@ -225,14 +228,14 @@ describe('Minecraft file mutation preflight', () => {
         combination: '{}',
         resolved_runtime: '{}',
         binding: JSON.stringify({
-          profile: 'fabric',
+          profile,
           release: '1.21.1',
           image: 'fixture/image:1',
           imageJavaMajor: 21,
           declaredEggVariables: [],
           bindings: {},
           fixedVariables: {},
-          installationKind: 'fabric-installer',
+          installationKind: `${profile}-installer`,
           artifactPaths: { server: 'server.jar' },
           supportedProperties: [],
         }),
@@ -436,6 +439,17 @@ describe('Minecraft file mutation preflight', () => {
       await expect(
         runtime.assertFileMutation(serverId, [...paths.slice(0, -1), protectedPath], f.db),
       ).rejects.toMatchObject({ code: 'validation_failed' });
+      expect(listFiles).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['minecraft.jar', 'quilt-server-launcher.properties'])(
+    'protects Quilt output %s before directory reads',
+    async (path) => {
+      const { listings } = tree();
+      const { runtime, serverId, listFiles } = await guardFixture(listings, 'quilt');
+      await expect(runtime.assertFileMutation(serverId, [path], f.db)).rejects.toMatchObject({
+        code: 'validation_failed',
+      });
       expect(listFiles).not.toHaveBeenCalled();
     },
   );

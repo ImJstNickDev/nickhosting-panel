@@ -142,7 +142,7 @@ export function RegisterCombination({ refresh }: { refresh: () => void }) {
                     required
                   />
                 )}
-                {(profile === 'fabric' || profile === 'forge' || profile === 'neoforge') && (
+                {['fabric', 'quilt', 'forge', 'neoforge'].includes(profile ?? '') && (
                   <Input
                     label={t('gameAdmin.loader')}
                     name="loaderVersion"
@@ -150,7 +150,7 @@ export function RegisterCombination({ refresh }: { refresh: () => void }) {
                     required
                   />
                 )}
-                {profile === 'fabric' && (
+                {(profile === 'fabric' || profile === 'quilt') && (
                   <Input
                     label={t('gameAdmin.installerVersion')}
                     name="installerVersion"
@@ -175,17 +175,20 @@ export function RegisterCombination({ refresh }: { refresh: () => void }) {
                   label={t('gameAdmin.installationKind')}
                   name="installationKind"
                   defaultValue={
-                    profile === 'fabric'
-                      ? 'fabric-installer'
-                      : profile === 'forge'
-                        ? 'forge-installer'
-                        : profile === 'neoforge'
-                          ? 'neoforge-installer'
-                          : 'server-jar'
+                    profile === 'quilt'
+                      ? 'quilt-installer'
+                      : profile === 'fabric'
+                        ? 'fabric-installer'
+                        : profile === 'forge'
+                          ? 'forge-installer'
+                          : profile === 'neoforge'
+                            ? 'neoforge-installer'
+                            : 'server-jar'
                   }
                 >
                   <option value="server-jar">{t('gameAdmin.serverJar')}</option>
                   <option value="fabric-installer">Fabric</option>
+                  <option value="quilt-installer">Quilt</option>
                   <option value="forge-installer">Forge</option>
                   <option value="neoforge-installer">NeoForge</option>
                 </Select>

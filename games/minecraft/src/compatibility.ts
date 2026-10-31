@@ -14,6 +14,7 @@ export const minecraftProfiles = [
   'purpur',
   'folia',
   'fabric',
+  'quilt',
   'forge',
   'neoforge',
 ] as const;
@@ -196,6 +197,7 @@ export const minecraftCapabilityDeclaration = {
 export const minecraftGatewayDeclarations = {
   vanilla: minecraftCapabilityDeclaration,
   fabric: { id: 'minecraft/fabric', version: 1 },
+  quilt: { id: 'minecraft/quilt', version: 1 },
   paper: { id: 'minecraft/paper', version: 1 },
   purpur: { id: 'minecraft/purpur', version: 1 },
   folia: { id: 'minecraft/folia', version: 1 },
@@ -206,6 +208,7 @@ export const minecraftGatewayDeclarations = {
 export function minecraftGatewayDeclaration(profile: MinecraftCombination['profile']) {
   return profile === 'vanilla' ||
     profile === 'fabric' ||
+    profile === 'quilt' ||
     profile === 'paper' ||
     profile === 'purpur' ||
     profile === 'folia' ||
@@ -245,7 +248,7 @@ export function minecraftDeclaredCapabilities(
   >,
 ) {
   const installation =
-    ['vanilla', 'fabric', 'paper', 'purpur', 'folia'].includes(combination.profile) ||
+    ['vanilla', 'fabric', 'quilt', 'paper', 'purpur', 'folia'].includes(combination.profile) ||
     (combination.profile === 'forge' && forgeEnhancedSupportedRelease(combination.release)) ||
     (combination.profile === 'neoforge' &&
       combination.releaseType === 'release' &&

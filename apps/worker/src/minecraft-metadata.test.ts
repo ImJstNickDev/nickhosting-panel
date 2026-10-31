@@ -7,6 +7,7 @@ import {
   refreshNeoForgeCatalog,
   refreshPaperCatalog,
   refreshPurpurCatalog,
+  refreshQuiltCatalog,
 } from '@nickhosting/server-management';
 import { beforeEach, expect, it, vi } from 'vitest';
 import {
@@ -16,12 +17,14 @@ import {
   pollNeoForgeMetadata,
   pollPaperMetadata,
   pollPurpurMetadata,
+  pollQuiltMetadata,
 } from './minecraft-metadata.js';
 
 vi.mock('@nickhosting/database', () => ({ getSettings: vi.fn() }));
 vi.mock('@nickhosting/server-management', () => ({
   refreshMinecraftMetadata: vi.fn(),
   refreshFabricCatalog: vi.fn(),
+  refreshQuiltCatalog: vi.fn(),
   refreshFoliaCatalog: vi.fn(),
   refreshPaperCatalog: vi.fn(),
   refreshPurpurCatalog: vi.fn(),
@@ -171,5 +174,20 @@ it('refreshes Folia independently and contains provider failures', async () => {
   vi.mocked(refreshFoliaCatalog).mockRejectedValue(new Error('secret://provider-detail'));
   await pollFoliaMetadata(db, {}, logger);
   expect(JSON.stringify(records)).toContain('folia.metadata_refresh_unavailable');
+  expect(JSON.stringify(records)).not.toContain('secret');
+});
+
+it('refreshes Quilt independently and contains provider failures', async () => {
+  refresh.mockRejectedValue(new Error('unavailable'));
+  vi.mocked(refreshQuiltCatalog).mockResolvedValue({ state: 'updated', changed: 2 });
+  await Promise.all([pollMinecraftMetadata(db, {}, logger), pollQuiltMetadata(db, {}, logger)]);
+  expect(refreshQuiltCatalog).toHaveBeenCalledWith(db, {
+    userAgent: 'Fixture https://example.test',
+  });
+  expect(JSON.stringify(records)).toContain('quilt.metadata_refreshed');
+  records.length = 0;
+  vi.mocked(refreshQuiltCatalog).mockRejectedValue(new Error('secret://provider-detail'));
+  await pollQuiltMetadata(db, {}, logger);
+  expect(JSON.stringify(records)).toContain('quilt.metadata_refresh_unavailable');
   expect(JSON.stringify(records)).not.toContain('secret');
 });

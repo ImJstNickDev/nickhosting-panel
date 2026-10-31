@@ -166,6 +166,12 @@ Gateway declaration and existing management flows with explicit Folia plugin
 compatibility. See [Folia scope and validation](M5-FOLIA.md). This is not live-client
 certification or production deployment.
 
+**Scoped M5 follow-up, 2026-10-31:** the Owner requested Quilt after importing an
+exact-version egg. Add official metadata discovery, Minecraft/loader selection,
+frozen installer, installed launcher/library verification and existing management
+flows. See [Quilt scope and validation](M5-QUILT.md). No production deployment or
+real-client certification is included.
+
 ## M6 — Satisfactory & Game Integration Expansion (PR)
 
 **Scope**

@@ -106,6 +106,7 @@ const translated: Record<string, [string, string]> = {
   'runtimes.purpur': ['Purpur', 'Purpur'],
   'runtimes.folia': ['Folia', 'Folia'],
   'runtimes.fabric': ['Fabric', 'Fabric'],
+  'runtimes.quilt': ['Quilt', 'Quilt'],
   'runtimes.forge': ['Forge', 'Forge'],
   'runtimes.neoforge': ['NeoForge', 'NeoForge'],
   'installer.address': ['Choose an address', 'Scegli un indirizzo'],
@@ -414,7 +415,13 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
       field('loaderVersion', {
         type: 'choice',
         required: true,
-        when: [{ field: 'runtime', operator: 'one-of', values: ['fabric', 'forge', 'neoforge'] }],
+        when: [
+          {
+            field: 'runtime',
+            operator: 'one-of',
+            values: ['fabric', 'quilt', 'forge', 'neoforge'],
+          },
+        ],
         source: { handler: 'loaders', dependsOn: ['runtime', 'choiceId'] },
       }),
       field('operators', {
@@ -648,7 +655,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
         summary: [
           { labelKey: k('fields.runtime'), value: choice.runtime },
           { labelKey: k('fields.choiceId'), value: choice.version },
-          ...(['fabric', 'forge', 'neoforge'].includes(choice.runtime)
+          ...(['fabric', 'quilt', 'forge', 'neoforge'].includes(choice.runtime)
             ? [
                 {
                   labelKey: k('fields.loaderVersion'),
@@ -728,7 +735,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
           connection: v.connection,
           minecraft: {
             choiceId,
-            ...(['fabric', 'forge', 'neoforge'].includes(String(v.runtime))
+            ...(['fabric', 'quilt', 'forge', 'neoforge'].includes(String(v.runtime))
               ? { loaderVersion: v.loaderVersion }
               : {}),
             configuration: {

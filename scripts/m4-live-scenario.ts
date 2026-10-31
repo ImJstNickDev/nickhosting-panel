@@ -153,7 +153,7 @@ export const minecraftBootstrapManifest = gameManifestSchema.parse({
   },
   ports: [{ role: 'game', transport: 'tcp', required: true }],
   runtimes: minecraftManifest.runtimes
-    .filter((runtime) => !['neoforge', 'purpur'].includes(runtime.id))
+    .filter((runtime) => !['neoforge', 'purpur', 'quilt'].includes(runtime.id))
     .map((runtime) => ({
       ...runtime,
       nameKey: `games.m4-bootstrap.runtimes.${runtime.id}`,
@@ -512,6 +512,7 @@ function mappingBinding(
   };
   const binding = ((): MinecraftRuntimeMapping => {
     switch (runtime.profile) {
+      case 'quilt':
       case 'purpur':
       case 'neoforge':
         // This historical live certification runner has no client contract for these profiles.

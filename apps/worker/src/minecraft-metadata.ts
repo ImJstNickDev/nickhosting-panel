@@ -8,6 +8,7 @@ import {
   refreshNeoForgeCatalog,
   refreshPaperCatalog,
   refreshPurpurCatalog,
+  refreshQuiltCatalog,
 } from '@nickhosting/server-management';
 
 type DB = ReturnType<typeof createDatabase>['db'];
@@ -15,7 +16,7 @@ type Environment = Readonly<Record<string, string | undefined>>;
 type Logger = ReturnType<typeof createLogger>;
 /** Each provider has its own scheduling loop; one slow discovery cannot delay another. */
 async function pollMetadata(
-  name: 'minecraft' | 'fabric' | 'folia' | 'paper' | 'purpur' | 'forge' | 'neoforge',
+  name: 'minecraft' | 'fabric' | 'quilt' | 'folia' | 'paper' | 'purpur' | 'forge' | 'neoforge',
   refresh: typeof refreshMinecraftMetadata,
   db: DB,
   env: Environment,
@@ -54,4 +55,8 @@ export function pollPurpurMetadata(db: DB, env: Environment, logger: Logger) {
 
 export function pollFoliaMetadata(db: DB, env: Environment, logger: Logger) {
   return pollMetadata('folia', refreshFoliaCatalog, db, env, logger);
+}
+
+export function pollQuiltMetadata(db: DB, env: Environment, logger: Logger) {
+  return pollMetadata('quilt', refreshQuiltCatalog, db, env, logger);
 }

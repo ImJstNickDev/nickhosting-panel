@@ -31,6 +31,7 @@ import {
   isFabricUpdatedBinding,
   isForgeEnhancedBinding,
   isNeoForgeBinding,
+  isQuiltBinding,
   minecraftCombinationSchema,
   minecraftDigest,
   minecraftManifest,
@@ -60,6 +61,10 @@ import {
   planMinecraftWorldSelection,
   verifyMinecraftPlayer,
 } from '../../../games/minecraft/src/management.js';
+import {
+  quiltInstalledLauncherMaxBytes,
+  verifyQuiltInstalledLauncher,
+} from '../../../games/minecraft/src/quilt-installed-launcher.js';
 import {
   minecraftRuntimeMappingSchema,
   type ResolvedMinecraftRuntime,
@@ -892,6 +897,76 @@ async function verifyInstalledRuntime(
     )
       throw new DomainError('conflict');
     verified.push({ path, sha256: actual.sha256, size: actual.size });
+  } else if (runtime.profile === 'quilt' && isQuiltBinding(binding)) {
+    const libraries = runtime.installation.quiltLibraries;
+    const serverArtifact = runtime.artifacts.find((entry) => entry.role === 'server');
+    if (
+      !libraries?.length ||
+      libraries.length > 128 ||
+      !serverArtifact ||
+      (!serverArtifact.sha1 && !serverArtifact.sha256) ||
+      !binding.artifactPaths.server
+    )
+      throw new DomainError('configuration_invalid');
+    const capture = async (path: string, maxBytes: number, retain = false) => {
+      const chunks: Buffer[] = [];
+      const actual = await hashMinecraftRemoteFile(context, path, {
+        maxBytes,
+        ...(retain
+          ? {
+              onChunk: (chunk: Uint8Array) => {
+                chunks.push(Buffer.from(chunk));
+              },
+            }
+          : {}),
+      });
+      if (!actual) throw new DomainError('conflict');
+      return { path, ...actual, bytes: retain ? Buffer.concat(chunks) : undefined };
+    };
+    const [launcher, server, properties] = await Promise.all([
+      capture(binding.artifactPaths.server, quiltInstalledLauncherMaxBytes, true),
+      capture('minecraft.jar', serverArtifact.size ?? 512 * 1024 ** 2),
+      capture('quilt-server-launcher.properties', 64 * 1024, true),
+    ]);
+    if (
+      !launcher.bytes ||
+      !properties.bytes ||
+      (serverArtifact.sha1 && serverArtifact.sha1 !== server.sha1) ||
+      (serverArtifact.sha256 && serverArtifact.sha256 !== server.sha256) ||
+      (serverArtifact.size !== undefined && serverArtifact.size !== server.size)
+    )
+      throw new DomainError('conflict');
+    const settings = parseMinecraftProperties(properties.bytes.toString('latin1'));
+    if (Object.keys(settings).length !== 1 || settings.serverJar !== 'minecraft.jar')
+      throw new DomainError('conflict');
+    await verifyQuiltInstalledLauncher(
+      launcher.bytes,
+      libraries.map((entry) => entry.path),
+    );
+    const libraryFiles = [];
+    let total = 0;
+    for (const library of libraries) {
+      if (!library.sha1 && !library.sha256) throw new DomainError('configuration_invalid');
+      const actual = await capture(
+        library.path,
+        Math.min(128 * 1024 ** 2, 512 * 1024 ** 2 - total),
+      );
+      total += actual.size;
+      if (
+        (library.sha1 && library.sha1 !== actual.sha1) ||
+        (library.sha256 && library.sha256 !== actual.sha256) ||
+        total > 512 * 1024 ** 2
+      )
+        throw new DomainError('conflict');
+      libraryFiles.push(actual);
+    }
+    verified.push(
+      ...[launcher, server, properties, ...libraryFiles].map(({ path, sha256, size }) => ({
+        path,
+        sha256,
+        size,
+      })),
+    );
   } else if (runtime.profile === 'fabric' && isFabricUpdatedBinding(binding)) {
     // The trusted installer owns library resolution. Capture the concrete outputs
     // once on installation/restore; power operations reuse the persisted receipt.

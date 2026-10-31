@@ -23,6 +23,8 @@ import {
   publicMinecraftChoice,
   purpurCatalogMetadataClient,
   purpurEggBinding,
+  quiltCatalogMetadataClient,
+  quiltEggBinding,
   resolveMinecraftImage,
   vanillaEggBinding,
 } from '@nickhosting/minecraft';
@@ -46,6 +48,7 @@ import { cachedMinecraftManifest, getMinecraftMetadataStatus } from './minecraft
 import { getNeoForgeCatalog, getNeoForgeCatalogSnapshot } from './neoforge-catalog.js';
 import { getPaperCatalog, getPaperCatalogSnapshot } from './paper-catalog.js';
 import { getPurpurCatalog, getPurpurCatalogSnapshot } from './purpur-catalog.js';
+import { getQuiltCatalog, getQuiltCatalogSnapshot } from './quilt-catalog.js';
 import { ownerOnly, parse } from './registry.js';
 
 type Mapping = Selectable<Database['runtime_egg_mappings']>;
@@ -161,17 +164,19 @@ async function registerCombination(
     value.binding ??
     (runtime.profile === 'fabric'
       ? fabricEggBinding
-      : runtime.profile === 'neoforge'
-        ? neoforgeEggBinding
-        : runtime.profile === 'forge'
-          ? forgeEggBinding
-          : runtime.profile === 'purpur'
-            ? purpurEggBinding
-            : runtime.profile === 'folia'
-              ? foliaEggBinding
-              : runtime.profile === 'paper'
-                ? paperEggBinding
-                : vanillaEggBinding)({
+      : runtime.profile === 'quilt'
+        ? quiltEggBinding
+        : runtime.profile === 'neoforge'
+          ? neoforgeEggBinding
+          : runtime.profile === 'forge'
+            ? forgeEggBinding
+            : runtime.profile === 'purpur'
+              ? purpurEggBinding
+              : runtime.profile === 'folia'
+                ? foliaEggBinding
+                : runtime.profile === 'paper'
+                  ? paperEggBinding
+                  : vanillaEggBinding)({
       runtime,
       variables: egg.relationships?.variables?.data.map((entry) => entry.attributes) ?? [],
       environment: mapping.environment,
@@ -317,7 +322,7 @@ async function assertCatalogCreationAccess(
     !mapping.nodeEnabled ||
     mapping.game_id !== 'minecraft' ||
     mapping.runtime_id !== profile ||
-    !['fabric', 'paper', 'purpur', 'folia', 'forge', 'neoforge'].includes(profile)
+    !['fabric', 'quilt', 'paper', 'purpur', 'folia', 'forge', 'neoforge'].includes(profile)
   )
     throw new DomainError('integration_unavailable');
   const { nodeEnabled: _nodeEnabled, ...identity } = mapping;
@@ -325,9 +330,10 @@ async function assertCatalogCreationAccess(
 }
 
 async function runtimeCreationCatalog(db: DB) {
-  const [catalog, paper, purpur, folia, forge, neoforge, mappings, releases, protocols] =
+  const [catalog, quilt, paper, purpur, folia, forge, neoforge, mappings, releases, protocols] =
     await Promise.all([
       getFabricCatalog(db),
+      getQuiltCatalog(db),
       getPaperCatalog(db),
       getPurpurCatalog(db),
       getFoliaCatalog(db),
@@ -340,6 +346,7 @@ async function runtimeCreationCatalog(db: DB) {
         .where('mapping.game_id', '=', 'minecraft')
         .where('mapping.runtime_id', 'in', [
           'fabric',
+          'quilt',
           'paper',
           'purpur',
           'folia',
@@ -378,9 +385,11 @@ async function runtimeCreationCatalog(db: DB) {
     }),
   );
   return mappings.flatMap((mapping) =>
-    (mapping.runtime_id === 'fabric'
-      ? catalog.synced && catalog.latestInstallerVersion && catalog.loaders.length
-        ? catalog.games
+    (['fabric', 'quilt'].includes(mapping.runtime_id)
+      ? (mapping.runtime_id === 'quilt' ? quilt : catalog).synced &&
+        (mapping.runtime_id === 'quilt' ? quilt : catalog).latestInstallerVersion &&
+        (mapping.runtime_id === 'quilt' ? quilt : catalog).loaders.length
+        ? (mapping.runtime_id === 'quilt' ? quilt : catalog).games
         : []
       : ['forge', 'neoforge'].includes(mapping.runtime_id)
         ? (mapping.runtime_id === 'neoforge' ? neoforge : forge).synced
@@ -411,12 +420,20 @@ async function runtimeCreationCatalog(db: DB) {
     ).map((game) => ({
       id: `${mapping.runtime_id}:${mapping.id}:${game.version}`,
       version: game.version,
-      runtime: mapping.runtime_id as 'fabric' | 'paper' | 'purpur' | 'folia' | 'forge' | 'neoforge',
+      runtime: mapping.runtime_id as
+        | 'fabric'
+        | 'quilt'
+        | 'paper'
+        | 'purpur'
+        | 'folia'
+        | 'forge'
+        | 'neoforge',
       releaseType: game.stable ? ('release' as const) : ('snapshot' as const),
       releaseTime: dates.get(game.version) ?? null,
       capabilities: minecraftDeclaredCapabilities({
         profile: mapping.runtime_id as
           | 'fabric'
+          | 'quilt'
           | 'paper'
           | 'purpur'
           | 'folia'
@@ -489,6 +506,66 @@ export async function resolveFabricCreationChoice(
     { mappingId, runtime },
     env,
     { ...options, metadata },
+    true,
+  );
+  return requireMinecraftChoice(db, current, registered.id, env);
+}
+
+export async function resolveQuiltCreationChoice(
+  db: Kysely<Database>,
+  adapter: PterodactylAdapter,
+  context: AuthContext,
+  input: { choiceId: string; loaderVersion: string },
+  env: Environment = {},
+  options: { metadata?: RuntimeMetadataClient; protocols?: typeof fetchMinecraftProtocols } = {},
+) {
+  const match = /^quilt:([a-f0-9-]{36}):(.+)$/.exec(input.choiceId);
+  if (!match) throw new DomainError('validation_failed');
+  const mappingId = parse(z.uuid(), match[1]);
+  const snapshot = await getQuiltCatalogSnapshot(db);
+  const current = await currentInteractiveContext(db, context, env);
+  const mapping = await assertCatalogCreationAccess(db, current, mappingId, 'quilt');
+  if (!snapshot?.installers[0]) throw new DomainError('integration_unavailable');
+  const runtime = parse(minecraftRuntimeRequestSchema, {
+    profile: 'quilt',
+    release: match[2],
+    loaderVersion: input.loaderVersion,
+    installerVersion: snapshot.installers[0].version,
+  });
+  if (
+    !snapshot.games.some((game) => game.version === runtime.release) ||
+    !snapshot.loaders.some((loader) => loader.version === runtime.loaderVersion)
+  )
+    throw new DomainError('validation_failed');
+  const existing = await db
+    .selectFrom('minecraft_combinations')
+    .select('id')
+    .where('mapping_id', '=', mappingId)
+    .where('mapping_digest', '=', minecraftMappingDigest(mapping))
+    .where(sql<string>`combination->>'profile'`, '=', 'quilt')
+    .where(sql<string>`combination->>'release'`, '=', runtime.release)
+    .where(sql<string>`combination->>'loaderVersion'`, '=', runtime.loaderVersion ?? '')
+    .where(sql<string>`combination->>'installerVersion'`, '=', runtime.installerVersion ?? '')
+    .orderBy('created_at', 'desc')
+    .executeTakeFirst();
+  if (existing) return requireMinecraftChoice(db, current, existing.id, env);
+  const { values } = await getSettings(db, env);
+  const upstream =
+    options.metadata ??
+    createRuntimeMetadataClient({ userAgent: values.contentMetadataUserAgent ?? '' });
+  const metadata: RuntimeMetadataClient = {
+    read: (url) =>
+      !options.metadata && url === minecraftManifestUrl
+        ? cachedMinecraftManifest(db)
+        : upstream.read(url),
+  };
+  const registered = await registerCombination(
+    db,
+    adapter,
+    current,
+    { mappingId, runtime },
+    env,
+    { ...options, metadata: quiltCatalogMetadataClient(snapshot, metadata) },
     true,
   );
   return requireMinecraftChoice(db, current, registered.id, env);
@@ -928,7 +1005,7 @@ function minecraftChoiceBlockReason(
 ): 'choice-disabled' | 'mapping-disabled' | 'mapping-changed' | 'evidence-required' | null {
   if (
     !choice.row.enabled &&
-    !['fabric', 'paper', 'purpur', 'folia', 'forge', 'neoforge'].includes(
+    !['fabric', 'quilt', 'paper', 'purpur', 'folia', 'forge', 'neoforge'].includes(
       choice.combination.profile,
     )
   )
@@ -1006,7 +1083,7 @@ export async function minecraftCatalog(db: DB, context: AuthContext, env: Enviro
   const choices = [];
   for (const choice of loaded) {
     if (
-      ['fabric', 'paper', 'purpur', 'folia', 'forge', 'neoforge'].includes(
+      ['fabric', 'quilt', 'paper', 'purpur', 'folia', 'forge', 'neoforge'].includes(
         choice.combination.profile,
       )
     )

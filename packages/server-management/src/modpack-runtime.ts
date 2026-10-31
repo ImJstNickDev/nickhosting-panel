@@ -29,6 +29,7 @@ import {
   resolveFabricCreationChoice,
   resolveForgeCreationChoice,
   resolveNeoForgeCreationChoice,
+  resolveQuiltCreationChoice,
 } from './minecraft-registry.js';
 import {
   assertMinecraftEggEnvironment,
@@ -139,7 +140,7 @@ export async function resolveModpackRuntime(input: {
   const server = await authorizeServer(db, context, serverId, 'game.minecraft.modpacks.write');
   if (
     !declaredTarget(target) ||
-    (['fabric', 'forge', 'neoforge'].includes(target.loader) && !target.loaderVersion)
+    (['fabric', 'quilt', 'forge', 'neoforge'].includes(target.loader) && !target.loaderVersion)
   )
     return null;
   const [source, allocations, mappings, owner] = await Promise.all([
@@ -207,7 +208,7 @@ export async function resolveModpackRuntime(input: {
         if (!eligibilityFailure(error)) throw error;
       }
     }
-    if (['fabric', 'forge', 'neoforge'].includes(target.loader) && target.loaderVersion) {
+    if (['fabric', 'quilt', 'forge', 'neoforge'].includes(target.loader) && target.loaderVersion) {
       let loaderVersion = target.loaderVersion;
       if (target.loader === 'forge') {
         const catalog = await getForgeCatalog(db);
@@ -228,11 +229,13 @@ export async function resolveModpackRuntime(input: {
       }
       try {
         const value = await accepted(
-          await (target.loader === 'neoforge'
-            ? resolveNeoForgeCreationChoice
-            : target.loader === 'forge'
-              ? resolveForgeCreationChoice
-              : resolveFabricCreationChoice)(
+          await (target.loader === 'quilt'
+            ? resolveQuiltCreationChoice
+            : target.loader === 'neoforge'
+              ? resolveNeoForgeCreationChoice
+              : target.loader === 'forge'
+                ? resolveForgeCreationChoice
+                : resolveFabricCreationChoice)(
             db,
             adapter,
             context,

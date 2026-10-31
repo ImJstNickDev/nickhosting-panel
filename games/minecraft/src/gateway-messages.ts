@@ -40,6 +40,7 @@ export function minecraftGatewayRuntimeName(runtimeId: string): string {
     purpur: 'Purpur',
     folia: 'Folia',
     fabric: 'Fabric',
+    quilt: 'Quilt',
     forge: 'Forge',
   };
   return Object.hasOwn(names, runtimeId) ? (names[runtimeId] ?? '') : '';

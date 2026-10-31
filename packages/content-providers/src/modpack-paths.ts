@@ -27,6 +27,7 @@ export function modpackDataPath(input: string): string | null {
       'session.lock',
       'user_jvm_args.txt',
       'fabric-server-launcher.properties',
+      'quilt-server-launcher.properties',
       'server-icon.png',
     ].includes(lower) ||
     (!path.includes('/') && /\.(?:jar|sh|bat|cmd|ps1|exe|dll|so|dylib)$/i.test(path))

@@ -7,19 +7,21 @@ import { ErrorNotice, Loading, Select, Time } from '../components/ui.js';
 import { MinecraftAdminIcon } from './minecraft-admin-presentation.js';
 import { VersionCatalogFrame } from './version-catalog-frame.js';
 
-const endpoint = '/v1/owner/minecraft/fabric/catalog';
-const queryKey = ['owner-fabric-catalog'];
 const pageSize = 25;
 
 /** Independent version catalogs, read locally; creation freezes a selection on submit. */
 export function FabricVersionCatalog({
   navigation,
   kind,
+  runtime = 'fabric',
 }: {
   navigation: ReactNode;
   kind: 'games' | 'loaders' | 'installers';
+  runtime?: 'fabric' | 'quilt';
 }) {
   const t = useT();
+  const endpoint = `/v1/owner/minecraft/${runtime}/catalog`;
+  const queryKey = [`owner-${runtime}-catalog`];
   const catalog = useQuery({
     queryKey,
     queryFn: ({ signal }) => api<FabricCatalogResponse>(endpoint, { signal }),
@@ -193,7 +195,7 @@ export function FabricVersionCatalog({
           // biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard users need to scroll the catalog.
           tabIndex={0}
         >
-          {catalog.isPending ? (
+          {catalog.error && !data ? null : catalog.isPending ? (
             <Loading />
           ) : (
             <table>
@@ -225,7 +227,13 @@ export function FabricVersionCatalog({
                 {!items.length && (
                   <tr>
                     <td colSpan={2} className="fabric-catalog-empty">
-                      {t(data?.synced ? 'fabricCatalog.noMatches' : 'fabricCatalog.notSynced')}
+                      {t(
+                        data?.synced
+                          ? 'fabricCatalog.noMatches'
+                          : runtime === 'quilt'
+                            ? 'quiltCatalog.notSynced'
+                            : 'fabricCatalog.notSynced',
+                      )}
                     </td>
                   </tr>
                 )}
