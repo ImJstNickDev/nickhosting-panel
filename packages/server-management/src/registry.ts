@@ -1482,7 +1482,13 @@ export async function setRuntimeMapping(
     .select('manifest')
     .where('id', '=', value.gameId)
     .executeTakeFirst();
-  const manifest = parse(gameManifestSchema, game?.manifest);
+  // Registered games retain their rollout in storage, but runtime/port contracts
+  // come from the same compiled module used by discovery and image selection.
+  // An older stored manifest must not reject a newly shipped runtime.
+  const manifest = parse(
+    gameManifestSchema,
+    game ? (trustedGameModules.get(value.gameId)?.manifest ?? game.manifest) : undefined,
+  );
   if (
     !manifest.runtimes.some((r) => r.id === value.runtimeId) ||
     value.portRoles.filter((r) => r.primary).length !== 1 ||

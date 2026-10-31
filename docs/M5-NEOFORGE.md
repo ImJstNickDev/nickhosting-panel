@@ -116,3 +116,35 @@ reviewed management plan before reverting code that recognizes their runtime.
 Review requests: exact legacy/26.x version rules, egg startup/receipt checks,
 Owner activation and direct-endpoint requirements, and the localized screenshots.
 PR #21 remains the M5 review vehicle and must not be merged by the agent.
+
+## Defined by integration mapping correction — 2026-10-31
+
+An Owner-reported mapping rejection exposed two integration defects. The actual
+NeoForge egg advertises `ghcr.io/ptero-eggs/yolks`, while the original declaration
+selected `ghcr.io/pterodactyl/yolks`; their exact-image intersection was empty.
+NeoForge now declares the egg's Java 17/21/25 family. An egg offering only Java 22,
+an unrelated image or the old family cannot satisfy this integration policy.
+
+Mapping validation also used the previously registered database manifest, which
+can predate a shipped runtime even though discovery uses the compiled module.
+For an already registered game, mapping validation now uses its trusted compiled
+runtime/port contract when available. It preserves the registration requirement,
+stored rollout and exact egg image checks; it does not rewrite manifests or
+implicitly register games. Other integrations retain the stored-manifest fallback.
+
+Validation: 19 focused unit tests and 17 isolated integration tests passed,
+including the actual egg image shape, exact Java 17/21/25 runtime registration,
+unsupported images, an older stored Minecraft manifest and absent registration.
+Root/web/browser typecheck, lint and independent review passed. No UI behavior or
+copy changed, so previous screenshots still apply.
+
+Live investigation was read-only: the reported request was a mapping validation
+error, actual egg metadata confirmed the image family, and the app database still
+had 53 migrations without the NeoForge catalog row. Migration 054 is a separate
+activation prerequisite. Its prepared guarded operation verifies every previous
+migration checksum, applies only 054 in one transaction, and uses bounded lock and
+statement timeouts. Application requires scoped Owner approval; no egg, existing
+mapping, rollout or server is changed by this correction. No test servers created.
+
+Rollback of this correction is source revert; it restores the previous mapping
+rejection. Retain any applied additive migration and existing server data.

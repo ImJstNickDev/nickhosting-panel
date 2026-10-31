@@ -118,7 +118,155 @@ function registration(release: string, java: number) {
     },
   };
 }
+function neoforgeAdapter(
+  images = [17, 21, 22, 25].map((major) => `ghcr.io/ptero-eggs/yolks:java_${major}`),
+) {
+  return {
+    ...adapter(),
+    getEgg: async () => ({
+      id: 1,
+      nest: 1,
+      config: { stop: 'stop' },
+      docker_image: images[0],
+      docker_images: Object.fromEntries(images.map((value) => [value.split(':')[1], value])),
+      relationships: {
+        variables: {
+          data: ['MC_VERSION', 'NEOFORGE_VERSION'].map((env_variable) => ({
+            attributes: { env_variable },
+          })),
+        },
+      },
+    }),
+  } as unknown as PterodactylAdapter;
+}
+function neoforgeRegistration(release: string, loader: string, java: number) {
+  const existing = registration(release, java);
+  const artifact = release === '1.20.1' ? 'forge' : 'neoforge';
+  const metadataUrl = `https://maven.neoforged.net/releases/net/neoforged/${artifact}/maven-metadata.xml`;
+  const checksumUrl = `https://maven.neoforged.net/releases/net/neoforged/${artifact}/${loader}/${artifact}-${loader}-installer.jar.sha1`;
+  return {
+    input: {
+      mappingId: f.mappingId,
+      runtime: { release, profile: 'neoforge', loaderVersion: loader },
+    },
+    options: {
+      ...existing.options,
+      metadata: {
+        read: async (url: string) => {
+          if (url !== metadataUrl && url !== checksumUrl)
+            return existing.options.metadata.read(url);
+          const bytes = Buffer.from(
+            url === checksumUrl
+              ? 'b'.repeat(40)
+              : `<metadata><groupId>net.neoforged</groupId><artifactId>${artifact}</artifactId><versioning><versions><version>${loader}</version></versions></versioning></metadata>`,
+          );
+          return {
+            bytes,
+            evidence: {
+              url,
+              sha256: createHash('sha256').update(bytes).digest('hex'),
+              retrievedAt: new Date().toISOString(),
+            },
+          };
+        },
+      },
+    },
+  };
+}
 describe('integration-owned runtime images', () => {
+  it('links the advertised NeoForge egg and pins its exact Java images in integration mode', async () => {
+    const provider = neoforgeAdapter();
+    await setRuntimeMapping(f.db, provider, f.owner, {
+      ...input(),
+      runtimeId: 'neoforge',
+      startup: 'java @unix_args.txt',
+    });
+    for (const [release, loader, java] of [
+      ['1.20.1', '1.20.1-47.1.106', 17],
+      ['1.21.1', '21.1.72', 21],
+      ['26.1', '26.1.0.1-beta', 25],
+    ] as const) {
+      const request = neoforgeRegistration(release, loader, java);
+      const registered = await registerMinecraftCombination(
+        f.db,
+        provider,
+        f.owner,
+        request.input,
+        {},
+        request.options,
+      );
+      const choice = await inspectMinecraftCombination(f.db, registered.id);
+      const expected = `ghcr.io/ptero-eggs/yolks:java_${java}`;
+      expect(choice.row.binding).toMatchObject({ image: expected, imageJavaMajor: java });
+      expect(mappingProvisionImage(choice.mapping, choice.row.binding)).toBe(expected);
+    }
+  });
+  it('uses the current compiled NeoForge contract when the registered manifest predates it', async () => {
+    await f.db
+      .updateTable('game_integrations')
+      .set({
+        manifest: JSON.stringify({
+          ...minecraftManifest,
+          runtimes: minecraftManifest.runtimes.filter((runtime) => runtime.id !== 'neoforge'),
+        }),
+      })
+      .where('id', '=', 'minecraft')
+      .execute();
+    await setRuntimeMapping(f.db, neoforgeAdapter(), f.owner, {
+      ...input(),
+      runtimeId: 'neoforge',
+      startup: 'java @unix_args.txt',
+    });
+    expect(
+      await f.db
+        .selectFrom('runtime_egg_mappings')
+        .select(['runtime_id', 'image_mode'])
+        .where('id', '=', f.mappingId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({
+      runtime_id: 'neoforge',
+      image_mode: 'integration',
+    });
+    // The authoritative compiled contract does not rewrite Owner registration/rollout state.
+    const registered = await f.db
+      .selectFrom('game_integrations')
+      .select('manifest')
+      .where('id', '=', 'minecraft')
+      .executeTakeFirstOrThrow();
+    expect(
+      (registered.manifest as typeof minecraftManifest).runtimes.some(
+        (runtime) => runtime.id === 'neoforge',
+      ),
+    ).toBe(false);
+  });
+  it('does not use a compiled contract to implicitly register an absent game', async () => {
+    const unregistered = await createTestDatabase();
+    try {
+      await expect(
+        setRuntimeMapping(unregistered.db, neoforgeAdapter(), f.owner, {
+          ...input(),
+          runtimeId: 'neoforge',
+          startup: 'java @unix_args.txt',
+        }),
+      ).rejects.toMatchObject({ code: 'validation_failed' });
+    } finally {
+      await unregistered.destroy();
+    }
+  });
+  it('rejects NeoForge eggs with only unapproved or unsupported images', async () => {
+    for (const images of [
+      [image(21)],
+      ['example.invalid/custom:java_21'],
+      ['ghcr.io/ptero-eggs/yolks:java_22'],
+    ])
+      await expect(
+        setRuntimeMapping(f.db, neoforgeAdapter(images), f.owner, {
+          ...input(),
+          runtimeId: 'neoforge',
+          startup: 'java @unix_args.txt',
+        }),
+      ).rejects.toMatchObject({ code: 'validation_failed' });
+  });
   it('dispatches a second integration immutable choice without game-specific Core logic', async () => {
     const mapping = await f.db
       .selectFrom('runtime_egg_mappings')

@@ -13,7 +13,7 @@ import { managementFixture } from './test-fixtures.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
 let f: Awaited<ReturnType<typeof managementFixture>>;
-const image = 'ghcr.io/pterodactyl/yolks:java_21';
+const image = 'ghcr.io/ptero-eggs/yolks:java_21';
 const base = 'https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml';
 const legacy = 'https://maven.neoforged.net/releases/net/neoforged/forge/maven-metadata.xml';
 const release = '1.21.1';
@@ -175,6 +175,8 @@ it('browses local versions then freezes the exact loader once, without downloadi
   });
   expect(choice.row.binding).toMatchObject({
     bindings: { release: 'MC_VERSION', loaderVersion: 'NEOFORGE_VERSION' },
+    image,
+    imageJavaMajor: 21,
   });
   expect(source.read.mock.calls.map(([url]) => url)).toEqual([
     minecraftManifestUrl,

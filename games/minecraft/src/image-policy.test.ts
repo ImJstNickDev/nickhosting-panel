@@ -56,6 +56,19 @@ describe('Minecraft integration-owned images', () => {
     for (const major of [11, 18, 20, 25, 26])
       expect(() => resolveMinecraftImage(runtime(major, 'fixture', 'forge'))).toThrow();
   });
+  it('uses the advertised NeoForge image family and only supported Java majors', () => {
+    for (const [release, major] of [
+      ['1.20.1', 17],
+      ['1.21.1', 21],
+      ['26.1', 25],
+    ] as const)
+      expect(resolveMinecraftImage(runtime(major, release, 'neoforge')).image).toBe(
+        `ghcr.io/ptero-eggs/yolks:java_${major}`,
+      );
+    // The egg also advertises Java 22, but no supported NeoForge pair needs it.
+    for (const major of [8, 16, 22, 26])
+      expect(() => resolveMinecraftImage(runtime(major, 'fixture', 'neoforge'))).toThrow();
+  });
   it('declares image policies for all profiles without advertising verified versions', () => {
     for (const profile of minecraftManifest.runtimes) {
       expect(profile.imagePolicy?.mode).toBe('rules');

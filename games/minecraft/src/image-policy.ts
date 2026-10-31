@@ -50,14 +50,14 @@ export const minecraftForgeImagePolicy = runtimeImagePolicySchema.parse({
   })),
 });
 
-/** NeoForge uses the standard Java runtime images; discovered egg images and
- * Owner overrides remain authoritative at binding time. */
+/** NeoForge eggs advertise the maintained ptero-eggs Java image family.
+ * Keep exact majors reviewed; the selected image must still exist on the egg. */
 export const minecraftNeoForgeImagePolicy = runtimeImagePolicySchema.parse({
   mode: 'rules',
   rules: [17, 21, 25].map((major) => ({
     id: `java-${major}`,
     requirements: { javaMajor: String(major) },
-    image: `ghcr.io/pterodactyl/yolks:java_${major}`,
+    image: `ghcr.io/ptero-eggs/yolks:java_${major}`,
   })),
 });
 
