@@ -19,6 +19,8 @@ import {
   paperCatalogMetadataClient,
   paperEggBinding,
   publicMinecraftChoice,
+  purpurCatalogMetadataClient,
+  purpurEggBinding,
   resolveMinecraftImage,
   vanillaEggBinding,
 } from '@nickhosting/minecraft';
@@ -40,6 +42,7 @@ import { currentInteractiveContext } from './interactive-context.js';
 import { cachedMinecraftManifest, getMinecraftMetadataStatus } from './minecraft-metadata.js';
 import { getNeoForgeCatalog, getNeoForgeCatalogSnapshot } from './neoforge-catalog.js';
 import { getPaperCatalog, getPaperCatalogSnapshot } from './paper-catalog.js';
+import { getPurpurCatalog, getPurpurCatalogSnapshot } from './purpur-catalog.js';
 import { ownerOnly, parse } from './registry.js';
 
 type Mapping = Selectable<Database['runtime_egg_mappings']>;
@@ -159,9 +162,11 @@ async function registerCombination(
         ? neoforgeEggBinding
         : runtime.profile === 'forge'
           ? forgeEggBinding
-          : runtime.profile === 'paper'
-            ? paperEggBinding
-            : vanillaEggBinding)({
+          : runtime.profile === 'purpur'
+            ? purpurEggBinding
+            : runtime.profile === 'paper'
+              ? paperEggBinding
+              : vanillaEggBinding)({
       runtime,
       variables: egg.relationships?.variables?.data.map((entry) => entry.attributes) ?? [],
       environment: mapping.environment,
@@ -307,7 +312,7 @@ async function assertCatalogCreationAccess(
     !mapping.nodeEnabled ||
     mapping.game_id !== 'minecraft' ||
     mapping.runtime_id !== profile ||
-    !['fabric', 'paper', 'forge', 'neoforge'].includes(profile)
+    !['fabric', 'paper', 'purpur', 'forge', 'neoforge'].includes(profile)
   )
     throw new DomainError('integration_unavailable');
   const { nodeEnabled: _nodeEnabled, ...identity } = mapping;
@@ -315,37 +320,39 @@ async function assertCatalogCreationAccess(
 }
 
 async function runtimeCreationCatalog(db: DB) {
-  const [catalog, paper, forge, neoforge, mappings, releases, protocols] = await Promise.all([
-    getFabricCatalog(db),
-    getPaperCatalog(db),
-    getForgeCatalog(db),
-    getNeoForgeCatalog(db),
-    db
-      .selectFrom('runtime_egg_mappings as mapping')
-      .innerJoin('managed_nodes as node', 'node.id', 'mapping.node_id')
-      .select(['mapping.id', 'mapping.runtime_id'])
-      .where('mapping.game_id', '=', 'minecraft')
-      .where('mapping.runtime_id', 'in', ['fabric', 'paper', 'forge', 'neoforge'])
-      .where('mapping.enabled', '=', true)
-      .where('node.enabled', '=', true)
-      .orderBy('mapping.id')
-      .execute(),
-    db
-      .selectFrom('minecraft_release_metadata')
-      .select(['id', 'release_time', 'release_type'])
-      .execute(),
-    // Reuse protocol facts already resolved locally, across runtimes. This is one
-    // bulk read, never a metadata request (or a query) for every catalog version.
-    db
-      .selectFrom('minecraft_combinations')
-      .select('combination')
-      .distinctOn(sql<string>`combination->>'release'`)
-      .where(sql<string>`combination->>'family'`, '=', 'netty')
-      .where(sql<string>`combination->>'protocolId'`, 'is not', null)
-      .orderBy(sql<string>`combination->>'release'`)
-      .orderBy('created_at', 'desc')
-      .execute(),
-  ]);
+  const [catalog, paper, purpur, forge, neoforge, mappings, releases, protocols] =
+    await Promise.all([
+      getFabricCatalog(db),
+      getPaperCatalog(db),
+      getPurpurCatalog(db),
+      getForgeCatalog(db),
+      getNeoForgeCatalog(db),
+      db
+        .selectFrom('runtime_egg_mappings as mapping')
+        .innerJoin('managed_nodes as node', 'node.id', 'mapping.node_id')
+        .select(['mapping.id', 'mapping.runtime_id'])
+        .where('mapping.game_id', '=', 'minecraft')
+        .where('mapping.runtime_id', 'in', ['fabric', 'paper', 'purpur', 'forge', 'neoforge'])
+        .where('mapping.enabled', '=', true)
+        .where('node.enabled', '=', true)
+        .orderBy('mapping.id')
+        .execute(),
+      db
+        .selectFrom('minecraft_release_metadata')
+        .select(['id', 'release_time', 'release_type'])
+        .execute(),
+      // Reuse protocol facts already resolved locally, across runtimes. This is one
+      // bulk read, never a metadata request (or a query) for every catalog version.
+      db
+        .selectFrom('minecraft_combinations')
+        .select('combination')
+        .distinctOn(sql<string>`combination->>'release'`)
+        .where(sql<string>`combination->>'family'`, '=', 'netty')
+        .where(sql<string>`combination->>'protocolId'`, 'is not', null)
+        .orderBy(sql<string>`combination->>'release'`)
+        .orderBy('created_at', 'desc')
+        .execute(),
+    ]);
 
   const dates = new Map(
     releases.map((release) => [release.id, release.release_time?.toISOString() ?? null]),
@@ -369,8 +376,8 @@ async function runtimeCreationCatalog(db: DB) {
               stable: true,
             }))
           : []
-        : paper.synced
-          ? paper.versions.map((entry) => ({
+        : (mapping.runtime_id === 'purpur' ? purpur : paper).synced
+          ? (mapping.runtime_id === 'purpur' ? purpur : paper).versions.map((entry) => ({
               version: entry.version,
               stable:
                 (releaseTypes.get(entry.version) ??
@@ -381,11 +388,11 @@ async function runtimeCreationCatalog(db: DB) {
     ).map((game) => ({
       id: `${mapping.runtime_id}:${mapping.id}:${game.version}`,
       version: game.version,
-      runtime: mapping.runtime_id as 'fabric' | 'paper' | 'forge' | 'neoforge',
+      runtime: mapping.runtime_id as 'fabric' | 'paper' | 'purpur' | 'forge' | 'neoforge',
       releaseType: game.stable ? ('release' as const) : ('snapshot' as const),
       releaseTime: dates.get(game.version) ?? null,
       capabilities: minecraftDeclaredCapabilities({
-        profile: mapping.runtime_id as 'fabric' | 'paper' | 'forge' | 'neoforge',
+        profile: mapping.runtime_id as 'fabric' | 'paper' | 'purpur' | 'forge' | 'neoforge',
         release: game.version,
         releaseType: game.stable ? 'release' : 'snapshot',
         family: knownProtocols.get(game.version)?.family ?? 'unknown',
@@ -510,6 +517,63 @@ export async function resolvePaperCreationChoice(
     },
     env,
     { ...options, metadata: paperCatalogMetadataClient(snapshot, fallback) },
+    true,
+  );
+  return requireMinecraftChoice(db, current, registered.id, env);
+}
+
+/** Resolve latest once from the accepted local catalog, then persist the exact build.
+ * Subsequent creation retries are served by the request idempotency record. */
+export async function resolvePurpurCreationChoice(
+  db: Kysely<Database>,
+  adapter: PterodactylAdapter,
+  context: AuthContext,
+  input: { choiceId: string },
+  env: Environment = {},
+  options: { metadata?: RuntimeMetadataClient; protocols?: typeof fetchMinecraftProtocols } = {},
+) {
+  const match = /^purpur:([a-f0-9-]{36}):(.+)$/.exec(input.choiceId);
+  if (!match) throw new DomainError('validation_failed');
+  const mappingId = parse(z.uuid(), match[1]);
+  const [snapshot, current] = await Promise.all([
+    getPurpurCatalogSnapshot(db),
+    currentInteractiveContext(db, context, env),
+  ]);
+  const mapping = await assertCatalogCreationAccess(db, current, mappingId, 'purpur');
+  if (!snapshot) throw new DomainError('integration_unavailable');
+  const version = snapshot.versions.find((entry) => entry.version === match[2]);
+  if (!version) throw new DomainError('validation_failed');
+  const existing = await db
+    .selectFrom('minecraft_combinations')
+    .select('id')
+    .where('mapping_id', '=', mappingId)
+    .where('mapping_digest', '=', minecraftMappingDigest(mapping))
+    .where(sql<string>`combination->>'profile'`, '=', 'purpur')
+    .where(sql<string>`combination->>'release'`, '=', version.version)
+    .where(sql<string>`combination->>'buildId'`, '=', String(version.buildId))
+    .orderBy('created_at', 'desc')
+    .executeTakeFirst();
+  if (existing) return requireMinecraftChoice(db, current, existing.id, env);
+  const { values } = await getSettings(db, env);
+  const upstream =
+    options.metadata ??
+    createRuntimeMetadataClient({ userAgent: values.contentMetadataUserAgent ?? '' });
+  const fallback: RuntimeMetadataClient = {
+    read: (url) =>
+      !options.metadata && url === minecraftManifestUrl
+        ? cachedMinecraftManifest(db)
+        : upstream.read(url),
+  };
+  const registered = await registerCombination(
+    db,
+    adapter,
+    current,
+    {
+      mappingId,
+      runtime: { profile: 'purpur', release: version.version, buildId: version.buildId },
+    },
+    env,
+    { ...options, metadata: purpurCatalogMetadataClient(snapshot, fallback) },
     true,
   );
   return requireMinecraftChoice(db, current, registered.id, env);
@@ -778,7 +842,7 @@ function minecraftChoiceBlockReason(
 ): 'choice-disabled' | 'mapping-disabled' | 'mapping-changed' | 'evidence-required' | null {
   if (
     !choice.row.enabled &&
-    !['fabric', 'paper', 'forge', 'neoforge'].includes(choice.combination.profile)
+    !['fabric', 'paper', 'purpur', 'forge', 'neoforge'].includes(choice.combination.profile)
   )
     return 'choice-disabled';
   if (!choice.mapping.enabled) return 'mapping-disabled';
@@ -853,7 +917,8 @@ export async function minecraftCatalog(db: DB, context: AuthContext, env: Enviro
   const loaded = await inspectMinecraftCombinations(db, rows, env, false);
   const choices = [];
   for (const choice of loaded) {
-    if (['fabric', 'paper', 'forge', 'neoforge'].includes(choice.combination.profile)) continue;
+    if (['fabric', 'paper', 'purpur', 'forge', 'neoforge'].includes(choice.combination.profile))
+      continue;
     try {
       assertLoadedMinecraftChoice(choice, rollout, context);
       choices.push({

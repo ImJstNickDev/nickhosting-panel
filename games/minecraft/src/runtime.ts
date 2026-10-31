@@ -9,11 +9,14 @@ import {
   neoforgeMinecraftVersion,
 } from './neoforge-policy.js';
 import { paperJavaMajor } from './paper-policy.js';
+import { purpurBuildSchema, purpurVersionSchema } from './purpur-catalog.js';
+import { purpurJavaMajor } from './purpur-policy.js';
 import { vanillaJavaMajor } from './vanilla-policy.js';
 
 export const minecraftRuntimeProfiles = [
   'vanilla',
   'paper',
+  'purpur',
   'folia',
   'fabric',
   'forge',
@@ -38,6 +41,7 @@ const origins = new Set([
   'https://launchermeta.mojang.com',
   'https://piston-data.mojang.com',
   'https://launcher.mojang.com',
+  'https://api.purpurmc.org',
   'https://fill.papermc.io',
   'https://fill-data.papermc.io',
   'https://meta.fabricmc.net',
@@ -73,6 +77,7 @@ export interface RuntimeSourceEvidence {
 export interface RuntimeArtifact {
   readonly role: 'server' | 'installer';
   readonly url: string;
+  readonly md5?: string;
   readonly sha1?: string;
   readonly sha256?: string;
   readonly size?: number;
@@ -206,7 +211,7 @@ export async function resolveMinecraftRuntime(
 ): Promise<ResolvedMinecraftRuntime> {
   const request = parse(minecraftRuntimeRequestSchema, input);
   if (
-    ['paper', 'folia'].includes(request.profile) !== (request.buildId !== undefined) ||
+    ['paper', 'purpur', 'folia'].includes(request.profile) !== (request.buildId !== undefined) ||
     ['fabric', 'forge', 'neoforge'].includes(request.profile) !==
       (request.loaderVersion !== undefined) ||
     (request.profile === 'fabric') !== (request.installerVersion !== undefined)
@@ -259,7 +264,7 @@ export async function resolveMinecraftRuntime(
         ? neoforgeJavaMajor(request.release, release.javaVersion?.majorVersion)
         : request.profile === 'forge'
           ? forgeJavaMajor(request.release, release.javaVersion?.majorVersion)
-          : request.profile === 'paper'
+          : request.profile === 'paper' || request.profile === 'purpur'
             ? (release.javaVersion?.majorVersion ?? 8)
             : (release.javaVersion?.majorVersion ?? fail('minecraft_java_unknown'));
   let upstreamSupport: string | undefined;
@@ -324,6 +329,25 @@ export async function resolveMinecraftRuntime(
         url: trustedMinecraftArtifactUrl(artifact.url),
         sha256: artifact.checksums.sha256.toLowerCase(),
         size: artifact.size,
+      },
+    ];
+  } else if (request.profile === 'purpur') {
+    const base = `https://api.purpurmc.org/v2/purpur/${request.release}`;
+    const version = parse(purpurVersionSchema, json(await read(base)));
+    if (
+      version.version !== request.release ||
+      !version.builds.all.includes(String(request.buildId))
+    )
+      return fail('minecraft_build_unavailable');
+    const build = parse(purpurBuildSchema, json(await read(`${base}/${request.buildId}`)));
+    if (build.version !== request.release || Number(build.build) !== request.buildId)
+      return fail('minecraft_build_mismatch');
+    javaMajor = purpurJavaMajor(request.release, release.javaVersion?.majorVersion);
+    artifacts = [
+      {
+        role: 'server',
+        url: trustedMinecraftArtifactUrl(`${base}/${request.buildId}/download`),
+        md5: build.md5.toLowerCase(),
       },
     ];
   } else if (request.profile === 'fabric') {

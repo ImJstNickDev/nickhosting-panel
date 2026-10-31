@@ -3,6 +3,7 @@ import { DomainError } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import {
   fetchPaperCatalog,
+  fetchPurpurCatalog,
   minecraftDigest,
   minecraftManifest,
   minecraftVerificationChecks,
@@ -1280,6 +1281,177 @@ describe('Minecraft backend API authorization and user projection', () => {
         manifest_json: JSON.stringify(await makeSnapshot(101)),
       })
       .where('id', '=', 'paper')
+      .execute();
+    management.mockClear();
+    expect(await (await post('/v1/minecraft/servers', input)).json()).toEqual(created);
+    expect(management).not.toHaveBeenCalled();
+    expect((await post('/v1/minecraft/servers', { ...input, name: 'Changed replay' })).status).toBe(
+      409,
+    );
+    expect(
+      (
+        await post('/v1/minecraft/servers', {
+          ...input,
+          minecraft: { ...input.minecraft, loaderVersion: '0.16.9' },
+        })
+      ).status,
+    ).toBe(400);
+  });
+  it('restricts Purpur discovery refresh to Owners and queues without contacting providers', async () => {
+    const endpoint = '/v1/owner/minecraft/purpur/catalog';
+    expect((await app.request(endpoint)).status).toBe(403);
+    actor = fixture.owner;
+    expect((await app.request(endpoint)).status).toBe(200);
+    expect((await post(endpoint, {})).status).toBe(202);
+    expect(management).not.toHaveBeenCalled();
+    expect(
+      (
+        await fixture.db
+          .selectFrom('minecraft_metadata_sync')
+          .select('requested_at')
+          .where('id', '=', 'purpur')
+          .executeTakeFirstOrThrow()
+      ).requested_at,
+    ).not.toBeNull();
+  });
+  it('creates Purpur with latest cached build and preserves retry identity across build updates', async () => {
+    const id = await eligibleChoice(false);
+    Object.assign(routeEnv, {
+      NH_GATEWAY_ENABLED: 'true',
+      NH_GATEWAY_ID: randomUUID(),
+      NH_GATEWAY_PHYSICAL_HOST_ID: fixture.hostId,
+    });
+    // Match a Gateway-only deployment: no public direct endpoint is configured.
+    await fixture.db
+      .updateTable('managed_nodes')
+      .set({
+        backend_allocation_pool: JSON.stringify(fixture.backendAllocationPool),
+      })
+      .where('id', '=', fixture.nodeId)
+      .execute();
+    await fixture.db
+      .updateTable('runtime_egg_mappings')
+      .set({
+        runtime_id: 'purpur',
+        port_roles: JSON.stringify([{ role: 'game', protocols: ['tcp'], primary: true }]),
+      })
+      .where('id', '=', fixture.mappingId)
+      .execute();
+    const mapping = await fixture.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', fixture.mappingId)
+      .executeTakeFirstOrThrow();
+    const old = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirstOrThrow();
+    const combination = {
+      ...(old.combination as Record<string, unknown>),
+      profile: 'purpur',
+      buildId: '100',
+    };
+    const runtime = {
+      ...(old.resolved_runtime as Record<string, unknown>),
+      profile: 'purpur',
+      buildId: 100,
+      installation: { kind: 'server-jar', args: [] },
+    };
+    const binding = {
+      ...(old.binding as Record<string, unknown>),
+      profile: 'purpur',
+      installationKind: 'server-jar',
+      declaredEggVariables: ['MINECRAFT_VERSION', 'BUILD_NUMBER'],
+      bindings: { release: 'MINECRAFT_VERSION', buildId: 'BUILD_NUMBER' },
+    };
+    await fixture.db
+      .updateTable('minecraft_combinations')
+      .set({
+        combination: JSON.stringify(combination),
+        resolved_runtime: JSON.stringify(runtime),
+        binding: JSON.stringify(binding),
+        mapping_digest: minecraftMappingDigest(mapping),
+        enabled: false,
+      })
+      .where('id', '=', id)
+      .execute();
+    const makeSnapshot = (build: number) =>
+      fetchPurpurCatalog({
+        read: async (url) => {
+          const value = url.endsWith('/purpur')
+            ? { project: 'purpur', versions: ['1.21.1'] }
+            : url.endsWith('/1.21.1')
+              ? {
+                  project: 'purpur',
+                  version: '1.21.1',
+                  builds: { latest: String(build), all: [String(build)] },
+                }
+              : {
+                  project: 'purpur',
+                  version: '1.21.1',
+                  build: String(build),
+                  result: 'SUCCESS',
+                  timestamp: Date.parse('2026-10-20T00:00:00Z'),
+                  md5: 'a'.repeat(32),
+                };
+          const bytes = Buffer.from(JSON.stringify(value));
+          return {
+            bytes,
+            evidence: {
+              url,
+              sha256: createHash('sha256').update(bytes).digest('hex'),
+              retrievedAt: new Date().toISOString(),
+            },
+          };
+        },
+      });
+    const snapshot = await makeSnapshot(100);
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({ manifest_json: JSON.stringify(snapshot), last_success_at: new Date() })
+      .where('id', '=', 'purpur')
+      .execute();
+    const choiceId = `purpur:${fixture.mappingId}:1.21.1`;
+    const choices = await (await app.request('/v1/minecraft/choices')).json();
+    expect(choices.find((choice: { id: string }) => choice.id === choiceId)).toMatchObject({
+      capabilities: { gateway: true, sleepWake: true },
+    });
+    const input = {
+      ...createInput(choiceId),
+      minecraft: createInput(choiceId).minecraft,
+    };
+    const response = await post('/v1/minecraft/servers', input);
+    expect(await response.clone().json()).not.toHaveProperty('code');
+    expect(response.status).toBe(202);
+    const created = await response.json();
+    const profile = await fixture.db
+      .selectFrom('minecraft_server_profiles')
+      .select('combination_id')
+      .where('server_id', '=', created.serverId)
+      .executeTakeFirstOrThrow();
+    expect(profile.combination_id).toBe(id);
+    expect(
+      await fixture.db
+        .selectFrom('managed_servers')
+        .select('connection_mode')
+        .where('id', '=', created.serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ connection_mode: 'gateway' });
+    expect(
+      await fixture.db
+        .selectFrom('gateway_routes')
+        .select(['enabled', 'transport'])
+        .where('server_id', '=', created.serverId)
+        .execute(),
+    ).toEqual([{ enabled: false, transport: 'tcp' }]);
+
+    await fixture.db
+      .updateTable('minecraft_metadata_sync')
+      .set({
+        manifest_json: JSON.stringify(await makeSnapshot(101)),
+      })
+      .where('id', '=', 'purpur')
       .execute();
     management.mockClear();
     expect(await (await post('/v1/minecraft/servers', input)).json()).toEqual(created);

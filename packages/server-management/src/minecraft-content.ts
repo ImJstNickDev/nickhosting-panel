@@ -520,7 +520,7 @@ export async function hashMinecraftRemoteFile(
   context: MinecraftReadContext,
   path: string,
   options: { maxBytes?: number; onChunk?: (chunk: Uint8Array) => void } = {},
-): Promise<{ sha256: string; sha1: string; size: number } | null> {
+): Promise<{ sha256: string; sha1: string; md5: string; size: number } | null> {
   const entry = await remoteEntry(context, path);
   if (!entry) return null;
   if (!entry.is_file || !Number.isSafeInteger(entry.size)) throw new DomainError('conflict');
@@ -536,7 +536,8 @@ export async function hashMinecraftRemoteFile(
   );
   const reader = response.body.getReader();
   const hash = createHash('sha256'),
-    legacy = createHash('sha1');
+    legacy = createHash('sha1'),
+    purpurHash = createHash('md5');
   let size = 0;
   try {
     for (;;) {
@@ -546,6 +547,7 @@ export async function hashMinecraftRemoteFile(
       if (size > entry.size) throw new DomainError('conflict');
       hash.update(item.value);
       legacy.update(item.value);
+      purpurHash.update(item.value);
       options.onChunk?.(item.value);
     }
   } finally {
@@ -553,7 +555,12 @@ export async function hashMinecraftRemoteFile(
     reader.releaseLock();
   }
   if (size !== entry.size) throw new DomainError('conflict');
-  return { sha256: hash.digest('hex'), sha1: legacy.digest('hex'), size };
+  return {
+    sha256: hash.digest('hex'),
+    sha1: legacy.digest('hex'),
+    md5: purpurHash.digest('hex'),
+    size,
+  };
 }
 async function textFile(
   context: GameLifecycleContext,
@@ -865,7 +872,13 @@ async function verifyInstalledRuntime(
   if (runtime.installation.kind === 'server-jar') {
     const artifact = runtime.artifacts.find((item) => item.role === 'server');
     const path = binding.artifactPaths.server;
-    if (!artifact || !path || (!artifact.sha1 && !artifact.sha256))
+    if (
+      !artifact ||
+      !path ||
+      (!artifact.sha1 &&
+        !artifact.sha256 &&
+        !(runtime.profile === 'purpur' && /^[a-f0-9]{32}$/.test(artifact.md5 ?? '')))
+    )
       throw new DomainError('configuration_invalid');
     const actual = await hashMinecraftRemoteFile(context, path, {
       maxBytes: artifact.size ?? 512 * 1024 ** 2,
@@ -874,6 +887,7 @@ async function verifyInstalledRuntime(
       !actual ||
       (artifact.sha1 && artifact.sha1 !== actual.sha1) ||
       (artifact.sha256 && artifact.sha256 !== actual.sha256) ||
+      (runtime.profile === 'purpur' && artifact.md5 && artifact.md5 !== actual.md5) ||
       (artifact.size !== undefined && artifact.size !== actual.size)
     )
       throw new DomainError('conflict');

@@ -3,7 +3,11 @@ import type { ModCompatibilityIssue, ModEnvironment } from './mod-catalog.js';
 
 /** Paper implements Bukkit/Spigot APIs. Folia support is a separate explicit declaration. */
 export function pluginLoaders(target: ContentTarget): string[] {
-  return target.loader === 'paper' ? ['paper', 'spigot', 'bukkit'] : [target.loader];
+  return target.loader === 'purpur'
+    ? ['purpur', 'paper', 'spigot', 'bukkit']
+    : target.loader === 'paper'
+      ? ['paper', 'spigot', 'bukkit']
+      : [target.loader];
 }
 export function pluginCompatibility(
   gameVersions: string[],

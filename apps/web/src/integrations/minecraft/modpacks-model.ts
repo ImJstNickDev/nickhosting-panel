@@ -29,6 +29,7 @@ export function recommendedPackVersion(versions: readonly ModpackCatalogVersion[
 const loaderLabels: Record<string, string> = {
   vanilla: 'Vanilla',
   paper: 'Paper',
+  purpur: 'Purpur',
   folia: 'Folia',
   fabric: 'Fabric',
   forge: 'Forge',

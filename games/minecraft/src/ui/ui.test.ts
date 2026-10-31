@@ -189,7 +189,7 @@ describe('Minecraft browser module and exact API contracts', () => {
       expect(sections(runtime)).toContain('mods');
       expect(sections(runtime)).not.toContain('plugins');
     }
-    for (const runtime of ['paper', 'folia']) {
+    for (const runtime of ['paper', 'purpur', 'folia']) {
       expect(sections(runtime)).toContain('plugins');
       expect(sections(runtime)).not.toContain('mods');
     }

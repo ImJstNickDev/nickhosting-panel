@@ -78,12 +78,15 @@ describe('Minecraft integration-owned images', () => {
       expect(profile.supportedGameVersions).toEqual([]);
     }
   });
-  it('uses only the PaperUpdated image family and its explicitly advertised majors', () => {
-    for (const major of [8, 11, 16, 17, 21, 22, 25])
-      expect(resolveMinecraftImage(runtime(major, 'fixture', 'paper')).image).toBe(
-        `ghcr.io/ptero-eggs/yolks:java_${major}`,
-      );
-    for (const major of [18, 19, 20, 23, 24, 26])
-      expect(() => resolveMinecraftImage(runtime(major, 'fixture', 'paper'))).toThrow();
-  });
+  it.each(['paper', 'purpur'] as const)(
+    'uses the advertised %s image family and majors',
+    (profile) => {
+      for (const major of [8, 11, 16, 17, 21, 22, 25])
+        expect(resolveMinecraftImage(runtime(major, 'fixture', profile)).image).toBe(
+          `ghcr.io/ptero-eggs/yolks:java_${major}`,
+        );
+      for (const major of [18, 19, 20, 23, 24, 26])
+        expect(() => resolveMinecraftImage(runtime(major, 'fixture', profile))).toThrow();
+    },
+  );
 });

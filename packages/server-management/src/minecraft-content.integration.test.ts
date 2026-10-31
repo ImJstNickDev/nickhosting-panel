@@ -266,7 +266,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       semantic?: boolean;
     },
     interactive = false,
-    serverJarProfile: 'vanilla' | 'paper' = 'vanilla',
+    serverJarProfile: 'vanilla' | 'paper' | 'purpur' = 'vanilla',
   ) {
     const profile = launcher ? 'fabric' : serverJarProfile;
     const image = 'fixture-java:21';
@@ -331,7 +331,15 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       release: '1.21.1',
       javaMajor: 21,
       installation: { kind: launcher ? 'fabric-installer' : 'server-jar', args: [] },
-      artifacts: [{ role: 'server', sha256: runtimeHash, size: runtimeBytes.length }],
+      artifacts: [
+        {
+          role: 'server',
+          ...(profile === 'purpur'
+            ? { md5: createHash('md5').update(runtimeBytes).digest('hex') }
+            : { sha256: runtimeHash }),
+          size: runtimeBytes.length,
+        },
+      ],
     };
     await f.db
       .insertInto('minecraft_combinations')
@@ -3094,7 +3102,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       await expect(verifyMinecraftInitialInstallation(context, options)).rejects.toThrow();
     },
   );
-  it.each(['vanilla', 'paper'] as const)(
+  it.each(['vanilla', 'paper', 'purpur'] as const)(
     'verifies a declaration-backed %s installation without signatures and still rejects changed artifacts',
     async (runtimeProfile) => {
       const { f, serverId, files, context, options } = await minecraftFixture(
@@ -3124,6 +3132,24 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       await expect(assertMinecraftLaunchInputs(context, options)).rejects.toThrow('conflict');
     },
   );
+
+  it('rejects a Purpur installer output that disagrees with the provider MD5 before recording installation', async () => {
+    const { f, serverId, files, context, options } = await minecraftFixture(
+      undefined,
+      false,
+      'purpur',
+    );
+    await f.db.deleteFrom('minecraft_verification_evidence').execute();
+    options.env = {};
+    files.set('server.jar', Buffer.from('wrong build content'));
+    await expect(configureMinecraftProvision(context, options)).rejects.toThrow('conflict');
+    const saved = await f.db
+      .selectFrom('minecraft_server_profiles')
+      .select('installed')
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    expect(saved.installed).toBe(false);
+  });
 
   it('applies declared modern whitelist configuration before a first generated properties file', async () => {
     const { f, serverId, files, context, options } = await minecraftFixture();

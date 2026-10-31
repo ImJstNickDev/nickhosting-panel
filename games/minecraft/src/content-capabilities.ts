@@ -1,7 +1,7 @@
 /** Shared by the manifest and browser UI; these declarations do not grant permissions. */
 export const minecraftContentRuntimes = {
   mods: ['fabric', 'forge', 'neoforge'],
-  plugins: ['paper', 'folia'],
+  plugins: ['paper', 'purpur', 'folia'],
 } as const;
 
 export function minecraftContentCapabilities(runtime: string) {

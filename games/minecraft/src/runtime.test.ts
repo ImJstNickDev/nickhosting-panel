@@ -61,6 +61,82 @@ function fixture(
   return { client, requests };
 }
 describe('Minecraft exact runtime metadata', () => {
+  it.each([
+    ['1.14.1', 11],
+    ['1.16.5', 16],
+    ['1.17.1', 17],
+  ] as const)(
+    'resolves historical Purpur %s without Mojang Java metadata',
+    async (release, javaMajor) => {
+      const base = `https://api.purpurmc.org/v2/purpur/${release}`;
+      const { client } = fixture(
+        {
+          [base]: { project: 'purpur', version: release, builds: { latest: '5', all: ['5'] } },
+          [`${base}/5`]: {
+            project: 'purpur',
+            version: release,
+            build: '5',
+            result: 'SUCCESS',
+            timestamp: 1770000000000,
+            md5: 'a'.repeat(32),
+          },
+        },
+        { release, java: null },
+      );
+      expect(
+        await resolveMinecraftRuntime({ profile: 'purpur', release, buildId: 5 }, client),
+      ).toMatchObject({ javaMajor });
+    },
+  );
+  it('resolves an exact Purpur build with published MD5 and no invented SHA256', async () => {
+    const base = 'https://api.purpurmc.org/v2/purpur/26.1';
+    const { client, requests } = fixture({
+      [base]: { project: 'purpur', version: '26.1', builds: { latest: '7', all: ['5', '7'] } },
+      [`${base}/5`]: {
+        project: 'purpur',
+        version: '26.1',
+        build: '5',
+        result: 'SUCCESS',
+        timestamp: 1770000000000,
+        md5: 'A'.repeat(32),
+      },
+    });
+    const runtime = await resolveMinecraftRuntime(
+      { profile: 'purpur', release: '26.1', buildId: 5 },
+      client,
+    );
+    expect(runtime.javaMajor).toBe(25);
+    expect(runtime.artifacts).toEqual([
+      { role: 'server', url: `${base}/5/download`, md5: 'a'.repeat(32) },
+    ]);
+    expect(requests).not.toContain(`${base}/7`);
+    expect(runtime.evidence).toHaveLength(4);
+  });
+  it.each([
+    { project: 'paper' },
+    { version: '1.21.11' },
+    { build: '6' },
+    { result: 'FAILURE' },
+    { md5: '' },
+  ])('rejects mismatched or unsuccessful Purpur artifact %j', async (change) => {
+    const base = 'https://api.purpurmc.org/v2/purpur/26.1';
+    const { client } = fixture({
+      [base]: { project: 'purpur', version: '26.1', builds: { latest: '5', all: ['5'] } },
+      [`${base}/5`]: {
+        project: 'purpur',
+        version: '26.1',
+        build: '5',
+        result: 'SUCCESS',
+        timestamp: 1770000000000,
+        md5: 'a'.repeat(32),
+        ...change,
+      },
+    });
+    await expect(
+      resolveMinecraftRuntime({ profile: 'purpur', release: '26.1', buildId: 5 }, client),
+    ).rejects.toThrow();
+  });
+
   it('resolves opaque 26.x release and Java25 from hash-verified Mojang metadata', async () => {
     const runtime = await resolveMinecraftRuntime(
       { release: '26.1', profile: 'vanilla' },

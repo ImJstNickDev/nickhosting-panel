@@ -132,7 +132,7 @@ export function RegisterCombination({ refresh }: { refresh: () => void }) {
                   ]}
                 />
                 <Input label={t('gameAdmin.version')} name="release" maxLength={96} required />
-                {(profile === 'paper' || profile === 'folia') && (
+                {(profile === 'paper' || profile === 'purpur' || profile === 'folia') && (
                   <Input
                     label={t('gameAdmin.build')}
                     name="buildId"
@@ -193,7 +193,12 @@ export function RegisterCombination({ refresh }: { refresh: () => void }) {
                   label={t('gameAdmin.serverPath')}
                   name="serverPath"
                   maxLength={500}
-                  required={profile === 'vanilla' || profile === 'paper' || profile === 'folia'}
+                  required={
+                    profile === 'vanilla' ||
+                    profile === 'paper' ||
+                    profile === 'purpur' ||
+                    profile === 'folia'
+                  }
                 />
                 <Input label={t('gameAdmin.installerPath')} name="installerPath" maxLength={500} />
                 <details>

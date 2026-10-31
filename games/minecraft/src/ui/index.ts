@@ -103,6 +103,7 @@ const translated: Record<string, [string, string]> = {
   'fields.runtime': ['Runtime', 'Runtime'],
   'runtimes.vanilla': ['Vanilla', 'Vanilla'],
   'runtimes.paper': ['Paper', 'Paper'],
+  'runtimes.purpur': ['Purpur', 'Purpur'],
   'runtimes.folia': ['Folia', 'Folia'],
   'runtimes.fabric': ['Fabric', 'Fabric'],
   'runtimes.forge': ['Forge', 'Forge'],

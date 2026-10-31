@@ -21,6 +21,15 @@ export const minecraftAdminWebMessages: Record<string, readonly [string, string]
     'The Forge catalog has not been synced yet.',
     'Il catalogo Forge non è ancora stato sincronizzato.',
   ],
+  'purpurCatalog.title': ['Purpur versions', 'Versioni Purpur'],
+  'purpurCatalog.buildPolicy': [
+    'New servers use the latest catalogued build for the selected Minecraft version. Existing servers keep their build.',
+    'I nuovi server usano l’ultima build catalogata per la versione Minecraft selezionata. I server esistenti mantengono la propria build.',
+  ],
+  'purpurCatalog.notSynced': [
+    'Purpur versions have not been detected yet.',
+    'Le versioni Purpur non sono ancora state rilevate.',
+  ],
   'paperCatalog.title': ['Paper versions', 'Versioni Paper'],
   'paperCatalog.latestBuild': ['Latest build', 'Ultima build'],
   'paperCatalog.buildPolicy': [

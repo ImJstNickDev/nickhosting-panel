@@ -986,3 +986,11 @@ families retain their restrictions. Direct fallback requires explicit endpoints.
 References: [official numbering](https://docs.neoforged.net/docs/gettingstarted/versioning/),
 [26.1 requirements](https://docs.neoforged.net/docs/gettingstarted/),
 [26.1 announcement](https://neoforged.net/news/26.1release/).
+
+### Purpur runtime — 2026-10-31
+
+Purpur has its own official catalog and exact build binding, sharing the Paper-style
+server-JAR workflow and plugin compatibility. Its published MD5 is checked only for
+Purpur; installed receipts retain independently computed SHA-256. See the
+[Purpur integration contract](M5-PURPUR.md) for catalog, image, Gateway, activation
+and rollback details. Existing server versions do not change on refresh.

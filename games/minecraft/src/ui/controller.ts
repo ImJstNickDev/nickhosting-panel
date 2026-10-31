@@ -164,7 +164,7 @@ export const minecraftChoiceSchema = z
   .object({
     id: z.string().min(1).max(256),
     version: z.string().min(1).max(80),
-    runtime: z.enum(['vanilla', 'paper', 'folia', 'fabric', 'forge', 'neoforge']),
+    runtime: z.enum(['vanilla', 'paper', 'purpur', 'folia', 'fabric', 'forge', 'neoforge']),
     releaseTime: z.iso.datetime({ offset: true }).nullable().optional(),
     releaseType: z.enum(['release', 'snapshot', 'old_alpha', 'old_beta']).optional(),
     capabilities: z.record(z.string(), z.boolean()).optional(),

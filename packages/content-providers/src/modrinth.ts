@@ -25,6 +25,7 @@ import type {
   ModCatalogVersionsInput,
   ResolveModsOptions,
 } from './mod-resolution.js';
+import { pluginLoaders } from './plugin-metadata.js';
 import { type WorldCatalogProjects, worldCatalogProjectsSchema } from './world-catalog.js';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
@@ -405,7 +406,7 @@ export class ModrinthProvider {
     const facets = JSON.stringify([
       [`project_type:${type}`],
       [`versions:${target.minecraftVersion}`],
-      [`categories:${target.loader}`],
+      pluginLoaders(target).map((loader) => `categories:${loader}`),
     ]);
     return this.http.json(
       `${this.origin}/search?${new URLSearchParams({ query, facets, offset: String(offset), limit: '20' })}`,
@@ -451,7 +452,7 @@ export class ModrinthProvider {
     id.parse(projectId);
     const params = new URLSearchParams({
       game_versions: JSON.stringify([target.minecraftVersion]),
-      loaders: JSON.stringify([target.loader]),
+      loaders: JSON.stringify(pluginLoaders(target)),
     });
     return z
       .array(versionSchema)
@@ -463,7 +464,8 @@ export class ModrinthProvider {
       )
       .filter(
         (v) =>
-          v.game_versions.includes(target.minecraftVersion) && v.loaders.includes(target.loader),
+          v.game_versions.includes(target.minecraftVersion) &&
+          pluginLoaders(target).some((loader) => v.loaders.includes(loader)),
       )
       .sort((a, b) => b.date_published.localeCompare(a.date_published) || a.id.localeCompare(b.id));
   }
@@ -516,12 +518,15 @@ export class ModrinthProvider {
         !version ||
         version.project_id !== project.id ||
         !version.game_versions.includes(target.minecraftVersion) ||
-        !version.loaders.includes(target.loader)
+        !pluginLoaders(target).some((loader) => version.loaders.includes(loader))
       )
         fail('content_compatibility');
       if (!serverSupported(project, version)) fail('client_or_unknown_content');
       if (!['mod', 'plugin'].includes(project.project_type)) fail('content_kind');
-      if ((project.project_type === 'plugin') !== ['paper', 'folia'].includes(target.loader))
+      if (
+        (project.project_type === 'plugin') !==
+        ['paper', 'purpur', 'folia'].includes(target.loader)
+      )
         fail('content_loader');
       const previous = selected.get(project.id);
       if (previous && previous !== version.id) fail('dependency_version_conflict');

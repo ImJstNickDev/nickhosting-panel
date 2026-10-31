@@ -512,8 +512,9 @@ function mappingBinding(
   };
   const binding = ((): MinecraftRuntimeMapping => {
     switch (runtime.profile) {
+      case 'purpur':
       case 'neoforge':
-        // This historical live certification runner has no NeoForge client contract.
+        // This historical live certification runner has no client contract for these profiles.
         throw new DomainError('configuration_invalid', 400, {
           reason: 'minecraft_live_profile_unsupported',
         });

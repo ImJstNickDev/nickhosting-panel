@@ -355,7 +355,9 @@ export class ModrinthModCatalog {
     if (
       project.id !== pid ||
       (this.kind === 'plugin'
-        ? !project.loaders.some((loader) => ['paper', 'spigot', 'bukkit', 'folia'].includes(loader))
+        ? !project.loaders.some((loader) =>
+            ['paper', 'purpur', 'spigot', 'bukkit', 'folia'].includes(loader),
+          )
         : project.project_type !== 'mod' &&
           !project.loaders.some((loader) =>
             ['fabric', 'forge', 'quilt', 'neoforge'].includes(loader),

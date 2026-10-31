@@ -11,7 +11,7 @@ interface PaperCatalog {
     version: string;
     buildId: number;
     javaMajor: number;
-    channel: string;
+    channel?: string;
     buildTime: string;
   }>;
   synced: boolean;
@@ -24,12 +24,19 @@ interface PaperCatalog {
     stale: boolean;
   };
 }
-const endpoint = '/v1/owner/minecraft/paper/catalog';
-const queryKey = ['owner-paper-catalog'];
 const pageSize = 25;
 
 /** Discovery reads a local snapshot and never creates an egg mapping. */
-export function PaperVersionCatalog({ navigation }: { navigation: ReactNode }) {
+export function PaperVersionCatalog({
+  navigation,
+  runtime = 'paper',
+}: {
+  navigation: ReactNode;
+  runtime?: 'paper' | 'purpur';
+}) {
+  const endpoint = `/v1/owner/minecraft/${runtime}/catalog`;
+  const queryKey = [`owner-${runtime}-catalog`];
+  const messages = runtime === 'purpur' ? 'purpurCatalog' : 'paperCatalog';
   const t = useT();
   const catalog = useQuery({
     queryKey,
@@ -65,15 +72,18 @@ export function PaperVersionCatalog({ navigation }: { navigation: ReactNode }) {
   const data = catalog.data;
   const syncState = data?.status.syncState ?? 'idle';
   const syncing = busy || syncState !== 'idle';
-  // Fill orders Minecraft releases newest first, including final releases after
-  // their prereleases. Build dates and lexical ordering cannot reconstruct that.
-  const items = (data?.versions ?? []).filter((item) =>
+  // Fill supplies display order. Purpur lists numeric releases oldest first;
+  // sort its copy by version, never by maintenance build date.
+  const versions = [...(data?.versions ?? [])];
+  if (runtime === 'purpur')
+    versions.sort((a, b) => b.version.localeCompare(a.version, 'en', { numeric: true }));
+  const items = versions.filter((item) =>
     item.version.toLowerCase().includes(search.toLowerCase().trim()),
   );
   const pages = Math.max(1, Math.ceil(items.length / pageSize));
   const current = Math.min(page, pages);
   return (
-    <section className="paper-version-catalog" aria-label={t('paperCatalog.title')}>
+    <section className="paper-version-catalog" aria-label={t(`${messages}.title`)}>
       <VersionCatalogFrame
         navigation={navigation}
         actions={
@@ -141,7 +151,7 @@ export function PaperVersionCatalog({ navigation }: { navigation: ReactNode }) {
         }
         status={
           <div className="paper-catalog-status muted" role="status">
-            <span>{t('paperCatalog.buildPolicy')}</span>
+            <span>{t(`${messages}.buildPolicy`)}</span>
             {data?.status.lastSuccessAt && (
               <span>
                 {t('fabricCatalog.lastSync')} <Time value={data.status.lastSuccessAt} />
@@ -169,7 +179,7 @@ export function PaperVersionCatalog({ navigation }: { navigation: ReactNode }) {
           ref={table}
           className="minecraft-versions-table paper-catalog-table"
           aria-busy={catalog.isPending}
-          aria-label={t('paperCatalog.title')}
+          aria-label={t(`${messages}.title`)}
           // biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard users need to scroll the catalog.
           tabIndex={0}
         >
@@ -177,7 +187,7 @@ export function PaperVersionCatalog({ navigation }: { navigation: ReactNode }) {
             <Loading />
           ) : (
             <table>
-              <caption className="visually-hidden">{t('paperCatalog.title')}</caption>
+              <caption className="visually-hidden">{t(`${messages}.title`)}</caption>
               <thead>
                 <tr>
                   <th scope="col">{t('fabricCatalog.games')}</th>
@@ -191,13 +201,15 @@ export function PaperVersionCatalog({ navigation }: { navigation: ReactNode }) {
                     <td>{item.version}</td>
                     <td>
                       <span>{item.buildId}</span>
-                      <span className="paper-build-channel muted">
-                        {['STABLE', 'RECOMMENDED', 'EXPERIMENTAL', 'ALPHA', 'BETA'].includes(
-                          item.channel,
-                        )
-                          ? t(`paperCatalog.channel.${item.channel}`)
-                          : item.channel}
-                      </span>
+                      {item.channel && (
+                        <span className="paper-build-channel muted">
+                          {['STABLE', 'RECOMMENDED', 'EXPERIMENTAL', 'ALPHA', 'BETA'].includes(
+                            item.channel,
+                          )
+                            ? t(`paperCatalog.channel.${item.channel}`)
+                            : item.channel}
+                        </span>
+                      )}
                     </td>
                     <td>{item.javaMajor}</td>
                   </tr>
@@ -209,7 +221,7 @@ export function PaperVersionCatalog({ navigation }: { navigation: ReactNode }) {
                         data
                           ? data.synced
                             ? 'fabricCatalog.noMatches'
-                            : 'paperCatalog.notSynced'
+                            : `${messages}.notSynced`
                           : 'web.unavailable',
                       )}
                     </td>

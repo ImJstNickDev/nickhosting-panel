@@ -14,7 +14,7 @@ const identity = z.string().min(1).max(256);
 export const modpackTargetSchema = z
   .object({
     minecraftVersion: z.string().min(1).max(64),
-    loader: z.enum(['vanilla', 'paper', 'folia', 'fabric', 'forge', 'neoforge', 'quilt']),
+    loader: z.enum(['vanilla', 'paper', 'purpur', 'folia', 'fabric', 'forge', 'neoforge', 'quilt']),
     loaderVersion: z.string().min(1).max(128).optional(),
   })
   .strict();

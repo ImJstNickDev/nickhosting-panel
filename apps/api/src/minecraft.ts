@@ -24,6 +24,7 @@ import {
   getForgeCatalog,
   getNeoForgeCatalog,
   getPaperCatalog,
+  getPurpurCatalog,
   getServerPermissionKeys,
   importMinecraftEvidence,
   inspectMinecraftCombination,
@@ -45,11 +46,13 @@ import {
   requestForgeCatalogRefresh,
   requestNeoForgeCatalogRefresh,
   requestPaperCatalogRefresh,
+  requestPurpurCatalogRefresh,
   requireMinecraftChoice,
   resolveFabricCreationChoice,
   resolveForgeCreationChoice,
   resolveNeoForgeCreationChoice,
   resolvePaperCreationChoice,
+  resolvePurpurCreationChoice,
   setMinecraftAvailability,
   setMinecraftBulkAvailability,
   syncFabricRegisteredCatalog,
@@ -136,6 +139,17 @@ export function registerMinecraftRoutes(
     parse(z.object({}).strict(), await body(c));
     c.header('Cache-Control', 'no-store');
     return c.json(await requestPaperCatalogRefresh(db), 202);
+  });
+  app.get('/v1/owner/minecraft/purpur/catalog', async (c) => {
+    await owner(c);
+    c.header('Cache-Control', 'no-store');
+    return c.json(await getPurpurCatalog(db));
+  });
+  app.post('/v1/owner/minecraft/purpur/catalog', async (c) => {
+    await owner(c);
+    parse(z.object({}).strict(), await body(c));
+    c.header('Cache-Control', 'no-store');
+    return c.json(await requestPurpurCatalogRefresh(db), 202);
   });
   app.get('/v1/owner/minecraft/forge/catalog', async (c) => {
     await owner(c);
@@ -478,9 +492,10 @@ export function registerMinecraftRoutes(
     const input = parse(minecraftCreateSchema, await body(c));
     const fabric = input.minecraft.choiceId.startsWith('fabric:');
     const paper = input.minecraft.choiceId.startsWith('paper:');
+    const purpur = input.minecraft.choiceId.startsWith('purpur:');
     const forge = input.minecraft.choiceId.startsWith('forge:');
     const neoforge = input.minecraft.choiceId.startsWith('neoforge:');
-    const catalogChoice = fabric || paper || forge || neoforge;
+    const catalogChoice = fabric || paper || purpur || forge || neoforge;
     if ((fabric || forge || neoforge) !== (input.minecraft.loaderVersion !== undefined))
       throw new DomainError('validation_failed');
     if (catalogChoice) {
@@ -509,8 +524,8 @@ export function registerMinecraftRoutes(
             },
             env,
           )
-        : paper
-          ? await resolvePaperCreationChoice(
+        : paper || purpur
+          ? await (purpur ? resolvePurpurCreationChoice : resolvePaperCreationChoice)(
               db,
               (await management()).adapter,
               context,

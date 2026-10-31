@@ -120,6 +120,7 @@ export type CurseForgeFile = z.infer<typeof fileSchema>;
 const loaderNames: Record<ContentTarget['loader'], string> = {
   vanilla: '',
   paper: '',
+  purpur: '',
   folia: '',
   fabric: 'Fabric',
   forge: 'Forge',

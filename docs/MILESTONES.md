@@ -156,6 +156,10 @@ and version guards. The player-lookup follow-up races official services against
 the winning providers. See
 [NeoForge policy](M5-COMMON-INTEGRATION.md#neoforge-runtime-follow-up--2026-10-31).
 
+**Scoped M5 follow-up, 2026-10-31:** the Owner also requested Purpur using the
+supplied egg. Add its exact-build catalog, runtime mapping, shared Gateway and
+plugin-compatible management to the existing flow. See [Purpur scope and validation](M5-PURPUR.md).
+
 ## M6 — Satisfactory & Game Integration Expansion (PR)
 
 **Scope**

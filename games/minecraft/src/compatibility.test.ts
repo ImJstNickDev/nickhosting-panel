@@ -94,7 +94,7 @@ describe('Minecraft compatibility evidence', () => {
         minecraftDeclaredCapabilities({ ...combination, profile: 'forge', release }),
       ).toMatchObject({ installation: false, gateway: false });
   });
-  it.each(['fabric', 'paper'] as const)(
+  it.each(['fabric', 'paper', 'purpur'] as const)(
     'declares %s installation and Gateway sleep/wake for known modern protocols',
     (profile) => {
       const fabric = { ...combination, profile };

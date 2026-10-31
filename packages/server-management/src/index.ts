@@ -40,6 +40,7 @@ export {
 } from './provider-feed-worker.js';
 export * from './provider-installation-events.js';
 export * from './provisioning.js';
+export * from './purpur-catalog.js';
 export * from './registry.js';
 export * from './runtime.js';
 export * from './schedules.js';

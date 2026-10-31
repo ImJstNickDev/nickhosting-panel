@@ -37,6 +37,7 @@ export function minecraftGatewayRuntimeName(runtimeId: string): string {
   const names: Record<string, string> = {
     vanilla: 'Vanilla',
     paper: 'Paper',
+    purpur: 'Purpur',
     folia: 'Folia',
     fabric: 'Fabric',
     forge: 'Forge',

@@ -25,6 +25,7 @@ import {
   pollMinecraftMetadata,
   pollNeoForgeMetadata,
   pollPaperMetadata,
+  pollPurpurMetadata,
 } from './minecraft-metadata.js';
 import { startMinecraftModpackLoop } from './minecraft-modpacks.js';
 import { refreshProviderFeeds, startProviderFeedLoop } from './provider-feed.js';
@@ -264,6 +265,16 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         }, 5000);
     };
     paperPoll = refreshPaper();
+    let purpurTimer: ReturnType<typeof setTimeout> | undefined;
+    let purpurPoll: Promise<void> | undefined;
+    const refreshPurpur = async () => {
+      await pollPurpurMetadata(db, env, logger);
+      if (!stopping)
+        purpurTimer = setTimeout(() => {
+          purpurPoll = refreshPurpur();
+        }, 5000);
+    };
+    purpurPoll = refreshPurpur();
     let forgeTimer: ReturnType<typeof setTimeout> | undefined;
     let forgePoll: Promise<void> | undefined;
     const refreshForge = async () => {
@@ -294,6 +305,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         if (metadataTimer) clearTimeout(metadataTimer);
         if (fabricTimer) clearTimeout(fabricTimer);
         if (paperTimer) clearTimeout(paperTimer);
+        if (purpurTimer) clearTimeout(purpurTimer);
         if (forgeTimer) clearTimeout(forgeTimer);
         if (neoforgeTimer) clearTimeout(neoforgeTimer);
         if (scheduleTimer) clearTimeout(scheduleTimer);
@@ -302,6 +314,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           metadataPoll,
           fabricPoll,
           paperPoll,
+          purpurPoll,
           forgePoll,
           neoforgePoll,
           schedulePoll,

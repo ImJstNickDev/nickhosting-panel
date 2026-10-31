@@ -5,6 +5,7 @@ import {
   refreshMinecraftMetadata,
   refreshNeoForgeCatalog,
   refreshPaperCatalog,
+  refreshPurpurCatalog,
 } from '@nickhosting/server-management';
 import { beforeEach, expect, it, vi } from 'vitest';
 import {
@@ -12,6 +13,7 @@ import {
   pollMinecraftMetadata,
   pollNeoForgeMetadata,
   pollPaperMetadata,
+  pollPurpurMetadata,
 } from './minecraft-metadata.js';
 
 vi.mock('@nickhosting/database', () => ({ getSettings: vi.fn() }));
@@ -19,6 +21,7 @@ vi.mock('@nickhosting/server-management', () => ({
   refreshMinecraftMetadata: vi.fn(),
   refreshFabricCatalog: vi.fn(),
   refreshPaperCatalog: vi.fn(),
+  refreshPurpurCatalog: vi.fn(),
   refreshNeoForgeCatalog: vi.fn(),
 }));
 const db = {} as Parameters<typeof pollMinecraftMetadata>[0];
@@ -135,5 +138,20 @@ it('refreshes NeoForge independently and contains provider failures', async () =
   vi.mocked(refreshNeoForgeCatalog).mockRejectedValue(new Error('secret://provider-detail'));
   await pollNeoForgeMetadata(db, {}, logger);
   expect(JSON.stringify(records)).toContain('neoforge.metadata_refresh_unavailable');
+  expect(JSON.stringify(records)).not.toContain('secret');
+});
+
+it('refreshes Purpur independently and contains provider failures', async () => {
+  refresh.mockRejectedValue(new Error('unavailable'));
+  vi.mocked(refreshPurpurCatalog).mockResolvedValue({ state: 'updated', changed: 2 });
+  await Promise.all([pollMinecraftMetadata(db, {}, logger), pollPurpurMetadata(db, {}, logger)]);
+  expect(refreshPurpurCatalog).toHaveBeenCalledWith(db, {
+    userAgent: 'Fixture https://example.test',
+  });
+  expect(JSON.stringify(records)).toContain('purpur.metadata_refreshed');
+  records.length = 0;
+  vi.mocked(refreshPurpurCatalog).mockRejectedValue(new Error('secret://provider-detail'));
+  await pollPurpurMetadata(db, {}, logger);
+  expect(JSON.stringify(records)).toContain('purpur.metadata_refresh_unavailable');
   expect(JSON.stringify(records)).not.toContain('secret');
 });
