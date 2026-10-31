@@ -840,7 +840,7 @@ export function createMinecraftUiController(client: GameUiClient) {
         .object({
           uuid: z.string().regex(/^[a-f0-9-]{36}$/),
           name: player,
-          source: z.literal('mojang'),
+          source: z.enum(['mojang', 'mc-api.io', 'mixed']),
           verifiedAt: z.iso.datetime({ offset: true }),
           avatar: z.url().optional(),
         })

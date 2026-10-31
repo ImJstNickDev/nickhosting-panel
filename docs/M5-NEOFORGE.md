@@ -157,12 +157,19 @@ rejection. Retain any applied additive migration and existing server data.
 The Owner reported slow player lookup and a port error at creation. Read-only
 diagnostics reproduced a timeout from the legacy Mojang name endpoint while
 Minecraft Services returned the matching profile. Sessionserver also exhibited
-intermittent transport timeouts. The shared identity provider now permits one
-first-party Minecraft Services fallbacks for both name and UUID lookups on transport failures,
+intermittent transport timeouts. The shared identity provider permits a
+first-party Minecraft Services fallback for both name and UUID lookups on transport failures,
 429 or 5xx, each within the original shared ten-second lookup budget (two bounded attempts). Missing users return
 404, malformed responses do not trigger retries, and name/UUID agreement remains
 mandatory. Fetch and body reads are bounded and cancelled; unavailable upstreams
 still fail rather than admitting an unverified player.
+
+At the Owner’s request, each lookup now also races `mc-api.io` in parallel.
+The first valid successful profile wins and the losing request is cancelled,
+including pending fallback attempts. Name and UUID must still agree; stored
+provenance distinguishes official, third-party and mixed results. A fast error
+does not override a valid result from the other provider. This shared change
+applies to the wizard and player management for all Minecraft Java runtimes.
 
 The allocation pool had free backend ports but no direct endpoints. NeoForge's
 initial direct-only capability forced a connection mode incompatible with that
@@ -197,3 +204,13 @@ standing Owner authorization to load the new compiled declaration. Its identity,
 image, mounts, networks and host configuration stayed unchanged and health passed.
 No server was created, no existing allocation or game state was changed, and no
 additional migration was required. Real client gameplay remains untested here.
+
+### Concurrent profile lookup validation
+
+The mc-api.io follow-up passed 58 management/provider tests and 137 downstream API/UI/storage unit tests, three
+NeoForge wizard browser tests using third-party provenance, and one isolated
+whitelist installation integration test. Type checking, lint and web build passed
+with the existing repository lint/chunk-size advisories. A public read-only
+verification of the Owner-provided username completed both lookup directions in
+423 ms with mc-api.io provenance; this observation is not a latency guarantee.
+No Pterodactyl server, allocation, egg or infrastructure configuration was mutated.

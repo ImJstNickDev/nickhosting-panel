@@ -168,15 +168,27 @@ describe('Minecraft identity and player mutation plans', () => {
     expect(minecraftAvatarUrl(verified, true)).toContain(uuid);
     expect(() => minecraftUuid('00000000-0000-0000-0000-000000000000')).toThrow();
   });
-  it('identity HTTP client pins origins, bounds bodies and rejects redirects', async () => {
+  const identityResponse = (
+    source: 'mojang' | 'mc-api.io' = 'mojang',
+    name = 'Example_1',
+    id = uuid,
+  ) => new Response(JSON.stringify({ [source === 'mojang' ? 'id' : 'uuid']: id, name }));
+  const onlyOfficial =
+    (fetcher: typeof fetch): typeof fetch =>
+    async (url, init) =>
+      String(url).startsWith('https://mc-api.io/')
+        ? new Response(null, { status: 404 })
+        : fetcher(url, init);
+  it('pins provider origins, forbids redirects and still verifies both lookup directions', async () => {
     const calls: string[] = [];
     const provider = createMinecraftIdentityProvider({
       userAgent: 'NickHosting-Test',
-      fetch: async (url, init) => {
+      fetch: onlyOfficial(async (url, init) => {
         calls.push(String(url));
         expect(init?.redirect).toBe('error');
-        return new Response(JSON.stringify({ id: uuid, name: 'Example_1' }));
-      },
+        expect(init?.credentials).toBe('omit');
+        return identityResponse();
+      }),
     });
     expect(await verifyMinecraftPlayer('Example_1', provider)).toMatchObject({
       uuid,
@@ -186,26 +198,31 @@ describe('Minecraft identity and player mutation plans', () => {
       'https://api.mojang.com/users/profiles/minecraft/Example_1',
       `https://sessionserver.mojang.com/session/minecraft/profile/${uuid.replaceAll('-', '')}`,
     ]);
+    expect(() => provider.lookupName('bad/name')).toThrow();
+    expect(() => provider.lookupUuid('bad/uuid')).toThrow();
     const excessive = createMinecraftIdentityProvider({
       userAgent: 'NickHosting-Test',
       fetch: async () => new Response('x'.repeat(65_537)),
     });
-    await expect(excessive.lookupName('Example_1')).rejects.toThrow();
-    expect(() => provider.lookupName('bad/name')).toThrow();
+    await expect(excessive.lookupName('Example_1')).rejects.toMatchObject({
+      code: 'integration_unavailable',
+    });
   });
-  it('retries an unavailable name endpoint only on first-party Minecraft Services and verifies UUID independently', async () => {
+  it('retains the official alternate endpoint and independent reverse lookup', async () => {
     const calls: string[] = [];
     const provider = createMinecraftIdentityProvider({
       userAgent: 'NickHosting-Test',
-      fetch: async (url, init) => {
+      fetch: onlyOfficial(async (url) => {
         calls.push(String(url));
-        expect(init?.redirect).toBe('error');
-        expect(init?.credentials).toBe('omit');
-        if (calls.length === 1) throw new TypeError('Network failure');
-        return new Response(JSON.stringify({ id: uuid, name: 'Example_1' }));
-      },
+        if (String(url).startsWith('https://api.mojang.com/'))
+          throw new TypeError('Network failure');
+        return identityResponse();
+      }),
     });
-    expect(await verifyMinecraftPlayer('Example_1', provider)).toMatchObject({ uuid });
+    expect(await verifyMinecraftPlayer('Example_1', provider)).toMatchObject({
+      uuid,
+      source: 'mojang',
+    });
     expect(calls).toEqual([
       'https://api.mojang.com/users/profiles/minecraft/Example_1',
       'https://api.minecraftservices.com/minecraft/profile/lookup/name/Example_1',
@@ -213,7 +230,7 @@ describe('Minecraft identity and player mutation plans', () => {
     ]);
   });
   it.each([204, 404])(
-    'reports missing identity for HTTP %i without retrying a different endpoint',
+    'reports not_found only when both providers report no profile (HTTP %i)',
     async (status) => {
       const fetcher = vi.fn(async () => new Response(null, { status }));
       const provider = createMinecraftIdentityProvider({
@@ -224,60 +241,74 @@ describe('Minecraft identity and player mutation plans', () => {
         code: 'not_found',
         status: 404,
       });
-      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(fetcher).toHaveBeenCalledTimes(2);
     },
   );
-  it.each([429, 500, 503])('retries transient HTTP %i within the lookup budget', async (status) => {
-    const fetcher = vi
-      .fn()
-      .mockResolvedValueOnce(new Response(null, { status }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ id: uuid, name: 'Example_1' })));
+  it.each([429, 500, 503])(
+    'retries transient official HTTP %i without letting a mirror404 mask success',
+    async (status) => {
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response(null, { status }))
+        .mockImplementationOnce(async () => identityResponse());
+      const provider = createMinecraftIdentityProvider({
+        userAgent: 'NickHosting-Test',
+        fetch: onlyOfficial(fetcher),
+      });
+      expect(await provider.lookupName('Example_1')).toEqual({
+        id: uuid,
+        name: 'Example_1',
+        source: 'mojang',
+      });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    },
+  );
+  it('reports unavailable when one provider cannot respond and the other says not_found', async () => {
     const provider = createMinecraftIdentityProvider({
       userAgent: 'NickHosting-Test',
-      fetch: fetcher,
-    });
-    expect(await provider.lookupName('Example_1')).toEqual({ id: uuid, name: 'Example_1' });
-    expect(fetcher).toHaveBeenCalledTimes(2);
-  });
-  it('does not turn malformed successful upstream identity into a user validation error or fallback', async () => {
-    const fetcher = vi.fn(
-      async () => new Response(JSON.stringify({ id: 'invalid', name: 'Example_1' })),
-    );
-    const provider = createMinecraftIdentityProvider({
-      userAgent: 'NickHosting-Test',
-      fetch: fetcher,
+      fetch: onlyOfficial(async () => new Response(null, { status: 503 })),
     });
     await expect(provider.lookupName('Example_1')).rejects.toMatchObject({
       code: 'integration_unavailable',
-      status: 503,
+    });
+  });
+  it('rejects malformed successful upstream identity without retrying it', async () => {
+    const fetcher = vi.fn(async () => identityResponse('mojang', 'Example_1', 'invalid'));
+    const provider = createMinecraftIdentityProvider({
+      userAgent: 'NickHosting-Test',
+      fetch: onlyOfficial(fetcher),
+    });
+    await expect(provider.lookupName('Example_1')).rejects.toMatchObject({
+      code: 'integration_unavailable',
     });
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
-  it('reserves time for fallback when the legacy endpoint never responds', async () => {
+  it('reserves time for official fallback when the primary never responds', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
     try {
       const fetcher = vi
-        .fn()
+        .fn<typeof fetch>()
         .mockImplementationOnce(() => new Promise<Response>(() => {}))
-        .mockResolvedValueOnce(new Response(JSON.stringify({ id: uuid, name: 'Example_1' })));
+        .mockImplementationOnce(async () => identityResponse());
       const provider = createMinecraftIdentityProvider({
         userAgent: 'NickHosting-Test',
-        fetch: fetcher,
+        fetch: onlyOfficial(fetcher),
         timeoutMs: 100,
       });
       const result = provider.lookupName('Example_1');
       await vi.advanceTimersByTimeAsync(50);
-      expect(await result).toEqual({ id: uuid, name: 'Example_1' });
+      expect(await result).toEqual({ id: uuid, name: 'Example_1', source: 'mojang' });
       expect(fetcher).toHaveBeenCalledTimes(2);
-      expect(fetcher.mock.calls[0]?.[1].signal.aborted).toBe(true);
+      expect(fetcher.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
   });
-  it('bounds both unresponsive name attempts to one lookup budget', async () => {
+  it('bounds both providers and the official retry to one lookup budget', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
     try {
-      const fetcher = vi.fn(() => new Promise<Response>(() => {}));
+      const fetcher = vi.fn<typeof fetch>(() => new Promise<Response>(() => {}));
       const provider = createMinecraftIdentityProvider({
         userAgent: 'NickHosting-Test',
         fetch: fetcher,
@@ -288,13 +319,14 @@ describe('Minecraft identity and player mutation plans', () => {
       });
       await vi.advanceTimersByTimeAsync(100);
       await result;
-      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(fetcher).toHaveBeenCalledTimes(3);
+      expect(fetcher.mock.calls.every(([, init]) => init?.signal?.aborted)).toBe(true);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
   });
-  it('bounds both stalled UUID response attempts and cancels their streams', async () => {
+  it('bounds stalled response bodies and cancels all streams', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
     try {
       const cancel = vi.fn();
@@ -308,97 +340,199 @@ describe('Minecraft identity and player mutation plans', () => {
       });
       await vi.advanceTimersByTimeAsync(100);
       await result;
-      expect(cancel).toHaveBeenCalledTimes(2);
+      expect(cancel).toHaveBeenCalledTimes(3);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
   });
-  it('falls back from a slow UUID lookup to the official reverse lookup endpoint', async () => {
+  it('uses the correct official reverse fallback URL', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(new TypeError('Network failure'))
+      .mockImplementationOnce(async () => identityResponse());
+    const provider = createMinecraftIdentityProvider({
+      userAgent: 'NickHosting-Test',
+      fetch: onlyOfficial(fetcher),
+    });
+    expect(await provider.lookupUuid(uuid)).toMatchObject({ id: uuid, source: 'mojang' });
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      `https://sessionserver.mojang.com/session/minecraft/profile/${uuid.replaceAll('-', '')}`,
+      `https://api.minecraftservices.com/minecraft/profile/lookup/${uuid.replaceAll('-', '')}`,
+    ]);
+  });
+  it('takes a fast valid mc-api result, aborts the official loser and prevents its fallback', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
     try {
-      const fetcher = vi
-        .fn()
-        .mockImplementationOnce(() => new Promise<Response>(() => {}))
-        .mockResolvedValueOnce(new Response(JSON.stringify({ id: uuid, name: 'Example_1' })));
+      const fetcher = vi.fn<typeof fetch>(async (url) =>
+        String(url).startsWith('https://mc-api.io/')
+          ? identityResponse('mc-api.io')
+          : new Promise<Response>(() => {}),
+      );
       const provider = createMinecraftIdentityProvider({
         userAgent: 'NickHosting-Test',
         fetch: fetcher,
         timeoutMs: 100,
       });
-      const result = provider.lookupUuid(uuid);
-      await vi.advanceTimersByTimeAsync(50);
-      expect(await result).toEqual({ id: uuid, name: 'Example_1' });
-      expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
-        `https://sessionserver.mojang.com/session/minecraft/profile/${uuid.replaceAll('-', '')}`,
-        `https://api.minecraftservices.com/minecraft/profile/lookup/${uuid.replaceAll('-', '')}`,
-      ]);
+      expect(await provider.lookupName('example_1')).toEqual({
+        id: uuid,
+        name: 'Example_1',
+        source: 'mc-api.io',
+      });
+      await vi.advanceTimersByTimeAsync(200);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(fetcher.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+      expect(fetcher.mock.calls[1]?.[0]).toBe('https://mc-api.io/profile/example_1/JAVA');
+      expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
   });
-  it.each([429, 503])(
-    'retries UUID HTTP %i once using first-party reverse lookup',
-    async (status) => {
-      const fetcher = vi
-        .fn()
-        .mockResolvedValueOnce(new Response(null, { status }))
-        .mockResolvedValueOnce(new Response(JSON.stringify({ id: uuid, name: 'Example_1' })));
+  it('cancels a late loser response without starting an official fallback', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    try {
+      const late = Promise.withResolvers<Response>();
+      const cancel = vi.fn();
+      const fetcher = vi.fn<typeof fetch>(async (url) =>
+        String(url).startsWith('https://mc-api.io/') ? identityResponse('mc-api.io') : late.promise,
+      );
       const provider = createMinecraftIdentityProvider({
         userAgent: 'NickHosting-Test',
         fetch: fetcher,
+        timeoutMs: 100,
       });
-      expect(await provider.lookupUuid(uuid)).toEqual({ id: uuid, name: 'Example_1' });
+      expect(await provider.lookupName('Example_1')).toMatchObject({ source: 'mc-api.io' });
+      late.resolve(new Response(new ReadableStream({ cancel })));
+      await vi.advanceTimersByTimeAsync(200);
+      expect(cancel).toHaveBeenCalledOnce();
       expect(fetcher).toHaveBeenCalledTimes(2);
-      expect(fetcher.mock.calls[1]?.[0]).toBe(
-        `https://api.minecraftservices.com/minecraft/profile/lookup/${uuid.replaceAll('-', '')}`,
-      );
-    },
-  );
-  it.each([204, 404])('never retries an absent UUID profile (HTTP %i)', async (status) => {
-    const fetcher = vi.fn(async () => new Response(null, { status }));
-    const provider = createMinecraftIdentityProvider({
-      userAgent: 'NickHosting-Test',
-      fetch: fetcher,
-    });
-    await expect(provider.lookupUuid(uuid)).rejects.toMatchObject({ code: 'not_found' });
-    expect(fetcher).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
-  it('still rejects mismatched UUID verification after a successful alternate name lookup', async () => {
-    const fetcher = vi
-      .fn()
-      .mockRejectedValueOnce(new TypeError('Network failure'))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ id: uuid, name: 'Example_1' })))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ id: uuid, name: 'OtherName' })));
+  it('takes a fast official result and cancels a stalled mirror body', async () => {
+    const cancel = vi.fn();
     const provider = createMinecraftIdentityProvider({
       userAgent: 'NickHosting-Test',
-      fetch: fetcher,
+      fetch: async (url) =>
+        String(url).startsWith('https://mc-api.io/')
+          ? new Response(new ReadableStream({ cancel }))
+          : identityResponse(),
     });
-    await expect(verifyMinecraftPlayer('Example_1', provider)).rejects.toMatchObject({
-      code: 'conflict',
+    expect(await provider.lookupUuid(uuid)).toMatchObject({ source: 'mojang' });
+    await Promise.resolve();
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+  it('does not let a fast provider error mask the other provider success', async () => {
+    const release = Promise.withResolvers<Response>();
+    const provider = createMinecraftIdentityProvider({
+      userAgent: 'NickHosting-Test',
+      fetch: async (url) =>
+        String(url).startsWith('https://mc-api.io/')
+          ? new Response(null, { status: 404 })
+          : release.promise,
+    });
+    const result = provider.lookupName('Example_1');
+    await Promise.resolve();
+    release.resolve(identityResponse());
+    expect(await result).toMatchObject({ source: 'mojang' });
+  });
+  it.each(['name', 'uuid'] as const)('does not let a fast wrong %s identity win', async (kind) => {
+    const release = Promise.withResolvers<Response>();
+    const provider = createMinecraftIdentityProvider({
+      userAgent: 'NickHosting-Test',
+      fetch: async (url) =>
+        String(url).startsWith('https://mc-api.io/')
+          ? identityResponse(
+              'mc-api.io',
+              kind === 'name' ? 'WrongName' : 'Example_1',
+              kind === 'uuid' ? 'abcdefab-cdef-4abc-8abc-abcdefabcdef' : uuid,
+            )
+          : release.promise,
+    });
+    const result = kind === 'name' ? provider.lookupName('Example_1') : provider.lookupUuid(uuid);
+    await Promise.resolve();
+    release.resolve(identityResponse());
+    expect(await result).toMatchObject({ source: 'mojang' });
+  });
+  it.each([
+    { error: true },
+    { xuid: '1234567890123456' },
+    { edition: 'BEDROCK' },
+    { edition: 'unknown' },
+  ])('rejects mc-api errors and non-Java profiles: %j', async (extra) => {
+    const provider = createMinecraftIdentityProvider({
+      userAgent: 'NickHosting-Test',
+      fetch: async (url) =>
+        String(url).startsWith('https://mc-api.io/')
+          ? new Response(JSON.stringify({ uuid, name: 'Example_1', ...extra }))
+          : new Response(null, { status: 404 }),
+    });
+    await expect(provider.lookupName('Example_1')).rejects.toMatchObject({
+      code: 'integration_unavailable',
     });
   });
-  it('requires independent name/UUID agreement even when both primary endpoints fail', async () => {
-    const fetcher = vi
-      .fn()
-      .mockRejectedValueOnce(new TypeError('Name endpoint unavailable'))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ id: uuid, name: 'Example_1' })))
-      .mockRejectedValueOnce(new TypeError('Session endpoint unavailable'))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ id: uuid, name: 'OtherName' })));
+  it('records mc-api provenance only after independent Java name and UUID queries agree', async () => {
+    const urls: string[] = [];
     const provider = createMinecraftIdentityProvider({
       userAgent: 'NickHosting-Test',
-      fetch: fetcher,
+      fetch: async (url) => {
+        if (!String(url).startsWith('https://mc-api.io/'))
+          return new Response(null, { status: 404 });
+        urls.push(String(url));
+        return identityResponse('mc-api.io');
+      },
     });
-    await expect(verifyMinecraftPlayer('Example_1', provider)).rejects.toMatchObject({
-      code: 'conflict',
+    expect(await verifyMinecraftPlayer('Example_1', provider)).toMatchObject({
+      uuid,
+      source: 'mc-api.io',
     });
-    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
-      'https://api.mojang.com/users/profiles/minecraft/Example_1',
-      'https://api.minecraftservices.com/minecraft/profile/lookup/name/Example_1',
-      `https://sessionserver.mojang.com/session/minecraft/profile/${uuid.replaceAll('-', '')}`,
-      `https://api.minecraftservices.com/minecraft/profile/lookup/${uuid.replaceAll('-', '')}`,
+    expect(urls).toEqual([
+      'https://mc-api.io/profile/Example_1/JAVA',
+      `https://mc-api.io/profile/${uuid}`,
     ]);
   });
+  it('records mixed provenance rather than claiming official verification for both directions', async () => {
+    const provider = createMinecraftIdentityProvider({
+      userAgent: 'NickHosting-Test',
+      fetch: async (url) => {
+        const value = String(url);
+        if (value.startsWith('https://api.mojang.com/')) return identityResponse();
+        if (value === `https://mc-api.io/profile/${uuid}`) return identityResponse('mc-api.io');
+        return new Response(null, { status: 404 });
+      },
+    });
+    expect(await verifyMinecraftPlayer('Example_1', provider)).toMatchObject({
+      uuid,
+      source: 'mixed',
+    });
+  });
+  it('still rejects cross-direction disagreement even when both primary endpoints fail', async () => {
+    const provider = createMinecraftIdentityProvider({
+      userAgent: 'NickHosting-Test',
+      fetch: async (url) => {
+        const value = String(url);
+        if (value.endsWith('/JAVA')) return identityResponse('mc-api.io');
+        if (value.startsWith('https://mc-api.io/'))
+          return identityResponse('mc-api.io', 'OtherName');
+        return new Response(null, { status: 404 });
+      },
+    });
+    await expect(verifyMinecraftPlayer('Example_1', provider)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+  });
+  it.each(['mojang', 'mc-api.io', 'mixed', 'server-file'] as const)(
+    'accepts verified player-list provenance %s',
+    (source) => {
+      expect(
+        JSON.parse(
+          planMinecraftPlayerList('[]', 'whitelist', 'add', { ...player, source }).content,
+        ),
+      ).toEqual([{ uuid, name: 'Example_1' }]);
+    },
+  );
   it('plans idempotent whitelist and operator changes without shell/console interpolation', () => {
     const first = planMinecraftPlayerList('[]', 'whitelist', 'add', player);
     expect(planMinecraftPlayerList(first.content, 'whitelist', 'add', player).content).toBe(

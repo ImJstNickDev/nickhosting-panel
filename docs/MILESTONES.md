@@ -151,7 +151,9 @@ integration using the supplied egg. Implement its exact catalog/version/egg and
 management contracts on the current M5 review baseline. This does not begin M6,
 authorize deployment or certify real NeoForge client/modpack behavior. A subsequent
 explicit Owner choice enables the shared modern Gateway declaration with protocol
-and version guards. See
+and version guards. The player-lookup follow-up races official services against
+`mc-api.io` as explicitly requested, retaining name/UUID verification and recording
+the winning providers. See
 [NeoForge policy](M5-COMMON-INTEGRATION.md#neoforge-runtime-follow-up--2026-10-31).
 
 ## M6 — Satisfactory & Game Integration Expansion (PR)

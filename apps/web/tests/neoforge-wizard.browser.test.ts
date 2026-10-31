@@ -179,7 +179,7 @@ describe('NeoForge independent catalog wizard', () => {
         return response({
           uuid: id,
           name: 'FixturePlayer',
-          source: 'mojang',
+          source: 'mc-api.io',
           verifiedAt: new Date().toISOString(),
         });
       if (path === '/v1/minecraft/servers') return response({ serverId: id, jobId: id });

@@ -336,6 +336,39 @@ describe('Minecraft durable content safety', () => {
       }).success,
     ).toBe(false);
   });
+  it.each(['mc-api.io', 'mixed'] as const)(
+    'preserves %s identity provenance through storage and reinstall',
+    async (source) => {
+      const player = {
+        uuid: '11111111-1111-1111-1111-111111111111',
+        name: 'VerifiedPlayer',
+        source,
+        verifiedAt: new Date().toISOString(),
+      };
+      const configuration = applyMinecraftStoredPlayerChange(
+        { eula: true },
+        { list: 'whitelist', action: 'add' },
+        player,
+      );
+      const provider = {
+        lookupName: vi.fn(),
+        lookupUuid: vi.fn(),
+      };
+      const replay = await resolveMinecraftStoredPlayers(
+        minecraftStoredConfigurationSchema.parse(configuration),
+        provider,
+      );
+      const stored = replay.playerIdentities?.whitelist[0];
+      expect(stored).toEqual(player);
+      if (!stored) throw new Error('missing stored player');
+      expect(JSON.parse(planMinecraftPlayerList('[]', 'whitelist', 'add', stored).content)).toEqual(
+        [{ uuid: player.uuid, name: player.name }],
+      );
+      expect(provider.lookupName).not.toHaveBeenCalled();
+      expect(provider.lookupUuid).not.toHaveBeenCalled();
+      expect(minecraftConfigurationSchema.safeParse(configuration).success).toBe(false);
+    },
+  );
   it('does not remove the original UUID when its former name has been reclaimed', () => {
     const original = {
       uuid: '11111111-1111-1111-1111-111111111111',

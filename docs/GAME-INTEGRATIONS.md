@@ -284,7 +284,7 @@ places it immediately after the version, before operators. It is not a game-owne
 DNS implementation. Runtime choice lists use
 release types to reveal snapshots/historical candidates only on request, while
 server-side eligibility remains authoritative. MCHeads images are optional
-presentation; independent Mojang name/UUID validation authorizes no action and
+presentation; independent provider name/UUID validation authorizes no action and
 remains required when recording players. Preset player counts are resource
 suggestions, not performance guarantees. Shared storage is Owner-managed through
 `defaultServerStorageMiB` (environment `NH_DEFAULT_SERVER_STORAGE_MIB`); omitted
@@ -451,8 +451,19 @@ presented as game-side execution; persistent list effects are checked before
 synchronizing replay configuration, and uncertain delivery is never automatically
 retried. Existing-row operations carry their selected UUID to prevent a renamed
 or reclaimed username from silently changing the target identity. Authoritative
-server-file UUIDs have explicit `server-file` provenance; Mojang lookup remains
-the verifier for new offline additions.
+server-file UUIDs have explicit `server-file` provenance. New additions require
+matching name and UUID lookups. Each lookup races the official Mojang/Minecraft
+Services chain against `mc-api.io`, accepts the first valid success and aborts
+the loser. Java profiles use `/profile/{name}/JAVA` and `/profile/{uuid}`; Bedrock
+identities are not accepted by this Java integration. Stored provenance records
+`mojang`, `mc-api.io`, or `mixed` when the two directions use different services.
+A fast failure cannot mask a successful response; both providers must report
+not-found before returning 404. All other combined failures report unavailable.
+Each direction retains its ten-second deadline and 64 KiB response limit
+(up to twenty seconds for the complete two-direction verification).
+The third-party service may return cached profiles and limits unauthenticated
+traffic to 60 requests per minute per IP; 429 does not prevent the official
+provider from succeeding. See the [mc-api.io reference](https://mc-api.io/).
 
 Online names come from a fresh bounded console `list` receipt, not the incomplete
 server-list status sample. The initial parser supports the English timestamped

@@ -203,14 +203,19 @@ export interface MinecraftVerifiedPlayer {
   readonly uuid: string;
   readonly name: string;
   readonly verifiedAt: string;
-  readonly source: 'mojang';
+  readonly source: 'mojang' | 'mc-api.io' | 'mixed';
+}
+export interface MinecraftIdentityResult {
+  readonly id: string;
+  readonly name: string;
+  readonly source?: 'mojang' | 'mc-api.io';
 }
 /** Provider identities, never an avatar response, establish authority. Both directions must agree. */
 export async function verifyMinecraftPlayer(
   name: string,
   provider: {
-    lookupName(name: string): Promise<{ id: string; name: string }>;
-    lookupUuid(uuid: string): Promise<{ id: string; name: string }>;
+    lookupName(name: string): Promise<MinecraftIdentityResult>;
+    lookupUuid(uuid: string): Promise<MinecraftIdentityResult>;
   },
   now = new Date(),
 ): Promise<MinecraftVerifiedPlayer> {
@@ -229,7 +234,10 @@ export async function verifyMinecraftPlayer(
     uuid,
     name: canonicalName,
     verifiedAt: now.toISOString(),
-    source: 'mojang',
+    source:
+      (byName.source ?? 'mojang') === (byUuid.source ?? 'mojang')
+        ? (byName.source ?? 'mojang')
+        : 'mixed',
   });
 }
 export function minecraftAvatarUrl(
@@ -251,7 +259,9 @@ export function planMinecraftPlayerList(
   source: string,
   kind: 'whitelist' | 'operators',
   action: 'add' | 'remove',
-  player: Omit<MinecraftVerifiedPlayer, 'source'> & { readonly source: 'mojang' | 'server-file' },
+  player: Omit<MinecraftVerifiedPlayer, 'source'> & {
+    readonly source: MinecraftVerifiedPlayer['source'] | 'server-file';
+  },
   options: { operatorLevel?: number; bypassesPlayerLimit?: boolean } = {},
 ): {
   path: 'whitelist.json' | 'ops.json';
@@ -262,7 +272,7 @@ export function planMinecraftPlayerList(
 } {
   if (
     Buffer.byteLength(source) > 4 * 1024 * 1024 ||
-    !['mojang', 'server-file'].includes(player.source) ||
+    !['mojang', 'mc-api.io', 'mixed', 'server-file'].includes(player.source) ||
     !Number.isFinite(Date.parse(player.verifiedAt))
   )
     return invalid('minecraft_player_list');
@@ -489,9 +499,9 @@ export function planMinecraftWorldSelection(
   };
 }
 
-/** Fixed first-party origins only; no avatar data, third-party mirrors or redirects
- * establish identity. Each lookup has one budget for at most two attempts; name
- * fallback uses Minecraft Services for the same lookup direction (name or UUID). */
+/** Race the official lookup chain against the Owner-approved mc-api.io Java
+ * profile service. Each direction validates its requested identity before it can
+ * win; verifyMinecraftPlayer still requires name/UUID agreement. */
 export function createMinecraftIdentityProvider(options: {
   userAgent: string;
   fetch?: typeof fetch;
@@ -504,17 +514,32 @@ export function createMinecraftIdentityProvider(options: {
     throw new DomainError('configuration_invalid');
   const unavailable = (reason: string) =>
     new DomainError('integration_unavailable', 503, { reason });
-  const request = async (url: string, budget: number): Promise<{ id: string; name: string }> => {
+  type Expected = { kind: 'name' | 'uuid'; value: string };
+  const request = async (
+    url: string,
+    budget: number,
+    source: 'mojang' | 'mc-api.io',
+    expected: Expected,
+    signal: AbortSignal,
+  ): Promise<MinecraftIdentityResult> => {
     const controller = new AbortController();
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancel: () => void = () => {};
     const deadline = new Promise<never>((_, reject) => {
+      cancel = () => {
+        controller.abort();
+        reject(unavailable('minecraft_identity_cancelled'));
+      };
+      signal.addEventListener('abort', cancel, { once: true });
+      if (signal.aborted) cancel();
       timer = setTimeout(() => {
         controller.abort();
         reject(unavailable('minecraft_identity_transport'));
       }, budget);
     });
     const work = async () => {
+      if (signal.aborted) throw unavailable('minecraft_identity_cancelled');
       let response: Response;
       try {
         response = await (options.fetch ?? fetch)(url, {
@@ -562,23 +587,45 @@ export function createMinecraftIdentityProvider(options: {
         if (
           !result ||
           typeof result !== 'object' ||
-          !('id' in result) ||
           !('name' in result) ||
-          typeof result.id !== 'string' ||
-          typeof result.name !== 'string'
+          typeof result.name !== 'string' ||
+          ('error' in result && result.error === true) ||
+          'xuid' in result ||
+          ('edition' in result && result.edition !== 'JAVA')
         )
           throw unavailable('minecraft_identity_response');
-        return { id: minecraftUuid(result.id), name: minecraftPlayerName(result.name) };
+        const rawId =
+          source === 'mc-api.io'
+            ? 'uuid' in result
+              ? result.uuid
+              : undefined
+            : 'id' in result
+              ? result.id
+              : undefined;
+        if (typeof rawId !== 'string') throw unavailable('minecraft_identity_response');
+        const identity = {
+          id: minecraftUuid(rawId),
+          name: minecraftPlayerName(result.name),
+          source,
+        };
+        if (
+          (expected.kind === 'name' &&
+            identity.name.toLowerCase() !== expected.value.toLowerCase()) ||
+          (expected.kind === 'uuid' && identity.id !== expected.value)
+        )
+          throw unavailable('minecraft_identity_response');
+        return identity;
       } catch {
         throw unavailable('minecraft_identity_response');
       }
     };
     try {
-      // Fetch normally aborts its stream too; the explicit race also bounds a
-      // stalled body or a transport implementation that does not honor abort.
+      // Race cancellation as well as transport timeout: a loser that ignores its
+      // abort signal must not retain a hanging lookup or start an official retry.
       return await Promise.race([work(), deadline]);
     } finally {
       clearTimeout(timer);
+      signal.removeEventListener('abort', cancel);
       controller.abort();
       if (reader) {
         void reader.cancel().catch(() => {});
@@ -586,34 +633,63 @@ export function createMinecraftIdentityProvider(options: {
       }
     }
   };
-  const requestWithRetry = (url: string, retryUrl = url) => {
+  const official = (url: string, retryUrl: string, expected: Expected, signal: AbortSignal) => {
     const started = performance.now();
-    return request(url, Math.max(1, Math.floor(timeout / 2))).catch((error: unknown) => {
-      const remaining = Math.floor(timeout - (performance.now() - started));
+    return request(url, Math.max(1, Math.floor(timeout / 2)), 'mojang', expected, signal).catch(
+      (error: unknown) => {
+        const remaining = Math.floor(timeout - (performance.now() - started));
+        if (
+          signal.aborted ||
+          !(error instanceof DomainError) ||
+          !['minecraft_identity_transport', 'minecraft_identity_upstream_retryable'].includes(
+            String(error.details?.reason),
+          ) ||
+          remaining < 1
+        )
+          throw error;
+        return request(retryUrl, remaining, 'mojang', expected, signal);
+      },
+    );
+  };
+  const race = async (url: string, retryUrl: string, mirrorUrl: string, expected: Expected) => {
+    const controller = new AbortController();
+    try {
+      return await Promise.any([
+        official(url, retryUrl, expected, controller.signal),
+        request(mirrorUrl, timeout, 'mc-api.io', expected, controller.signal),
+      ]);
+    } catch (error) {
       if (
-        !(error instanceof DomainError) ||
-        !['minecraft_identity_transport', 'minecraft_identity_upstream_retryable'].includes(
-          String(error.details?.reason),
-        ) ||
-        remaining < 1
+        error instanceof AggregateError &&
+        error.errors.length === 2 &&
+        error.errors.every(
+          (failure: unknown) => failure instanceof DomainError && failure.code === 'not_found',
+        )
       )
-        throw error;
-      return request(retryUrl, remaining);
-    });
+        throw new DomainError('not_found', 404, { reason: 'minecraft_player_not_found' });
+      throw unavailable('minecraft_identity_unavailable');
+    } finally {
+      controller.abort();
+    }
   };
   return {
     lookupName: (name: string) => {
       const selected = minecraftPlayerName(name);
-      return requestWithRetry(
+      return race(
         `https://api.mojang.com/users/profiles/minecraft/${selected}`,
         `https://api.minecraftservices.com/minecraft/profile/lookup/name/${selected}`,
+        `https://mc-api.io/profile/${selected}/JAVA`,
+        { kind: 'name', value: selected },
       );
     },
     lookupUuid: (uuid: string) => {
-      const selected = minecraftUuid(uuid).replaceAll('-', '');
-      return requestWithRetry(
-        `https://sessionserver.mojang.com/session/minecraft/profile/${selected}`,
-        `https://api.minecraftservices.com/minecraft/profile/lookup/${selected}`,
+      const selected = minecraftUuid(uuid);
+      const compact = selected.replaceAll('-', '');
+      return race(
+        `https://sessionserver.mojang.com/session/minecraft/profile/${compact}`,
+        `https://api.minecraftservices.com/minecraft/profile/lookup/${compact}`,
+        `https://mc-api.io/profile/${selected}`,
+        { kind: 'uuid', value: selected },
       );
     },
   };

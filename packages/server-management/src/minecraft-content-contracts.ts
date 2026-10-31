@@ -27,7 +27,7 @@ export const minecraftStoredPlayerSchema = z
     uuid: z.string().regex(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/),
     name: playerName,
     // Server-file provenance preserves observed UUID authority without claiming Mojang verification.
-    source: z.enum(['mojang', 'server-file']),
+    source: z.enum(['mojang', 'mc-api.io', 'mixed', 'server-file']),
     verifiedAt: z.iso.datetime({ offset: true }),
     level: z.number().int().min(1).max(4).optional(),
     bypassesPlayerLimit: z.boolean().optional(),

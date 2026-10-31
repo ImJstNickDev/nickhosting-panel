@@ -48,6 +48,21 @@ function clientFixture() {
   return { request };
 }
 describe('Minecraft browser module and exact API contracts', () => {
+  it.each(['mojang', 'mc-api.io', 'mixed'])(
+    'accepts verified player responses with %s provenance',
+    async (source) => {
+      const client = clientFixture();
+      const identity = {
+        uuid: serverId,
+        name: 'FixturePlayer',
+        source,
+        verifiedAt: new Date().toISOString(),
+      };
+      client.request.mockResolvedValueOnce(identity);
+      expect(await createMinecraftUiController(client).player('FixturePlayer')).toEqual(identity);
+    },
+  );
+
   it('retains world icon discovery and bundled fallback through the trusted registry', () => {
     const registry = createTrustedGameUiRegistry([minecraftUiModule]);
     const icon = registry.get('minecraft')?.fileDirectoryIcon;
