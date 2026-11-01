@@ -81,7 +81,11 @@ Browser evidence uses isolated fixtures rather than live installations:
 - [Loader selection English](screenshots/m5/quilt-wizard-loaders-en.png), [Italian mobile](screenshots/m5/quilt-wizard-loaders-it-mobile.png)
 
 Guarded read-only development database preflight verified all 56 prior migration
-checksums. Migration057 is pending separate Owner approval. The development Gateway
+checksums. The Owner explicitly approved migration057 on 2026-11-01; the guarded
+transaction applied only that migration and preserved all 56 prior checksums.
+The worker synchronized 447 Minecraft versions, 309 loaders and 34 installers
+without error. No container restart, mapping/egg change or game-server operation
+was performed during this activation. The development Gateway
 was restarted under standing authorization to load the compiled declaration.
 
 All 23 Firefox browser tests passed across Quilt, the Fabric wizard and existing
