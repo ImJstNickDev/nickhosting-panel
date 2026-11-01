@@ -92,6 +92,27 @@ export async function acceptSatisfactoryHttps(
   if (context.signal.aborted || socket.destroyed) return;
   const expected = new X509Certificate(identity.certificatePem).raw;
   const cache = cacheFor(context);
+  const diagnosticOperations = new Set([
+    ...satisfactoryCachedFunctions,
+    'HealthCheck',
+    'VerifyAuthenticationToken',
+    'PasswordlessLogin',
+    'PasswordLogin',
+    satisfactoryJoinFunction,
+  ]);
+  function diagnostic(
+    fn: string | undefined,
+    outcome: 'health' | 'cached' | 'unavailable' | 'wake_result' | 'forwarding_attempt',
+  ): void {
+    try {
+      context.onApiDiagnostic?.({
+        operation: fn && diagnosticOperations.has(fn) ? fn : 'other',
+        outcome,
+      });
+    } catch {
+      // Diagnostics cannot change an API response or expose request contents.
+    }
+  }
   let loaded = hydration.get(cache);
   if (!loaded) {
     loaded = (async () => {
@@ -177,6 +198,7 @@ export async function acceptSatisfactoryHttps(
       return;
     }
     if (fn === 'HealthCheck') {
+      diagnostic(fn, 'health');
       outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       outgoing.end(JSON.stringify({ data: { health: 'slow', serverCustomData: '' } }));
       return;
@@ -187,6 +209,7 @@ export async function acceptSatisfactoryHttps(
     // validity. Only the backend may positively verify authentication.
     const cached = fn && cache.read(fn, authorization, playerId);
     if (cached) {
+      diagnostic(fn, 'cached');
       outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       outgoing.end(cached);
       return;
@@ -196,6 +219,7 @@ export async function acceptSatisfactoryHttps(
     // cache. Admission/coalescing remain in Core; the backend authenticates the
     // unchanged request and is the only issuer of multiplayer tickets.
     if (!isJoinIntent(incoming, body)) {
+      diagnostic(fn, 'unavailable');
       error(outgoing);
       return;
     }
@@ -204,6 +228,7 @@ export async function acceptSatisfactoryHttps(
       return;
     }
     const mode = await context.requestWake();
+    diagnostic(fn, 'wake_result');
     if (!['waking', 'online'].includes(mode)) {
       error(outgoing);
       return;
@@ -243,6 +268,7 @@ export async function acceptSatisfactoryHttps(
       error(outgoing);
       return;
     }
+    diagnostic(fn, 'forwarding_attempt');
     let upstream: ClientRequest;
     try {
       upstream = request(

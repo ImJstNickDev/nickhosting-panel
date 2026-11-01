@@ -158,7 +158,8 @@ export function createSatisfactoryGatewayAdapter(
           : 'ignore',
     }),
     async prepareResponse(context) {
-      if (store.read(context.route.serverId) || !context.loadState) return;
+      const existing = store.read(context.route.serverId);
+      if (existing?.state === 1 || existing?.state === 3 || !context.loadState) return;
       const id = context.route.serverId;
       const current = loads.get(id);
       if (current && Date.now() - current.attemptedAt < 10_000) {
@@ -169,7 +170,8 @@ export function createSatisfactoryGatewayAdapter(
       const work = (async () => {
         try {
           const state = await context.loadState?.();
-          if (state && !context.signal.aborted && !store.read(id))
+          const latest = store.read(id);
+          if (state && !context.signal.aborted && latest?.state !== 1 && latest?.state !== 3)
             store.write(id, { ...state, flags: BigInt(state.flags) });
         } catch {
           // Missing durable status does not invent a build number or readiness.
@@ -185,11 +187,19 @@ export function createSatisfactoryGatewayAdapter(
         store.read(context.route.serverId) ??
         (persisted ? { ...persisted, flags: BigInt(persisted.flags) } : undefined);
       if (!request || !cached) return undefined;
-      // Offline is an actual documented protocol state; never advertise Playing
-      // for a backend unable to issue authentication or multiplayer tickets.
+      // Auto-sleep suspends the known instance, so retain its last native ready
+      // presentation for the Server Manager. This does not establish readiness
+      // or issue authentication/tickets; an actual join still wakes the backend.
       return encodeSatisfactoryState(request.cookie, {
         ...cached,
-        state: mode === 'waking' ? 2 : 0,
+        state:
+          mode === 'waking'
+            ? 2
+            : mode === 'sleeping' &&
+                context.route.wakeEnabled !== false &&
+                (cached.state === 1 || cached.state === 3)
+              ? cached.state
+              : 0,
       });
     },
     async observe(context) {
@@ -238,8 +248,13 @@ export function createSatisfactoryGatewayAdapter(
       if (context.route.protocol?.role !== 'game') return { ready: false };
       try {
         const state = await probeSatisfactoryQuery(context);
-        store.write(context.route.serverId, state);
-        if (context.route.public.transport === 'udp') {
+        const ready = state.state === 1 || state.state === 3;
+        const previous = store.read(context.route.serverId);
+        if (ready || (previous?.state !== 1 && previous?.state !== 3))
+          store.write(context.route.serverId, state);
+        // Only complete ready snapshots become durable presentation. Transient
+        // shutdown/loading responses must not replace the last known instance.
+        if (ready && context.route.public.transport === 'udp') {
           try {
             await context.persistState?.({
               ...state,
@@ -251,13 +266,13 @@ export function createSatisfactoryGatewayAdapter(
             // Persistence availability cannot change the actual protocol reply.
           }
         }
-        if (state.state === 1 || state.state === 3)
+        if (ready)
           boundInsert(observations, context.route.serverId, {
             generation: context.route.generation,
             at: Date.now(),
           });
         else observations.delete(context.route.serverId);
-        return { ready: state.state === 1 || state.state === 3 };
+        return { ready };
       } catch {
         return { ready: false };
       }

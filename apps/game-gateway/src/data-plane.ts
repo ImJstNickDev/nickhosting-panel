@@ -171,6 +171,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     { deadline: number; observedAt: number; generation: string; routes: GatewayRoute[] }
   >();
   const loggedRouteStates = new Map<string, string>();
+  const apiDiagnosticTimes = new Map<string, number>();
   const logTiming = (event: string, data: Readonly<Record<string, unknown>>) => {
     try {
       options.logger?.log('info', event, data);
@@ -478,6 +479,25 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         .acceptTcp(socket, {
           route,
           signal: controller.signal,
+          onApiDiagnostic: (event) => {
+            if (!valid()) return;
+            const mode = responseMode(listener);
+            const key = `${route.id}:${mode}:${event.operation}:${event.outcome}`;
+            const now = Date.now();
+            if (now - (apiDiagnosticTimes.get(key) ?? 0) < 30_000) return;
+            if (apiDiagnosticTimes.size >= 10_000) {
+              const first = apiDiagnosticTimes.keys().next().value;
+              if (first) apiDiagnosticTimes.delete(first);
+            }
+            apiDiagnosticTimes.set(key, now);
+            logTiming('gateway.api_response', {
+              routeId: route.id,
+              serverId: route.serverId,
+              mode,
+              operation: event.operation,
+              outcome: event.outcome,
+            });
+          },
           beginForwarding: () => {
             if (
               !valid() ||

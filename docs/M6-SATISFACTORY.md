@@ -36,8 +36,13 @@ with persisted cache in `satisfactory_server_state`. No invented NetCL is sent
 when no backend observation exists. Query observations are kept outside routing
 authority and cannot change route revisions. After a Gateway restart, offline
 queries hydrate the observed cache through a revision-checked internal endpoint.
-Only actual backend probes establish readiness. Offline/waking responses use the
-documented Offline/Loading states.
+Only actual backend probes establish readiness. During automatic sleep, query responses retain the last actually observed Idle or
+Playing snapshot, allowing the Server Manager to continue its normal API flow.
+Waking reports Loading; manual stop, maintenance, blocked routes and sleeping
+routes with automatic wake disabled report Offline.
+Transient shutdown/loading probes do not overwrite the durable ready snapshot,
+but still immediately revoke live readiness. No cached snapshot authorizes backend
+forwarding or proves that a world is currently running.
 
 HTTPS uses a stable per-server identity in both Gateway and backend. The Gateway
 terminates incoming TLS and creates a separate upstream TLS session, pinning the
@@ -67,10 +72,11 @@ observation and a successful TCP connection. UDP polling does not request wake.
 
 ## Capability limits and acceptance evidence
 
-Coffee Stain's public controller headers establish the exact join function. Actual
-client behavior still needs verification: the Server Manager may disable Join
-when the UDP state is Offline, and an automatic login/verification request cannot
-be authenticated while the backend is stopped. A real JoinGameRequest can request
+Coffee Stain's public controller headers establish the exact join function. A real client test confirmed that reporting Offline after automatic sleep prevents
+the Server Manager from proceeding. Sleeping routes now retain their last native
+ready presentation instead. An automatic login/verification request still cannot
+be authenticated while the backend is stopped; cold-client authentication behavior
+remains a separate acceptance requirement. A real JoinGameRequest can request
 wake regardless of cache age, but clients that stop before sending it require
 manual panel start. Polling does not silently start the backend. The manifest does not claim
 real-client-certified protocol wake merely because isolated protocol tests pass.
@@ -329,3 +335,21 @@ stop completed with fresh host evidence that both installer and game were stoppe
 A subsequent valid join request returned HTTP 503 and created no start operation,
 confirming that manual stop prevents automatic wake. Both ledger-owned test servers
 were retained stopped, without OOM termination; no active jobs remained.
+
+
+## Automatic-sleep Server Manager correction
+
+The Owner reproduced the Offline message after an actual idle timeout. Inspection
+confirmed successful automatic stop and a persisted native Idle snapshot. The
+previous unconditional conversion to Offline caused the presentation failure.
+The correction replays only observed Idle/Playing state for sleeping routes and
+retains the distinction from manual stop. Tests cover both ready states, cold
+hydration, transient stop/loading probes and non-wakeable modes.
+
+Managed API diagnostics emit only allowlisted operation names (otherwise `other`),
+fixed outcomes, route/server identifiers and mode. They exclude credentials,
+player identifiers, headers and bodies, throttle repeated events to once per
+30 seconds, and bound diagnostic memory. Forwarding-attempt and wake-result events
+are diagnostics, not proof of delivery or successful admission. These allow the
+remaining native client authentication sequence to be investigated without recording
+secrets or treating automatic login/verification as play intent.

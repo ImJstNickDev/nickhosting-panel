@@ -69,12 +69,14 @@ async function exchange(
 }
 it('answers health without waking and never manufactures login tokens', async () => {
   const wake = vi.fn();
+  const diagnostics = vi.fn();
   const controller = new AbortController();
   const context = {
     tlsIdentity: async () => identity,
     signal: controller.signal,
     canForward: () => false,
     requestWake: wake,
+    onApiDiagnostic: diagnostics,
   } as unknown as GatewayTcpContext;
   const server = createServer((socket) => {
     void acceptSatisfactoryHttps(socket, context);
@@ -89,6 +91,20 @@ it('answers health without waking and never manufactures login tokens', async ()
     const login = await exchange(address.port, 'PasswordlessLogin');
     expect(login.status).toBe(503);
     expect(login.body).not.toContain('authenticationToken');
+    const secret = 'credential-must-not-appear';
+    expect(
+      (await exchange(address.port, secret, { Authorization: `Bearer ${secret}` })).status,
+    ).toBe(503);
+    expect(diagnostics.mock.calls.map(([event]) => event)).toEqual([
+      { operation: 'HealthCheck', outcome: 'health' },
+      { operation: 'PasswordlessLogin', outcome: 'unavailable' },
+      { operation: 'other', outcome: 'unavailable' },
+    ]);
+    expect(JSON.stringify(diagnostics.mock.calls)).not.toContain(secret);
+    diagnostics.mockImplementation(() => {
+      throw new Error('diagnostic sink failed');
+    });
+    expect((await exchange(address.port, 'HealthCheck')).status).toBe(200);
     expect(wake).not.toHaveBeenCalled();
   } finally {
     controller.abort();

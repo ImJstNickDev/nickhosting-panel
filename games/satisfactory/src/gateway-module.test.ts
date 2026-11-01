@@ -102,7 +102,7 @@ describe('Satisfactory gateway', () => {
     expect(c.route).toEqual(original);
     expect(
       decodeSatisfactoryState(current.response(c, 'sleeping') ?? new Uint8Array(), 42n),
-    ).toMatchObject({ state: 0, netCL: persisted.netCL, name: persisted.name });
+    ).toMatchObject({ state: 3, netCL: persisted.netCL, name: persisted.name });
     await current.prepareResponse?.(c);
     expect(c.loadState).toHaveBeenCalledOnce();
   });
@@ -124,12 +124,110 @@ describe('Satisfactory gateway', () => {
       expect(response).toBeDefined();
       expect(decodeSatisfactoryState(response ?? new Uint8Array(), cookie)).toEqual({
         cookie,
-        state: 0,
+        state: 3,
         netCL: 12345,
         flags: 1n,
         substates: [{ id: 0, version: 9 }],
         name: 'Factory',
       });
+    }
+  });
+  it.each([0, 1, 2, 3] as const)(
+    'replays only observed ready state %s during automatic sleep',
+    (nativeState) => {
+      const c = context(encodeSatisfactoryPoll(5n));
+      if (!c.route.protocol) throw new Error('Missing protocol');
+      c.route.protocol.satisfactory = { ...persisted, state: nativeState };
+      for (const mode of [
+        'sleeping',
+        'waking',
+        'manually_stopped',
+        'maintenance',
+        'blocked',
+        'stopping',
+        'online',
+      ] as const) {
+        const reply = decodeSatisfactoryState(adapter.response(c, mode) ?? new Uint8Array(), 5n);
+        expect(reply.state).toBe(
+          mode === 'waking'
+            ? 2
+            : mode === 'sleeping' && (nativeState === 1 || nativeState === 3)
+              ? nativeState
+              : 0,
+        );
+        expect(reply.netCL).toBe(persisted.netCL);
+      }
+    },
+  );
+  it('keeps an explicitly disabled automatic wake offline despite a saved loaded world', () => {
+    const c = context(encodeSatisfactoryPoll(7n));
+    c.route = { ...c.route, wakeEnabled: false };
+    expect(
+      decodeSatisfactoryState(adapter.response(c, 'sleeping') ?? new Uint8Array(), 7n).state,
+    ).toBe(0);
+  });
+  it('preserves the whole ready snapshot across transient probes while still rejecting readiness', async () => {
+    let nativeState: 0 | 1 | 2 | 3 = 3;
+    const backend = createSocket('udp4');
+    await new Promise<void>((resolve) => backend.bind(0, '127.0.0.1', resolve));
+    backend.on('message', (bytes, remote) => {
+      const poll = decodeSatisfactoryPoll(bytes);
+      if (poll)
+        backend.send(
+          encodeSatisfactoryState(poll.cookie, {
+            ...persisted,
+            state: nativeState,
+            flags: 1n,
+            netCL: nativeState === 3 ? 12345 : 99999,
+            name: nativeState === 3 ? 'Factory' : 'Transient',
+          }),
+          remote.port,
+          remote.address,
+        );
+    });
+    const states = new Map<string, import('./protocol.js').SatisfactoryQueryState>();
+    const current = createSatisfactoryGatewayAdapter({
+      read: (id) => states.get(id),
+      write: (id, state) => {
+        states.set(id, state);
+      },
+    });
+    const c = context(encodeSatisfactoryPoll(42n));
+    delete c.route.protocol?.satisfactory;
+    c.route = {
+      ...c.route,
+      backend: {
+        address: '127.0.0.1',
+        allocationAddress: '127.0.0.1',
+        port: backend.address().port,
+      },
+    };
+    c.persistState = vi.fn(async () => {});
+    try {
+      nativeState = 0;
+      expect(await current.probeReadiness(c)).toEqual({ ready: false });
+      expect(
+        decodeSatisfactoryState(current.response(c, 'sleeping') ?? new Uint8Array(), 42n).state,
+      ).toBe(0);
+      expect(c.persistState).not.toHaveBeenCalled();
+      nativeState = 3;
+      expect(await current.probeReadiness(c)).toEqual({ ready: true });
+      for (const transient of [0, 2] as const) {
+        nativeState = transient;
+        expect(await current.probeReadiness(c)).toEqual({ ready: false });
+        expect(
+          decodeSatisfactoryState(current.response(c, 'sleeping') ?? new Uint8Array(), 42n),
+        ).toMatchObject({ state: 3, netCL: 12345, name: 'Factory' });
+      }
+      expect(c.persistState).toHaveBeenCalledTimes(1);
+      nativeState = 1;
+      expect(await current.probeReadiness(c)).toEqual({ ready: true });
+      expect(
+        decodeSatisfactoryState(current.response(c, 'sleeping') ?? new Uint8Array(), 42n).state,
+      ).toBe(1);
+      expect(c.persistState).toHaveBeenCalledTimes(2);
+    } finally {
+      backend.close();
     }
   });
   it('reports loading only during wake and never fabricates a NetCL without cached state', () => {

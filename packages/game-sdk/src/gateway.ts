@@ -319,6 +319,12 @@ export interface GatewayProtocolSession {
 /** Trusted game code. Implementations must distinguish real protocol readiness
  * and player idleness; an open socket or no Gateway traffic proves neither. */
 export interface GatewayTcpContext extends GatewayProtocolContext {
+  /** Credential-free API diagnostics. Only fixed operation names and outcomes;
+   * never include headers, request/response bodies or player identifiers. */
+  onApiDiagnostic?(event: {
+    operation: string;
+    outcome: 'health' | 'cached' | 'unavailable' | 'wake_result' | 'forwarding_attempt';
+  }): void;
   /** Reserve a validated backend stream before opening it. Undefined refuses
    * forwarding; the idempotent release must run when that upstream closes. */
   beginForwarding?(): (() => void) | undefined;
