@@ -726,3 +726,27 @@ passed 12 API/external-mode cases, 17 worker/inventory cases, 34 targeted domain
 unit cases, nine browser journeys and two upstream ficsit/SFTP cases. These suites
 overlap and their counts must not be summed. Independent code and visual reviewers
 reported no open must-fix findings.
+
+
+### Mod selection and Installed alignment
+
+Discovery checkboxes precede the mod artwork/name in both visual and keyboard
+order. Quick selection stages the latest compatible stable version as a minimum
+(`>=version`), allowing that release or later versions; explicit version/policy
+selection remains available in the mod dialog. Multiple choices remain in the same
+draft until the existing resolved review/apply flow runs.
+
+Installed search, filter and action controls share a bottom baseline. Mod rows use
+separate artwork/content/action columns; narrow layouts put actions below the name
+and metadata. Browser regression checks cover multiple selections, deselection,
+submitted minimum constraints, leading checkbox geometry on desktop/mobile and
+Installed control alignment. All ten browser cases passed across the suite and the
+scoped new-case rerun. Web/application-test TypeScript, frontend build and lint
+passed (existing lint warnings and bundle-size notices remain). Independent code
+and screenshot review found no open issues. The actual dev UI was checked
+read-only: inventory/catalog HTTP 200, checkbox before artwork, no page errors or
+horizontal overflow. No migration, service restart, game-file/power mutation or
+Pterodactyl/Blueprint change was needed.
+
+- [Multiple selection, desktop](screenshots/m6/satisfactory-mods-multiselect-1280.png)
+- [Multiple selection, mobile](screenshots/m6/satisfactory-mods-multiselect-390.png)

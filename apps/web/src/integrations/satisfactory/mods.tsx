@@ -664,19 +664,6 @@ function ModsWorkspace(props: GameSectionViewProps) {
                     undefined
                   }
                 >
-                  <button type="button" className="mods-project-open" onClick={() => choose(item)}>
-                    <ModsArtwork image={item.logo ?? undefined} name={item.name} />
-                    <span className="mods-project-copy">
-                      <span className="mods-project-title">
-                        <strong>{item.name}</strong>
-                      </span>
-                      <span className="mods-project-summary">{item.description}</span>
-                      <span className="satisfactory-mod-meta">
-                        {item.authors?.join(', ')}
-                        {item.tags?.length ? ` · ${item.tags.join(' · ')}` : ''}
-                      </span>
-                    </span>
-                  </button>
                   <ModsCheckbox
                     compact
                     label={t(key('selectMod'), { name: item.name })}
@@ -697,7 +684,7 @@ function ModsWorkspace(props: GameSectionViewProps) {
                           if (recommended)
                             replace({
                               reference: item.reference,
-                              version: recommended.version,
+                              version: `>=${recommended.version}`,
                               enabled: true,
                             });
                           else choose(item);
@@ -711,6 +698,19 @@ function ModsWorkspace(props: GameSectionViewProps) {
                         });
                     }}
                   />
+                  <button type="button" className="mods-project-open" onClick={() => choose(item)}>
+                    <ModsArtwork image={item.logo ?? undefined} name={item.name} />
+                    <span className="mods-project-copy">
+                      <span className="mods-project-title">
+                        <strong>{item.name}</strong>
+                      </span>
+                      <span className="mods-project-summary">{item.description}</span>
+                      <span className="satisfactory-mod-meta">
+                        {item.authors?.join(', ')}
+                        {item.tags?.length ? ` · ${item.tags.join(' · ')}` : ''}
+                      </span>
+                    </span>
+                  </button>
                 </li>
               ))}
             </ul>

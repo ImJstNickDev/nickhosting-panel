@@ -603,6 +603,14 @@ it('stages updates and disabled choices, keeps failed requests retryable with th
   await page.getByRole('button', { name: 'Check updates', exact: true }).click();
   await page.getByRole('button', { name: 'Select all updates', exact: true }).click();
   await page.getByRole('button', { name: 'Disable Example mod', exact: true }).click();
+  const controlBottoms = await page
+    .locator('.mods-search-toolbar')
+    .evaluate((toolbar) =>
+      [...toolbar.querySelectorAll('.workspace-search, select, :scope > button')].map(
+        (control) => control.getBoundingClientRect().bottom,
+      ),
+    );
+  expect(Math.max(...controlBottoms) - Math.min(...controlBottoms)).toBeLessThanOrEqual(1);
   await page.screenshot({ path: `${shots}/satisfactory-mods-installed-en.png`, fullPage: true });
   await page.getByRole('button', { name: 'Review changes', exact: true }).click();
   await check(
@@ -885,6 +893,87 @@ it('loads imported minimum-version constraints and submits explicit version poli
   await check(page.getByText('No mod file changes are required.', { exact: true })).toBeVisible();
   expect(previews).toMatchObject([
     { selection: [{ reference: 'Example', version: '1.2.3', enabled: true }] },
+  ]);
+  await context.close();
+});
+
+it('selects multiple mods with leading checkboxes and latest compatible minimum versions', async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  const previews: unknown[] = [];
+  await page.route('**/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/catalog'))
+      return route.fulfill({
+        json: {
+          total: 2,
+          items: [
+            exampleProject,
+            { ...exampleProject, id: 'second', reference: 'Second', name: 'Second mod' },
+          ],
+        },
+      });
+    if (path.includes('/versions/'))
+      return route.fulfill({
+        json: [
+          { ...exampleVersion, version: '3.0.0', compatibility: 'incompatible' },
+          { ...exampleVersion, version: '2.0.0' },
+          exampleVersion,
+        ],
+      });
+    if (path.endsWith('/inventory')) return route.fulfill({ json: emptyInventory() });
+    if (path.endsWith('/preview')) {
+      previews.push(route.request().postDataJSON());
+      return route.fulfill({ status: 202, json: { jobId: 'multi-job', planId: 'multi-plan' } });
+    }
+    if (path.includes('/plans/'))
+      return route.fulfill({ json: { id: 'multi-plan', status: 'pending', revision: 0 } });
+    return route.fulfill({ json: emptySnapshot() });
+  });
+  await page.goto(`${origin}satisfactory-fixture`);
+  await page.getByRole('button', { name: 'Discover', exact: true }).first().click();
+  const first = page.getByRole('checkbox', { name: 'Select Example mod', exact: true });
+  const second = page.getByRole('checkbox', { name: 'Select Second mod', exact: true });
+  await first.click();
+  await check(first).toBeChecked();
+  await second.click();
+  await check(second).toBeChecked();
+  await check(first).toBeChecked();
+  await check(page.getByRole('dialog')).toHaveCount(0);
+  await first.uncheck();
+  await check(first).not.toBeChecked();
+  await check(second).toBeChecked();
+  await first.click();
+  await check(first).toBeChecked();
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    const position = await page
+      .locator('.mods-project')
+      .first()
+      .evaluate((row) => {
+        const checkbox = row.querySelector('.mods-checkbox')?.getBoundingClientRect();
+        const artwork = row.querySelector('.mods-artwork')?.getBoundingClientRect();
+        if (!checkbox || !artwork) throw new Error('Missing mod selection controls');
+        return { checkboxRight: checkbox.right, artworkLeft: artwork.left };
+      });
+    expect(position.checkboxRight).toBeLessThanOrEqual(position.artworkLeft);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    await page.screenshot({
+      path: `${shots}/satisfactory-mods-multiselect-${width}.png`,
+      fullPage: true,
+    });
+  }
+  await page.getByRole('button', { name: 'Review changes', exact: true }).click();
+  await check(page.locator('body')).toHaveAttribute('data-job', 'multi-job');
+  expect(previews).toMatchObject([
+    {
+      selection: [
+        { reference: 'Second', version: '>=2.0.0', enabled: true },
+        { reference: 'Example', version: '>=2.0.0', enabled: true },
+      ],
+    },
   ]);
   await context.close();
 });
