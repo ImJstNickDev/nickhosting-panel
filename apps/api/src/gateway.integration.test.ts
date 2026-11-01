@@ -234,7 +234,7 @@ describe('M3 Core service authentication and managed control plane', () => {
     name: 'Factory',
     observedAt: new Date().toISOString(),
   });
-  it.each(['tls-identity', 'protocol-state'])(
+  it.each(['tls-identity', 'protocol-state', 'private-state-read', 'private-state-write'])(
     'rejects browser and wrong-Gateway access to %s',
     async (endpoint) => {
       const input = {
@@ -271,7 +271,7 @@ describe('M3 Core service authentication and managed control plane', () => {
     const snapshot = await request(`${prefix()}/snapshot`);
     expect(await snapshot.text()).not.toContain('PRIVATE KEY');
   });
-  it.each(['tls-identity', 'protocol-state'])(
+  it.each(['tls-identity', 'protocol-state', 'private-state-read', 'private-state-write'])(
     'rejects wrong protocol handlers for %s',
     async (endpoint) => {
       const response = await request(`${prefix()}/${endpoint}`, {
@@ -312,6 +312,47 @@ describe('M3 Core service authentication and managed control plane', () => {
         })
       ).status,
     ).toBe(403);
+  });
+  it('persists private protocol state encrypted, never in routing snapshots', async () => {
+    const input = await satisfactoryRoute();
+    const state = [
+      {
+        key: 'f'.repeat(64),
+        expiresAt: Date.now() + 60000,
+        responses: { QueryServerState: '{"data":{"privateSession":"factory-secret"}}' },
+      },
+    ];
+    expect((await request(`${prefix()}/private-state-write`, { ...input, state })).status).toBe(
+      204,
+    );
+    const response = await request(`${prefix()}/private-state-read`, input);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual(state);
+    const stored = await f.db
+      .selectFrom('encrypted_secrets')
+      .select('envelope')
+      .where('name', '=', `gateway.satisfactory.cache.${serverId}`)
+      .executeTakeFirstOrThrow();
+    expect(JSON.stringify(stored.envelope)).not.toContain('factory-secret');
+    expect(await (await request(`${prefix()}/snapshot`)).text()).not.toContain('factory-secret');
+    expect(
+      (
+        await request(`${prefix()}/private-state-read`, {
+          ...input,
+          routeRevision: input.routeRevision + 1,
+        })
+      ).status,
+    ).toBe(412);
+    expect(
+      (
+        await request(`${prefix()}/private-state-write`, {
+          ...input,
+          state,
+          serverId: randomUUID(),
+        })
+      ).status,
+    ).toBe(400);
   });
   it('persists fresh UDP protocol state and does not churn revisions for timestamp-only observations', async () => {
     const input = await satisfactoryRoute('udp');

@@ -99,6 +99,7 @@ export async function processSatisfactoryMods(
       env,
     );
     const prepared = await prepareSatisfactoryMods({
+      sandboxExecutable: env.NH_CONTENT_SANDBOX_PATH,
       executable: env.NH_FICSIT_CLI_PATH ?? '/usr/local/bin/ficsit',
       executableSha256:
         env.NH_FICSIT_CLI_SHA256 ??

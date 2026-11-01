@@ -5,7 +5,6 @@ import {
 } from '../../../games/satisfactory/src/index.js';
 import type { GameRuntimeHooks, TrustedGameModule } from './game-modules.js';
 import type { GameLifecycleContext } from './lifecycle.js';
-import { processSatisfactoryMods } from './satisfactory-mods.js';
 import { ensureSatisfactoryTlsIdentity } from './satisfactory-tls.js';
 
 export const satisfactoryModule: TrustedGameModule = {
@@ -36,6 +35,17 @@ export function createSatisfactoryModuleRuntime(
     if (!identifier) throw new DomainError('integration_unavailable');
     await context.authorize();
     await context.assertStopped();
+    const binaries = await context.adapter.listFiles(identifier, 'Engine/Binaries/Linux');
+    if (
+      !binaries.some(
+        (entry) =>
+          entry.is_file &&
+          !entry.is_symlink &&
+          /-Linux-Shipping$/.test(entry.name) &&
+          entry.size > 0,
+      )
+    )
+      throw new DomainError('integration_unavailable');
     const identity = await ensureSatisfactoryTlsIdentity(context.db, codec, context.server.id);
     for (const [path, value] of [
       [satisfactoryCertificatePaths.certificate, identity.certificatePem],
@@ -87,20 +97,47 @@ export function createSatisfactoryModuleRuntime(
   return {
     id: satisfactoryModule.id,
     configureProvision: configure,
+    async prepareStop(context) {
+      const { satisfactoryApiConfigured, resolveSatisfactoryApi } = await import(
+        './satisfactory-api.js'
+      );
+      if (!(await satisfactoryApiConfigured(context.db, context.server.id))) return;
+      await context.authorize();
+      const api = await resolveSatisfactoryApi(context.db, codec, context.server.id);
+      if ((await api.state()).isGameRunning) {
+        await context.authorize();
+        await api.save(`nh-stop-${context.operation().job_id}`);
+        await context.authorize();
+      }
+    },
     verifyRestore: configure,
-    processContent: (context) => processSatisfactoryMods(context, env),
+    processContent: async (context) =>
+      (await import('./satisfactory-mods.js')).processSatisfactoryMods(context, env),
     async assertRuntimeImage(serverId, db, _requireObserved, snapshot) {
       const server = await db
         .selectFrom('managed_servers as server')
         .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
-        .select(['mapping.game_id', 'mapping.runtime_id', 'mapping.docker_image', 'mapping.egg_id'])
+        .select([
+          'mapping.game_id',
+          'mapping.runtime_id',
+          'mapping.docker_image',
+          'mapping.egg_id',
+          'mapping.image_mode',
+        ])
         .where('server.id', '=', serverId)
         .executeTakeFirstOrThrow();
       if (server.game_id !== 'satisfactory' || server.runtime_id !== 'dedicated')
         throw new DomainError('configuration_invalid');
       if (snapshot?.providerServer) {
         const remote = await snapshot.providerServer;
-        if (remote.egg !== server.egg_id || remote.container.image !== server.docker_image)
+        const policy = satisfactoryManifest.runtimes.find(
+          (runtime) => runtime.id === server.runtime_id,
+        )?.imagePolicy;
+        const expectedImage =
+          server.image_mode === 'integration' && policy?.mode === 'fixed'
+            ? policy.image
+            : server.docker_image;
+        if (remote.egg !== server.egg_id || remote.container.image !== expectedImage)
           throw new DomainError('configuration_invalid');
       }
     },

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
@@ -44,6 +44,7 @@ export const satisfactoryVersionPaths = [
 export async function prepareSatisfactoryMods(options: {
   executable: string;
   executableSha256: string;
+  sandboxExecutable?: string;
   stagingRoot: string;
   selection: SatisfactoryModSelection;
   versionPath: (typeof satisfactoryVersionPaths)[number];
@@ -117,19 +118,63 @@ export async function prepareSatisfactoryMods(options: {
     const run =
       options.run ??
       (async (binary, argv, cwd, signal) => {
-        await promisify(execFile)(binary, argv, {
-          cwd,
-          signal,
-          timeout: 300_000,
-          maxBuffer: 1_048_576,
-          env: {
-            PATH: process.env.PATH,
-            HOME: root,
-            XDG_CONFIG_HOME: state,
-            XDG_DATA_HOME: state,
-            XDG_CACHE_HOME: join(root, 'cache'),
-          },
-        });
+        const budget = new AbortController();
+        let scanning: Promise<void> | undefined;
+        const scan = async () => {
+          let bytes = 0,
+            entries = 0;
+          const walk = async (directory: string, depth = 0): Promise<void> => {
+            if (depth > 32) throw new Error('satisfactory_mod_output_limit');
+            for (const entry of await readdir(directory, { withFileTypes: true })) {
+              if (++entries > 40000 || entry.isSymbolicLink())
+                throw new Error('satisfactory_mod_output_limit');
+              const path = join(directory, entry.name);
+              if (entry.isDirectory()) await walk(path, depth + 1);
+              else {
+                try {
+                  bytes += (await lstat(path)).size;
+                } catch (error) {
+                  if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+                }
+                if (bytes > 1_610_612_736) throw new Error('satisfactory_mod_output_limit');
+              }
+            }
+          };
+          await walk(cwd);
+        };
+        const timer = setInterval(() => {
+          if (scanning) return;
+          scanning = scan()
+            .catch((error: unknown) => budget.abort(error))
+            .finally(() => {
+              scanning = undefined;
+            });
+        }, 500);
+        try {
+          await promisify(execFile)(
+            options.sandboxExecutable ?? '/usr/local/bin/nh-content-sandbox',
+            [cwd, binary, ...argv],
+            {
+              cwd,
+              signal: signal ? AbortSignal.any([signal, budget.signal]) : budget.signal,
+              timeout: 300_000,
+              maxBuffer: 1_048_576,
+              env: {
+                PATH: process.env.PATH,
+                HOME: root,
+                TMPDIR: root,
+                XDG_CONFIG_HOME: state,
+                XDG_DATA_HOME: state,
+                XDG_CACHE_HOME: join(root, 'cache'),
+              },
+            },
+          );
+          await scan();
+          budget.signal.throwIfAborted();
+        } finally {
+          clearInterval(timer);
+          await scanning;
+        }
       });
     await run(options.executable, args, root, options.signal);
     const lock = satisfactoryModLockSchema.parse(

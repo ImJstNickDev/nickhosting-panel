@@ -60,7 +60,10 @@ describe('trusted game frontend rendering', () => {
     expect(getGameArtwork('unknown-game')).toBeUndefined();
     expect(getGameAdminSections('unknown-game')).toEqual([]);
     expect(getGameAdminSections('minecraft').map((section) => section.id)).toEqual(['versions']);
-    expect(gameUiRegistry.list().map((m) => m.descriptor.gameId)).toEqual(['minecraft', 'satisfactory']);
+    expect(gameUiRegistry.list().map((m) => m.descriptor.gameId)).toEqual([
+      'minecraft',
+      'satisfactory',
+    ]);
   });
   it('renders distinct bundled runtime artwork from integration-provided choices', () => {
     const cache = new QueryClient();

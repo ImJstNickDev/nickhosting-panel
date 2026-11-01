@@ -22,7 +22,7 @@ services:
       NH_GATEWAY_CONTROL_TOKEN: ${NH_DEV_GATEWAY_CONTROL_TOKEN:?Dedicated development Gateway token required}
       NH_GATEWAY_CORE_URL: ${NH_DEV_PUBLIC_URL:?HTTPS development origin required}
       NH_GATEWAY_DIAGNOSTICS_SOCKET: /run/nickhosting-gateway/diagnostics.sock
-      NH_GATEWAY_PROTOCOL_MODULES: '["/app/games/minecraft/src/gateway-module.ts"]'
+      NH_GATEWAY_PROTOCOL_MODULES: '["/app/games/minecraft/src/gateway-module.ts","/app/games/satisfactory/src/gateway-module.ts"]'
     network_mode: host
     depends_on:
       api: { condition: service_healthy }
@@ -52,6 +52,7 @@ services:
       - { type: bind, source: ./packages/gateway-safety/src, target: /app/packages/gateway-safety/src, read_only: true, bind: { create_host_path: false } }
       - { type: bind, source: ./packages/pterodactyl-adapter/src, target: /app/packages/pterodactyl-adapter/src, read_only: true, bind: { create_host_path: false } }
       - { type: bind, source: ./games/minecraft/src, target: /app/games/minecraft/src, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: ./games/satisfactory/src, target: /app/games/satisfactory/src, read_only: true, bind: { create_host_path: false } }
       - { type: bind, source: ./tsconfig.json, target: /app/tsconfig.json, read_only: true, bind: { create_host_path: false } }
       - { type: bind, source: ./deploy/gateway-health.mjs, target: /app/deploy/gateway-health.mjs, read_only: true, bind: { create_host_path: false } }
     healthcheck:

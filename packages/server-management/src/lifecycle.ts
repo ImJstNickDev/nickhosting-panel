@@ -139,6 +139,7 @@ export interface LifecycleOptions {
   } | null>;
   /** Game hooks run under the same pinned server lock and durable effect journal. */
   configureGameProvision?: (context: GameLifecycleContext) => Promise<boolean>;
+  prepareGameStop?: (context: GameLifecycleContext) => Promise<void>;
   /** Read-only, trusted integration attestation; never used for reinstall/wipe. */
   verifyInitialInstallation?: (
     context: GameLifecycleContext,
@@ -1635,6 +1636,7 @@ export async function processServerOperation(
         }
         if (operation.plan.backupWasRunning === true && operation.phase !== 'backup_stop') {
           await effect('backup_stop', async (verifiedServer) => {
+            await options.prepareGameStop?.(gameContext());
             await options.adapter.stopWithConfirmation(
               server.pterodactyl_id ?? 0,
               server.pterodactyl_identifier ?? '',
@@ -2616,6 +2618,7 @@ export async function processServerOperation(
             await effect(
               'power',
               async (verifiedServer) => {
+                await options.prepareGameStop?.(gameContext());
                 const result = await options.adapter.stopWithConfirmation(
                   server.pterodactyl_id ?? 0,
                   server.pterodactyl_identifier ?? '',
@@ -2725,9 +2728,10 @@ export async function processServerOperation(
               remote,
             );
           } else
-            await effect('power', () =>
-              options.adapter.power(server.pterodactyl_identifier ?? '', action),
-            );
+            await effect('power', async () => {
+              if (action === 'restart') await options.prepareGameStop?.(gameContext());
+              return options.adapter.power(server.pterodactyl_identifier ?? '', action);
+            });
           const stopped = await completeObservedStop();
           if (stopped) return stopped;
           return wait('power_confirmation');

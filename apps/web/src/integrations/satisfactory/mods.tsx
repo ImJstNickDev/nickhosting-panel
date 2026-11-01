@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { api, idempotencyKey } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
 import { ErrorNotice } from '../../components/ui.js';
+import './mods.css';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 
 type Choice = { reference: string; version: string };
@@ -73,10 +74,12 @@ export function SatisfactoryModsSection(props: GameSectionViewProps) {
     }
   }
   return (
-    <section className="workspace-surface">
+    <section className="workspace-surface satisfactory-mods">
       <h2>{t(key('title'))}</h2>
       <p>{t(key('applyHint'))}</p>
-      <ErrorNotice error={error ?? snapshot.error ?? catalog.error ?? versions.error} />
+      {(error ?? snapshot.error ?? catalog.error ?? versions.error) != null && (
+        <ErrorNotice error={error ?? snapshot.error ?? catalog.error ?? versions.error} />
+      )}
       {snapshot.isPending ? (
         <p role="status">{t('web.loading')}</p>
       ) : (

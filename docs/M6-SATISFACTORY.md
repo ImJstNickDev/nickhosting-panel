@@ -40,31 +40,47 @@ HTTPS uses a stable per-server identity in both Gateway and backend. The Gateway
 terminates incoming TLS and creates a separate upstream TLS session, pinning the
 exact server certificate before forwarding request bytes. Existing sessions are
 not transplanted between TLS endpoints. Online API responses and credentials pass
-through unchanged. Offline HealthCheck reports slow; other offline HTTP requests
-receive 503, never manufactured authentication tokens or multiplayer tickets.
+through unchanged. Offline HealthCheck reports slow. Read-only snapshots previously
+returned by the backend can be replayed to the same credential for at most five
+minutes. These encrypted snapshots are historical responses, not current backend
+authorization. VerifyAuthenticationToken is never positively emulated offline.
+No authentication tokens or multiplayer tickets are manufactured.
+
+The exact Coffee Stain `JoinGameRequest` is recognized separately from polling.
+A recent backend-validated player credential can request wake; the HTTPS request
+waits up to 25 seconds for readiness before being forwarded unchanged. The backend
+still validates current authentication and issues the multiplayer ticket. Unknown
+credentials, application tokens and arbitrary TCP/UDP traffic never trigger wake.
+A rejected credential invalidates only its own cache entry; successful mutations
+clear server snapshots. The private cache is persisted encrypted through the
+existing authenticated control channel.
 
 Reliable TCP remains raw forwarding. Its readiness requires a recent game-query
 observation and a successful TCP connection. UDP polling does not request wake.
 
 ## Capability limits and acceptance evidence
 
-The public API document does not establish a verified distinction between the
-client's intent to join and background authentication/status polling. Therefore
-this integration does not declare protocol wake, and does not wake on arbitrary
-TLS or UDP traffic. A real-client trace is required to implement that requirement
-without unsolicited starts. No real-client wake or multiplayer certification is
-claimed by isolated protocol tests.
+Coffee Stain's public controller headers establish the exact join function. Actual
+client behavior still needs verification: the Server Manager may disable Join
+when the UDP state is Offline, and a cold/expired client credential cannot be
+authenticated while the backend is stopped without inventing authentication.
+Manual panel start remains necessary in those cases. The manifest does not claim
+real-client-certified protocol wake merely because isolated protocol tests pass.
 
-The typed HTTPS API client implements state/options/save/shutdown, but wiring a
-server-scoped application token into lifecycle and management remains necessary
-before declaring player/idle/graceful-stop capabilities. Shared console, files,
-backups and power operations remain available through the existing platform.
+The Settings section accepts a server application token, validates it against the
+pinned backend, and stores it encrypted. It never returns that token. State,
+player counts and server options use the authenticated API. Option updates share
+the lifecycle lock and authorization/audit boundaries. When a token is configured,
+stop/restart and stopped-backup flows save a running world before the existing
+provider-confirmed stop; absent a token, the native egg graceful stop remains.
 
-Real-provider creation, first start, claim/authentication, multiplayer join,
-reinstall/migration identity continuity and modded-client compatibility have not
-been exercised by this change. No production schema, egg, game files, ports or
-container configuration were changed. Migration application and deployment remain
-separate infrastructure operations.
+A newly created, ledger-proven test server was installed through the actual egg,
+configured with the real upload pipeline, started, claimed and queried over pinned
+TLS. The first Steam download failed with Missing configuration; retry succeeded.
+Provisioning now verifies the game executable instead of trusting installed state
+alone. Real multiplayer/client compatibility is not established by API tests.
+Only the new test server has been mutated; existing games and Panel source remain
+untouched. Development migrations/restarts are described below.
 
 ## References
 
@@ -72,6 +88,7 @@ separate infrastructure operations.
 - [Lightweight Query](https://satisfactory.wiki.gg/wiki/Dedicated_servers/Lightweight_Query_API)
 - [HTTPS API](https://satisfactory.wiki.gg/wiki/Dedicated_servers/HTTPS_API)
 - [Dedicated servers](https://satisfactory.wiki.gg/wiki/Dedicated_servers)
+- [Coffee Stain JoinGameRequest controller](https://github.com/satisfactorymodding/SatisfactoryModLoader/blob/master/Source/FactoryDedicatedServer/Public/Controller/FGServerStateController.h)
 - [FICSIT dedicated servers](https://docs.ficsit.app/satisfactory-modding/latest/ForUsers/DedicatedServerSetup.html)
 
 ## Rollback
@@ -80,3 +97,98 @@ Revert the application commit before activating new integrations. For an activat
 installation, stop new Satisfactory admissions, preserve encrypted TLS identities,
 server files and database backup, and review active operations before rolling back.
 Do not delete certificates or drop durable mod-operation tables as routine rollback.
+
+## Native mods
+
+The Satisfactory Mods section searches SMR, shows Linux server releases and their
+published game-build requirements, and lets users select exact versions, remove
+selected roots, or replace a version. Apply uses the shared `satisfactory-content`
+operation and Activity tracking, stops the server, resolves dependencies/SML with
+ficsit-cli, uploads through the existing Pterodactyl file pipeline, verifies every
+file with streaming SHA-256, then commits the installed selection and dependency
+lock. Only previously managed files with matching hashes may be replaced/removed;
+manual files are not silently adopted or deleted. The user starts the server after
+reviewing the completed operation.
+
+Migration 059 stores desired roots, installed file hashes and the resolver lock.
+Per-job staging receipts freeze resolved output across worker retries. Completion
+is recorded before deleting the operation-owned staging directory, allowing cleanup
+to resume safely. Staging uses the existing content reservation ledger and limits;
+failed jobs retain their charged staging data for controlled recovery.
+
+The development and runtime images include upstream ficsit-cli **v0.7.1**, pinned
+by SHA-256 for Linux amd64 and arm64. The default path is `/usr/local/bin/ficsit`.
+Local non-container workers can set `NH_FICSIT_CLI_PATH` and
+`NH_FICSIT_CLI_SHA256` together to a verified installation. The worker verifies the
+binary digest before every preparation. No server SFTP credentials are passed to
+the CLI: upstream's remote SFTP implementation currently ignores host keys, so
+resolution runs in a private local directory using actual server version metadata,
+then the existing file bridge transfers the result. No game executable is run in
+that staging directory.
+
+Verified checks: seven catalog/resolver tests, three durable transfer tests
+(including a 2 MiB binary and symlink/ownership conflicts), and one isolated browser
+journey covering exact-version selection, durable request, English desktop,
+Italian mobile/read-only, no horizontal overflow and automated WCAG checks.
+Screenshots are under `.codex/local/m6-browser/screenshots/` (local evidence).
+These checks do not certify a real modded Satisfactory client/server session.
+
+Sources: [ficsit-cli v0.7.1](https://github.com/satisfactorymodding/ficsit-cli/releases/tag/v0.7.1),
+[upstream release checksums](https://github.com/satisfactorymodding/ficsit-cli/releases/download/v0.7.1/checksums.txt),
+[SMR protocol implementation](https://github.com/satisfactorymodding/ficsit-cli/tree/master/ficsit).
+
+The CLI subprocess runs through `nh-content-sandbox`, built from the reviewed
+Landlock helper. It clears inherited environment, grants writes only inside its
+private stage, denies other filesystem reads except runtime libraries/certificates,
+and limits individual file size. It requires Landlock ABI 2 or newer plus a seccomp filter denying path-based
+truncate, read-only O_TRUNC opens and openat2. ABI 3+ additionally enforces native
+Landlock truncation rights. Inherited nonstandard file descriptors are closed;
+writable regular standard descriptors are rejected. The current host reports ABI 2:
+actual confinement tests verify traversal, outside reads/writes/rename/truncation
+and environment isolation. Unsupported kernels fail before running the CLI.
+No host/kernel configuration was changed.
+`NH_CONTENT_SANDBOX_PATH` may select the locally compiled helper for non-container
+workers; there is no unsandboxed fallback.
+
+## Development activation — 2026-11-01
+
+The Owner explicitly authorized development database migrations and dev service
+restarts for the entire Satisfactory implementation. The standard transactional
+migrator applied 058 and 059 after a private PostgreSQL backup; existing migration
+checksums were verified by the migrator. API, worker, Vite and Gateway were
+recreated through the existing complete Compose stack, retaining networks, host
+ports and persistent mounts. The new game source bind and trusted protocol module
+were added to the existing dev configuration. No Pterodactyl Panel source changed.
+
+The Owner also authorized updates to our Blueprint extension exclusively through
+its normal `blueprint -i name.blueprint` installation/update workflow; no such
+extension update has been necessary so far.
+
+The upstream v0.7.1 binary was also exercised through the actual sandbox on this
+host: installation/profile initialization, empty selection preparation and an SML
+3.9.1 resolution/download/extraction using synthetic build metadata (NetCL 400000).
+The SML run returned 17 validated files totaling 21,946,377 bytes. Temporary files
+were removed. This smoke check does not install a Pterodactyl server or launch game
+code. A periodic aggregate staging scan aborts CLI work above its 1.5 GiB reserved
+budget, in addition to the per-file and final output limits.
+
+Settings browser evidence also covers unconfigured/configured API connection,
+password-field token submission and clearing, no token in GET responses or visible
+text, changed-only option submission, player-state display and read-only Italian
+mobile controls. Desktop/mobile captures and automated Axe checks passed. The
+sandbox metadata escape found during independent review was fixed by denying
+chmod/chown/xattr/time mutations and ioctl; the actual SML smoke passed again after
+that hardening.
+
+The aggregate staging watchdog detects excess usage every 500 ms; it is not a
+filesystem hard quota and transient overshoot is possible. The per-file limit is
+kernel-enforced. io_uring and legacy asynchronous I/O syscalls are denied so they
+cannot bypass the synchronous open/truncate seccomp checks.
+
+A subsequent resolver smoke used the exact installed metadata from the isolated
+Pterodactyl test server: `Engine/Binaries/Linux/FactoryServer-Linux-Shipping.version`,
+GameVersion 1.2.4.1 / Changelist 513885. SMR's newest stable LinuxServer SML 3.12.0
+requires game build >=491125. The hardened sandbox resolved and extracted that
+exact SML version into 17 verified files (14,025,213 bytes). This preparation used
+a nonexecuted launcher existence marker and did not modify the provider server.
+Both documented Linux version-file paths are supported by the discovery code.

@@ -44,6 +44,7 @@ import { registerPlatformRoutes } from './platform.js';
 import { registerProfilePhotoRoutes } from './profile-photo.js';
 import { PROVIDER_EVENTS_PATH, receiveProviderEvent } from './provider-events.js';
 import { registerSatisfactoryRoutes } from './satisfactory.js';
+import { registerSatisfactoryApiRoutes } from './satisfactory-api.js';
 import { registerSatisfactoryModRoutes } from './satisfactory-mods.js';
 import { registerScheduleRoutes } from './schedules.js';
 import { registerServerRoutes } from './servers.js';
@@ -625,6 +626,7 @@ export function createApp(options: Options) {
     http: options.minecraftContentHttp,
   });
   registerSatisfactoryRoutes(app, { db, principal });
+  registerSatisfactoryApiRoutes(app, { db, codec: options.codec, principal });
   registerSatisfactoryModRoutes(app, { db, principal, env });
   registerMinecraftRoutes(app, {
     db,

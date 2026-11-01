@@ -23,6 +23,7 @@ export const satisfactoryManifest = gameManifestSchema.parse({
   runtimes: [
     {
       id: 'dedicated',
+      imagePolicy: { mode: 'fixed', image: 'ghcr.io/ptero-eggs/steamcmd:debian' },
       nameKey: 'games.satisfactory.runtimes.dedicated',
       supportedGameVersions: [],
       supports: {},

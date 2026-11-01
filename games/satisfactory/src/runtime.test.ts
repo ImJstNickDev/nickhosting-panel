@@ -29,3 +29,20 @@ it('binds explicit allocated ports and advertised reliable port without shell in
   ).toThrow();
   expect(() => buildSatisfactoryPlan({ branch: '$(bad)' }, 'public')).toThrow();
 });
+
+it('matches the installed SteamCMD egg branch and container contracts', () => {
+  expect(
+    satisfactoryEggEnvironment(
+      { branch: 'experimental' },
+      { game: 7777, reliable: 8888, externalReliable: 8888 },
+    ),
+  ).toMatchObject({ SRCDS_BETAID: 'experimental', SRCDS_APPID: '1690800' });
+  expect(
+    satisfactoryEggEnvironment({}, { game: 7777, reliable: 8888, externalReliable: 8888 })
+      .SRCDS_BETAID,
+  ).toBe('');
+  expect(satisfactoryIntegration.manifest.runtimes[0]?.imagePolicy).toEqual({
+    mode: 'fixed',
+    image: 'ghcr.io/ptero-eggs/steamcmd:debian',
+  });
+});

@@ -3,6 +3,28 @@ import { z } from 'zod';
 
 const prefix = 'games.satisfactory.';
 const translations: Record<string, [string, string]> = {
+  'api.title': ['Server settings', 'Impostazioni server'],
+  'api.token': ['Application token', 'Token applicazione'],
+  'api.tokenHelp': [
+    'In the game Server Manager console, run server.GenerateAPIToken and enter the result here. The token is verified against the running server and stored encrypted.',
+    'Nella console del Server Manager del gioco esegui server.GenerateAPIToken e inserisci qui il risultato. Il token viene verificato sul server acceso e conservato cifrato.',
+  ],
+  'api.configured': ['Server API connected.', 'API del server collegata.'],
+  'api.unconfigured': [
+    'Connect the server API to manage settings and read player counts.',
+    'Collega l’API del server per gestire le impostazioni e leggere il numero di giocatori.',
+  ],
+  'api.startFirst': [
+    'Start the server to connect its API or edit settings.',
+    'Avvia il server per collegare l’API o modificare le impostazioni.',
+  ],
+  'api.saved': ['Changes saved.', 'Modifiche salvate.'],
+  'api.session': ['Session', 'Sessione'],
+  'api.players': ['Connected players', 'Giocatori connessi'],
+  'api.tickRate': ['Average tick rate', 'Tick rate medio'],
+  'api.options': ['Server options', 'Opzioni server'],
+  'api.pending': ['Pending value', 'Valore in attesa'],
+
   name: ['Satisfactory', 'Satisfactory'],
   'mods.title': ['Mods', 'Mod'],
   'runtimes.dedicated': ['Dedicated server', 'Server dedicato'],
@@ -65,6 +87,17 @@ export const satisfactoryUiDescriptor = gameUiDescriptorSchema.parse({
   },
   sections: [
     {
+      id: 'server-settings',
+      titleKey: `${prefix}api.title`,
+      loader: 'server-settings',
+      renderer: 'satisfactory-settings',
+      navigation: { group: 'config', order: 40, icon: 'settings', placement: 'sidebar' },
+      requiredPermissions: ['server:read'],
+      requiredCapabilities: ['files'],
+      columns: [],
+      forms: [],
+    },
+    {
       id: 'mods',
       titleKey: `${prefix}mods.title`,
       loader: 'mods',
@@ -108,6 +141,9 @@ export const satisfactoryUiModule = defineTrustedGameUiModule({
   descriptor: satisfactoryUiDescriptor,
   catalogs: satisfactoryUiCatalogs,
   handlers: {
+    async 'server-settings'() {
+      return { values: {}, rows: [] };
+    },
     async mods(client, context) {
       await client.request(`/v1/servers/${z.uuid().parse(context.serverId)}/satisfactory/mods`, {
         signal: context.signal,

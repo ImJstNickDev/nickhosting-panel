@@ -434,6 +434,25 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             listener.route.mode === 'online' &&
             !quiescence.has(route.serverId),
           requestWake: () => (valid() ? wake(listener.route) : Promise.resolve('blocked')),
+          loadPrivateState: options.control.loadPrivateState
+            ? async () => {
+                if (!valid()) throw new DomainError('integration_unavailable');
+                return options.control.loadPrivateState?.({
+                  routeId: listener.route.id,
+                  routeRevision: listener.route.revision,
+                });
+              }
+            : undefined,
+          savePrivateState: options.control.savePrivateState
+            ? async (state) => {
+                if (!valid()) throw new DomainError('integration_unavailable');
+                await options.control.savePrivateState?.({
+                  routeId: listener.route.id,
+                  routeRevision: listener.route.revision,
+                  state,
+                });
+              }
+            : undefined,
           tlsIdentity: async () => {
             if (!valid() || !options.control.fetchTlsIdentity)
               throw new DomainError('integration_unavailable');

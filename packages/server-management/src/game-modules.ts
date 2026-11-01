@@ -86,6 +86,8 @@ export interface FileMutationContext {
 }
 export interface GameRuntimeHooks extends GameBackupHooks<GameLifecycleContext> {
   configureProvision(context: GameLifecycleContext): Promise<boolean>;
+  /** Flush game state inside the existing durable stop/restart effect. */
+  prepareStop?(context: GameLifecycleContext): Promise<void>;
   verifyInitialInstallation?(
     context: GameLifecycleContext,
   ): Promise<import('./lifecycle.js').InitialInstallationOutputs | null>;

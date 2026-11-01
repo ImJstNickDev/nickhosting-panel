@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { SecretCodec } from '@nickhosting/core';
 import { describe, expect, it, vi } from 'vitest';
 import type { GameLifecycleContext } from './lifecycle.js';
+import { resolveSatisfactoryApi, satisfactoryApiConfigured } from './satisfactory-api.js';
 import { createSatisfactoryModuleRuntime } from './satisfactory-module.js';
+
+vi.mock('./satisfactory-api.js', () => ({
+  satisfactoryApiConfigured: vi.fn(async () => false),
+  resolveSatisfactoryApi: vi.fn(),
+}));
 
 vi.mock('./satisfactory-tls.js', () => ({
   ensureSatisfactoryTlsIdentity: vi.fn(async () => ({
@@ -18,9 +24,11 @@ function fixture() {
   const assertStopped = vi.fn(async () => {});
   const adapter = {
     listFiles: vi.fn(async (_id: string, root: string) =>
-      [...directories]
-        .filter((path) => path.split('/').slice(0, -1).join('/') === root)
-        .map((path) => ({ name: path.split('/').at(-1), is_file: false, is_symlink: false })),
+      root === 'Engine/Binaries/Linux'
+        ? [{ name: 'FactoryServer-Linux-Shipping', is_file: true, is_symlink: false, size: 1024 }]
+        : [...directories]
+            .filter((path) => path.split('/').slice(0, -1).join('/') === root)
+            .map((path) => ({ name: path.split('/').at(-1), is_file: false, is_symlink: false })),
     ),
     createDirectory: vi.fn(async (_id: string, root: string, name: string) => {
       directories.add([root, name].filter(Boolean).join('/'));
@@ -56,6 +64,30 @@ function fixture() {
   };
 }
 describe('Satisfactory prestart TLS distribution', () => {
+  it('retains native stop when no application token exists', async () => {
+    const f = fixture();
+    vi.mocked(satisfactoryApiConfigured).mockResolvedValue(false);
+    vi.mocked(resolveSatisfactoryApi).mockClear();
+    await createSatisfactoryModuleRuntime(codec).prepareStop?.(f.context);
+    expect(resolveSatisfactoryApi).not.toHaveBeenCalled();
+  });
+  it('saves active game state before the provider stop handoff', async () => {
+    const f = fixture();
+    const save = vi.fn(async () => {});
+    vi.mocked(satisfactoryApiConfigured).mockResolvedValue(true);
+    vi.mocked(resolveSatisfactoryApi).mockResolvedValue({
+      state: async () => ({ isGameRunning: true }),
+      save,
+    } as unknown as Awaited<ReturnType<typeof resolveSatisfactoryApi>>);
+    f.context.operation = () =>
+      ({ job_id: 'baf5311a-bec0-4b82-9948-92e77a8401a4' }) as ReturnType<
+        GameLifecycleContext['operation']
+      >;
+    await createSatisfactoryModuleRuntime(codec).prepareStop?.(f.context);
+    expect(save).toHaveBeenCalledWith('nh-stop-baf5311a-bec0-4b82-9948-92e77a8401a4');
+    expect(f.authorize).toHaveBeenCalledTimes(3);
+  });
+
   it('uploads and verifies both identity files using the authenticated transfer pipeline', async () => {
     const f = fixture();
     const runtime = createSatisfactoryModuleRuntime(codec);
@@ -67,6 +99,14 @@ describe('Satisfactory prestart TLS distribution', () => {
     expect(new TextDecoder().decode(f.files.get('FactoryGame/Certificates/private_key.pem'))).toBe(
       'private-key',
     );
+  });
+  it('rejects a provider-installed flag when the game executable is absent', async () => {
+    const f = fixture();
+    f.adapter.listFiles.mockResolvedValue([]);
+    await expect(
+      createSatisfactoryModuleRuntime(codec).configureProvision(f.context),
+    ).rejects.toThrow('integration_unavailable');
+    expect(f.adapter.uploadFile).not.toHaveBeenCalled();
   });
   it('does not publish keys when process stop cannot be proven', async () => {
     const f = fixture();

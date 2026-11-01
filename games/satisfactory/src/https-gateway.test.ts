@@ -37,13 +37,14 @@ beforeAll(() => {
   };
 });
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
-async function exchange(port: number, fn: string) {
+async function exchange(port: number, fn: string, headers?: Record<string, string>) {
   return new Promise<{ status: number; body: string }>((resolve, reject) => {
     const req = request(
       {
         host: '127.0.0.1',
         port,
         path: '/api/v1',
+        headers,
         method: 'POST',
         rejectUnauthorized: false,
         agent: false,
@@ -175,5 +176,74 @@ it('does not send an HTTP request to a backend presenting another certificate', 
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await new Promise<void>((resolve) => backend.close(() => resolve()));
     rmSync(other, { recursive: true, force: true });
+  }
+});
+
+it('wakes only on a proven player JoinGameRequest and obtains tickets from the backend', async () => {
+  const authorization = `Bearer ${Buffer.from(JSON.stringify({ pl: 'Client' })).toString('base64')}.verified`;
+  const seen: string[] = [];
+  const backend = createHttpsServer(
+    { key: identity.privateKeyPem, cert: identity.certificatePem },
+    (req, res) => {
+      let raw = '';
+      req.on('data', (part) => {
+        raw += part;
+      });
+      req.on('end', () => {
+        const fn = JSON.parse(raw).function;
+        seen.push(fn);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            data:
+              fn === 'JoinGameRequest'
+                ? { serverJoinData: { encryptionToken: 'backend-ticket' } }
+                : { serverGameState: { numConnectedPlayers: 0 } },
+          }),
+        );
+      });
+    },
+  );
+  await new Promise<void>((resolve) => backend.listen(0, '127.0.0.1', resolve));
+  const address = backend.address();
+  if (!address || typeof address === 'string') throw new Error('bind');
+  let online = true;
+  const wake = vi.fn(async () => {
+    online = true;
+    return 'online';
+  });
+  const controller = new AbortController();
+  const context = {
+    tlsIdentity: async () => identity,
+    signal: controller.signal,
+    canForward: () => online,
+    requestWake: wake,
+    route: { serverId: 'test-join', backend: { address: '127.0.0.1', port: address.port } },
+  } as unknown as GatewayTcpContext;
+  const server = createServer((socket) => {
+    void acceptSatisfactoryHttps(socket, context);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const publicAddress = server.address();
+  if (!publicAddress || typeof publicAddress === 'string') throw new Error('bind');
+  try {
+    await exchange(publicAddress.port, 'QueryServerState', { authorization });
+    online = false;
+    const cached = await exchange(publicAddress.port, 'QueryServerState', { authorization });
+    expect(cached.status).toBe(200);
+    expect(wake).not.toHaveBeenCalled();
+    expect((await exchange(publicAddress.port, 'JoinGameRequest')).status).toBe(503);
+    expect(wake).not.toHaveBeenCalled();
+    const joined = await exchange(publicAddress.port, 'JoinGameRequest', {
+      authorization,
+      'X-FactoryGame-PlayerId': '060102',
+    });
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(joined.body).toContain('backend-ticket');
+    expect(seen).toEqual(['QueryServerState', 'JoinGameRequest']);
+  } finally {
+    controller.abort();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => backend.close(() => resolve()));
   }
 });

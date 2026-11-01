@@ -746,6 +746,9 @@ export async function createManagementRuntime(options: ManagementOptions) {
     backupPolicy: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await trustedGameModules.resolve(context.db, context.server.id)).module?.manifest
         .backupPolicy ?? { offline: 'required' as const },
+    prepareGameStop: async (context: import('./lifecycle.js').GameLifecycleContext) => {
+      await (await gameRuntime(context.db, context.server.id))?.prepareStop?.(context);
+    },
     prepareBackup: async (
       context: import('./lifecycle.js').GameLifecycleContext,
       mode: 'offline' | 'live',

@@ -226,6 +226,12 @@ export interface GatewayTlsIdentity {
 }
 
 export interface GatewayControl {
+  loadPrivateState?(request: { routeId: string; routeRevision: number }): Promise<unknown>;
+  savePrivateState?(request: {
+    routeId: string;
+    routeRevision: number;
+    state: unknown;
+  }): Promise<void>;
   reportProtocolState?(request: {
     routeId: string;
     routeRevision: number;
@@ -302,6 +308,8 @@ export interface GatewayProtocolSession {
 /** Trusted game code. Implementations must distinguish real protocol readiness
  * and player idleness; an open socket or no Gateway traffic proves neither. */
 export interface GatewayTcpContext extends GatewayProtocolContext {
+  loadPrivateState?(): Promise<unknown>;
+  savePrivateState?(state: unknown): Promise<void>;
   mode(): GatewayResponseMode;
   canForward(): boolean;
   requestWake(): Promise<GatewayMode>;

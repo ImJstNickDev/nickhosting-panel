@@ -235,6 +235,12 @@ export function createGatewayControlClient(
   };
   return {
     requestJson: request,
+    loadPrivateState(input) {
+      return request('private-state-read', input);
+    },
+    async savePrivateState(input) {
+      await request('private-state-write', input);
+    },
     async reportProtocolState(input) {
       const value = z
         .object({

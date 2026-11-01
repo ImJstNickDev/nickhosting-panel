@@ -488,6 +488,50 @@ export function registerGatewayRoutes(
       .execute();
     return c.body(null, 204);
   });
+  for (const action of ['private-state-read', 'private-state-write'] as const) {
+    app.post(`${prefix}/${action}`, async (c) => {
+      const parsed = z
+        .object({
+          routeId: z.uuid(),
+          routeRevision: z.number().int().positive(),
+          state: z.unknown().optional(),
+        })
+        .strict()
+        .safeParse(await options.body(c));
+      if (!parsed.success) throw new DomainError('validation_failed');
+      const selected = await route({
+        routeId: parsed.data.routeId,
+        routeRevision: parsed.data.routeRevision,
+      });
+      await gatewaySafetyContext(db, selected);
+      if (
+        selected.protocol?.handlerId !== 'satisfactory' ||
+        selected.protocol.role !== 'game' ||
+        selected.public.transport !== 'tcp'
+      )
+        throw new DomainError('forbidden');
+      const name = `gateway.satisfactory.cache.${selected.serverId}`;
+      c.header('Cache-Control', 'no-store');
+      if (action === 'private-state-read') {
+        const existing = await db
+          .selectFrom('encrypted_secrets')
+          .select('envelope')
+          .where('name', '=', name)
+          .executeTakeFirst();
+        return c.json(existing ? JSON.parse(codec.decrypt(existing.envelope, name)) : null);
+      }
+      const serialized = JSON.stringify(parsed.data.state);
+      if (!serialized || Buffer.byteLength(serialized) > 262144)
+        throw new DomainError('validation_failed');
+      const envelope = codec.encrypt(serialized, name);
+      await db
+        .insertInto('encrypted_secrets')
+        .values({ name, envelope })
+        .onConflict((conflict) => conflict.column('name').doUpdateSet({ envelope }))
+        .execute();
+      return c.body(null, 204);
+    });
+  }
   app.post(`${prefix}/tls-identity`, async (c) => {
     const parsed = z
       .object({ routeId: z.uuid(), routeRevision: z.number().int().positive() })

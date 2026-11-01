@@ -62,7 +62,7 @@ export function satisfactoryEggEnvironment(
   return {
     STEAM_APP_ID: satisfactorySteamAppId,
     SRCDS_APPID: satisfactorySteamAppId,
-    STEAM_BRANCH: parsed.branch === 'public' ? '' : parsed.branch,
+    SRCDS_BETAID: parsed.branch === 'public' ? '' : parsed.branch,
     AUTO_UPDATE: parsed.autoUpdate ? '1' : '0',
     SERVER_PORT: String(ports.game),
     RELIABLE_PORT: String(ports.reliable),
