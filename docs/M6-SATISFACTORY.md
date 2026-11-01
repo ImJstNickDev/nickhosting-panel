@@ -74,9 +74,11 @@ observation and a successful TCP connection. UDP polling does not request wake.
 
 Coffee Stain's public controller headers establish the exact join function. A real client test confirmed that reporting Offline after automatic sleep prevents
 the Server Manager from proceeding. Sleeping routes now retain their last native
-ready presentation instead. An automatic login/verification request still cannot
-be authenticated while the backend is stopped; cold-client authentication behavior
-remains a separate acceptance requirement. A real JoinGameRequest can request
+ready presentation instead. A subsequent real-client test confirmed the next blocker: after HealthCheck,
+the client issued QueryServerState, GetServerOptions and VerifyAuthenticationToken.
+The read snapshots had expired and verification returned HTTP 503, producing
+`no_content` and an unauthenticated UI. Native authentication before Join is
+therefore a confirmed functional gap, not merely an untested client variation. A real JoinGameRequest can request
 wake regardless of cache age, but clients that stop before sending it require
 manual panel start. Polling does not silently start the backend. The manifest does not claim
 real-client-certified protocol wake merely because isolated protocol tests pass.
@@ -353,3 +355,43 @@ player identifiers, headers and bodies, throttle repeated events to once per
 are diagnostics, not proof of delivery or successful admission. These allow the
 remaining native client authentication sequence to be investigated without recording
 secrets or treating automatic login/verification as play intent.
+
+
+## Native-client authentication evidence
+
+Sanitized Gateway diagnostics from the Owner's test at 2026-11-01 16:58 UTC show
+HealthCheck succeeded while QueryServerState, GetServerOptions and
+VerifyAuthenticationToken were unavailable in sleeping mode. No JoinGameRequest
+was observed in that sequence. The response had no body, so the native client
+reported HTTP 503 with `no_content` and required authentication.
+
+The native authentication token is persistent and distinct from the short-lived
+entry ticket. The five-minute cache lifetime is NickHosting policy, not a documented
+native token expiry. Extending that cache alone cannot authenticate a first-seen
+credential. TLS identity is separate from the server secret/password state used
+for authentication. A safe memoized verification would require exact native
+verification evidence bound to a current credential epoch, requested privilege and
+player context; existing read-cache entries do not supply that proof.
+
+Native client authentication can precede JoinGameRequest. Automatic-login metadata
+is local client pass-through context rather than a reliable wire indication of an
+explicit Join click. Waking on authentication would require an explicit behavior
+choice: it preserves passive UDP/HealthCheck, but merely selecting a server may
+wake its backend. No such change, fabricated authentication success or extended
+credential lifetime was applied in response to this diagnostic report.
+
+Primary contracts:
+- [Native authentication types](https://github.com/satisfactorymodding/SatisfactoryModLoader/blob/master/Source/FactoryGame/Public/Server/FGDSAuthenticationTypes.h)
+- [Native authentication controller](https://github.com/satisfactorymodding/SatisfactoryModLoader/blob/master/Source/FactoryDedicatedServer/Public/Controller/FGServerAuthenticationController.h)
+- [Client authentication requester](https://github.com/satisfactorymodding/SatisfactoryModLoader/blob/master/Source/FactoryDedicatedClient/Public/RequestEmitters/FGClientAuthenticationRequester.h)
+
+
+The Owner explicitly selected **wake only for Join** after this finding. Do not
+expand wake to VerifyAuthenticationToken, PasswordlessLogin or status reads.
+Independent review rejected file-hash-only positive verification: stable persisted
+settings do not establish that the native in-memory credentials used by an earlier
+verification were the same, especially across concurrent changes or delayed writes.
+No positive offline verification was implemented. The native-client authentication
+blocker remains open; prior API-only wake tests do not close it. Until a correctly
+attested native authentication path exists, authentication requires a running
+backend and Join-only wake cannot provide the complete cold-client experience.
