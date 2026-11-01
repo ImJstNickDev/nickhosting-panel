@@ -55,7 +55,8 @@ async function fixture(
     | 'backup'
     | 'restore'
     | 'configure'
-    | 'minecraft-content',
+    | 'minecraft-content'
+    | 'satisfactory-content',
   plan: Record<string, unknown> = {},
   binding?: {
     address: string;
@@ -5638,5 +5639,39 @@ describe('inactive Minecraft world removal', () => {
     expect(await f.run()).toBe('failed');
     expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
     expect((await f.operation()).effect_state).toBe('none');
+  });
+});
+
+describe('Satisfactory background preview lifecycle', () => {
+  it('prepares in one delivery using fresh physical stop proof without a settling timer', async () => {
+    const f = await fixture('satisfactory-content', {
+      satisfactoryContent: { kind: 'mods', mode: 'preview' },
+    });
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.options.processGameContent = vi.fn(async () => true);
+    expect(await f.run()).toBe('succeeded');
+    expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
+    expect(f.options.processGameContent).toHaveBeenCalledOnce();
+    expect(f.adapter.getResources).not.toHaveBeenCalled();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it('rejects preview when the physical stopped proof is unavailable', async () => {
+    const f = await fixture('satisfactory-content', {
+      satisfactoryContent: { kind: 'mods', mode: 'preview' },
+    });
+    f.options.confirmAlreadyStopped = vi.fn(async () => false);
+    f.options.processGameContent = vi.fn(async () => true);
+    expect(await f.run()).not.toBe('succeeded');
+    expect(f.options.processGameContent).not.toHaveBeenCalled();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it.each(['apply', 'rollback'])('retains the mutation settling guard for %s', async (mode) => {
+    const f = await fixture('satisfactory-content', {
+      satisfactoryContent: { kind: 'mods', mode },
+    });
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.options.processGameContent = vi.fn(async () => true);
+    expect(await f.run()).toBe('waiting');
+    expect(f.options.processGameContent).not.toHaveBeenCalled();
   });
 });

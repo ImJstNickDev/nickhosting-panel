@@ -109,7 +109,7 @@ export function registerSatisfactoryModRoutes(
   }
   app.get(base, async (c) => {
     c.header('cache-control', 'no-store');
-    await access(await options.principal(c), c.req.param('id'));
+    const server = await access(await options.principal(c), c.req.param('id'));
     const row = await options.db
       .selectFrom('satisfactory_mod_states')
       .selectAll()
@@ -121,7 +121,26 @@ export function registerSatisfactoryModRoutes(
       .where('server_id', '=', c.req.param('id'))
       .orderBy('name')
       .execute();
+    const activePreview = server.active_operation_id
+      ? await options.db
+          .selectFrom('server_operations as operation')
+          .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+          .select(['operation.action', 'operation.plan', 'job.state'])
+          .where('operation.job_id', '=', server.active_operation_id)
+          .where('operation.server_id', '=', server.id)
+          .executeTakeFirst()
+      : undefined;
+    const activeCommand = activePreview?.plan.satisfactoryContent as
+      | { kind?: string; mode?: string }
+      | undefined;
     return c.json({
+      activePreviewJobId:
+        activePreview?.action === 'satisfactory-content' &&
+        ['queued', 'running'].includes(activePreview.state) &&
+        activeCommand?.kind === 'mods' &&
+        activeCommand.mode === 'preview'
+          ? server.active_operation_id
+          : null,
       selection: row?.selection ?? [],
       lock: row?.lock ?? emptySatisfactoryLock,
       revision: row?.revision ?? 0,
@@ -377,13 +396,32 @@ export function registerSatisfactoryModRoutes(
           .where('id', '=', plan.job_id)
           .executeTakeFirst()
       : null;
+    const operation = plan.job_id
+      ? await options.db
+          .selectFrom('server_operations')
+          .select('plan')
+          .where('job_id', '=', plan.job_id)
+          .executeTakeFirst()
+      : undefined;
+    const status =
+      plan.status !== 'applied' && job && ['failed', 'cancelled', 'uncertain'].includes(job.state)
+        ? 'failed'
+        : plan.status === 'ready' && job?.state !== 'succeeded'
+          ? 'pending'
+          : plan.status;
+    const phase = operation?.plan.satisfactoryPreviewPhase;
     return c.json({
       id: plan.id,
       expiresAt: plan.expires_at.toISOString(),
-      status:
-        plan.status === 'pending' && job && ['failed', 'cancelled', 'uncertain'].includes(job.state)
-          ? 'failed'
-          : plan.status,
+      status,
+      phase:
+        status === 'ready' || status === 'applied'
+          ? 'ready'
+          : status === 'failed'
+            ? 'failed'
+            : phase === 'preparing' || phase === 'inventory'
+              ? phase
+              : 'queued',
       revision: plan.revision,
       selection: plan.selection,
       vanilla: plan.vanilla,

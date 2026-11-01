@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { AxeBuilder } from '@axe-core/playwright';
 import { type Browser, expect as check, chromium } from '@playwright/test';
@@ -615,10 +615,10 @@ it('stages updates and disabled choices, keeps failed requests retryable with th
   await page.getByRole('button', { name: 'Review changes', exact: true }).click();
   await check(
     page.getByText(
-      'The request outcome is unknown. Retry the same request to recover its result before making other changes.',
+      'Preparation could not be confirmed. Retry to recover the request; you can still change your selection.',
     ),
   ).toBeVisible();
-  await check(page.getByRole('button', { name: 'Discard selection changes' })).toBeDisabled();
+  await check(page.getByRole('button', { name: 'Discard selection changes' })).toBeEnabled();
   await page.screenshot({ path: `${shots}/satisfactory-mods-uncertain-en.png`, fullPage: true });
   await page.getByRole('button', { name: 'Try again', exact: true }).click();
   await check(page.getByRole('button', { name: 'Apply changes', exact: true })).toBeEnabled();
@@ -966,14 +966,199 @@ it('selects multiple mods with leading checkboxes and latest compatible minimum 
     });
   }
   await page.getByRole('button', { name: 'Review changes', exact: true }).click();
-  await check(page.locator('body')).toHaveAttribute('data-job', 'multi-job');
+  await check.poll(() => previews.length).toBeGreaterThan(0);
+  await check(page.locator('body')).not.toHaveAttribute('data-job', 'multi-job');
   expect(previews).toMatchObject([
     {
       selection: [
-        { reference: 'Second', version: '>=2.0.0', enabled: true },
         { reference: 'Example', version: '>=2.0.0', enabled: true },
+        { reference: 'Second', version: '>=2.0.0', enabled: true },
       ],
     },
   ]);
+  await context.close();
+});
+
+it('prepares incrementally, keeps editing responsive and opens the matching ready review without another request', async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  const inputs: { selection: { reference: string; version: string }[] }[] = [];
+  let finishFirst = false;
+  await page.route('**/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/inventory')) return route.fulfill({ json: emptyInventory() });
+    if (path.endsWith('/catalog'))
+      return route.fulfill({
+        json: {
+          total: 2,
+          items: [
+            exampleProject,
+            { ...exampleProject, id: 'second', reference: 'Second', name: 'Second mod' },
+          ],
+        },
+      });
+    if (path.includes('/versions/')) return route.fulfill({ json: [exampleVersion] });
+    if (path.endsWith('/preview')) {
+      inputs.push(route.request().postDataJSON());
+      return route.fulfill({
+        status: 202,
+        json: {
+          jobId: `incremental-job-${inputs.length}`,
+          planId: `incremental-plan-${inputs.length}`,
+        },
+      });
+    }
+    if (path.includes('/plans/')) {
+      const index = Number(path.split('-').at(-1)) - 1;
+      const selected = inputs[index];
+      if (!selected) throw new Error('Unknown preview request');
+      return route.fulfill({
+        json: {
+          id: `incremental-plan-${index + 1}`,
+          status: index === 0 && !finishFirst ? 'pending' : 'ready',
+          phase: index === 0 && !finishFirst ? 'preparing' : 'ready',
+          revision: 0,
+          selection: selected.selection,
+          vanilla: false,
+          lock: { version: 1, mods: {} },
+          filesBytes: 100,
+          changes: selected.selection.map((mod) => ({
+            reference: mod.reference,
+            action: 'install',
+            toVersion: '1.2.3',
+            dependency: false,
+          })),
+        },
+      });
+    }
+    return route.fulfill({ json: emptySnapshot() });
+  });
+  await page.goto(`${origin}satisfactory-fixture`);
+  await page.getByRole('button', { name: 'Discover', exact: true }).first().click();
+  await page.getByRole('checkbox', { name: 'Select Example mod' }).click();
+  await check.poll(() => inputs.length).toBe(1);
+  await check(page.getByRole('checkbox', { name: 'Select Second mod' })).toBeEnabled();
+  await page.getByRole('checkbox', { name: 'Select Second mod' }).click();
+  await check(page.getByRole('checkbox', { name: 'Select Second mod' })).toBeChecked();
+  await page.getByRole('button', { name: 'Review changes', exact: true }).click();
+  await check(page.getByRole('button', { name: 'Apply changes', exact: true })).toBeDisabled();
+  expect(inputs).toHaveLength(1);
+  finishFirst = true;
+  await check.poll(() => inputs.length).toBe(2);
+  await check(page.getByRole('button', { name: 'Apply changes', exact: true })).toBeEnabled();
+  expect(inputs[1]?.selection).toMatchObject([
+    { reference: 'Example', version: '>=1.2.3' },
+    { reference: 'Second', version: '>=1.2.3' },
+  ]);
+  await check(page.locator('.satisfactory-review-row')).toHaveCount(2);
+  await check(page.locator('body')).not.toHaveAttribute('data-job');
+  await page.getByRole('button', { name: 'Back to discovery', exact: true }).click();
+  const localReviewMs = await page.evaluate(async () => {
+    const button = [...document.querySelectorAll('button')].find(
+      (node) => node.textContent?.trim() === 'Review changes',
+    );
+    if (!button) throw new Error('Review button missing');
+    const started = performance.now();
+    button.click();
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    );
+    return performance.now() - started;
+  });
+  expect(localReviewMs).toBeLessThan(300);
+  await writeFile(
+    `${shots}/satisfactory-mods-incremental-timing.json`,
+    JSON.stringify({ localReviewMs, previewRequests: inputs.length }),
+  );
+  await check(page.getByRole('button', { name: 'Apply changes', exact: true })).toBeEnabled();
+  expect(inputs).toHaveLength(2);
+  await page.screenshot({
+    path: `${shots}/satisfactory-mods-incremental-ready-en.png`,
+    fullPage: true,
+  });
+  await context.close();
+});
+
+it('revalidates a returned cached draft and replaces an evicted plan before allowing apply', async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const previews: {
+    idempotencyKey: string;
+    selection: { reference: string; version: string }[];
+  }[] = [];
+  const applies: { planId: string }[] = [];
+  let evictFirst = false,
+    finishThird = false;
+  await page.route('**/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/inventory')) return route.fulfill({ json: emptyInventory() });
+    if (path.endsWith('/catalog'))
+      return route.fulfill({
+        json: {
+          total: 2,
+          items: [
+            exampleProject,
+            { ...exampleProject, id: 'second', reference: 'Second', name: 'Second mod' },
+          ],
+        },
+      });
+    if (path.includes('/versions/')) return route.fulfill({ json: [exampleVersion] });
+    if (path.endsWith('/preview')) {
+      previews.push(route.request().postDataJSON());
+      return route.fulfill({
+        status: 202,
+        json: { planId: `cached-${previews.length}`, jobId: `job-${previews.length}` },
+      });
+    }
+    if (path.includes('/plans/')) {
+      const number = Number(path.split('-').at(-1));
+      if (number === 1 && evictFirst)
+        return route.fulfill({
+          status: 404,
+          json: { error: { code: 'not_found', messageKey: 'errors.not_found' } },
+        });
+      const input = previews[number - 1];
+      if (!input) throw new Error('Unknown plan');
+      return route.fulfill({
+        json: {
+          id: `cached-${number}`,
+          status: number === 3 && !finishThird ? 'pending' : 'ready',
+          revision: 0,
+          selection: input.selection,
+          vanilla: false,
+          lock: { version: 1, mods: {} },
+          filesBytes: 0,
+          changes: [],
+        },
+      });
+    }
+    if (path.endsWith('/apply')) {
+      applies.push(route.request().postDataJSON());
+      return route.fulfill({ status: 202, json: { jobId: 'apply-new-plan' } });
+    }
+    return route.fulfill({ json: emptySnapshot() });
+  });
+  await page.goto(`${origin}satisfactory-fixture`);
+  await page.getByRole('button', { name: 'Discover', exact: true }).first().click();
+  await page.getByRole('checkbox', { name: 'Select Example mod' }).click();
+  await check(
+    page.getByText('Selection prepared. Review the changes before applying.'),
+  ).toBeVisible();
+  await page.getByRole('checkbox', { name: 'Select Second mod' }).click();
+  await check.poll(() => previews.length).toBe(2);
+  await check(
+    page.getByText('Selection prepared. Review the changes before applying.'),
+  ).toBeVisible();
+  evictFirst = true;
+  await page.getByRole('checkbox', { name: 'Select Second mod' }).uncheck();
+  await page.getByRole('button', { name: 'Review changes', exact: true }).click();
+  await check.poll(() => previews.length).toBe(3);
+  await check(page.getByRole('button', { name: 'Apply changes', exact: true })).toBeDisabled();
+  expect(previews[2]?.idempotencyKey).not.toBe(previews[0]?.idempotencyKey);
+  expect(applies).toEqual([]);
+  finishThird = true;
+  await check(page.getByRole('button', { name: 'Apply changes', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Apply changes', exact: true }).click();
+  await check.poll(() => applies).toEqual([expect.objectContaining({ planId: 'cached-3' })]);
   await context.close();
 });

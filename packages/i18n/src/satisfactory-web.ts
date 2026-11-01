@@ -130,8 +130,28 @@ export const satisfactoryWebMessages: Record<string, [string, string]> = {
     'Arresta il server prima di applicare questo piano.',
   ],
   'games.satisfactory.mods.resolving': [
-    'Resolving versions and dependencies…',
-    'Risoluzione di versioni e dipendenze…',
+    'Resolving dependencies and preparing mod files…',
+    'Risoluzione delle dipendenze e preparazione dei file delle mod…',
+  ],
+  'games.satisfactory.mods.preparationRetry': [
+    'Preparation could not be confirmed. Retry to recover the request; you can still change your selection.',
+    'Non è stato possibile confermare la preparazione. Riprova per recuperare la richiesta; puoi ancora modificare la selezione.',
+  ],
+  'games.satisfactory.mods.backgroundPreparing': [
+    'Preparing this selection in the background. You can keep choosing mods.',
+    'Preparazione della selezione in background. Puoi continuare a scegliere le mod.',
+  ],
+  'games.satisfactory.mods.prepared': [
+    'Selection prepared. Review the changes before applying.',
+    'Selezione pronta. Rivedi le modifiche prima di applicarle.',
+  ],
+  'games.satisfactory.mods.checkingInventory': [
+    'Checking the current server files…',
+    'Verifica dei file attuali del server…',
+  ],
+  'games.satisfactory.mods.queuedPreparation': [
+    'Waiting for preparation to start…',
+    'In attesa dell’avvio della preparazione…',
   ],
   'games.satisfactory.mods.resolveAgain': ['Resolve again', 'Ricalcola il piano'],
   'games.satisfactory.mods.reviewHint': [

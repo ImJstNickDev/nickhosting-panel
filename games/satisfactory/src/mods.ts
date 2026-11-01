@@ -6,6 +6,10 @@ import { isAbsolute, join, relative } from 'node:path';
 import { promisify } from 'node:util';
 import { satisfies, validRange } from 'semver';
 import { z } from 'zod';
+import {
+  persistSatisfactoryDownloadCache,
+  seedSatisfactoryDownloadCache,
+} from './mods-download-cache.js';
 
 export const satisfactoryModReferenceSchema = z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,127}$/);
 export const satisfactoryModVersionSchema = z
@@ -70,6 +74,8 @@ export async function prepareSatisfactoryMods(options: {
   stagingRoot: string;
   /** Trusted durable operation directory; artifacts are moved to <index>.bin. */
   outputDirectory?: string;
+  /** Reuse only verified public archives from prior durable stages. */
+  downloadCache?: { sourceDirectories: string[] };
   selection: SatisfactoryModSelection;
   vanilla?: boolean;
   requiredTargets?: z.infer<typeof satisfactoryModTargetsSchema>;
@@ -80,8 +86,14 @@ export async function prepareSatisfactoryMods(options: {
   launcherFile: Buffer;
   signal?: AbortSignal;
   run?: (executable: string, args: string[], cwd: string, signal?: AbortSignal) => Promise<void>;
-}): Promise<{ files: SatisfactoryModFile[]; lock: SatisfactoryModLock }> {
+}): Promise<{
+  files: SatisfactoryModFile[];
+  lock: SatisfactoryModLock;
+  downloadCacheBytes?: number;
+}> {
   const selection = satisfactoryModSelectionSchema.parse(options.selection);
+  if (options.downloadCache && !options.outputDirectory)
+    throw new Error('satisfactory_mod_cache_output_required');
   const requiredTargets = satisfactoryModTargetsSchema.parse(
     options.requiredTargets ?? ['LinuxServer'],
   );
@@ -99,7 +111,8 @@ export async function prepareSatisfactoryMods(options: {
   if (!Number.isSafeInteger(version.Changelist) || Number(version.Changelist) <= 0)
     throw new Error('satisfactory_game_version_invalid');
   const executableHash = createHash('sha256');
-  for await (const chunk of createReadStream(options.executable)) executableHash.update(chunk);
+  for await (const chunk of createReadStream(options.executable, { highWaterMark: 1_048_576 }))
+    executableHash.update(chunk);
   if (executableHash.digest('hex') !== options.executableSha256)
     throw new Error('satisfactory_cli_integrity_failed');
   await mkdir(options.stagingRoot, { recursive: true, mode: 0o700 });
@@ -176,6 +189,13 @@ export async function prepareSatisfactoryMods(options: {
         { mode: 0o600 },
       );
     }
+    if (options.downloadCache)
+      await seedSatisfactoryDownloadCache({
+        stagingRoot: options.stagingRoot,
+        sourceDirectories: options.downloadCache.sourceDirectories,
+        destinationDirectory: join(root, 'cache/downloadCache'),
+        signal: options.signal,
+      });
     const args = [
       '--local-dir',
       state,
@@ -207,7 +227,8 @@ export async function prepareSatisfactoryMods(options: {
                 } catch (error) {
                   if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
                 }
-                if (bytes > 1_610_612_736) throw new Error('satisfactory_mod_output_limit');
+                if (bytes > 1_610_612_736 - 1_048_576)
+                  throw new Error('satisfactory_mod_output_limit');
               }
             }
           };
@@ -267,6 +288,16 @@ export async function prepareSatisfactoryMods(options: {
       )
         throw new Error('satisfactory_mod_resolution_mismatch');
     }
+    const downloadCacheBytes =
+      options.downloadCache && options.outputDirectory
+        ? await persistSatisfactoryDownloadCache({
+            stagingRoot: options.stagingRoot,
+            sourceDirectory: join(root, 'cache/downloadCache'),
+            destinationDirectory: join(options.outputDirectory, 'download-cache'),
+            lock,
+            signal: options.signal,
+          })
+        : undefined;
     const files: SatisfactoryModFile[] = [];
     let total = 0;
     const collect = async (relative: string): Promise<void> => {
@@ -285,7 +316,7 @@ export async function prepareSatisfactoryMods(options: {
             throw new Error('satisfactory_mod_output_limit');
           const hash = createHash('sha256');
           let observed = 0;
-          for await (const chunk of createReadStream(source)) {
+          for await (const chunk of createReadStream(source, { highWaterMark: 1_048_576 })) {
             observed += chunk.length;
             if (observed > size) throw new Error('satisfactory_mod_output_invalid');
             hash.update(chunk);
@@ -298,7 +329,7 @@ export async function prepareSatisfactoryMods(options: {
       }
     };
     await collect('FactoryGame/Mods');
-    return { files, lock };
+    return { files, lock, ...(downloadCacheBytes === undefined ? {} : { downloadCacheBytes }) };
   } finally {
     await rm(root, { recursive: true, force: true });
   }

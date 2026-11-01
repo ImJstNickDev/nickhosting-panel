@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { copyFile, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { DomainError } from '@nickhosting/core';
@@ -37,6 +37,7 @@ const receiptSchema = z.object({
   lock: satisfactoryModLockSchema,
   gameVersion: z.number().int().positive().optional(),
   requiredTargets: z.array(z.enum(['LinuxServer', 'Windows', 'WindowsServer'])).optional(),
+  downloadCacheBytes: z.number().int().nonnegative().max(536870912).optional(),
 });
 
 export async function processSatisfactoryMods(
@@ -76,6 +77,12 @@ export async function processSatisfactoryMods(
     ? resolve(env.NH_SATISFACTORY_MOD_WORK_ROOT)
     : contentStorageRoot((await getSettings(context.db, env)).values.contentWorkRoot, env);
   const stage = join(root, 'content-staging', context.operation().job_id);
+  const previewPhase = async (phase: 'preparing' | 'inventory') => {
+    if (command.mode === 'preview')
+      await context.update({
+        plan: { ...context.operation().plan, satisfactoryPreviewPhase: phase },
+      });
+  };
   const releaseStage = async (jobId: string) => {
     z.uuid().parse(jobId);
     await rm(join(root, 'content-staging', jobId), { recursive: true, force: true });
@@ -146,6 +153,26 @@ export async function processSatisfactoryMods(
       if (job && !['succeeded', 'failed'].includes(job.state)) continue;
       await releaseStage(plan.job_id);
       await context.db.deleteFrom('satisfactory_mod_plans').where('id', '=', plan.id).execute();
+    }
+    if (command.mode === 'preview') {
+      // Incremental drafts must not accumulate a full stage for every checkbox.
+      // Retain the three most recent completed previews for navigation/cache reuse.
+      const superseded = await context.db
+        .selectFrom('satisfactory_mod_plans as plan')
+        .innerJoin('operation_jobs as job', 'job.id', 'plan.job_id')
+        .select(['plan.id', 'plan.job_id'])
+        .where('plan.server_id', '=', context.server.id)
+        .where('plan.id', '!=', command.planId!)
+        .where('plan.status', 'in', ['pending', 'ready', 'failed'])
+        .where('job.state', 'in', ['succeeded', 'failed'])
+        .orderBy('plan.created_at', 'desc')
+        .offset(3)
+        .execute();
+      for (const plan of superseded) {
+        if (!plan.job_id) continue;
+        await releaseStage(plan.job_id);
+        await context.db.deleteFrom('satisfactory_mod_plans').where('id', '=', plan.id).execute();
+      }
     }
   }
   if (command.mode === 'apply' || command.mode === 'rollback') {
@@ -252,6 +279,10 @@ export async function processSatisfactoryMods(
       throw new DomainError('conflict');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    // Without a committed preparation receipt none of this job's payloads can
+    // have been applied. Do not accumulate partial staging files across retries.
+    await rm(stage, { recursive: true, force: true });
+    await mkdir(stage, { recursive: true, mode: 0o700 });
     let versionPath: (typeof satisfactoryVersionPaths)[number] | undefined;
     let versionFile: Buffer | undefined;
     const entries = await context.adapter.listFiles(identifier, 'Engine/Binaries/Linux');
@@ -293,6 +324,20 @@ export async function processSatisfactoryMods(
           .where('server_id', '=', context.server.id)
           .executeTakeFirstOrThrow()
       : null;
+    await previewPhase('preparing');
+    const cacheSources = await context.db
+      .selectFrom('satisfactory_mod_plans as plan')
+      .innerJoin('operation_jobs as job', 'job.id', 'plan.job_id')
+      .select('plan.job_id')
+      .where('plan.server_id', '=', context.server.id)
+      .where('plan.status', '=', 'ready')
+      .where('job.state', '=', 'succeeded')
+      .where('plan.game_version', '=', Number(JSON.parse(versionFile.toString('utf8')).Changelist))
+      .where('plan.expires_at', '>', new Date())
+      .orderBy('plan.created_at', 'desc')
+      .limit(2)
+      .execute();
+    const preparationStarted = performance.now();
     const prepared = await prepareSatisfactoryMods({
       sandboxExecutable: env.NH_CONTENT_SANDBOX_PATH,
       executable: env.NH_FICSIT_CLI_PATH ?? '/usr/local/bin/ficsit',
@@ -303,6 +348,11 @@ export async function processSatisfactoryMods(
           : '2af0f8815af93b097c7a97968569575b21cf451b7c345fbb62fae29096ee4a31'),
       stagingRoot: root,
       outputDirectory: stage,
+      downloadCache: {
+        sourceDirectories: cacheSources.flatMap((source) =>
+          source.job_id ? [join(root, 'content-staging', z.uuid().parse(source.job_id))] : [],
+        ),
+      },
       selection: command.selection,
       vanilla: command.vanilla,
       requiredTargets: profile
@@ -317,7 +367,18 @@ export async function processSatisfactoryMods(
         await context.adapter.readFile(identifier, 'FactoryServer.sh', 1048576),
       ),
     });
+    try {
+      context.logger?.log('info', 'satisfactory.mods_preparation', {
+        jobId: context.operation().job_id,
+        durationMs: Math.round(performance.now() - preparationStarted),
+        cacheSources: cacheSources.length,
+        files: prepared.files.length,
+      });
+    } catch {
+      // Timing diagnostics never invalidate a successfully prepared payload.
+    }
     receipt = {
+      downloadCacheBytes: prepared.downloadCacheBytes,
       gameVersion: Number(JSON.parse(versionFile.toString('utf8')).Changelist),
       requiredTargets: profile
         ? z
@@ -336,6 +397,7 @@ export async function processSatisfactoryMods(
     await rename(join(stage, 'receipt.tmp'), join(stage, 'receipt.json'));
   }
   if (command.mode === 'preview') {
+    await previewPhase('inventory');
     const inventory = await inspectSatisfactoryModInventory(
       context.db,
       context.adapter,
@@ -371,6 +433,13 @@ export async function processSatisfactoryMods(
       .where('id', '=', command.planId!)
       .where('server_id', '=', context.server.id)
       .where('revision', '=', command.revision!)
+      .execute();
+    await context.db
+      .updateTable('minecraft_staging_claims')
+      .set({
+        reserved_bytes: String((await preparedStageBytes(stage)) + 65536),
+      })
+      .where('job_id', '=', context.operation().job_id)
       .execute();
     return true;
   }
@@ -662,4 +731,23 @@ export async function processSatisfactoryMods(
   if (command.mode) await cleanupApplied(cleanupPlan);
   else await cleanup();
   return true;
+}
+
+async function preparedStageBytes(directory: string): Promise<number> {
+  let bytes = 0;
+  let entries = 0;
+  const walk = async (path: string, depth: number): Promise<void> => {
+    if (depth > 32) throw new DomainError('configuration_invalid');
+    for (const entry of await readdir(path, { withFileTypes: true })) {
+      if (++entries > 40000 || entry.isSymbolicLink())
+        throw new DomainError('configuration_invalid');
+      const child = join(path, entry.name);
+      if (entry.isDirectory()) await walk(child, depth + 1);
+      else if (entry.isFile()) bytes += (await lstat(child)).size;
+      else throw new DomainError('configuration_invalid');
+      if (bytes > 1610612736) throw new DomainError('configuration_invalid');
+    }
+  };
+  await walk(directory, 0);
+  return bytes;
 }

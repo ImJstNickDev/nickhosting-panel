@@ -2864,7 +2864,17 @@ export async function processServerOperation(
       }
       // The integration checks the selected world at dispatch. An unused folder
       // needs neither process telemetry nor an artificial offline settling period.
-      if (!onlineWorldContent && !metadataContent) {
+      const satisfactoryPreview =
+        operation.action === 'satisfactory-content' &&
+        (operation.plan.satisfactoryContent as { kind?: string; mode?: string } | undefined)
+          ?.kind === 'mods' &&
+        (operation.plan.satisfactoryContent as { mode?: string }).mode === 'preview';
+      if (satisfactoryPreview) {
+        // Preview writes only its private staging tree. A fresh physical stopped
+        // proof is sufficient; do not start another resource-cache settling timer.
+        // Apply/rollback retain the normal mutation lifecycle and revalidate files.
+        await gameContext().assertStopped();
+      } else if (!onlineWorldContent && !metadataContent) {
         await requireQuiescentReservation();
         if (!(await offline())) return wait('offline_confirmation');
       }

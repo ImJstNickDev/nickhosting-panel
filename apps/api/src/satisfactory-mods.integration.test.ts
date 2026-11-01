@@ -297,3 +297,55 @@ it('does not report no updates when the installed game build is unavailable', as
   listFiles.mockResolvedValue([]);
   expect((await request('/updates')).status).toBe(400);
 });
+
+it('reports active background previews and exposes ready only after the operation releases the server', async () => {
+  const response = await request('/preview', {
+    selection: [],
+    revision: 0,
+    idempotencyKey: randomUUID(),
+  });
+  const { jobId, planId } = await response.json();
+  expect((await (await request('')).json()).activePreviewJobId).toBe(jobId);
+  expect(await (await request(`/plans/${planId}`)).json()).toMatchObject({
+    status: 'pending',
+    phase: 'queued',
+  });
+  const operation = await f.db
+    .selectFrom('server_operations')
+    .select('plan')
+    .where('job_id', '=', jobId)
+    .executeTakeFirstOrThrow();
+  await f.db
+    .updateTable('server_operations')
+    .set({ plan: JSON.stringify({ ...operation.plan, satisfactoryPreviewPhase: 'inventory' }) })
+    .where('job_id', '=', jobId)
+    .execute();
+  await f.db
+    .updateTable('satisfactory_mod_plans')
+    .set({ status: 'ready' })
+    .where('id', '=', planId)
+    .execute();
+  expect(await (await request(`/plans/${planId}`)).json()).toMatchObject({
+    status: 'pending',
+    phase: 'inventory',
+  });
+  await f.db
+    .updateTable('operation_jobs')
+    .set({ state: 'failed', error_code: 'conflict', completed_at: new Date() })
+    .where('id', '=', jobId)
+    .execute();
+  expect(await (await request(`/plans/${planId}`)).json()).toMatchObject({
+    status: 'failed',
+    phase: 'failed',
+  });
+  await f.db
+    .updateTable('operation_jobs')
+    .set({ state: 'succeeded' })
+    .where('id', '=', jobId)
+    .execute();
+  expect(await (await request(`/plans/${planId}`)).json()).toMatchObject({
+    status: 'ready',
+    phase: 'ready',
+  });
+  expect((await (await request('')).json()).activePreviewJobId).toBeNull();
+});

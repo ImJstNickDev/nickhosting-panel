@@ -621,3 +621,55 @@ it('releases deleted-server recovery bytes only after the deletion operation is 
     ).state,
   ).toBe('released');
 });
+
+it.each([false, true])(
+  'bounds incremental stages including failed previews: %s',
+  async (failed) => {
+    const ids: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      const planId = await preview(`${i + 2}.0.0`);
+      ids.push(planId);
+      if (failed && i < 2) {
+        const plan = await f.db
+          .selectFrom('satisfactory_mod_plans')
+          .select('job_id')
+          .where('id', '=', planId)
+          .executeTakeFirstOrThrow();
+        await f.db
+          .updateTable('satisfactory_mod_plans')
+          .set({ status: 'pending' })
+          .where('id', '=', planId)
+          .execute();
+        await f.db
+          .updateTable('operation_jobs')
+          .set({ state: 'failed' })
+          .where('id', '=', plan.job_id!)
+          .execute();
+      }
+    }
+    const calls = vi.mocked(prepareSatisfactoryMods).mock.calls;
+    expect(calls[0]?.[0].downloadCache?.sourceDirectories).toEqual([]);
+    expect(calls.at(-1)?.[0].downloadCache?.sourceDirectories).toHaveLength(2);
+    const retained = await f.db
+      .selectFrom('satisfactory_mod_plans')
+      .selectAll()
+      .where('server_id', '=', id)
+      .execute();
+    expect(retained).toHaveLength(4);
+    expect(retained.some((plan) => plan.id === ids[0])).toBe(false);
+    const claims = await f.db
+      .selectFrom('minecraft_staging_claims')
+      .selectAll()
+      .where('server_id', '=', id)
+      .execute();
+    expect(claims.filter((claim) => claim.state === 'released')).toHaveLength(2);
+    for (const plan of retained) {
+      const claim = claims.find((value) => value.job_id === plan.job_id);
+      const preparedFiles = plan.files as { size: number }[];
+      const payloadBytes = preparedFiles.reduce((sum, file) => sum + file.size, 0);
+      expect(Number(claim?.reserved_bytes)).toBeGreaterThan(payloadBytes + 65536);
+      expect(Number(claim?.reserved_bytes)).toBeLessThan(payloadBytes + 1048576);
+    }
+    expect(adapter.uploadFile).not.toHaveBeenCalled();
+  },
+);

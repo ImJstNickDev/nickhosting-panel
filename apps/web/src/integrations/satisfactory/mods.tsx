@@ -35,7 +35,178 @@ const controller = createSatisfactoryModsController({ request: api });
 const key = (name: string) => `games.satisfactory.mods.${name}`;
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 type Draft = { selection: ModChoice[]; vanilla: boolean; profileId?: string };
+type PreviewInput = Draft & { revision: number; idempotencyKey: string };
+type PreviewAttempt = { signature: string; input: PreviewInput };
 type View = 'installed' | 'discover' | 'review';
+
+/** One durable preparation at a time; newer edits never inherit an older plan. */
+function useIncrementalPreview(
+  serverId: string,
+  desired: Omit<PreviewInput, 'idempotencyKey'> | undefined,
+  enabled: boolean,
+  onSettled: () => Promise<void>,
+) {
+  const signature = desired
+    ? JSON.stringify({
+        ...desired,
+        selection: [...desired.selection].sort((a, b) => a.reference.localeCompare(b.reference)),
+      })
+    : '';
+  const settled = useRef(onSettled);
+  settled.current = onSettled;
+  const [candidate, setCandidate] = useState<PreviewAttempt>();
+  const [active, setActive] = useState<PreviewAttempt>();
+  const [jobId, setJobId] = useState<string>();
+  const [progress, setProgress] = useState<{ signature: string; plan: ModPlan }>();
+  const [cache, setCache] = useState<Map<string, ModPlan>>(() => new Map());
+  const [failure, setFailure] = useState<{ attempt: PreviewAttempt; cause: unknown }>();
+  const [generation, setGeneration] = useState(0);
+  const [validatedSignature, setValidatedSignature] = useState('');
+  const [validationError, setValidationError] = useState<unknown>();
+  const cacheRef = useRef(cache);
+  cacheRef.current = cache;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: generation requests an explicit fresh validation.
+  useEffect(() => {
+    setValidatedSignature('');
+    const saved = cacheRef.current.get(signature);
+    setValidationError(undefined);
+    if (saved?.status !== 'ready') return;
+    const abort = new AbortController();
+    void controller
+      .plan(serverId, saved.id, abort.signal)
+      .then((value) => {
+        if (abort.signal.aborted) return;
+        setCache((previous) => new Map(previous).set(signature, value));
+        setValidatedSignature(signature);
+      })
+      .catch((cause: unknown) => {
+        if (abort.signal.aborted) return;
+        if (cause instanceof ApiError && [404, 409].includes(cause.status)) {
+          setCache((previous) => {
+            const next = new Map(previous);
+            next.delete(signature);
+            return next;
+          });
+          setProgress(undefined);
+        } else setValidationError(cause);
+      });
+    return () => abort.abort();
+  }, [signature, serverId, generation]);
+  useEffect(() => {
+    if (!signature || !enabled) {
+      setCandidate(undefined);
+      return;
+    }
+    const input = JSON.parse(signature) as Omit<PreviewInput, 'idempotencyKey'>;
+    const timer = setTimeout(() => {
+      setCandidate({
+        signature,
+        input: { ...input, idempotencyKey: `${idempotencyKey()}_${generation}` },
+      });
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [signature, enabled, generation]);
+  useEffect(() => {
+    if (!enabled || !candidate || candidate.signature !== signature || active || failure) return;
+    const saved = cache.get(signature);
+    if (saved && (!saved.expiresAt || Date.parse(saved.expiresAt) > Date.now())) return;
+    setCache((previous) => {
+      const next = new Map(previous);
+      next.delete(signature);
+      return next;
+    });
+    setActive(candidate);
+  }, [candidate, signature, enabled, active, failure, cache]);
+  useEffect(() => {
+    if (!active) return;
+    const abort = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    void (async () => {
+      try {
+        const accepted = await controller.preview(serverId, active.input);
+        if (abort.signal.aborted) return;
+        setJobId(accepted.jobId);
+        for (;;) {
+          const value = await controller.plan(serverId, accepted.planId, abort.signal);
+          if (abort.signal.aborted) return;
+          setProgress({ signature: active.signature, plan: value });
+          if (value.status !== 'pending') {
+            setValidatedSignature(active.signature);
+            setCache((previous) => {
+              const next = new Map(previous);
+              next.set(active.signature, value);
+              const oldest = next.keys().next().value;
+              if (next.size > 4 && oldest) next.delete(oldest);
+              return next;
+            });
+            // Reload outer activity only once; preparation never marks the whole UI busy.
+            await settled.current();
+            if (!abort.signal.aborted) {
+              setActive(undefined);
+              setJobId(undefined);
+            }
+            return;
+          }
+          await new Promise<void>((resolve) => {
+            const done = () => {
+              abort.signal.removeEventListener('abort', done);
+              resolve();
+            };
+            abort.signal.addEventListener('abort', done, { once: true });
+            timer = setTimeout(done, 250);
+          });
+          if (abort.signal.aborted) return;
+        }
+      } catch (cause) {
+        if (!abort.signal.aborted) {
+          // A lost enqueue response may already have started the job. Replay its exact key.
+          setFailure({ attempt: active, cause });
+          setActive(undefined);
+        }
+      }
+    })();
+    return () => {
+      abort.abort();
+      clearTimeout(timer);
+    };
+  }, [active, serverId]);
+  const saved = cache.get(signature);
+  const result = saved ?? (progress?.signature === signature ? progress.plan : undefined);
+  function retry() {
+    if (active) return;
+    if (validationError) {
+      setValidationError(undefined);
+      setGeneration((value) => value + 1);
+    } else if (failure) {
+      setActive(failure.attempt);
+      setFailure(undefined);
+    } else {
+      setCache((previous) => {
+        const next = new Map(previous);
+        next.delete(signature);
+        return next;
+      });
+      setProgress(undefined);
+      setCandidate(undefined);
+      setGeneration((value) => value + 1);
+    }
+  }
+  return {
+    data: result,
+    jobId,
+    active: !!active,
+    blocked: !!failure,
+    error: failure?.cause ?? validationError,
+    validated: validatedSignature === signature && !validationError,
+    isPending: (!!active || (enabled && (!result || result.status === 'pending'))) && !failure,
+    refetch: retry,
+    reset: () => {
+      setCache(new Map());
+      setProgress(undefined);
+      setCandidate(undefined);
+    },
+  };
+}
 
 export function SatisfactoryModsSection(props: GameSectionViewProps) {
   return <ModsWorkspace key={props.serverId} {...props} />;
@@ -61,7 +232,6 @@ function ModsWorkspace(props: GameSectionViewProps) {
   const [confirm, setConfirm] = useState<
     'rollback' | 'external' | 'reconcile' | 'deleteProfile' | 'stop'
   >();
-  const [planId, setPlanId] = useState<string>();
   const [error, setError] = useState<unknown>();
   const [working, setWorking] = useState(false);
   const [uncertain, setUncertain] = useState(false);
@@ -102,12 +272,6 @@ function ModsWorkspace(props: GameSectionViewProps) {
     queryFn: ({ signal }) => controller.updates(props.serverId, signal),
     enabled: false,
   });
-  const plan = useQuery({
-    queryKey: ['satisfactory-mods-plan', props.serverId, planId],
-    queryFn: ({ signal }) => controller.plan(props.serverId, planId ?? '', signal),
-    enabled: !!planId,
-    refetchInterval: (query) => (query.state.data?.status === 'pending' ? 1000 : false),
-  });
   const data = snapshot.data;
   const current: Draft = draft ?? {
     selection: data?.selection ?? [],
@@ -119,12 +283,34 @@ function ModsWorkspace(props: GameSectionViewProps) {
     (!same(current.selection, data?.selection) ||
       current.vanilla !== data?.vanilla ||
       current.profileId !== (data?.activeProfileId ?? undefined));
-  const busy = props.pending || working;
-  const canEditProfile = props.canManage && !busy && !uncertain && !!data;
-  const editable = canEditProfile && !data.externalMode;
   const stopped = ['offline', 'stopped'].includes(props.runtimeState);
+  const mayPrepare =
+    props.canManage && !working && !uncertain && !!data && !data.externalMode && stopped;
+  const plan = useIncrementalPreview(
+    props.serverId,
+    data && (changed || view === 'review') ? { ...current, revision: data.revision } : undefined,
+    mayPrepare && !props.pending,
+    async () => {
+      await snapshot.refetch();
+      await props.reload();
+    },
+  );
+  const ownPreview =
+    plan.active || plan.blocked || (!!plan.jobId && data?.activePreviewJobId === plan.jobId);
+  const selectionBusy = working || (props.pending && !ownPreview);
+  const busy = selectionBusy || plan.active || plan.blocked;
+  const canEditSelection = props.canManage && !selectionBusy && !uncertain && !!data;
+  const canEditProfile = canEditSelection && !plan.active && !plan.blocked;
+  const editable = canEditSelection && !data.externalMode;
   const validSearch = searchInput.trim().length === 0 || searchInput.trim().length >= 3;
+  const planStale =
+    plan.data?.status === 'ready' &&
+    (plan.data.revision !== data?.revision ||
+      (!!plan.data.expiresAt && Date.parse(plan.data.expiresAt) <= Date.now()));
   const planReady =
+    !plan.active &&
+    !plan.blocked &&
+    plan.validated &&
     plan.data?.status === 'ready' &&
     plan.data.revision === data?.revision &&
     (!plan.data.expiresAt || Date.parse(plan.data.expiresAt) > Date.now());
@@ -132,13 +318,6 @@ function ModsWorkspace(props: GameSectionViewProps) {
   useEffect(() => {
     if (view === 'review') viewHeading.current?.focus();
   }, [view]);
-  useEffect(() => {
-    if (plan.data?.status === 'applied') {
-      setDraft(undefined);
-      void snapshot.refetch();
-      void inventory.refetch();
-    }
-  }, [plan.data?.status, snapshot.refetch, inventory.refetch]);
 
   async function refresh() {
     await Promise.all([snapshot.refetch(), inventory.refetch()]);
@@ -165,7 +344,6 @@ function ModsWorkspace(props: GameSectionViewProps) {
   }
   function edit(next: Draft) {
     setDraft(next);
-    setPlanId(undefined);
   }
   function choose(item: ModProject) {
     setProject(item);
@@ -186,25 +364,33 @@ function ModsWorkspace(props: GameSectionViewProps) {
   }
   function preview() {
     setView('review');
-    if (!data || !editable || !stopped) return;
-    const input = { ...current, revision: data.revision, idempotencyKey: idempotencyKey() };
-    void execute(async () => {
-      const result = await controller.preview(props.serverId, input);
-      setPlanId(result.planId);
-      props.onAccepted(result.jobId);
-    }, true);
   }
   function apply() {
-    if (!data || !planId || !planReady || !editable) return;
+    if (!data || !plan.data || !planReady || !editable) return;
     if (plan.data?.expiresAt && Date.parse(plan.data.expiresAt) <= Date.now()) {
       setError(new ApiError('conflict', 'errors.conflict'));
+      plan.refetch();
       return;
     }
-    const input = { planId, revision: data.revision, idempotencyKey: idempotencyKey() };
+    const input = {
+      planId: plan.data.id,
+      revision: data.revision,
+      idempotencyKey: idempotencyKey(),
+    };
     void execute(async () => {
-      const result = await controller.apply(props.serverId, input);
+      let result: { jobId: string };
+      try {
+        result = await controller.apply(props.serverId, input);
+      } catch (cause) {
+        if (cause instanceof ApiError && [404, 409].includes(cause.status)) {
+          retry.current = undefined;
+          plan.refetch();
+          await snapshot.refetch();
+        }
+        throw cause;
+      }
       setDraft(undefined);
-      setPlanId(undefined);
+      plan.reset();
       setView('installed');
       props.onAccepted(result.jobId);
       await refresh();
@@ -248,13 +434,11 @@ function ModsWorkspace(props: GameSectionViewProps) {
           const result = await controller.rollback(props.serverId, revision, idem);
           props.onAccepted(result.jobId);
           setDraft(undefined);
-          setPlanId(undefined);
         } else if (action === 'external') {
           const result = await controller.beginExternal(props.serverId, revision, idem);
           if (result.jobId) props.onAccepted(result.jobId);
           setExternalOpen(true);
           setDraft(undefined);
-          setPlanId(undefined);
         } else if (action === 'reconcile' && inventory.data) {
           await controller.reconcile(props.serverId, {
             fingerprint: inventory.data.fingerprint,
@@ -263,7 +447,6 @@ function ModsWorkspace(props: GameSectionViewProps) {
             profileId: current.profileId,
           });
           setDraft(undefined);
-          setPlanId(undefined);
         } else if (action === 'deleteProfile' && profileEdit) {
           await controller.deleteProfile(props.serverId, profileEdit, revision);
           setProfileEdit(undefined);
@@ -369,7 +552,12 @@ function ModsWorkspace(props: GameSectionViewProps) {
             onClick={() => setExternalOpen(true)}
           />
           {changed && view !== 'review' && (
-            <button type="button" className="mods-primary" disabled={!editable} onClick={preview}>
+            <button
+              type="button"
+              className="mods-primary"
+              disabled={!props.canManage}
+              onClick={preview}
+            >
               <ModsIcon name="queue" />
               {t(key('review'))}
             </button>
@@ -388,6 +576,25 @@ function ModsWorkspace(props: GameSectionViewProps) {
         </div>
       </header>
       {!profilesOpen && !externalOpen && !confirm && errorNode}
+      {plan.error != null && <ErrorNotice error={plan.error} retry={plan.refetch} />}
+      {plan.blocked && (
+        <p className="satisfactory-notice" role="status">
+          {t(key('preparationRetry'))}
+        </p>
+      )}
+      {changed && stopped && !data?.externalMode && view !== 'review' && (
+        <p role="status" className="muted">
+          {t(
+            key(
+              planReady
+                ? 'prepared'
+                : plan.data?.phase === 'inventory'
+                  ? 'checkingInventory'
+                  : 'backgroundPreparing',
+            ),
+          )}
+        </p>
+      )}
       {uncertain && (
         <p className="satisfactory-notice" role="status">
           {t(key('uncertain'))}
@@ -751,9 +958,18 @@ function ModsWorkspace(props: GameSectionViewProps) {
               </Link>
             </p>
           )}
-          {plan.error && <ErrorNotice error={plan.error} retry={() => void plan.refetch()} />}
-          {working || plan.data?.status === 'pending' || (!!planId && plan.isPending) ? (
-            <p role="status">{t(key('resolving'))}</p>
+          {working || plan.isPending ? (
+            <p role="status">
+              {t(
+                key(
+                  plan.data?.phase === 'inventory'
+                    ? 'checkingInventory'
+                    : plan.data?.phase === 'queued'
+                      ? 'queuedPreparation'
+                      : 'resolving',
+                ),
+              )}
+            </p>
           ) : plan.data?.status === 'failed' ? (
             <>
               <ErrorNotice
@@ -768,7 +984,7 @@ function ModsWorkspace(props: GameSectionViewProps) {
                 type="button"
                 className="secondary"
                 disabled={!editable || !stopped}
-                onClick={preview}
+                onClick={plan.refetch}
               >
                 {t(key('resolveAgain'))}
               </button>
@@ -781,7 +997,7 @@ function ModsWorkspace(props: GameSectionViewProps) {
                   type="button"
                   className="secondary"
                   disabled={!editable || !stopped}
-                  onClick={preview}
+                  onClick={plan.refetch}
                 >
                   {t(key('resolveAgain'))}
                 </button>
@@ -790,19 +1006,19 @@ function ModsWorkspace(props: GameSectionViewProps) {
           ) : (
             <>
               <p>{t(key('reviewHint'))}</p>
-              <button type="button" disabled={!editable || !stopped} onClick={preview}>
+              <button type="button" disabled={!editable || !stopped} onClick={plan.refetch}>
                 {t(key('resolve'))}
               </button>
             </>
           )}
-          {plan.data?.status === 'ready' && !planReady && (
+          {planStale && (
             <p className="satisfactory-notice">
               {t(key('stalePlan'))}
               <button
                 type="button"
                 className="secondary"
                 disabled={!editable || !stopped}
-                onClick={preview}
+                onClick={plan.refetch}
               >
                 {t(key('resolveAgain'))}
               </button>
@@ -816,10 +1032,9 @@ function ModsWorkspace(props: GameSectionViewProps) {
           <button
             type="button"
             className="secondary"
-            disabled={busy || uncertain}
+            disabled={selectionBusy || uncertain}
             onClick={() => {
               setDraft(undefined);
-              setPlanId(undefined);
             }}
           >
             {t(key('discard'))}

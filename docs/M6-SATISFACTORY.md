@@ -750,3 +750,64 @@ Pterodactyl/Blueprint change was needed.
 
 - [Multiple selection, desktop](screenshots/m6/satisfactory-mods-multiselect-1280.png)
 - [Multiple selection, mobile](screenshots/m6/satisfactory-mods-multiselect-390.png)
+
+### Incremental mod preparation and review latency
+
+Selection changes now schedule background preparation after a 150 ms debounce.
+The draft remains editable while one preview is running; only the latest pending
+selection starts next. Results are keyed by the full selection, profile, vanilla
+flag and state revision. Stale results cannot enable Apply for a different draft.
+Review changes opens the already prepared result rather than enqueueing another
+job. Pending work reports queue, native preparation and inventory phases. Preparation
+continues to require a stopped server; running servers retain the existing stop
+flow. No background task installs mods on the server.
+
+Preview alone bypasses the generic per-operation 21-second resource-cache settling
+window, using a fresh physical-stop proof instead. Apply and rollback retain their
+normal stopped-state, revision, build and filesystem checks. API plan status is not
+published as ready until the worker completes and releases the server operation.
+Snapshot responses expose `activePreviewJobId`; plan responses expose `phase`.
+There is no migration or additional infrastructure.
+
+The native sandbox remains unchanged. A preview can seed its private download
+cache from two recent completed stages belonging to the same server/build. Only
+archives matching fresh native-lock SHA256 hashes are retained. Copies used by the
+child have distinct inodes; verified archives are moved into the completed stage
+without a second peak-size copy. Cache retention is bounded to 512 MiB/512 archives
+per stage. Three preceding completed/failed previews plus the current preview are
+retained, with actual retained stage bytes charged to the existing storage claims.
+A missing preparation receipt clears incomplete job-owned staging before retry.
+The UI retains at most four plans, revalidates returning selections and re-prepares
+an evicted/conflicting plan without automatically applying it.
+
+Measured on development, with one selected PEP_Mod and SML dependency (76 files,
+61.4 MB), without applying mods or changing game files/power:
+
+| Measurement | Before | After |
+| --- | --- | --- |
+| Complete preview preparation | 34.5–36.8 s | 12.6 s cold; 5.2 s with verified cache |
+| Native preparation within the real worker | Not separately timed | 7.2 s cold; 1.8 s warm |
+| Opening Review with a prepared result | Started another preparation | 20–32 ms, no additional preview request |
+
+The under-300 ms result measures opening a prepared Review, not the complete cold
+preparation. Native dependency requests, download/extraction, hashing and current
+server checks still take time in the background; no claim is made that all of
+these complete within 300 ms. An isolated pinned-ficsit benchmark also measured
+6.6 s cold versus 1.6–1.9 s warm with identical output; those values exclude the
+application's provider/queue checks.
+
+Validation: 12 browser journeys, including editing during preparation, stale
+results, minimum-version multi-selection, cached-plan eviction/recovery and a
+sub-300 ms prepared-Review paint check; 21 domain/cache/sandbox tests; 22 API/worker
+integration tests; and the lifecycle suite including four preview/physical-proof/
+apply guard cases passed. Full types, lint, i18n parity, frontend and runtime builds
+passed (existing lint warnings and bundle notices remain). Independent code and
+screenshot review found no open must-fix findings. Real dev preview-only checks
+reported no page errors and never called Apply. All four dev services remained
+healthy; no manual service restart, migration, Blueprint/Panel/Wings change or new
+game-server test asset was needed. Issue #18 remains unchanged.
+
+[Prepared incremental Review screenshot](screenshots/m6/satisfactory-mods-incremental-ready-en.png).
+Rollback after pending preview jobs settle by reverting this application change;
+retain normal operation/plan records and stages for existing recovery. Archive
+caches are optional and are removed with their normal stage retention lifecycle.

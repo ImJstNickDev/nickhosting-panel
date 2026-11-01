@@ -25,6 +25,7 @@ export type ModSnapshot = {
   lock: ModLock;
   profiles: ModProfile[];
   activeProfileId: string | null;
+  activePreviewJobId?: string | null;
   vanilla: boolean;
   externalMode: boolean;
   inventoryFingerprint: string | null;
@@ -79,6 +80,7 @@ export type ModChange = {
 export type ModPlan = {
   id: string;
   status: 'pending' | 'ready' | 'failed' | 'applied';
+  phase?: 'queued' | 'preparing' | 'inventory' | 'ready' | 'failed';
   revision: number;
   selection: ModChoice[];
   vanilla: boolean;
