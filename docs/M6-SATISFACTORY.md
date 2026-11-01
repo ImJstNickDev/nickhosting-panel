@@ -307,3 +307,25 @@ A Gateway-only restart repeated these checks with empty in-memory caches, retain
 the same TLS identity. Persisted read snapshots are best-effort: a write rejected
 by a changed route revision can leave an earlier genuine snapshot until its original
 expiry. They do not promise the most recent in-memory sample.
+
+
+The final strict JoinGameRequest test held the original HTTPS connection across
+backend startup and enqueued exactly one wake operation. The real backend returned
+HTTP 200 with its native `no_game_running` error because that test instance had no
+loaded world. The Gateway preserved this response and did not create a ticket.
+This verifies request continuity and wake orchestration; it is not a successful
+multiplayer join or Steam/Epic client certification.
+
+Managed protocols now reserve each upstream stream separately from their incoming
+connection and activity count. Unforwarded requests may survive temporary backend
+churn within the same route generation. Actual upstream streams are revoked when
+the backend loses validity; generation, identity, route and lease revocations still
+close all affected connections. Tests cover both preservation and revocation,
+including refusal to send upstream bytes before fresh readiness is established.
+
+
+After acceptance, the original idle policy was restored and the canonical manual
+stop completed with fresh host evidence that both installer and game were stopped.
+A subsequent valid join request returned HTTP 503 and created no start operation,
+confirming that manual stop prevents automatic wake. Both ledger-owned test servers
+were retained stopped, without OOM termination; no active jobs remained.
