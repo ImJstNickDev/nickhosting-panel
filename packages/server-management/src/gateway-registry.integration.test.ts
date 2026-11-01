@@ -60,6 +60,36 @@ const input = () => ({
   transport: 'tcp' as const,
 });
 describe('durable explicit Gateway route registry', () => {
+  it('attaches durable Satisfactory protocol observations without revision churn on repeated reads', async () => {
+    await setGatewayRoute(f.db, f.owner, input(), env);
+    await f.db
+      .insertInto('game_integrations')
+      .values({ id: 'satisfactory', version: '1.0.0', manifest: {} })
+      .onConflict((c) => c.column('id').doNothing())
+      .execute();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'satisfactory', runtime_id: 'dedicated' })
+      .where('id', '=', f.mappingId)
+      .execute();
+    const observation = {
+      state: 3,
+      netCL: 123456,
+      flags: '0',
+      substates: [{ id: 0, version: 2 }],
+      name: 'Factory',
+      observedAt: new Date().toISOString(),
+    };
+    await f.db
+      .insertInto('satisfactory_server_state')
+      .values({ server_id: serverId, snapshot: observation })
+      .execute();
+    const first = await getGatewaySnapshot(f.db, env);
+    const second = await getGatewaySnapshot(f.db, env);
+    expect(first.routes[0]?.protocol?.satisfactory).toEqual(observation);
+    expect(second.routes[0]?.revision).toBe(first.routes[0]?.revision);
+  });
+
   it('withdraws an active reinstall without renewing its lease, then restores its route', async () => {
     const route = await setGatewayRoute(f.db, f.owner, input(), env);
     const before = await getGatewaySnapshot(f.db, env);

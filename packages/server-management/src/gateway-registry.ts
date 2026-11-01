@@ -10,6 +10,7 @@ import {
   type GatewayMinecraftProtocol,
   type GatewayRoute,
   gatewayMinecraftProtocolSchema,
+  gatewaySatisfactoryStateSchema,
   gatewaySnapshotSchema,
 } from '@nickhosting/game-sdk';
 import { minecraftGatewayDeclaration } from '@nickhosting/minecraft';
@@ -441,8 +442,20 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
     for (const row of rows) {
       let state: Awaited<ReturnType<typeof getGatewayState>>;
       let minecraft: GatewayMinecraftProtocol | undefined;
+      let satisfactory: NonNullable<
+        import('@nickhosting/game-sdk').GatewayRoute['protocol']
+      >['satisfactory'];
       try {
         state = await getGatewayState(tx, row.server_id, { env });
+        if (row.game_id === 'satisfactory') {
+          const observation = await tx
+            .selectFrom('satisfactory_server_state')
+            .select('snapshot')
+            .where('server_id', '=', row.server_id)
+            .executeTakeFirst();
+          if (observation)
+            satisfactory = gatewaySatisfactoryStateSchema.parse(observation.snapshot);
+        }
         if (row.game_id === 'minecraft') {
           minecraft = await requireMinecraftGatewayProtocol(
             tx,
@@ -517,6 +530,7 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
           gameVersion: state.gameVersion,
           role: row.role,
           ...(minecraft ? { minecraft } : {}),
+          ...(satisfactory ? { satisfactory } : {}),
         },
         mode: state.state,
         wakeEnabled: state.wakeEnabled,

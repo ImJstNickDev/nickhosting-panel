@@ -36,6 +36,11 @@ import {
 import { type Kysely, sql, type Transaction } from 'kysely';
 import { z } from 'zod';
 import {
+  satisfactoryConfigurationSchema,
+  satisfactoryEggEnvironment,
+  satisfactoryPortArguments,
+} from '../../../games/satisfactory/src/index.js';
+import {
   checkStorage,
   type DB,
   type Environment,
@@ -67,6 +72,7 @@ import { minecraftProvisionStartup } from './minecraft-startup.js';
 import { backupSchemaAvailable } from './provider-backup-events.js';
 import { retryableProvision } from './provision-retry.js';
 import { integrationImageCandidates, mappingProvisionImage } from './runtime-images.js';
+import { ensureSatisfactoryTlsIdentity } from './satisfactory-tls.js';
 import { killRequestSchema, requestStopEscalation } from './stop-escalation.js';
 import { storageCommitments } from './storage-accounting.js';
 import { getUserStorageBudget } from './storage-user-budget.js';
@@ -100,6 +106,7 @@ export const createServerSchema = z
       })
       .strict()
       .optional(),
+    satisfactory: satisfactoryConfigurationSchema.optional(),
     minecraft: z
       .object({ choiceId: z.uuid(), configuration: minecraftConfigurationSchema })
       .strict()
@@ -107,6 +114,21 @@ export const createServerSchema = z
   })
   .strict();
 export const operationSchema = z.discriminatedUnion('action', [
+  z.strictObject({
+    action: z.literal('satisfactory-content'),
+    idempotencyKey: keySchema,
+    command: z.strictObject({
+      kind: z.literal('mods'),
+      selection: z
+        .array(
+          z.strictObject({
+            reference: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,127}$/),
+            version: z.string().regex(/^[0-9A-Za-z.+_-]{1,128}$/),
+          }),
+        )
+        .max(256),
+    }),
+  }),
   z
     .object({ action: z.literal('retry-provision'), failedJobId: id, idempotencyKey: keySchema })
     .strict(),
@@ -498,7 +520,11 @@ export async function createManagedServer(
   context: AuthContext,
   input: unknown,
   env: Environment = {},
-  options: { minecraftInitialContent?: MinecraftPreparedContent; creationRequest?: unknown } = {},
+  options: {
+    minecraftInitialContent?: MinecraftPreparedContent;
+    creationRequest?: unknown;
+    codec?: import('@nickhosting/core').SecretCodec;
+  } = {},
 ) {
   assertPermission(context, 'server:manage', { ownerUserId: context.subjectUserId });
   const request = parse(createServerSchema, input);
@@ -826,13 +852,39 @@ export async function createManagedServer(
           allocationRows.find((allocation) => allocation.role === role.role)?.port,
         );
     }
+    let satisfactoryStartup: string | undefined;
+    if (mapping.game_id === 'satisfactory') {
+      if (!options.codec) throw new DomainError('configuration_invalid');
+      const game = allocationRows.find((row) => row.role === 'game');
+      const reliable = allocationRows.find((row) => row.role === 'reliable');
+      if (
+        !game ||
+        !reliable ||
+        !game.protocols.includes('tcp') ||
+        !game.protocols.includes('udp') ||
+        !reliable.protocols.includes('tcp')
+      )
+        throw new DomainError('configuration_invalid');
+      const publicReliable = gatewayProvision?.routes.find(
+        (route) => route.allocationId === reliable.id && route.transport === 'tcp',
+      );
+      const ports = {
+        game: game.port,
+        reliable: reliable.port,
+        externalReliable: publicReliable?.publicPort ?? reliable.port,
+      };
+      Object.assign(environment, satisfactoryEggEnvironment(value.satisfactory ?? {}, ports));
+      satisfactoryStartup = `${mapping.startup.replace(/\s+-(?:ExternalReliablePort|ReliablePort|Port)=(?:\{\{[^}]+\}\}|[^\s]+)/g, '')} ${satisfactoryPortArguments(ports).join(' ')}`;
+      await ensureSatisfactoryTlsIdentity(tx, options.codec, serverId);
+    } else if (value.satisfactory) throw new DomainError('validation_failed');
     const provision: ProvisionPlan = {
       name: value.name,
       externalId,
       userId: providerOwner.provider_id,
       eggId: mapping.egg_id,
       dockerImage: mappingProvisionImage(mapping, minecraft?.row.binding),
-      startup: minecraft ? minecraftProvisionStartup(minecraft) : mapping.startup,
+      startup:
+        satisfactoryStartup ?? (minecraft ? minecraftProvisionStartup(minecraft) : mapping.startup),
       environment,
       limits: value.limits,
       featureLimits: mapping.feature_limits,
@@ -1105,6 +1157,15 @@ export async function enqueueLockedServerOperation(
     plan.minecraftContent = options.minecraftPlan;
     plan.backupBefore = options.minecraftPlan.backupBefore;
   }
+  if (value.action === 'satisfactory-content') {
+    const mapping = await tx
+      .selectFrom('runtime_egg_mappings')
+      .select('game_id')
+      .where('id', '=', server.mapping_id)
+      .executeTakeFirstOrThrow();
+    if (mapping.game_id !== 'satisfactory' || automation) throw new DomainError('forbidden');
+    plan.satisfactoryContent = value.command;
+  }
   if (value.action === 'reinstall' || value.action === 'wipe') {
     const profile = await tx
       .selectFrom('minecraft_server_profiles')
@@ -1145,9 +1206,15 @@ export async function enqueueLockedServerOperation(
     throw new DomainError('operation_uncertain');
   if (
     !onlineWorldContent &&
-    ['configure', 'reinstall', 'wipe', 'restore', 'delete', 'minecraft-content'].includes(
-      value.action,
-    ) &&
+    [
+      'configure',
+      'reinstall',
+      'wipe',
+      'restore',
+      'delete',
+      'minecraft-content',
+      'satisfactory-content',
+    ].includes(value.action) &&
     reservation
   )
     throw new DomainError('operation_uncertain');
@@ -1169,9 +1236,15 @@ export async function enqueueLockedServerOperation(
   }
   if (
     !onlineWorldContent &&
-    ['wipe', 'reinstall', 'restore', 'configure', 'delete', 'minecraft-content'].includes(
-      value.action,
-    ) &&
+    [
+      'wipe',
+      'reinstall',
+      'restore',
+      'configure',
+      'delete',
+      'minecraft-content',
+      'satisfactory-content',
+    ].includes(value.action) &&
     !['offline', 'unknown'].includes(server.runtime_state)
   )
     throw new DomainError('conflict');

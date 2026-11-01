@@ -6,6 +6,7 @@ import type { GatewayRoute } from '@nickhosting/game-sdk';
 import { safetyProviderServerSchema } from '@nickhosting/gateway-safety';
 import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import {
+  ensureSatisfactoryTlsIdentity,
   getGatewaySnapshot,
   getGatewayState,
   type ManagementRuntime,
@@ -192,6 +193,169 @@ beforeEach(async () => {
   });
 });
 describe('M3 Core service authentication and managed control plane', () => {
+  async function satisfactoryRoute(transport: 'tcp' | 'udp' = 'tcp') {
+    await f.db
+      .insertInto('game_integrations')
+      .values({ id: 'satisfactory', version: '1.0.0', manifest: {} })
+      .onConflict((conflict) => conflict.column('id').doNothing())
+      .execute();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'satisfactory', runtime_id: 'dedicated' })
+      .where('id', '=', f.mappingId)
+      .execute();
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ protocol_id: 'satisfactory' })
+      .where('server_id', '=', serverId)
+      .execute();
+    await f.db
+      .updateTable('server_allocations')
+      .set({ protocols: ['tcp', 'udp'] })
+      .where('id', '=', route.allocationId)
+      .execute();
+    await f.db
+      .updateTable('gateway_routes')
+      .set({ transport })
+      .where('id', '=', route.id)
+      .execute();
+    const selected = (await getGatewaySnapshot(f.db, env)).routes.find(
+      (entry) => entry.id === route.id,
+    );
+    if (!selected) throw new Error('Missing Satisfactory fixture route');
+    route = selected;
+    return { routeId: route.id, routeRevision: route.revision };
+  }
+  const satisfactoryState = () => ({
+    state: 3,
+    netCL: 123456,
+    flags: '0',
+    substates: [{ id: 0, version: 1 }],
+    name: 'Factory',
+    observedAt: new Date().toISOString(),
+  });
+  it.each(['tls-identity', 'protocol-state'])(
+    'rejects browser and wrong-Gateway access to %s',
+    async (endpoint) => {
+      const input = {
+        routeId: route.id,
+        routeRevision: route.revision,
+        ...(endpoint === 'protocol-state' ? { state: satisfactoryState() } : {}),
+      };
+      expect((await request(`${prefix()}/${endpoint}`, input, { authorization: '' })).status).toBe(
+        401,
+      );
+      expect(
+        (await request(`${prefix()}/${endpoint}`, input, { 'x-nh-support-token': 'support' }))
+          .status,
+      ).toBe(401);
+      expect((await request(`/internal/gateway/${randomUUID()}/${endpoint}`, input)).status).toBe(
+        401,
+      );
+    },
+  );
+  it('returns only the route-bound TLS identity, rejects stale revisions and hides keys from snapshots', async () => {
+    const input = await satisfactoryRoute();
+    const identity = await ensureSatisfactoryTlsIdentity(f.db, codec, serverId);
+    const response = await request(`${prefix()}/tls-identity`, input);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual(identity);
+    expect(
+      (await request(`${prefix()}/tls-identity`, { ...input, routeRevision: route.revision + 1 }))
+        .status,
+    ).toBe(412);
+    expect(
+      (await request(`${prefix()}/tls-identity`, { ...input, serverId: randomUUID() })).status,
+    ).toBe(400);
+    const snapshot = await request(`${prefix()}/snapshot`);
+    expect(await snapshot.text()).not.toContain('PRIVATE KEY');
+  });
+  it.each(['tls-identity', 'protocol-state'])(
+    'rejects wrong protocol handlers for %s',
+    async (endpoint) => {
+      const response = await request(`${prefix()}/${endpoint}`, {
+        routeId: route.id,
+        routeRevision: route.revision,
+        ...(endpoint === 'protocol-state' ? { state: satisfactoryState() } : {}),
+      });
+      expect(response.status).toBe(403);
+    },
+  );
+  it('rejects TLS identity retrieval for UDP routes and other Gateway namespaces', async () => {
+    const input = await satisfactoryRoute('udp');
+    expect((await request(`${prefix()}/tls-identity`, input)).status).toBe(403);
+    await f.db
+      .updateTable('gateway_routes')
+      .set({ gateway_id: randomUUID() })
+      .where('id', '=', route.id)
+      .execute();
+    expect((await request(`${prefix()}/tls-identity`, input)).status).toBe(404);
+  });
+  it('rejects Reliable Messaging routes and missing persisted TLS identities', async () => {
+    const input = await satisfactoryRoute();
+    expect((await request(`${prefix()}/tls-identity`, input)).status).toBe(503);
+    await f.db
+      .updateTable('server_allocations')
+      .set({ role: 'reliable' })
+      .where('id', '=', route.allocationId)
+      .execute();
+    const selected = (await getGatewaySnapshot(f.db, env)).routes.find(
+      (entry) => entry.id === route.id,
+    );
+    if (!selected) throw new Error('Missing reliable fixture route');
+    expect(
+      (
+        await request(`${prefix()}/tls-identity`, {
+          routeId: selected.id,
+          routeRevision: selected.revision,
+        })
+      ).status,
+    ).toBe(403);
+  });
+  it('persists fresh UDP protocol state and does not churn revisions for timestamp-only observations', async () => {
+    const input = await satisfactoryRoute('udp');
+    const state = satisfactoryState();
+    expect((await request(`${prefix()}/protocol-state`, { ...input, state })).status).toBe(204);
+    const selected = (await getGatewaySnapshot(f.db, env)).routes.find(
+      (entry) => entry.id === route.id,
+    );
+    if (!selected) throw new Error('Missing Satisfactory fixture route');
+    route = selected;
+    const revision = route.revision;
+    expect(route.protocol?.satisfactory).toEqual(state);
+    expect(
+      (
+        await request(`${prefix()}/protocol-state`, {
+          routeId: route.id,
+          routeRevision: revision,
+          state: { ...state, observedAt: new Date(Date.now() + 1000).toISOString() },
+        })
+      ).status,
+    ).toBe(204);
+    expect(
+      (await getGatewaySnapshot(f.db, env)).routes.find((entry) => entry.id === route.id)?.revision,
+    ).toBe(revision);
+    expect(
+      (
+        await request(`${prefix()}/protocol-state`, {
+          routeId: route.id,
+          routeRevision: revision,
+          state: { ...state, observedAt: new Date(Date.now() - 60000).toISOString() },
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await request(`${prefix()}/protocol-state`, {
+          routeId: route.id,
+          routeRevision: revision + 1,
+          state,
+        })
+      ).status,
+    ).toBe(412);
+  });
+
   it.each<Record<string, string>>([
     { authorization: '' },
     { authorization: 'Bearer wrong' },

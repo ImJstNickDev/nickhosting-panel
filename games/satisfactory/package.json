@@ -1,0 +1,14 @@
+{
+  "name": "@nickhosting/satisfactory",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./ui": "./src/ui/index.ts"
+  },
+  "dependencies": {
+    "@nickhosting/core": "workspace:*",
+    "@nickhosting/game-sdk": "workspace:*",
+    "zod": "4.6.5"
+  }
+}

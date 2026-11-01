@@ -1093,9 +1093,15 @@ export async function processServerOperation(
       if (
         !onlineWorldContent &&
         !metadataContent &&
-        ['configure', 'reinstall', 'wipe', 'restore', 'delete', 'minecraft-content'].includes(
-          operation.action,
-        )
+        [
+          'configure',
+          'reinstall',
+          'wipe',
+          'restore',
+          'delete',
+          'minecraft-content',
+          'satisfactory-content',
+        ].includes(operation.action)
       )
         await requireQuiescentReservation();
       const attempts = z
@@ -2804,7 +2810,7 @@ export async function processServerOperation(
         await requireQuiescentReservation();
         if (!(await offline())) return wait('offline_confirmation');
       }
-      if (operation.action === 'minecraft-content') {
+      if (operation.action === 'minecraft-content' || operation.action === 'satisfactory-content') {
         if (!options.processGameContent) throw new DomainError('configuration_invalid');
         if (!(await options.processGameContent(gameContext())))
           return wait('game_content_confirmation');

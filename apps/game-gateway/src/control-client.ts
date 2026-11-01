@@ -3,6 +3,7 @@ import { DomainError } from '@nickhosting/core';
 import {
   type GatewayControl,
   gatewayObservationSchema,
+  gatewaySatisfactoryStateSchema,
   gatewaySnapshotSchema,
   gatewayWakeRequestSchema,
   gatewayWakeResultSchema,
@@ -234,6 +235,30 @@ export function createGatewayControlClient(
   };
   return {
     requestJson: request,
+    async reportProtocolState(input) {
+      const value = z
+        .object({
+          routeId: z.uuid(),
+          routeRevision: z.number().int().positive(),
+          state: gatewaySatisfactoryStateSchema,
+        })
+        .strict()
+        .parse(input);
+      await request('protocol-state', value);
+    },
+    async fetchTlsIdentity(input) {
+      const value = z
+        .object({ routeId: z.uuid(), routeRevision: z.number().int().positive() })
+        .strict()
+        .parse(input);
+      return z
+        .object({
+          privateKeyPem: z.string().min(1).max(32768),
+          certificatePem: z.string().min(1).max(65536),
+        })
+        .strict()
+        .parse(await request('tls-identity', value));
+    },
     close() {
       closed = true;
       for (const controller of controllers) controller.abort();

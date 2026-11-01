@@ -15,12 +15,14 @@ import type { MinecraftSourceTables } from './minecraft-source-types.js';
 import type { MinecraftTables } from './minecraft-types.js';
 import type { ProviderAccountTables } from './provider-account-types.js';
 import type { ProviderFeedTables } from './provider-feed-types.js';
+import type { SatisfactoryModTables } from './satisfactory-types.js';
 import type { ScheduleTables } from './schedule-types.js';
 import type { ServerTables } from './server-types.js';
 import type { StoragePolicyTables } from './storage-policy-types.js';
 
 export interface Database
-  extends AuthTables,
+  extends SatisfactoryModTables,
+    AuthTables,
     JobTables,
     ServerTables,
     GatewayTables,
@@ -57,6 +59,11 @@ export interface Database
   platform_settings: {
     key: string;
     value: Partial<PlatformConfig>;
+    updated_at: Generated<Date>;
+  };
+  satisfactory_server_state: {
+    server_id: string;
+    snapshot: Record<string, unknown>;
     updated_at: Generated<Date>;
   };
   encrypted_secrets: {

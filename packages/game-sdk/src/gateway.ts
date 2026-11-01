@@ -1,4 +1,4 @@
-import { isIP } from 'node:net';
+import { isIP, type Socket } from 'node:net';
 import { gatewayPresentationSchema, minecraftGatewayResponsesSchema } from '@nickhosting/core';
 import { z } from 'zod';
 
@@ -66,6 +66,30 @@ export const gatewayMinecraftProtocolSchema = z
   .refine((value) => !value.transfer || (value.family === 'netty' && value.protocolId >= 766));
 export type GatewayMinecraftProtocol = z.infer<typeof gatewayMinecraftProtocolSchema>;
 
+export const gatewaySatisfactoryStateSchema = z
+  .object({
+    state: z.number().int().min(0).max(3),
+    netCL: z.number().int().min(0).max(4294967295),
+    flags: z
+      .string()
+      .regex(/^[0-9]{1,20}$/)
+      .refine((value) => BigInt(value) <= 18446744073709551615n),
+    substates: z
+      .array(
+        z
+          .object({
+            id: z.number().int().min(0).max(255),
+            version: z.number().int().min(0).max(65535),
+          })
+          .strict(),
+      )
+      .max(255),
+    name: z.string().max(1024),
+    observedAt: timestamp,
+  })
+  .strict();
+export type GatewaySatisfactoryState = z.infer<typeof gatewaySatisfactoryStateSchema>;
+
 export const gatewayRouteSchema = z
   .object({
     id: z.uuid(),
@@ -100,6 +124,7 @@ export const gatewayRouteSchema = z
         gameVersion: z.string().min(1).max(128),
         role: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
         minecraft: gatewayMinecraftProtocolSchema.optional(),
+        satisfactory: gatewaySatisfactoryStateSchema.optional(),
       })
       .strict()
       .optional(),
@@ -195,7 +220,21 @@ export const gatewayObservationSchema = z
   );
 export type GatewayObservation = z.infer<typeof gatewayObservationSchema>;
 
+export interface GatewayTlsIdentity {
+  privateKeyPem: string;
+  certificatePem: string;
+}
+
 export interface GatewayControl {
+  reportProtocolState?(request: {
+    routeId: string;
+    routeRevision: number;
+    state: GatewaySatisfactoryState;
+  }): Promise<void>;
+  fetchTlsIdentity?(request: {
+    routeId: string;
+    routeRevision: number;
+  }): Promise<GatewayTlsIdentity>;
   /** Commit notification only; receipt must match the current fenced operation.
    * No timer here grants authority or extends a listener lease. */
   waitForSleep?(
@@ -237,6 +276,8 @@ export interface GatewaySessionDiagnostic {
   action: 'status' | 'login' | 'incompatible' | 'transfer';
 }
 export interface GatewayProtocolContext {
+  persistState?(state: GatewaySatisfactoryState): Promise<void>;
+  input?: Uint8Array;
   route: Readonly<GatewayRoute>;
   signal: AbortSignal;
   /** Optional trusted diagnostics; implementations must isolate sink failures. */
@@ -260,7 +301,17 @@ export interface GatewayProtocolSession {
 
 /** Trusted game code. Implementations must distinguish real protocol readiness
  * and player idleness; an open socket or no Gateway traffic proves neither. */
+export interface GatewayTcpContext extends GatewayProtocolContext {
+  mode(): GatewayResponseMode;
+  canForward(): boolean;
+  requestWake(): Promise<GatewayMode>;
+  tlsIdentity(): Promise<GatewayTlsIdentity>;
+}
+
 export interface GatewayProtocolAdapter {
+  /** Owns a bounded application connection; the core retains lease/socket ownership. */
+  handlesTcp?(route: Readonly<GatewayRoute>): boolean;
+  acceptTcp?(socket: Socket, context: GatewayTcpContext): Promise<void>;
   readonly id: string;
   /** Authenticated provider events may deliver durable readiness receipts for opted-in integrations. */
   readonly startupHint?: 'provider_running';

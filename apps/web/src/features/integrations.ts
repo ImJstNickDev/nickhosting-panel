@@ -5,11 +5,15 @@ import {
   type GameUiClient,
 } from '@nickhosting/game-sdk/ui';
 import { minecraftUiModule } from '@nickhosting/minecraft/ui';
+import { satisfactoryUiModule } from '../../../../games/satisfactory/src/ui/index.js';
 import { api, queryClient, upload } from '../api/client.js';
 import type { ServerInfo } from './service-contracts.js';
 
 /** Executable modules and artwork are build-time imports, never API URLs. */
-export const gameUiRegistry = createTrustedGameUiRegistry([minecraftUiModule]);
+export const gameUiRegistry = createTrustedGameUiRegistry([
+  minecraftUiModule,
+  satisfactoryUiModule,
+]);
 export function availableGameSections(
   server: ServerInfo,
   module = gameUiRegistry.get(server.gameId),
@@ -192,7 +196,13 @@ const MinecraftModpacksSection = lazy(() =>
     default: module.MinecraftModpacksSection,
   })),
 );
+const SatisfactoryModsSection = lazy(() =>
+  import('../integrations/satisfactory/mods.js').then((module) => ({
+    default: module.SatisfactoryModsSection,
+  })),
+);
 const sectionViews = new Map<string, ComponentType<GameSectionViewProps>>([
+  ['satisfactory-mods', SatisfactoryModsSection],
   ['minecraft-players', MinecraftPlayersSection],
   ['minecraft-worlds', MinecraftWorldsSection],
   ['minecraft-datapacks', MinecraftDatapacksSection],

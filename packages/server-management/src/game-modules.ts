@@ -20,6 +20,7 @@ import type { Kysely, Selectable } from 'kysely';
 import type { DB, Environment } from './admission.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { minecraftModule } from './minecraft-module.js';
+import { satisfactoryModule } from './satisfactory-module.js';
 
 export type ManagedGameServer = Selectable<Database['managed_servers']>;
 export type GameMapping = Selectable<Database['runtime_egg_mappings']>;
@@ -170,7 +171,7 @@ export function createGameModuleRegistry(modules: readonly TrustedGameModule[]) 
     },
   });
 }
-export const trustedGameModules = createGameModuleRegistry([minecraftModule]);
+export const trustedGameModules = createGameModuleRegistry([minecraftModule, satisfactoryModule]);
 
 /** A registry-bound dispatcher protects all content/lifecycle entry points.
  * Unknown generic games retain M2 lifecycle support but cannot acquire content

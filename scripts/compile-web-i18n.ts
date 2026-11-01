@@ -13,6 +13,7 @@ import { ownerIntegrationWebMessages } from '../packages/i18n/src/owner-integrat
 import { ownerWebMessages } from '../packages/i18n/src/owner-web.js';
 import { platformWebMessages } from '../packages/i18n/src/platform-web.js';
 import { quillWebMessages } from '../packages/i18n/src/quill-web.js';
+import { satisfactoryWebMessages } from '../packages/i18n/src/satisfactory-web.js';
 import { serverNavigationWebMessages } from '../packages/i18n/src/server-navigation-web.js';
 import { serviceWebMessages } from '../packages/i18n/src/services-web.js';
 import { sftpWebMessages } from '../packages/i18n/src/sftp-web.js';
@@ -23,6 +24,7 @@ import { webMessages } from '../packages/i18n/src/web.js';
 const catalogs: Record<string, Record<string, string>> = { en: { ...en }, it: { ...it } };
 for (const [key, pair] of Object.entries({
   ...webMessages,
+  ...satisfactoryWebMessages,
   ...accountSecurityWebMessages,
   ...contentSettingsWebMessages,
   ...platformWebMessages,
@@ -51,6 +53,9 @@ try {
   const { minecraftUiModule } = await import('../games/minecraft/src/ui/index.js');
   Object.assign(catalogs.en!, minecraftUiModule.catalogs.en);
   Object.assign(catalogs.it!, minecraftUiModule.catalogs.it);
+  const { satisfactoryUiModule } = await import('../games/satisfactory/src/ui/index.js');
+  Object.assign(catalogs.en!, satisfactoryUiModule.catalogs.en);
+  Object.assign(catalogs.it!, satisfactoryUiModule.catalogs.it);
 } catch (error) {
   // A missing first-party module is a failed build, not a silent empty UI.
   throw error;

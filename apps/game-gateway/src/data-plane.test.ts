@@ -2452,6 +2452,32 @@ describe('sleep protocol handling and observations', () => {
 });
 
 describe('lease, reconciliation and shutdown safety', () => {
+  it('revokes managed application streams on topology churn', async () => {
+    const backend = await tcpFixture();
+    const r = route(backend.port);
+    const accepted = vi.fn();
+    const f = plane([r], {
+      protocols: [
+        fixtureProtocol({
+          async acceptTcp(socket, context) {
+            accepted();
+            socket.write('managed');
+            context.signal.addEventListener('abort', () => socket.destroy(), { once: true });
+          },
+        }),
+      ],
+    });
+    await f.gateway.start();
+    const client = connect(backend.port, '127.0.0.1');
+    await once(client, 'data');
+    expect(accepted).toHaveBeenCalledOnce();
+    const closed = once(client, 'close');
+    vi.mocked(f.safety.validate).mockRejectedValue(new NetworkObservationError('container_churn'));
+    await expect(f.gateway.refresh()).rejects.toThrow('integration_unavailable');
+    await closed;
+    expect(client.destroyed).toBe(true);
+  });
+
   it.each(['online', 'sleeping'] as const)(
     'permits only local status during churn in %s, then recovers after fresh validation',
     async (mode) => {

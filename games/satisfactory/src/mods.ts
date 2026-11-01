@@ -1,0 +1,165 @@
+import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { isAbsolute, join } from 'node:path';
+import { promisify } from 'node:util';
+import { z } from 'zod';
+
+export const satisfactoryModReferenceSchema = z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,127}$/);
+export const satisfactoryModSelectionSchema = z
+  .array(
+    z.strictObject({
+      reference: satisfactoryModReferenceSchema,
+      version: z.string().regex(/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/),
+    }),
+  )
+  .max(256)
+  .superRefine((items, ctx) => {
+    if (new Set(items.map((item) => item.reference)).size !== items.length)
+      ctx.addIssue({ code: 'custom', message: 'duplicate_mod_reference' });
+  });
+export const satisfactoryModLockSchema = z.object({
+  version: z.literal(1),
+  mods: z.record(
+    satisfactoryModReferenceSchema,
+    z.object({
+      version: z.string(),
+      dependencies: z.record(z.string(), z.string()).nullable(),
+      targets: z.record(z.string(), z.object({ hash: z.string(), link: z.url() })),
+    }),
+  ),
+});
+export type SatisfactoryModSelection = z.infer<typeof satisfactoryModSelectionSchema>;
+export type SatisfactoryModLock = z.infer<typeof satisfactoryModLockSchema>;
+export type SatisfactoryModFile = { path: string; bytes: Buffer; sha256: string };
+export const satisfactoryVersionPaths = [
+  'Engine/Binaries/Linux/UnrealServer-Linux-Shipping.version',
+  'Engine/Binaries/Linux/FactoryServer-Linux-Shipping.version',
+] as const;
+
+/** Resolves SML/dependencies with the upstream resolver in a private local staging tree.
+ * The caller applies returned files through the existing durable upload pipeline while stopped.
+ * Never gives ficsit-cli credentials, a server mount, or a remote installation URL.
+ */
+export async function prepareSatisfactoryMods(options: {
+  executable: string;
+  executableSha256: string;
+  stagingRoot: string;
+  selection: SatisfactoryModSelection;
+  versionPath: (typeof satisfactoryVersionPaths)[number];
+  versionFile: Buffer;
+  launcherFile: Buffer;
+  signal?: AbortSignal;
+  run?: (executable: string, args: string[], cwd: string, signal?: AbortSignal) => Promise<void>;
+}): Promise<{ files: SatisfactoryModFile[]; lock: SatisfactoryModLock }> {
+  const selection = satisfactoryModSelectionSchema.parse(options.selection);
+  if (
+    !isAbsolute(options.executable) ||
+    !isAbsolute(options.stagingRoot) ||
+    !/^[a-f0-9]{64}$/.test(options.executableSha256) ||
+    !satisfactoryVersionPaths.includes(options.versionPath) ||
+    options.versionFile.length > 65536 ||
+    options.launcherFile.length > 1048576
+  )
+    throw new Error('satisfactory_mod_input_invalid');
+  const version = JSON.parse(options.versionFile.toString('utf8')) as Record<string, unknown>;
+  if (!Number.isSafeInteger(version.Changelist) || Number(version.Changelist) <= 0)
+    throw new Error('satisfactory_game_version_invalid');
+  const executable = await readFile(options.executable);
+  if (createHash('sha256').update(executable).digest('hex') !== options.executableSha256)
+    throw new Error('satisfactory_cli_integrity_failed');
+  await mkdir(options.stagingRoot, { recursive: true, mode: 0o700 });
+  const root = await mkdtemp(join(options.stagingRoot, 'satisfactory-mods-'));
+  try {
+    const game = join(root, 'game'),
+      state = join(root, 'state');
+    await mkdir(join(game, 'Engine/Binaries/Linux'), { recursive: true, mode: 0o700 });
+    await mkdir(join(game, 'FactoryGame/Mods'), { recursive: true, mode: 0o700 });
+    await mkdir(state, { mode: 0o700 });
+    await writeFile(join(game, options.versionPath), options.versionFile, { mode: 0o600 });
+    await writeFile(join(game, 'FactoryServer.sh'), options.launcherFile, { mode: 0o600 });
+    await writeFile(
+      join(state, 'profiles.json'),
+      JSON.stringify({
+        version: 0,
+        selected_profile: 'NickHosting',
+        profiles: {
+          NickHosting: {
+            name: 'NickHosting',
+            required_targets: ['LinuxServer'],
+            mods: Object.fromEntries(
+              selection.map((item) => [item.reference, { version: item.version, enabled: true }]),
+            ),
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    await writeFile(
+      join(state, 'installations.json'),
+      JSON.stringify({
+        version: 0,
+        selected_installation: game,
+        installations: [{ path: game, profile: 'NickHosting', vanilla: false }],
+      }),
+      { mode: 0o600 },
+    );
+    const args = [
+      '--local-dir',
+      state,
+      '--cache-dir',
+      join(root, 'cache'),
+      '--pretty=false',
+      '--quiet',
+      'apply',
+      game,
+    ];
+    const run =
+      options.run ??
+      (async (binary, argv, cwd, signal) => {
+        await promisify(execFile)(binary, argv, {
+          cwd,
+          signal,
+          timeout: 300_000,
+          maxBuffer: 1_048_576,
+          env: {
+            PATH: process.env.PATH,
+            HOME: root,
+            XDG_CONFIG_HOME: state,
+            XDG_DATA_HOME: state,
+            XDG_CACHE_HOME: join(root, 'cache'),
+          },
+        });
+      });
+    await run(options.executable, args, root, options.signal);
+    const lock = satisfactoryModLockSchema.parse(
+      JSON.parse(await readFile(join(game, 'FactoryGame/Mods/nick_hosting-lock.json'), 'utf8')),
+    );
+    for (const item of selection) {
+      const resolved = lock.mods[item.reference];
+      if (!resolved || resolved.version !== item.version || !resolved.targets.LinuxServer)
+        throw new Error('satisfactory_mod_resolution_mismatch');
+    }
+    const files: SatisfactoryModFile[] = [];
+    let total = 0;
+    const collect = async (relative: string): Promise<void> => {
+      for (const entry of await readdir(join(game, relative), { withFileTypes: true })) {
+        if (!/^[A-Za-z0-9_. -]+$/.test(entry.name) || entry.isSymbolicLink())
+          throw new Error('satisfactory_mod_output_invalid');
+        const path = `${relative}/${entry.name}`;
+        if (entry.isDirectory()) await collect(path);
+        else if (entry.isFile()) {
+          const bytes = await readFile(join(game, path));
+          total += bytes.length;
+          if (total > 536_870_912 || files.length >= 20000)
+            throw new Error('satisfactory_mod_output_limit');
+          files.push({ path, bytes, sha256: createHash('sha256').update(bytes).digest('hex') });
+        } else throw new Error('satisfactory_mod_output_invalid');
+      }
+    };
+    await collect('FactoryGame/Mods');
+    return { files, lock };
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}

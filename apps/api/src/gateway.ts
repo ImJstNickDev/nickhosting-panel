@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import {
   type AuthContext,
   type createLogger,
@@ -6,7 +7,11 @@ import {
   type SecretCodec,
 } from '@nickhosting/core';
 import { type createDatabase, getSecret, getSettings } from '@nickhosting/database';
-import { gatewayObservationSchema, gatewayWakeRequestSchema } from '@nickhosting/game-sdk';
+import {
+  gatewayObservationSchema,
+  gatewaySatisfactoryStateSchema,
+  gatewayWakeRequestSchema,
+} from '@nickhosting/game-sdk';
 import { gatewayReachabilityProofSchema } from '@nickhosting/gateway-safety';
 import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
 import {
@@ -17,6 +22,7 @@ import {
   getGatewayState,
   listGatewayRoutes,
   type ManagementRuntime,
+  readSatisfactoryTlsIdentity,
   recordGatewayContact,
   reportGatewayObservation,
   requestGatewayWake,
@@ -438,6 +444,69 @@ export function registerGatewayRoutes(
     const remote = await management.adapter.getApplicationServer(context.providerServerId);
     await verifyManagedIdentity(db, server, remote);
     return c.json(safetyServer(remote));
+  });
+  app.post(`${prefix}/protocol-state`, async (c) => {
+    const parsed = z
+      .object({
+        routeId: z.uuid(),
+        routeRevision: z.number().int().positive(),
+        state: gatewaySatisfactoryStateSchema,
+      })
+      .strict()
+      .safeParse(await options.body(c));
+    if (!parsed.success) throw new DomainError('validation_failed');
+    const input = parsed.data;
+    const selected = await route({ routeId: input.routeId, routeRevision: input.routeRevision });
+    await gatewaySafetyContext(db, selected);
+    if (
+      selected.protocol?.handlerId !== 'satisfactory' ||
+      selected.protocol.role !== 'game' ||
+      selected.public.transport !== 'udp'
+    )
+      throw new DomainError('forbidden');
+    const age = Date.now() - Date.parse(input.state.observedAt);
+    if (age < -5000 || age > 30000) throw new DomainError('validation_failed');
+    const previous = await db
+      .selectFrom('satisfactory_server_state')
+      .select('snapshot')
+      .where('server_id', '=', selected.serverId)
+      .executeTakeFirst();
+    const parsedPrevious = gatewaySatisfactoryStateSchema.safeParse(previous?.snapshot);
+    if (parsedPrevious.success) {
+      const { observedAt: _previousTime, ...previousState } = parsedPrevious.data;
+      const { observedAt: _currentTime, ...currentState } = input.state;
+      // Identical observations must not change route authority or invalidate
+      // the readiness receipt currently being collected against this revision.
+      if (isDeepStrictEqual(previousState, currentState)) return c.body(null, 204);
+    }
+    await db
+      .insertInto('satisfactory_server_state')
+      .values({ server_id: selected.serverId, snapshot: input.state, updated_at: new Date() })
+      .onConflict((conflict) =>
+        conflict.column('server_id').doUpdateSet({ snapshot: input.state, updated_at: new Date() }),
+      )
+      .execute();
+    return c.body(null, 204);
+  });
+  app.post(`${prefix}/tls-identity`, async (c) => {
+    const parsed = z
+      .object({ routeId: z.uuid(), routeRevision: z.number().int().positive() })
+      .strict()
+      .safeParse(await options.body(c));
+    if (!parsed.success) throw new DomainError('validation_failed');
+    const input = parsed.data;
+    const selected = await route(input);
+    await gatewaySafetyContext(db, selected);
+    if (
+      selected.protocol?.handlerId !== 'satisfactory' ||
+      selected.public.transport !== 'tcp' ||
+      selected.protocol.role !== 'game'
+    )
+      throw new DomainError('forbidden');
+    const identity = await readSatisfactoryTlsIdentity(db, codec, selected.serverId);
+    if (!identity) throw new DomainError('integration_unavailable');
+    c.header('Cache-Control', 'no-store');
+    return c.json(identity);
   });
   app.post(`${prefix}/proof-read`, async (c) => {
     const selected = await route(await options.body(c));

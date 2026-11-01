@@ -105,6 +105,8 @@ export interface UploadDestination {
   exists: boolean;
 }
 export interface UploadPreparationOptions extends TransferOptions {
+  /** Restrict sensitive uploads before bytes are written to staging. */
+  privateFile?: boolean;
   /** Reuse the caller's already-authorized parent-directory preflight. */
   readDirectory?: (root: string) => Promise<z.infer<typeof fileSchema>[]>;
 }
@@ -167,7 +169,7 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         const existing = (await listing).find(
           (file) => file.name === normalized.slice(normalized.lastIndexOf('/') + 1),
         );
-        if (!existing) return { mode: '644', exists: false };
+        if (!existing) return { mode: input.privateFile ? '600' : '644', exists: false };
         const identity = options.managedProviderIdentity;
         if (!identity || identity.identifier !== identifier)
           throw new DomainError('provenance_mismatch');
@@ -189,7 +191,10 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         }
         if (!bits || !/^[0-7]{1,3}$/.test(bits))
           throw new PterodactylError('invalid_response', 'client', 'rejected');
-        return { mode: Number.parseInt(bits, 8).toString(8), exists: true };
+        return {
+          mode: input.privateFile ? '600' : Number.parseInt(bits, 8).toString(8),
+          exists: true,
+        };
       }),
     );
   }

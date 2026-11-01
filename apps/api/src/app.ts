@@ -43,6 +43,8 @@ import { registerMinecraftWorldCatalogRoutes } from './minecraft-world-catalog.j
 import { registerPlatformRoutes } from './platform.js';
 import { registerProfilePhotoRoutes } from './profile-photo.js';
 import { PROVIDER_EVENTS_PATH, receiveProviderEvent } from './provider-events.js';
+import { registerSatisfactoryRoutes } from './satisfactory.js';
+import { registerSatisfactoryModRoutes } from './satisfactory-mods.js';
 import { registerScheduleRoutes } from './schedules.js';
 import { registerServerRoutes } from './servers.js';
 import { receiveSftpEvent, SFTP_EVENTS_PATH } from './sftp-events.js';
@@ -572,6 +574,7 @@ export function createApp(options: Options) {
       }),
   });
   registerServerRoutes(app, {
+    codec: options.codec,
     provisioningCache: options.provisioningCache,
     logger: options.logger,
     db,
@@ -621,6 +624,8 @@ export function createApp(options: Options) {
     acquireUploadSlot,
     http: options.minecraftContentHttp,
   });
+  registerSatisfactoryRoutes(app, { db, principal });
+  registerSatisfactoryModRoutes(app, { db, principal, env });
   registerMinecraftRoutes(app, {
     db,
     env,

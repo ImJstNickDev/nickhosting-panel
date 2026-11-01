@@ -72,6 +72,7 @@ interface UdpSession {
   queuedBytes: number;
 }
 interface Listener {
+  tlsIdentity?: Promise<import('@nickhosting/game-sdk').GatewayTlsIdentity>;
   route: GatewayRoute;
   backendReady: boolean;
   statusOnly?: boolean;
@@ -217,6 +218,19 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       return undefined;
     }
   };
+  const observationContext = (route: GatewayRoute, signal: AbortSignal) => ({
+    route,
+    signal,
+    persistState: options.control.reportProtocolState
+      ? async (state: import('@nickhosting/game-sdk').GatewaySatisfactoryState) => {
+          await options.control.reportProtocolState?.({
+            routeId: route.id,
+            routeRevision: route.revision,
+            state,
+          });
+        }
+      : undefined,
+  });
   const dropSession = (listener: Listener, key: string) => {
     const session = listener.sessions.get(key);
     if (!session) return;
@@ -228,6 +242,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     }
   };
   const clearSessions = (listener: Listener) => {
+    listener.tlsIdentity = undefined;
     for (const client of listener.clients) client.destroy();
     for (const key of listener.sessions.keys()) dropSession(listener, key);
   };
@@ -246,10 +261,10 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       listener.tcp.close(() => resolve());
     });
   };
-  const response = (route: GatewayRoute, mode: GatewayResponseMode) => {
+  const response = (route: GatewayRoute, mode: GatewayResponseMode, input?: Uint8Array) => {
     try {
       const bytes = protocol(route)?.response(
-        { route, signal: AbortSignal.timeout(policy.classificationTimeoutMs) },
+        { route, input, signal: AbortSignal.timeout(policy.classificationTimeoutMs) },
         mode,
       );
       return bytes && bytes.byteLength <= policy.maxProtocolResponseBytes ? bytes : undefined;
@@ -373,12 +388,13 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         signal: AbortSignal.timeout(policy.classificationTimeoutMs),
       });
       if (intent.kind === 'need-more') return { pending: true };
-      if (intent.kind === 'status') return { bytes: response(route, responseMode(listener)) };
+      if (intent.kind === 'status')
+        return { bytes: response(route, responseMode(listener), input) };
       if (intent.kind !== 'join') return {};
       const mode =
         route.mode === 'sleeping' || route.mode === 'blocked' ? await wake(route) : route.mode;
       return active(listener) && listener.route === route
-        ? { bytes: response(route, responseMode(listener, mode)) }
+        ? { bytes: response(route, responseMode(listener, mode), input) }
         : {};
     } catch {
       return {};
@@ -399,6 +415,45 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     });
     socket.setNoDelay(true);
     socket.setTimeout(policy.tcpIdleTimeoutMs, () => socket.destroy());
+    const managedHandler = protocol(listener.route);
+    if (managedHandler?.acceptTcp && (managedHandler.handlesTcp?.(listener.route) ?? true)) {
+      // Managed TLS streams remain subject to topology revocation.
+      listener.forwardingClients.add(socket);
+      const controller = new AbortController();
+      socket.once('close', () => controller.abort());
+      const route = listener.route;
+      const valid = () => active(listener) && listener.route.generation === route.generation;
+      void managedHandler
+        .acceptTcp(socket, {
+          route,
+          signal: controller.signal,
+          mode: () => (valid() ? responseMode(listener) : 'blocked'),
+          canForward: () =>
+            valid() &&
+            listener.backendReady &&
+            listener.route.mode === 'online' &&
+            !quiescence.has(route.serverId),
+          requestWake: () => (valid() ? wake(listener.route) : Promise.resolve('blocked')),
+          tlsIdentity: async () => {
+            if (!valid() || !options.control.fetchTlsIdentity)
+              throw new DomainError('integration_unavailable');
+            listener.tlsIdentity ??= options.control
+              .fetchTlsIdentity({
+                routeId: listener.route.id,
+                routeRevision: listener.route.revision,
+              })
+              .catch((error) => {
+                listener.tlsIdentity = undefined;
+                throw error;
+              });
+            const identity = await listener.tlsIdentity;
+            if (!valid()) throw new DomainError('integration_unavailable');
+            return identity;
+          },
+        })
+        .catch(() => socket.destroy());
+      return;
+    }
     if (
       listener.backendReady &&
       listener.route.mode === 'online' &&
@@ -1508,8 +1563,11 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
                 if (providerOnline) {
                   probeStage = 'idle';
                   const sample = handler.observe
-                    ? await handler.observe({ route, signal })
-                    : { ...(await handler.probeReadiness({ route, signal })), idle: false };
+                    ? await handler.observe(observationContext(route, signal))
+                    : {
+                        ...(await handler.probeReadiness(observationContext(route, signal))),
+                        idle: false,
+                      };
                   return {
                     ready: true,
                     coherent: true,
@@ -1531,8 +1589,14 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
                 if (sample) return { ...sample, coherent: true };
                 probeStage = 'protocol';
                 if (handler.observe)
-                  return { ...(await handler.observe({ route, signal })), coherent: true };
-                return { ...(await handler.probeReadiness({ route, signal })), coherent: false };
+                  return {
+                    ...(await handler.observe(observationContext(route, signal))),
+                    coherent: true,
+                  };
+                return {
+                  ...(await handler.probeReadiness(observationContext(route, signal))),
+                  coherent: false,
+                };
               },
             );
             readinessConfirmed = validated.ready === true;

@@ -69,6 +69,7 @@ import {
 import { cachedProviderStartLimits } from './provider-change-feed.js';
 import { supportsProviderFileOperations } from './provider-file-operations.js';
 import { assertGatewaySleepFence, authorizeServer } from './registry.js';
+import { createSatisfactoryModuleRuntime } from './satisfactory-module.js';
 import { authorizeScheduledEffect } from './schedules.js';
 import { createScopedProviderAdapter } from './scoped-provider-adapter.js';
 import { assertIdleSleepAllowed } from './sleep-policy.js';
@@ -672,7 +673,10 @@ export async function createManagementRuntime(options: ManagementOptions) {
   });
   const gameRuntime = createGameRuntimeDispatcher(
     trustedGameModules,
-    new Map([[minecraft.id, minecraft]]),
+    new Map<string, import('./game-modules.js').GameRuntimeHooks>([
+      [minecraft.id, minecraft],
+      ['satisfactory', createSatisfactoryModuleRuntime(options.codec, env)],
+    ]),
   );
   // Kept for existing M4 callers; common hooks below dispatch through game identity.
   const minecraftOptions = minecraft.minecraftOptions;

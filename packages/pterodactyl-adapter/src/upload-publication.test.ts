@@ -346,6 +346,20 @@ describe('streamed upload publication', () => {
     expect(f.publications).toEqual([]);
     expect(f.fetcher).toHaveBeenCalledTimes(4);
   });
+  it('restricts private uploads before any secret bytes are sent', async () => {
+    const f = fixture();
+    await f.adapter.uploadFile('server', 'config/private.key', {
+      privateFile: true,
+      body: body('secret'),
+      contentLength: 6,
+      maxBytes: 6,
+    });
+    expect(f.chmods).toEqual([{ file: f.publications[0]?.from, mode: '600' }]);
+    const calls = f.fetcher.mock.calls.map(([url]) => new URL(String(url)).pathname);
+    expect(calls.indexOf('/api/client/servers/server/files/chmod')).toBeLessThan(
+      calls.indexOf('/upload/file'),
+    );
+  });
   it.each(['600', '755'])(
     'preserves an existing destination mode %s before publishing',
     async (mode) => {
