@@ -5655,6 +5655,35 @@ describe('Satisfactory background preview lifecycle', () => {
     expect(f.adapter.getResources).not.toHaveBeenCalled();
     expect(f.adapter.power).not.toHaveBeenCalled();
   });
+  it('reuses this delivery identity and keeps read authorization revocable after physical proof', async () => {
+    const f = await fixture('satisfactory-content', {
+      satisfactoryContent: { kind: 'mods', mode: 'preview' },
+    });
+    let proof = false;
+    f.options.authorizeEffect = vi.fn(async () => {});
+    f.options.confirmAlreadyStopped = vi.fn(async (_id, _db, options) => {
+      expect(await options?.providerServer).toBeDefined();
+      proof = true;
+      return true;
+    });
+    const intent = vi.fn(async () => {
+      expect(proof).toBe(true);
+    });
+    f.options.authorizeIntent = intent;
+    f.options.processGameContent = vi.fn(async (context) => {
+      expect(context.previewSourceVerified).toBe(true);
+      const effects = vi.mocked(f.options.authorizeEffect).mock.calls.length;
+      await context.authorize();
+      await context.authorize();
+      expect(f.options.authorizeEffect).toHaveBeenCalledTimes(effects);
+      intent.mockRejectedValueOnce(new Error('revoked'));
+      await expect(context.authorize()).rejects.toThrow('revoked');
+      return true;
+    });
+    expect(await f.run()).toBe('succeeded');
+    expect(intent).toHaveBeenCalledTimes(3);
+    expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
+  });
   it('rejects preview when the physical stopped proof is unavailable', async () => {
     const f = await fixture('satisfactory-content', {
       satisfactoryContent: { kind: 'mods', mode: 'preview' },

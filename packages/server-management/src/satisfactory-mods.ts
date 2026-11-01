@@ -58,7 +58,7 @@ export async function processSatisfactoryMods(
   const identifier = context.server.pterodactyl_identifier;
   if (!identifier) throw new DomainError('integration_unavailable');
   await context.authorize();
-  await context.assertStopped();
+  if (command.mode !== 'preview' || !context.previewSourceVerified) await context.assertStopped();
   const managerState = command.mode
     ? await ensureSatisfactoryModState(context.db, context.server.id)
     : null;
@@ -273,6 +273,7 @@ export async function processSatisfactoryMods(
     );
   }
   let receipt: z.infer<typeof receiptSchema>;
+  let previewInventory: Awaited<ReturnType<typeof inspectSatisfactoryModInventory>> | undefined;
   try {
     receipt = receiptSchema.parse(JSON.parse(await readFile(join(stage, 'receipt.json'), 'utf8')));
     if (JSON.stringify(receipt.selection) !== JSON.stringify(command.selection))
@@ -284,17 +285,23 @@ export async function processSatisfactoryMods(
     await rm(stage, { recursive: true, force: true });
     await mkdir(stage, { recursive: true, mode: 0o700 });
     let versionPath: (typeof satisfactoryVersionPaths)[number] | undefined;
-    let versionFile: Buffer | undefined;
     const entries = await context.adapter.listFiles(identifier, 'Engine/Binaries/Linux');
     for (const candidate of satisfactoryVersionPaths) {
       const entry = entries.find((item) => item.name === candidate.split('/').at(-1));
       if (entry?.is_file && !entry.is_symlink) {
         versionPath = candidate;
-        versionFile = Buffer.from(await context.adapter.readFile(identifier, candidate, 65536));
         break;
       }
     }
-    if (!versionPath || !versionFile) throw new DomainError('configuration_invalid');
+    if (!versionPath) throw new DomainError('configuration_invalid');
+    const metadata = await Promise.allSettled([
+      context.adapter.readFile(identifier, versionPath, 65536),
+      context.adapter.readFile(identifier, 'FactoryServer.sh', 1048576),
+    ]);
+    if (metadata[0].status === 'rejected') throw metadata[0].reason;
+    if (metadata[1].status === 'rejected') throw metadata[1].reason;
+    const versionFile = Buffer.from(metadata[0].value);
+    const launcherFile = Buffer.from(metadata[1].value);
     const { authorizeQueuedEffect } = await import('./runtime.js');
     const actor = await authorizeQueuedEffect(
       context.db,
@@ -338,39 +345,78 @@ export async function processSatisfactoryMods(
       .limit(2)
       .execute();
     const preparationStarted = performance.now();
-    const prepared = await prepareSatisfactoryMods({
-      sandboxExecutable: env.NH_CONTENT_SANDBOX_PATH,
-      executable: env.NH_FICSIT_CLI_PATH ?? '/usr/local/bin/ficsit',
-      executableSha256:
-        env.NH_FICSIT_CLI_SHA256 ??
-        (process.arch === 'arm64'
-          ? 'a591eb87be517d9d03798184c210d7166141be19e37b9d4e5fe68c84f264c6bf'
-          : '2af0f8815af93b097c7a97968569575b21cf451b7c345fbb62fae29096ee4a31'),
-      stagingRoot: root,
-      outputDirectory: stage,
-      downloadCache: {
-        sourceDirectories: cacheSources.flatMap((source) =>
-          source.job_id ? [join(root, 'content-staging', z.uuid().parse(source.job_id))] : [],
-        ),
-      },
-      selection: command.selection,
-      vanilla: command.vanilla,
-      requiredTargets: profile
-        ? z
-            .array(z.enum(['LinuxServer', 'Windows', 'WindowsServer']))
-            .parse(profile.required_targets)
-        : ['LinuxServer'],
-      // Resolve published metadata afresh: external lockfiles are never download authority.
-      versionPath,
-      versionFile,
-      launcherFile: Buffer.from(
-        await context.adapter.readFile(identifier, 'FactoryServer.sh', 1048576),
-      ),
-    });
+    let nativeDurationMs = 0;
+    let inventoryDurationMs = 0;
+    const abort = new AbortController();
+    const settle = <T>(work: Promise<T>): Promise<T> =>
+      work.catch((error: unknown) => {
+        if (!abort.signal.aborted) abort.abort(error);
+        throw error;
+      });
+    const inventoryWork =
+      command.mode === 'preview'
+        ? settle(
+            inspectSatisfactoryModInventory(
+              context.db,
+              context.adapter,
+              context.server,
+              context.authorize,
+              { signal: abort.signal, reuseListings: true },
+            ).finally(() => {
+              inventoryDurationMs = Math.round(performance.now() - preparationStarted);
+            }),
+          )
+        : Promise.resolve(undefined);
+    const prepareWork = settle(
+      (async () =>
+        prepareSatisfactoryMods({
+          sandboxExecutable: env.NH_CONTENT_SANDBOX_PATH,
+          executable: env.NH_FICSIT_CLI_PATH ?? '/usr/local/bin/ficsit',
+          executableSha256:
+            env.NH_FICSIT_CLI_SHA256 ??
+            (process.arch === 'arm64'
+              ? 'a591eb87be517d9d03798184c210d7166141be19e37b9d4e5fe68c84f264c6bf'
+              : '2af0f8815af93b097c7a97968569575b21cf451b7c345fbb62fae29096ee4a31'),
+          stagingRoot: root,
+          outputDirectory: stage,
+          signal: abort.signal,
+          downloadCache: {
+            sourceDirectories: cacheSources.flatMap((source) =>
+              source.job_id ? [join(root, 'content-staging', z.uuid().parse(source.job_id))] : [],
+            ),
+          },
+          selection: command.selection,
+          vanilla: command.vanilla,
+          requiredTargets: profile
+            ? z
+                .array(z.enum(['LinuxServer', 'Windows', 'WindowsServer']))
+                .parse(profile.required_targets)
+            : ['LinuxServer'],
+          // Resolve published metadata afresh: external lockfiles are never download authority.
+          versionPath,
+          versionFile,
+          launcherFile,
+        }))().finally(() => {
+        nativeDurationMs = Math.round(performance.now() - preparationStarted);
+      }),
+    );
+    // Both branches share this operation's connection lease. Cancellation must
+    // settle every read and child process before the delivery releases its lock.
+    const results = await Promise.allSettled([prepareWork, inventoryWork]);
+    if (abort.signal.aborted) throw abort.signal.reason;
+    const preparedResult = results[0];
+    const inventoryResult = results[1];
+    if (preparedResult.status !== 'fulfilled') throw preparedResult.reason;
+    if (inventoryResult.status !== 'fulfilled') throw inventoryResult.reason;
+    const prepared = preparedResult.value;
+    previewInventory = inventoryResult.value;
     try {
       context.logger?.log('info', 'satisfactory.mods_preparation', {
         jobId: context.operation().job_id,
-        durationMs: Math.round(performance.now() - preparationStarted),
+        durationMs: nativeDurationMs,
+        nativeTimings: prepared.timings,
+        inventoryDurationMs,
+        overlappedDurationMs: Math.round(performance.now() - preparationStarted),
         cacheSources: cacheSources.length,
         files: prepared.files.length,
       });
@@ -398,12 +444,15 @@ export async function processSatisfactoryMods(
   }
   if (command.mode === 'preview') {
     await previewPhase('inventory');
-    const inventory = await inspectSatisfactoryModInventory(
-      context.db,
-      context.adapter,
-      context.server,
-      context.authorize,
-    );
+    const inventory =
+      previewInventory ??
+      (await inspectSatisfactoryModInventory(
+        context.db,
+        context.adapter,
+        context.server,
+        context.authorize,
+        { reuseListings: true },
+      ));
     if (inventory.diverged || inventory.gameVersion !== receipt.gameVersion)
       throw new DomainError('conflict');
     const changes = diffSatisfactoryMods({

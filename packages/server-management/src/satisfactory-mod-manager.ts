@@ -65,10 +65,20 @@ export async function inspectSatisfactoryModInventory(
   adapter: PterodactylAdapter,
   server: Pick<Selectable<Database['managed_servers']>, 'id' | 'pterodactyl_identifier'>,
   authorize: () => Promise<void> = async () => {},
+  options: { signal?: AbortSignal; reuseListings?: true } = {},
 ) {
   const identifier = server.pterodactyl_identifier;
   if (!identifier) throw new DomainError('integration_unavailable');
-  await authorize();
+  const deadline = AbortSignal.any([
+    AbortSignal.timeout(120000),
+    ...(options.signal ? [options.signal] : []),
+  ]);
+  const authorizeRead = async () => {
+    deadline.throwIfAborted();
+    await authorize();
+    deadline.throwIfAborted();
+  };
+  await authorizeRead();
   const state = await db
     .selectFrom('satisfactory_mod_states')
     .selectAll()
@@ -77,13 +87,27 @@ export async function inspectSatisfactoryModInventory(
   const selection = satisfactoryModSelectionSchema.parse(state?.selection ?? []);
   const lock = satisfactoryModLockSchema.parse(state?.lock ?? emptySatisfactoryLock);
   let metadataBytes = 0;
+  // Preview may share one bounded listing snapshot between metadata and hashing.
+  // Apply/reconciliation deliberately re-list and always fingerprint actual file bytes.
+  const listings = new Map<string, Awaited<ReturnType<PterodactylAdapter['listFiles']>>>();
+  let listedEntries = 0;
   const listFiles = async (path: string) => {
-    await authorize();
-    return adapter.listFiles(identifier, path);
+    await authorizeRead();
+    const cached = listings.get(path);
+    if (cached) return cached;
+    const entries = await adapter.listFiles(identifier, path);
+    deadline.throwIfAborted();
+    if (options.reuseListings) {
+      listedEntries += entries.length;
+      if (listedEntries > 40000) throw new DomainError('conflict');
+      listings.set(path, entries);
+    }
+    return entries;
   };
   const readFile = async (path: string, maxBytes: number) => {
-    await authorize();
+    await authorizeRead();
     const bytes = Buffer.from(await adapter.readFile(identifier, path, maxBytes));
+    deadline.throwIfAborted();
     metadataBytes += bytes.length;
     if (metadataBytes > 67108864) throw new DomainError('conflict');
     return bytes;
@@ -92,10 +116,8 @@ export async function inspectSatisfactoryModInventory(
   const files: SatisfactoryModFile[] = [];
   let total = 0,
     entriesSeen = 0;
-  const deadline = AbortSignal.timeout(120000);
   const walk = async (path: string, depth = 0): Promise<void> => {
     if (depth > 32) throw new DomainError('conflict');
-    await authorize();
     for (const entry of await listFiles(path)) {
       deadline.throwIfAborted();
       if (++entriesSeen > 40000) throw new DomainError('conflict');
@@ -117,14 +139,16 @@ export async function inspectSatisfactoryModInventory(
       const response = await adapter.downloadFile(identifier, name, {
         maxBytes: Math.max(1, entry.size),
         signal: deadline,
-        authorize,
+        authorize: authorizeRead,
       });
       const digest = createHash('sha256');
       let size = 0;
       const reader = response.body.getReader();
       try {
         for (;;) {
+          deadline.throwIfAborted();
           const chunk = await reader.read();
+          deadline.throwIfAborted();
           if (chunk.done) break;
           size += chunk.value.byteLength;
           if (size > entry.size) throw new DomainError('conflict');
@@ -173,8 +197,8 @@ export async function readSatisfactoryGameBuild(adapter: PterodactylAdapter, ide
   const readFile = async (path: string, max: number) =>
     Buffer.from(await adapter.readFile(identifier, path, max));
   let gameVersion: number | null = null;
+  const entries = await listFiles('Engine/Binaries/Linux');
   for (const path of satisfactoryVersionPaths) {
-    const entries = await listFiles('Engine/Binaries/Linux');
     const entry = entries.find((item) => item.name === path.split('/').at(-1));
     if (!entry) continue;
     if (entry.is_symlink || !entry.is_file) throw new DomainError('conflict');

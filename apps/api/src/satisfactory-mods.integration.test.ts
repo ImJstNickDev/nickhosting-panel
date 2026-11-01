@@ -3,7 +3,7 @@ import { DomainError } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { ManagementRuntime } from '@nickhosting/server-management';
 import { Hono } from 'hono';
-import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { satisfactoryManifest } from '../../../games/satisfactory/src/manifest.js';
 import { authorizeServer } from '../../../packages/server-management/src/registry.js';
 import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
@@ -36,8 +36,10 @@ beforeAll(async () => {
 afterAll(async () => {
   await database?.destroy();
 });
+afterEach(() => vi.unstubAllGlobals());
 beforeEach(async () => {
   vi.clearAllMocks();
+  readFile.mockImplementation(async () => version);
   if (defaultListing) listFiles.mockImplementation(defaultListing);
   f = await managementFixture(database.db, { interactive: true });
   actor = f.context;
@@ -92,6 +94,59 @@ const request = (path: string, body?: unknown, method = 'POST') =>
       ? {}
       : { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) },
   );
+it('loads public versions and the actual build concurrently and filters compatibility with that build', async () => {
+  const release = Promise.withResolvers<void>();
+  readFile.mockImplementation(async () => {
+    await release.promise;
+    return version;
+  });
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => {
+      await release.promise;
+      return Response.json({
+        data: {
+          mod: {
+            versions: ['>=513885', '>=999999'].map((game_version, index) => ({
+              version: `${index + 1}.0.0`,
+              game_version,
+              required_on_remote: false,
+              changelog: '',
+              dependencies: [],
+              targets: [{ targetName: 'LinuxServer' }],
+            })),
+          },
+        },
+      });
+    }),
+  );
+  const pending = request('/versions/Example');
+  try {
+    await vi.waitFor(() => {
+      expect(readFile).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+  } finally {
+    release.resolve();
+  }
+  const response = await pending;
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject([
+    { version: '2.0.0', compatibility: 'incompatible' },
+    { version: '1.0.0', compatibility: 'compatible' },
+  ]);
+  expect(listFiles).toHaveBeenCalledTimes(1);
+});
+it('preserves authorization failures from parallel version build reads', async () => {
+  readFile.mockRejectedValueOnce(new DomainError('forbidden'));
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => Response.json({ data: { mod: null } })),
+  );
+  const response = await request('/versions/Example');
+  expect(response.status).toBe(403);
+  expect(await response.json()).toEqual({ code: 'forbidden' });
+});
 const profile = (revision = 0) => ({
   name: 'Shared',
   selection: [{ reference: 'Example', version: '^1.0.0', enabled: false }],

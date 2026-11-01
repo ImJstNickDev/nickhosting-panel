@@ -753,7 +753,8 @@ Pterodactyl/Blueprint change was needed.
 
 ### Incremental mod preparation and review latency
 
-Selection changes now schedule background preparation after a 150 ms debounce.
+Selection changes start background preparation immediately after the checkbox
+version request completes. Version requests are never triggered by hover or focus.
 The draft remains editable while one preview is running; only the latest pending
 selection starts next. Results are keyed by the full selection, profile, vanilla
 flag and state revision. Stale results cannot enable Apply for a different draft.
@@ -786,7 +787,7 @@ Measured on development, with one selected PEP_Mod and SML dependency (76 files,
 | Measurement | Before | After |
 | --- | --- | --- |
 | Complete preview preparation | 34.5–36.8 s | 12.6 s cold; 5.2 s with verified cache |
-| Native preparation within the real worker | Not separately timed | 7.2 s cold; 1.8 s warm |
+| Preparation block within the real worker (including launcher read) | Not separately timed | 7.2 s cold; 1.8 s warm |
 | Opening Review with a prepared result | Started another preparation | 20–32 ms, no additional preview request |
 
 The under-300 ms result measures opening a prepared Review, not the complete cold
@@ -811,3 +812,84 @@ game-server test asset was needed. Issue #18 remains unchanged.
 Rollback after pending preview jobs settle by reverting this application change;
 retain normal operation/plan records and stages for existing recovery. Archive
 caches are optional and are removed with their normal stage retention lifecycle.
+
+
+### Further preview latency optimization
+
+The checkbox remains the trigger for fetching compatible versions. The versions
+endpoint overlaps SMR metadata and the current server-build read, then computes
+compatibility against that live build. No authorization or build cache is added.
+The UI starts the next committed draft without a debounce or intermediate
+candidate render; one durable preview remains active at a time. Pending plans are
+polled at 100 ms for the first ten seconds, then 250 ms during longer downloads;
+final snapshot/activity refreshes run concurrently.
+
+Core proves provider identity, host ownership and the physical stopped process
+once for the locked preview delivery. The integration reuses that ephemeral proof
+and keeps revocable local authorization on inventory reads. Apply and rollback
+retain independent physical/process/authorization and full byte checks. Preview
+alone shares its bounded directory listings between inventory metadata and the
+full file fingerprint; metadata-only fingerprints are never accepted.
+
+Native preparation and full inventory now overlap. Any branch failure aborts
+and drains both branches before the connection/server lock is released, including
+errors thrown while constructing native options. Worker diagnostics separately
+report native duration, inventory duration and their overlapping interval. Native
+timings separate setup, cache seed, child execution, publication and cleanup;
+these diagnostics remain internal and contain no file contents or credentials.
+
+
+Artifact publication hashes up to four files concurrently and overlaps verified
+archive publication. Copies remain private inodes, use one-pass streaming
+copy/SHA256 verification, and keep the existing 1 MiB buffers and storage limits.
+The sandbox checks the aggregate seeded budget before starting the child and
+again during/after execution. Vanilla does not copy unused archive caches.
+
+The storage choice was measured in the actual development worker and its
+configured content filesystem. Seven-run alternating tests found archive-only
+warm preparation at 1.69–1.90 s versus 1.99–2.12 s when also copying verified
+extracted files. Larger 4 MiB buffers did not improve this workload. Neither
+additional extracted-file caching nor larger buffers was retained. The original
+SHA256 checks remain; timestamps never substitute for content verification.
+
+
+Final actual browser runs, same PEP_Mod/SML selection and 76 files/61.4 MB,
+measured from the DOM checkbox click to the matching ready plan:
+
+| Stage | Final run 1 | Final run 2 |
+| --- | ---: | ---: |
+| Version request | 367 ms | 323 ms |
+| Response to preview submission | 76 ms | 78 ms |
+| Preview POST | 220 ms | 309 ms |
+| Queue after POST response | 12 ms | 7 ms |
+| Worker prelude, metadata, admission | 1,019 ms | 724 ms |
+| Native preparation, overlapping inventory | 1,774 ms | 1,801 ms |
+| Inventory (already within the preceding interval) | 666 ms | 645 ms |
+| Worker finish | 49 ms | 111 ms |
+| Ready-plan observation | 103 ms | 135 ms |
+| Complete checkbox-to-ready, including dispatch | **3,624 ms** | **3,494 ms** |
+| Prepared Review paint | **32 ms** | **23 ms** |
+
+The earlier reference was approximately 5.2 s; final runs reduce this by about
+30–33%. These are observed development timings, not a guaranteed latency SLA.
+The complete preparation has not reached 300 ms: fresh remote metadata, native
+resolution/extraction, durable jobs and full integrity checks remain necessary.
+Prepared Review remains below that target and does not submit another preview.
+Both runs had zero browser errors, one preview POST, and no Apply/power/file writes.
+The API alone required one authorized dev restart after its source watcher stalled
+in graceful shutdown; no migration, extension or Pterodactyl/Wings change occurred.
+Synthetic storage benchmarks created and cleaned only their own temporary trees.
+
+
+Final validation: `pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+--config vitest.integration.config.ts` for the lifecycle, Satisfactory API,
+inventory and worker suites passed 412/412 cases. The four mod domain/cache/sandbox
+suites passed 31/31, and all 12 Satisfactory browser journeys passed, including
+hover/focus making no version request, rapid edits, exact-key recovery and cached
+plan invalidation. `pnpm typecheck`, `pnpm lint`, `pnpm i18n:check`, `pnpm build`
+and `pnpm build:runtime` passed; existing lint warnings and bundle-size notices
+remain. Independent final review found no open issues. All four dev app services
+were healthy after verification. No game-server test assets were created or
+mutated. Issue #18 and the remaining M6 playable-client acceptance are unchanged.
+Rollback: revert this commit after pending preview deliveries settle; existing
+plans, archive caches and recovery formats remain compatible, with no migration.

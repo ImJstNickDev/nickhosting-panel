@@ -73,6 +73,9 @@ export interface GameLifecycleContext {
   operation: () => Operation;
   authorize: () => Promise<void>;
   assertStopped: () => Promise<void>;
+  /** Ephemeral Core proof for read-only Satisfactory preview processing in this
+   * locked delivery. Never substitutes for Apply/rollback effect authorization. */
+  previewSourceVerified?: true;
   /** Trusted host guarantee for property/player edits: effect checks the physical
    * process immediately before dispatch, so integrations need not repeat it. */
   effectVerifiesStopped?: true;
@@ -1015,6 +1018,12 @@ export async function processServerOperation(
       minecraftContentSelectsWorld(operation.plan.minecraftContent);
     const offlineMetadataContent = metadataContent && !offlineWorldSelection;
     const worldFileContent = onlineWorldContent || metadataContent;
+    const satisfactoryPreview =
+      operation.action === 'satisfactory-content' &&
+      (operation.plan.satisfactoryContent as { kind?: string; mode?: string } | undefined)?.kind ===
+        'mods' &&
+      (operation.plan.satisfactoryContent as { mode?: string }).mode === 'preview';
+    let previewSourceVerified = false;
     let providerFileEffects = false;
     let worldSelectionReadAuthorized = false;
     // Reuse this delivery's identity for game file operations. Metadata edits
@@ -1594,13 +1603,14 @@ export async function processServerOperation(
         backup,
         authorize: async () => {
           await trace('auth.read', () =>
-            (worldFileContent
+            (worldFileContent || (satisfactoryPreview && previewSourceVerified)
               ? (options.authorizeIntent ?? options.authorizeEffect)
               : options.authorizeEffect)(jobId, server.id, db, { timing: timing?.child('auth') }),
           );
           if (offlineWorldSelection) worldSelectionReadAuthorized = true;
         },
         ...(offlineMetadataContent ? { effectVerifiesStopped: true as const } : {}),
+        ...(previewSourceVerified ? { previewSourceVerified: true as const } : {}),
         assertStopped: async () => {
           await requireQuiescentReservation();
           if (
@@ -2864,16 +2874,19 @@ export async function processServerOperation(
       }
       // The integration checks the selected world at dispatch. An unused folder
       // needs neither process telemetry nor an artificial offline settling period.
-      const satisfactoryPreview =
-        operation.action === 'satisfactory-content' &&
-        (operation.plan.satisfactoryContent as { kind?: string; mode?: string } | undefined)
-          ?.kind === 'mods' &&
-        (operation.plan.satisfactoryContent as { mode?: string }).mode === 'preview';
       if (satisfactoryPreview) {
         // Preview writes only its private staging tree. A fresh physical stopped
         // proof is sufficient; do not start another resource-cache settling timer.
         // Apply/rollback retain the normal mutation lifecycle and revalidate files.
-        await gameContext().assertStopped();
+        await requireQuiescentReservation();
+        if (
+          !options.confirmAlreadyStopped ||
+          !(await options.confirmAlreadyStopped(server.id, db, {
+            providerServer: Promise.resolve(remote),
+          }))
+        )
+          throw new DomainError('operation_uncertain');
+        previewSourceVerified = true;
       } else if (!onlineWorldContent && !metadataContent) {
         await requireQuiescentReservation();
         if (!(await offline())) return wait('offline_confirmation');

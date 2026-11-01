@@ -602,6 +602,7 @@ it('stages updates and disabled choices, keeps failed requests retryable with th
   await page.goto(`${origin}satisfactory-fixture`);
   await page.getByRole('button', { name: 'Check updates', exact: true }).click();
   await page.getByRole('button', { name: 'Select all updates', exact: true }).click();
+  await check.poll(() => previews.length).toBe(1);
   await page.getByRole('button', { name: 'Disable Example mod', exact: true }).click();
   const controlBottoms = await page
     .locator('.mods-search-toolbar')
@@ -622,9 +623,12 @@ it('stages updates and disabled choices, keeps failed requests retryable with th
   await page.screenshot({ path: `${shots}/satisfactory-mods-uncertain-en.png`, fullPage: true });
   await page.getByRole('button', { name: 'Try again', exact: true }).click();
   await check(page.getByRole('button', { name: 'Apply changes', exact: true })).toBeEnabled();
-  expect(previews).toHaveLength(2);
+  expect(previews).toHaveLength(3);
   expect(previews[0]).toEqual(previews[1]);
   expect(previews[0]).toMatchObject({
+    selection: [{ reference: 'Example', version: '1.2.3', enabled: true }],
+  });
+  expect(previews[2]).toMatchObject({
     selection: [{ reference: 'Example', version: '1.2.3', enabled: false }],
   });
   await check(page.getByText('No mod file changes are required.', { exact: true })).toHaveCount(0);
@@ -900,7 +904,9 @@ it('loads imported minimum-version constraints and submits explicit version poli
 it('selects multiple mods with leading checkboxes and latest compatible minimum versions', async () => {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
-  const previews: unknown[] = [];
+  const previews: { selection: unknown[] }[] = [];
+  let finish = false;
+  let versionRequests = 0;
   await page.route('**/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path.endsWith('/catalog'))
@@ -913,7 +919,8 @@ it('selects multiple mods with leading checkboxes and latest compatible minimum 
           ],
         },
       });
-    if (path.includes('/versions/'))
+    if (path.includes('/versions/')) {
+      versionRequests++;
       return route.fulfill({
         json: [
           { ...exampleVersion, version: '3.0.0', compatibility: 'incompatible' },
@@ -921,19 +928,34 @@ it('selects multiple mods with leading checkboxes and latest compatible minimum 
           exampleVersion,
         ],
       });
+    }
     if (path.endsWith('/inventory')) return route.fulfill({ json: emptyInventory() });
     if (path.endsWith('/preview')) {
       previews.push(route.request().postDataJSON());
       return route.fulfill({ status: 202, json: { jobId: 'multi-job', planId: 'multi-plan' } });
     }
     if (path.includes('/plans/'))
-      return route.fulfill({ json: { id: 'multi-plan', status: 'pending', revision: 0 } });
+      return route.fulfill({
+        json: {
+          id: 'multi-plan',
+          status: finish ? 'ready' : 'pending',
+          revision: 0,
+          selection: previews.at(-1)?.selection,
+          changes: [],
+          lock: { version: 1, mods: {} },
+          filesBytes: 0,
+        },
+      });
     return route.fulfill({ json: emptySnapshot() });
   });
   await page.goto(`${origin}satisfactory-fixture`);
   await page.getByRole('button', { name: 'Discover', exact: true }).first().click();
   const first = page.getByRole('checkbox', { name: 'Select Example mod', exact: true });
   const second = page.getByRole('checkbox', { name: 'Select Second mod', exact: true });
+  await first.hover();
+  await first.focus();
+  await page.waitForTimeout(200);
+  expect(versionRequests).toBe(0);
   await first.click();
   await check(first).toBeChecked();
   await second.click();
@@ -966,16 +988,16 @@ it('selects multiple mods with leading checkboxes and latest compatible minimum 
     });
   }
   await page.getByRole('button', { name: 'Review changes', exact: true }).click();
-  await check.poll(() => previews.length).toBeGreaterThan(0);
+  expect(previews).toHaveLength(1);
+  finish = true;
+  await check.poll(() => previews.length).toBe(2);
   await check(page.locator('body')).not.toHaveAttribute('data-job', 'multi-job');
-  expect(previews).toMatchObject([
-    {
-      selection: [
-        { reference: 'Example', version: '>=2.0.0', enabled: true },
-        { reference: 'Second', version: '>=2.0.0', enabled: true },
-      ],
-    },
-  ]);
+  expect(previews.at(-1)).toMatchObject({
+    selection: [
+      { reference: 'Example', version: '>=2.0.0', enabled: true },
+      { reference: 'Second', version: '>=2.0.0', enabled: true },
+    ],
+  });
   await context.close();
 });
 

@@ -250,7 +250,7 @@ async function complete(ctx: GameLifecycleContext) {
     .where('id', '=', ctx.operation().job_id)
     .execute();
 }
-async function preview(version = '2.0.0', profileId?: string) {
+async function previewContext(version = '2.0.0', profileId?: string) {
   const planId = randomUUID();
   const revision = (
     await f.db
@@ -283,10 +283,193 @@ async function preview(version = '2.0.0', profileId?: string) {
     revision,
     planId,
   });
+  return { ctx, planId };
+}
+async function preview(version = '2.0.0', profileId?: string) {
+  const { ctx, planId } = await previewContext(version, profileId);
   await processSatisfactoryMods(ctx, env);
   await complete(ctx);
   return planId;
 }
+it.each([false, true])(
+  'uses an existing stopped proof only for preview (verified=%s)',
+  async (verified) => {
+    const { ctx } = await previewContext();
+    ctx.previewSourceVerified = verified ? true : undefined;
+    ctx.assertStopped = vi.fn(async () => {});
+    await processSatisfactoryMods(ctx, env);
+    expect(ctx.assertStopped).toHaveBeenCalledTimes(verified ? 0 : 1);
+  },
+);
+it.each(['apply', 'rollback'])('still requires a current stopped proof for %s', async (mode) => {
+  const planId = await preview();
+  const ctx = await context({ mode, revision: 0, planId });
+  ctx.previewSourceVerified = true;
+  ctx.assertStopped = vi.fn(async () => {
+    throw new Error('current stopped proof required');
+  });
+  await expect(processSatisfactoryMods(ctx, env)).rejects.toThrow('current stopped proof required');
+  expect(ctx.assertStopped).toHaveBeenCalledTimes(1);
+  expect(adapter.uploadFile).not.toHaveBeenCalled();
+});
+it('overlaps native preparation and the live byte inventory', async () => {
+  const { ctx } = await previewContext();
+  const release = Promise.withResolvers<void>();
+  const prepare = vi.mocked(prepareSatisfactoryMods).getMockImplementation()!;
+  const download = vi.mocked(adapter.downloadFile).getMockImplementation()!;
+  vi.mocked(prepareSatisfactoryMods).mockImplementation(async (options) => {
+    await release.promise;
+    return prepare(options);
+  });
+  vi.mocked(adapter.downloadFile).mockImplementation(async (...args) => {
+    await release.promise;
+    return download(...args);
+  });
+  const pending = processSatisfactoryMods(ctx, env);
+  try {
+    await vi.waitFor(() => {
+      expect(prepareSatisfactoryMods).toHaveBeenCalledTimes(1);
+      expect(adapter.downloadFile).toHaveBeenCalledTimes(1);
+    });
+  } finally {
+    release.resolve();
+  }
+  await expect(pending).resolves.toBe(true);
+});
+it.each(['native', 'inventory'])('aborts and drains the sibling when %s fails', async (failure) => {
+  const { ctx } = await previewContext();
+  const release = Promise.withResolvers<void>();
+  const inventoryEntered = Promise.withResolvers<void>();
+  const nativeEntered = Promise.withResolvers<void>();
+  const list = vi.mocked(adapter.listFiles).getMockImplementation()!;
+  let signal: AbortSignal | undefined;
+  vi.mocked(adapter.listFiles).mockImplementation(async (...args) => {
+    if (args[1] === '') {
+      inventoryEntered.resolve();
+      if (failure === 'inventory') {
+        await nativeEntered.promise;
+        throw new Error('inventory failure');
+      }
+      await release.promise;
+    }
+    return list(...args);
+  });
+  vi.mocked(prepareSatisfactoryMods).mockImplementation(async (options) => {
+    signal = options.signal;
+    nativeEntered.resolve();
+    if (failure === 'native') {
+      await inventoryEntered.promise;
+      throw new Error('native failure');
+    }
+    await release.promise;
+    options.signal?.throwIfAborted();
+    throw new Error('expected cancellation');
+  });
+  let settled = false;
+  const pending = processSatisfactoryMods(ctx, env).then(
+    () => {
+      settled = true;
+      return undefined;
+    },
+    (error: unknown) => {
+      settled = true;
+      return error;
+    },
+  );
+  try {
+    await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+    expect(settled).toBe(false);
+  } finally {
+    release.resolve();
+  }
+  expect(await pending).toMatchObject({ message: `${failure} failure` });
+  expect(adapter.uploadFile).not.toHaveBeenCalled();
+});
+it('drains inventory when native preparation throws synchronously', async () => {
+  vi.mocked(prepareSatisfactoryMods).mockImplementation(() => {
+    throw new Error('invalid native options');
+  });
+  const { ctx } = await previewContext('3.0.0');
+  const release = Promise.withResolvers<void>();
+  let calls = 0,
+    entered = false,
+    settled = false;
+  ctx.authorize = async () => {
+    if (++calls === 2) {
+      entered = true;
+      await release.promise;
+    }
+  };
+  const pending = processSatisfactoryMods(ctx, env).then(
+    () => {
+      settled = true;
+      return undefined;
+    },
+    (error: unknown) => {
+      settled = true;
+      return error;
+    },
+  );
+  try {
+    await vi.waitFor(() => expect(entered).toBe(true));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+    expect(prepareSatisfactoryMods).toHaveBeenCalledTimes(1);
+  } finally {
+    release.resolve();
+  }
+  expect(await pending).toMatchObject({ message: 'invalid native options' });
+});
+it('passes the previous successful same-server/build plan as an archive cache source', async () => {
+  const priorId = await preview();
+  const prior = await f.db
+    .selectFrom('satisfactory_mod_plans')
+    .selectAll()
+    .where('id', '=', priorId)
+    .executeTakeFirstOrThrow();
+  await preview('3.0.0');
+  expect(
+    vi.mocked(prepareSatisfactoryMods).mock.calls.at(-1)?.[0].downloadCache?.sourceDirectories,
+  ).toEqual([join(resolve(root), 'content-staging', prior.job_id!)]);
+});
+it.each(['server', 'build', 'plan', 'job'])(
+  'excludes a prior cache with a different or unsuccessful %s',
+  async (kind) => {
+    const priorId = await preview();
+    const prior = await f.db
+      .selectFrom('satisfactory_mod_plans')
+      .selectAll()
+      .where('id', '=', priorId)
+      .executeTakeFirstOrThrow();
+    if (kind === 'job') {
+      await f.db
+        .updateTable('operation_jobs')
+        .set({ state: 'failed' })
+        .where('id', '=', prior.job_id!)
+        .execute();
+    } else {
+      await f.db
+        .updateTable('satisfactory_mod_plans')
+        .set(
+          kind === 'server'
+            ? {
+                server_id: await (
+                  await managementFixture(database.db, { interactive: true })
+                ).server(),
+              }
+            : kind === 'build'
+              ? { game_version: 654321 }
+              : { status: 'failed' },
+        )
+        .where('id', '=', priorId)
+        .execute();
+    }
+    await preview('3.0.0');
+    expect(
+      vi.mocked(prepareSatisfactoryMods).mock.calls.at(-1)?.[0].downloadCache?.sourceDirectories,
+    ).toEqual([]);
+  },
+);
 it('previews without remote writes then applies frozen artifacts and restores original bytes on rollback', async () => {
   const planId = await preview();
   expect(adapter.uploadFile).not.toHaveBeenCalled();

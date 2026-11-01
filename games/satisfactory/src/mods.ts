@@ -90,7 +90,17 @@ export async function prepareSatisfactoryMods(options: {
   files: SatisfactoryModFile[];
   lock: SatisfactoryModLock;
   downloadCacheBytes?: number;
+  timings?: {
+    setupMs: number;
+    seedMs: number;
+    runMs: number;
+    publishMs: number;
+    cleanupMs: number;
+    totalMs: number;
+  };
 }> {
+  const started = performance.now();
+  const timings = { setupMs: 0, seedMs: 0, runMs: 0, publishMs: 0, cleanupMs: 0, totalMs: 0 };
   const selection = satisfactoryModSelectionSchema.parse(options.selection);
   if (options.downloadCache && !options.outputDirectory)
     throw new Error('satisfactory_mod_cache_output_required');
@@ -168,6 +178,15 @@ export async function prepareSatisfactoryMods(options: {
       }),
       { mode: 0o600 },
     );
+    timings.setupMs = Math.round(performance.now() - started);
+    const seedStarted = performance.now();
+    if (options.downloadCache && !options.vanilla)
+      await seedSatisfactoryDownloadCache({
+        stagingRoot: options.stagingRoot,
+        sourceDirectories: options.downloadCache.sourceDirectories,
+        destinationDirectory: join(root, 'cache/downloadCache'),
+        signal: options.signal,
+      });
     if (options.priorLock && !options.vanilla) {
       const priorLock = satisfactoryModLockSchema.parse(options.priorLock);
       // Even internal stored state must never seed non-public download locations.
@@ -189,13 +208,7 @@ export async function prepareSatisfactoryMods(options: {
         { mode: 0o600 },
       );
     }
-    if (options.downloadCache)
-      await seedSatisfactoryDownloadCache({
-        stagingRoot: options.stagingRoot,
-        sourceDirectories: options.downloadCache.sourceDirectories,
-        destinationDirectory: join(root, 'cache/downloadCache'),
-        signal: options.signal,
-      });
+    timings.seedMs = Math.round(performance.now() - seedStarted);
     const args = [
       '--local-dir',
       state,
@@ -243,6 +256,9 @@ export async function prepareSatisfactoryMods(options: {
             });
         }, 500);
         try {
+          // Include privately copied caches in the same working-tree budget
+          // before starting the native process, then monitor its extraction.
+          await scan();
           await promisify(execFile)(
             options.sandboxExecutable ?? '/usr/local/bin/nh-content-sandbox',
             [cwd, binary, ...argv],
@@ -268,9 +284,12 @@ export async function prepareSatisfactoryMods(options: {
           await scanning;
         }
       });
+    const runStarted = performance.now();
     await run(options.executable, args, root, options.signal);
+    timings.runMs = Math.round(performance.now() - runStarted);
+    const publishStarted = performance.now();
     // Upstream vanilla mode deliberately skips resolution and writes no lockfile.
-    if (options.vanilla) return { files: [], lock: { version: 1, mods: {} } };
+    if (options.vanilla) return { files: [], lock: { version: 1, mods: {} }, timings };
     const lockPath = join(game, 'FactoryGame/Mods/nick_hosting-lock.json');
     const lockStat = await lstat(lockPath);
     if (!lockStat.isFile() || lockStat.isSymbolicLink() || lockStat.size > 1048576)
@@ -288,9 +307,9 @@ export async function prepareSatisfactoryMods(options: {
       )
         throw new Error('satisfactory_mod_resolution_mismatch');
     }
-    const downloadCacheBytes =
+    const persistCache = () =>
       options.downloadCache && options.outputDirectory
-        ? await persistSatisfactoryDownloadCache({
+        ? persistSatisfactoryDownloadCache({
             stagingRoot: options.stagingRoot,
             sourceDirectory: join(root, 'cache/downloadCache'),
             destinationDirectory: join(options.outputDirectory, 'download-cache'),
@@ -298,7 +317,7 @@ export async function prepareSatisfactoryMods(options: {
             signal: options.signal,
           })
         : undefined;
-    const files: SatisfactoryModFile[] = [];
+    const entries: { path: string; source: string; size: number }[] = [];
     let total = 0;
     const collect = async (relative: string): Promise<void> => {
       for (const entry of await readdir(join(game, relative), { withFileTypes: true })) {
@@ -312,25 +331,56 @@ export async function prepareSatisfactoryMods(options: {
           const stat = await lstat(source);
           const size = stat.size;
           total += size;
-          if (total > 536_870_912 || files.length >= 20000)
+          if (total > 536_870_912 || entries.length >= 20000)
             throw new Error('satisfactory_mod_output_limit');
-          const hash = createHash('sha256');
-          let observed = 0;
-          for await (const chunk of createReadStream(source, { highWaterMark: 1_048_576 })) {
-            observed += chunk.length;
-            if (observed > size) throw new Error('satisfactory_mod_output_invalid');
-            hash.update(chunk);
-          }
-          if (observed !== size) throw new Error('satisfactory_mod_output_invalid');
-          if (options.outputDirectory)
-            await rename(source, join(options.outputDirectory, `${files.length}.bin`));
-          files.push({ path, size, sha256: hash.digest('hex') });
+          entries.push({ path, source, size });
         } else throw new Error('satisfactory_mod_output_invalid');
       }
     };
     await collect('FactoryGame/Mods');
-    return { files, lock, ...(downloadCacheBytes === undefined ? {} : { downloadCacheBytes }) };
+    const files: SatisfactoryModFile[] = new Array(entries.length);
+    let cursor = 0;
+    const publish = async () => {
+      while (cursor < entries.length) {
+        const index = cursor++;
+        const entry = entries[index];
+        if (!entry) throw new Error('satisfactory_mod_output_invalid');
+        const hash = createHash('sha256');
+        let observed = 0;
+        for await (const chunk of createReadStream(entry.source, {
+          highWaterMark: 1_048_576,
+          signal: options.signal,
+        })) {
+          observed += chunk.length;
+          if (observed > entry.size) throw new Error('satisfactory_mod_output_invalid');
+          hash.update(chunk);
+        }
+        if (observed !== entry.size) throw new Error('satisfactory_mod_output_invalid');
+        if (options.outputDirectory)
+          await rename(entry.source, join(options.outputDirectory, `${index}.bin`));
+        files[index] = { path: entry.path, size: entry.size, sha256: hash.digest('hex') };
+      }
+    };
+    const published = await Promise.allSettled([
+      persistCache(),
+      ...Array.from({ length: 4 }, publish),
+    ]);
+    const failed = published.find((result) => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
+    const persisted = published[0];
+    const downloadCacheBytes = persisted?.status === 'fulfilled' ? persisted.value : undefined;
+
+    timings.publishMs = Math.round(performance.now() - publishStarted);
+    return {
+      files,
+      lock,
+      timings,
+      ...(downloadCacheBytes === undefined ? {} : { downloadCacheBytes }),
+    };
   } finally {
+    const cleanupStarted = performance.now();
     await rm(root, { recursive: true, force: true });
+    timings.cleanupMs = Math.round(performance.now() - cleanupStarted);
+    timings.totalMs = Math.round(performance.now() - started);
   }
 }

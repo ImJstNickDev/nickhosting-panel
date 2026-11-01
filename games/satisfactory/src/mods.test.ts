@@ -65,6 +65,11 @@ describe('Satisfactory ficsit preparation', () => {
     expect(result.files[index]).toMatchObject({ size: 8 * 1024 * 1024 });
     expect(result.files[index]).not.toHaveProperty('bytes');
     expect((await lstat(join(outputDirectory, `${index}.bin`))).size).toBe(8 * 1024 * 1024);
+    for (const [position, file] of result.files.entries()) {
+      const bytes = await readFile(join(outputDirectory, `${position}.bin`));
+      expect(bytes.length).toBe(file.size);
+      expect(createHash('sha256').update(bytes).digest('hex')).toBe(file.sha256);
+    }
     expect(await readdir(input.stagingRoot)).toEqual(['output']);
   });
   it('pins exact requested mods, requests LinuxServer and returns dependency lock and hashes', async () => {
@@ -118,7 +123,8 @@ describe('Satisfactory ficsit preparation', () => {
         expect(installs.installations[0].vanilla).toBe(true);
       },
     });
-    expect(result).toEqual({ files: [], lock: { version: 1, mods: {} } });
+    expect(result).toMatchObject({ files: [], lock: { version: 1, mods: {} } });
+    expect(result.timings?.totalMs).toBeGreaterThanOrEqual(0);
   });
   it('accepts resolved shared profiles containing client-only and server-only roots', async () => {
     const result = await prepareSatisfactoryMods({

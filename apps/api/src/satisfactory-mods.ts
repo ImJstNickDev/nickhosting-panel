@@ -9,6 +9,7 @@ import {
   satisfiesSatisfactoryModVersion,
 } from '../../../games/satisfactory/src/mods.js';
 import {
+  satisfactoryModCompatibility,
   satisfactoryModDetails,
   satisfactoryModSearchSchema,
   satisfactoryModVersions,
@@ -185,14 +186,23 @@ export function registerSatisfactoryModRoutes(
     const actor = await options.principal(c),
       id = c.req.param('id');
     await access(actor, id);
-    const build = await gameBuild(actor, id);
     try {
+      const [build, versions] = await Promise.allSettled([
+        gameBuild(actor, id),
+        satisfactoryModVersions(c.req.param('reference')),
+      ]);
+      if (build.status === 'rejected') throw build.reason;
+      if (versions.status === 'rejected') throw versions.reason;
       return c.json(
-        await satisfactoryModVersions(c.req.param('reference'), undefined, {
-          gameBuild: build ?? undefined,
-        }),
+        versions.value.map((version) => ({
+          ...version,
+          compatibility: version.targets.includes('LinuxServer')
+            ? satisfactoryModCompatibility(version.gameVersion, build.value ?? undefined)
+            : 'incompatible',
+        })),
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof DomainError) throw error;
       throw new DomainError('integration_unavailable');
     }
   });

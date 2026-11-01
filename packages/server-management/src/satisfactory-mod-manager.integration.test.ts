@@ -6,6 +6,7 @@ import { satisfactoryManifest } from '../../../games/satisfactory/src/manifest.j
 import {
   ensureSatisfactoryModState,
   inspectSatisfactoryModInventory,
+  readSatisfactoryGameBuild,
   reconcileSatisfactoryMods,
 } from './satisfactory-mod-manager.js';
 import { managementFixture } from './test-fixtures.js';
@@ -120,6 +121,71 @@ it('finds real mod metadata, native locks, manual files and byte-level divergenc
   expect((await inspectSatisfactoryModInventory(f.db, adapter, await server())).diverged).toBe(
     true,
   );
+});
+it('reuses listings only within an explicit preview and still hashes every file', async () => {
+  const current = await server();
+  const fresh = await inspectSatisfactoryModInventory(f.db, adapter, current);
+  expect(
+    vi.mocked(adapter.listFiles).mock.calls.filter(([, path]) => path === 'FactoryGame/Mods'),
+  ).toHaveLength(2);
+  vi.mocked(adapter.listFiles).mockClear();
+  vi.mocked(adapter.downloadFile).mockClear();
+  const preview = await inspectSatisfactoryModInventory(f.db, adapter, current, undefined, {
+    reuseListings: true,
+  });
+  expect(preview).toEqual(fresh);
+  const listed = vi.mocked(adapter.listFiles).mock.calls.map(([, path]) => path);
+  expect(new Set(listed).size).toBe(listed.length);
+  expect(adapter.downloadFile).toHaveBeenCalledTimes(fresh.files.length);
+  files.set('FactoryGame/Mods/Example/binary.so', Buffer.from('mutate'));
+  const changed = await inspectSatisfactoryModInventory(f.db, adapter, current, undefined, {
+    reuseListings: true,
+  });
+  expect(changed.fingerprint).not.toBe(preview.fingerprint);
+});
+it('checks preview authorization again even when reusing a directory listing', async () => {
+  const current = await server();
+  const list = vi.mocked(adapter.listFiles).getMockImplementation()!;
+  let revoked = false;
+  vi.mocked(adapter.listFiles).mockImplementation(async (identifier, path) => {
+    const entries = await list(identifier, path);
+    if (path === 'FactoryGame/Mods/Manual') revoked = true;
+    return entries;
+  });
+  await expect(
+    inspectSatisfactoryModInventory(
+      f.db,
+      adapter,
+      current,
+      async () => {
+        if (revoked) throw new Error('revoked');
+      },
+      { reuseListings: true },
+    ),
+  ).rejects.toThrow('revoked');
+  expect(adapter.downloadFile).not.toHaveBeenCalled();
+});
+it('stops a preview after an aborted metadata read before downloading files', async () => {
+  const controller = new AbortController();
+  vi.mocked(adapter.readFile).mockImplementation(async (_identifier, path) => {
+    controller.abort(new Error('cancelled preview'));
+    return files.get(path)!;
+  });
+  await expect(
+    inspectSatisfactoryModInventory(f.db, adapter, await server(), undefined, {
+      signal: controller.signal,
+      reuseListings: true,
+    }),
+  ).rejects.toThrow('cancelled preview');
+  expect(adapter.downloadFile).not.toHaveBeenCalled();
+});
+it('lists the game build directory once when only the second supported file exists', async () => {
+  const first = 'Engine/Binaries/Linux/UnrealServer-Linux-Shipping.version';
+  files.set('Engine/Binaries/Linux/FactoryServer-Linux-Shipping.version', files.get(first)!);
+  files.delete(first);
+  expect(await readSatisfactoryGameBuild(adapter, 'fixture')).toBe(123456);
+  expect(adapter.listFiles).toHaveBeenCalledTimes(1);
+  expect(adapter.readFile).toHaveBeenCalledTimes(1);
 });
 it('adopts explicitly selected native state only during stopped external management, preserving unknown files', async () => {
   const scanned = await inspectSatisfactoryModInventory(f.db, adapter, await server());

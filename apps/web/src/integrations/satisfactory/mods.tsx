@@ -54,7 +54,6 @@ function useIncrementalPreview(
     : '';
   const settled = useRef(onSettled);
   settled.current = onSettled;
-  const [candidate, setCandidate] = useState<PreviewAttempt>();
   const [active, setActive] = useState<PreviewAttempt>();
   const [jobId, setJobId] = useState<string>();
   const [progress, setProgress] = useState<{ signature: string; plan: ModPlan }>();
@@ -92,31 +91,25 @@ function useIncrementalPreview(
       });
     return () => abort.abort();
   }, [signature, serverId, generation]);
+  // Start directly from the committed draft; an intermediate candidate state
+  // would add another render/effect round trip after the checkbox request.
   useEffect(() => {
-    if (!signature || !enabled) {
-      setCandidate(undefined);
-      return;
-    }
-    const input = JSON.parse(signature) as Omit<PreviewInput, 'idempotencyKey'>;
-    const timer = setTimeout(() => {
-      setCandidate({
-        signature,
-        input: { ...input, idempotencyKey: `${idempotencyKey()}_${generation}` },
-      });
-    }, 150);
-    return () => clearTimeout(timer);
-  }, [signature, enabled, generation]);
-  useEffect(() => {
-    if (!enabled || !candidate || candidate.signature !== signature || active || failure) return;
+    if (!enabled || !signature || active || failure) return;
     const saved = cache.get(signature);
     if (saved && (!saved.expiresAt || Date.parse(saved.expiresAt) > Date.now())) return;
-    setCache((previous) => {
-      const next = new Map(previous);
-      next.delete(signature);
-      return next;
+    if (saved) {
+      setCache((previous) => {
+        const next = new Map(previous);
+        next.delete(signature);
+        return next;
+      });
+    }
+    const input = JSON.parse(signature) as Omit<PreviewInput, 'idempotencyKey'>;
+    setActive({
+      signature,
+      input: { ...input, idempotencyKey: `${idempotencyKey()}_${generation}` },
     });
-    setActive(candidate);
-  }, [candidate, signature, enabled, active, failure, cache]);
+  }, [signature, enabled, active, failure, cache, generation]);
   useEffect(() => {
     if (!active) return;
     const abort = new AbortController();
@@ -126,6 +119,7 @@ function useIncrementalPreview(
         const accepted = await controller.preview(serverId, active.input);
         if (abort.signal.aborted) return;
         setJobId(accepted.jobId);
+        const pollingStarted = performance.now();
         for (;;) {
           const value = await controller.plan(serverId, accepted.planId, abort.signal);
           if (abort.signal.aborted) return;
@@ -153,7 +147,9 @@ function useIncrementalPreview(
               resolve();
             };
             abort.signal.addEventListener('abort', done, { once: true });
-            timer = setTimeout(done, 250);
+            // Keep warm previews responsive without sustained 10 Hz polling
+            // during a long upstream download. Requests never overlap.
+            timer = setTimeout(done, performance.now() - pollingStarted < 10_000 ? 100 : 250);
           });
           if (abort.signal.aborted) return;
         }
@@ -187,7 +183,6 @@ function useIncrementalPreview(
         return next;
       });
       setProgress(undefined);
-      setCandidate(undefined);
       setGeneration((value) => value + 1);
     }
   }
@@ -203,7 +198,6 @@ function useIncrementalPreview(
     reset: () => {
       setCache(new Map());
       setProgress(undefined);
-      setCandidate(undefined);
     },
   };
 }
@@ -291,8 +285,7 @@ function ModsWorkspace(props: GameSectionViewProps) {
     data && (changed || view === 'review') ? { ...current, revision: data.revision } : undefined,
     mayPrepare && !props.pending,
     async () => {
-      await snapshot.refetch();
-      await props.reload();
+      await Promise.all([snapshot.refetch(), props.reload()]);
     },
   );
   const ownPreview =
