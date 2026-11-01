@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { Readable } from 'node:stream';
 import { DomainError } from '@nickhosting/core';
 import { getSettings } from '@nickhosting/database';
 import { z } from 'zod';
@@ -14,7 +16,6 @@ import { contentStorageRoot, reserveContentStaging } from './content-admission.j
 import type { GameLifecycleContext } from './lifecycle.js';
 import { assertServerStorageCapacity } from './storage-capacity.js';
 
-const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 const fileSchema = z.object({
   path: z
     .string()
@@ -107,6 +108,7 @@ export async function processSatisfactoryMods(
           ? 'a591eb87be517d9d03798184c210d7166141be19e37b9d4e5fe68c84f264c6bf'
           : '2af0f8815af93b097c7a97968569575b21cf451b7c345fbb62fae29096ee4a31'),
       stagingRoot: root,
+      outputDirectory: stage,
       selection: command.selection,
       versionPath,
       versionFile,
@@ -114,15 +116,13 @@ export async function processSatisfactoryMods(
         await context.adapter.readFile(identifier, 'FactoryServer.sh', 1048576),
       ),
     });
-    for (let index = 0; index < prepared.files.length; index++)
-      await writeFile(join(stage, `${index}.bin`), prepared.files[index]!.bytes, { mode: 0o600 });
     receipt = {
       selection: command.selection,
       lock: prepared.lock,
       files: prepared.files.map((file) => ({
         path: file.path,
         sha256: file.sha256,
-        size: file.bytes.length,
+        size: file.size,
       })),
     };
     await writeFile(join(stage, 'receipt.tmp'), JSON.stringify(receipt), { mode: 0o600 });
@@ -198,21 +198,22 @@ export async function processSatisfactoryMods(
     const actual = await readHash(file.path, Math.max(file.size, old?.size ?? 0));
     if (actual === file.sha256) continue;
     if (actual !== null && actual !== old?.sha256) throw new DomainError('conflict');
-    const bytes = await readFile(join(stage, `${index}.bin`));
-    if (bytes.length !== file.size || hash(bytes) !== file.sha256)
+    const staged = join(stage, `${index}.bin`);
+    const metadata = await lstat(staged);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size !== file.size)
       throw new DomainError('operation_uncertain');
+    const stagedHash = createHash('sha256');
+    for await (const chunk of createReadStream(staged)) stagedHash.update(chunk);
+    if (stagedHash.digest('hex') !== file.sha256) throw new DomainError('operation_uncertain');
     await context.effect(`satisfactory.mods.upload.${index}`, async () => {
       await context.authorize();
       await context.assertStopped();
       await context.adapter.uploadFile(identifier, file.path, {
-        body: new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(bytes);
-            controller.close();
-          },
-        }),
-        contentLength: bytes.length,
-        maxBytes: bytes.length,
+        body: Readable.toWeb(createReadStream(staged, { highWaterMark: 65536 }), {
+          strategy: { highWaterMark: 65536, size: (chunk: Buffer) => chunk.byteLength },
+        }) as ReadableStream<Uint8Array>,
+        contentLength: file.size,
+        maxBytes: file.size,
         authorize: async () => {
           await context.authorize();
           await context.assertStopped();

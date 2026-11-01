@@ -34,6 +34,7 @@ import {
 } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
+import { resolveSatisfactoryApi } from '../../../packages/server-management/src/satisfactory-api.js';
 import type { Variables } from './app.js';
 import { gatewayClientFeatures, gatewayPresentationForClient } from './gateway-presentation.js';
 import { registerGatewaySleepRoutes } from './gateway-sleep.js';
@@ -444,6 +445,34 @@ export function registerGatewayRoutes(
     const remote = await management.adapter.getApplicationServer(context.providerServerId);
     await verifyManagedIdentity(db, server, remote);
     return c.json(safetyServer(remote));
+  });
+  app.post(`${prefix}/application-observation`, async (c) => {
+    const parsed = z
+      .strictObject({
+        routeId: z.uuid(),
+        routeRevision: z.number().int().positive(),
+      })
+      .safeParse(await options.body(c));
+    if (!parsed.success) throw new DomainError('validation_failed');
+    const selected = await route(parsed.data);
+    await gatewaySafetyContext(db, selected);
+    if (
+      selected.protocol?.handlerId !== 'satisfactory' ||
+      selected.protocol.role !== 'game' ||
+      selected.public.transport !== 'udp'
+    )
+      throw new DomainError('forbidden');
+    c.header('Cache-Control', 'no-store');
+    // Only live, authenticated backend state can establish player idleness.
+    // The Gateway receives no application credential or private session data.
+    const api = await resolveSatisfactoryApi(db, codec, selected.serverId);
+    const state = await api.state(AbortSignal.timeout(3000));
+    await route(parsed.data);
+    return c.json({
+      ready: true,
+      idle: state.numConnectedPlayers === 0,
+      playerCount: state.numConnectedPlayers,
+    });
   });
   app.post(`${prefix}/protocol-state`, async (c) => {
     const parsed = z

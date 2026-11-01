@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { createReadStream } from 'node:fs';
+import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { isAbsolute, join, relative } from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 
@@ -31,14 +32,16 @@ export const satisfactoryModLockSchema = z.object({
 });
 export type SatisfactoryModSelection = z.infer<typeof satisfactoryModSelectionSchema>;
 export type SatisfactoryModLock = z.infer<typeof satisfactoryModLockSchema>;
-export type SatisfactoryModFile = { path: string; bytes: Buffer; sha256: string };
+export type SatisfactoryModFile = { path: string; size: number; sha256: string };
 export const satisfactoryVersionPaths = [
   'Engine/Binaries/Linux/UnrealServer-Linux-Shipping.version',
   'Engine/Binaries/Linux/FactoryServer-Linux-Shipping.version',
 ] as const;
 
 /** Resolves SML/dependencies with the upstream resolver in a private local staging tree.
- * The caller applies returned files through the existing durable upload pipeline while stopped.
+ * With outputDirectory, numbered artifacts survive in the durable job stage; returned
+ * metadata never contains payload buffers. Without it this only resolves/validates.
+ * The caller applies preserved files through the existing upload pipeline while stopped.
  * Never gives ficsit-cli credentials, a server mount, or a remote installation URL.
  */
 export async function prepareSatisfactoryMods(options: {
@@ -46,6 +49,8 @@ export async function prepareSatisfactoryMods(options: {
   executableSha256: string;
   sandboxExecutable?: string;
   stagingRoot: string;
+  /** Trusted durable operation directory; artifacts are moved to <index>.bin. */
+  outputDirectory?: string;
   selection: SatisfactoryModSelection;
   versionPath: (typeof satisfactoryVersionPaths)[number];
   versionFile: Buffer;
@@ -66,10 +71,25 @@ export async function prepareSatisfactoryMods(options: {
   const version = JSON.parse(options.versionFile.toString('utf8')) as Record<string, unknown>;
   if (!Number.isSafeInteger(version.Changelist) || Number(version.Changelist) <= 0)
     throw new Error('satisfactory_game_version_invalid');
-  const executable = await readFile(options.executable);
-  if (createHash('sha256').update(executable).digest('hex') !== options.executableSha256)
+  const executableHash = createHash('sha256');
+  for await (const chunk of createReadStream(options.executable)) executableHash.update(chunk);
+  if (executableHash.digest('hex') !== options.executableSha256)
     throw new Error('satisfactory_cli_integrity_failed');
   await mkdir(options.stagingRoot, { recursive: true, mode: 0o700 });
+  if (options.outputDirectory) {
+    const subpath = relative(options.stagingRoot, options.outputDirectory);
+    if (
+      !isAbsolute(options.outputDirectory) ||
+      !subpath ||
+      subpath.startsWith('..') ||
+      isAbsolute(subpath)
+    )
+      throw new Error('satisfactory_mod_output_invalid');
+    await mkdir(options.outputDirectory, { recursive: true, mode: 0o700 });
+    const directory = await lstat(options.outputDirectory);
+    if (!directory.isDirectory() || directory.isSymbolicLink())
+      throw new Error('satisfactory_mod_output_invalid');
+  }
   const root = await mkdtemp(join(options.stagingRoot, 'satisfactory-mods-'));
   try {
     const game = join(root, 'game'),
@@ -177,9 +197,11 @@ export async function prepareSatisfactoryMods(options: {
         }
       });
     await run(options.executable, args, root, options.signal);
-    const lock = satisfactoryModLockSchema.parse(
-      JSON.parse(await readFile(join(game, 'FactoryGame/Mods/nick_hosting-lock.json'), 'utf8')),
-    );
+    const lockPath = join(game, 'FactoryGame/Mods/nick_hosting-lock.json');
+    const lockStat = await lstat(lockPath);
+    if (!lockStat.isFile() || lockStat.isSymbolicLink() || lockStat.size > 1048576)
+      throw new Error('satisfactory_mod_output_invalid');
+    const lock = satisfactoryModLockSchema.parse(JSON.parse(await readFile(lockPath, 'utf8')));
     for (const item of selection) {
       const resolved = lock.mods[item.reference];
       if (!resolved || resolved.version !== item.version || !resolved.targets.LinuxServer)
@@ -192,13 +214,26 @@ export async function prepareSatisfactoryMods(options: {
         if (!/^[A-Za-z0-9_. -]+$/.test(entry.name) || entry.isSymbolicLink())
           throw new Error('satisfactory_mod_output_invalid');
         const path = `${relative}/${entry.name}`;
+        if (path.length > 1024) throw new Error('satisfactory_mod_output_invalid');
         if (entry.isDirectory()) await collect(path);
         else if (entry.isFile()) {
-          const bytes = await readFile(join(game, path));
-          total += bytes.length;
+          const source = join(game, path);
+          const stat = await lstat(source);
+          const size = stat.size;
+          total += size;
           if (total > 536_870_912 || files.length >= 20000)
             throw new Error('satisfactory_mod_output_limit');
-          files.push({ path, bytes, sha256: createHash('sha256').update(bytes).digest('hex') });
+          const hash = createHash('sha256');
+          let observed = 0;
+          for await (const chunk of createReadStream(source)) {
+            observed += chunk.length;
+            if (observed > size) throw new Error('satisfactory_mod_output_invalid');
+            hash.update(chunk);
+          }
+          if (observed !== size) throw new Error('satisfactory_mod_output_invalid');
+          if (options.outputDirectory)
+            await rename(source, join(options.outputDirectory, `${files.length}.bin`));
+          files.push({ path, size, sha256: hash.digest('hex') });
         } else throw new Error('satisfactory_mod_output_invalid');
       }
     };

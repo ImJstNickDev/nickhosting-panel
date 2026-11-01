@@ -47,11 +47,15 @@ authorization. VerifyAuthenticationToken is never positively emulated offline.
 No authentication tokens or multiplayer tickets are manufactured.
 
 The exact Coffee Stain `JoinGameRequest` is recognized separately from polling.
-A recent backend-validated player credential can request wake; the HTTPS request
-waits up to 25 seconds for readiness before being forwarded unchanged. The backend
-still validates current authentication and issues the multiplayer ticket. Unknown
-credentials, application tokens and arbitrary TCP/UDP traffic never trigger wake.
-A rejected credential invalidates only its own cache entry; successful mutations
+A strictly formed player join request can request wake even without a cached
+session; this is an intent classification, not authentication. As with Minecraft
+Login Start, the existing core admits/coalesces the start before the game backend
+authenticates the player. The HTTPS request waits up to 25 seconds for readiness
+before being forwarded unchanged. Application tokens, malformed requests, polling
+and arbitrary TCP/UDP traffic never trigger wake. The backend alone validates the
+original credential and issues the multiplayer ticket; a rejected credential is
+forwarded as a rejection, never converted into a successful join.
+A rejected credential invalidates every cached player variant of that token; successful mutations
 clear server snapshots. The private cache is persisted encrypted through the
 existing authenticated control channel.
 
@@ -62,9 +66,10 @@ observation and a successful TCP connection. UDP polling does not request wake.
 
 Coffee Stain's public controller headers establish the exact join function. Actual
 client behavior still needs verification: the Server Manager may disable Join
-when the UDP state is Offline, and a cold/expired client credential cannot be
-authenticated while the backend is stopped without inventing authentication.
-Manual panel start remains necessary in those cases. The manifest does not claim
+when the UDP state is Offline, and an automatic login/verification request cannot
+be authenticated while the backend is stopped. A real JoinGameRequest can request
+wake regardless of cache age, but clients that stop before sending it require
+manual panel start. Polling does not silently start the backend. The manifest does not claim
 real-client-certified protocol wake merely because isolated protocol tests pass.
 
 The Settings section accepts a server application token, validates it against the
@@ -79,7 +84,7 @@ configured with the real upload pipeline, started, claimed and queried over pinn
 TLS. The first Steam download failed with Missing configuration; retry succeeded.
 Provisioning now verifies the game executable instead of trusting installed state
 alone. Real multiplayer/client compatibility is not established by API tests.
-Only the new test server has been mutated; existing games and Panel source remain
+Only ledger-proven test servers have been mutated; existing games and Panel source remain
 untouched. Development migrations/restarts are described below.
 
 ## References
@@ -192,3 +197,64 @@ requires game build >=491125. The hardened sandbox resolved and extracted that
 exact SML version into 17 verified files (14,025,213 bytes). This preparation used
 a nonexecuted launcher existence marker and did not modify the provider server.
 Both documented Linux version-file paths are supported by the discovery code.
+
+Artifact preparation and upload are streamed: output contains path/size/SHA-256
+metadata, validated artifacts move into the durable job stage, and binary hashing
+and upload use bounded read streams. Web-stream buffering is explicitly measured
+in bytes (64 KiB), avoiding payload-sized Buffers under the worker memory limit.
+An 8 MiB sparse artifact test verifies durable spooling without returned bytes.
+
+
+## Integrated routing and player observations
+
+The compiled readiness capability is enabled, so the common provision transaction
+reserves and activates all three routes: game UDP, game TCP and Reliable TCP.
+Creation tests cover both automatic start choices through the real admission,
+registry and lifecycle implementation with an isolated provider. Certificate upload
+precedes the first start and provider-installed status alone cannot bypass the
+executable check.
+
+Gateway validates independent servers with a bounded pool of four, while retaining
+sequential checks for each server and immediate pre-bind validation. An integration
+priority orders Satisfactory game UDP, game TCP, then Reliable; this also applies
+to observation cycles. Listener leases, live binding proof and generation fences
+remain unchanged. A Reliable-first UUID regression uses real UDP/TCP fixtures.
+
+Authenticated application observations are requested through the existing private
+Gateway control plane. The API validates current route ownership/revision and uses
+the encrypted server application token with certificate pinning. It returns only
+readiness, idle and player count. No application token reaches the Gateway. The UDP
+role obtains the live sample; other roles reuse it only within five seconds and
+the same generation. Missing tokens, failed calls and unknown counts never prove
+an empty server or authorize sleep. The integration supplies readiness, idle and
+graceful-stop capabilities through the existing platform lifecycle contracts.
+
+On a real test server (GameVersion 1.2.4.1 / NetCL 513885), six UDP samples validated
+distinct cookies and returned state 3, flags 0 and stable substates. Reliable TCP
+accepted connections, and all three startup port arguments matched the allocation.
+The request cookie is excluded from persisted state; otherwise its bigint would
+prevent JSON serialization. The query codec retains full cookie validation.
+
+The actual native mod job installed SML 3.12.0, resumed an interrupted upload by
+checking existing hashes, and started a modded world successfully. A second durable
+job removed only managed SML files; the TLS identity and file permissions remained
+unchanged. Save and restart preserved the world. These server-side checks do not
+establish multiplayer client interoperability.
+
+Wings can emit a finite negative uptime value immediately before its terminal
+`offline` frame. The adapter now treats that single unavailable metric as absent,
+without accepting invalid memory/CPU/disk values or weakening ordered stop proof.
+An isolated WebSocket regression and the real server stop both confirm that the
+terminal frame reaches the existing host-observer confirmation path.
+
+A terminal installer receipt followed by a definitively missing Satisfactory
+shipping executable is an installation failure. It is not retried indefinitely as
+a provider outage. The normal reinstall action remains available; transient file
+API errors retain their existing recovery behavior.
+
+Online query polling remains transparently forwarded but does not extend gameplay
+activity or keep an otherwise authenticated-idle server awake. Managed HTTPS
+connections remain in the lease/topology revocation set while only active joins
+and mutations count as gameplay work. Query-only UDP relays stay passive; gameplay
+on the same endpoint promotes activity, and later polls cannot renew that activity
+window. New gameplay work is fenced during quiescence.

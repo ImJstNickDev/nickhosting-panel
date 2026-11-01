@@ -226,6 +226,11 @@ export interface GatewayTlsIdentity {
 }
 
 export interface GatewayControl {
+  /** Authenticated, per-route application observation. No credentials cross this boundary. */
+  observeApplication?(request: {
+    routeId: string;
+    routeRevision: number;
+  }): Promise<GatewayProtocolObservation>;
   loadPrivateState?(request: { routeId: string; routeRevision: number }): Promise<unknown>;
   savePrivateState?(request: {
     routeId: string;
@@ -282,6 +287,7 @@ export interface GatewaySessionDiagnostic {
   action: 'status' | 'login' | 'incompatible' | 'transfer';
 }
 export interface GatewayProtocolContext {
+  observeApplication?(): Promise<GatewayProtocolObservation>;
   persistState?(state: GatewaySatisfactoryState): Promise<void>;
   input?: Uint8Array;
   route: Readonly<GatewayRoute>;
@@ -308,6 +314,9 @@ export interface GatewayProtocolSession {
 /** Trusted game code. Implementations must distinguish real protocol readiness
  * and player idleness; an open socket or no Gateway traffic proves neither. */
 export interface GatewayTcpContext extends GatewayProtocolContext {
+  /** Reserve active request work before a join or mutation. Undefined means
+   * authority/quiescence forbids the effect. Release is idempotent. */
+  beginActivity?(): (() => void) | undefined;
   loadPrivateState?(): Promise<unknown>;
   savePrivateState?(state: unknown): Promise<void>;
   mode(): GatewayResponseMode;
@@ -317,6 +326,13 @@ export interface GatewayTcpContext extends GatewayProtocolContext {
 }
 
 export interface GatewayProtocolAdapter {
+  /** Opt in only when every non-polling managed request uses beginActivity. */
+  readonly managesTcpActivity?: boolean;
+  /** Pure, bounded packet classification for online activity accounting. */
+  isStatusDatagram?(input: Uint8Array, direction: 'client' | 'backend'): boolean;
+  /** Trusted ordering of roles within one server. Lower numbers run first;
+   * finite integers in [-1000, 1000], default 0. This never grants readiness. */
+  validationPriority?(route: Readonly<GatewayRoute>): number;
   /** Owns a bounded application connection; the core retains lease/socket ownership. */
   handlesTcp?(route: Readonly<GatewayRoute>): boolean;
   acceptTcp?(socket: Socket, context: GatewayTcpContext): Promise<void>;

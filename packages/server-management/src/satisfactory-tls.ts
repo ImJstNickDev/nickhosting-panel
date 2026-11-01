@@ -1,9 +1,8 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createPrivateKey, createPublicKey, X509Certificate } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import { DomainError, type SecretCodec } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
 import type { Kysely } from 'kysely';
@@ -34,28 +33,36 @@ export async function generateSatisfactoryTlsIdentity(
   identityName(serverId);
   const directory = await mkdtemp(join(tmpdir(), 'nickhosting-tls-'));
   try {
-    await promisify(execFile)(
-      'openssl',
-      [
-        'req',
-        '-x509',
-        '-newkey',
-        'rsa:3072',
-        '-sha256',
-        '-nodes',
-        '-days',
-        '3650',
-        '-subj',
-        `/CN=${serverId}`,
-        '-addext',
-        `subjectAltName=DNS:${serverId}`,
-        '-keyout',
-        join(directory, 'key.pem'),
-        '-out',
-        join(directory, 'cert.pem'),
-      ],
-      { timeout: 30000, maxBuffer: 4096 },
-    );
+    await new Promise<void>((resolve, reject) => {
+      // RSA generation writes variable-length progress to stderr. It is not
+      // protocol output and must not exhaust an execFile buffer during creation.
+      const child = spawn(
+        'openssl',
+        [
+          'req',
+          '-x509',
+          '-newkey',
+          'rsa:3072',
+          '-sha256',
+          '-nodes',
+          '-days',
+          '3650',
+          '-subj',
+          `/CN=${serverId}`,
+          '-addext',
+          `subjectAltName=DNS:${serverId}`,
+          '-keyout',
+          join(directory, 'key.pem'),
+          '-out',
+          join(directory, 'cert.pem'),
+        ],
+        { stdio: 'ignore', timeout: 30000, killSignal: 'SIGKILL' },
+      );
+      child.once('error', reject);
+      child.once('exit', (code) =>
+        code === 0 ? resolve() : reject(new Error('certificate_generation_failed')),
+      );
+    });
     return validateSatisfactoryTlsIdentity({
       privateKeyPem: await readFile(join(directory, 'key.pem'), 'utf8'),
       certificatePem: await readFile(join(directory, 'cert.pem'), 'utf8'),

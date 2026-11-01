@@ -1,8 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { api, idempotencyKey } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
-import { ErrorNotice } from '../../components/ui.js';
+import { useUnsavedChanges } from '../../components/navigation-guard.js';
+import { Dialog, ErrorNotice, Select } from '../../components/ui.js';
+import { Pagination, SearchField } from '../../components/workspace-controls.js';
 import './mods.css';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 
@@ -21,6 +23,7 @@ const key = (name: string) => `games.satisfactory.mods.${name}`;
 
 export function SatisfactoryModsSection(props: GameSectionViewProps) {
   const t = useT();
+  const searchHintId = useId();
   const base = `/v1/servers/${encodeURIComponent(props.serverId)}/satisfactory/mods`;
   const [draft, setDraft] = useState<Choice[] | undefined>();
   const [query, setQuery] = useState('');
@@ -46,12 +49,16 @@ export function SatisfactoryModsSection(props: GameSectionViewProps) {
     queryKey: ['satisfactory-mod-versions', props.serverId, project?.reference],
     enabled: !!project,
     queryFn: ({ signal }) =>
-      api<Version[]>(`${base}/versions/${encodeURIComponent(project!.reference)}`, { signal }),
+      project
+        ? api<Version[]>(`${base}/versions/${encodeURIComponent(project.reference)}`, { signal })
+        : Promise.resolve([]),
   });
   const selection = draft ?? snapshot.data?.selection ?? [];
   const busy = props.pending || submitting;
   const editable = props.canManage && !busy && !!snapshot.data;
   const changed = JSON.stringify(selection) !== JSON.stringify(snapshot.data?.selection ?? []);
+  const validSearch = query.trim().length === 0 || query.trim().length >= 3;
+  useUnsavedChanges(changed, submitting);
   function choose(item: Project) {
     setProject(item);
     setVersion('');
@@ -76,9 +83,16 @@ export function SatisfactoryModsSection(props: GameSectionViewProps) {
   return (
     <section className="workspace-surface satisfactory-mods">
       <h2>{t(key('title'))}</h2>
-      <p>{t(key('applyHint'))}</p>
-      {(error ?? snapshot.error ?? catalog.error ?? versions.error) != null && (
-        <ErrorNotice error={error ?? snapshot.error ?? catalog.error ?? versions.error} />
+      <p className="muted">{t(key('applyHint'))}</p>
+      {(error ?? snapshot.error ?? catalog.error) != null && (
+        <ErrorNotice
+          error={error ?? snapshot.error ?? catalog.error}
+          retry={() => {
+            setError(undefined);
+            void snapshot.refetch();
+            void catalog.refetch();
+          }}
+        />
       )}
       {snapshot.isPending ? (
         <p role="status">{t('web.loading')}</p>
@@ -88,139 +102,179 @@ export function SatisfactoryModsSection(props: GameSectionViewProps) {
           {selection.length === 0 ? (
             <p>{t(key('empty'))}</p>
           ) : (
-            <ul>
+            <ul className="satisfactory-mod-list">
               {selection.map((mod) => (
                 <li key={mod.reference}>
-                  <strong>{mod.reference}</strong> <span>{mod.version}</span>{' '}
-                  <button
-                    type="button"
-                    disabled={!editable}
-                    onClick={() =>
-                      choose({ id: mod.reference, reference: mod.reference, name: mod.reference })
-                    }
-                  >
-                    {t(key('changeVersion'))}
-                  </button>{' '}
-                  <button
-                    type="button"
-                    disabled={!editable}
-                    onClick={() =>
-                      setDraft(selection.filter((item) => item.reference !== mod.reference))
-                    }
-                  >
-                    {t('web.remove')}
-                  </button>
+                  <div className="satisfactory-mod-name">
+                    <strong>{mod.reference}</strong> <span>{mod.version}</span>
+                  </div>
+                  <div className="actions">
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={!editable}
+                      onClick={() =>
+                        choose({ id: mod.reference, reference: mod.reference, name: mod.reference })
+                      }
+                    >
+                      {t(key('changeVersion'))}
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={!editable}
+                      onClick={() =>
+                        setDraft(selection.filter((item) => item.reference !== mod.reference))
+                      }
+                    >
+                      {t('web.remove')}
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
           )}
-          <button type="button" disabled={!editable || !changed} onClick={() => void apply()}>
-            {t(key('apply'))}
-          </button>{' '}
-          <button type="button" disabled={!changed || busy} onClick={() => setDraft(undefined)}>
-            {t('web.cancel')}
-          </button>
+          <div className="form-footer">
+            <button
+              type="button"
+              className="secondary"
+              disabled={!changed || busy}
+              onClick={() => setDraft(undefined)}
+            >
+              {t('web.cancel')}
+            </button>
+            <button type="button" disabled={!editable || !changed} onClick={() => void apply()}>
+              {t(key('apply'))}
+            </button>
+          </div>
           <details>
             <summary>{t(key('dependencies'))}</summary>
-            <ul>
-              {Object.entries(snapshot.data?.lock.mods ?? {}).map(([reference, mod]) => (
-                <li key={reference}>
-                  {reference} {mod.version}
-                </li>
-              ))}
-            </ul>
+            {Object.keys(snapshot.data?.lock.mods ?? {}).length === 0 ? (
+              <p className="muted">{t(key('noDependencies'))}</p>
+            ) : (
+              <ul className="satisfactory-dependencies">
+                {Object.entries(snapshot.data?.lock.mods ?? {}).map(([reference, mod]) => (
+                  <li key={reference}>
+                    {reference} {mod.version}
+                  </li>
+                ))}
+              </ul>
+            )}
           </details>
         </>
       )}
       <form
+        className="satisfactory-mod-search"
         onSubmit={(event) => {
           event.preventDefault();
-          setSearch(query);
+          if (!validSearch) return;
+          setSearch(query.trim());
           setOffset(0);
         }}
       >
-        <label>
-          {t(key('search'))}
-          <input value={query} maxLength={256} onChange={(event) => setQuery(event.target.value)} />
-        </label>
-        <button type="submit">{t('web.search')}</button>
+        <SearchField
+          label={t(key('search'))}
+          value={query}
+          minLength={3}
+          maxLength={256}
+          aria-describedby={searchHintId}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <button type="submit" className="secondary" disabled={!validSearch}>
+          {t('web.search')}
+        </button>
       </form>
+      <small id={searchHintId}>{t(key('searchHint'))}</small>
       {catalog.isPending ? (
         <p role="status">{t('web.loading')}</p>
       ) : (
-        <ul>
+        <ul className="satisfactory-mod-list satisfactory-catalog">
           {catalog.data?.items.map((item) => (
             <li key={item.id}>
-              <button type="button" onClick={() => choose(item)}>
+              <button
+                type="button"
+                className="satisfactory-project-action"
+                onClick={() => choose(item)}
+              >
                 {item.name}
-              </button>{' '}
+              </button>
               <code>{item.reference}</code>
             </li>
           ))}
         </ul>
       )}
       {catalog.data?.items.length === 0 && <p>{t(key('noResults'))}</p>}
-      <nav aria-label={t(key('pages'))}>
-        <button
-          type="button"
-          disabled={offset === 0 || catalog.isFetching}
-          onClick={() => setOffset(Math.max(0, offset - 30))}
-        >
-          {t(key('previous'))}
-        </button>{' '}
-        <button
-          type="button"
-          disabled={!catalog.data || offset + 30 >= catalog.data.total || catalog.isFetching}
-          onClick={() => setOffset(offset + 30)}
-        >
-          {t(key('next'))}
-        </button>
-      </nav>
+      <Pagination
+        label={t(key('pages'))}
+        previousLabel={t(key('previous'))}
+        nextLabel={t(key('next'))}
+        summary={catalog.data ? t(key('results'), { count: catalog.data.total }) : t('web.loading')}
+        canPrevious={offset > 0}
+        canNext={!!catalog.data && offset + 30 < catalog.data.total}
+        disabled={catalog.isFetching}
+        onPrevious={() => setOffset(Math.max(0, offset - 30))}
+        onNext={() => setOffset(offset + 30)}
+      />
       {project && (
-        <fieldset disabled={!editable}>
-          <legend>{project.name}</legend>
-          {versions.isPending ? (
-            <p role="status">{t('web.loading')}</p>
-          ) : (
-            <>
-              <label>
-                {t(key('version'))}
-                <select value={version} onChange={(event) => setVersion(event.target.value)}>
-                  <option value="">{t(key('chooseVersion'))}</option>
-                  {versions.data?.map((item) => (
-                    <option key={item.version} value={item.version}>
-                      {item.version} · {item.gameVersion}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {versions.data?.length === 0 && <p>{t(key('noVersions'))}</p>}
-              <ul>
-                {versions.data
-                  ?.find((item) => item.version === version)
-                  ?.dependencies.map((dependency) => (
-                    <li key={dependency.mod_id}>
-                      {dependency.mod_id} {dependency.condition}
-                      {dependency.optional ? ` (${t(key('optional'))})` : ''}
-                    </li>
-                  ))}
-              </ul>
-              <button
-                type="button"
-                disabled={!version}
-                onClick={() => {
-                  setDraft([
-                    ...selection.filter((item) => item.reference !== project.reference),
-                    { reference: project.reference, version },
-                  ]);
-                  setProject(undefined);
-                }}
-              >
-                {t(key('select'))}
-              </button>
-            </>
+        <Dialog
+          open
+          title={project.name}
+          onClose={() => setProject(undefined)}
+          initialFocusSelector="select"
+          className="satisfactory-version-dialog"
+        >
+          {versions.error && (
+            <ErrorNotice error={versions.error} retry={() => void versions.refetch()} />
           )}
-        </fieldset>
+          {!versions.error && (
+            <fieldset disabled={!editable}>
+              {versions.isPending ? (
+                <p role="status">{t('web.loading')}</p>
+              ) : (
+                <>
+                  <Select
+                    label={t(key('version'))}
+                    value={version}
+                    onChange={(event) => setVersion(event.target.value)}
+                  >
+                    <option value="">{t(key('chooseVersion'))}</option>
+                    {versions.data?.map((item) => (
+                      <option key={item.version} value={item.version}>
+                        {item.version} · {item.gameVersion}
+                      </option>
+                    ))}
+                  </Select>
+                  {versions.data?.length === 0 && <p>{t(key('noVersions'))}</p>}
+                  <ul className="satisfactory-dependencies">
+                    {versions.data
+                      ?.find((item) => item.version === version)
+                      ?.dependencies.map((dependency) => (
+                        <li key={dependency.mod_id}>
+                          {dependency.mod_id} {dependency.condition}
+                          {dependency.optional ? ` (${t(key('optional'))})` : ''}
+                        </li>
+                      ))}
+                  </ul>
+                  <div className="form-footer">
+                    <button
+                      type="button"
+                      disabled={!version}
+                      onClick={() => {
+                        setDraft([
+                          ...selection.filter((item) => item.reference !== project.reference),
+                          { reference: project.reference, version },
+                        ]);
+                        setProject(undefined);
+                      }}
+                    >
+                      {t(key('select'))}
+                    </button>
+                  </div>
+                </>
+              )}
+            </fieldset>
+          )}
+        </Dialog>
       )}
     </section>
   );

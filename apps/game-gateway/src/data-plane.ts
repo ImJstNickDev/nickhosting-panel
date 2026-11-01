@@ -65,6 +65,7 @@ export interface GatewayDataPlaneOptions {
 }
 
 interface UdpSession {
+  lastGameplayAt?: number;
   socket: DatagramSocket;
   lastActivity: number;
   connecting: boolean;
@@ -82,6 +83,7 @@ interface Listener {
   udp?: DatagramSocket;
   clients: Set<Socket>;
   forwardingClients: Set<Socket>;
+  passiveClients: Set<Socket>;
   sessions: Map<string, UdpSession>;
 }
 
@@ -218,9 +220,26 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       return undefined;
     }
   };
+  const validationPriority = (route: GatewayRoute) => {
+    const priority = protocol(route)?.validationPriority?.(route) ?? 0;
+    if (!Number.isInteger(priority) || Math.abs(priority) > 1000)
+      throw new DomainError('configuration_invalid');
+    return priority;
+  };
   const observationContext = (route: GatewayRoute, signal: AbortSignal) => ({
     route,
     signal,
+    observeApplication: options.control.observeApplication
+      ? async () => {
+          if (signal.aborted) throw new DomainError('integration_unavailable');
+          const observed = await options.control.observeApplication?.({
+            routeId: route.id,
+            routeRevision: route.revision,
+          });
+          if (signal.aborted || !observed) throw new DomainError('integration_unavailable');
+          return observed;
+        }
+      : undefined,
     persistState: options.control.reportProtocolState
       ? async (state: import('@nickhosting/game-sdk').GatewaySatisfactoryState) => {
           await options.control.reportProtocolState?.({
@@ -412,6 +431,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     socket.once('close', () => {
       listener.clients.delete(socket);
       listener.forwardingClients.delete(socket);
+      listener.passiveClients.delete(socket);
     });
     socket.setNoDelay(true);
     socket.setTimeout(policy.tcpIdleTimeoutMs, () => socket.destroy());
@@ -419,6 +439,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     if (managedHandler?.acceptTcp && (managedHandler.handlesTcp?.(listener.route) ?? true)) {
       // Managed TLS streams remain subject to topology revocation.
       listener.forwardingClients.add(socket);
+      if (managedHandler.managesTcpActivity) listener.passiveClients.add(socket);
+      let activities = 0;
       const controller = new AbortController();
       socket.once('close', () => controller.abort());
       const route = listener.route;
@@ -427,6 +449,30 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         .acceptTcp(socket, {
           route,
           signal: controller.signal,
+          beginActivity: () => {
+            if (
+              !valid() ||
+              socket.destroyed ||
+              !listener.clients.has(socket) ||
+              listener.statusOnly ||
+              quiescence.has(route.serverId)
+            )
+              return undefined;
+            activities++;
+            listener.passiveClients.delete(socket);
+            let released = false;
+            return () => {
+              if (released) return;
+              released = true;
+              activities--;
+              if (
+                activities === 0 &&
+                managedHandler.managesTcpActivity &&
+                listener.clients.has(socket)
+              )
+                listener.passiveClients.add(socket);
+            };
+          },
           mode: () => (valid() ? responseMode(listener) : 'blocked'),
           canForward: () =>
             valid() &&
@@ -698,6 +744,18 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       counters.udpDropped++;
     }
   };
+  const isStatusDatagram = (
+    listener: Listener,
+    input: Uint8Array,
+    direction: 'client' | 'backend',
+  ) => {
+    if (input.byteLength > policy.maxClassificationBytes) return false;
+    try {
+      return protocol(listener.route)?.isStatusDatagram?.(input, direction) === true;
+    } catch {
+      return false;
+    }
+  };
   const receive = (listener: Listener, message: Buffer, remote: RemoteInfo) => {
     counters.udpReceived++;
     if (!active(listener)) {
@@ -740,7 +798,14 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       socket.on('error', () => dropSession(listener, key));
       socket.on('message', (bytes: Buffer) => {
         if (!active(listener) || listener.sessions.get(key) !== current) return;
+        const status = isStatusDatagram(listener, bytes, 'backend');
+        if (!status && quiescence.has(listener.route.serverId)) {
+          counters.udpDropped++;
+          dropSession(listener, key);
+          return;
+        }
         current.lastActivity = now();
+        if (!status) current.lastGameplayAt = now();
         sendUdpResponse(listener, bytes, remote);
       });
       socket.connect(listener.route.backend.port, listener.route.backend.address, () => {
@@ -752,6 +817,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       });
     }
     session.lastActivity = now();
+    if (!isStatusDatagram(listener, message, 'client')) session.lastGameplayAt = now();
     if (
       session.queuedBytes + session.socket.getSendQueueSize() + message.length >
       policy.maxUdpQueuedBytes
@@ -771,6 +837,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       backendReady,
       clients: new Set(),
       forwardingClients: new Set(),
+      passiveClients: new Set(),
       sessions: new Map(),
     };
     try {
@@ -895,24 +962,87 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     // Share only provider source reads for this snapshot. Each route and final
     // bind still checks its own current authority, topology and reachability.
     const validation = options.safety.createValidationBatch?.(next.routes) ?? options.safety;
+    // Independent servers share a bounded read-only validation pool. Roles of
+    // one server remain ordered: a failed role withholds its siblings, and a
+    // protocol probe may depend on the preceding game-port observation.
+    // Native binds and final pre-bind checks remain sequential below.
+    type ValidationResult = { ok: true } | { ok: false; error: unknown };
+    const results = new Map<string, ValidationResult>();
+    const groups = new Map<string, GatewayRoute[]>();
+    for (const route of next.routes) {
+      const group = groups.get(route.serverId) ?? [];
+      group.push(route);
+      groups.set(route.serverId, group);
+    }
+    const pending = [...groups.values()];
+    for (const group of pending)
+      group.sort((a, b) => validationPriority(a) - validationPriority(b));
+    let nextGroup = 0;
+    let fatalValidation = false;
+    await Promise.all(
+      Array.from({ length: Math.min(4, pending.length) }, async () => {
+        while (!fatalValidation && !stopping) {
+          const group = pending[nextGroup++];
+          if (!group) return;
+          for (const route of group) {
+            if (fatalValidation || stopping) return;
+            try {
+              const verdict = await bounded(() => validation.validate(route, owned));
+              readiness.set(route.id, verdict?.backendReady ?? true);
+              const current = listeners.get(route.id);
+              if (verdict?.backendReady === false && current?.backendReady) {
+                current.backendReady = false;
+                clearSessions(current);
+                logRouteTransition(current, 'backend_not_ready');
+              }
+              results.set(route.id, { ok: true });
+            } catch (error) {
+              results.set(route.id, { ok: false, error });
+              if (
+                error instanceof GatewaySafetyError &&
+                error.reason === 'backend_active_binding'
+              ) {
+                await withholdServer(route.serverId);
+              } else {
+                // Existing authority retains only its original lease while
+                // already-issued reads settle. Withdraw the unsafe traffic now,
+                // before processing rollback decisions in snapshot order below.
+                fatalValidation = true;
+                controlAvailable = false;
+                if (
+                  error instanceof NetworkObservationError &&
+                  error.reason === 'container_churn'
+                ) {
+                  for (const current of listeners.values()) {
+                    current.backendReady = false;
+                    current.statusOnly = true;
+                    for (const client of current.forwardingClients) client.destroy();
+                    for (const key of current.sessions.keys()) dropSession(current, key);
+                  }
+                } else if (
+                  !(error instanceof GatewayProviderRateLimitedError) &&
+                  !(error instanceof GatewayRouteRevisionStaleError)
+                ) {
+                  const unsafe = listeners.get(route.id);
+                  if (unsafe) {
+                    logRouteTransition(unsafe, 'safety_rejected', false);
+                    listeners.delete(route.id);
+                    await closeListener(unsafe);
+                  }
+                }
+              }
+              break;
+            }
+          }
+        }
+      }),
+    );
     for (const route of next.routes) {
       if (stopping) throw new DomainError('integration_unavailable');
-      if (withheldServers.has(route.serverId)) continue;
+      const result = results.get(route.id);
+      if (!result) continue;
       try {
-        await bounded(async () => {
-          // Listener validation can establish its initial proof from the same
-          // fresh inspection; a separate backend inspection duplicates inventory.
-          const verdict = await validation.validate(route, owned);
-          readiness.set(route.id, verdict?.backendReady ?? true);
-          // A known failed backend must stop receiving traffic immediately,
-          // even if validation of another route keeps this snapshot pending.
-          const current = listeners.get(route.id);
-          if (verdict?.backendReady === false && current?.backendReady) {
-            current.backendReady = false;
-            clearSessions(current);
-            logRouteTransition(current, 'backend_not_ready');
-          }
-        });
+        if (!result.ok) throw result.error;
       } catch (error) {
         // Core may advance a route while fresh inventory/protocol evidence is
         // collected. This candidate never becomes authoritative; the already
@@ -1518,7 +1648,9 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       // Non-due servers keep their stable snapshot order; effects stay serialized.
       const orderedServers = [...servers.values()].sort((a, b) => dueAt(a) - dueAt(b));
       for (const routes of orderedServers) {
-        routes.sort((a, b) => a.id.localeCompare(b.id));
+        routes.sort(
+          (a, b) => validationPriority(a) - validationPriority(b) || a.id.localeCompare(b.id),
+        );
         const anchor = routes[0];
         if (!anchor || stopping || routes.some((route) => listeners.get(route.id)?.statusOnly))
           continue;
@@ -1605,7 +1737,13 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
                 const sample = leasedProbe
                   ? await leasedProbe.call(options.safety, route)
                   : await options.safety.validateBackend(route);
-                if (sample) return { ...sample, coherent: true };
+                if (sample)
+                  return {
+                    ...sample,
+                    // A safety readiness sample without player evidence cannot
+                    // replace a game integration's authenticated idle probe.
+                    coherent: sample.idle !== undefined || !handler.probeIdle,
+                  };
                 probeStage = 'protocol';
                 if (handler.observe)
                   return {
@@ -1630,7 +1768,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             const observation = validated.coherent
               ? validated
               : probeIdle
-                ? await bounded((signal) => probeIdle({ route, signal }))
+                ? await bounded((signal) => probeIdle(observationContext(route, signal)))
                 : { idle: false, playerCount: undefined };
             const playerCount =
               Number.isSafeInteger(observation.playerCount) &&
@@ -1693,7 +1831,16 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           const activeSessions = [...listeners.values()]
             .filter((listener) => listener.route.serverId === anchor.serverId)
             .reduce(
-              (count, listener) => count + listener.forwardingClients.size + listener.sessions.size,
+              (count, listener) =>
+                count +
+                [...listener.forwardingClients].filter(
+                  (socket) => !listener.passiveClients.has(socket),
+                ).length +
+                [...listener.sessions.values()].filter(
+                  (session) =>
+                    session.lastGameplayAt !== undefined &&
+                    now() - session.lastGameplayAt < policy.udpIdleTimeoutMs,
+                ).length,
               0,
             );
           const canQuiesce =

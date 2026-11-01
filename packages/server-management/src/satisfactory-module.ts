@@ -1,4 +1,5 @@
 import { DomainError, type SecretCodec } from '@nickhosting/core';
+import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import {
   satisfactoryCertificatePaths,
   satisfactoryManifest,
@@ -35,7 +36,31 @@ export function createSatisfactoryModuleRuntime(
     if (!identifier) throw new DomainError('integration_unavailable');
     await context.authorize();
     await context.assertStopped();
-    const binaries = await context.adapter.listFiles(identifier, 'Engine/Binaries/Linux');
+    const missingInstallation = () =>
+      new DomainError('configuration_invalid', 503, {
+        reason: 'installation_outputs_missing',
+      });
+    // A missing directory can be reported as HTTP 500 by Panel/Wings. Prove
+    // absence through its successfully listed parent instead of interpreting
+    // an unavailable provider response as an empty installation.
+    let parent = '';
+    for (const name of ['Engine', 'Binaries', 'Linux']) {
+      const entries = await context.adapter.listFiles(identifier, parent);
+      const directory = entries.find((entry) => entry.name === name);
+      if (!directory || directory.is_file || directory.is_symlink) throw missingInstallation();
+      parent = [parent, name].filter(Boolean).join('/');
+    }
+    const binaries = await context.adapter
+      .listFiles(identifier, 'Engine/Binaries/Linux')
+      .catch((error: unknown) => {
+        if (
+          error instanceof PterodactylError &&
+          error.reason === 'not_found' &&
+          error.outcome === 'rejected'
+        )
+          throw missingInstallation();
+        throw error;
+      });
     if (
       !binaries.some(
         (entry) =>
@@ -45,7 +70,7 @@ export function createSatisfactoryModuleRuntime(
           entry.size > 0,
       )
     )
-      throw new DomainError('integration_unavailable');
+      throw missingInstallation();
     const identity = await ensureSatisfactoryTlsIdentity(context.db, codec, context.server.id);
     for (const [path, value] of [
       [satisfactoryCertificatePaths.certificate, identity.certificatePem],

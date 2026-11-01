@@ -36,13 +36,21 @@ function credentialKey(
     .update(playerId ?? '')
     .digest('hex');
 }
+/** Syntax only: this is an ingress intent discriminator, never authentication.
+ * Only the backend can validate the fingerprint and player binding. */
 export function satisfactoryPlayerCredential(authorization: string | undefined): boolean {
-  if (!authorization?.startsWith('Bearer ')) return false;
+  if (!authorization?.startsWith('Bearer ') || authorization.length > 8199) return false;
   try {
-    const token = authorization.slice(7).split('.')[0];
-    if (!token || token.length > 8192) return false;
-    const payload = JSON.parse(Buffer.from(token, 'base64').toString('utf8'));
-    return payload.pl === 'Client' || payload.pl === 'Administrator';
+    const parts = authorization.slice(7).split('.');
+    if (parts.length !== 2) return false;
+    const [token, fingerprint] = parts;
+    if (!token || !fingerprint || !/^[a-fA-F0-9]{128}$/.test(fingerprint)) return false;
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(token) || (token.includes('=') && token.length % 4 !== 0))
+      return false;
+    const decoded = Buffer.from(token, 'base64');
+    if (decoded.toString('base64').replace(/=+$/, '') !== token.replace(/=+$/, '')) return false;
+    const payload: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(decoded));
+    return z.object({ pl: z.enum(['Client', 'Administrator']) }).safeParse(payload).success;
   } catch {
     return false;
   }

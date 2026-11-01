@@ -14,6 +14,8 @@ import {
   setGatewayRoute,
 } from '@nickhosting/server-management';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SatisfactoryApi } from '../../../games/satisfactory/src/api.js';
+import * as satisfactoryApi from '../../../packages/server-management/src/satisfactory-api.js';
 import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
 import { createApp } from './app.js';
 
@@ -234,26 +236,28 @@ describe('M3 Core service authentication and managed control plane', () => {
     name: 'Factory',
     observedAt: new Date().toISOString(),
   });
-  it.each(['tls-identity', 'protocol-state', 'private-state-read', 'private-state-write'])(
-    'rejects browser and wrong-Gateway access to %s',
-    async (endpoint) => {
-      const input = {
-        routeId: route.id,
-        routeRevision: route.revision,
-        ...(endpoint === 'protocol-state' ? { state: satisfactoryState() } : {}),
-      };
-      expect((await request(`${prefix()}/${endpoint}`, input, { authorization: '' })).status).toBe(
-        401,
-      );
-      expect(
-        (await request(`${prefix()}/${endpoint}`, input, { 'x-nh-support-token': 'support' }))
-          .status,
-      ).toBe(401);
-      expect((await request(`/internal/gateway/${randomUUID()}/${endpoint}`, input)).status).toBe(
-        401,
-      );
-    },
-  );
+  it.each([
+    'tls-identity',
+    'protocol-state',
+    'private-state-read',
+    'private-state-write',
+    'application-observation',
+  ])('rejects browser and wrong-Gateway access to %s', async (endpoint) => {
+    const input = {
+      routeId: route.id,
+      routeRevision: route.revision,
+      ...(endpoint === 'protocol-state' ? { state: satisfactoryState() } : {}),
+    };
+    expect((await request(`${prefix()}/${endpoint}`, input, { authorization: '' })).status).toBe(
+      401,
+    );
+    expect(
+      (await request(`${prefix()}/${endpoint}`, input, { 'x-nh-support-token': 'support' })).status,
+    ).toBe(401);
+    expect((await request(`/internal/gateway/${randomUUID()}/${endpoint}`, input)).status).toBe(
+      401,
+    );
+  });
   it('returns only the route-bound TLS identity, rejects stale revisions and hides keys from snapshots', async () => {
     const input = await satisfactoryRoute();
     const identity = await ensureSatisfactoryTlsIdentity(f.db, codec, serverId);
@@ -271,17 +275,20 @@ describe('M3 Core service authentication and managed control plane', () => {
     const snapshot = await request(`${prefix()}/snapshot`);
     expect(await snapshot.text()).not.toContain('PRIVATE KEY');
   });
-  it.each(['tls-identity', 'protocol-state', 'private-state-read', 'private-state-write'])(
-    'rejects wrong protocol handlers for %s',
-    async (endpoint) => {
-      const response = await request(`${prefix()}/${endpoint}`, {
-        routeId: route.id,
-        routeRevision: route.revision,
-        ...(endpoint === 'protocol-state' ? { state: satisfactoryState() } : {}),
-      });
-      expect(response.status).toBe(403);
-    },
-  );
+  it.each([
+    'tls-identity',
+    'protocol-state',
+    'private-state-read',
+    'private-state-write',
+    'application-observation',
+  ])('rejects wrong protocol handlers for %s', async (endpoint) => {
+    const response = await request(`${prefix()}/${endpoint}`, {
+      routeId: route.id,
+      routeRevision: route.revision,
+      ...(endpoint === 'protocol-state' ? { state: satisfactoryState() } : {}),
+    });
+    expect(response.status).toBe(403);
+  });
   it('rejects TLS identity retrieval for UDP routes and other Gateway namespaces', async () => {
     const input = await satisfactoryRoute('udp');
     expect((await request(`${prefix()}/tls-identity`, input)).status).toBe(403);
@@ -353,6 +360,65 @@ describe('M3 Core service authentication and managed control plane', () => {
         })
       ).status,
     ).toBe(400);
+  });
+  it('observes only authenticated live player state without exposing private session data', async () => {
+    const input = await satisfactoryRoute('udp');
+    expect((await request(`${prefix()}/application-observation`, input)).status).toBe(503);
+    let players = 3;
+    const resolver = vi.spyOn(satisfactoryApi, 'resolveSatisfactoryApi').mockResolvedValue(
+      new SatisfactoryApi({
+        async request(body, signal) {
+          expect(body.function).toBe('QueryServerState');
+          expect(signal).toBeInstanceOf(AbortSignal);
+          return {
+            data: {
+              serverGameState: {
+                activeSessionName: 'Private session',
+                numConnectedPlayers: players,
+                playerLimit: 4,
+                techTier: 1,
+                activeSchematic: '',
+                gamePhase: '',
+                isGameRunning: true,
+                totalGameDuration: 100,
+                isGamePaused: false,
+                averageTickRate: 30,
+                autoLoadSessionName: '',
+              },
+            },
+          };
+        },
+      }),
+    );
+    try {
+      const response = await request(`${prefix()}/application-observation`, input);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.json()).toEqual({ ready: true, idle: false, playerCount: 3 });
+      expect(resolver).toHaveBeenCalledWith(expect.anything(), codec, serverId);
+      players = 0;
+      expect(await (await request(`${prefix()}/application-observation`, input)).json()).toEqual({
+        ready: true,
+        idle: true,
+        playerCount: 0,
+      });
+      expect(
+        (
+          await request(`${prefix()}/application-observation`, {
+            ...input,
+            routeRevision: input.routeRevision + 1,
+          })
+        ).status,
+      ).toBe(412);
+      expect(
+        (await request(`${prefix()}/application-observation`, { ...input, serverId: randomUUID() }))
+          .status,
+      ).toBe(400);
+    } finally {
+      resolver.mockRestore();
+    }
+    const tcp = await satisfactoryRoute('tcp');
+    expect((await request(`${prefix()}/application-observation`, tcp)).status).toBe(403);
   });
   it('persists fresh UDP protocol state and does not churn revisions for timestamp-only observations', async () => {
     const input = await satisfactoryRoute('udp');

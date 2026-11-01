@@ -4,6 +4,7 @@ import type { Hono } from 'hono';
 import { z } from 'zod';
 import { satisfactoryModSelectionSchema } from '../../../games/satisfactory/src/mods.js';
 import {
+  satisfactoryModSearchSchema,
   satisfactoryModVersions,
   searchSatisfactoryMods,
 } from '../../../games/satisfactory/src/mods-catalog.js';
@@ -48,7 +49,7 @@ export function registerSatisfactoryModRoutes(
     await access(await options.principal(c), c.req.param('id'));
     const input = z
       .object({
-        query: z.string().max(256).default(''),
+        query: satisfactoryModSearchSchema.default(''),
         offset: z.coerce.number().int().min(0).max(100000).default(0),
       })
       .safeParse(c.req.query());

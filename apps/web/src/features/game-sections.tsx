@@ -1,4 +1,5 @@
 import {
+  canManageGameUiSection,
   type GameUiContext,
   type TrustedGameUiModule,
   type UiField,
@@ -470,18 +471,7 @@ export function GameSections({
     ),
     ...(server.data?.permissionKeys ?? []),
   ];
-  const canManageSection = Boolean(
-    section?.requiredPermissions.some(
-      (read) =>
-        read.endsWith('.read') &&
-        permissions.some(
-          (permission) =>
-            permission.startsWith(read.slice(0, -4)) &&
-            permission !== read &&
-            !permission.endsWith('.download'),
-        ),
-    ),
-  );
+  const canManageSection = !!section && canManageGameUiSection(section, permissions);
   const hasSectionPermission = Boolean(
     section?.requiredPermissions.every((permission) => permissions.includes(permission)),
   );

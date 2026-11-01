@@ -235,6 +235,15 @@ export function createGatewayControlClient(
   };
   return {
     requestJson: request,
+    async observeApplication(input) {
+      return z
+        .strictObject({
+          ready: z.boolean(),
+          idle: z.boolean().optional(),
+          playerCount: z.number().int().min(0).max(1000000).optional(),
+        })
+        .parse(await request('application-observation', input));
+    },
     loadPrivateState(input) {
       return request('private-state-read', input);
     },

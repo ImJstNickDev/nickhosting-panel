@@ -313,6 +313,19 @@ export const gameUiDescriptorSchema = z
               )
               .min(1)
               .max(4),
+            /** Explicit write authority for bundled section renderers. Read
+             * access alone never grants mutation controls. */
+            managePermissions: z
+              .array(
+                z
+                  .string()
+                  .regex(
+                    /^(?:server:(?:read|operate|manage)|platform:manage|[a-z][a-z0-9.-]{0,126})$/,
+                  ),
+              )
+              .min(1)
+              .max(4)
+              .optional(),
             requiredCapabilities: z.array(id).max(16),
             forms: z.array(uiFormSchema).max(32),
             columns: z
@@ -690,6 +703,26 @@ export function availableGameUiSections(
       section.requiredPermissions.every((permission) => context.permissions.includes(permission)) &&
       section.requiredCapabilities.every(
         (capability) => context.capabilities?.[capability] === true,
+      ),
+  );
+}
+/** UI affordance only; corresponding API handlers enforce the same permissions. */
+export function canManageGameUiSection(
+  section: Pick<GameUiDescriptor['sections'][number], 'requiredPermissions' | 'managePermissions'>,
+  permissions: readonly string[],
+): boolean {
+  if (section.managePermissions)
+    return section.managePermissions.every((permission) => permissions.includes(permission));
+  // Preserve existing granular integration declarations until they opt into
+  // explicit write permissions. A generic server:read section stays read-only.
+  return section.requiredPermissions.some(
+    (read) =>
+      read.endsWith('.read') &&
+      permissions.some(
+        (permission) =>
+          permission.startsWith(read.slice(0, -4)) &&
+          permission !== read &&
+          !permission.endsWith('.download'),
       ),
   );
 }

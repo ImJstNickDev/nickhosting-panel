@@ -55,6 +55,11 @@ const responseSchema = z.object({
   }),
   errors: z.array(z.unknown()).optional(),
 });
+export const satisfactoryModSearchSchema = z
+  .string()
+  .trim()
+  .max(256)
+  .refine((query) => query.length === 0 || query.length >= 3);
 
 /** SMR's public GraphQL catalog; project presence is not server compatibility evidence.
  * Target/version/dependency compatibility is resolved by ficsit-cli at preparation time.
@@ -65,7 +70,7 @@ export async function searchSatisfactoryMods(input: {
   signal?: AbortSignal;
   fetch?: typeof fetch;
 }) {
-  const query = z.string().max(256).parse(input.query);
+  const query = satisfactoryModSearchSchema.parse(input.query);
   const offset = z
     .number()
     .int()
@@ -80,7 +85,13 @@ export async function searchSatisfactoryMods(input: {
       query:
         'query Mods($filter: ModFilter) { mods: getMods(filter: $filter) { count mods { id name mod_reference } } }',
       variables: {
-        filter: { search: query, offset, limit: 30, order: 'desc', order_by: 'last_version_date' },
+        filter: {
+          ...(query ? { search: query } : {}),
+          offset,
+          limit: 30,
+          order: 'desc',
+          order_by: 'last_version_date',
+        },
       },
     }),
     signal: input.signal

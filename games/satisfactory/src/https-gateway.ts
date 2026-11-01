@@ -5,6 +5,7 @@ import type { Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { TLSSocket } from 'node:tls';
 import type { GatewayTcpContext } from '@nickhosting/game-sdk';
+import { z } from 'zod';
 import {
   SatisfactoryHttpsCache,
   satisfactoryCachedFunctions,
@@ -36,6 +37,36 @@ function error(outgoing: ServerResponse, status = 503): void {
 function header(incoming: IncomingMessage, name: string): string | undefined {
   const value = incoming.headers[name];
   return typeof value === 'string' ? value : undefined;
+}
+const joinBody = z.strictObject({
+  function: z.literal(satisfactoryJoinFunction),
+  data: z.strictObject({}).optional(),
+});
+function hasOneHeader(incoming: IncomingMessage, name: string): boolean {
+  let count = 0;
+  for (let index = 0; index < incoming.rawHeaders.length; index += 2)
+    if (incoming.rawHeaders[index]?.toLowerCase() === name) count++;
+  return count === 1;
+}
+function isJoinIntent(incoming: IncomingMessage, body: Buffer): boolean {
+  if (
+    incoming.method !== 'POST' ||
+    !/^\/api\/v1\/?$/.test(incoming.url ?? '') ||
+    incoming.headers['content-encoding'] !== undefined ||
+    !hasOneHeader(incoming, 'content-type') ||
+    header(incoming, 'content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json' ||
+    !hasOneHeader(incoming, 'authorization') ||
+    !hasOneHeader(incoming, 'x-factorygame-playerid') ||
+    !satisfactoryPlayerCredential(header(incoming, 'authorization')) ||
+    !/^(?:[a-fA-F0-9]{2}){1,1024}$/.test(header(incoming, 'x-factorygame-playerid') ?? '')
+  )
+    return false;
+  try {
+    return joinBody.safeParse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)))
+      .success;
+  } catch {
+    return false;
+  }
 }
 function parseFunction(incoming: IncomingMessage, body: Buffer): string | undefined {
   if (
@@ -88,6 +119,16 @@ export async function acceptSatisfactoryHttps(
       if (writes.get(id) === pending) writes.delete(id);
     });
   };
+  const activeRequests = new WeakSet<ServerResponse>();
+  function reserveActivity(outgoing: ServerResponse): boolean {
+    if (activeRequests.has(outgoing) || !context.beginActivity) return true;
+    const release = context.beginActivity();
+    if (!release) return false;
+    activeRequests.add(outgoing);
+    outgoing.once('finish', release);
+    outgoing.once('close', release);
+    return true;
+  }
   const server = createServer(
     {
       key: identity.privateKeyPem,
@@ -150,12 +191,15 @@ export async function acceptSatisfactoryHttps(
       outgoing.end(cached);
       return;
     }
-    if (
-      fn !== satisfactoryJoinFunction ||
-      !playerId ||
-      !satisfactoryPlayerCredential(authorization) ||
-      !cache.authorize(authorization, playerId)
-    ) {
+    // Like Minecraft Login Start, a syntactically valid join is an intention
+    // to play. It is not proof of identity and does not depend on a recent read
+    // cache. Admission/coalescing remain in Core; the backend authenticates the
+    // unchanged request and is the only issuer of multiplayer tickets.
+    if (!isJoinIntent(incoming, body)) {
+      error(outgoing);
+      return;
+    }
+    if (!reserveActivity(outgoing)) {
       error(outgoing);
       return;
     }
@@ -184,6 +228,16 @@ export async function acceptSatisfactoryHttps(
     body: Buffer | undefined,
     fn: string | undefined,
   ): void {
+    const passive =
+      fn !== undefined &&
+      (satisfactoryCachedFunctions.has(fn) ||
+        ['HealthCheck', 'VerifyAuthenticationToken', 'PasswordlessLogin', 'PasswordLogin'].includes(
+          fn,
+        ));
+    if (!passive && !reserveActivity(outgoing)) {
+      error(outgoing);
+      return;
+    }
     const upstream = request(
       {
         hostname: context.route.backend.address,

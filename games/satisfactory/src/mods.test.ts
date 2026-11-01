@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, open, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -41,6 +41,32 @@ const lock = {
   },
 };
 describe('Satisfactory ficsit preparation', () => {
+  it('spools large files into durable output and returns metadata without payload buffers', async () => {
+    const input = await fixture();
+    const outputDirectory = join(input.stagingRoot, 'output');
+    const result = await prepareSatisfactoryMods({
+      ...input,
+      outputDirectory,
+      run: async (_binary, _args, cwd) => {
+        await writeFile(
+          join(cwd, 'game/FactoryGame/Mods/nick_hosting-lock.json'),
+          JSON.stringify(lock),
+        );
+        const binary = await open(join(cwd, 'game/FactoryGame/Mods/large.so'), 'w');
+        try {
+          await binary.truncate(8 * 1024 * 1024);
+        } finally {
+          await binary.close();
+        }
+      },
+    });
+    const index = result.files.findIndex((file) => file.path.endsWith('large.so'));
+    expect(index).toBeGreaterThanOrEqual(0);
+    expect(result.files[index]).toMatchObject({ size: 8 * 1024 * 1024 });
+    expect(result.files[index]).not.toHaveProperty('bytes');
+    expect((await lstat(join(outputDirectory, `${index}.bin`))).size).toBe(8 * 1024 * 1024);
+    expect(await readdir(input.stagingRoot)).toEqual(['output']);
+  });
   it('pins exact requested mods, requests LinuxServer and returns dependency lock and hashes', async () => {
     const input = await fixture();
     const result = await prepareSatisfactoryMods({
@@ -115,6 +141,24 @@ describe('Satisfactory ficsit preparation', () => {
   });
 });
 describe('SMR catalog', () => {
+  it('browses without an empty search filter and rejects short searches before contacting SMR', async () => {
+    const request = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            data: { mods: { count: 0, mods: [] } },
+          }),
+        ),
+    );
+    await searchSatisfactoryMods({ query: '   ', fetch: request as typeof fetch });
+    const init = (request.mock.calls as unknown as [string, RequestInit][])[0]?.[1];
+    expect(JSON.parse(String(init?.body)).variables.filter).not.toHaveProperty('search');
+    for (const query of ['a', 'ab'])
+      await expect(
+        searchSatisfactoryMods({ query, fetch: request as typeof fetch }),
+      ).rejects.toThrow();
+    expect(request).toHaveBeenCalledTimes(1);
+  });
   it('passes search as GraphQL variables and normalizes public projects', async () => {
     const request = vi.fn(
       async () =>

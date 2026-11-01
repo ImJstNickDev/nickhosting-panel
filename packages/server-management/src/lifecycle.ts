@@ -3159,6 +3159,20 @@ export async function processServerOperation(
       }
       const code = safeError(error).code;
       if (
+        error instanceof DomainError &&
+        error.code === 'configuration_invalid' &&
+        error.details?.reason === 'installation_outputs_missing' &&
+        operation.plan.installConfirmed === true &&
+        ['provision', 'reinstall'].includes(operation.action)
+      ) {
+        await db
+          .updateTable('managed_servers')
+          .set({ installation_state: 'failed' })
+          .where('id', '=', server.id)
+          .execute();
+        return finish(false, false, code);
+      }
+      if (
         operation.action === 'backup' &&
         (operation.plan.backupFailed === true || operation.plan.rejected === true)
       ) {

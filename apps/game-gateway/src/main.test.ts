@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { resolveConfig } from '@nickhosting/core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createGatewayRuntime, main } from './main.js';
+import { coalesceNetworkObservations, createGatewayRuntime, main } from './main.js';
 
 const token = randomBytes(32).toString('base64url');
 const id = randomUUID();
@@ -215,4 +215,57 @@ it('quarantines a cold process before any control report or game forwarding and 
   expect(f.fetcher).not.toHaveBeenCalled();
   await service.close();
   expect(f.fetcher).not.toHaveBeenCalled();
+});
+
+describe('overlapping network observation reads', () => {
+  const observation = () => ({
+    observedAt: Date.now(),
+    namespaceId: 'net:[123]',
+    hostNamespaceId: 'net:[123]',
+    dockerDaemonId: 'fixture',
+    interfaceAddresses: ['127.0.0.1'],
+    sockets: [],
+    containers: [],
+    networks: [],
+  });
+  it('shares only an unfinished read and preserves independent original evidence', async () => {
+    let release!: (value: ReturnType<typeof observation>) => void;
+    const observe = vi.fn(
+      () =>
+        new Promise<ReturnType<typeof observation>>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const observer = coalesceNetworkObservations({ observe });
+    const first = observer.observe();
+    const second = observer.observe();
+    await Promise.resolve();
+    expect(observe).toHaveBeenCalledTimes(1);
+    const evidence = observation();
+    release(evidence);
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.observedAt).toBe(evidence.observedAt);
+    a.interfaceAddresses.push('127.0.0.2');
+    expect(b.interfaceAddresses).toEqual(['127.0.0.1']);
+    const third = observer.observe();
+    await Promise.resolve();
+    expect(observe).toHaveBeenCalledTimes(2);
+    release(observation());
+    await third;
+  });
+  it('shares the failure without reusing failed or successful observations afterward', async () => {
+    const failure = new Error('host inspection failed');
+    const observe = vi.fn().mockRejectedValueOnce(failure).mockResolvedValue(observation());
+    const observer = coalesceNetworkObservations({ observe });
+    const results = await Promise.allSettled([observer.observe(), observer.observe()]);
+    expect(results).toEqual([
+      { status: 'rejected', reason: failure },
+      { status: 'rejected', reason: failure },
+    ]);
+    expect(observe).toHaveBeenCalledTimes(1);
+    await expect(observer.observe()).resolves.toMatchObject({ namespaceId: 'net:[123]' });
+    expect(observe).toHaveBeenCalledTimes(2);
+    await observer.observe();
+    expect(observe).toHaveBeenCalledTimes(3);
+  });
 });

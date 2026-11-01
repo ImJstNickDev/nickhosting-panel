@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { SecretCodec } from '@nickhosting/core';
+import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import { describe, expect, it, vi } from 'vitest';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { resolveSatisfactoryApi, satisfactoryApiConfigured } from './satisfactory-api.js';
@@ -19,7 +20,12 @@ vi.mock('./satisfactory-tls.js', () => ({
 const codec = new SecretCodec({ activeKeyId: 'test', keys: { test: Buffer.alloc(32, 42) } });
 function fixture() {
   const files = new Map<string, Uint8Array>();
-  const directories = new Set(['FactoryGame']);
+  const directories = new Set([
+    'FactoryGame',
+    'Engine',
+    'Engine/Binaries',
+    'Engine/Binaries/Linux',
+  ]);
   const authorize = vi.fn(async () => {});
   const assertStopped = vi.fn(async () => {});
   const adapter = {
@@ -105,7 +111,29 @@ describe('Satisfactory prestart TLS distribution', () => {
     f.adapter.listFiles.mockResolvedValue([]);
     await expect(
       createSatisfactoryModuleRuntime(codec).configureProvision(f.context),
-    ).rejects.toThrow('integration_unavailable');
+    ).rejects.toMatchObject({
+      code: 'configuration_invalid',
+      details: { reason: 'installation_outputs_missing' },
+    });
+    expect(f.adapter.uploadFile).not.toHaveBeenCalled();
+  });
+  it('classifies a missing executable directory as an installation failure and retains transient provider errors', async () => {
+    const f = fixture();
+    const runtime = createSatisfactoryModuleRuntime(codec);
+    const list = f.adapter.listFiles.getMockImplementation();
+    if (!list) throw new Error('fixture listing absent');
+    f.adapter.listFiles.mockImplementation(async (id, root) => {
+      if (root === 'Engine/Binaries/Linux')
+        throw new PterodactylError('not_found', 'client', 'rejected', 404);
+      return list(id, root);
+    });
+    await expect(runtime.configureProvision(f.context)).rejects.toMatchObject({
+      code: 'configuration_invalid',
+      details: { reason: 'installation_outputs_missing' },
+    });
+    const unavailable = new PterodactylError('unavailable', 'client', 'unknown', 503);
+    f.adapter.listFiles.mockRejectedValueOnce(unavailable);
+    await expect(runtime.configureProvision(f.context)).rejects.toBe(unavailable);
     expect(f.adapter.uploadFile).not.toHaveBeenCalled();
   });
   it('does not publish keys when process stop cannot be proven', async () => {

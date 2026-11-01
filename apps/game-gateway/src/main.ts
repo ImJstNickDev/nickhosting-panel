@@ -59,6 +59,30 @@ async function loadProtocols(env: Environment): Promise<GatewayProtocolAdapter[]
   }
   return protocols;
 }
+/** Share only overlapping host scans. A settled observation is never cached:
+ * later validation (including the final bind check) takes a new host snapshot.
+ * Each caller still checks the original observation timestamp and route proof. */
+export function coalesceNetworkObservations(source: NetworkObserver): NetworkObserver {
+  let pending: ReturnType<NetworkObserver['observe']> | undefined;
+  return {
+    async observe() {
+      if (!pending) {
+        const work = Promise.resolve().then(() => source.observe());
+        pending = work;
+        void work.then(
+          () => {
+            if (pending === work) pending = undefined;
+          },
+          () => {
+            if (pending === work) pending = undefined;
+          },
+        );
+      }
+      // Independent consumers cannot mutate another route's evidence.
+      return structuredClone(await pending);
+    },
+  };
+}
 export async function createGatewayRuntime(
   env: Environment,
   dependencies: {
@@ -95,7 +119,9 @@ export async function createGatewayRuntime(
     )
       throw new DomainError('configuration_invalid');
     const networkPolicy = gatewayNetworkPolicySchema.parse(settings.gatewayNetworkPolicy);
-    const observer = dependencies.observer ?? createNetworkObserver(settings.gatewayObserver);
+    const observer = coalesceNetworkObservations(
+      dependencies.observer ?? createNetworkObserver(settings.gatewayObserver),
+    );
     const protocols = dependencies.protocols ?? (await loadProtocols(env));
     const serverRoutes = new Map<number, string>();
     const context = async (route: { id: string; revision: number }) => {

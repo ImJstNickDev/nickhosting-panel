@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest';
 import { SatisfactoryHttpsCache, satisfactoryPlayerCredential } from './https-cache.js';
 
-const authorization = `Bearer ${Buffer.from(JSON.stringify({ pl: 'Client' })).toString('base64')}.abcd`;
+const authorization = `Bearer ${Buffer.from(JSON.stringify({ pl: 'Client' })).toString('base64')}.${'ab'.repeat(64)}`;
 it('persists only credential hashes and read envelopes, scoped by player where available', () => {
   const cache = new SatisfactoryHttpsCache(() => 1000);
   cache.remember('QueryServerState', authorization, '060102', '{"data":{"serverGameState":{}}}');
@@ -30,9 +30,31 @@ it('does not authenticate rejected responses, application tokens cannot request 
   expect(satisfactoryPlayerCredential(authorization)).toBe(true);
   expect(
     satisfactoryPlayerCredential(
-      `Bearer ${Buffer.from('{"pl":"APIToken"}').toString('base64')}.abcd`,
+      `Bearer ${Buffer.from('{"pl":"APIToken"}').toString('base64')}.${'ab'.repeat(64)}`,
     ),
   ).toBe(false);
+});
+
+it.each([
+  undefined,
+  'Bearer invalid',
+  `Bearer ${Buffer.from('{"pl":"Client"}').toString('base64')}.abcd`,
+  `${authorization}.extra`,
+  authorization.replace('Bearer ', 'Basic '),
+  authorization.replace('.', '!.'),
+  `Bearer ${Buffer.from('{"pl":"InitialAdmin"}').toString('base64')}.${'ab'.repeat(64)}`,
+  `Bearer ${Buffer.from('{"pl":"APIToken"}').toString('base64')}.${'ab'.repeat(64)}`,
+  `Bearer ${Buffer.from('null').toString('base64')}.${'ab'.repeat(64)}`,
+  `Bearer ${Buffer.from('{"pl":"Client"}').toString('base64')}.${'zz'.repeat(64)}`,
+])('rejects malformed or non-player credential syntax: %s', (value) => {
+  expect(satisfactoryPlayerCredential(value)).toBe(false);
+});
+
+it('accepts canonical player token syntax without claiming fingerprint validity', () => {
+  const administrator = `Bearer ${Buffer.from('{"pl":"Administrator"}').toString('base64')}.${'00'.repeat(64)}`;
+  expect(satisfactoryPlayerCredential(authorization)).toBe(true);
+  expect(satisfactoryPlayerCredential(administrator)).toBe(true);
+  expect(satisfactoryPlayerCredential(administrator.replace(/=+\./, '.'))).toBe(true);
 });
 it('rejecting one credential cannot erase another client snapshot', () => {
   const cache = new SatisfactoryHttpsCache();

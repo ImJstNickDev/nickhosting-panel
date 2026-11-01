@@ -1,6 +1,9 @@
 .satisfactory-settings {
   display: grid;
-  gap: 1rem;
+  gap: 20px;
+  padding: 24px;
+  max-width: 1080px;
+  margin-inline: auto;
 }
 .satisfactory-settings h2,
 .satisfactory-settings h3,
@@ -9,26 +12,48 @@
 }
 .satisfactory-settings form {
   display: grid;
-  gap: 0.75rem;
+  gap: 16px;
 }
-.satisfactory-settings form button {
-  justify-self: start;
+.satisfactory-settings .field {
+  min-width: 0;
 }
-.satisfactory-settings dl {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
-  gap: 0.5rem 1rem;
+.satisfactory-settings .field > label {
+  font-size: 0.85rem;
+}
+.satisfactory-settings .field > small {
+  max-width: 70ch;
+}
+.satisfactory-settings .satisfactory-settings-connection {
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+.satisfactory-settings .details {
   margin: 0;
 }
-.satisfactory-settings dd {
-  margin: 0;
+.satisfactory-settings .details > div {
+  min-width: 0;
+}
+.satisfactory-settings .details dd {
   overflow-wrap: anywhere;
 }
+.satisfactory-option-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 24px;
+}
+.satisfactory-settings .form-footer {
+  justify-content: flex-end;
+}
+.satisfactory-settings input:disabled {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface) 94%, var(--muted));
+  opacity: 1;
+}
 @media (max-width: 600px) {
-  .satisfactory-settings dl {
-    grid-template-columns: 1fr;
+  .satisfactory-settings {
+    padding: 16px;
   }
-  .satisfactory-settings dd {
-    margin-bottom: 0.5rem;
+  .satisfactory-option-fields {
+    grid-template-columns: 1fr;
   }
 }

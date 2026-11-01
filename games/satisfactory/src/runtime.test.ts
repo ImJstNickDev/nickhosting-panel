@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { satisfactoryIntegration } from './manifest.js';
+import { satisfactoryManifest } from './manifest.js';
 import {
   buildSatisfactoryPlan,
   satisfactoryEggEnvironment,
@@ -7,7 +7,7 @@ import {
 } from './runtime.js';
 
 it('declares both game transports and a distinct reliable port', () => {
-  expect(satisfactoryIntegration.manifest.ports).toEqual([
+  expect(satisfactoryManifest.ports).toEqual([
     { role: 'game', transport: 'both', required: true },
     { role: 'reliable', transport: 'tcp', required: true },
   ]);
@@ -41,8 +41,16 @@ it('matches the installed SteamCMD egg branch and container contracts', () => {
     satisfactoryEggEnvironment({}, { game: 7777, reliable: 8888, externalReliable: 8888 })
       .SRCDS_BETAID,
   ).toBe('');
-  expect(satisfactoryIntegration.manifest.runtimes[0]?.imagePolicy).toEqual({
+  expect(satisfactoryManifest.runtimes[0]?.imagePolicy).toEqual({
     mode: 'fixed',
     image: 'ghcr.io/ptero-eggs/steamcmd:debian',
+  });
+});
+
+it('declares implemented readiness and graceful stop for automatic gateway provisioning', () => {
+  expect(satisfactoryManifest.capabilities).toMatchObject({
+    readiness: true,
+    gracefulStop: true,
+    wake: 'manual',
   });
 });

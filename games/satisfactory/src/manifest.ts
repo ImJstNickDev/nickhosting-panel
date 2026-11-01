@@ -1,4 +1,10 @@
-import { defineGameIntegration, gameManifestSchema } from '@nickhosting/game-sdk';
+import {
+  type AuthorizedGameServices,
+  defineGameIntegration,
+  gameManifestSchema,
+} from '@nickhosting/game-sdk';
+import type { SatisfactoryApi } from './api.js';
+import { createSatisfactoryLifecycle } from './lifecycle.js';
 import { satisfactoryPorts, satisfactoryRuntime } from './runtime.js';
 
 export const satisfactoryManifest = gameManifestSchema.parse({
@@ -13,9 +19,9 @@ export const satisfactoryManifest = gameManifestSchema.parse({
     players: false,
     mods: true,
     worlds: false,
-    idleDetection: false,
-    gracefulStop: false,
-    readiness: false,
+    idleDetection: true,
+    gracefulStop: true,
+    readiness: true,
     wake: 'manual',
   },
   connection: { mode: 'static-host-port', hostnameSettingKey: 'gatewayHostname', showPort: true },
@@ -44,7 +50,14 @@ export const satisfactoryManifest = gameManifestSchema.parse({
   contentProviders: [],
   localizations: { namespace: 'games.satisfactory', locales: ['en', 'it'] },
 });
-export const satisfactoryIntegration = defineGameIntegration({
-  manifest: satisfactoryManifest,
-  runtimes: [satisfactoryRuntime],
-});
+/** Runtime services are injected by the common platform; an unbound module
+ * cannot manufacture player observations or authenticated lifecycle actions. */
+export function createSatisfactoryIntegration(
+  resolveApi: (services: AuthorizedGameServices) => Promise<SatisfactoryApi>,
+) {
+  return defineGameIntegration({
+    manifest: satisfactoryManifest,
+    runtimes: [satisfactoryRuntime],
+    lifecycle: createSatisfactoryLifecycle(resolveApi),
+  });
+}
