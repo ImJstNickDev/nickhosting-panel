@@ -319,6 +319,9 @@ export interface GatewayProtocolSession {
 /** Trusted game code. Implementations must distinguish real protocol readiness
  * and player idleness; an open socket or no Gateway traffic proves neither. */
 export interface GatewayTcpContext extends GatewayProtocolContext {
+  /** Reserve a validated backend stream before opening it. Undefined refuses
+   * forwarding; the idempotent release must run when that upstream closes. */
+  beginForwarding?(): (() => void) | undefined;
   /** Reserve active request work before a join or mutation. Undefined means
    * authority/quiescence forbids the effect. Release is idempotent. */
   beginActivity?(): (() => void) | undefined;
@@ -333,6 +336,9 @@ export interface GatewayTcpContext extends GatewayProtocolContext {
 export interface GatewayProtocolAdapter {
   /** Opt in only when every non-polling managed request uses beginActivity. */
   readonly managesTcpActivity?: boolean;
+  /** Opt in only when every upstream stream is registered through beginForwarding.
+   * Unforwarded frontends remain lease-owned during temporary backend churn. */
+  readonly managesTcpForwarding?: boolean;
   /** Pure, bounded packet classification for online activity accounting. */
   isStatusDatagram?(input: Uint8Array, direction: 'client' | 'backend'): boolean;
   /** Trusted ordering of roles within one server. Lower numbers run first;

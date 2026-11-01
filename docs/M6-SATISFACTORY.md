@@ -207,7 +207,6 @@ and upload use bounded read streams. Web-stream buffering is explicitly measured
 in bytes (64 KiB), avoiding payload-sized Buffers under the worker memory limit.
 An 8 MiB sparse artifact test verifies durable spooling without returned bytes.
 
-
 ## Integrated routing and player observations
 
 The compiled readiness capability is enabled, so the common provision transaction
@@ -284,9 +283,27 @@ installer and game are stopped. Ordinary Panel status updates never substitute f
 completion. This closes the gap where a download longer than the old five-minute
 window completed after its confirmation subscriber had disconnected.
 
-
 Control requests for one route rebuild only that route with the same fresh policy,
 identity, eligibility and evidence checks under the existing resource lock. They do
 not rebuild every unrelated route or renew unrelated leases. Full snapshots remain
 the only writer of aggregate snapshot revisions. This removes the serialized
 all-route work previously repeated by every context/proof/cache request.
+
+
+## End-to-end development checks
+
+A second ledger-owned server was created through the ordinary NickPanel server API,
+admission transaction and worker. A failed first Steam download exposed the native
+retry flow; the subsequent reinstall completed through the same lifecycle and
+activated all three reserved routes. A real application token was stored through
+the protected API, and both the Settings and Mods pages were exercised against
+that instance without browser errors.
+
+Automatic idle suspension was verified against the physically stopped backend.
+Repeated UDP queries and HTTPS HealthCheck requests did not enqueue another start.
+The Gateway continued returning the observed NetCL, server name and substates,
+and protected read responses matched actual previously observed native responses.
+A Gateway-only restart repeated these checks with empty in-memory caches, retaining
+the same TLS identity. Persisted read snapshots are best-effort: a write rejected
+by a changed route revision can leave an earlier genuine snapshot until its original
+expiry. They do not promise the most recent in-memory sample.

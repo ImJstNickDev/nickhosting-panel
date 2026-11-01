@@ -96,9 +96,13 @@ it('answers health without waking and never manufactures login tokens', async ()
   }
 });
 it('forwards backend responses with the pinned per-server identity', async () => {
+  const received = vi.fn();
+  const releaseForwarding = vi.fn();
+  const beginForwarding = vi.fn<() => (() => void) | undefined>(() => releaseForwarding);
   const backend = createHttpsServer(
     { key: identity.privateKeyPem, cert: identity.certificatePem },
     (req, res) => {
+      received();
       req.resume();
       req.on('end', () => {
         res.writeHead(200);
@@ -114,6 +118,7 @@ it('forwards backend responses with the pinned per-server identity', async () =>
     tlsIdentity: async () => identity,
     signal: controller.signal,
     canForward: () => true,
+    beginForwarding,
     route: { backend: { address: '127.0.0.1', port: address.port } },
   } as unknown as GatewayTcpContext;
   const server = createServer((socket) => {
@@ -126,6 +131,11 @@ it('forwards backend responses with the pinned per-server identity', async () =>
     expect((await exchange(gateway.port, 'QueryServerState')).body).toBe(
       '{"data":{"backend":true}}',
     );
+    expect(beginForwarding).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(releaseForwarding).toHaveBeenCalledOnce());
+    beginForwarding.mockReturnValue(undefined);
+    expect((await exchange(gateway.port, 'QueryServerState')).status).toBe(503);
+    expect(received).toHaveBeenCalledOnce();
   } finally {
     controller.abort();
     await new Promise<void>((resolve) => server.close(() => resolve()));

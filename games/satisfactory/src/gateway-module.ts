@@ -133,6 +133,7 @@ export function createSatisfactoryGatewayAdapter(
   const adapter: GatewayProtocolAdapter = {
     id: 'satisfactory',
     managesTcpActivity: true,
+    managesTcpForwarding: true,
     isStatusDatagram(input, direction) {
       if (direction === 'client') return decodeSatisfactoryPoll(input) !== undefined;
       try {

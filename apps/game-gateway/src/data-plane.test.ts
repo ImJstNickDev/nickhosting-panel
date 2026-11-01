@@ -2780,6 +2780,102 @@ describe('sleep protocol handling and observations', () => {
 });
 
 describe('lease, reconciliation and shutdown safety', () => {
+  it('preserves an unforwarded managed waiter across churn while revoking attached backend streams', async () => {
+    const backend = await tcpFixture();
+    const r = route(backend.port, 'tcp', 'online');
+    const contexts: import('@nickhosting/game-sdk').GatewayTcpContext[] = [];
+    const f = plane([r], {
+      protocols: [
+        fixtureProtocol({
+          managesTcpActivity: true,
+          managesTcpForwarding: true,
+          acceptTcp: async (socket, context) => {
+            contexts.push(context);
+            socket.write('accepted');
+          },
+          observe: async () => ({ ready: true, idle: true, playerCount: 0 }),
+        }),
+      ],
+    });
+    await f.gateway.applySnapshot(f.snapshot());
+    const waiting = connect(backend.port, '127.0.0.1');
+    await once(waiting, 'data');
+    const attached = connect(backend.port, '127.0.0.1');
+    await once(attached, 'data');
+    cleanups.push(async () => {
+      waiting.destroy();
+      attached.destroy();
+    });
+    const releaseActivity = contexts[0]?.beginActivity?.();
+    expect(releaseActivity).toBeTypeOf('function');
+    expect(contexts[1]?.beginForwarding?.()).toBeTypeOf('function');
+    const attachedClosed = once(attached, 'close');
+    vi.mocked(f.safety.validate).mockRejectedValue(new NetworkObservationError('container_churn'));
+    await expect(f.gateway.refresh()).rejects.toThrow('integration_unavailable');
+    await attachedClosed;
+    expect(waiting.destroyed).toBe(false);
+    expect(contexts[0]?.canForward()).toBe(false);
+    expect(contexts[0]?.beginForwarding?.()).toBeUndefined();
+    vi.mocked(f.safety.validate).mockResolvedValue(undefined);
+    await f.gateway.refresh();
+    expect(contexts[0]?.canForward()).toBe(true);
+    await f.gateway.observe();
+    expect(vi.mocked(f.control.reportObservation).mock.calls.at(-1)?.[0]).toMatchObject({
+      activeSessions: 1,
+      idle: false,
+    });
+    releaseActivity?.();
+    const first = contexts[0]?.beginForwarding?.();
+    const second = contexts[0]?.beginForwarding?.();
+    expect(first).toBeTypeOf('function');
+    expect(second).toBeTypeOf('function');
+    first?.();
+    first?.();
+    const waitingClosed = once(waiting, 'close');
+    vi.mocked(f.safety.validate).mockRejectedValue(new NetworkObservationError('container_churn'));
+    await expect(f.gateway.refresh()).rejects.toThrow('integration_unavailable');
+    await waitingClosed;
+    second?.();
+    expect(contexts[0]?.beginForwarding?.()).toBeUndefined();
+  });
+  it.each(['generation', 'backend', 'protocol', 'withdrawal'] as const)(
+    'revokes even unforwarded managed frontends on %s authority changes',
+    async (change) => {
+      const backend = await tcpFixture();
+      const r = route(backend.port, 'tcp', 'sleeping');
+      const f = plane([r], {
+        protocols: [
+          fixtureProtocol({
+            managesTcpActivity: true,
+            managesTcpForwarding: true,
+            acceptTcp: async (socket) => {
+              socket.write('waiting');
+            },
+          }),
+        ],
+      });
+      await f.gateway.applySnapshot(f.snapshot());
+      const client = connect(backend.port, '127.0.0.1');
+      await once(client, 'data');
+      cleanups.push(async () => {
+        client.destroy();
+      });
+      const closed = once(client, 'close');
+      const next = { ...r, revision: r.revision + 1 };
+      if (change === 'generation') next.generation = randomUUID();
+      if (change === 'backend') next.backend = { ...r.backend, port: r.backend.port + 1 };
+      if (change === 'protocol')
+        next.protocol = {
+          ...r.protocol,
+          handlerId: 'fixture',
+          gameVersion: 'changed',
+          role: 'game',
+        };
+      await f.gateway.applySnapshot(f.snapshot(change === 'withdrawal' ? [] : [next], 2));
+      await closed;
+      expect(client.destroyed).toBe(true);
+    },
+  );
   it('revokes managed application streams on topology churn', async () => {
     const backend = await tcpFixture();
     const r = route(backend.port);

@@ -1,5 +1,5 @@
 import { timingSafeEqual, X509Certificate } from 'node:crypto';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ClientRequest, IncomingMessage, ServerResponse } from 'node:http';
 import { createServer, request } from 'node:https';
 import { isIP, type Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -238,74 +238,86 @@ export async function acceptSatisfactoryHttps(
       error(outgoing);
       return;
     }
-    const upstream = request(
-      {
-        hostname: context.route.backend.address,
-        port: context.route.backend.port,
-        method: incoming.method,
-        path: incoming.url,
-        agent: false,
-        rejectUnauthorized: false,
-        minVersion: 'TLSv1.2',
-        headers: {
-          ...incoming.headers,
-          host: `${isIP(context.route.backend.address) === 6 ? `[${context.route.backend.address}]` : context.route.backend.address}:${context.route.backend.port}`,
+    const releaseForwarding = context.beginForwarding?.();
+    if (context.beginForwarding && !releaseForwarding) {
+      error(outgoing);
+      return;
+    }
+    let upstream: ClientRequest;
+    try {
+      upstream = request(
+        {
+          hostname: context.route.backend.address,
+          port: context.route.backend.port,
+          method: incoming.method,
+          path: incoming.url,
+          agent: false,
+          rejectUnauthorized: false,
+          minVersion: 'TLSv1.2',
+          headers: {
+            ...incoming.headers,
+            host: `${isIP(context.route.backend.address) === 6 ? `[${context.route.backend.address}]` : context.route.backend.address}:${context.route.backend.port}`,
+          },
+          signal: context.signal,
+          timeout: 30000,
         },
-        signal: context.signal,
-        timeout: 30000,
-      },
-      (response) => {
-        const status = response.statusCode ?? 502;
-        if (status === 401 || status === 403) {
-          cache.reject(
-            header(incoming, 'authorization'),
-            header(incoming, 'x-factorygame-playerid'),
-          );
-          persist();
-        }
-        if (
-          status >= 200 &&
-          status < 300 &&
-          (!fn ||
-            (!satisfactoryCachedFunctions.has(fn) &&
-              ![
-                'HealthCheck',
-                'VerifyAuthenticationToken',
-                'PasswordlessLogin',
-                'PasswordLogin',
-                satisfactoryJoinFunction,
-              ].includes(fn)))
-        ) {
-          cache.clear();
-          persist();
-        }
-        const capture =
-          fn &&
-          satisfactoryCachedFunctions.has(fn) &&
-          status === 200 &&
-          !response.headers['content-encoding'];
-        const parts: Buffer[] = [];
-        let length = 0;
-        if (capture) {
-          response.on('data', (chunk: Buffer) => {
-            length += chunk.length;
-            if (length <= 262144) parts.push(chunk);
-          });
-          response.on('end', () => {
-            if (length <= 262144)
-              cache.remember(
-                fn,
-                header(incoming, 'authorization'),
-                header(incoming, 'x-factorygame-playerid'),
-                Buffer.concat(parts).toString('utf8'),
-              );
+        (response) => {
+          const status = response.statusCode ?? 502;
+          if (status === 401 || status === 403) {
+            cache.reject(
+              header(incoming, 'authorization'),
+              header(incoming, 'x-factorygame-playerid'),
+            );
             persist();
-          });
-        }
-        outgoing.writeHead(status, response.headers);
-        response.pipe(outgoing);
-      },
-    );
+          }
+          if (
+            status >= 200 &&
+            status < 300 &&
+            (!fn ||
+              (!satisfactoryCachedFunctions.has(fn) &&
+                ![
+                  'HealthCheck',
+                  'VerifyAuthenticationToken',
+                  'PasswordlessLogin',
+                  'PasswordLogin',
+                  satisfactoryJoinFunction,
+                ].includes(fn)))
+          ) {
+            cache.clear();
+            persist();
+          }
+          const capture =
+            fn &&
+            satisfactoryCachedFunctions.has(fn) &&
+            status === 200 &&
+            !response.headers['content-encoding'];
+          const parts: Buffer[] = [];
+          let length = 0;
+          if (capture) {
+            response.on('data', (chunk: Buffer) => {
+              length += chunk.length;
+              if (length <= 262144) parts.push(chunk);
+            });
+            response.on('end', () => {
+              if (length <= 262144)
+                cache.remember(
+                  fn,
+                  header(incoming, 'authorization'),
+                  header(incoming, 'x-factorygame-playerid'),
+                  Buffer.concat(parts).toString('utf8'),
+                );
+              persist();
+            });
+          }
+          outgoing.writeHead(status, response.headers);
+          response.pipe(outgoing);
+        },
+      );
+    } catch {
+      releaseForwarding?.();
+      error(outgoing, 502);
+      return;
+    }
     upstream.on('socket', (raw) => {
       const tls = raw as TLSSocket;
       tls.once('secureConnect', () => {
@@ -323,6 +335,7 @@ export async function acceptSatisfactoryHttps(
         else incoming.pipe(upstream);
       });
     });
+    upstream.once('close', () => releaseForwarding?.());
     upstream.on('timeout', () => upstream.destroy());
     upstream.on('error', () => error(outgoing, 502));
     outgoing.once('close', () => upstream.destroy());

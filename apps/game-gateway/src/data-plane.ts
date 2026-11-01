@@ -83,6 +83,7 @@ interface Listener {
   udp?: DatagramSocket;
   clients: Set<Socket>;
   forwardingClients: Set<Socket>;
+  managedClients: Set<Socket>;
   passiveClients: Set<Socket>;
   sessions: Map<string, UdpSession>;
 }
@@ -271,6 +272,10 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       /* A connecting or failed socket may already be closed. */
     }
   };
+  const clearBackendSessions = (listener: Listener) => {
+    for (const client of listener.forwardingClients) client.destroy();
+    for (const key of listener.sessions.keys()) dropSession(listener, key);
+  };
   const clearSessions = (listener: Listener) => {
     listener.tlsIdentity = undefined;
     for (const client of listener.clients) client.destroy();
@@ -451,14 +456,18 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     socket.once('close', () => {
       listener.clients.delete(socket);
       listener.forwardingClients.delete(socket);
+      listener.managedClients.delete(socket);
       listener.passiveClients.delete(socket);
     });
     socket.setNoDelay(true);
     socket.setTimeout(policy.tcpIdleTimeoutMs, () => socket.destroy());
     const managedHandler = protocol(listener.route);
     if (managedHandler?.acceptTcp && (managedHandler.handlesTcp?.(listener.route) ?? true)) {
-      // Managed TLS streams remain subject to topology revocation.
-      listener.forwardingClients.add(socket);
+      // Every frontend remains lease-owned. Opted-in managed protocols reserve
+      // actual upstreams separately, allowing unforwarded wake requests to wait.
+      listener.managedClients.add(socket);
+      if (!managedHandler.managesTcpForwarding) listener.forwardingClients.add(socket);
+      let upstreams = 0;
       if (managedHandler.managesTcpActivity) listener.passiveClients.add(socket);
       let activities = 0;
       const controller = new AbortController();
@@ -469,6 +478,28 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         .acceptTcp(socket, {
           route,
           signal: controller.signal,
+          beginForwarding: () => {
+            if (
+              !valid() ||
+              socket.destroyed ||
+              !listener.clients.has(socket) ||
+              listener.statusOnly ||
+              !listener.backendReady ||
+              listener.route.mode !== 'online' ||
+              quiescence.has(route.serverId)
+            )
+              return undefined;
+            upstreams++;
+            listener.forwardingClients.add(socket);
+            let released = false;
+            return () => {
+              if (released) return;
+              released = true;
+              upstreams--;
+              if (upstreams === 0 && managedHandler.managesTcpForwarding)
+                listener.forwardingClients.delete(socket);
+            };
+          },
           beginActivity: () => {
             if (
               !valid() ||
@@ -496,6 +527,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           mode: () => (valid() ? responseMode(listener) : 'blocked'),
           canForward: () =>
             valid() &&
+            !listener.statusOnly &&
             listener.backendReady &&
             listener.route.mode === 'online' &&
             !quiescence.has(route.serverId),
@@ -857,6 +889,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       backendReady,
       clients: new Set(),
       forwardingClients: new Set(),
+      managedClients: new Set(),
       passiveClients: new Set(),
       sessions: new Map(),
     };
@@ -1012,7 +1045,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
               const current = listeners.get(route.id);
               if (verdict?.backendReady === false && current?.backendReady) {
                 current.backendReady = false;
-                clearSessions(current);
+                clearBackendSessions(current);
                 logRouteTransition(current, 'backend_not_ready');
               }
               results.set(route.id, { ok: true });
@@ -1190,11 +1223,15 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         if (!listener) throw new DomainError('internal_error');
         if (
           !isDeepStrictEqual(listener.route.backend, route.backend) ||
+          !isDeepStrictEqual(listener.route.protocol, route.protocol) ||
+          listener.route.serverId !== route.serverId ||
+          listener.route.nodeId !== route.nodeId ||
+          listener.route.allocationId !== route.allocationId ||
           listener.route.generation !== route.generation ||
-          (listener.route.mode === 'online' && route.mode !== 'online') ||
-          (listener.backendReady && !readiness.get(route.id))
+          (listener.route.mode === 'online' && route.mode !== 'online')
         )
           clearSessions(listener);
+        else if (listener.backendReady && !readiness.get(route.id)) clearBackendSessions(listener);
         listener.route = route;
         listener.backendReady = readiness.get(route.id) ?? false;
         listener.statusOnly = false;
@@ -1853,7 +1890,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             .reduce(
               (count, listener) =>
                 count +
-                [...listener.forwardingClients].filter(
+                [...new Set([...listener.forwardingClients, ...listener.managedClients])].filter(
                   (socket) => !listener.passiveClients.has(socket),
                 ).length +
                 [...listener.sessions.values()].filter(
