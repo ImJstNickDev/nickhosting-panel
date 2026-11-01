@@ -55,9 +55,13 @@ state and computes the same persistent tokens as the backend. It never issues
 multiplayer tickets. Protected reads require a currently valid native player token;
 a previously cached successful response supplies no authentication authority.
 
-QueryServerState, GetServerOptions and GetAdvancedGameSettings retain schema-checked,
-encrypted backend observations. Core's live application observation also records
-QueryServerState, so this does not require a player to have opened Status previously.
+QueryServerState, GetServerOptions, GetAdvancedGameSettings and Administrator-only
+EnumerateSessions retain schema-checked,
+encrypted backend observations. Core's live application observation records
+QueryServerState and refreshes the three other native reads in parallel, with a
+shared 1.5-second deadline and a 30-second cadence. It does not require a player
+to have opened those tabs previously. Failed or malformed reads retain only the
+last genuine observation; missing metadata is never replaced with invented defaults.
 While sleeping, Status reports zero connected players and tick rate, a paused world,
 and a localized suspended/Join label on the last observed active session. It does
 not invent a world when the last native state had none. These are historical game
@@ -67,8 +71,11 @@ The exact Coffee Stain `JoinGameRequest` is recognized separately from polling.
 A strictly formed player join request can request wake even without a cached
 session; this is an intent classification, not authentication. As with Minecraft
 Login Start, the existing core admits/coalesces the start before the game backend
-authenticates the player. The HTTPS request waits up to 25 seconds for readiness
-before being forwarded unchanged. Application tokens, malformed requests, polling
+authenticates the player. The HTTPS request waits within the existing Core TCP idle budget for readiness
+before being forwarded unchanged. Pending reads during an already authorized
+startup follow the same bounded wait without requesting wake or extending idle
+activity. A sleeping-to-waking transition during offline authentication discards
+the stopped-instance result and forwards the original request only after readiness. Application tokens, malformed requests, polling
 and arbitrary TCP/UDP traffic never trigger wake. The backend alone validates the
 original credential and issues the multiplayer ticket; a rejected credential is
 forwarded as a rejection, never converted into a successful join.
@@ -403,7 +410,7 @@ The implementation was checked against a ledger-proven isolated dedicated server
   accepted by native VerifyAuthenticationToken and QueryServerState.
 - No-player, distinct Steam identities and both Epic identifier cases interoperate;
   player/privilege changes and tampered signatures are rejected.
-- Native Client can read all three retained functions. No session enumeration or
+- Native Client can read all three retained functions. Session enumeration additionally requires native Administrator scope; no
   administrative mutation is exposed through the offline endpoint.
 - Changing native client and administrator passwords revokes the previous tokens;
   new tokens interoperate, including Unicode passwords. Original native settings
@@ -446,3 +453,50 @@ setup is distinct from authentication; no Owner game files were changed to bypas
 it. Full Join acceptance requires a real loaded world and subsequent automatic
 sleep. Private native test credentials/settings were restored and its backend
 stopped. Historical per-function observation times are retained independently.
+
+## Native Server Manager selection and startup follow-up
+
+The Owner's next test exposed an uncached Administrator EnumerateSessions request
+on server selection, producing503 while Status remained visible. Native save
+enumeration can use gzip; its original compressed response had previously been
+forwarded but excluded from cache capture. The Gateway now observes bounded gzip
+and deflate JSON while forwarding the exact original bytes. Expanded observations
+are capped64KiB, schema-checked, encrypted and served only after fresh native
+Administrator verification. A valid Client receives403 insufficient_scope. Actual
+ledger-owned native-server enumeration passed both identity and gzip with the
+expected session/header fields. That test instance was stopped with host proof.
+
+The observed first cold Join took roughly43seconds to reach readiness, beyond the
+former25-second wait. The independent cutoff is removed. Pending requests are
+bounded at8/connection,64/server and128/process, with64KiB body limits and prompt
+cleanup on close, abort, revoked authority or forbidden mode. Native authentication
+and tickets still come from their respective verified authority; no pending ticket
+is invented. Controlled HTTPS tests cross43seconds and preserve the original
+request; real client timeout policy remains outside Gateway control.
+
+Satisfactory now opts into the existing provider-running **startup hint** to
+schedule priority native probes. It does not declare provider-running as a
+readiness source: UDP readiness, Reliable TCP and all authority checks remain.
+Idle/player RPCs are skipped only while waking, since they cannot authorize sleep
+then; fresh authenticated player observations resume online.
+
+The Owner reported that a subsequent Join reached the game and was rejected by
+their client mods, an expected separate compatibility issue. During development,
+API source reloads also produced transient lease interruptions; final verification
+uses stable services. Public offline checks passed native Admin enumeration200,
+Client enumeration403, token verification204 and state/options200 with zero new
+starts. A missing Advanced settings observation discovered in that check motivated
+the proactive metadata refresh above. The Owner then retried Join: the real
+backend supplied all four snapshots, including Advanced settings, and the Gateway
+forwarded Join at18:44:57UTC after the successful readiness report at18:44:53UTC.
+This confirms routing and metadata acquisition; it does not assert which native
+client request/retry remained open or that the mod-mismatched client played.
+
+After the Owner-triggered retry and confirmed automatic sleep at18:46:40UTC,
+public TLS validation passed Health200, native Login200, Verify204,
+QueryServerState/GetServerOptions/GetAdvancedGameSettings200, and native Admin
+EnumerateSessions200. A Client token was correctly refused enumeration403 and an
+invalid token401. The backend remained offline with zero additional start jobs.
+Final validation:316 targeted tests,68 API integration tests, TypeScript/runtime
+build and changed-file lint pass; independent reviews passed the authority,
+compression, concurrency and readiness changes.

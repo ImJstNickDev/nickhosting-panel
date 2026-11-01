@@ -95,6 +95,12 @@ export function createSatisfactoryGatewayAdapter(
     context: GatewayProtocolContext,
   ): Promise<import('@nickhosting/game-sdk').GatewayProtocolObservation> {
     prune();
+    // Startup readiness still comes from the actual native probes. Player-idle
+    // sampling cannot authorize sleep during waking and would delay readiness.
+    if (context.route.mode === 'waking') {
+      applicationSamples.delete(context.route.serverId);
+      return { ready: true };
+    }
     if (context.route.protocol?.role === 'game' && context.route.public.transport === 'udp') {
       applicationSamples.delete(context.route.serverId);
       try {
@@ -132,6 +138,7 @@ export function createSatisfactoryGatewayAdapter(
   }
   const adapter: GatewayProtocolAdapter = {
     id: 'satisfactory',
+    startupHint: 'provider_running',
     managesTcpActivity: true,
     managesTcpForwarding: true,
     isStatusDatagram(input, direction) {

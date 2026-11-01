@@ -81,6 +81,18 @@ export class SatisfactoryApi {
     if (!result.success) throw new DomainError('integration_unavailable');
     return result.data;
   }
+  /** Native Administrator-scoped metadata; the offline snapshot boundary applies
+   * the complete versioned session/header schema before retaining this result. */
+  async sessions(signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return z
+      .record(z.string(), z.unknown())
+      .parse(await this.call('EnumerateSessions', undefined, signal));
+  }
+  async advancedSettings(signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return z
+      .record(z.string(), z.unknown())
+      .parse(await this.call('GetAdvancedGameSettings', undefined, signal));
+  }
   async applyOptions(options: Record<string, string>, signal?: AbortSignal): Promise<void> {
     const parsed = z.record(z.string().min(1).max(256), z.string().max(4096)).parse(options);
     if (Object.keys(parsed).length > 128) throw new DomainError('validation_failed');

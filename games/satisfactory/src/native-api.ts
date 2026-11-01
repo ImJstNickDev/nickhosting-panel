@@ -17,6 +17,7 @@ const operations = new Set([
   'QueryServerState',
   'GetServerOptions',
   'GetAdvancedGameSettings',
+  'EnumerateSessions',
 ]);
 export function supportsNativeOfflineOperation(operation: string): boolean {
   return operations.has(operation);
@@ -103,11 +104,15 @@ export function handleNativeOfflineApi(
     };
   }
   const authorization = request.authorization;
-  if (
-    !authorization?.startsWith('Bearer ') ||
-    !verifyNativeAuthenticationToken(credentials, authorization.slice(7), 'Client', player)
-  )
-    return failure('invalid_token', 401);
+  const privilege = authorization?.startsWith('Bearer ')
+    ? verifyNativeAuthenticationToken(credentials, authorization.slice(7), 'Client', player)
+    : undefined;
+  if (!privilege) return failure('invalid_token', 401);
+  // The native save controller requires Administrator even though enumeration
+  // is read-only. Validate the token before checking scope, without consulting
+  // historical observations for either authentication or authorization.
+  if (request.operation === 'EnumerateSessions' && privilege !== 'Administrator')
+    return failure('insufficient_scope', 403);
   const snapshot = readSnapshot(request.operation);
   return snapshot ? { status: 200, body: snapshot } : failure('server_unavailable', 503);
 }

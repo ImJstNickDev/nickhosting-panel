@@ -479,6 +479,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         .acceptTcp(socket, {
           route,
           signal: controller.signal,
+          backendWaitTimeoutMs: policy.tcpIdleTimeoutMs,
           onApiDiagnostic: (event) => {
             if (!valid()) return;
             const mode = responseMode(listener);

@@ -1,10 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { setMaxListeners } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer as createHttpsServer, request } from 'node:https';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { connect as connectTls } from 'node:tls';
+import { gzipSync } from 'node:zlib';
 import type { GatewayTcpContext } from '@nickhosting/game-sdk';
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { SatisfactoryHttpsCache } from './https-cache.js';
@@ -40,6 +43,388 @@ beforeAll(() => {
   };
 });
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
+
+async function pendingFixture(id: string, budget = 300000) {
+  const received: Array<{ body: string; authorization: string | undefined }> = [];
+  const backend = createHttpsServer(
+    { key: identity.privateKeyPem, cert: identity.certificatePem },
+    (req, res) => {
+      let body = '';
+      req.on('data', (part) => {
+        body += part;
+      });
+      req.on('end', () => {
+        received.push({ body, authorization: req.headers.authorization });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"data":{"nativeResult":"unchanged-backend-response"}}');
+      });
+    },
+  );
+  await new Promise<void>((resolve) => backend.listen(0, '127.0.0.1', resolve));
+  const backendAddress = backend.address();
+  if (!backendAddress || typeof backendAddress === 'string') throw new Error('bind');
+  const controller = new AbortController();
+  const state = { online: false, mode: 'waking' };
+  const wake = vi.fn(async () => 'waking');
+  const beginActivity = vi.fn(() => vi.fn());
+  const offline = vi.fn();
+  const context = {
+    tlsIdentity: async () => identity,
+    signal: controller.signal,
+    canForward: () => state.online,
+    mode: () => state.mode,
+    requestWake: wake,
+    beginActivity,
+    requestOfflineApi: offline,
+    backendWaitTimeoutMs: budget,
+    route: { serverId: id, backend: { address: '127.0.0.1', port: backendAddress.port } },
+  } as unknown as GatewayTcpContext;
+  const gateway = createServer((socket) => {
+    void acceptSatisfactoryHttps(socket, context);
+  });
+  await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  const address = gateway.address();
+  if (!address || typeof address === 'string') throw new Error('bind');
+  return {
+    port: address.port,
+    state,
+    wake,
+    beginActivity,
+    offline,
+    received,
+    controller,
+    close: async () => {
+      controller.abort();
+      await new Promise<void>((resolve) => gateway.close(() => resolve()));
+      await new Promise<void>((resolve) => backend.close(() => resolve()));
+    },
+  };
+}
+
+it('keeps the original Join alive beyond 25 seconds within the existing Core connection budget', async () => {
+  const fixture = await pendingFixture('startup-over-25-seconds');
+  let now = Date.now();
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  try {
+    fixture.state.mode = 'sleeping';
+    let finished = false;
+    const body = '{ "function": "JoinGameRequest", "data": {} }';
+    const pending = exchange(fixture.port, 'JoinGameRequest', playerHeaders, body).then(
+      (result) => {
+        finished = true;
+        return result;
+      },
+    );
+    await vi.waitFor(() => expect(fixture.wake).toHaveBeenCalledTimes(1));
+    fixture.state.mode = 'waking';
+    now += 43000;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(finished).toBe(false);
+    expect(fixture.received).toHaveLength(0);
+    fixture.state.mode = 'online';
+    fixture.state.online = true;
+    expect((await pending).body).toBe('{"data":{"nativeResult":"unchanged-backend-response"}}');
+    expect(fixture.received).toEqual([{ body, authorization: playerAuthorization }]);
+    expect(fixture.beginActivity).toHaveBeenCalledTimes(1);
+  } finally {
+    clock.mockRestore();
+    await fixture.close();
+  }
+});
+
+it('holds passive native requests during an existing wake and forwards without offline auth or activity', async () => {
+  const fixture = await pendingFixture('startup-passive');
+  try {
+    const requests = ['VerifyAuthenticationToken', 'QueryServerState', 'EnumerateSessions'].map(
+      (operation) => exchange(fixture.port, operation, playerHeaders),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(fixture.received).toHaveLength(0);
+    fixture.state.mode = 'online';
+    fixture.state.online = true;
+    expect((await Promise.all(requests)).map((response) => response.status)).toEqual([
+      200, 200, 200,
+    ]);
+    expect(fixture.wake).not.toHaveBeenCalled();
+    expect(fixture.beginActivity).not.toHaveBeenCalled();
+    expect(fixture.offline).not.toHaveBeenCalled();
+  } finally {
+    await fixture.close();
+  }
+});
+
+it.each(['resolved', 'rejected'])(
+  'forwards a passive request after an overlapping wake invalidates its %s offline read',
+  async (outcome) => {
+    const fixture = await pendingFixture(`startup-offline-race-${outcome}`);
+    fixture.state.mode = 'sleeping';
+    fixture.offline.mockImplementation(async () => {
+      fixture.state.mode = 'waking';
+      if (outcome === 'rejected') throw new Error('stopped authority changed');
+      return { status: 200, body: { data: { mustNotReplay: true } } };
+    });
+    try {
+      const pending = exchange(fixture.port, 'QueryServerState', playerHeaders);
+      await vi.waitFor(() => expect(fixture.offline).toHaveBeenCalledTimes(1));
+      expect(fixture.received).toHaveLength(0);
+      fixture.state.mode = 'online';
+      fixture.state.online = true;
+      expect((await pending).body).toBe('{"data":{"nativeResult":"unchanged-backend-response"}}');
+      expect(fixture.wake).not.toHaveBeenCalled();
+      expect(fixture.beginActivity).not.toHaveBeenCalled();
+    } finally {
+      await fixture.close();
+    }
+  },
+);
+
+it.each(['manually_stopped', 'maintenance', 'blocked', 'stopping', 'sleeping'])(
+  'stops a passive startup wait when the route changes to %s',
+  async (mode) => {
+    const fixture = await pendingFixture(`startup-revoked-${mode}`);
+    try {
+      const pending = exchange(fixture.port, 'QueryServerState', playerHeaders);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      fixture.state.mode = mode;
+      expect((await pending).status).toBe(503);
+      expect(fixture.received).toHaveLength(0);
+      expect(fixture.wake).not.toHaveBeenCalled();
+    } finally {
+      await fixture.close();
+    }
+  },
+);
+
+it('honors a shorter Core startup wait budget', async () => {
+  const fixture = await pendingFixture('startup-short-budget', 40);
+  try {
+    expect((await exchange(fixture.port, 'QueryServerState', playerHeaders)).status).toBe(503);
+    expect(fixture.received).toHaveLength(0);
+    expect(fixture.wake).not.toHaveBeenCalled();
+  } finally {
+    await fixture.close();
+  }
+});
+
+it('bounds pipelined waiting requests per connection and releases them when authority changes', async () => {
+  const fixture = await pendingFixture('startup-pipeline');
+  const socket = connectTls({ host: '127.0.0.1', port: fixture.port, rejectUnauthorized: false });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.once('secureConnect', resolve);
+      socket.once('error', reject);
+    });
+    let received = '';
+    socket.on('data', (part) => {
+      received += part.toString('utf8');
+    });
+    const body = '{"function":"QueryServerState"}';
+    const wire = `POST /api/v1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
+    socket.write(wire.repeat(9));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    fixture.state.mode = 'manually_stopped';
+    await vi.waitFor(() => expect([...received.matchAll(/HTTP\/1\.1 (\d+)/g)]).toHaveLength(9));
+    const statuses = [...received.matchAll(/HTTP\/1\.1 (\d+)/g)].map((match) => Number(match[1]));
+    expect(statuses).toEqual([...Array(8).fill(503), 429]);
+    expect(fixture.wake).not.toHaveBeenCalled();
+  } finally {
+    socket.destroy();
+    await fixture.close();
+  }
+});
+
+it('bounds waits across connections for one server and frees capacity when a client disconnects', async () => {
+  const fixture = await pendingFixture('startup-global-capacity');
+  // Production supplies a distinct signal per connection; this fixture shares one.
+  setMaxListeners(0, fixture.controller.signal);
+  const finished = new Map<number, number>();
+  const start = (index: number) => {
+    let resolveResult: (status: number) => void = () => undefined;
+    const result = new Promise<number>((resolve) => {
+      resolveResult = resolve;
+    });
+    const complete = (status: number) => {
+      finished.set(index, status);
+      resolveResult(status);
+    };
+    const req = request(
+      {
+        hostname: '127.0.0.1',
+        port: fixture.port,
+        path: '/api/v1',
+        method: 'POST',
+        rejectUnauthorized: false,
+        agent: false,
+        headers: { 'Content-Type': 'application/json' },
+      },
+      (response) => {
+        response.resume();
+        response.on('end', () => complete(response.statusCode ?? 0));
+      },
+    );
+    req.on('error', () => complete(0));
+    req.end('{"function":"QueryServerState"}');
+    return { req, result };
+  };
+  const pending = Array.from({ length: 65 }, (_, index) => start(index));
+  try {
+    await vi.waitFor(() => expect(finished.size).toBe(1), { timeout: 5000 });
+    expect([...finished.values()]).toEqual([429]);
+    const disconnectIndex = pending.findIndex((_, index) => !finished.has(index));
+    const disconnected = pending[disconnectIndex];
+    if (!disconnected) throw new Error('missing pending request');
+    disconnected.req.destroy();
+    expect(await disconnected.result).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const replacement = start(65);
+    pending.push(replacement);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(finished.has(65)).toBe(false);
+    fixture.state.mode = 'manually_stopped';
+    expect(await replacement.result).toBe(503);
+    const results = await Promise.all(pending.map((request) => request.result));
+    expect(results.filter((status) => status === 429)).toHaveLength(1);
+    expect(fixture.wake).not.toHaveBeenCalled();
+    expect(fixture.beginActivity).not.toHaveBeenCalled();
+  } finally {
+    for (const pendingRequest of pending) pendingRequest.req.destroy();
+    await fixture.close();
+  }
+});
+
+it('caps all pending native requests at 128 across different servers and releases the slots', async () => {
+  const fixtures = await Promise.all(
+    [0, 1, 2].map((index) => pendingFixture(`startup-process-cap-${index}`)),
+  );
+  for (const fixture of fixtures) setMaxListeners(0, fixture.controller.signal);
+  const statuses: number[] = [];
+  const pending = Array.from({ length: 129 }, (_, index) => {
+    const fixture = fixtures[index % fixtures.length];
+    if (!fixture) throw new Error('missing fixture');
+    return exchange(fixture.port, 'QueryServerState').then((response) => {
+      statuses.push(response.status);
+      return response.status;
+    });
+  });
+  try {
+    await vi.waitFor(() => expect(statuses).toHaveLength(1), { timeout: 5000 });
+    expect(statuses).toEqual([429]);
+    for (const fixture of fixtures) fixture.state.mode = 'manually_stopped';
+    const results = await Promise.all(pending);
+    expect(results.filter((status) => status === 503)).toHaveLength(128);
+    const fixture = fixtures[0];
+    if (!fixture) throw new Error('missing fixture');
+    fixture.state.mode = 'waking';
+    let completed = false;
+    const replacement = exchange(fixture.port, 'QueryServerState').then((response) => {
+      completed = true;
+      return response;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(completed).toBe(false);
+    fixture.state.mode = 'manually_stopped';
+    expect((await replacement).status).toBe(503);
+    for (const fixture of fixtures) {
+      expect(fixture.wake).not.toHaveBeenCalled();
+      expect(fixture.beginActivity).not.toHaveBeenCalled();
+    }
+  } finally {
+    for (const fixture of fixtures) fixture.controller.abort();
+    await Promise.allSettled(pending);
+    await Promise.all(fixtures.map((fixture) => fixture.close()));
+  }
+});
+
+it.each(['QueryServerState', 'JoinGameRequest'])(
+  'rejects an oversized %s before reserving a pending slot or requesting wake',
+  async (operation) => {
+    const fixture = await pendingFixture(`startup-oversized-${operation}`);
+    try {
+      const payload = `${' '.repeat(64 * 1024)}{"function":"${operation}"}`;
+      const response = await exchange(fixture.port, operation, playerHeaders, payload);
+      expect(response.status).toBe(413);
+      expect(fixture.wake).not.toHaveBeenCalled();
+      expect(fixture.beginActivity).not.toHaveBeenCalled();
+      expect(fixture.offline).not.toHaveBeenCalled();
+      expect(fixture.received).toHaveLength(0);
+    } finally {
+      await fixture.close();
+    }
+  },
+);
+
+it('captures compressed native session observations while forwarding their original response bytes', async () => {
+  const body = '{"data":{"sessions":[],"currentSessionIndex":-1}}';
+  const compressed = gzipSync(body);
+  const backend = createHttpsServer(
+    { key: identity.privateKeyPem, cert: identity.certificatePem },
+    (req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Content-Encoding': 'gzip',
+          'Content-Length': compressed.length,
+        });
+        res.end(compressed);
+      });
+    },
+  );
+  await new Promise<void>((resolve) => backend.listen(0, '127.0.0.1', resolve));
+  const address = backend.address();
+  if (!address || typeof address === 'string') throw new Error('bind');
+  const controller = new AbortController(),
+    save = vi.fn(async (_state: unknown) => undefined);
+  const context = {
+    tlsIdentity: async () => identity,
+    signal: controller.signal,
+    canForward: () => true,
+    savePrivateState: save,
+    route: {
+      serverId: 'compressed-native-observation',
+      backend: { address: '127.0.0.1', port: address.port },
+    },
+  } as unknown as GatewayTcpContext;
+  const gateway = createServer((socket) => {
+    void acceptSatisfactoryHttps(socket, context);
+  });
+  await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  const publicAddress = gateway.address();
+  if (!publicAddress || typeof publicAddress === 'string') throw new Error('bind');
+  try {
+    const received = await new Promise<{ body: Buffer; encoding: string | undefined }>(
+      (resolve, reject) => {
+        const req = request(
+          {
+            hostname: '127.0.0.1',
+            port: publicAddress.port,
+            path: '/api/v1',
+            method: 'POST',
+            agent: false,
+            rejectUnauthorized: false,
+            headers: { 'Content-Type': 'application/json', ...playerHeaders },
+          },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (chunk) => chunks.push(chunk));
+            res.on('end', () =>
+              resolve({ body: Buffer.concat(chunks), encoding: res.headers['content-encoding'] }),
+            );
+          },
+        );
+        req.on('error', reject);
+        req.end('{"function":"EnumerateSessions"}');
+      },
+    );
+    expect(received).toEqual({ body: compressed, encoding: 'gzip' });
+    await vi.waitFor(() => expect(save).toHaveBeenCalled());
+    expect(JSON.stringify(save.mock.lastCall?.[0])).toContain(JSON.stringify(body));
+  } finally {
+    controller.abort();
+    await new Promise<void>((resolve) => gateway.close(() => resolve()));
+    await new Promise<void>((resolve) => backend.close(() => resolve()));
+  }
+});
 it('authenticates native players and serves protected status while sleeping without any wake', async () => {
   const password = 'Pässword🔐';
   const credentials = {

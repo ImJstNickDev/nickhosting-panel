@@ -23,7 +23,10 @@ import * as satisfactoryApi from '../../../packages/server-management/src/satisf
 import * as nativeCredentials from '../../../packages/server-management/src/satisfactory-native-credentials.js';
 import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
 import { createApp } from './app.js';
-import { persistSatisfactoryOfflineSnapshots } from './gateway-satisfactory-offline.js';
+import {
+  observeSatisfactorySessions,
+  persistSatisfactoryOfflineSnapshots,
+} from './gateway-satisfactory-offline.js';
 
 const policy = {
   enabled: true,
@@ -494,6 +497,123 @@ describe('M3 Core service authentication and managed control plane', () => {
           })
         ).json(),
       ).toEqual({ status: 401, body: { errorCode: 'invalid_token' } });
+    });
+    it('captures native save metadata online and serves it offline only to a verified administrator', async () => {
+      const { input } = await setup();
+      const native = { sessions: [], currentSessionIndex: -1 };
+      const sessions = vi.fn(async () => native);
+      const advancedSettings = vi.fn(async () => ({
+        creativeModeEnabled: false,
+        advancedGameSettings: {},
+      }));
+      const options = vi.fn(async () => ({ serverOptions: {}, pendingServerOptions: {} }));
+      const api = { sessions, advancedSettings, options } as unknown as SatisfactoryApi;
+      const revalidate = vi.fn(async () => undefined);
+      await observeSatisfactorySessions(f.db, codec, route, api, revalidate);
+      expect(sessions).not.toHaveBeenCalled();
+      await observeSatisfactorySessions(f.db, codec, { ...route, mode: 'online' }, api, revalidate);
+      await observeSatisfactorySessions(f.db, codec, { ...route, mode: 'online' }, api, revalidate);
+      expect(sessions).toHaveBeenCalledTimes(1);
+      expect(advancedSettings).toHaveBeenCalledTimes(1);
+      expect(options).toHaveBeenCalledTimes(1);
+      expect(revalidate).toHaveBeenCalledTimes(1);
+      const player = decodeNativePlayerIdentity(playerId);
+      if (!player) throw new Error('fixture');
+      const client = `Bearer ${createNativeAuthenticationToken(credentials, 'Client', player)}`;
+      expect(
+        await (
+          await request(`${prefix()}/offline-api`, {
+            ...input,
+            request: {
+              operation: 'GetAdvancedGameSettings',
+              playerId,
+              authorization: client,
+            },
+          })
+        ).json(),
+      ).toEqual({
+        status: 200,
+        body: { data: { creativeModeEnabled: false, advancedGameSettings: {} } },
+      });
+      for (const privilege of ['Client', 'Administrator'] as const) {
+        const response = await request(`${prefix()}/offline-api`, {
+          ...input,
+          request: {
+            operation: 'EnumerateSessions',
+            playerId,
+            authorization: `Bearer ${createNativeAuthenticationToken(credentials, privilege, player)}`,
+          },
+        });
+        expect(await response.json()).toEqual(
+          privilege === 'Administrator'
+            ? { status: 200, body: { data: native } }
+            : { status: 403, body: { errorCode: 'insufficient_scope' } },
+        );
+      }
+    });
+    it('keeps genuine metadata when one native read fails while persisting successful observations', async () => {
+      await setup();
+      const options = { serverOptions: { Existing: 'yes' }, pendingServerOptions: {} };
+      const advanced = { creativeModeEnabled: false, advancedGameSettings: {} };
+      await persistSatisfactoryOfflineSnapshots(
+        f.db,
+        codec,
+        serverId,
+        [],
+        [
+          { operation: 'GetServerOptions', body: { data: options } },
+          { operation: 'GetAdvancedGameSettings', body: { data: advanced } },
+        ],
+      );
+      const api = {
+        sessions: async () => ({ sessions: [], currentSessionIndex: -1 }),
+        options: async () => {
+          throw new Error('private-error');
+        },
+        advancedSettings: async () => ({ malformed: 'must-not-persist' }),
+      } as unknown as SatisfactoryApi;
+      await observeSatisfactorySessions(
+        f.db,
+        codec,
+        { ...route, mode: 'online' },
+        api,
+        async () => undefined,
+      );
+      const name = `gateway.satisfactory.observations.${serverId}`;
+      const row = await f.db
+        .selectFrom('encrypted_secrets')
+        .select('envelope')
+        .where('name', '=', name)
+        .executeTakeFirstOrThrow();
+      const value = JSON.parse(codec.decrypt(row.envelope, name));
+      expect(value.GetServerOptions.body).toEqual({ data: options });
+      expect(value.GetAdvancedGameSettings.body).toEqual({ data: advanced });
+      expect(value.EnumerateSessions.body).toEqual({
+        data: { sessions: [], currentSessionIndex: -1 },
+      });
+      expect(JSON.stringify(value)).not.toMatch(/private-error|must-not-persist/);
+    });
+    it('never persists enumeration after route revalidation fails', async () => {
+      await setup();
+      const api = {
+        sessions: vi.fn(async () => ({ sessions: [], currentSessionIndex: -1 })),
+      } as unknown as SatisfactoryApi;
+      await observeSatisfactorySessions(
+        f.db,
+        codec,
+        { ...route, mode: 'online' },
+        api,
+        async () => {
+          throw new Error('revoked');
+        },
+      );
+      expect(
+        await f.db
+          .selectFrom('encrypted_secrets')
+          .select('name')
+          .where('name', '=', `gateway.satisfactory.observations.${serverId}`)
+          .executeTakeFirst(),
+      ).toBeUndefined();
     });
     it('rechecks route authority after native reads instead of returning a token for a changed route', async () => {
       const { input, spy, authority } = await setup();

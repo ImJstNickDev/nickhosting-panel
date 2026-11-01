@@ -250,6 +250,24 @@ describe('authenticated Satisfactory player observations', () => {
     adapter.probeReadiness = async () => ({ ready: true });
     return adapter;
   }
+  it('prioritizes startup hints while keeping native readiness and skipping irrelevant waking idle reads', async () => {
+    const adapter = observedAdapter(),
+      c = context(encodeSatisfactoryPoll(1n));
+    const probe = vi.fn(async () => ({ ready: false }));
+    adapter.probeReadiness = probe;
+    c.route = { ...c.route, mode: 'waking' };
+    c.observeApplication = vi.fn(async () => ({ ready: true, idle: true, playerCount: 0 }));
+    expect(adapter.startupHint).toBe('provider_running');
+    expect(adapter.readinessSource).toBeUndefined();
+    expect(await adapter.observe?.(c)).toEqual({ ready: false });
+    probe.mockResolvedValue({ ready: true });
+    expect(await adapter.observe?.(c)).toEqual({ ready: true });
+    expect(await adapter.probeIdle?.(c)).toEqual({ idle: false });
+    expect(c.observeApplication).not.toHaveBeenCalled();
+    c.route = { ...c.route, mode: 'online' };
+    expect(await adapter.observe?.(c)).toEqual({ ready: true, idle: true, playerCount: 0 });
+    expect(c.observeApplication).toHaveBeenCalledTimes(1);
+  });
   it('preserves independent readiness when no application credential or API response exists', async () => {
     const adapter = observedAdapter(),
       c = context(encodeSatisfactoryPoll(1n));

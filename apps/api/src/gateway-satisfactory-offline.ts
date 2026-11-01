@@ -6,6 +6,7 @@ import { gatewaySafetyContext, type ManagementRuntime } from '@nickhosting/serve
 import type { Context, Hono } from 'hono';
 import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
+import type { SatisfactoryApi } from '../../../games/satisfactory/src/api.js';
 import {
   handleNativeOfflineApi,
   supportsNativeOfflineOperation,
@@ -18,12 +19,57 @@ import { readStoppedSatisfactoryCredentials } from '../../../packages/server-man
 import type { Variables } from './app.js';
 
 const nameFor = (serverId: string) => `gateway.satisfactory.observations.${serverId}`;
+const sessionObservations = new Map<string, { generation: string; at: number }>();
+/** The existing online observation captures native read metadata even when no
+ * player opens the relevant tab before idle suspension. Failure supplies no data
+ * and cannot invalidate an independently successful player-count observation. */
+export async function observeSatisfactorySessions(
+  db: Kysely<Database>,
+  codec: SecretCodec,
+  route: GatewayRoute,
+  api: SatisfactoryApi,
+  revalidate: () => Promise<unknown>,
+): Promise<void> {
+  if (route.mode !== 'online') return;
+  const previous = sessionObservations.get(route.serverId);
+  if (previous?.generation === route.generation && Date.now() - previous.at < 30000) return;
+  if (sessionObservations.size >= 1024) {
+    const first = sessionObservations.keys().next().value;
+    if (first) sessionObservations.delete(first);
+  }
+  sessionObservations.set(route.serverId, { generation: route.generation, at: Date.now() });
+  try {
+    const signal = AbortSignal.timeout(1500);
+    const operations = [
+      'EnumerateSessions',
+      'GetServerOptions',
+      'GetAdvancedGameSettings',
+    ] as const;
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() => api.sessions(signal)),
+      Promise.resolve().then(() => api.options(signal)),
+      Promise.resolve().then(() => api.advancedSettings(signal)),
+    ]);
+    await revalidate();
+    const observations = results.flatMap((result, index) =>
+      result.status === 'fulfilled'
+        ? [{ operation: operations[index] as string, body: { data: result.value } }]
+        : [],
+    );
+    if (observations.length)
+      await persistSatisfactoryOfflineSnapshots(db, codec, route.serverId, [], observations);
+  } catch {
+    /* No successful native observation: retain the last genuine snapshot. */
+  }
+}
 export async function persistSatisfactoryOfflineSnapshots(
   db: Kysely<Database>,
   codec: SecretCodec,
   serverId: string,
   cache: unknown,
-  nativeObservation?: { operation: string; body: Record<string, unknown> },
+  nativeObservation?:
+    | { operation: string; body: Record<string, unknown> }
+    | Array<{ operation: string; body: Record<string, unknown> }>,
 ): Promise<void> {
   const name = nameFor(serverId);
   await db.transaction().execute(async (transaction) => {
@@ -39,12 +85,14 @@ export async function persistSatisfactoryOfflineSnapshots(
       old ? JSON.parse(codec.decrypt(old.envelope, name)) : {},
       cache,
     );
-    if (nativeObservation)
+    for (const entry of nativeObservation
+      ? Array.isArray(nativeObservation)
+        ? nativeObservation
+        : [nativeObservation]
+      : [])
       Object.assign(
         next,
-        readOfflineSnapshots({
-          [nativeObservation.operation]: { observedAt: Date.now(), body: nativeObservation.body },
-        }),
+        readOfflineSnapshots({ [entry.operation]: { observedAt: Date.now(), body: entry.body } }),
       );
     if (!Object.keys(next).length) return;
     const envelope = codec.encrypt(JSON.stringify(next), name);
@@ -110,7 +158,7 @@ export function registerSatisfactoryOfflineApi(
     );
     // Upgrade observations from the existing private Gateway cache without
     // carrying over its old bearer-token-based authorization heuristic.
-    if (!stored) {
+    if (!snapshots[input.data.request.operation]) {
       const cacheName = `gateway.satisfactory.cache.${selected.serverId}`;
       const cache = await db
         .selectFrom('encrypted_secrets')
@@ -118,7 +166,10 @@ export function registerSatisfactoryOfflineApi(
         .where('name', '=', cacheName)
         .executeTakeFirst();
       if (cache)
-        snapshots = mergeOfflineSnapshots({}, JSON.parse(codec.decrypt(cache.envelope, cacheName)));
+        snapshots = mergeOfflineSnapshots(
+          snapshots,
+          JSON.parse(codec.decrypt(cache.envelope, cacheName)),
+        );
     }
     const result = handleNativeOfflineApi(
       authority.credentials,

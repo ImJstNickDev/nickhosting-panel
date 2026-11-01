@@ -48,3 +48,64 @@ it('uses the response observation time instead of another function refreshing it
     mergeOfflineSnapshots(old, [{ ...entry, observedAt: { GetServerOptions: 10000 } }]),
   ).toEqual(old);
 });
+
+it('retains actual native save metadata, strips unrelated fields and preserves observed empty collections', () => {
+  const header = {
+    saveVersion: 51,
+    buildVersion: 513885,
+    saveName: 'Synthetic_autosave_0',
+    saveLocationInfo: 'SLI_Server',
+    mapName: 'SyntheticMap',
+    mapOptions: '',
+    sessionName: 'Synthetic',
+    playDurationSeconds: 15,
+    saveDateTime: '2026-11-01T12:00:00.000Z',
+    isModdedSave: false,
+    isEditedSave: false,
+    isCreativeModeEnabled: false,
+  };
+  const body = {
+    data: {
+      sessions: [{ sessionName: 'Synthetic', saveHeaders: [header] }],
+      currentSessionIndex: 0,
+    },
+  };
+  const input = {
+    data: {
+      ...body.data,
+      unrelated: 'private',
+      sessions: [
+        {
+          ...body.data.sessions[0],
+          privateField: 'excluded',
+          saveHeaders: [{ ...header, serverSecret: 'excluded' }],
+        },
+      ],
+    },
+    extra: 'excluded',
+  };
+  expect(mergeOfflineSnapshots({}, cache(input, 10000, 'EnumerateSessions'))).toEqual({
+    EnumerateSessions: { observedAt: 10000, body },
+  });
+  const empty = { data: { sessions: [], currentSessionIndex: -1 } };
+  expect(mergeOfflineSnapshots({}, cache(empty, 10000, 'EnumerateSessions'))).toEqual({
+    EnumerateSessions: { observedAt: 10000, body: empty },
+  });
+  for (const invalid of [
+    { data: { sessions: [], currentSessionIndex: 0 } },
+    { data: { sessions: [], currentSessionIndex: -2 } },
+    {
+      data: { sessions: [{ sessionName: 'Synthetic', saveHeaders: [{}] }], currentSessionIndex: 0 },
+    },
+    {
+      data: {
+        ...body.data,
+        sessions: [
+          { sessionName: 'Synthetic', saveHeaders: [{ ...header, saveLocationInfo: 'Unknown' }] },
+        ],
+      },
+    },
+    { errorCode: 'enumerate_sessions_failed' },
+  ])
+    expect(mergeOfflineSnapshots({}, cache(invalid, 10000, 'EnumerateSessions'))).toEqual({});
+});

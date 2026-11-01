@@ -344,6 +344,8 @@ export interface GatewayProtocolSession {
 /** Trusted game code. Implementations must distinguish real protocol readiness
  * and player idleness; an open socket or no Gateway traffic proves neither. */
 export interface GatewayTcpContext extends GatewayProtocolContext {
+  /** Existing Core TCP idle policy bounds managed requests waiting for readiness. */
+  backendWaitTimeoutMs?: number;
   /** Native game authentication and authorized reads against protected stopped
    * instance state. This hook must never initiate a backend start. */
   requestOfflineApi?(request: GatewayOfflineApiRequest): Promise<GatewayOfflineApiResponse>;

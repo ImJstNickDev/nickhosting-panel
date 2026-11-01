@@ -42,3 +42,12 @@ it('does not interpret malformed state or a failed health check as ready', async
   await expect(api.state()).rejects.toThrow();
   expect(await api.health()).toBe(false);
 });
+it('requests native save enumeration through the existing authenticated transport', async () => {
+  const data = { sessions: [], currentSessionIndex: -1 };
+  const request = vi.fn().mockResolvedValue({ data });
+  const api = new SatisfactoryApi({ request });
+  expect(await api.sessions()).toEqual(data);
+  expect(request).toHaveBeenCalledWith({ function: 'EnumerateSessions' }, undefined);
+  request.mockResolvedValueOnce({ errorCode: 'insufficient_scope' });
+  await expect(api.sessions()).rejects.toThrow();
+});

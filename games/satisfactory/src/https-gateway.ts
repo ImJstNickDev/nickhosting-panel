@@ -4,7 +4,11 @@ import { createServer, request } from 'node:https';
 import { isIP, type Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { TLSSocket } from 'node:tls';
-import { type GatewayTcpContext, gatewayOfflineApiRequestSchema } from '@nickhosting/game-sdk';
+import {
+  type GatewayOfflineApiResponse,
+  type GatewayTcpContext,
+  gatewayOfflineApiRequestSchema,
+} from '@nickhosting/game-sdk';
 import { z } from 'zod';
 import {
   SatisfactoryHttpsCache,
@@ -12,11 +16,15 @@ import {
   satisfactoryJoinFunction,
   satisfactoryPlayerCredential,
 } from './https-cache.js';
+import { captureSatisfactoryResponseBody } from './https-cache-response.js';
 import { supportsNativeOfflineOperation } from './native-api.js';
 
 const caches = new Map<string, SatisfactoryHttpsCache>();
 const writes = new Map<string, Promise<void>>();
 const hydration = new WeakMap<SatisfactoryHttpsCache, Promise<void>>();
+const pendingByServer = new Map<string, number>();
+let totalPendingRequests = 0;
+const maxPendingBodyBytes = 64 * 1024;
 const offlineLimits = new Map<string, { since: number; requests: number; passwords: number }>();
 function permitOffline(serverId: string, peer: string, password: boolean): boolean {
   const key = JSON.stringify([serverId, peer]),
@@ -202,6 +210,75 @@ export async function acceptSatisfactoryHttps(
     });
   };
   const activeRequests = new WeakSet<ServerResponse>();
+  let pendingRequests = 0;
+  function reservePending(outgoing: ServerResponse): (() => void) | undefined {
+    const id = context.route?.serverId ?? '';
+    const count = pendingByServer.get(id) ?? 0;
+    if (totalPendingRequests >= 128 || pendingRequests >= 8 || count >= 64) return undefined;
+    totalPendingRequests++;
+    pendingRequests++;
+    pendingByServer.set(id, count + 1);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      totalPendingRequests--;
+      pendingRequests--;
+      const remaining = (pendingByServer.get(id) ?? 1) - 1;
+      if (remaining > 0) pendingByServer.set(id, remaining);
+      else pendingByServer.delete(id);
+      outgoing.off('close', release);
+      context.signal.removeEventListener('abort', release);
+    };
+    outgoing.once('close', release);
+    context.signal.addEventListener('abort', release, { once: true });
+    return release;
+  }
+  async function waitForBackend(outgoing: ServerResponse, acceptedWake = false): Promise<boolean> {
+    const budget = context.backendWaitTimeoutMs ?? 30000;
+    if (!Number.isSafeInteger(budget) || budget <= 0) return false;
+    const deadline = Date.now() + budget;
+    const disconnected = new AbortController();
+    const disconnect = () => disconnected.abort();
+    outgoing.once('close', disconnect);
+    const signal = AbortSignal.any([context.signal, disconnected.signal]);
+    let awaitingWakeSnapshot = acceptedWake;
+    try {
+      while (
+        !context.canForward() &&
+        Date.now() < deadline &&
+        !signal.aborted &&
+        !outgoing.destroyed
+      ) {
+        const mode = context.mode?.() ?? 'waking';
+        if (mode === 'waking' || mode === 'online') awaitingWakeSnapshot = false;
+        else if (!(mode === 'sleeping' && awaitingWakeSnapshot)) return false;
+        await delay(Math.min(100, Math.max(1, deadline - Date.now())), undefined, { signal });
+      }
+      return !signal.aborted && !outgoing.destroyed && context.canForward();
+    } catch {
+      return false;
+    } finally {
+      outgoing.off('close', disconnect);
+    }
+  }
+  async function forwardWhenReady(
+    incoming: IncomingMessage,
+    outgoing: ServerResponse,
+    body: Buffer,
+    fn: string,
+  ): Promise<void> {
+    if (context.signal.aborted || outgoing.destroyed) return;
+    if (body.length > maxPendingBodyBytes) return error(outgoing, 413);
+    const release = reservePending(outgoing);
+    if (!release) return error(outgoing, 429);
+    try {
+      if (await waitForBackend(outgoing)) forward(incoming, outgoing, body, fn);
+      else error(outgoing);
+    } finally {
+      release();
+    }
+  }
   function reserveActivity(outgoing: ServerResponse): boolean {
     if (activeRequests.has(outgoing) || !context.beginActivity) return true;
     const release = context.beginActivity();
@@ -258,10 +335,23 @@ export async function acceptSatisfactoryHttps(
       forward(incoming, outgoing, body, fn);
       return;
     }
+    // Do not retain a large request while waiting for a stopped or starting
+    // backend. Online streams retain their existing forwarding behavior.
+    if (body.length > maxPendingBodyBytes) return error(outgoing, 413);
     if (fn === 'HealthCheck') {
       diagnostic(fn, 'health');
       outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       outgoing.end(JSON.stringify({ data: { health: 'slow', serverCustomData: '' } }));
+      return;
+    }
+    // Startup is already authorized. These passive requests wait for the real
+    // backend without starting it, extending activity, or reusing stopped keys.
+    if (
+      fn &&
+      supportsNativeOfflineOperation(fn) &&
+      ['waking', 'online'].includes(context.mode?.() ?? '')
+    ) {
+      await forwardWhenReady(incoming, outgoing, body, fn);
       return;
     }
     if (fn && supportsNativeOfflineOperation(fn) && context.requestOfflineApi) {
@@ -277,7 +367,20 @@ export async function acceptSatisfactoryHttps(
         error(outgoing, 429);
         return;
       }
-      const response = await context.requestOfflineApi(request);
+      let response: GatewayOfflineApiResponse;
+      try {
+        response = await context.requestOfflineApi(request);
+      } catch (failure) {
+        if (!context.signal.aborted && ['waking', 'online'].includes(context.mode())) {
+          await forwardWhenReady(incoming, outgoing, body, fn);
+          return;
+        }
+        throw failure;
+      }
+      if (!context.signal.aborted && ['waking', 'online'].includes(context.mode())) {
+        await forwardWhenReady(incoming, outgoing, body, fn);
+        return;
+      }
       if (context.signal.aborted || outgoing.destroyed || context.mode() !== 'sleeping')
         return error(outgoing);
       diagnostic(fn, 'native');
@@ -301,29 +404,24 @@ export async function acceptSatisfactoryHttps(
       error(outgoing);
       return;
     }
+    const releasePending = reservePending(outgoing);
+    if (!releasePending) return error(outgoing, 429);
     if (!reserveActivity(outgoing)) {
+      releasePending();
       error(outgoing);
       return;
     }
-    const mode = await context.requestWake();
-    diagnostic(fn, 'wake_result');
-    if (!['waking', 'online'].includes(mode)) {
-      error(outgoing);
-      return;
+    try {
+      const mode = await context.requestWake();
+      diagnostic(fn, 'wake_result');
+      if (!['waking', 'online'].includes(mode) || !(await waitForBackend(outgoing, true))) {
+        error(outgoing);
+        return;
+      }
+      forward(incoming, outgoing, body, fn);
+    } finally {
+      releasePending();
     }
-    const deadline = Date.now() + 25000;
-    while (
-      !context.canForward() &&
-      Date.now() < deadline &&
-      !context.signal.aborted &&
-      !outgoing.destroyed
-    )
-      await delay(100, undefined, { signal: context.signal });
-    if (!context.canForward() || outgoing.destroyed) {
-      error(outgoing);
-      return;
-    }
-    forward(incoming, outgoing, body, fn);
   }
   function forward(
     incoming: IncomingMessage,
@@ -390,11 +488,7 @@ export async function acceptSatisfactoryHttps(
             cache.clear();
             persist();
           }
-          const capture =
-            fn &&
-            satisfactoryCachedFunctions.has(fn) &&
-            status === 200 &&
-            !response.headers['content-encoding'];
+          const capture = fn && satisfactoryCachedFunctions.has(fn) && status === 200;
           const parts: Buffer[] = [];
           let length = 0;
           if (capture) {
@@ -403,14 +497,22 @@ export async function acceptSatisfactoryHttps(
               if (length <= 262144) parts.push(chunk);
             });
             response.on('end', () => {
-              if (length <= 262144)
-                cache.remember(
-                  fn,
-                  header(incoming, 'authorization'),
-                  header(incoming, 'x-factorygame-playerid'),
-                  Buffer.concat(parts).toString('utf8'),
-                );
-              persist();
+              if (length > 262144) return;
+              void captureSatisfactoryResponseBody(
+                Buffer.concat(parts),
+                response.headers['content-encoding'],
+              )
+                .then((captured) => {
+                  if (captured === undefined) return;
+                  cache.remember(
+                    fn,
+                    header(incoming, 'authorization'),
+                    header(incoming, 'x-factorygame-playerid'),
+                    captured,
+                  );
+                  persist();
+                })
+                .catch(() => undefined);
             });
           }
           outgoing.writeHead(status, response.headers);

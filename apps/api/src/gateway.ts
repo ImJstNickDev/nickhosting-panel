@@ -38,6 +38,7 @@ import { resolveSatisfactoryApi } from '../../../packages/server-management/src/
 import type { Variables } from './app.js';
 import { gatewayClientFeatures, gatewayPresentationForClient } from './gateway-presentation.js';
 import {
+  observeSatisfactorySessions,
   persistSatisfactoryOfflineSnapshots,
   registerSatisfactoryOfflineApi,
 } from './gateway-satisfactory-offline.js';
@@ -477,6 +478,7 @@ export function registerGatewayRoutes(
       operation: 'QueryServerState',
       body: { data: { serverGameState: state } },
     });
+    await observeSatisfactorySessions(db, codec, selected, api, () => route(parsed.data));
     return c.json({
       ready: true,
       idle: state.numConnectedPlayers === 0,

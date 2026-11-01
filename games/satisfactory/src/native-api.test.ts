@@ -198,6 +198,56 @@ describe('native offline API authentication', () => {
     }
   });
 
+  it('requires native Administrator scope for save enumeration without weakening other reads', () => {
+    expect(supportsNativeOfflineOperation('EnumerateSessions')).toBe(true);
+    const observed = { data: { sessions: [], currentSessionIndex: -1 } };
+    const read = vi.fn(() => observed);
+    const input = request('EnumerateSessions');
+    expect(
+      handleNativeOfflineApi(
+        credentials,
+        {
+          ...input,
+          authorization: `Bearer ${token()}`,
+        },
+        read,
+      ),
+    ).toEqual({ status: 403, body: { errorCode: 'insufficient_scope' } });
+    expect(
+      handleNativeOfflineApi(
+        credentials,
+        {
+          ...input,
+          authorization: 'Bearer invalid',
+        },
+        read,
+      ),
+    ).toEqual({ status: 401, body: { errorCode: 'invalid_token' } });
+    expect(read).not.toHaveBeenCalled();
+    const admin = { ...input, authorization: `Bearer ${token(credentials, 'Administrator')}` };
+    expect(handleNativeOfflineApi(credentials, admin, read)).toEqual({
+      status: 200,
+      body: observed,
+    });
+    expect(read).toHaveBeenCalledExactlyOnceWith('EnumerateSessions');
+    expect(handleNativeOfflineApi(credentials, admin, () => undefined)).toEqual({
+      status: 503,
+      body: { errorCode: 'server_unavailable' },
+    });
+    read.mockClear();
+    expect(
+      handleNativeOfflineApi(credentials, { ...admin, playerId: '060102030405060709' }, read),
+    ).toEqual({ status: 401, body: { errorCode: 'invalid_token' } });
+    expect(
+      handleNativeOfflineApi(
+        { ...credentials, adminPassword: password('replacement', '04'.repeat(32)) },
+        admin,
+        read,
+      ),
+    ).toEqual({ status: 401, body: { errorCode: 'invalid_token' } });
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it('never borrows another player authorization, stale-password token, or invents missing observations', () => {
     const read = vi.fn(() => snapshot);
     const authorized = { ...request('QueryServerState'), authorization: `Bearer ${token()}` };
