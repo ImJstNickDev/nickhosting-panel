@@ -1105,6 +1105,173 @@ describe('persistent Gateway fixture forwarding', () => {
     await closed;
     expect(client.destroyed).toBe(true);
   });
+  it('keeps opted-in online UDP polling active until reported, without counting probes or backend replies', async () => {
+    const backend = await udpFixture();
+    let peer: { port: number; address: string } | undefined;
+    backend.socket.on('message', (bytes, remote) => {
+      if (bytes.toString() !== 'INTERNAL') peer = remote;
+    });
+    const current = route(backend.port, 'udp');
+    let clock = Date.now();
+    current.sleepEligibleAt = new Date(clock + 10000).toISOString();
+    const observe = vi.fn(async () => {
+      const probe = createSocket('udp4');
+      try {
+        const response = once(probe, 'message', { signal: AbortSignal.timeout(1000) });
+        probe.send('INTERNAL', backend.port, '127.0.0.2');
+        await response;
+        return { ready: true, idle: true, playerCount: 0 };
+      } finally {
+        probe.close();
+      }
+    });
+    const f = plane([current], {
+      now: () => clock,
+      protocols: [
+        fixtureProtocol({ clientRequestsPreventIdle: true, isStatusDatagram: () => true, observe }),
+      ],
+    });
+    await f.gateway.applySnapshot(f.snapshot());
+    const client = createSocket('udp4');
+    client.bind(0, '127.0.0.1');
+    await once(client, 'listening');
+    cleanups.push(async () => new Promise<void>((resolve) => client.close(() => resolve())));
+    for (let i = 0; i < 3; i++) {
+      await datagram(backend.port, 'STATUS\n', client);
+      if (i === 0) clock += 10000;
+      await f.gateway.observe();
+      expect(vi.mocked(f.control.reportObservation).mock.calls.at(-1)?.[0]).toMatchObject({
+        idle: false,
+        activeSessions: 0,
+        playerCount: 0,
+        quiescenceUntil: undefined,
+      });
+      expect(f.gateway.health().quiescentServers).toBe(0);
+    }
+    // A status response sent by the backend without another client request is
+    // not activity. Nor is the protocol observation run by the Gateway itself.
+    const reply = once(client, 'message');
+    if (!peer) throw new Error('missing UDP relay');
+    backend.socket.send('STATUS\n', peer.port, peer.address);
+    await reply;
+    await f.gateway.observe();
+    expect(observe).toHaveBeenCalledTimes(4);
+    expect(vi.mocked(f.control.reportObservation).mock.calls.at(-1)?.[0]).toMatchObject({
+      idle: true,
+      activeSessions: 0,
+      playerCount: 0,
+    });
+    expect(f.gateway.health().quiescentServers).toBe(1);
+    expect((await datagram(backend.port, 'STATUS\n', client)).toString()).toBe('stopping\n');
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+  });
+  it('retains completed managed requests through failed reports and traffic during a report', async () => {
+    const backend = await tcpFixture();
+    const current = route(backend.port);
+    let managed: import('@nickhosting/game-sdk').GatewayTcpContext | undefined;
+    const f = plane([current], {
+      protocols: [
+        fixtureProtocol({
+          clientRequestsPreventIdle: true,
+          managesTcpActivity: true,
+          acceptTcp: async (_socket, context) => {
+            managed = context;
+          },
+          observe: async () => ({ ready: true, idle: true, playerCount: 0 }),
+        }),
+      ],
+    });
+    await f.gateway.applySnapshot(f.snapshot());
+    const client = connect({ host: '127.0.0.1', port: backend.port });
+    client.on('error', () => {});
+    cleanups.push(async () => {
+      client.destroy();
+    });
+    await once(client, 'connect');
+    await vi.waitFor(() => expect(managed).toBeDefined());
+    const request = () => {
+      const release = managed?.beginActivity?.();
+      expect(release).toBeTypeOf('function');
+      release?.();
+    };
+    request();
+    const report = vi.mocked(f.control.reportObservation);
+    report.mockRejectedValueOnce(new Error('Core unavailable'));
+    await f.gateway.observe();
+    expect(report.mock.calls.at(-1)?.[0]).toMatchObject({ idle: false, activeSessions: 0 });
+    let completeReport: (() => void) | undefined;
+    report.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          completeReport = resolve;
+        }),
+    );
+    const reporting = f.gateway.observe();
+    await vi.waitFor(() => expect(completeReport).toBeDefined());
+    expect(report.mock.calls.at(-1)?.[0]).toMatchObject({ idle: false, activeSessions: 0 });
+    request();
+    completeReport?.();
+    await reporting;
+    await f.gateway.observe();
+    expect(report.mock.calls.at(-1)?.[0]).toMatchObject({ idle: false, activeSessions: 0 });
+    await f.gateway.observe();
+    expect(report.mock.calls.at(-1)?.[0]).toMatchObject({ idle: true, activeSessions: 0 });
+    // Completion starts a fresh quiet interval even when the start was already reported.
+    const release = managed?.beginActivity?.();
+    await f.gateway.observe();
+    release?.();
+    await f.gateway.observe();
+    expect(report.mock.calls.at(-1)?.[0]).toMatchObject({ idle: false, activeSessions: 0 });
+    await f.gateway.observe();
+    expect(report.mock.calls.at(-1)?.[0]).toMatchObject({ idle: true, activeSessions: 0 });
+  });
+  it.each(['sleeping', 'waking'] as const)(
+    'keeps opted-in %s UDP polling passive',
+    async (mode) => {
+      const backend = await udpFixture();
+      const current = route(backend.port, 'udp', mode);
+      const f = plane([current], {
+        protocols: [
+          fixtureProtocol({
+            clientRequestsPreventIdle: true,
+            observe: async () => ({ ready: true, idle: true, playerCount: 0 }),
+          }),
+        ],
+      });
+      await f.gateway.applySnapshot(f.snapshot());
+      expect((await datagram(backend.port, 'STATUS\n')).toString()).toBe(`${mode}\n`);
+      expect(f.control.requestWake).not.toHaveBeenCalled();
+      await f.gateway.applySnapshot(f.snapshot([{ ...current, mode: 'online', revision: 2 }], 2));
+      await f.gateway.observe();
+      expect(vi.mocked(f.control.reportObservation).mock.calls.at(-1)?.[0]).toMatchObject({
+        idle: true,
+        activeSessions: 0,
+      });
+    },
+  );
+  it('discards request activity when a listener enters a new generation', async () => {
+    const backend = await udpFixture();
+    const current = route(backend.port, 'udp');
+    const f = plane([current], {
+      protocols: [
+        fixtureProtocol({
+          clientRequestsPreventIdle: true,
+          isStatusDatagram: () => true,
+          observe: async () => ({ ready: true, idle: true, playerCount: 0 }),
+        }),
+      ],
+    });
+    await f.gateway.applySnapshot(f.snapshot());
+    await datagram(backend.port, 'STATUS\n');
+    await f.gateway.applySnapshot(
+      f.snapshot([{ ...current, generation: randomUUID(), revision: 2 }], 2),
+    );
+    await f.gateway.observe();
+    expect(vi.mocked(f.control.reportObservation).mock.calls.at(-1)?.[0]).toMatchObject({
+      idle: true,
+      activeSessions: 0,
+    });
+  });
   it('rolls back all staged listeners when a later bind collides', async () => {
     const backend = await tcpFixture();
     const direct = await tcpFixture('127.0.0.1');

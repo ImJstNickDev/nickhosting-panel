@@ -278,12 +278,28 @@ shipping executable is an installation failure. It is not retried indefinitely a
 a provider outage. The normal reinstall action remains available; transient file
 API errors retain their existing recovery behavior.
 
-Online query polling remains transparently forwarded but does not extend gameplay
-activity or keep an otherwise authenticated-idle server awake. Managed HTTPS
-connections remain in the lease/topology revocation set while only active joins
-and mutations count as gameplay work. Query-only UDP relays stay passive; gameplay
-on the same endpoint promotes activity, and later polls cannot renew that activity
-window. New gameplay work is fenced during quiescence.
+Satisfactory automatically suspends only after a world exists and the backend has
+zero players, no active work and no client requests for the configured idle timeout.
+An active world is saved by the existing graceful-stop hook. With no active world,
+each idle observation requires fresh, authenticated `EnumerateSessions` metadata
+containing at least one valid save header. Empty sessions, old session names,
+historical snapshots, unavailable permissions and failed or malformed enumeration
+never authorize sleep. This keeps first-time setup online until a world is created;
+a saved but unloaded world remains eligible for normal idle suspension.
+
+While online, all admitted client UDP requests (including server-list queries) and
+forwarded HTTPS requests (including status, authentication and settings reads)
+prevent idle suspension. Leaving the Server Manager polling the server therefore
+keeps it awake. The Core's optional `clientRequestsPreventIdle` protocol capability
+retains activity between observation ticks until a successful report; requests
+arriving during that report remain pending for the next one. Long HTTPS requests
+also retain the existing active-operation protection. Counts remain actual player
+and session counts; activity is not represented as a fictitious player. Internal
+readiness/application probes and backend responses do not count as client activity.
+Existing quiescence fences still apply to a stop already committed. Sleeping or
+starting query responses remain passive: only Join requests wake, and pending
+reads count as activity only once forwarded to an online backend. Other games
+retain their existing idle policy.
 
 The runtime also coalesces unfinished host-inventory reads and shares one immutable
 host observation across the initial checks of a validation batch. The original
@@ -500,3 +516,24 @@ invalid token401. The backend remained offline with zero additional start jobs.
 Final validation:316 targeted tests,68 API integration tests, TypeScript/runtime
 build and changed-file lint pass; independent reviews passed the authority,
 compression, concurrency and readiness changes.
+
+
+## Setup and client-request idle policy — 2026-11-01
+
+The Owner requested that first-time setup remain online without a created world,
+and that all client requests keep an online server awake. Both rules use the
+existing application observation and Core idle timer, with no schema migration or
+separate scheduler. Client polling while sleeping still never requests a start.
+The gateway protocol capability is enabled only for Satisfactory.
+
+Validation: all 142 Satisfactory unit tests and all 197 Gateway data-plane tests
+pass; 167 isolated Gateway API/orchestration integration tests pass. Coverage
+includes active and unloaded saved worlds, absent/malformed/unavailable save
+metadata, short HTTPS reads between observations, continuous UDP polling, internal
+probes, failed reports, concurrent activity during reporting and listener generation
+changes. Full TypeScript checks, runtime compilation and changed-file Biome pass.
+Independent review found no remaining must-fix issue. The existing development
+API and Gateway were restarted under standing Owner authorization. No migration,
+Blueprint/Panel/Wings change, new game test asset or user server power/file/world
+mutation was needed. This change has automated protocol/control-plane evidence;
+the new keep-awake policy has not yet been observed in a real game-client session.

@@ -44,7 +44,7 @@ beforeAll(() => {
 });
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
 
-async function pendingFixture(id: string, budget = 300000) {
+async function pendingFixture(id: string, budget = 300000, responseGate?: Promise<void>) {
   const received: Array<{ body: string; authorization: string | undefined }> = [];
   const backend = createHttpsServer(
     { key: identity.privateKeyPem, cert: identity.certificatePem },
@@ -53,8 +53,9 @@ async function pendingFixture(id: string, budget = 300000) {
       req.on('data', (part) => {
         body += part;
       });
-      req.on('end', () => {
+      req.on('end', async () => {
         received.push({ body, authorization: req.headers.authorization });
+        if (responseGate) await responseGate;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end('{"data":{"nativeResult":"unchanged-backend-response"}}');
       });
@@ -132,7 +133,7 @@ it('keeps the original Join alive beyond 25 seconds within the existing Core con
   }
 });
 
-it('holds passive native requests during an existing wake and forwards without offline auth or activity', async () => {
+it('holds native reads passively during wake and counts activity only when forwarding online', async () => {
   const fixture = await pendingFixture('startup-passive');
   try {
     const requests = ['VerifyAuthenticationToken', 'QueryServerState', 'EnumerateSessions'].map(
@@ -140,15 +141,52 @@ it('holds passive native requests during an existing wake and forwards without o
     );
     await new Promise((resolve) => setTimeout(resolve, 150));
     expect(fixture.received).toHaveLength(0);
+    expect(fixture.beginActivity).not.toHaveBeenCalled();
     fixture.state.mode = 'online';
     fixture.state.online = true;
     expect((await Promise.all(requests)).map((response) => response.status)).toEqual([
       200, 200, 200,
     ]);
     expect(fixture.wake).not.toHaveBeenCalled();
-    expect(fixture.beginActivity).not.toHaveBeenCalled();
+    expect(fixture.beginActivity).toHaveBeenCalledTimes(3);
     expect(fixture.offline).not.toHaveBeenCalled();
   } finally {
+    await fixture.close();
+  }
+});
+
+it.each([
+  'HealthCheck',
+  'PasswordlessLogin',
+  'PasswordLogin',
+  'VerifyAuthenticationToken',
+  'QueryServerState',
+  'EnumerateSessions',
+  'GetServerOptions',
+  'GetAdvancedGameSettings',
+  'ApplyServerOptions',
+])('holds activity for an online %s until its backend response finishes', async (operation) => {
+  let respond = () => {};
+  const gate = new Promise<void>((resolve) => {
+    respond = resolve;
+  });
+  const fixture = await pendingFixture(`online-activity-${operation}`, 300000, gate);
+  fixture.state.mode = 'online';
+  fixture.state.online = true;
+  const release = vi.fn();
+  fixture.beginActivity.mockReturnValue(release);
+  try {
+    const pending = exchange(fixture.port, operation, playerHeaders);
+    await vi.waitFor(() => expect(fixture.received).toHaveLength(1));
+    expect(fixture.beginActivity).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    expect(fixture.wake).not.toHaveBeenCalled();
+    expect(fixture.offline).not.toHaveBeenCalled();
+    respond();
+    expect((await pending).status).toBe(200);
+    expect(release).toHaveBeenCalled();
+  } finally {
+    respond();
     await fixture.close();
   }
 });
@@ -167,11 +205,12 @@ it.each(['resolved', 'rejected'])(
       const pending = exchange(fixture.port, 'QueryServerState', playerHeaders);
       await vi.waitFor(() => expect(fixture.offline).toHaveBeenCalledTimes(1));
       expect(fixture.received).toHaveLength(0);
+      expect(fixture.beginActivity).not.toHaveBeenCalled();
       fixture.state.mode = 'online';
       fixture.state.online = true;
       expect((await pending).body).toBe('{"data":{"nativeResult":"unchanged-backend-response"}}');
       expect(fixture.wake).not.toHaveBeenCalled();
-      expect(fixture.beginActivity).not.toHaveBeenCalled();
+      expect(fixture.beginActivity).toHaveBeenCalledTimes(1);
     } finally {
       await fixture.close();
     }
@@ -730,7 +769,7 @@ it('does not send an HTTP request to a backend presenting another certificate', 
   }
 });
 
-it('keeps polling passive and obtains join tickets only from the backend', async () => {
+it('counts online polling, keeps offline polling passive and obtains join tickets only from the backend', async () => {
   const authorization = `Bearer ${Buffer.from(JSON.stringify({ pl: 'Client' })).toString('base64')}.${'ab'.repeat(64)}`;
   const seen: string[] = [];
   const backend = createHttpsServer(
@@ -798,7 +837,7 @@ it('keeps polling passive and obtains join tickets only from the backend', async
     expect(wake).not.toHaveBeenCalled();
     expect((await exchange(publicAddress.port, 'JoinGameRequest')).status).toBe(503);
     expect(wake).not.toHaveBeenCalled();
-    expect(beginActivity).not.toHaveBeenCalled();
+    expect(beginActivity).toHaveBeenCalledTimes(1);
     const joined = await exchange(publicAddress.port, 'JoinGameRequest', {
       authorization,
       'X-FactoryGame-PlayerId': '060102',
@@ -806,13 +845,18 @@ it('keeps polling passive and obtains join tickets only from the backend', async
     expect(wake).toHaveBeenCalledTimes(1);
     expect(joined.body).toContain('backend-ticket');
     expect(seen).toEqual(['QueryServerState', 'JoinGameRequest']);
-    expect(beginActivity).toHaveBeenCalledTimes(1);
-    expect(activeRequests).toBe(0);
-    await exchange(publicAddress.port, 'ApplyServerOptions', { authorization });
     expect(beginActivity).toHaveBeenCalledTimes(2);
     expect(activeRequests).toBe(0);
-    online = false;
+    await exchange(publicAddress.port, 'ApplyServerOptions', { authorization });
+    expect(beginActivity).toHaveBeenCalledTimes(3);
+    expect(activeRequests).toBe(0);
     fenced = true;
+    expect((await exchange(publicAddress.port, 'QueryServerState', { authorization })).status).toBe(
+      503,
+    );
+    expect(seen).toEqual(['QueryServerState', 'JoinGameRequest', 'ApplyServerOptions']);
+    expect(activeRequests).toBe(0);
+    online = false;
     expect(
       (
         await exchange(publicAddress.port, 'JoinGameRequest', {

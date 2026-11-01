@@ -51,3 +51,65 @@ it('requests native save enumeration through the existing authenticated transpor
   request.mockResolvedValueOnce({ errorCode: 'insufficient_scope' });
   await expect(api.sessions()).rejects.toThrow();
 });
+
+const savedSession = {
+  sessionName: 'Factory',
+  saveHeaders: [
+    {
+      saveVersion: 1,
+      buildVersion: 513885,
+      saveName: 'Factory_autosave',
+      mapName: 'Persistent_Level',
+      mapOptions: '',
+      sessionName: 'Factory',
+      playDurationSeconds: 100,
+      saveDateTime: '2026-11-01T10:00:00Z',
+      isModdedSave: false,
+      isEditedSave: false,
+      isCreativeModeEnabled: false,
+    },
+  ],
+};
+it('allows an active world to be saved and stopped without requiring an existing save', async () => {
+  const request = vi.fn();
+  const api = new SatisfactoryApi({ request });
+  expect(await api.canAutoSleep(state)).toBe(true);
+  expect(await api.canAutoSleep({ ...state, numConnectedPlayers: 1 })).toBe(false);
+  expect(request).not.toHaveBeenCalled();
+});
+it('checks current saves for an unloaded world and never retains a previous existence result', async () => {
+  const request = vi
+    .fn()
+    .mockResolvedValueOnce({ data: { sessions: [savedSession], currentSessionIndex: -1 } })
+    .mockResolvedValueOnce({ data: { sessions: [], currentSessionIndex: -1 } });
+  const api = new SatisfactoryApi({ request });
+  const unloaded = { ...state, isGameRunning: false };
+  const signal = AbortSignal.timeout(1500);
+  expect(await api.canAutoSleep(unloaded, signal)).toBe(true);
+  expect(await api.canAutoSleep(unloaded, signal)).toBe(false);
+  expect(request).toHaveBeenCalledTimes(2);
+  expect(request).toHaveBeenCalledWith({ function: 'EnumerateSessions' }, signal);
+});
+it.each([
+  { data: { sessions: [], currentSessionIndex: -1 } },
+  { data: { sessions: [{ sessionName: 'Factory', saveHeaders: [] }], currentSessionIndex: 0 } },
+  { data: { sessions: [{ sessionName: 'Factory', saveHeaders: [{}] }], currentSessionIndex: 0 } },
+  { data: { sessions: [savedSession], currentSessionIndex: 1 } },
+  { data: {} },
+  { errorCode: 'insufficient_scope' },
+])('keeps setup online without verified saved headers: %j', async (response) => {
+  const api = new SatisfactoryApi({ request: async () => response });
+  // Even nonempty active/auto-load names are not evidence of an existing world.
+  expect(await api.canAutoSleep({ ...state, isGameRunning: false })).toBe(false);
+});
+it('keeps setup online if enumeration times out or the backend becomes unavailable', async () => {
+  const api = new SatisfactoryApi({
+    request: async (_body, signal) => {
+      signal?.throwIfAborted();
+      throw new Error('Backend unavailable');
+    },
+  });
+  const unloaded = { ...state, isGameRunning: false };
+  expect(await api.canAutoSleep(unloaded, AbortSignal.abort())).toBe(false);
+  expect(await api.canAutoSleep(unloaded)).toBe(false);
+});

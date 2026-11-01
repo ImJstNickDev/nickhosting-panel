@@ -140,6 +140,7 @@ export function createSatisfactoryGatewayAdapter(
     id: 'satisfactory',
     startupHint: 'provider_running',
     managesTcpActivity: true,
+    clientRequestsPreventIdle: true,
     managesTcpForwarding: true,
     isStatusDatagram(input, direction) {
       if (direction === 'client') return decodeSatisfactoryPoll(input) !== undefined;

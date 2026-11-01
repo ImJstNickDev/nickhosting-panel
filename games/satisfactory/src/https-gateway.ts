@@ -344,8 +344,8 @@ export async function acceptSatisfactoryHttps(
       outgoing.end(JSON.stringify({ data: { health: 'slow', serverCustomData: '' } }));
       return;
     }
-    // Startup is already authorized. These passive requests wait for the real
-    // backend without starting it, extending activity, or reusing stopped keys.
+    // Startup is already authorized. Reads remain passive while waiting, then
+    // count as client activity when forwarded to the real backend.
     if (
       fn &&
       supportsNativeOfflineOperation(fn) &&
@@ -429,13 +429,7 @@ export async function acceptSatisfactoryHttps(
     body: Buffer | undefined,
     fn: string | undefined,
   ): void {
-    const passive =
-      fn !== undefined &&
-      (satisfactoryCachedFunctions.has(fn) ||
-        ['HealthCheck', 'VerifyAuthenticationToken', 'PasswordlessLogin', 'PasswordLogin'].includes(
-          fn,
-        ));
-    if (!passive && !reserveActivity(outgoing)) {
+    if (!reserveActivity(outgoing)) {
       error(outgoing);
       return;
     }

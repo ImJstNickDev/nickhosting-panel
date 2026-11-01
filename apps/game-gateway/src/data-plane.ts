@@ -86,6 +86,7 @@ interface Listener {
   managedClients: Set<Socket>;
   passiveClients: Set<Socket>;
   sessions: Map<string, UdpSession>;
+  clientActivity: { version: number; reportedVersion: number };
 }
 
 /** One process owns the hot route cache. There is no Core, SQL or Redis call in
@@ -222,6 +223,17 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       return undefined;
     }
   };
+  const recordClientActivity = (listener: Listener) => {
+    if (
+      active(listener) &&
+      listener.route.mode === 'online' &&
+      listener.backendReady &&
+      !listener.statusOnly &&
+      !quiescence.has(listener.route.serverId) &&
+      protocol(listener.route)?.clientRequestsPreventIdle
+    )
+      listener.clientActivity.version++;
+  };
   const validationPriority = (route: GatewayRoute) => {
     const priority = protocol(route)?.validationPriority?.(route) ?? 0;
     if (!Number.isInteger(priority) || Math.abs(priority) > 1000)
@@ -279,6 +291,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   };
   const clearSessions = (listener: Listener) => {
     listener.tlsIdentity = undefined;
+    listener.clientActivity = { version: 0, reportedVersion: 0 };
     for (const client of listener.clients) client.destroy();
     for (const key of listener.sessions.keys()) dropSession(listener, key);
   };
@@ -531,12 +544,14 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             )
               return undefined;
             activities++;
+            recordClientActivity(listener);
             listener.passiveClients.delete(socket);
             let released = false;
             return () => {
               if (released) return;
               released = true;
               activities--;
+              if (valid()) recordClientActivity(listener);
               if (
                 activities === 0 &&
                 managedHandler.managesTcpActivity &&
@@ -915,6 +930,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       return;
     }
     counters.udpBytesToBackend += message.length;
+    recordClientActivity(listener);
     if (session.connecting) {
       session.queued.push(message);
       session.queuedBytes += message.length;
@@ -929,6 +945,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       managedClients: new Set(),
       passiveClients: new Set(),
       sessions: new Map(),
+      clientActivity: { version: 0, reportedVersion: 0 },
     };
     try {
       if (route.public.transport === 'tcp') {
@@ -1922,25 +1939,36 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           // Equivalent lease renewals must not starve a slower protocol probe.
           // Keep the captured lease/time for this observation and its idle fence;
           // only exactly unchanged route authority may outlive object replacement.
-          const activeSessions = [...listeners.values()]
-            .filter((listener) => listener.route.serverId === anchor.serverId)
-            .reduce(
-              (count, listener) =>
-                count +
-                [...new Set([...listener.forwardingClients, ...listener.managedClients])].filter(
-                  (socket) => !listener.passiveClients.has(socket),
-                ).length +
-                [...listener.sessions.values()].filter(
-                  (session) =>
-                    session.lastGameplayAt !== undefined &&
-                    now() - session.lastGameplayAt < policy.udpIdleTimeoutMs,
-                ).length,
-              0,
-            );
+          const serverListeners = [...listeners.values()].filter(
+            (listener) => listener.route.serverId === anchor.serverId,
+          );
+          // Preserve requests completed between probes, and retain any newer
+          // request arriving while Core commits this observation.
+          const clientActivity = serverListeners.map((listener) => ({
+            state: listener.clientActivity,
+            version: listener.clientActivity.version,
+          }));
+          const recentClientRequests = clientActivity.some(
+            ({ state, version }) => version !== state.reportedVersion,
+          );
+          const activeSessions = serverListeners.reduce(
+            (count, listener) =>
+              count +
+              [...new Set([...listener.forwardingClients, ...listener.managedClients])].filter(
+                (socket) => !listener.passiveClients.has(socket),
+              ).length +
+              [...listener.sessions.values()].filter(
+                (session) =>
+                  session.lastGameplayAt !== undefined &&
+                  now() - session.lastGameplayAt < policy.udpIdleTimeoutMs,
+              ).length,
+            0,
+          );
           const canQuiesce =
             anchor.mode === 'online' &&
             ready &&
             idle &&
+            !recentClientRequests &&
             activeSessions === 0 &&
             anchor.sleepEligibleAt !== undefined &&
             routes.every((route) => route.sleepEligibleAt === anchor.sleepEligibleAt) &&
@@ -1983,7 +2011,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
               wakeJobId: anchor.wakeJobId,
               observedAt,
               ready,
-              idle: ready && idle && activeSessions === 0,
+              idle: ready && idle && activeSessions === 0 && !recentClientRequests,
               quiescenceUntil:
                 quiescenceUntil === undefined ? undefined : new Date(quiescenceUntil).toISOString(),
               playerCount: players.every((count) => count !== undefined)
@@ -2003,6 +2031,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
                   durationMs: Math.round(durationMs),
                 });
             });
+          for (const { state, version } of clientActivity) state.reportedVersion = version;
           if (ready && anchor.mode === 'waking') {
             const applied =
               receipt &&

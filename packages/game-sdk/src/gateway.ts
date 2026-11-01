@@ -370,6 +370,10 @@ export interface GatewayTcpContext extends GatewayProtocolContext {
 }
 
 export interface GatewayProtocolAdapter {
+  /** Online client requests, including polling, reset the idle interval. Managed
+   * TCP adapters must reserve each forwarded request with beginActivity.
+   * Backend probes and offline responses never count as client activity. */
+  readonly clientRequestsPreventIdle?: boolean;
   /** Opt in only when every non-polling managed request uses beginActivity. */
   readonly managesTcpActivity?: boolean;
   /** Opt in only when every upstream stream is registered through beginForwarding.

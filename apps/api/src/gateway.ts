@@ -478,10 +478,14 @@ export function registerGatewayRoutes(
       operation: 'QueryServerState',
       body: { data: { serverGameState: state } },
     });
-    await observeSatisfactorySessions(db, codec, selected, api, () => route(parsed.data));
+    const [idle] = await Promise.all([
+      api.canAutoSleep(state, AbortSignal.timeout(1500)),
+      observeSatisfactorySessions(db, codec, selected, api, () => route(parsed.data)),
+    ]);
+    await route(parsed.data);
     return c.json({
       ready: true,
-      idle: state.numConnectedPlayers === 0,
+      idle,
       playerCount: state.numConnectedPlayers,
     });
   });

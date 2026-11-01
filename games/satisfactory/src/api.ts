@@ -15,6 +15,36 @@ export const satisfactoryGameStateSchema = z.object({
   autoLoadSessionName: z.string(),
 });
 export type SatisfactoryGameState = z.infer<typeof satisfactoryGameStateSchema>;
+// Coffee Stain's FGSaveManagerInterface FSessionSaveStruct/FSaveHeader and
+// FGServerSaveGameController EnumerateSessions response. No world/file data is
+// synthesized from this metadata; consumers still require native Admin scope.
+const saveHeader = z.object({
+  saveVersion: z.number().int().nonnegative().max(2147483647),
+  buildVersion: z.number().int().nonnegative().max(2147483647),
+  saveName: z.string().max(4096),
+  saveLocationInfo: z.enum(['SLI_Default', 'SLI_Common', 'SLI_Server']).optional(),
+  mapName: z.string().max(4096),
+  mapOptions: z.string().max(16384),
+  sessionName: z.string().max(4096),
+  playDurationSeconds: z.number().int().nonnegative().max(2147483647),
+  saveDateTime: z.string().max(128),
+  isModdedSave: z.boolean(),
+  isEditedSave: z.boolean(),
+  isCreativeModeEnabled: z.boolean(),
+});
+export const satisfactorySessionsSchema = z
+  .object({
+    sessions: z
+      .array(
+        z.object({
+          sessionName: z.string().max(4096),
+          saveHeaders: z.array(saveHeader).max(4096),
+        }),
+      )
+      .max(1024),
+    currentSessionIndex: z.number().int().min(-1).max(2147483647),
+  })
+  .refine((value) => value.currentSessionIndex < value.sessions.length);
 export interface SatisfactoryApiTransport {
   /** The caller provides an authenticated, certificate-verified per-server transport. */
   request(
@@ -81,12 +111,25 @@ export class SatisfactoryApi {
     if (!result.success) throw new DomainError('integration_unavailable');
     return result.data;
   }
-  /** Native Administrator-scoped metadata; the offline snapshot boundary applies
-   * the complete versioned session/header schema before retaining this result. */
-  async sessions(signal?: AbortSignal): Promise<Record<string, unknown>> {
-    return z
-      .record(z.string(), z.unknown())
-      .parse(await this.call('EnumerateSessions', undefined, signal));
+  /** Fresh native save metadata, validated with the same schema as offline reads. */
+  async sessions(signal?: AbortSignal): Promise<z.infer<typeof satisfactorySessionsSchema>> {
+    return satisfactorySessionsSchema.parse(
+      await this.call('EnumerateSessions', undefined, signal),
+    );
+  }
+  /** A first-time setup without a world must remain online. Historical names or
+   * snapshots cannot establish that a save still exists on this backend. */
+  async canAutoSleep(state: SatisfactoryGameState, signal?: AbortSignal): Promise<boolean> {
+    if (state.numConnectedPlayers !== 0) return false;
+    // saveAndStop persists an active world before shutdown, even its first save.
+    if (state.isGameRunning) return true;
+    try {
+      const current = await this.sessions(signal);
+      return current.sessions.some((session) => session.saveHeaders.length > 0);
+    } catch {
+      // Unknown world availability vetoes sleep without losing live readiness.
+      return false;
+    }
   }
   async advancedSettings(signal?: AbortSignal): Promise<Record<string, unknown>> {
     return z

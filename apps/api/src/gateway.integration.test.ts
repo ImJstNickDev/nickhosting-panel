@@ -761,9 +761,15 @@ describe('M3 Core service authentication and managed control plane', () => {
     const input = await satisfactoryRoute('udp');
     expect((await request(`${prefix()}/application-observation`, input)).status).toBe(503);
     let players = 3;
+    let gameRunning = true;
+    let enumerationAvailable = true;
     const resolver = vi.spyOn(satisfactoryApi, 'resolveSatisfactoryApi').mockResolvedValue(
       new SatisfactoryApi({
         async request(body, signal) {
+          if (body.function === 'EnumerateSessions') {
+            if (!enumerationAvailable) throw new Error('Enumeration unavailable');
+            return { data: { sessions: [], currentSessionIndex: -1 } };
+          }
           expect(body.function).toBe('QueryServerState');
           expect(signal).toBeInstanceOf(AbortSignal);
           return {
@@ -775,7 +781,7 @@ describe('M3 Core service authentication and managed control plane', () => {
                 techTier: 1,
                 activeSchematic: '',
                 gamePhase: '',
-                isGameRunning: true,
+                isGameRunning: gameRunning,
                 totalGameDuration: 100,
                 isGamePaused: false,
                 averageTickRate: 30,
@@ -793,6 +799,19 @@ describe('M3 Core service authentication and managed control plane', () => {
       expect(await response.json()).toEqual({ ready: true, idle: false, playerCount: 3 });
       expect(resolver).toHaveBeenCalledWith(expect.anything(), codec, serverId);
       players = 0;
+      expect(await (await request(`${prefix()}/application-observation`, input)).json()).toEqual({
+        ready: true,
+        idle: true,
+        playerCount: 0,
+      });
+      gameRunning = false;
+      for (const available of [true, false]) {
+        enumerationAvailable = available;
+        const setup = await request(`${prefix()}/application-observation`, input);
+        expect(setup.status).toBe(200);
+        expect(await setup.json()).toEqual({ ready: true, idle: false, playerCount: 0 });
+      }
+      gameRunning = true;
       expect(await (await request(`${prefix()}/application-observation`, input)).json()).toEqual({
         ready: true,
         idle: true,
