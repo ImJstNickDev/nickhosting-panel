@@ -70,6 +70,7 @@ import {
 import { cachedProviderStartLimits } from './provider-change-feed.js';
 import { supportsProviderFileOperations } from './provider-file-operations.js';
 import { assertGatewaySleepFence, authorizeServer } from './registry.js';
+import { cleanupSatisfactoryModPlans } from './satisfactory-mod-manager.js';
 import { createSatisfactoryModuleRuntime } from './satisfactory-module.js';
 import { authorizeScheduledEffect } from './schedules.js';
 import { createScopedProviderAdapter } from './scoped-provider-adapter.js';
@@ -1188,6 +1189,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     const external = options.reconcileExternal
       ? await options.reconcileExternal(db)
       : await reconcileExternalServices(db, externalOptions);
+    await cleanupSatisfactoryModPlans(db, env);
     await db
       .deleteFrom('server_metrics')
       .where('observed_at', '<', new Date(Date.now() - 30 * 86400000))

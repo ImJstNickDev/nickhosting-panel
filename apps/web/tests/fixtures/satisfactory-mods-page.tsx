@@ -29,11 +29,14 @@ createRoot(root).render(
                     serverId="10000000-0000-4000-8000-000000000001"
                     serverName="Satisfactory"
                     runtimeState={
-                      settings && !location.search.includes('offline') ? 'running' : 'offline'
+                      (settings || location.search.includes('running')) &&
+                      !location.search.includes('offline')
+                        ? 'running'
+                        : 'offline'
                     }
                     canManage={!location.search.includes('readonly')}
-                    permissionKeys={['server:manage']}
-                    pending={false}
+                    permissionKeys={['server:manage', 'console.power']}
+                    pending={location.search.includes('pending')}
                     onAccepted={(jobId) => {
                       document.body.dataset.job = jobId;
                     }}

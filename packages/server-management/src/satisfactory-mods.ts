@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { DomainError } from '@nickhosting/core';
 import { getSettings } from '@nickhosting/database';
+import { sql } from 'kysely';
 import { z } from 'zod';
 import {
   prepareSatisfactoryMods,
@@ -12,8 +13,13 @@ import {
   satisfactoryModSelectionSchema,
   satisfactoryVersionPaths,
 } from '../../../games/satisfactory/src/mods.js';
+import { diffSatisfactoryMods } from '../../../games/satisfactory/src/mods-plan.js';
 import { contentStorageRoot, reserveContentStaging } from './content-admission.js';
 import type { GameLifecycleContext } from './lifecycle.js';
+import {
+  ensureSatisfactoryModState,
+  inspectSatisfactoryModInventory,
+} from './satisfactory-mod-manager.js';
 import { assertServerStorageCapacity } from './storage-capacity.js';
 
 const fileSchema = z.object({
@@ -29,6 +35,8 @@ const receiptSchema = z.object({
   selection: satisfactoryModSelectionSchema,
   files: filesSchema,
   lock: satisfactoryModLockSchema,
+  gameVersion: z.number().int().positive().optional(),
+  requiredTargets: z.array(z.enum(['LinuxServer', 'Windows', 'WindowsServer'])).optional(),
 });
 
 export async function processSatisfactoryMods(
@@ -36,16 +44,47 @@ export async function processSatisfactoryMods(
   env: Readonly<Record<string, string | undefined>>,
 ): Promise<boolean> {
   const command = z
-    .object({ kind: z.literal('mods'), selection: satisfactoryModSelectionSchema })
+    .object({
+      kind: z.literal('mods'),
+      selection: satisfactoryModSelectionSchema.default([]),
+      mode: z.enum(['preview', 'apply', 'rollback']).optional(),
+      revision: z.number().int().nonnegative().optional(),
+      planId: z.uuid().optional(),
+      profileId: z.uuid().optional(),
+      vanilla: z.boolean().default(false),
+    })
     .parse(context.operation().plan.satisfactoryContent);
   const identifier = context.server.pterodactyl_identifier;
   if (!identifier) throw new DomainError('integration_unavailable');
   await context.authorize();
   await context.assertStopped();
+  const managerState = command.mode
+    ? await ensureSatisfactoryModState(context.db, context.server.id)
+    : null;
+  const priorRecovery = z
+    .object({ jobId: z.uuid(), supersededStageJobs: z.array(z.uuid()).max(128).default([]) })
+    .safeParse(managerState?.recovery);
+  if (managerState?.recovery && !priorRecovery.success)
+    throw new DomainError('configuration_invalid');
+  if (
+    managerState &&
+    (managerState.external_mode || managerState.revision !== command.revision) &&
+    context.operation().plan.satisfactoryModsApplied !== true
+  )
+    throw new DomainError('conflict');
   const root = env.NH_SATISFACTORY_MOD_WORK_ROOT
     ? resolve(env.NH_SATISFACTORY_MOD_WORK_ROOT)
     : contentStorageRoot((await getSettings(context.db, env)).values.contentWorkRoot, env);
   const stage = join(root, 'content-staging', context.operation().job_id);
+  const releaseStage = async (jobId: string) => {
+    z.uuid().parse(jobId);
+    await rm(join(root, 'content-staging', jobId), { recursive: true, force: true });
+    await context.db
+      .updateTable('minecraft_staging_claims')
+      .set({ state: 'released' })
+      .where('job_id', '=', jobId)
+      .execute();
+  };
   const cleanup = async () => {
     await rm(stage, { recursive: true, force: true });
     await context.db
@@ -54,11 +93,158 @@ export async function processSatisfactoryMods(
       .where('job_id', '=', context.operation().job_id)
       .execute();
   };
+  const cleanupApplied = async (input: unknown) => {
+    const value = z
+      .object({
+        release: z.array(z.uuid()),
+        files: z.number().int().nonnegative(),
+        retainedBytes: z.number().int().nonnegative(),
+        removeCurrent: z.boolean(),
+      })
+      .parse(input);
+    for (const jobId of value.release) await releaseStage(jobId);
+    await context.db
+      .updateTable('satisfactory_mod_states')
+      .set({ recovery: sql`jsonb_set(recovery,'{supersededStageJobs}','[]'::jsonb)` })
+      .where('server_id', '=', context.server.id)
+      .where(sql<boolean>`recovery->>'jobId' = ${context.operation().job_id}`)
+      .execute();
+    if (value.removeCurrent) await cleanup();
+    else {
+      for (let index = 0; index < value.files; index++)
+        await rm(join(stage, `${index}.bin`), { force: true });
+      await context.db
+        .updateTable('minecraft_staging_claims')
+        .set({ reserved_bytes: String(value.retainedBytes + 65536) })
+        .where('job_id', '=', context.operation().job_id)
+        .execute();
+    }
+  };
   if (context.operation().plan.satisfactoryModsApplied === true) {
-    await cleanup();
+    if (!command.mode) await cleanup();
+    else await cleanupApplied(context.operation().plan.satisfactoryModsCleanup);
     return true;
   }
   await mkdir(stage, { recursive: true, mode: 0o700 });
+  let recoveryAppliedFiles: z.infer<typeof filesSchema> = [];
+  let sourceStageJobId: string | null = null;
+  if (command.mode) {
+    const expired = await context.db
+      .selectFrom('satisfactory_mod_plans')
+      .select(['id', 'job_id'])
+      .where('server_id', '=', context.server.id)
+      .where('expires_at', '<', new Date())
+      .limit(100)
+      .execute();
+    for (const plan of expired) {
+      if (plan.id === command.planId || !plan.job_id) continue;
+      const job = await context.db
+        .selectFrom('operation_jobs')
+        .select('state')
+        .where('id', '=', plan.job_id)
+        .executeTakeFirst();
+      if (job && !['succeeded', 'failed'].includes(job.state)) continue;
+      await releaseStage(plan.job_id);
+      await context.db.deleteFrom('satisfactory_mod_plans').where('id', '=', plan.id).execute();
+    }
+  }
+  if (command.mode === 'apply' || command.mode === 'rollback') {
+    const plan =
+      command.mode === 'apply'
+        ? await context.db
+            .selectFrom('satisfactory_mod_plans')
+            .selectAll()
+            .where('id', '=', command.planId!)
+            .where('server_id', '=', context.server.id)
+            .executeTakeFirstOrThrow()
+        : null;
+    const recovery =
+      command.mode === 'rollback'
+        ? z
+            .object({
+              jobId: z.uuid(),
+              selection: satisfactoryModSelectionSchema,
+              files: filesSchema,
+              lock: satisfactoryModLockSchema,
+              vanilla: z.boolean(),
+              profileId: z.uuid().nullable(),
+              appliedFiles: filesSchema.optional(),
+              gameVersion: z.number().int().positive().optional(),
+            })
+            .parse(managerState?.recovery)
+        : null;
+    if (
+      plan &&
+      (plan.status !== 'ready' ||
+        plan.revision !== command.revision ||
+        plan.expires_at.getTime() < Date.now() ||
+        !plan.job_id)
+    )
+      throw new DomainError('conflict');
+    const selected = plan
+      ? satisfactoryModSelectionSchema.parse(plan.selection)
+      : recovery!.selection;
+    sourceStageJobId = plan?.job_id ?? recovery!.jobId;
+    const source = join(root, 'content-staging', sourceStageJobId);
+    command.selection = selected;
+    command.vanilla = plan?.vanilla ?? recovery!.vanilla;
+    command.profileId = plan?.profile_id ?? recovery?.profileId ?? undefined;
+    recoveryAppliedFiles = recovery?.appliedFiles ?? [];
+    const inventory = await inspectSatisfactoryModInventory(
+      context.db,
+      context.adapter,
+      context.server,
+      context.authorize,
+    );
+    try {
+      await writeFile(join(stage, 'baseline.json'), JSON.stringify(inventory.files), {
+        mode: 0o600,
+        flag: 'wx',
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    if (
+      (plan && inventory.gameVersion !== plan.game_version) ||
+      (recovery?.gameVersion && inventory.gameVersion !== recovery.gameVersion)
+    )
+      throw new DomainError('conflict');
+    if (
+      !context.operation().plan.satisfactoryModsApplying &&
+      ((plan && inventory.fingerprint !== plan.inventory_fingerprint) ||
+        (plan && inventory.diverged))
+    )
+      throw new DomainError('conflict');
+    const { authorizeQueuedEffect } = await import('./runtime.js');
+    const actor = await authorizeQueuedEffect(
+      context.db,
+      context.operation().job_id,
+      context.server.id,
+      env,
+      context.adapter,
+    );
+    await reserveContentStaging(
+      context.db,
+      actor,
+      context.operation().job_id,
+      context.server.id,
+      1610612736,
+      env,
+    );
+    const sourceFiles = filesSchema.parse(plan?.files ?? recovery!.files);
+    for (let i = 0; i < sourceFiles.length; i++)
+      await copyFile(join(source, `${recovery ? 'old-' : ''}${i}.bin`), join(stage, `${i}.bin`));
+    await writeFile(
+      join(stage, 'receipt.json'),
+      JSON.stringify({
+        selection: selected,
+        files: sourceFiles,
+        lock: plan?.lock ?? recovery!.lock,
+        gameVersion: plan?.game_version ?? recovery?.gameVersion,
+      }),
+      { mode: 0o600 },
+    );
+  }
   let receipt: z.infer<typeof receiptSchema>;
   try {
     receipt = receiptSchema.parse(JSON.parse(await readFile(join(stage, 'receipt.json'), 'utf8')));
@@ -99,6 +285,14 @@ export async function processSatisfactoryMods(
       1_610_612_736,
       env,
     );
+    const profile = command.profileId
+      ? await context.db
+          .selectFrom('satisfactory_mod_profiles')
+          .select('required_targets')
+          .where('id', '=', command.profileId)
+          .where('server_id', '=', context.server.id)
+          .executeTakeFirstOrThrow()
+      : null;
     const prepared = await prepareSatisfactoryMods({
       sandboxExecutable: env.NH_CONTENT_SANDBOX_PATH,
       executable: env.NH_FICSIT_CLI_PATH ?? '/usr/local/bin/ficsit',
@@ -110,6 +304,13 @@ export async function processSatisfactoryMods(
       stagingRoot: root,
       outputDirectory: stage,
       selection: command.selection,
+      vanilla: command.vanilla,
+      requiredTargets: profile
+        ? z
+            .array(z.enum(['LinuxServer', 'Windows', 'WindowsServer']))
+            .parse(profile.required_targets)
+        : ['LinuxServer'],
+      // Resolve published metadata afresh: external lockfiles are never download authority.
       versionPath,
       versionFile,
       launcherFile: Buffer.from(
@@ -117,6 +318,12 @@ export async function processSatisfactoryMods(
       ),
     });
     receipt = {
+      gameVersion: Number(JSON.parse(versionFile.toString('utf8')).Changelist),
+      requiredTargets: profile
+        ? z
+            .array(z.enum(['LinuxServer', 'Windows', 'WindowsServer']))
+            .parse(profile.required_targets)
+        : ['LinuxServer'],
       selection: command.selection,
       lock: prepared.lock,
       files: prepared.files.map((file) => ({
@@ -128,6 +335,45 @@ export async function processSatisfactoryMods(
     await writeFile(join(stage, 'receipt.tmp'), JSON.stringify(receipt), { mode: 0o600 });
     await rename(join(stage, 'receipt.tmp'), join(stage, 'receipt.json'));
   }
+  if (command.mode === 'preview') {
+    const inventory = await inspectSatisfactoryModInventory(
+      context.db,
+      context.adapter,
+      context.server,
+      context.authorize,
+    );
+    if (inventory.diverged || inventory.gameVersion !== receipt.gameVersion)
+      throw new DomainError('conflict');
+    const changes = diffSatisfactoryMods({
+      previousLock: satisfactoryModLockSchema.parse(managerState!.lock),
+      nextLock: receipt.lock,
+      previousSelection: satisfactoryModSelectionSchema.parse(managerState!.selection),
+      selection: receipt.selection,
+      vanilla: command.vanilla,
+    });
+    await context.update({
+      plan: {
+        ...context.operation().plan,
+        satisfactoryModsRequiredTargets: receipt.requiredTargets ?? ['LinuxServer'],
+      },
+    });
+    await context.db
+      .updateTable('satisfactory_mod_plans')
+      .set({
+        status: 'ready',
+        job_id: context.operation().job_id,
+        lock: JSON.stringify(receipt.lock),
+        files: JSON.stringify(receipt.files),
+        changes: JSON.stringify(changes),
+        inventory_fingerprint: inventory.fingerprint,
+        game_version: inventory.gameVersion,
+      })
+      .where('id', '=', command.planId!)
+      .where('server_id', '=', context.server.id)
+      .where('revision', '=', command.revision!)
+      .execute();
+    return true;
+  }
   assertServerStorageCapacity(
     context.server.limits.disk,
     receipt.files.reduce((sum, file) => sum + file.size, 0),
@@ -138,7 +384,12 @@ export async function processSatisfactoryMods(
     .where('server_id', '=', context.server.id)
     .executeTakeFirst();
   const oldFiles = filesSchema.parse(previous?.files ?? []);
-  // The stopped job is the sole writer. Validate existing managed files before replacing them.
+  for (const file of recoveryAppliedFiles) {
+    const index = oldFiles.findIndex((old) => old.path === file.path);
+    if (index < 0) oldFiles.push(file);
+    else oldFiles[index] = file;
+  }
+  // Validate managed ownership before every write; external SFTP changes remain conflicts.
   const readHash = async (path: string, maximum: number) => {
     const ancestors = path.split('/');
     for (let index = 0; index < ancestors.length - 1; index++) {
@@ -176,6 +427,68 @@ export async function processSatisfactoryMods(
     }
     return digest.digest('hex');
   };
+  // Snapshot every managed byte before the first mutation. Recovery survives partial applies.
+  // Preflight all destinations before snapshot/mutation, including unmanaged collisions.
+  if (command.mode && !context.operation().plan.satisfactoryModsApplying)
+    for (const file of receipt.files) {
+      const old = oldFiles.find((value) => value.path === file.path);
+      const hash = await readHash(file.path, Math.max(file.size, old?.size ?? 0));
+      if (hash !== null && hash !== file.sha256 && hash !== old?.sha256)
+        throw new DomainError('conflict');
+    }
+  if (
+    command.mode &&
+    command.mode !== 'rollback' &&
+    !context.operation().plan.satisfactoryModsApplying
+  ) {
+    for (const [index, file] of oldFiles.entries()) {
+      if ((await readHash(file.path, file.size)) !== file.sha256) throw new DomainError('conflict');
+      const response = await context.adapter.downloadFile(identifier, file.path, {
+        maxBytes: Math.max(1, file.size),
+        authorize: context.authorize,
+      });
+      const { pipeline } = await import('node:stream/promises');
+      const { createWriteStream } = await import('node:fs');
+      await pipeline(
+        Readable.fromWeb(response.body as never),
+        createWriteStream(join(stage, `old-${index}.bin`), { mode: 0o600 }),
+      );
+      const copied = createHash('sha256');
+      let copiedBytes = 0;
+      for await (const chunk of createReadStream(join(stage, `old-${index}.bin`))) {
+        copiedBytes += chunk.length;
+        copied.update(chunk);
+      }
+      if (copiedBytes !== file.size || copied.digest('hex') !== file.sha256)
+        throw new DomainError('conflict');
+    }
+    await context.db
+      .updateTable('satisfactory_mod_states')
+      .set({
+        recovery: JSON.stringify({
+          jobId: context.operation().job_id,
+          supersededStageJobs: priorRecovery.success
+            ? [
+                ...new Set(
+                  [priorRecovery.data.jobId, ...priorRecovery.data.supersededStageJobs].filter(
+                    (id) => id !== context.operation().job_id,
+                  ),
+                ),
+              ]
+            : [],
+          selection: previous?.selection ?? [],
+          files: oldFiles,
+          lock: previous?.lock ?? { version: 1, mods: {} },
+          vanilla: previous?.vanilla ?? false,
+          profileId: previous?.active_profile_id ?? null,
+          appliedFiles: receipt.files,
+          gameVersion: receipt.gameVersion,
+        }),
+      })
+      .where('server_id', '=', context.server.id)
+      .execute();
+    await context.update({ plan: { ...context.operation().plan, satisfactoryModsApplying: true } });
+  }
   for (let index = 0; index < receipt.files.length; index++) {
     const file = receipt.files[index]!;
     const parts = file.path.split('/');
@@ -235,24 +548,118 @@ export async function processSatisfactoryMods(
     });
     if ((await readHash(old.path, old.size)) !== null) throw new DomainError('operation_uncertain');
   }
-  await context.db
-    .insertInto('satisfactory_mod_states')
-    .values({
-      server_id: context.server.id,
-      selection: JSON.stringify(receipt.selection),
-      files: JSON.stringify(receipt.files),
-      lock: JSON.stringify(receipt.lock),
-    })
-    .onConflict((oc) =>
-      oc.column('server_id').doUpdateSet({
+  if (!command.mode)
+    await context.db
+      .insertInto('satisfactory_mod_states')
+      .values({
+        server_id: context.server.id,
         selection: JSON.stringify(receipt.selection),
         files: JSON.stringify(receipt.files),
         lock: JSON.stringify(receipt.lock),
-        updated_at: new Date(),
-      }),
+        active_profile_id: null,
+        external_previous_intent: null,
+        inventory_fingerprint: null,
+        recovery: null,
+      })
+      .onConflict((oc) =>
+        oc.column('server_id').doUpdateSet({
+          selection: JSON.stringify(receipt.selection),
+          files: JSON.stringify(receipt.files),
+          lock: JSON.stringify(receipt.lock),
+          updated_at: new Date(),
+        }),
+      )
+      .execute();
+  const cleanupPlan = {
+    release: [
+      ...new Set(
+        [
+          sourceStageJobId,
+          priorRecovery.success ? priorRecovery.data.jobId : null,
+          ...(priorRecovery.success ? priorRecovery.data.supersededStageJobs : []),
+        ].filter((id): id is string => !!id && id !== context.operation().job_id),
+      ),
+    ],
+    files: receipt.files.length,
+    retainedBytes: oldFiles.reduce((sum, file) => sum + file.size, 0),
+    removeCurrent: command.mode === 'rollback',
+  };
+  const completedPlan = {
+    ...context.operation().plan,
+    satisfactoryModsApplied: true,
+    ...(command.mode ? { satisfactoryModsCleanup: cleanupPlan } : {}),
+  };
+  if (command.mode) {
+    const inventory = await inspectSatisfactoryModInventory(
+      context.db,
+      context.adapter,
+      context.server,
+      context.authorize,
+    );
+    const baseline = filesSchema.parse(
+      JSON.parse(await readFile(join(stage, 'baseline.json'), 'utf8')),
+    );
+    const expected = new Map(baseline.map((file) => [file.path, file]));
+    for (const file of oldFiles) expected.delete(file.path);
+    for (const file of receipt.files) expected.set(file.path, file);
+    if (
+      inventory.files.length !== expected.size ||
+      inventory.files.some((file) => {
+        const item = expected.get(file.path);
+        return !item || item.size !== file.size || item.sha256 !== file.sha256;
+      })
     )
-    .execute();
-  await context.update({ plan: { ...context.operation().plan, satisfactoryModsApplied: true } });
-  await cleanup();
+      throw new DomainError('conflict');
+    await context.db.transaction().execute(async (tx) => {
+      if (command.profileId) {
+        const profile = await tx
+          .selectFrom('satisfactory_mod_profiles')
+          .select('id')
+          .where('id', '=', command.profileId)
+          .where('server_id', '=', context.server.id)
+          .executeTakeFirst();
+        if (!profile) command.profileId = undefined;
+        else
+          await tx
+            .updateTable('satisfactory_mod_profiles')
+            .set({
+              selection: JSON.stringify(receipt.selection),
+              vanilla: command.vanilla,
+              updated_at: new Date(),
+            })
+            .where('id', '=', profile.id)
+            .execute();
+      }
+      await tx
+        .updateTable('satisfactory_mod_states')
+        .set({
+          selection: JSON.stringify(receipt.selection),
+          files: JSON.stringify(receipt.files),
+          lock: JSON.stringify(receipt.lock),
+          updated_at: new Date(),
+          revision: managerState!.revision + 1,
+          vanilla: command.vanilla,
+          active_profile_id: command.profileId ?? null,
+          inventory_fingerprint: inventory.fingerprint,
+          ...(command.mode === 'rollback' ? { recovery: null } : {}),
+        })
+        .where('server_id', '=', context.server.id)
+        .execute();
+      if (command.planId)
+        await tx
+          .updateTable('satisfactory_mod_plans')
+          .set({ status: 'applied' })
+          .where('id', '=', command.planId)
+          .execute();
+      await tx
+        .updateTable('server_operations')
+        .set({ plan: JSON.stringify(completedPlan) })
+        .where('job_id', '=', context.operation().job_id)
+        .execute();
+    });
+  }
+  await context.update({ plan: completedPlan });
+  if (command.mode) await cleanupApplied(cleanupPlan);
+  else await cleanup();
   return true;
 }

@@ -40,6 +40,7 @@ import {
   satisfactoryEggEnvironment,
   satisfactoryPortArguments,
 } from '../../../games/satisfactory/src/index.js';
+import { satisfactoryModSelectionSchema } from '../../../games/satisfactory/src/mods.js';
 import {
   checkStorage,
   type DB,
@@ -119,14 +120,12 @@ export const operationSchema = z.discriminatedUnion('action', [
     idempotencyKey: keySchema,
     command: z.strictObject({
       kind: z.literal('mods'),
-      selection: z
-        .array(
-          z.strictObject({
-            reference: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,127}$/),
-            version: z.string().regex(/^[0-9A-Za-z.+_-]{1,128}$/),
-          }),
-        )
-        .max(256),
+      mode: z.enum(['preview', 'apply', 'rollback']).optional(),
+      selection: satisfactoryModSelectionSchema.optional(),
+      vanilla: z.boolean().optional(),
+      revision: z.number().int().nonnegative().optional(),
+      planId: z.uuid().optional(),
+      profileId: z.uuid().optional(),
     }),
   }),
   z
@@ -1010,6 +1009,7 @@ export async function enqueueLockedServerOperation(
   options: {
     minecraftPlan?: MinecraftPreparedContent;
     minecraftInitialContent?: MinecraftPreparedContent;
+    satisfactoryContent?: true;
   } = {},
 ) {
   const value = parse(operationSchema, input);
@@ -1045,6 +1045,16 @@ export async function enqueueLockedServerOperation(
   if (('backupBefore' in value && value.backupBefore) || options.minecraftPlan?.backupBefore)
     await authorizeServer(tx, context, serverId, 'backups.create');
   if (server.active_operation_id) throw new DomainError('conflict');
+  if (value.action === 'satisfactory-content' && !options.satisfactoryContent)
+    throw new DomainError('forbidden');
+  if (value.action !== 'stop') {
+    const modState = await tx
+      .selectFrom('satisfactory_mod_states')
+      .select('external_mode')
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    if (modState?.external_mode) throw new DomainError('conflict');
+  }
   await assertNoModpackPublication(tx, serverId);
   if (value.action === 'retry-provision') {
     if (automation) throw new DomainError('forbidden');
@@ -1354,6 +1364,7 @@ export async function enqueueServerOperation(
   options: {
     minecraftPlan?: MinecraftPreparedContent;
     minecraftInitialContent?: MinecraftPreparedContent;
+    satisfactoryContent?: true;
   } = {},
 ) {
   const value = parse(operationSchema, input);
@@ -1465,6 +1476,26 @@ export async function enqueueServerOperation(
       }
     }
     return result;
+  });
+}
+
+/** Let the game API replay an accepted content request before inspecting mutable
+ * plan/recovery state. This never creates work and always rechecks live access. */
+export async function replaySatisfactoryContentOperation(
+  db: Kysely<Database>,
+  context: AuthContext,
+  serverId: string,
+  input: unknown,
+  env: Environment = {},
+) {
+  const value = parse(operationSchema, input);
+  if (value.action !== 'satisfactory-content') throw new DomainError('validation_failed');
+  const hash = digest({ kind: 'operation', subject: context.subjectUserId, serverId, value });
+  return db.transaction().execute(async (tx) => {
+    await requestLock(tx, context, value.idempotencyKey);
+    const current = await currentInteractiveContext(tx, context, env);
+    await authorizeServer(tx, current, serverId, 'server:manage');
+    return previousRequest(tx, current, value.idempotencyKey, hash);
   });
 }
 

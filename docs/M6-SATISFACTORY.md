@@ -132,21 +132,73 @@ Do not delete certificates or drop durable mod-operation tables as routine rollb
 
 ## Native mods
 
-The Satisfactory Mods section searches SMR, shows Linux server releases and their
-published game-build requirements, and lets users select exact versions, remove
-selected roots, or replace a version. Apply uses the shared `satisfactory-content`
-operation and Activity tracking, stops the server, resolves dependencies/SML with
-ficsit-cli, uploads through the existing Pterodactyl file pipeline, verifies every
-file with streaming SHA-256, then commits the installed selection and dependency
-lock. Only previously managed files with matching hashes may be replaced/removed;
-manual files are not silently adopted or deleted. The user starts the server after
-reviewing the completed operation.
+The Satisfactory Mods workspace shares the Minecraft addon layout and visual
+components: Installed, Discover and Review changes. SMR discovery includes project
+artwork, authors, description, version details, published build compatibility and
+Linux server targets. Installed inventory reads the real mod directories, including
+`FactoryGame/Mods/GameFeatures`, and distinguishes selected roots, dependencies,
+unmanaged content and discrepancies from the last committed file hashes.
+
+Profiles retain enabled/disabled roots, exact versions or supported semver constraints,
+required client/server targets and reversible disabling of all managed mods. Update checks can
+stage individual or all compatible stable updates. Disabling a root preserves its
+profile entry; dependencies still required by another enabled root remain installed.
+Unmanaged mods remain untouched when disabling the managed selection.
+SML and dependency resolution use upstream ficsit-cli. A mixed client/server profile
+may contain mods present only on their relevant side; the upstream resolver validates
+side requirements and only Linux server artifacts are uploaded to the server.
+
+Preview and Apply are separate durable `satisfactory-content` jobs. Both require a
+stopped server. Review can request the existing graceful stop without discarding
+the staged selection. Preview resolves into private reserved staging and exposes the exact
+resolved changes; Apply consumes those frozen artifacts and rejects stale selection
+revisions, changed game builds and changed filesystem fingerprints. The existing
+Pterodactyl file pipeline streams uploads and verifies SHA-256. Unmanaged files are
+preserved; neither discovery nor a failed hash comparison silently adopts them.
+The user starts the server after reviewing the completed operation.
 
 Migration 059 stores desired roots, installed file hashes and the resolver lock.
-Per-job staging receipts freeze resolved output across worker retries. Completion
-is recorded before deleting the operation-owned staging directory, allowing cleanup
-to resume safely. Staging uses the existing content reservation ledger and limits;
-failed jobs retain their charged staging data for controlled recovery.
+Migration 060 adds revisioned profiles, frozen plans, external-edit state and recovery
+metadata. Before replacing managed files, Apply retains verified previous file bytes
+in its reserved stage. Rollback restores that snapshot, including recovery from a
+partially applied operation, and refuses unexpected external changes. This is recovery
+of managed mod content, not a backup of world saves. Retries use durable receipts and
+completion/cleanup markers rather than resolving a different set of mods. Plans expire
+after 24 hours; the existing reconciliation worker reclaims expired unreferenced stages. The latest
+recovery snapshot remains charged to the existing content staging ledger until it is
+superseded, restored, or its server is deleted.
+
+Native SMM3 `.smmprofile` import/export preserves profile intent, enabled flags and
+targets. Imported lockfile URLs are never trusted download authorities. An export can
+include a matching trusted resolved plan; otherwise SMM resolves dependencies from
+the exported choices. Importing a profile does not itself change server files.
+
+The SMM connection helper reuses existing per-server SFTP credentials and permissions.
+Use SMM Manage Servers, SFTP, the endpoint shown by NickPanel and installation root
+`/` (containing `FactoryServer.sh`). SMM retains its profiles on the user's computer;
+remote lockfiles alone do not synchronize those choices with the panel database.
+
+Entering external management queues the normal graceful stop even if the cached
+runtime state is offline, establishes maintenance intent and blocks NickPanel starts,
+content operations and file-manager writes touching the mod tree. Wait for that stop
+to finish before changing files in SMM. Close SMM's connection when done, import its
+profile when needed, explicitly reconcile the observed managed files, then finish the
+session. Reconciliation is also required when nothing changed. Finishing rechecks the
+fingerprint and physical stop; it leaves the server manually stopped and does not
+silently grant wake consent. Malformed, ambiguous or partially transferred mod metadata
+must be corrected before adoption.
+
+This coordinates NickPanel writers; it is not a distributed lock honored by every
+external SFTP client. Existing SFTP sessions may still write and subsequent drift is
+rejected by the reviewed plan/hash checks. Issue #18 is explicitly outside this rework
+and remains the separate production-release gate; credential revocation is not used as
+proof that every retained SSH transport has lost access.
+
+API routes live under `/v1/servers/:id/satisfactory/mods`: state, inventory, catalog,
+project details/versions, updates, preview, plans, apply, rollback, profiles/import/export,
+reconcile and external/begin/finish. They use the existing authorization, adapter,
+Activity and staging boundaries. Generic operation requests cannot bypass the reviewed
+mod-plan API. English and Italian cover the complete workspace and recovery flows.
 
 The development and runtime images include upstream ficsit-cli **v0.7.1**, pinned
 by SHA-256 for Linux amd64 and arm64. The default path is `/usr/local/bin/ficsit`.
@@ -158,12 +210,15 @@ resolution runs in a private local directory using actual server version metadat
 then the existing file bridge transfers the result. No game executable is run in
 that staging directory.
 
-Verified checks: seven catalog/resolver tests, three durable transfer tests
-(including a 2 MiB binary and symlink/ownership conflicts), and one isolated browser
-journey covering exact-version selection, durable request, English desktop,
-Italian mobile/read-only, no horizontal overflow and automated WCAG checks.
-Screenshots are under `.codex/local/m6-browser/screenshots/` (local evidence).
-These checks do not certify a real modded Satisfactory client/server session.
+Validation includes domain/profile/inventory tests, isolated database/API lifecycle
+and stale-state tests, durable transfer/recovery checks, and browser journeys in
+English/Italian across desktop/mobile, read-only, external-edit, error and recovery
+states. The opt-in `satisfactory-smm.integration.test.ts` exercises the actual pinned
+upstream ficsit binary against the existing isolated SFTPGo service: Linux discovery,
+native lockfile writing, normal/GameFeature managed removal and unmanaged preservation.
+Set `NH_TEST_FICSIT_PATH` to the verified local binary and run through `scripts/test-env.ts
+--m2`; the test rejects any other storage root. These checks do not certify the desktop
+SMM GUI itself or a new modded Satisfactory multiplayer session.
 
 Sources: [ficsit-cli v0.7.1](https://github.com/satisfactorymodding/ficsit-cli/releases/tag/v0.7.1),
 [upstream release checksums](https://github.com/satisfactorymodding/ficsit-cli/releases/download/v0.7.1/checksums.txt),
@@ -618,3 +673,56 @@ Blueprint update, Panel/Wings change or infrastructure reconfiguration were need
 Rollback this follow-up only after console lifecycle jobs have settled. Revert the
 code commit and restart the same dev services; no schema rollback is required.
 Do not delete pending job plans, TLS identities, native credentials or game data.
+
+## Mod manager rework validation — 2026-11-01
+
+The rework reuses the Minecraft addon primitives, workspace CSS and sanitized
+Markdown renderer, with a separate Satisfactory controller and SMR/ficsit domain.
+Browser tests render the real components against isolated HTTP fixtures; they are
+not screenshots of a simulated production server. Reviewed sanitized evidence:
+
+- [Installed, English desktop](screenshots/m6/satisfactory-mods-installed-en.png)
+- [Discovery](screenshots/m6/satisfactory-mods-discover-en.png)
+- [Resolved change review](screenshots/m6/satisfactory-mods-review-en.png)
+- [Profiles](screenshots/m6/satisfactory-mods-profiles-en.png)
+- [SMM external editing](screenshots/m6/satisfactory-mods-smm-en.png)
+- [Stop pending](screenshots/m6/satisfactory-mods-stopping-en.png)
+- [Running server and preserved draft](screenshots/m6/satisfactory-mods-running-blocked-en.png)
+- [Uncertain operation](screenshots/m6/satisfactory-mods-uncertain-en.png)
+- [Italian mobile](screenshots/m6/satisfactory-mods-installed-mobile-it.png)
+- [English mobile](screenshots/m6/satisfactory-mods-mobile-en.png)
+- [Italian desktop](screenshots/m6/satisfactory-mods-desktop-it.png)
+
+Nine browser journeys cover profile import/export and targets, version constraints,
+resolved review, staged updates/disable, confirmation focus, uncertain request replay,
+rollback, external editing with and without changes, read-only access and stopping
+without discarding the draft. Automated accessibility and overflow checks accompany
+independent visual/content review. This does not constitute exhaustive WCAG certification.
+
+Under the Owner's standing development authorization, migration 060 was applied
+alone after a private development database backup and verification of all 59 prior
+migration checksums. API, worker, Gateway and Vite were recreated using the existing
+complete Compose configuration; bind mounts and published ports were verified unchanged.
+All four became healthy. A read-only browser check of the actual development panel
+returned the real inventory with HTTP 200, no alerts/page errors and no desktop/mobile
+overflow. No game files, power state, Pterodactyl source, Blueprint extension, production
+infrastructure or issue #18 behavior were changed by this activation.
+
+Rollback: stop admitting new mod operations, let active transfers settle, retain the
+current database and reserved recovery stages, and revert the application commit/image.
+Migration 060 is additive; retain its tables/columns rather than dropping active plans
+or snapshots. Resume the new version to finish recovery operations before attempting
+an older writer. The previous development image and private pre-migration backup are
+retained locally; do not restore a whole database over intervening user changes as a
+routine code rollback.
+
+Final rework checks: lint, full TypeScript, i18n parity, frontend build and runtime
+compilation passed. The full unit run reported 4,434 passing tests, one skipped and
+one Gateway fixture failure caused by an ephemeral-port `EADDRINUSE`; that exact
+case passed when rerun alone. An earlier parallel run's three resource-sensitive
+failures also passed in the isolated 90-test rerun. No test thresholds were weakened.
+The broad lifecycle/registry regression run passed 439 cases; final scoped checks
+passed 12 API/external-mode cases, 17 worker/inventory cases, 34 targeted domain/module
+unit cases, nine browser journeys and two upstream ficsit/SFTP cases. These suites
+overlap and their counts must not be summed. Independent code and visual reviewers
+reported no open must-fix findings.

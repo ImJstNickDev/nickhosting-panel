@@ -170,7 +170,7 @@ export function createSatisfactoryModuleRuntime(
           throw new DomainError('configuration_invalid');
       }
     },
-    async assertFileMutation(_serverId, paths) {
+    async assertFileMutation(serverId, paths, connection) {
       if (
         paths.some((path) =>
           Object.values(satisfactoryCertificatePaths).some(
@@ -179,6 +179,25 @@ export function createSatisfactoryModuleRuntime(
         )
       )
         throw new DomainError('conflict');
+      const modRoot = 'factorygame/mods';
+      if (
+        paths.some((path) => {
+          const normalized = path.replace(/^\/+|\/+$/g, '').toLowerCase();
+          return (
+            !normalized ||
+            normalized === modRoot ||
+            normalized.startsWith(`${modRoot}/`) ||
+            modRoot.startsWith(`${normalized}/`)
+          );
+        })
+      ) {
+        const state = await connection
+          .selectFrom('satisfactory_mod_states')
+          .select('external_mode')
+          .where('server_id', '=', serverId)
+          .executeTakeFirst();
+        if (state?.external_mode) throw new DomainError('conflict');
+      }
     },
     async verifyProcessEpoch(_serverId, _db, before, readAgain) {
       const after = await readAgain();

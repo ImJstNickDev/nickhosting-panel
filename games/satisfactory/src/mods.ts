@@ -4,14 +4,33 @@ import { createReadStream } from 'node:fs';
 import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative } from 'node:path';
 import { promisify } from 'node:util';
+import { satisfies, validRange } from 'semver';
 import { z } from 'zod';
 
 export const satisfactoryModReferenceSchema = z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,127}$/);
+export const satisfactoryModVersionSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(256)
+  .refine(
+    (value) =>
+      /^[0-9A-Za-z.*+<>=~^|, -]+$/.test(value) && validRange(value.replaceAll(',', ' ')) !== null,
+  );
+export function satisfiesSatisfactoryModVersion(version: string, constraint: string): boolean {
+  return satisfies(version, constraint.replaceAll(',', ' '));
+}
+export const satisfactoryModTargetsSchema = z
+  .array(z.enum(['Windows', 'WindowsServer', 'LinuxServer']))
+  .min(1)
+  .max(3)
+  .refine((targets) => new Set(targets).size === targets.length);
 export const satisfactoryModSelectionSchema = z
   .array(
     z.strictObject({
       reference: satisfactoryModReferenceSchema,
-      version: z.string().regex(/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/),
+      version: satisfactoryModVersionSchema,
+      enabled: z.boolean().optional(),
     }),
   )
   .max(256)
@@ -52,6 +71,10 @@ export async function prepareSatisfactoryMods(options: {
   /** Trusted durable operation directory; artifacts are moved to <index>.bin. */
   outputDirectory?: string;
   selection: SatisfactoryModSelection;
+  vanilla?: boolean;
+  requiredTargets?: z.infer<typeof satisfactoryModTargetsSchema>;
+  /** Only a lock previously resolved by this service; never an imported profile's lock. */
+  priorLock?: SatisfactoryModLock;
   versionPath: (typeof satisfactoryVersionPaths)[number];
   versionFile: Buffer;
   launcherFile: Buffer;
@@ -59,6 +82,10 @@ export async function prepareSatisfactoryMods(options: {
   run?: (executable: string, args: string[], cwd: string, signal?: AbortSignal) => Promise<void>;
 }): Promise<{ files: SatisfactoryModFile[]; lock: SatisfactoryModLock }> {
   const selection = satisfactoryModSelectionSchema.parse(options.selection);
+  const requiredTargets = satisfactoryModTargetsSchema.parse(
+    options.requiredTargets ?? ['LinuxServer'],
+  );
+  if (!requiredTargets.includes('LinuxServer')) throw new Error('satisfactory_mod_target_invalid');
   if (
     !isAbsolute(options.executable) ||
     !isAbsolute(options.stagingRoot) ||
@@ -107,9 +134,12 @@ export async function prepareSatisfactoryMods(options: {
         profiles: {
           NickHosting: {
             name: 'NickHosting',
-            required_targets: ['LinuxServer'],
+            required_targets: requiredTargets,
             mods: Object.fromEntries(
-              selection.map((item) => [item.reference, { version: item.version, enabled: true }]),
+              selection.map((item) => [
+                item.reference,
+                { version: item.version.replaceAll(',', ' '), enabled: item.enabled !== false },
+              ]),
             ),
           },
         },
@@ -121,10 +151,31 @@ export async function prepareSatisfactoryMods(options: {
       JSON.stringify({
         version: 0,
         selected_installation: game,
-        installations: [{ path: game, profile: 'NickHosting', vanilla: false }],
+        installations: [{ path: game, profile: 'NickHosting', vanilla: options.vanilla ?? false }],
       }),
       { mode: 0o600 },
     );
+    if (options.priorLock && !options.vanilla) {
+      const priorLock = satisfactoryModLockSchema.parse(options.priorLock);
+      // Even internal stored state must never seed non-public download locations.
+      for (const mod of Object.values(priorLock.mods))
+        for (const target of Object.values(mod.targets)) {
+          const url = new URL(target.link);
+          if (
+            url.protocol !== 'https:' ||
+            url.username ||
+            url.password ||
+            url.port ||
+            !['api.ficsit.app', 'storage.ficsit.app', 'ficsit.app'].includes(url.hostname)
+          )
+            throw new Error('satisfactory_mod_lock_url_invalid');
+        }
+      await writeFile(
+        join(game, 'FactoryGame/Mods/nick_hosting-lock.json'),
+        JSON.stringify(priorLock),
+        { mode: 0o600 },
+      );
+    }
     const args = [
       '--local-dir',
       state,
@@ -197,14 +248,23 @@ export async function prepareSatisfactoryMods(options: {
         }
       });
     await run(options.executable, args, root, options.signal);
+    // Upstream vanilla mode deliberately skips resolution and writes no lockfile.
+    if (options.vanilla) return { files: [], lock: { version: 1, mods: {} } };
     const lockPath = join(game, 'FactoryGame/Mods/nick_hosting-lock.json');
     const lockStat = await lstat(lockPath);
     if (!lockStat.isFile() || lockStat.isSymbolicLink() || lockStat.size > 1048576)
       throw new Error('satisfactory_mod_output_invalid');
     const lock = satisfactoryModLockSchema.parse(JSON.parse(await readFile(lockPath, 'utf8')));
+    // The upstream resolver validates sidedness. A shared profile may contain
+    // client-only and server-only mods; each root needs a relevant target, not all.
     for (const item of selection) {
+      if (item.enabled === false) continue;
       const resolved = lock.mods[item.reference];
-      if (!resolved || resolved.version !== item.version || !resolved.targets.LinuxServer)
+      if (
+        !resolved ||
+        !satisfiesSatisfactoryModVersion(resolved.version, item.version) ||
+        !requiredTargets.some((target) => resolved.targets[target])
+      )
         throw new Error('satisfactory_mod_resolution_mismatch');
     }
     const files: SatisfactoryModFile[] = [];

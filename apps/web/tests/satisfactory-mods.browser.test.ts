@@ -43,63 +43,168 @@ afterAll(async () => {
   await browser?.close();
   await vite?.close();
 });
-it('selects exact versions, submits durable apply, supports Italian mobile read-only view', async () => {
+const emptySnapshot = () => ({
+  selection: [],
+  lock: { version: 1, mods: {} },
+  revision: 0,
+  profiles: [],
+  activeProfileId: null,
+  vanilla: false,
+  externalMode: false,
+  rollbackAvailable: false,
+  inventoryFingerprint: null,
+});
+const emptyInventory = () => ({
+  items: [],
+  fingerprint: 'a'.repeat(64),
+  diverged: false,
+  gameVersion: 400001,
+});
+const exampleProject = {
+  id: 'example',
+  reference: 'Example',
+  name: 'Example mod',
+  description: 'A compact factory mod.',
+  authors: ['Factory Tools'],
+  tags: ['Buildings'],
+  logo: null,
+};
+const exampleVersion = {
+  version: '1.2.3',
+  gameVersion: '>=400000',
+  compatibility: 'compatible',
+  dependencies: [{ mod_id: 'SML', condition: '>=3.0.0', optional: false }],
+};
+
+it('reviews resolved changes before apply, reuses shared Minecraft layout, and supports Italian mobile read-only view', async () => {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
-  const requests: unknown[] = [];
+  const requests: { path: string; body: unknown }[] = [];
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
   await page.route('**/v1/**', async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname.endsWith('/catalog'))
+      return route.fulfill({ json: { total: 1, items: [exampleProject] } });
+    if (url.pathname.includes('/catalog/'))
       return route.fulfill({
-        json: { total: 1, items: [{ id: 'example', reference: 'Example', name: 'Example mod' }] },
+        json: {
+          ...exampleProject,
+          fullDescription: 'A compact factory mod. No scripts are executed from descriptions.',
+        },
       });
-    if (url.pathname.includes('/versions/'))
+    if (url.pathname.includes('/versions/')) return route.fulfill({ json: [exampleVersion] });
+    if (url.pathname.endsWith('/inventory')) return route.fulfill({ json: emptyInventory() });
+    if (url.pathname.endsWith('/preview') || url.pathname.endsWith('/apply')) {
+      requests.push({ path: url.pathname, body: route.request().postDataJSON() });
       return route.fulfill({
-        json: [
-          {
-            version: '1.2.3',
-            gameVersion: '>=400000',
-            dependencies: [{ mod_id: 'SML', condition: '>=3.0.0', optional: false }],
-          },
-        ],
+        json: url.pathname.endsWith('/preview')
+          ? { planId: 'resolved-plan', jobId: 'preview-job' }
+          : { jobId: 'durable-job' },
+        status: 202,
       });
-    if (url.pathname.endsWith('/apply')) {
-      requests.push(route.request().postDataJSON());
-      return route.fulfill({ json: { jobId: 'durable-job' }, status: 202 });
     }
-    return route.fulfill({ json: { selection: [], lock: { version: 1, mods: {} } } });
+    if (url.pathname.includes('/plans/'))
+      return route.fulfill({
+        json: {
+          id: 'resolved-plan',
+          status: 'ready',
+          revision: 0,
+          selection: [{ reference: 'Example', version: '1.2.3', enabled: true }],
+          vanilla: false,
+          lock: { version: 1, mods: {} },
+          filesBytes: 4200,
+          changes: [
+            {
+              reference: 'Example',
+              action: 'install',
+              fromVersion: null,
+              toVersion: '1.2.3',
+              dependency: false,
+              requiredBy: [],
+            },
+            {
+              reference: 'SML',
+              action: 'install',
+              fromVersion: null,
+              toVersion: '3.10.0',
+              dependency: true,
+              requiredBy: ['Example'],
+            },
+          ],
+        },
+      });
+    return route.fulfill({ json: emptySnapshot() });
   });
   await page.goto(`${origin}satisfactory-fixture`);
   await check(page.getByText('No mods selected.')).toBeVisible();
+  await page.getByRole('button', { name: 'Discover', exact: true }).first().click();
   await page.getByRole('searchbox').fill('ab');
   await check(page.getByRole('button', { name: 'Search', exact: true })).toBeDisabled();
   await page.getByRole('searchbox').fill('');
-  await check(page.getByRole('button', { name: 'Search', exact: true })).toBeEnabled();
-  await page.getByRole('button', { name: 'Example mod', exact: true }).click();
+  await page
+    .getByRole('button', {
+      name: 'Example mod A compact factory mod. Factory Tools · Buildings',
+      exact: true,
+    })
+    .click();
   await check(page.getByRole('dialog')).toBeVisible();
   await page.screenshot({ path: `${shots}/satisfactory-mods-version-en.png`, fullPage: true });
   await page.keyboard.press('Escape');
   await check(page.getByRole('dialog')).toHaveCount(0);
-  await check(page.getByRole('button', { name: 'Example mod', exact: true })).toBeFocused();
-  await page.keyboard.press('Enter');
-  await page.getByRole('combobox').selectOption('1.2.3');
+  await page
+    .getByRole('button', {
+      name: 'Example mod A compact factory mod. Factory Tools · Buildings',
+      exact: true,
+    })
+    .click();
+  await page
+    .getByLabel('Version and game build requirement', { exact: true })
+    .selectOption('1.2.3');
   await page.getByRole('button', { name: 'Select version', exact: true }).click();
-  await check(page.getByRole('alert')).toHaveCount(0);
+  await page.screenshot({ path: `${shots}/satisfactory-mods-discover-en.png`, fullPage: true });
+  await page.getByRole('button', { name: 'Review changes', exact: true }).click();
+  await check(page.getByRole('heading', { name: 'Review changes' })).toBeFocused();
+  await check(page.getByText('Required by Example')).toBeVisible();
+  await check(page.getByRole('button', { name: 'Apply changes', exact: true })).toBeEnabled();
   expect(
-    (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())
-      .violations,
+    (
+      await new AxeBuilder({ page })
+        .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+        .analyze()
+    ).violations,
   ).toEqual([]);
-  await page.screenshot({ path: `${shots}/satisfactory-mods-desktop-en.png`, fullPage: true });
+  await page.screenshot({ path: `${shots}/satisfactory-mods-review-en.png`, fullPage: true });
   await page.getByRole('button', { name: 'Apply changes', exact: true }).click();
   await check(page.locator('body')).toHaveAttribute('data-job', 'durable-job');
-  expect(requests).toMatchObject([{ selection: [{ reference: 'Example', version: '1.2.3' }] }]);
+  expect(requests).toMatchObject([
+    {
+      body: { selection: [{ reference: 'Example', version: '1.2.3', enabled: true }], revision: 0 },
+    },
+    { body: { planId: 'resolved-plan', revision: 0 } },
+  ]);
   await page.evaluate(() => localStorage.setItem('nh.locale', 'it'));
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${origin}satisfactory-fixture?readonly`);
   await check(page.getByText('Nessuna mod selezionata.')).toBeVisible();
-  await check(page.getByRole('button', { name: 'Applica modifiche' })).toBeDisabled();
+  await check(page.getByText('Puoi consultare le mod, ma non modificarle.')).toBeVisible();
   await page.screenshot({ path: `${shots}/satisfactory-mods-mobile-it.png`, fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect(
+    (
+      await new AxeBuilder({ page })
+        .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+        .analyze()
+    ).violations,
+  ).toEqual([]);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.screenshot({ path: `${shots}/satisfactory-mods-desktop-it.png`, fullPage: true });
+  await page.evaluate(() => localStorage.setItem('nh.locale', 'en'));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${origin}satisfactory-fixture?readonly`);
+  await check(page.getByText('No mods selected.')).toBeVisible();
+  await page.screenshot({ path: `${shots}/satisfactory-mods-mobile-en.png`, fullPage: true });
+  expect(errors).toEqual([]);
   await context.close();
 });
 
@@ -224,14 +329,19 @@ it('shows version failures and a usable retry inside the read-only modal', async
         json: [{ version: '1.2.3', gameVersion: '>=400000', dependencies: [] }],
       });
     }
-    return route.fulfill({ json: { selection: [], lock: { version: 1, mods: {} } } });
+    if (path.endsWith('/inventory')) return route.fulfill({ json: emptyInventory() });
+    if (path.includes('/catalog/')) return route.fulfill({ json: exampleProject });
+    return route.fulfill({ json: emptySnapshot() });
   });
   try {
     await page.goto(`${origin}satisfactory-fixture?readonly`);
+    await page.getByRole('button', { name: 'Discover', exact: true }).first().click();
     await page.getByRole('button', { name: 'Example mod', exact: true }).click();
     const modal = page.getByRole('dialog', { name: 'Example mod' });
     await check(modal.getByRole('alert')).toBeVisible();
-    await check(modal.getByRole('combobox')).toHaveCount(0);
+    await check(
+      modal.getByLabel('Version and game build requirement', { exact: true }),
+    ).toHaveCount(0);
     const retry = modal.getByRole('button', { name: 'Try again', exact: true });
     await check(retry).toBeEnabled();
     await retry.focus();
@@ -244,8 +354,12 @@ it('shows version failures and a usable retry inside the read-only modal', async
     const readsBefore = versionReads;
     await page.keyboard.press('Enter');
     await check(modal.getByRole('alert')).toHaveCount(0);
-    await check(modal.getByRole('combobox').locator('option')).toHaveCount(2);
-    await check(modal.getByRole('combobox')).toBeDisabled();
+    await check(
+      modal.getByLabel('Version and game build requirement', { exact: true }).locator('option'),
+    ).toHaveCount(2);
+    await check(
+      modal.getByLabel('Version and game build requirement', { exact: true }),
+    ).toBeDisabled();
     expect(versionReads).toBeGreaterThan(readsBefore);
     expect(writes).toEqual([]);
     await page.keyboard.press('Escape');
@@ -254,4 +368,523 @@ it('shows version failures and a usable retry inside the read-only modal', async
   } finally {
     await context.close();
   }
+});
+
+it('imports an SMM profile during external management and reconciles before finishing', async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  const writes: { path: string; body: Record<string, unknown> }[] = [];
+  let revision = 0,
+    externalMode = false,
+    diverged = true;
+  let profiles: {
+    id: string;
+    name: string;
+    selection: { reference: string; version: string; enabled: boolean }[];
+    vanilla: boolean;
+  }[] = [];
+  let selection: { reference: string; version: string; enabled: boolean }[] = [];
+  await page.route('**/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const body = route.request().method() === 'GET' ? {} : route.request().postDataJSON();
+    if (route.request().method() !== 'GET') writes.push({ path, body });
+    if (path.endsWith('/external/begin')) {
+      externalMode = true;
+      revision++;
+      return route.fulfill({ json: { externalMode: true, jobId: null } });
+    }
+    if (path.endsWith('/profiles/import')) {
+      profiles = [
+        {
+          id: 'imported',
+          name: 'Shared factory',
+          selection: [
+            { reference: 'Example', version: '1.2.3', enabled: true },
+            { reference: 'Paused', version: '2.0.0', enabled: false },
+          ],
+          vanilla: false,
+        },
+      ];
+      revision++;
+      return route.fulfill({ json: profiles[0] });
+    }
+    if (path.endsWith('/reconcile')) {
+      selection = body.selection;
+      diverged = false;
+      revision++;
+      return route.fulfill({ json: { revision, fingerprint: 'a'.repeat(64) } });
+    }
+    if (path.endsWith('/external/finish')) {
+      externalMode = false;
+      revision++;
+      return route.fulfill({ json: { externalMode: false } });
+    }
+    if (path.endsWith('/inventory'))
+      return route.fulfill({
+        json: {
+          ...emptyInventory(),
+          diverged,
+          items: [
+            {
+              reference: 'Example',
+              name: 'Example mod',
+              version: '1.2.3',
+              path: 'FactoryGame/Mods/Example',
+              managed: true,
+              dependency: true,
+              gameFeature: false,
+            },
+          ],
+        },
+      });
+    return route.fulfill({
+      json: {
+        ...emptySnapshot(),
+        revision,
+        profiles,
+        selection,
+        externalMode,
+        inventoryFingerprint: !diverged ? 'a'.repeat(64) : null,
+      },
+    });
+  });
+  await page.goto(`${origin}satisfactory-fixture`);
+  await page.getByRole('button', { name: 'Connect Satisfactory Mod Manager', exact: true }).click();
+  await page.getByRole('button', { name: 'Stop and enable SMM management', exact: true }).click();
+  const confirm = page.getByRole('dialog', { name: 'Switch to SMM management?' });
+  await check(confirm.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+  await confirm
+    .getByRole('button', { name: 'Stop and enable SMM management', exact: true })
+    .click();
+  const smm = page.getByRole('dialog', { name: 'Connect Satisfactory Mod Manager' });
+  await check(smm.getByText('The server is stopped. You can now edit with SMM.')).toBeVisible();
+  await check(smm.getByRole('button', { name: 'Finish SMM management' })).toBeDisabled();
+  await smm.getByRole('button', { name: 'Profiles', exact: true }).click();
+  const profileDialog = page.getByRole('dialog', { name: 'Profiles', exact: true });
+  await profileDialog.getByLabel('Import SMM profile (.smmprofile)').setInputFiles({
+    name: 'factory.smmprofile',
+    mimeType: 'application/json',
+    buffer: Buffer.from(
+      JSON.stringify({
+        profile: {
+          name: 'Shared factory',
+          mods: {
+            Example: { version: '1.2.3', enabled: true },
+            Paused: { version: '2.0.0', enabled: false },
+          },
+          required_targets: ['LinuxServer', 'Windows'],
+        },
+        lockfile: null,
+        metadata: { gameVersion: 400001 },
+      }),
+    ),
+  });
+  await check(profileDialog.getByText('Shared factory', { exact: true })).toBeVisible();
+  await page.screenshot({ path: `${shots}/satisfactory-mods-profiles-en.png`, fullPage: true });
+  await profileDialog.getByRole('button', { name: 'Load selection', exact: true }).click();
+  await page.getByRole('button', { name: 'Adopt inspected files', exact: true }).click();
+  const adopt = page.getByRole('dialog', { name: 'Adopt the inspected server files?' });
+  await check(adopt.getByText('Paused 2.0.0 · Disabled', { exact: true })).toBeVisible();
+  await adopt.getByRole('button', { name: 'Adopt inspected files', exact: true }).click();
+  await check(
+    page.getByText(
+      'Server files differ from the last panel installation. Review external changes before applying another selection.',
+    ),
+  ).toHaveCount(0);
+  await page.getByRole('button', { name: 'Manage SMM session', exact: true }).click();
+  await check(smm.getByRole('button', { name: 'Finish SMM management' })).toBeEnabled();
+  expect(
+    (
+      await new AxeBuilder({ page })
+        .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+        .analyze()
+    ).violations,
+  ).toEqual([]);
+  await page.screenshot({ path: `${shots}/satisfactory-mods-smm-en.png`, fullPage: true });
+  await smm.getByRole('button', { name: 'Finish SMM management' }).click();
+  await check(smm).toHaveCount(0);
+  expect(writes.map((value) => value.path.split('/').slice(-2).join('/'))).toEqual([
+    'external/begin',
+    'profiles/import',
+    'mods/reconcile',
+    'external/finish',
+  ]);
+  expect(writes[2]?.body).toMatchObject({
+    revision: 2,
+    profileId: 'imported',
+    selection: [
+      { reference: 'Example', version: '1.2.3', enabled: true },
+      { reference: 'Paused', version: '2.0.0', enabled: false },
+    ],
+  });
+  expect(writes[3]?.body).toMatchObject({ revision: 3, inventoryFingerprint: 'a'.repeat(64) });
+  await context.close();
+});
+
+it('stages updates and disabled choices, keeps failed requests retryable with the same identity', async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  const previews: Record<string, unknown>[] = [];
+  let failPreview = true;
+  let latestSelection: unknown[] = [];
+  await page.route('**/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/inventory'))
+      return route.fulfill({
+        json: {
+          ...emptyInventory(),
+          items: [
+            {
+              reference: 'Example',
+              name: 'Example mod',
+              version: '1.0.0',
+              path: 'FactoryGame/Mods/Example',
+              managed: true,
+              dependency: false,
+              gameFeature: false,
+            },
+            {
+              reference: 'SML',
+              name: 'Satisfactory Mod Loader',
+              version: '3.10.0',
+              path: 'FactoryGame/Mods/SML',
+              managed: true,
+              dependency: true,
+              gameFeature: false,
+            },
+          ],
+        },
+      });
+    if (path.endsWith('/updates'))
+      return route.fulfill({
+        json: { items: [{ reference: 'Example', currentVersion: '1.0.0', version: '1.2.3' }] },
+      });
+    if (path.endsWith('/preview')) {
+      const input = route.request().postDataJSON();
+      previews.push(input);
+      latestSelection = input.selection;
+      if (failPreview) {
+        failPreview = false;
+        return route.abort('failed');
+      }
+      return route.fulfill({ status: 202, json: { planId: 'retry-plan', jobId: 'retry-preview' } });
+    }
+    if (path.includes('/plans/'))
+      return route.fulfill({
+        json: {
+          id: 'retry-plan',
+          status: 'ready',
+          revision: 3,
+          selection: latestSelection,
+          vanilla: false,
+          lock: { version: 1, mods: {} },
+          changes: [
+            {
+              reference: 'Example',
+              action: 'disable',
+              fromVersion: '1.0.0',
+              toVersion: '1.2.3',
+              dependency: false,
+              requiredBy: [],
+            },
+          ],
+          filesBytes: 0,
+        },
+      });
+    return route.fulfill({
+      json: {
+        ...emptySnapshot(),
+        revision: 3,
+        selection: [{ reference: 'Example', version: '1.0.0', enabled: true }],
+      },
+    });
+  });
+  await page.goto(`${origin}satisfactory-fixture`);
+  await page.getByRole('button', { name: 'Check updates', exact: true }).click();
+  await page.getByRole('button', { name: 'Select all updates', exact: true }).click();
+  await page.getByRole('button', { name: 'Disable Example mod', exact: true }).click();
+  await page.screenshot({ path: `${shots}/satisfactory-mods-installed-en.png`, fullPage: true });
+  await page.getByRole('button', { name: 'Review changes', exact: true }).click();
+  await check(
+    page.getByText(
+      'The request outcome is unknown. Retry the same request to recover its result before making other changes.',
+    ),
+  ).toBeVisible();
+  await check(page.getByRole('button', { name: 'Discard selection changes' })).toBeDisabled();
+  await page.screenshot({ path: `${shots}/satisfactory-mods-uncertain-en.png`, fullPage: true });
+  await page.getByRole('button', { name: 'Try again', exact: true }).click();
+  await check(page.getByRole('button', { name: 'Apply changes', exact: true })).toBeEnabled();
+  expect(previews).toHaveLength(2);
+  expect(previews[0]).toEqual(previews[1]);
+  expect(previews[0]).toMatchObject({
+    selection: [{ reference: 'Example', version: '1.2.3', enabled: false }],
+  });
+  await check(page.getByText('No mod file changes are required.', { exact: true })).toHaveCount(0);
+  await context.close();
+});
+
+it('preserves SMM targets when renaming, exports a native profile, and confirms rollback', async () => {
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    acceptDownloads: true,
+  });
+  const page = await context.newPage();
+  const selection = [{ reference: 'Example', version: '1.2.3', enabled: true }];
+  let revision = 4;
+  const profiles = [
+    {
+      id: 'shared',
+      name: 'Shared factory',
+      selection,
+      vanilla: false,
+      requiredTargets: ['Windows', 'LinuxServer'],
+    },
+  ];
+  const writes: { path: string; body: Record<string, unknown> }[] = [];
+  await page.route('**/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() !== 'GET') {
+      const body = route.request().postDataJSON();
+      writes.push({ path, body });
+      if (path.endsWith('/profiles/shared')) {
+        profiles[0] = { ...profiles[0], ...body };
+        revision++;
+        return route.fulfill({ json: profiles[0] });
+      }
+      if (path.endsWith('/rollback'))
+        return route.fulfill({ status: 202, json: { jobId: 'rollback-job' } });
+    }
+    if (path.endsWith('/inventory')) return route.fulfill({ json: emptyInventory() });
+    if (path.endsWith('/export'))
+      return route.fulfill({
+        json: {
+          profile: {
+            name: profiles[0]?.name,
+            mods: { Example: { version: '1.2.3', enabled: true } },
+            required_targets: profiles[0]?.requiredTargets,
+          },
+          lockfile: { version: 1, mods: {} },
+          metadata: { gameVersion: 400001 },
+        },
+      });
+    return route.fulfill({
+      json: { ...emptySnapshot(), revision, selection, profiles, rollbackAvailable: true },
+    });
+  });
+  await page.goto(`${origin}satisfactory-fixture`);
+  await page.getByRole('button', { name: 'Profiles', exact: true }).click();
+  const profilesDialog = page.getByRole('dialog', { name: 'Profiles', exact: true });
+  await profilesDialog.getByRole('button', { name: 'Edit profile Shared factory' }).click();
+  await check(
+    profilesDialog.getByRole('checkbox', { name: 'Also resolve for Windows players' }),
+  ).toBeChecked();
+  await profilesDialog.getByRole('textbox', { name: 'Profile name' }).fill('Team factory');
+  await profilesDialog.getByRole('button', { name: 'Save profile', exact: true }).click();
+  await check(profilesDialog.getByText('Team factory', { exact: true })).toBeVisible();
+  expect(writes[0]?.body).toMatchObject({
+    selection,
+    requiredTargets: ['LinuxServer', 'Windows'],
+    name: 'Team factory',
+  });
+  const downloadPromise = page.waitForEvent('download');
+  await profilesDialog.getByRole('button', { name: 'Export Team factory for SMM' }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe('Team_factory.smmprofile');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Restore previous mod set', exact: true }).click();
+  const confirm = page.getByRole('dialog', { name: 'Restore the previous mod set?' });
+  await check(confirm.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+  await confirm.getByRole('button', { name: 'Restore previous mod set', exact: true }).click();
+  await check(page.locator('body')).toHaveAttribute('data-job', 'rollback-job');
+  expect(writes[1]?.body).toMatchObject({ revision: 5 });
+  await context.close();
+});
+
+it('requires explicit reconciliation even when an external SMM session changed no files', async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  let reconciled = false;
+  await page.route('**/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/inventory')) return route.fulfill({ json: emptyInventory() });
+    if (path.endsWith('/reconcile')) {
+      reconciled = true;
+      return route.fulfill({ json: { revision: 2 } });
+    }
+    return route.fulfill({
+      json: {
+        ...emptySnapshot(),
+        externalMode: true,
+        revision: reconciled ? 2 : 1,
+        inventoryFingerprint: reconciled ? 'a'.repeat(64) : null,
+      },
+    });
+  });
+  await page.goto(`${origin}satisfactory-fixture`);
+  await page.getByRole('button', { name: 'Manage SMM session', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Connect Satisfactory Mod Manager' });
+  await check(dialog.getByRole('button', { name: 'Finish SMM management' })).toBeDisabled();
+  await dialog.getByRole('button', { name: 'Adopt inspected files' }).click();
+  await page
+    .getByRole('dialog', { name: 'Adopt the inspected server files?' })
+    .getByRole('button', { name: 'Adopt inspected files' })
+    .click();
+  await check(dialog.getByRole('button', { name: 'Finish SMM management' })).toBeEnabled();
+  await context.close();
+});
+
+it('keeps SMM edits blocked during stop, and preserves a running-server draft with console navigation', async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  const mutations: string[] = [];
+  let external = true;
+  await page.route('**/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() !== 'GET') mutations.push(path);
+    if (path.endsWith('/operations'))
+      return route.fulfill({
+        status: 202,
+        json: { jobId: 'stop-job', serverId: '10000000-0000-4000-8000-000000000001' },
+      });
+    if (path.endsWith('/inventory'))
+      return route.fulfill({
+        json: {
+          ...emptyInventory(),
+          items: [
+            {
+              reference: 'Example',
+              name: 'Example mod',
+              version: '1.2.3',
+              path: 'FactoryGame/Mods/Example',
+              managed: true,
+              dependency: false,
+              gameFeature: false,
+            },
+          ],
+        },
+      });
+    return route.fulfill({
+      json: {
+        ...emptySnapshot(),
+        externalMode: external,
+        selection: [{ reference: 'Example', version: '1.2.3', enabled: true }],
+      },
+    });
+  });
+  await page.goto(`${origin}satisfactory-fixture?pending`);
+  await page.getByRole('button', { name: 'Manage SMM session' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Connect Satisfactory Mod Manager' });
+  await check(
+    dialog.getByText('Wait for the server to stop before changing files with SMM.'),
+  ).toBeVisible();
+  await check(dialog.getByRole('button', { name: 'Adopt inspected files' })).toBeDisabled();
+  await check(dialog.getByRole('button', { name: 'Finish SMM management' })).toBeDisabled();
+  await page.screenshot({ path: `${shots}/satisfactory-mods-stopping-en.png`, fullPage: true });
+  external = false;
+  await page.goto(`${origin}satisfactory-fixture?running`);
+  await page.getByRole('button', { name: 'Disable Example mod' }).click();
+  await page.getByRole('button', { name: 'Review changes', exact: true }).click();
+  await check(page.getByText('Stop the server before applying this plan.')).toBeVisible();
+  await check(page.getByRole('link', { name: 'Open console' })).toHaveAttribute(
+    'href',
+    '/servers/10000000-0000-4000-8000-000000000001/console',
+  );
+  await check(page.getByRole('button', { name: 'Resolve changes', exact: true })).toBeDisabled();
+  expect(mutations).toEqual([]);
+  await page.screenshot({
+    path: `${shots}/satisfactory-mods-running-blocked-en.png`,
+    fullPage: true,
+  });
+  await page.getByRole('button', { name: 'Stop server', exact: true }).click();
+  const stop = page.getByRole('dialog', { name: 'Save and stop the server?' });
+  await check(stop.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+  await stop.getByRole('button', { name: 'Stop server', exact: true }).click();
+  await check(page.locator('body')).toHaveAttribute('data-job', 'stop-job');
+  await check(page.getByText('Selection has unapplied changes.', { exact: true })).toBeVisible();
+  await page.evaluate(() => localStorage.setItem('nh.locale', 'it'));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${origin}satisfactory-fixture?readonly`);
+  await check(page.getByRole('button', { name: 'Example mod', exact: true })).toBeVisible();
+  await page.screenshot({
+    path: `${shots}/satisfactory-mods-installed-mobile-it.png`,
+    fullPage: true,
+  });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect(
+    (
+      await new AxeBuilder({ page })
+        .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+        .analyze()
+    ).violations,
+  ).toEqual([]);
+  await context.close();
+});
+
+it('loads imported minimum-version constraints and submits explicit version policies', async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const previews: unknown[] = [];
+  await page.route('**/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/inventory'))
+      return route.fulfill({
+        json: {
+          ...emptyInventory(),
+          items: [
+            {
+              reference: 'Example',
+              name: 'Example mod',
+              version: '1.2.3',
+              path: 'FactoryGame/Mods/Example',
+              managed: true,
+              dependency: false,
+              gameFeature: false,
+            },
+          ],
+        },
+      });
+    if (path.includes('/catalog/')) return route.fulfill({ json: exampleProject });
+    if (path.includes('/versions/')) return route.fulfill({ json: [exampleVersion] });
+    if (path.endsWith('/preview')) {
+      previews.push(route.request().postDataJSON());
+      return route.fulfill({
+        status: 202,
+        json: { jobId: 'constraints-job', planId: 'constraints-plan' },
+      });
+    }
+    if (path.includes('/plans/'))
+      return route.fulfill({
+        json: {
+          id: 'constraints-plan',
+          status: 'ready',
+          revision: 0,
+          selection: [{ reference: 'Example', version: '1.2.3', enabled: true }],
+          vanilla: false,
+          lock: { version: 1, mods: {} },
+          changes: [],
+          filesBytes: 0,
+        },
+      });
+    return route.fulfill({
+      json: {
+        ...emptySnapshot(),
+        selection: [{ reference: 'Example', version: '>=1.2.3', enabled: true }],
+      },
+    });
+  });
+  await page.goto(`${origin}satisfactory-fixture`);
+  await page.getByRole('button', { name: 'Change version of Example mod' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Example mod' });
+  await check(dialog.getByLabel('Version and game build requirement', { exact: true })).toHaveValue(
+    '1.2.3',
+  );
+  await check(dialog.getByLabel('Version policy', { exact: true })).toHaveValue('minimum');
+  await dialog.getByLabel('Version policy', { exact: true }).selectOption('exact');
+  await dialog.getByRole('button', { name: 'Select version', exact: true }).click();
+  await page.getByRole('button', { name: 'Review changes', exact: true }).click();
+  await check(page.getByText('No mod file changes are required.', { exact: true })).toBeVisible();
+  expect(previews).toMatchObject([
+    { selection: [{ reference: 'Example', version: '1.2.3', enabled: true }] },
+  ]);
+  await context.close();
 });

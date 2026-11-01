@@ -264,6 +264,7 @@ const isGatewaySleep = (operation: Operation) => {
 };
 
 const isScheduledStop = (operation: Operation) => {
+  if (operation.action === 'stop' && operation.plan.satisfactoryExternalEdit === true) return true;
   const marker = operation.plan.scheduleAutomation;
   return (
     operation.action === 'stop' &&

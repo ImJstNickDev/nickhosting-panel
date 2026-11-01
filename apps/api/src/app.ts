@@ -137,6 +137,12 @@ export function createApp(options: Options) {
       allowMethods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
     }),
   );
+  const satisfactoryProfileBodyLimit = bodyLimit({
+    maxSize: 2_097_152 + 8192,
+    onError: () => {
+      throw new DomainError('validation_failed', 413);
+    },
+  });
   const jsonBodyLimit = bodyLimit({
     maxSize: 65_536,
     onError: () => {
@@ -170,6 +176,11 @@ export function createApp(options: Options) {
     // This route authenticates before reading and bounds actual bytes itself,
     // including requests without Content-Length or with an incorrect value.
     if (c.req.method === 'PUT' && c.req.path === '/v1/web/profile-photo') return next();
+    if (
+      c.req.method === 'POST' &&
+      /^\/v1\/servers\/[^/]+\/satisfactory\/mods\/profiles\/import$/.test(c.req.path)
+    )
+      return satisfactoryProfileBodyLimit(c, next);
     if (
       c.req.method === 'POST' &&
       /^\/v1\/servers\/[^/]+\/files(?:\/(?:copy|archive|extract|viewer\/archive\/download))?$/.test(
@@ -627,7 +638,16 @@ export function createApp(options: Options) {
   });
   registerSatisfactoryRoutes(app, { db, principal });
   registerSatisfactoryApiRoutes(app, { db, codec: options.codec, principal });
-  registerSatisfactoryModRoutes(app, { db, principal, env });
+  registerSatisfactoryModRoutes(app, {
+    db,
+    principal,
+    env,
+    management:
+      options.management ??
+      (async () => {
+        throw new DomainError('integration_unavailable');
+      }),
+  });
   registerMinecraftRoutes(app, {
     db,
     env,

@@ -1,105 +1,225 @@
 .satisfactory-mods {
-  display: grid;
-  gap: 16px;
-  padding: 20px;
-  max-width: 1080px;
+  width: 100%;
+  min-width: 0;
   margin-inline: auto;
+  container-type: inline-size;
+  --mods-quiet: color-mix(in srgb, var(--surface) 94%, var(--muted));
+  --mods-selected: color-mix(in srgb, var(--surface) 94%, var(--blue));
 }
 .satisfactory-mods h2,
 .satisfactory-mods h3,
 .satisfactory-mods p {
   margin: 0;
 }
-.satisfactory-mods > .muted {
-  font-size: 0.86rem;
-  max-width: 80ch;
+.satisfactory-mods .mods-header {
+  flex-wrap: wrap;
 }
-.satisfactory-mod-search {
+.satisfactory-mods .mods-header-actions {
+  flex-wrap: wrap;
+}
+.satisfactory-mods .mods-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.satisfactory-mods .mods-tabs button > span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.satisfactory-mods .mods-search-toolbar {
+  margin-top: 14px;
+}
+:where(.satisfactory-mods .mods-search-toolbar) .field {
+  margin: 0;
+  min-width: 130px;
+}
+.satisfactory-mods .mods-search-toolbar .field > label {
+  font-size: 0.75rem;
+}
+.satisfactory-mods .mods-project-list {
+  margin-top: 14px;
+}
+.satisfactory-mods .mods-project-open {
+  text-align: left;
+}
+.satisfactory-mods .mods-project-summary {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.satisfactory-installed-row {
+  gap: 14px;
+  padding: 14px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.satisfactory-mod-copy {
+  flex: 1;
+  min-width: 0;
+}
+.satisfactory-mods button.satisfactory-name {
+  padding: 0;
+  min-height: 28px;
+  text-align: left;
+  display: inline;
+  background: transparent;
+  color: inherit;
+  border: 0;
+  box-shadow: none;
+  font-size: 0.9rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.satisfactory-mods button.satisfactory-name:hover {
+  color: var(--blue);
+}
+.satisfactory-mod-meta {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 10px;
-  padding-top: 16px;
+  gap: 8px;
+  font-size: 0.76rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.satisfactory-mod-footer,
+.satisfactory-draft-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 16px 0;
+}
+.satisfactory-draft-footer {
   border-top: 1px solid var(--line);
+  margin-top: 12px;
+  font-size: 0.82rem;
 }
-.satisfactory-mod-search .workspace-search {
-  max-width: none;
-}
-.satisfactory-mod-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-.satisfactory-mod-list > li {
+.satisfactory-notice {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 12px;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--line);
-  overflow-wrap: anywhere;
-}
-.satisfactory-mod-name {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  min-width: 0;
-}
-.satisfactory-mod-name > span,
-.satisfactory-catalog code {
-  color: var(--muted);
+  padding: 12px;
+  margin: 12px 0;
+  background: var(--mods-quiet);
+  border-radius: 8px;
   font-size: 0.85rem;
 }
-.satisfactory-mod-list .actions {
-  gap: 8px;
+.satisfactory-notice p {
+  flex: 1 1 260px;
 }
-.satisfactory-mod-list .actions button {
-  min-height: 36px;
-  font-size: 0.8rem;
+.satisfactory-mod-dialog {
+  width: min(640px, calc(100vw - 32px));
 }
-.satisfactory-mods .form-footer,
-.satisfactory-version-dialog .form-footer {
+.satisfactory-mod-dialog .form-footer {
   justify-content: flex-end;
   gap: 8px;
 }
-.satisfactory-mods summary {
-  cursor: pointer;
-  color: var(--muted);
-  font-size: 0.85rem;
+.satisfactory-mod-dialog .field {
+  margin-bottom: 12px;
 }
-.satisfactory-mods details > p {
-  margin-top: 8px;
+.satisfactory-mod-dialog .muted {
+  font-size: 0.82rem;
+}
+.satisfactory-mod-dialog .actions {
+  flex-wrap: wrap;
+}
+.satisfactory-description {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 280px;
+  overflow: auto;
+  font-size: 0.86rem;
 }
 .satisfactory-dependencies {
-  margin: 8px 0;
+  margin: 12px 0;
   padding-left: 20px;
   color: var(--muted);
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   overflow-wrap: anywhere;
 }
-.satisfactory-mods .satisfactory-project-action {
-  min-height: 36px;
-  padding: 4px 0;
-  border: 0;
-  border-radius: 0;
-  color: var(--blue);
-  background: transparent;
-  text-align: left;
-  justify-content: flex-start;
+.satisfactory-profile-list {
+  list-style: none;
+  margin: 0 0 20px;
+  padding: 0;
+}
+.satisfactory-profile-list > li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  padding: 12px 0;
+}
+.satisfactory-profile-list strong {
   overflow-wrap: anywhere;
 }
-.satisfactory-version-dialog {
-  width: min(560px, calc(100vw - 32px));
+.satisfactory-profile-list small {
+  display: block;
+  color: var(--muted);
+  margin-top: 4px;
 }
-.satisfactory-version-dialog select {
+.satisfactory-sftp-link {
+  display: inline-block;
+  margin: 8px 0;
+}
+.satisfactory-review {
+  margin-top: 16px;
+}
+.satisfactory-review-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.satisfactory-review-row > div {
   min-width: 0;
+  overflow-wrap: anywhere;
+}
+.satisfactory-change-action {
+  min-width: 90px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.satisfactory-review-row small {
+  color: var(--muted);
+}
+@container (max-width: 600px) {
+  .satisfactory-mods .mods-header-actions {
+    gap: 6px;
+  }
+  .satisfactory-mods .mods-search-toolbar {
+    align-items: end;
+  }
+  .satisfactory-mods .mods-search-toolbar .workspace-search {
+    width: 100%;
+    max-width: none;
+    flex-basis: 100%;
+  }
+  .satisfactory-installed-row {
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .satisfactory-installed-row .mods-installed-actions {
+    margin-left: auto;
+  }
+  .satisfactory-mods .mods-project {
+    padding-inline: 0;
+  }
+  .satisfactory-mods .mods-project-open {
+    gap: 10px;
+  }
 }
 @media (max-width: 600px) {
-  .satisfactory-mods {
-    padding: 16px;
+  .satisfactory-profile-list .actions {
+    width: 100%;
   }
-  .satisfactory-mod-list .actions {
-    flex-basis: 100%;
+  .satisfactory-mod-dialog {
+    padding: 18px;
   }
 }

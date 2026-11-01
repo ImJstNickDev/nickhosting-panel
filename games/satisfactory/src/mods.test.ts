@@ -89,6 +89,111 @@ describe('Satisfactory ficsit preparation', () => {
     expect(result.files[0]?.sha256).toHaveLength(64);
     expect(await readdir(input.stagingRoot)).toEqual([]);
   });
+  it('preserves disabled roots and checks resolved versions against constraints', async () => {
+    const input = await fixture();
+    const result = await prepareSatisfactoryMods({
+      ...input,
+      selection: [
+        { reference: 'Example', version: '>=1.0.0 <2.0.0' },
+        { reference: 'Paused', version: '9.0.0', enabled: false },
+      ],
+      run: async (_binary, _args, cwd) => {
+        const profiles = JSON.parse(await readFile(join(cwd, 'state/profiles.json'), 'utf8'));
+        expect(profiles.profiles.NickHosting.mods.Paused.enabled).toBe(false);
+        await writeFile(
+          join(cwd, 'game/FactoryGame/Mods/nick_hosting-lock.json'),
+          JSON.stringify(lock),
+        );
+      },
+    });
+    expect(result.lock.mods.Example?.version).toBe('1.2.3');
+    expect(result.lock.mods.Paused).toBeUndefined();
+  });
+  it('handles upstream vanilla mode without requiring a lockfile', async () => {
+    const result = await prepareSatisfactoryMods({
+      ...(await fixture()),
+      vanilla: true,
+      run: async (_binary, _args, cwd) => {
+        const installs = JSON.parse(await readFile(join(cwd, 'state/installations.json'), 'utf8'));
+        expect(installs.installations[0].vanilla).toBe(true);
+      },
+    });
+    expect(result).toEqual({ files: [], lock: { version: 1, mods: {} } });
+  });
+  it('accepts resolved shared profiles containing client-only and server-only roots', async () => {
+    const result = await prepareSatisfactoryMods({
+      ...(await fixture()),
+      selection: [
+        { reference: 'ClientOnly', version: '1.0.0' },
+        { reference: 'ServerOnly', version: '1.0.0' },
+      ],
+      requiredTargets: ['LinuxServer', 'Windows'],
+      run: async (_binary, _args, cwd) => {
+        await writeFile(
+          join(cwd, 'game/FactoryGame/Mods/nick_hosting-lock.json'),
+          JSON.stringify({
+            version: 1,
+            mods: {
+              ClientOnly: {
+                version: '1.0.0',
+                dependencies: {},
+                targets: { Windows: { hash: 'a', link: 'https://api.ficsit.app/client.zip' } },
+              },
+              ServerOnly: {
+                version: '1.0.0',
+                dependencies: {},
+                targets: { LinuxServer: { hash: 'b', link: 'https://api.ficsit.app/server.zip' } },
+              },
+            },
+          }),
+        );
+      },
+    });
+    expect(Object.keys(result.lock.mods)).toEqual(['ClientOnly', 'ServerOnly']);
+  });
+  it('rejects unsafe prior lock URLs and roots with no relevant target', async () => {
+    const run = vi.fn();
+    await expect(
+      prepareSatisfactoryMods({
+        ...(await fixture()),
+        run,
+        priorLock: {
+          version: 1,
+          mods: {
+            Example: {
+              version: '1.2.3',
+              dependencies: {},
+              targets: { LinuxServer: { hash: 'abc', link: 'http://127.0.0.1/private' } },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow('lock_url_invalid');
+    expect(run).not.toHaveBeenCalled();
+    await expect(
+      prepareSatisfactoryMods({
+        ...(await fixture()),
+        requiredTargets: ['LinuxServer', 'Windows'],
+        run: async (_binary, _args, cwd) => {
+          await writeFile(
+            join(cwd, 'game/FactoryGame/Mods/nick_hosting-lock.json'),
+            JSON.stringify({
+              ...lock,
+              mods: {
+                ...lock.mods,
+                Example: {
+                  ...lock.mods.Example,
+                  targets: {
+                    WindowsServer: { hash: 'abc', link: 'https://api.ficsit.app/mod.zip' },
+                  },
+                },
+              },
+            }),
+          );
+        },
+      }),
+    ).rejects.toThrow('resolution_mismatch');
+  });
   it('rejects an untrusted CLI before executing it', async () => {
     const run = vi.fn();
     await expect(
@@ -130,7 +235,8 @@ describe('Satisfactory ficsit preparation', () => {
       satisfactoryModSelectionSchema.safeParse([{ reference: '--help', version: '1.0.0' }]).success,
     ).toBe(false);
     expect(
-      satisfactoryModSelectionSchema.safeParse([{ reference: 'X', version: '*' }]).success,
+      satisfactoryModSelectionSchema.safeParse([{ reference: 'X', version: '$(curl bad)' }])
+        .success,
     ).toBe(false);
     expect(
       satisfactoryModSelectionSchema.safeParse([

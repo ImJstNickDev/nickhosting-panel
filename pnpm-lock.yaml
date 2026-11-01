@@ -413,9 +413,16 @@ importers:
       '@nickhosting/game-sdk':
         specifier: workspace:*
         version: link:../../packages/game-sdk
+      semver:
+        specifier: 7.8.5
+        version: 7.8.5
       zod:
         specifier: 4.6.5
         version: 4.6.5
+    devDependencies:
+      '@types/semver':
+        specifier: 7.8.0
+        version: 7.8.0
 
   packages/auth:
     dependencies:
@@ -1611,6 +1618,9 @@ packages:
 
   '@types/readable-stream@4.0.25':
     resolution: {integrity: sha512-7GsxL8Wd5X3jh73/qgW7WCnbBvGSdD8U3E4Jiuus3/8I+PN20DtlkJtwFhr/sImXfDDQ2Z03i/9wNiIF3TVSsw==}
+
+  '@types/semver@7.8.0':
+    resolution: {integrity: sha512-1mAINjtQCXXeLkJ9ehXkwOcBpqtLxiVtKhpUf83DdRNdQKV0iXZpaHYqRr7nj+wvxuJzoAmAwXI+sCNMv1CzLQ==}
 
   '@types/ssh2@1.15.6':
     resolution: {integrity: sha512-oGdxhBqcRTwSTKFm+9EiKzkNVYRLEFkcW44lhguvBalGJbWfGnDt/ezwSUZc+SF9m9bMc3VyklNAtp7zICjS5w==}
@@ -4495,6 +4505,8 @@ snapshots:
   '@types/readable-stream@4.0.25':
     dependencies:
       '@types/node': 24.19.1
+
+  '@types/semver@7.8.0': {}
 
   '@types/ssh2@1.15.6':
     dependencies:
