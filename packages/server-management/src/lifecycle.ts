@@ -30,6 +30,7 @@ import {
   resolveBackupMode,
 } from './backup-policy.js';
 import { effectiveNodeOverhead } from './configuration.js';
+import { isGatewayConsoleSleep } from './gateway-console-contract.js';
 import { reconcileGatewayState } from './gateway-orchestration.js';
 import {
   activateProvisionGateway,
@@ -801,7 +802,11 @@ export async function processServerOperation(
               .where('server_id', '=', server.id)
               .executeTakeFirst();
             if (compute || installation) return false;
-            if (!isGatewaySleep(operation) && !isScheduledStop(operation))
+            if (
+              !isGatewaySleep(operation) &&
+              !isScheduledStop(operation) &&
+              !isGatewayConsoleSleep(operation.plan)
+            )
               await tx
                 .updateTable('managed_servers')
                 .set({ intent: 'manually_stopped' })
@@ -902,7 +907,9 @@ export async function processServerOperation(
                     runtime_state: 'offline' as const,
                     readiness: 'unknown' as const,
                     last_observed_at: nowOf(options),
-                    ...(!isGatewaySleep(operation) && !isScheduledStop(operation)
+                    ...(!isGatewaySleep(operation) &&
+                    !isScheduledStop(operation) &&
+                    !isGatewayConsoleSleep(operation.plan)
                       ? { intent: 'manually_stopped' as const }
                       : {}),
                   }
@@ -986,7 +993,9 @@ export async function processServerOperation(
       if (
         success &&
         confirmedStopped &&
-        (isGatewaySleep(operation) || isScheduledStop(operation))
+        (isGatewaySleep(operation) ||
+          isScheduledStop(operation) ||
+          isGatewayConsoleSleep(operation.plan))
       ) {
         // Reuse the canonical durable transition now rather than waiting for a
         // worker tick. A crash/failure here is recovered by the same reconciler
@@ -1188,6 +1197,7 @@ export async function processServerOperation(
         finalPowerIdentity ||
         worldFileContent ||
         ((operation.plan.gatewayAutomation !== undefined ||
+          operation.plan.gatewayConsole !== undefined ||
           operation.plan.scheduleAutomation !== undefined ||
           minecraftProvision) &&
           !(phase === 'power' && operation.action === 'stop' && options.authorizeIntent))
@@ -2644,11 +2654,19 @@ export async function processServerOperation(
                 : {}),
             },
           });
+          // An explicit console sleep/restart promises a saved world. Complete
+          // that prerequisite before recording any possible power handoff, so a
+          // failed save can never be mistaken for an uncertain shutdown.
+          const consolePower = operation.plan.gatewayConsole !== undefined;
+          if (consolePower) {
+            if (!options.prepareGameStop) throw new DomainError('configuration_invalid');
+            await options.prepareGameStop(gameContext());
+          }
           if (action === 'stop') {
             await effect(
               'power',
               async (verifiedServer) => {
-                await options.prepareGameStop?.(gameContext());
+                if (!consolePower) await options.prepareGameStop?.(gameContext());
                 const result = await options.adapter.stopWithConfirmation(
                   server.pterodactyl_id ?? 0,
                   server.pterodactyl_identifier ?? '',
@@ -2759,7 +2777,8 @@ export async function processServerOperation(
             );
           } else
             await effect('power', async () => {
-              if (action === 'restart') await options.prepareGameStop?.(gameContext());
+              if (action === 'restart' && !consolePower)
+                await options.prepareGameStop?.(gameContext());
               return options.adapter.power(server.pterodactyl_identifier ?? '', action);
             });
           const stopped = await completeObservedStop();
@@ -2799,7 +2818,11 @@ export async function processServerOperation(
           // with trusted, host-bound Docker non-running evidence before persisting proof.
           if (operation.plan.stopConfirmed !== true)
             return wait('stop_terminal_unproven', 'operation_uncertain');
-          if (!isGatewaySleep(operation) && !isScheduledStop(operation))
+          if (
+            !isGatewaySleep(operation) &&
+            !isScheduledStop(operation) &&
+            !isGatewayConsoleSleep(operation.plan)
+          )
             await db
               .updateTable('managed_servers')
               .set({ intent: 'manually_stopped' })

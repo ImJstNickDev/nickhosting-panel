@@ -19,6 +19,7 @@ import {
   createNativeAuthenticationToken,
   decodeNativePlayerIdentity,
 } from '../../../games/satisfactory/src/native-auth.js';
+import * as consoleLifecycle from '../../../packages/server-management/src/gateway-orchestration.js';
 import * as satisfactoryApi from '../../../packages/server-management/src/satisfactory-api.js';
 import * as nativeCredentials from '../../../packages/server-management/src/satisfactory-native-credentials.js';
 import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
@@ -247,6 +248,281 @@ describe('M3 Core service authentication and managed control plane', () => {
     substates: [{ id: 0, version: 1 }],
     name: 'Factory',
     observedAt: new Date().toISOString(),
+  });
+  describe('authenticated Satisfactory console commands', () => {
+    afterEach(() => vi.restoreAllMocks());
+    const credentials = {
+      build: 513885,
+      serverName: 'Private factory',
+      serverSecret: 'A1'.repeat(256),
+      adminPassword: { hash: 'B2'.repeat(64), salt: 'C3'.repeat(32) },
+    };
+    const playerId = '060102030405060708';
+    const player = decodeNativePlayerIdentity(playerId);
+    if (!player) throw new Error('fixture');
+    const admin = createNativeAuthenticationToken(credentials, 'Administrator', player);
+    async function setup(mode: 'sleeping' | 'online' = 'sleeping') {
+      await satisfactoryRoute();
+      await f.db
+        .updateTable('gateway_server_states')
+        .set({
+          state: mode,
+          auto_wake_override: true,
+          process_started_at: mode === 'online' ? new Date().toISOString() : null,
+          readiness_observed_at: mode === 'online' ? new Date() : null,
+        })
+        .where('server_id', '=', serverId)
+        .execute();
+      await f.db
+        .updateTable('managed_servers')
+        .set({
+          intent: mode === 'online' ? 'auto_wake_enabled' : 'sleeping',
+          runtime_state: mode === 'online' ? 'running' : 'offline',
+          automatic_starts_paused: false,
+        })
+        .where('id', '=', serverId)
+        .execute();
+      const selected = (await getGatewaySnapshot(f.db, env)).routes.find(
+        (entry) => entry.id === route.id,
+      );
+      if (!selected) throw new Error('fixture');
+      route = selected;
+      const stopped = vi
+        .spyOn(nativeCredentials, 'readStoppedSatisfactoryCredentials')
+        .mockResolvedValue({
+          credentials,
+          generation: route.generation,
+          digest: 'D4'.repeat(32),
+          providerUuid: remote.uuid,
+          port: route.backend.port,
+        });
+      const verify = vi.fn(async () => undefined);
+      const live = vi
+        .spyOn(satisfactoryApi, 'resolveSatisfactoryApi')
+        .mockResolvedValue(new SatisfactoryApi({ request: verify }));
+      const input = (command: string, authorization = `Bearer ${admin}`) => ({
+        routeId: route.id,
+        routeRevision: route.revision,
+        request: { operation: 'RunCommand', data: { Command: command }, authorization, playerId },
+      });
+      const call = async (command: string) => {
+        const response = await request(`${prefix()}/console-command`, input(command));
+        expect(response.status).toBe(200);
+        return response.json();
+      };
+      return { input, call, stopped, live, verify };
+    }
+    it('serves the complete read-only command tree while sleeping, including exact mods text, without waking or exposing credentials', async () => {
+      const { call, live } = await setup();
+      const wake = vi.spyOn(consoleLifecycle, 'requestGatewayWake');
+      for (const command of [
+        'nickhosting',
+        'nickhosting help stop',
+        'nickhosting status',
+        'nickhosting info',
+        'nickhosting version',
+        'nickhosting idle',
+        'nickhosting mods',
+      ]) {
+        const body = await call(command);
+        expect(body).toMatchObject({
+          status: 200,
+          body: { data: { commandResult: expect.any(String), returnValue: true } },
+        });
+        expect(JSON.stringify(body)).not.toContain(credentials.serverSecret);
+        expect(JSON.stringify(body)).not.toContain(admin);
+        if (command === 'nickhosting mods')
+          expect(body.body.data.commandResult).toBe('Coming Soon :)');
+      }
+      expect((await call('quit')).body.data.returnValue).toBe(false);
+      expect((await call('nickhosting stop')).body.data.returnValue).toBe(true);
+      expect((await call('nickhosting restart')).body.data.returnValue).toBe(false);
+      expect(wake).not.toHaveBeenCalled();
+      expect(live).not.toHaveBeenCalled();
+    });
+    it('rejects forged, client, application and other-player credentials before returning even help or mods', async () => {
+      const { input, live } = await setup();
+      for (const authorization of [
+        '',
+        `Bearer ${createNativeAuthenticationToken(credentials, 'Client', player)}`,
+        `Bearer ${admin.slice(0, -2)}00`,
+        `Bearer ${Buffer.from(JSON.stringify({ pl: 'APIToken' })).toString('base64')}.${'AA'.repeat(64)}`,
+      ]) {
+        const response = await request(
+          `${prefix()}/console-command`,
+          input('nickhosting mods', authorization),
+        );
+        expect(await response.json()).toMatchObject({ status: 401 });
+      }
+      const other = input('nickhosting help');
+      other.request.playerId = '060102030405060709';
+      expect(await (await request(`${prefix()}/console-command`, other)).json()).toMatchObject({
+        status: 401,
+      });
+      expect(live).not.toHaveBeenCalled();
+    });
+    it('authenticates online with original Administrator token/player and rejects success-shaped non-204 verification', async () => {
+      const { call, live, stopped, verify } = await setup('online');
+      expect((await call('nickhosting mods')).body.data.commandResult).toBe('Coming Soon :)');
+      expect(live).toHaveBeenCalledWith(expect.anything(), codec, serverId, admin, playerId);
+      expect(verify).toHaveBeenCalledWith(
+        {
+          function: 'VerifyAuthenticationToken',
+          data: { AuthenticationToken: admin.split('.')[1], PrivilegeLevel: 'Administrator' },
+        },
+        expect.any(AbortSignal),
+      );
+      expect(stopped).not.toHaveBeenCalled();
+      verify.mockResolvedValueOnce({ data: {} } as never);
+      expect(await call('nickhosting mods')).toMatchObject({ status: 401 });
+      verify.mockRejectedValueOnce(new DomainError('unauthenticated'));
+      expect(await call('nickhosting mods')).toMatchObject({ status: 401 });
+    });
+    it.each(['sleeping', 'online'] as const)(
+      'accepts genuine native anonymous Administrator in %s without inventing a player',
+      async (mode) => {
+        const { input, live } = await setup(mode);
+        const anonymous = decodeNativePlayerIdentity();
+        if (!anonymous) throw new Error('fixture');
+        const nativeToken = createNativeAuthenticationToken(
+          credentials,
+          'Administrator',
+          anonymous,
+        );
+        const value = input('nickhosting mods', `Bearer ${nativeToken}`);
+        const response = await request(`${prefix()}/console-command`, {
+          ...value,
+          request: { ...value.request, playerId: undefined },
+        });
+        expect(await response.json()).toMatchObject({
+          status: 200,
+          body: { data: { commandResult: 'Coming Soon :)', returnValue: true } },
+        });
+        if (mode === 'online')
+          expect(live).toHaveBeenCalledWith(
+            expect.anything(),
+            codec,
+            serverId,
+            nativeToken,
+            'INVALID',
+          );
+      },
+    );
+    it('checks service identity, transport and revision before native credential access', async () => {
+      const { input, stopped } = await setup();
+      const value = input('nickhosting status');
+      expect(
+        (await request(`${prefix()}/console-command`, value, { authorization: '' })).status,
+      ).toBe(401);
+      expect(
+        (
+          await request(`${prefix()}/console-command`, {
+            ...value,
+            routeRevision: route.revision + 1,
+          })
+        ).status,
+      ).toBe(412);
+      await f.db
+        .updateTable('gateway_routes')
+        .set({ transport: 'udp' })
+        .where('id', '=', route.id)
+        .execute();
+      const changed = (await getGatewaySnapshot(f.db, env)).routes.find(
+        (entry) => entry.id === route.id,
+      );
+      if (!changed) throw new Error('fixture');
+      expect(
+        (
+          await request(`${prefix()}/console-command`, {
+            ...value,
+            routeRevision: changed.revision,
+          })
+        ).status,
+      ).toBe(403);
+      expect(stopped).not.toHaveBeenCalled();
+    });
+    it('revalidates generation after native authentication before allowing an action', async () => {
+      const { input, verify } = await setup('online');
+      const action = vi.spyOn(consoleLifecycle, 'requestGatewayConsoleAction');
+      verify.mockImplementationOnce(async () => {
+        await f.db
+          .updateTable('gateway_server_states')
+          .set({ generation: randomUUID() })
+          .where('server_id', '=', serverId)
+          .execute();
+        return undefined;
+      });
+      const response = await request(`${prefix()}/console-command`, input('nickhosting stop'));
+      expect([409, 412]).toContain(response.status);
+      expect(action).not.toHaveBeenCalled();
+    });
+    it('never requests forced sleep without a configured save credential', async () => {
+      const { call } = await setup('online');
+      const action = vi.spyOn(consoleLifecycle, 'requestGatewayConsoleAction');
+      vi.spyOn(satisfactoryApi, 'satisfactoryApiConfigured').mockResolvedValue(false);
+      expect((await call('nickhosting stop')).body.data.returnValue).toBe(false);
+      expect(action).not.toHaveBeenCalled();
+    });
+    it.each(['stop', 'restart'] as const)(
+      'sends %s through Core and returns only its accepted transition proof',
+      async (command) => {
+        const { call } = await setup('online');
+        vi.spyOn(satisfactoryApi, 'satisfactoryApiConfigured').mockResolvedValue(true);
+        const before = await getGatewayState(f.db, serverId, { env });
+        const generation = command === 'restart' ? randomUUID() : before.generation;
+        const action = vi.spyOn(consoleLifecycle, 'requestGatewayConsoleAction').mockResolvedValue({
+          ...before,
+          generation,
+          state: command === 'stop' ? 'blocked' : 'waking',
+          sleepJobId: command === 'stop' ? randomUUID() : null,
+          wakeJobId: command === 'restart' ? randomUUID() : null,
+        });
+        const result = await call(`nickhosting ${command}`);
+        expect(result).toMatchObject({
+          status: 200,
+          body: { data: { returnValue: true } },
+          transition: {
+            action: command === 'stop' ? 'sleep' : 'restart',
+            previousGeneration: before.generation,
+            generation,
+          },
+        });
+        expect(action).toHaveBeenCalledWith(
+          expect.anything(),
+          serverId,
+          {
+            generation: before.generation,
+            action: command === 'stop' ? 'sleep' : 'restart',
+            playerId,
+          },
+          expect.objectContaining({ env, validateObservation: expect.any(Function) }),
+        );
+      },
+    );
+    it('uses existing wake admission for start and returns no accepted proof when blocked', async () => {
+      const { call } = await setup();
+      const before = await getGatewayState(f.db, serverId, { env });
+      const wake = vi
+        .spyOn(consoleLifecycle, 'requestGatewayWake')
+        .mockResolvedValue({ ...before, state: 'waking', wakeJobId: randomUUID() });
+      expect(await call('nickhosting start')).toMatchObject({
+        transition: {
+          action: 'start',
+          previousGeneration: before.generation,
+          generation: before.generation,
+        },
+      });
+      expect(wake).toHaveBeenCalledWith(
+        expect.anything(),
+        serverId,
+        { generation: before.generation, intent: 'join' },
+        expect.objectContaining({ validateObservation: expect.any(Function) }),
+      );
+      wake.mockResolvedValueOnce({ ...before, state: 'blocked', wakeJobId: null });
+      expect(await call('nickhosting start')).toMatchObject({
+        body: { data: { returnValue: false } },
+      });
+    });
   });
   describe('native stopped Satisfactory API', () => {
     afterEach(() => vi.restoreAllMocks());

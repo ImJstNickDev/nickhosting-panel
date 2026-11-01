@@ -62,6 +62,7 @@ function fixture() {
       adapter,
       authorize,
       assertStopped,
+      operation: () => ({ plan: {} }),
       effect: async (_phase: string, perform: () => Promise<unknown>) => {
         await perform();
         return true;
@@ -76,6 +77,17 @@ describe('Satisfactory prestart TLS distribution', () => {
     vi.mocked(resolveSatisfactoryApi).mockClear();
     await createSatisfactoryModuleRuntime(codec).prepareStop?.(f.context);
     expect(resolveSatisfactoryApi).not.toHaveBeenCalled();
+  });
+  it('refuses a console sleep when no credential can verify the required save', async () => {
+    const f = fixture();
+    vi.mocked(satisfactoryApiConfigured).mockResolvedValue(false);
+    f.context.operation = () =>
+      ({ plan: { gatewayConsole: { action: 'sleep' } } }) as unknown as ReturnType<
+        GameLifecycleContext['operation']
+      >;
+    await expect(createSatisfactoryModuleRuntime(codec).prepareStop?.(f.context)).rejects.toThrow(
+      'integration_unavailable',
+    );
   });
   it('saves active game state before the provider stop handoff', async () => {
     const f = fixture();

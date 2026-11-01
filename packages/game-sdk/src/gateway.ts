@@ -39,6 +39,18 @@ export const gatewayOfflineApiResponseSchema = z.strictObject({
   body: z.record(z.string(), z.unknown()).optional(),
 });
 export type GatewayOfflineApiResponse = z.infer<typeof gatewayOfflineApiResponseSchema>;
+/** Core-authenticated lifecycle receipt, never exposed in the game's JSON body. */
+export const gatewayConsoleCommandResponseSchema = gatewayOfflineApiResponseSchema.extend({
+  transition: z
+    .strictObject({
+      action: z.enum(['start', 'sleep', 'restart']),
+      previousGeneration: z.uuid(),
+      generation: z.uuid(),
+    })
+    .optional(),
+});
+export type GatewayConsoleCommandResponse = z.infer<typeof gatewayConsoleCommandResponseSchema>;
+
 export interface GatewayProtocolObservation {
   ready: boolean;
   idle?: boolean;
@@ -261,6 +273,12 @@ export interface GatewayControl {
     routeRevision: number;
     request: GatewayOfflineApiRequest;
   }): Promise<GatewayOfflineApiResponse>;
+  /** Native-authenticated command execution through Core's existing lifecycle. */
+  requestConsoleCommand?(request: {
+    routeId: string;
+    routeRevision: number;
+    request: GatewayOfflineApiRequest;
+  }): Promise<GatewayConsoleCommandResponse>;
   savePrivateState?(request: {
     routeId: string;
     routeRevision: number;
@@ -349,6 +367,13 @@ export interface GatewayTcpContext extends GatewayProtocolContext {
   /** Native game authentication and authorized reads against protected stopped
    * instance state. This hook must never initiate a backend start. */
   requestOfflineApi?(request: GatewayOfflineApiRequest): Promise<GatewayOfflineApiResponse>;
+  /** Bounded native console request; Core verifies the original player token. */
+  requestConsoleCommand?(request: GatewayOfflineApiRequest): Promise<GatewayConsoleCommandResponse>;
+  /** Protect one bounded command response, never gameplay, across its own accepted
+   * lifecycle transition. Release only after HTTP response finish/close. */
+  beginConsoleReply?(): (() => void) | undefined;
+  /** A detached connection may finish its accepted reply but handle no new work. */
+  consoleReplyOnly?(): boolean;
   /** Credential-free API diagnostics. Only fixed operation names and outcomes;
    * never include headers, request/response bodies or player identifiers. */
   onApiDiagnostic?(event: {

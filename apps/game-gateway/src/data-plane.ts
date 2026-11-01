@@ -4,6 +4,7 @@ import { connect, createServer, isIP, type Server, type Socket } from 'node:net'
 import { isDeepStrictEqual } from 'node:util';
 import { DomainError } from '@nickhosting/core';
 import {
+  type GatewayConsoleCommandResponse,
   type GatewayControl,
   type GatewayEndpoint,
   type GatewayMode,
@@ -100,6 +101,16 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     throw new DomainError('configuration_invalid');
   const now = options.now ?? Date.now;
   const listeners = new Map<string, Listener>();
+  const consoleReplies = new WeakMap<
+    Socket,
+    {
+      deadline: number;
+      draining: boolean;
+      sourceGeneration: string;
+      targetGeneration?: string;
+      transition?: GatewayConsoleCommandResponse['transition'];
+    }
+  >();
   const protocols = new Map(options.protocols.map((adapter) => [adapter.id, adapter]));
   const wakeRequests = new Map<
     string,
@@ -289,10 +300,22 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     for (const client of listener.forwardingClients) client.destroy();
     for (const key of listener.sessions.keys()) dropSession(listener, key);
   };
-  const clearSessions = (listener: Listener) => {
+  const clearSessions = (listener: Listener, commandTransition?: GatewayRoute) => {
     listener.tlsIdentity = undefined;
     listener.clientActivity = { version: 0, reportedVersion: 0 };
-    for (const client of listener.clients) client.destroy();
+    for (const client of listener.clients) {
+      const reply = consoleReplies.get(client);
+      if (
+        commandTransition &&
+        reply &&
+        reply.deadline > now() &&
+        !listener.forwardingClients.has(client) &&
+        (!reply.transition || reply.transition.generation === commandTransition.generation)
+      ) {
+        reply.draining = true;
+        reply.targetGeneration = commandTransition.generation;
+      } else client.destroy();
+    }
     for (const key of listener.sessions.keys()) dropSession(listener, key);
   };
   const closeListener = (listener: Listener, force = true): Promise<void> => {
@@ -487,7 +510,10 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       const controller = new AbortController();
       socket.once('close', () => controller.abort());
       const route = listener.route;
-      const valid = () => active(listener) && listener.route.generation === route.generation;
+      const valid = () =>
+        active(listener) &&
+        listener.route.generation === route.generation &&
+        !consoleReplies.get(socket)?.draining;
       void managedHandler
         .acceptTcp(socket, {
           route,
@@ -515,6 +541,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           beginForwarding: () => {
             if (
               !valid() ||
+              consoleReplies.has(socket) ||
               socket.destroyed ||
               !listener.clients.has(socket) ||
               listener.statusOnly ||
@@ -568,6 +595,72 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             listener.route.mode === 'online' &&
             !quiescence.has(route.serverId),
           requestWake: () => (valid() ? wake(listener.route) : Promise.resolve('blocked')),
+          consoleReplyOnly: () => consoleReplies.get(socket)?.draining ?? false,
+          beginConsoleReply: () => {
+            if (
+              !valid() ||
+              socket.destroyed ||
+              listener.statusOnly ||
+              !listener.clients.has(socket) ||
+              listener.forwardingClients.has(socket) ||
+              consoleReplies.has(socket) ||
+              quiescence.has(route.serverId)
+            )
+              return undefined;
+            const reply = {
+              deadline: now() + 10000,
+              draining: false,
+              sourceGeneration: route.generation,
+            };
+            consoleReplies.set(socket, reply);
+            const timer = setTimeout(() => socket.destroy(), 10000);
+            timer.unref();
+            let released = false;
+            const release = () => {
+              if (released) return;
+              released = true;
+              clearTimeout(timer);
+              socket.off('close', release);
+              consoleReplies.delete(socket);
+              if (reply.draining) socket.destroySoon();
+            };
+            socket.once('close', release);
+            return release;
+          },
+          requestConsoleCommand: options.control.requestConsoleCommand
+            ? async (request) => {
+                const reply = consoleReplies.get(socket);
+                if (!valid() || listener.statusOnly || !reply || quiescence.has(route.serverId))
+                  throw new DomainError('integration_unavailable');
+                const result = await options.control.requestConsoleCommand?.({
+                  routeId: listener.route.id,
+                  routeRevision: listener.route.revision,
+                  request,
+                });
+                if (
+                  !result ||
+                  !active(listener) ||
+                  socket.destroyed ||
+                  listener.statusOnly ||
+                  reply.deadline <= now() ||
+                  consoleReplies.get(socket) !== reply
+                )
+                  throw new DomainError('integration_unavailable');
+                const transition = result.transition;
+                if (transition && transition.previousGeneration !== reply.sourceGeneration)
+                  throw new DomainError('integration_unavailable');
+                if (
+                  reply.draining &&
+                  (!transition ||
+                    transition.generation !== reply.targetGeneration ||
+                    transition.generation !== listener.route.generation)
+                )
+                  throw new DomainError('integration_unavailable');
+                if (!reply.draining && !valid()) throw new DomainError('integration_unavailable');
+                reply.transition = transition;
+                return result;
+              }
+            : undefined,
           requestOfflineApi: options.control.requestOfflineApi
             ? async (request) => {
                 const allowed = () =>
@@ -1276,6 +1369,11 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         const listener = listeners.get(route.id);
         if (!listener) throw new DomainError('internal_error');
         if (
+          listener.route.wakeEnabled !== route.wakeEnabled ||
+          ['maintenance', 'manually_stopped'].includes(route.mode)
+        )
+          for (const client of listener.clients) if (consoleReplies.has(client)) client.destroy();
+        if (
           !isDeepStrictEqual(listener.route.backend, route.backend) ||
           !isDeepStrictEqual(listener.route.protocol, route.protocol) ||
           listener.route.serverId !== route.serverId ||
@@ -1283,9 +1381,22 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           listener.route.allocationId !== route.allocationId ||
           listener.route.generation !== route.generation ||
           (listener.route.mode === 'online' && route.mode !== 'online')
-        )
-          clearSessions(listener);
-        else if (listener.backendReady && !readiness.get(route.id)) clearBackendSessions(listener);
+        ) {
+          // A lifecycle acknowledgement may finish on its original frontend only
+          // across a pure mode/generation change. Every other authority change,
+          // lease expiry, safety failure or listener removal still closes it.
+          const sameTarget =
+            listener.route.serverId === route.serverId &&
+            listener.route.nodeId === route.nodeId &&
+            listener.route.allocationId === route.allocationId &&
+            listener.route.wakeEnabled === route.wakeEnabled &&
+            isDeepStrictEqual(listener.route.public, route.public) &&
+            isDeepStrictEqual(listener.route.backend, route.backend) &&
+            isDeepStrictEqual(listener.route.protocol, route.protocol) &&
+            ['online', 'waking', 'blocked', 'sleeping'].includes(route.mode);
+          clearSessions(listener, sameTarget ? route : undefined);
+        } else if (listener.backendReady && !readiness.get(route.id))
+          clearBackendSessions(listener);
         listener.route = route;
         listener.backendReady = readiness.get(route.id) ?? false;
         listener.statusOnly = false;

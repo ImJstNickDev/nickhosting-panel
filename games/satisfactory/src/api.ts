@@ -71,6 +71,21 @@ export class SatisfactoryApi {
       throw new DomainError('integration_unavailable', 503, { reason: 'satisfactory_api_failed' });
     return envelope.data.data;
   }
+  /** Native verification binds the raw fingerprint to Administrator and the
+   * player ID supplied by the certificate-pinned transport. Only HTTP 204 maps
+   * to undefined; a JSON success-shaped response is not verification. */
+  async verifyConsoleAdministrator(fingerprint: string, signal?: AbortSignal): Promise<boolean> {
+    if (!/^[a-f\d]{128}$/i.test(fingerprint)) return false;
+    return (
+      (await this.transport.request(
+        {
+          function: 'VerifyAuthenticationToken',
+          data: { AuthenticationToken: fingerprint, PrivilegeLevel: 'Administrator' },
+        },
+        signal,
+      )) === undefined
+    );
+  }
   async state(signal?: AbortSignal): Promise<SatisfactoryGameState> {
     const result = z
       .object({ serverGameState: satisfactoryGameStateSchema })

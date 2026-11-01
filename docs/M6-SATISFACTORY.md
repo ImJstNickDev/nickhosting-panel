@@ -48,7 +48,7 @@ HTTPS uses a stable per-server identity in both Gateway and backend. The Gateway
 terminates incoming TLS and creates a separate upstream TLS session, pinning the
 exact server certificate before forwarding request bytes. Existing sessions are
 not transplanted between TLS endpoints. Online API responses and credentials pass
-through unchanged. Offline HealthCheck reports slow. Claimed, automatically sleeping
+through unchanged, except the reserved `nickhosting` console namespace described below. Offline HealthCheck reports slow. Claimed, automatically sleeping
 instances support native PasswordlessLogin, PasswordLogin and VerifyAuthenticationToken
 for the verified build profile. Core reads the stopped instance's native credential
 state and computes the same persistent tokens as the backend. It never issues
@@ -297,7 +297,7 @@ also retain the existing active-operation protection. Counts remain actual playe
 and session counts; activity is not represented as a fictitious player. Internal
 readiness/application probes and backend responses do not count as client activity.
 Existing quiescence fences still apply to a stop already committed. Sleeping or
-starting query responses remain passive: only Join requests wake, and pending
+starting query responses remain passive: Join or an authenticated `nickhosting start` request can wake, and pending
 reads count as activity only once forwarded to an online backend. Other games
 retain their existing idle policy.
 
@@ -537,3 +537,84 @@ API and Gateway were restarted under standing Owner authorization. No migration,
 Blueprint/Panel/Wings change, new game test asset or user server power/file/world
 mutation was needed. This change has automated protocol/control-plane evidence;
 the new keep-awake policy has not yet been observed in a real game-client session.
+
+
+## Native Server Manager console
+
+The Gateway handles the `nickhosting` namespace inside native HTTPS `RunCommand`.
+The existing TLS listener and authenticated control plane provide this surface;
+no game mod, Unreal-console emulator or shell interpreter is involved. Other
+online commands reach the backend unchanged. While sleeping, native commands
+receive an authenticated textual explanation instead of being queued or executed.
+
+| Command | Behavior |
+| --- | --- |
+| `nickhosting` / `nickhosting help [command]` | Lists descriptors or explains one command. |
+| `nickhosting status` | Current Core state and safe failure information. |
+| `nickhosting info` | Server name, game and configured public address. |
+| `nickhosting version` | Integration version and last observed game NetCL; never an invented current version. |
+| `nickhosting idle` | Effective timeout and prerequisites; live player/world evidence when available. Reading it online is itself client activity. |
+| `nickhosting start` | Uses normal wake admission, consent and coalescing. This is an explicit additional wake trigger alongside Join. |
+| `nickhosting stop` | Requests immediate forced sleep without waiting for inactivity or zero players. Saves first, disconnects players, confirms stop and remains wakeable. |
+| `nickhosting restart` | Saves and restarts an online instance through existing admission/readiness. A sleeping instance directs the administrator to `start`. |
+| `nickhosting mods` | Returns exactly `Coming Soon :)`, as requested; no mod-manager operation is exposed yet. |
+
+All commands, including help and mods, require a native Administrator token bound
+to the native caller identity (Steam/Epic or the native anonymous identity when
+the optional player header is absent/`INVALID`). Malformed identities never fall
+back to anonymous authentication. Online authorization uses the
+original bearer and player ID over certificate-pinned HTTPS, accepting only native
+HTTP 204 fingerprint verification. Offline authorization reads fresh credentials
+from the physically stopped managed instance. Neither cached responses nor the
+platform application token authorize the caller. Unknown commands, ambiguous
+case-duplicate parameters, control characters and extra arguments do not execute.
+English/Italian output uses the existing catalogs and route locale. The command
+descriptors/parser are separate from Core handlers so future subcommands can be
+added without changing transport or authentication.
+
+The route-scoped internal `console-command` endpoint rechecks revision/generation
+after native authorization; power admission rechecks again under the existing
+resource transaction lock. Native player attribution is audited without credentials.
+Explicit sleep/restart jobs have a durable `gatewayConsole` plan marker and remain
+subject to current ownership, identity, operation, wake-consent and maintenance
+checks at every worker effect. They do not fabricate idle observations. Required
+save failure occurs before the power journal, preventing a false or uncertain stop
+claim when no stop was sent. Missing platform save credentials block these commands.
+No new database schema, scheduler or provider-control boundary is introduced.
+
+A stop/restart can change route authority before its HTTP response is flushed.
+The Gateway therefore allows only the bounded, unforwarded console reply to drain
+across the matching Core-confirmed mode/generation transition, then closes it.
+Gameplay and further requests are fenced immediately. Lease expiry, topology or
+identity changes, route withdrawal, manual-stop and wake revocation still close
+all affected sockets. The internal transition proof is never sent to the game.
+
+Validation includes native-token rejection, exact verification status/player
+binding, offline reads with no wake, complete command output, Core acceptance and
+route races, forced sleep with players/no idle proof, save failures, restart
+admission/recovery, duplicate requests, consent revocation and actual TLS response
+flushing across a lifecycle transition. Real-client rendering and multiplayer
+forced-disconnect behavior remain separate acceptance checks; automated fixtures
+are not represented as a connected game-client session.
+
+
+Console validation: 441 unit tests across Satisfactory, Gateway data plane/control,
+pinned transport, save hook and i18n; 563 integration cases across Gateway API,
+general lifecycle, Gateway orchestration and activity (final anonymous-identity
+cases rerun as targeted regressions). Full typecheck, runtime build and i18n parity
+pass. Repository lint passes with 34 warnings and one informational item.
+Independent security review found no remaining must-fix issue.
+
+After the authorized restart of existing dev API, worker and Gateway, all three
+services were healthy. Public certificate-pinned HTTPS returned successful native
+console envelopes for help, command help, status, info, version, idle and mods;
+mods matched the requested string exactly. Client-scope and invalid credentials
+received HTTP 401. The user-used server remained physically stopped/sleeping, with
+zero operation jobs added. No user server start/stop/restart or world/file mutation
+was performed to test power commands; those paths were exercised through isolated
+Core lifecycle and transport fixtures. No new game test assets, migrations,
+Blueprint update, Panel/Wings change or infrastructure reconfiguration were needed.
+
+Rollback this follow-up only after console lifecycle jobs have settled. Revert the
+code commit and restart the same dev services; no schema rollback is required.
+Do not delete pending job plans, TLS identities, native credentials or game data.

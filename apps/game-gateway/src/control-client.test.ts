@@ -26,6 +26,50 @@ const snapshot = {
 };
 
 describe('authenticated bounded Gateway control client', () => {
+  it('sends console credentials only through revision-bound Core and validates lifecycle receipts', async () => {
+    const generation = randomUUID();
+    const input = {
+      routeId: randomUUID(),
+      routeRevision: 7,
+      request: {
+        operation: 'RunCommand',
+        data: { Command: 'nickhosting stop' },
+        authorization: 'Bearer original-token',
+        playerId: '0601100001aabbccdd',
+      },
+    };
+    const response = {
+      status: 200,
+      body: { data: { commandResult: 'Accepted', returnValue: true } },
+      transition: { action: 'sleep', previousGeneration: generation, generation },
+    };
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json(response));
+    const client = createGatewayControlClient({ ...settings, fetcher });
+    try {
+      expect(await client.requestConsoleCommand?.(input)).toEqual(response);
+      const [url, options] = fetcher.mock.calls[0] ?? [];
+      expect(String(url)).toBe(`${settings.baseUrl}/internal/gateway/${gatewayId}/console-command`);
+      expect(JSON.parse(String(options?.body))).toEqual(input);
+      expect(new Headers(options?.headers).get('authorization')).toBe(`Bearer ${token}`);
+      fetcher.mockImplementation(async () =>
+        Response.json({
+          ...response,
+          transition: { ...response.transition, generation: 'invalid' },
+        }),
+      );
+      await expect(client.requestConsoleCommand?.(input)).rejects.toThrow();
+      fetcher.mockClear();
+      await expect(
+        client.requestConsoleCommand?.({
+          ...input,
+          request: { operation: 'RunCommand', data: { Command: 'a'.repeat(65536) } },
+        }),
+      ).rejects.toThrow();
+      expect(fetcher).not.toHaveBeenCalled();
+    } finally {
+      client.close();
+    }
+  });
   it('sends offline API credentials only inside an authenticated revision-bound control request', async () => {
     const input = {
       routeId: randomUUID(),

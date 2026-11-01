@@ -126,7 +126,11 @@ export function createSatisfactoryModuleRuntime(
       const { satisfactoryApiConfigured, resolveSatisfactoryApi } = await import(
         './satisfactory-api.js'
       );
-      if (!(await satisfactoryApiConfigured(context.db, context.server.id))) return;
+      if (!(await satisfactoryApiConfigured(context.db, context.server.id))) {
+        if (context.operation().plan.gatewayConsole)
+          throw new DomainError('integration_unavailable');
+        return;
+      }
       await context.authorize();
       const api = await resolveSatisfactoryApi(context.db, codec, context.server.id);
       if ((await api.state()).isGameRunning) {

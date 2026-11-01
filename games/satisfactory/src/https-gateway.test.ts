@@ -92,6 +92,7 @@ async function pendingFixture(id: string, budget = 300000, responseGate?: Promis
     wake,
     beginActivity,
     offline,
+    context,
     received,
     controller,
     close: async () => {
@@ -101,6 +102,200 @@ async function pendingFixture(id: string, budget = 300000, responseGate?: Promis
     },
   };
 }
+
+it.each(['online', 'sleeping'] as const)(
+  'intercepts namespaced console requests while %s without forwarding or implicit wake',
+  async (mode) => {
+    const fixture = await pendingFixture(`console-${mode}`);
+    fixture.state.mode = mode;
+    fixture.state.online = mode === 'online';
+    const command = vi.fn<NonNullable<GatewayTcpContext['requestConsoleCommand']>>(async () => ({
+      status: 200,
+      body: { data: { commandResult: 'Coming Soon :)', returnValue: true } },
+    }));
+    fixture.context.requestConsoleCommand = command;
+    try {
+      for (const input of ['nickhosting mods', 'NICKHOSTING status', 'nickhosting']) {
+        const response = await exchange(
+          fixture.port,
+          'RunCommand',
+          playerHeaders,
+          JSON.stringify({ function: 'RunCommand', data: { Command: input } }),
+        );
+        expect(response.status).toBe(200);
+        expect(JSON.parse(response.body)).toEqual({
+          data: { commandResult: 'Coming Soon :)', returnValue: true },
+        });
+        expect(command).toHaveBeenLastCalledWith({
+          operation: 'RunCommand',
+          data: { Command: input },
+          authorization: playerAuthorization,
+          playerId: playerHeaders['X-FactoryGame-PlayerId'],
+        });
+      }
+      expect(fixture.received).toHaveLength(0);
+      expect(fixture.wake).not.toHaveBeenCalled();
+      expect(fixture.beginActivity).toHaveBeenCalledTimes(mode === 'online' ? 3 : 0);
+    } finally {
+      await fixture.close();
+    }
+  },
+);
+it('keeps native console commands transparent online and returns authenticated offline explanations', async () => {
+  const fixture = await pendingFixture('console-native');
+  fixture.state.mode = 'online';
+  fixture.state.online = true;
+  const command = vi.fn<NonNullable<GatewayTcpContext['requestConsoleCommand']>>(async () => ({
+    status: 200,
+    body: { data: { commandResult: 'The server is sleeping.', returnValue: false } },
+  }));
+  fixture.context.requestConsoleCommand = command;
+  try {
+    for (const input of ['server.SaveGame factory', 'nickhostingOther status']) {
+      const response = await exchange(
+        fixture.port,
+        'RunCommand',
+        playerHeaders,
+        JSON.stringify({ function: 'RunCommand', data: { Command: input } }),
+      );
+      expect(response.body).toContain('unchanged-backend-response');
+    }
+    expect(command).not.toHaveBeenCalled();
+    fixture.state.mode = 'sleeping';
+    fixture.state.online = false;
+    const response = await exchange(
+      fixture.port,
+      'RunCommand',
+      playerHeaders,
+      JSON.stringify({ function: 'RunCommand', data: { Command: 'server.SaveGame factory' } }),
+    );
+    expect(JSON.parse(response.body).data.returnValue).toBe(false);
+    expect(command).toHaveBeenCalledOnce();
+    expect(fixture.wake).not.toHaveBeenCalled();
+  } finally {
+    await fixture.close();
+  }
+});
+it('preserves console auth rejection and never forwards a rejected namespaced command', async () => {
+  const fixture = await pendingFixture('console-auth');
+  fixture.state.mode = 'online';
+  fixture.state.online = true;
+  fixture.context.requestConsoleCommand = vi.fn(async () => ({
+    status: 403,
+    body: { errorCode: 'insufficient_scope' },
+  }));
+  try {
+    const response = await exchange(
+      fixture.port,
+      'RunCommand',
+      playerHeaders,
+      JSON.stringify({ function: 'RunCommand', data: { Command: 'nickhosting stop' } }),
+    );
+    expect(response).toEqual({ status: 403, body: '{"errorCode":"insufficient_scope"}' });
+    expect(fixture.received).toHaveLength(0);
+    expect(fixture.wake).not.toHaveBeenCalled();
+  } finally {
+    await fixture.close();
+  }
+});
+it('rejects ambiguous console parameters before Core or backend access', async () => {
+  const fixture = await pendingFixture('console-invalid');
+  fixture.state.mode = 'online';
+  fixture.state.online = true;
+  const command = vi.fn();
+  fixture.context.requestConsoleCommand = command;
+  try {
+    for (const data of [
+      { Command: 'nickhosting start', command: 'nickhosting stop' },
+      { Command: 1 },
+      {},
+    ]) {
+      const response = await exchange(
+        fixture.port,
+        'RunCommand',
+        playerHeaders,
+        JSON.stringify({ function: 'RunCommand', data }),
+      );
+      expect(response.status).toBe(400);
+    }
+    expect(command).not.toHaveBeenCalled();
+    expect(fixture.received).toHaveLength(0);
+  } finally {
+    await fixture.close();
+  }
+});
+it('releases console reply ownership only after sending the native response and strips transport receipts', async () => {
+  const fixture = await pendingFixture('console-reply');
+  fixture.state.mode = 'online';
+  fixture.state.online = true;
+  const released = vi.fn();
+  fixture.context.beginConsoleReply = () => released;
+  fixture.context.requestConsoleCommand = async () => {
+    expect(released).not.toHaveBeenCalled();
+    return {
+      status: 200,
+      body: { data: { commandResult: 'Accepted', returnValue: true } },
+      transition: { action: 'sleep', previousGeneration: 'old', generation: 'new' },
+    };
+  };
+  try {
+    const response = await exchange(
+      fixture.port,
+      'RunCommand',
+      playerHeaders,
+      JSON.stringify({ function: 'RunCommand', data: { Command: 'nickhosting stop' } }),
+    );
+    expect(JSON.parse(response.body)).toEqual({
+      data: { commandResult: 'Accepted', returnValue: true },
+    });
+    expect(released).toHaveBeenCalled();
+  } finally {
+    await fixture.close();
+  }
+});
+
+it('flushes the TLS console result before closing a detached lifecycle reply socket', async () => {
+  const controller = new AbortController();
+  let draining = false;
+  const server = createServer((socket) => {
+    const context = {
+      tlsIdentity: async () => identity,
+      signal: controller.signal,
+      canForward: () => !draining,
+      mode: () => (draining ? 'blocked' : 'online'),
+      route: { serverId: 'console-tls-drain' },
+      beginActivity: () => () => {},
+      beginConsoleReply: () => () => socket.destroySoon(),
+      consoleReplyOnly: () => draining,
+      requestConsoleCommand: async () => {
+        draining = true;
+        return {
+          status: 200,
+          body: { data: { commandResult: 'Suspension requested.', returnValue: true } },
+        };
+      },
+    } as unknown as GatewayTcpContext;
+    void acceptSatisfactoryHttps(socket, context);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('bind');
+  try {
+    const response = await exchange(
+      address.port,
+      'RunCommand',
+      playerHeaders,
+      JSON.stringify({ function: 'RunCommand', data: { Command: 'nickhosting stop' } }),
+    );
+    expect(response).toEqual({
+      status: 200,
+      body: JSON.stringify({ data: { commandResult: 'Suspension requested.', returnValue: true } }),
+    });
+  } finally {
+    controller.abort();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
 
 it('keeps the original Join alive beyond 25 seconds within the existing Core connection budget', async () => {
   const fixture = await pendingFixture('startup-over-25-seconds');

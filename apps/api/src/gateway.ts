@@ -37,6 +37,7 @@ import { z } from 'zod';
 import { resolveSatisfactoryApi } from '../../../packages/server-management/src/satisfactory-api.js';
 import type { Variables } from './app.js';
 import { gatewayClientFeatures, gatewayPresentationForClient } from './gateway-presentation.js';
+import { registerSatisfactoryConsoleApi } from './gateway-satisfactory-console.js';
 import {
   observeSatisfactorySessions,
   persistSatisfactoryOfflineSnapshots,
@@ -131,6 +132,7 @@ export function registerGatewayRoutes(
   registerGatewayStartupRoutes(app, options);
   registerGatewaySleepRoutes(app, { ...options, authenticate: authenticateGateway });
   registerSatisfactoryOfflineApi(app, { ...options, route });
+  registerSatisfactoryConsoleApi(app, { ...options, route });
   const prefix = '/internal/gateway/:gatewayId';
   app.get(`${prefix}/configuration`, async (c) => {
     const values = await gatewayConfiguration(db, env);

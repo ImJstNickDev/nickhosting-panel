@@ -46,6 +46,7 @@ import {
   type RuntimeImageContext,
   trustedGameModules,
 } from './game-modules.js';
+import { gatewayConsoleOperationSchema } from './gateway-console-contract.js';
 import { refreshHostObservations } from './host-observations.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import {
@@ -206,6 +207,40 @@ export async function authorizeQueuedEffect(
   )
     throw new DomainError('forbidden');
   const game = await traceOperation(timing, 'game', () => trustedGameModules.resolve(db, serverId));
+
+  if (operation.plan.gatewayConsole !== undefined) {
+    const parsed = gatewayConsoleOperationSchema.safeParse(operation.plan.gatewayConsole);
+    if (!parsed.success || server.connection_mode !== 'gateway') throw new DomainError('forbidden');
+    const marker = parsed.data;
+    const policy = await db
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    if (
+      !policy?.enabled ||
+      policy.generation !== marker.generation ||
+      policy.protocol_id !== marker.protocolId ||
+      server.active_operation_id !== jobId ||
+      job.actor_id !== server.owner_id ||
+      job.subject_id !== server.owner_id ||
+      job.support_session_id ||
+      server.automatic_starts_paused ||
+      ['manually_stopped', 'maintenance'].includes(server.intent) ||
+      (marker.action === 'sleep' &&
+        (operation.action !== 'stop' ||
+          policy.sleep_job_id !== jobId ||
+          server.intent !== 'sleeping')) ||
+      (marker.action === 'restart' &&
+        (operation.action !== 'restart' ||
+          policy.wake_job_id !== jobId ||
+          policy.state !== 'waking'))
+    )
+      throw new DomainError('forbidden');
+    // Explicit sleep must remain wakeable; an Owner policy/consent change can
+    // revoke either queued action before its external effect.
+    await assertAutoWakeAllowed(db, serverId, policy, env);
+  }
 
   if (operation.plan.gatewayAutomation !== undefined) {
     if (server.connection_mode === 'direct') throw new DomainError('forbidden');

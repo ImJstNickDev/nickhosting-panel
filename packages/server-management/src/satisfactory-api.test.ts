@@ -75,3 +75,54 @@ it('rejects non-IP backend destinations and unsafe authorization headers', () =>
     ),
   ).toThrow();
 });
+
+it('binds native Administrator verification to the caller player and requires a native 204', async () => {
+  let received: unknown;
+  const playerId = '060102030405060708';
+  const server = createServer(
+    { key: identity.privateKeyPem, cert: identity.certificatePem },
+    (req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        received = {
+          bearer: req.headers.authorization,
+          playerId: req.headers['x-factorygame-playerid'],
+          body: JSON.parse(Buffer.concat(chunks).toString()),
+        };
+        res.writeHead(204);
+        res.end();
+      });
+    },
+  );
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('bind');
+  try {
+    const { SatisfactoryApi } = await import('../../../games/satisfactory/src/api.js');
+    const api = new SatisfactoryApi(
+      satisfactoryPinnedTransport(
+        { address: '127.0.0.1', port: address.port },
+        identity.certificatePem,
+        'original-player-token',
+        playerId,
+      ),
+    );
+    expect(await api.verifyConsoleAdministrator('AB'.repeat(64))).toBe(true);
+    expect(received).toEqual({
+      bearer: 'Bearer original-player-token',
+      playerId,
+      body: {
+        function: 'VerifyAuthenticationToken',
+        data: { AuthenticationToken: 'AB'.repeat(64), PrivilegeLevel: 'Administrator' },
+      },
+    });
+    expect(
+      await new SatisfactoryApi({ request: async () => ({ data: {} }) }).verifyConsoleAdministrator(
+        'AB'.repeat(64),
+      ),
+    ).toBe(false);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

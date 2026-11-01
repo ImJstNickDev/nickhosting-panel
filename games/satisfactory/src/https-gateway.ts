@@ -10,6 +10,7 @@ import {
   gatewayOfflineApiRequestSchema,
 } from '@nickhosting/game-sdk';
 import { z } from 'zod';
+import { isNickHostingCommand } from './console-commands.js';
 import {
   SatisfactoryHttpsCache,
   satisfactoryCachedFunctions,
@@ -330,7 +331,55 @@ export async function acceptSatisfactoryHttps(
       incoming.destroy();
       return;
     }
-    const fn = parseFunction(incoming, body);
+    if (context.consoleReplyOnly?.()) return error(outgoing);
+    const decoded =
+      incoming.method === 'POST' && /^\/api\/v1\/?$/.test(incoming.url ?? '')
+        ? offlineRequest(incoming, body)
+        : undefined;
+    const fn = decoded?.operation ?? parseFunction(incoming, body);
+    if (fn === 'RunCommand') {
+      const commands = Object.entries(decoded?.data ?? {}).filter(
+        ([key]) => key.toLowerCase() === 'command',
+      );
+      if (!decoded || commands.length !== 1 || typeof commands[0]?.[1] !== 'string')
+        return error(outgoing, 400);
+      const command = commands[0][1];
+      if (isNickHostingCommand(command) || !context.canForward()) {
+        if (body.length > maxPendingBodyBytes) return error(outgoing, 413);
+        if (!context.requestConsoleCommand) return error(outgoing);
+        if (!permitOffline(context.route.serverId, socket.remoteAddress ?? '', false))
+          return error(outgoing, 429);
+        const releasePending = reservePending(outgoing);
+        if (!releasePending) return error(outgoing, 429);
+        const releaseReply = context.beginConsoleReply?.();
+        if (context.beginConsoleReply && !releaseReply) {
+          releasePending();
+          return error(outgoing, 429);
+        }
+        if (releaseReply) {
+          outgoing.once('finish', releaseReply);
+          outgoing.once('close', releaseReply);
+        }
+        // Intercepted online reads count just like forwarded requests. Sleeping
+        // commands remain passive until Core explicitly accepts a lifecycle action.
+        if (context.canForward() && !reserveActivity(outgoing)) {
+          releasePending();
+          return error(outgoing);
+        }
+        try {
+          const response = await context.requestConsoleCommand(decoded);
+          if (context.signal.aborted || outgoing.destroyed) return;
+          outgoing.writeHead(response.status, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+          });
+          outgoing.end(response.status === 204 ? undefined : JSON.stringify(response.body));
+        } finally {
+          releasePending();
+        }
+        return;
+      }
+    }
     if (context.canForward()) {
       forward(incoming, outgoing, body, fn);
       return;

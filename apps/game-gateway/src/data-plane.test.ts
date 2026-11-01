@@ -2978,6 +2978,205 @@ describe('lease, reconciliation and shutdown safety', () => {
     if (!context) throw new Error('Managed fixture context was not accepted');
     return { ...f, current, context, requestOfflineApi };
   }
+  async function consoleFixture() {
+    const backend = await tcpFixture();
+    const current = { ...route(backend.port, 'tcp', 'online'), wakeEnabled: true };
+    let context: import('@nickhosting/game-sdk').GatewayTcpContext | undefined;
+    let timestamp = Date.now();
+    const requestConsoleCommand = vi.fn<NonNullable<GatewayControl['requestConsoleCommand']>>(
+      async () => ({
+        status: 200,
+        body: { data: { commandResult: 'Ready', returnValue: true } },
+      }),
+    );
+    const f = plane([current], {
+      now: () => timestamp,
+      control: { requestConsoleCommand },
+      protocols: [
+        fixtureProtocol({
+          managesTcpActivity: true,
+          managesTcpForwarding: true,
+          async acceptTcp(socket, accepted) {
+            context = accepted;
+            socket.write('accepted');
+          },
+        }),
+      ],
+    });
+    await f.gateway.applySnapshot(f.snapshot());
+    const client = connect(backend.port, '127.0.0.1');
+    client.on('error', () => {});
+    cleanups.push(async () => {
+      client.destroy();
+    });
+    await once(client, 'data');
+    if (!context) throw new Error('Console fixture context missing');
+    return {
+      ...f,
+      current,
+      context,
+      client,
+      requestConsoleCommand,
+      advance: (ms: number) => {
+        timestamp += ms;
+      },
+    };
+  }
+  const consoleRequest = {
+    operation: 'RunCommand',
+    data: { Command: 'nickhosting status' },
+    authorization: 'Bearer player-token',
+    playerId: '0601100001aabbccdd',
+  };
+  it('keeps console control revision-bound without implicit wake or direct forwarding', async () => {
+    const f = await consoleFixture();
+    const release = f.context.beginConsoleReply?.();
+    expect(release).toBeTypeOf('function');
+    expect(f.context.beginConsoleReply?.()).toBeUndefined();
+    expect(f.context.beginForwarding?.()).toBeUndefined();
+    expect(await f.context.requestConsoleCommand?.(consoleRequest)).toMatchObject({ status: 200 });
+    expect(f.requestConsoleCommand).toHaveBeenCalledExactlyOnceWith({
+      routeId: f.current.id,
+      routeRevision: f.current.revision,
+      request: consoleRequest,
+    });
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+    release?.();
+    expect(f.context.canForward()).toBe(true);
+  });
+  it.each(['sleep', 'restart'] as const)(
+    'drains only an accepted %s reply across its lifecycle transition',
+    async (action) => {
+      const f = await consoleFixture();
+      const release = f.context.beginConsoleReply?.();
+      const pending =
+        Promise.withResolvers<import('@nickhosting/game-sdk').GatewayConsoleCommandResponse>();
+      f.requestConsoleCommand.mockImplementationOnce(async () => pending.promise);
+      const response = f.context.requestConsoleCommand?.(consoleRequest);
+      await vi.waitFor(() => expect(f.requestConsoleCommand).toHaveBeenCalledOnce());
+      const generation = action === 'restart' ? randomUUID() : f.current.generation;
+      await f.gateway.applySnapshot(
+        f.snapshot(
+          [
+            {
+              ...f.current,
+              revision: 2,
+              generation,
+              mode: action === 'restart' ? 'waking' : 'blocked',
+            },
+          ],
+          2,
+        ),
+      );
+      expect(f.client.destroyed).toBe(false);
+      expect(f.context.consoleReplyOnly?.()).toBe(true);
+      expect(f.context.canForward()).toBe(false);
+      expect(f.context.beginActivity?.()).toBeUndefined();
+      expect(f.context.beginForwarding?.()).toBeUndefined();
+      expect(f.context.beginConsoleReply?.()).toBeUndefined();
+      expect(await f.context.requestWake()).toBe('blocked');
+      const result = {
+        status: 200,
+        body: { data: { commandResult: 'Accepted', returnValue: true } },
+        transition: { action, previousGeneration: f.current.generation, generation },
+      };
+      pending.resolve(result);
+      expect(await response).toEqual(result);
+      const closed = once(f.client, 'close');
+      release?.();
+      await closed;
+      expect(f.control.requestWake).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['missing', 'wrong-source', 'wrong-target'] as const)(
+    'rejects a draining command reply with %s transition proof',
+    async (failure) => {
+      const f = await consoleFixture();
+      const release = f.context.beginConsoleReply?.();
+      const pending =
+        Promise.withResolvers<import('@nickhosting/game-sdk').GatewayConsoleCommandResponse>();
+      f.requestConsoleCommand.mockImplementationOnce(async () => pending.promise);
+      const response = f.context.requestConsoleCommand?.(consoleRequest);
+      const rejected = expect(response).rejects.toThrow('integration_unavailable');
+      const generation = randomUUID();
+      await f.gateway.applySnapshot(
+        f.snapshot([{ ...f.current, revision: 2, generation, mode: 'waking' }], 2),
+      );
+      pending.resolve({
+        status: 200,
+        transition:
+          failure === 'missing'
+            ? undefined
+            : {
+                action: 'restart',
+                previousGeneration:
+                  failure === 'wrong-source' ? randomUUID() : f.current.generation,
+                generation: failure === 'wrong-target' ? randomUUID() : generation,
+              },
+      });
+      await rejected;
+      release?.();
+    },
+  );
+  it.each(['removed', 'backend', 'protocol', 'wake-disabled', 'manual-stop'] as const)(
+    'does not protect command replies from %s authority revocation',
+    async (change) => {
+      const f = await consoleFixture();
+      const release = f.context.beginConsoleReply?.();
+      const pending =
+        Promise.withResolvers<import('@nickhosting/game-sdk').GatewayConsoleCommandResponse>();
+      f.requestConsoleCommand.mockImplementationOnce(async () => pending.promise);
+      const response = f.context.requestConsoleCommand?.(consoleRequest);
+      const rejected = expect(response).rejects.toThrow('integration_unavailable');
+      const next: GatewayRoute = {
+        ...f.current,
+        revision: 2,
+        generation: randomUUID(),
+        mode: 'waking',
+      };
+      if (change === 'backend') next.backend = { ...next.backend, port: next.backend.port + 1 };
+      if (change === 'protocol')
+        next.protocol = { handlerId: 'fixture', role: 'game', gameVersion: '2' };
+      if (change === 'wake-disabled') {
+        next.wakeEnabled = false;
+        next.generation = f.current.generation;
+        next.mode = 'online';
+      }
+      if (change === 'manual-stop') next.mode = 'manually_stopped';
+      const closed = once(f.client, 'close');
+      await f.gateway.applySnapshot(f.snapshot(change === 'removed' ? [] : [next], 2));
+      await closed;
+      pending.resolve({
+        status: 200,
+        transition: {
+          action: 'restart',
+          previousGeneration: f.current.generation,
+          generation: next.generation,
+        },
+      });
+      await rejected;
+      release?.();
+    },
+  );
+  it('does not extend command response authority beyond the fixed response deadline or lease', async () => {
+    const f = await consoleFixture();
+    const release = f.context.beginConsoleReply?.();
+    f.requestConsoleCommand.mockImplementationOnce(async () => {
+      f.advance(10001);
+      return { status: 200 };
+    });
+    await expect(f.context.requestConsoleCommand?.(consoleRequest)).rejects.toThrow(
+      'integration_unavailable',
+    );
+    release?.();
+    const releaseExpired = f.context.beginConsoleReply?.();
+    f.advance(60001);
+    await expect(f.context.requestConsoleCommand?.(consoleRequest)).rejects.toThrow(
+      'integration_unavailable',
+    );
+    expect(f.requestConsoleCommand).toHaveBeenCalledTimes(1);
+    releaseExpired?.();
+  });
   it('keeps offline authentication revision-bound and passive', async () => {
     const f = await offlineApiFixture();
     const request = {

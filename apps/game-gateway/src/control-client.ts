@@ -2,6 +2,7 @@ import { isIP } from 'node:net';
 import { DomainError } from '@nickhosting/core';
 import {
   type GatewayControl,
+  gatewayConsoleCommandResponseSchema,
   gatewayObservationSchema,
   gatewayOfflineApiRequestSchema,
   gatewayOfflineApiResponseSchema,
@@ -258,6 +259,18 @@ export function createGatewayControlClient(
         })
         .parse(input);
       return gatewayOfflineApiResponseSchema.parse(await request('offline-api', value));
+    },
+    async requestConsoleCommand(input) {
+      const value = z
+        .strictObject({
+          routeId: z.uuid(),
+          routeRevision: z.number().int().positive(),
+          request: gatewayOfflineApiRequestSchema,
+        })
+        .parse(input);
+      return gatewayConsoleCommandResponseSchema.parse(
+        await request('console-command', value, undefined, 10000),
+      );
     },
     async savePrivateState(input) {
       await request('private-state-write', input);

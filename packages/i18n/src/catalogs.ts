@@ -40,6 +40,55 @@ export const en = {
   'games.minecraft.management.players': 'Players',
   'gateway.states.sleeping': 'Sleeping',
   'gateway.satisfactory.sleepingSession': '{name} — Server sleeping; press Join to start',
+  'gateway.satisfactory.console.help': 'List commands or describe one command.',
+  'gateway.satisfactory.console.status': 'Show the current server state.',
+  'gateway.satisfactory.console.info': 'Show the server name and public connection address.',
+  'gateway.satisfactory.console.version':
+    'Show integration version and the last observed game build.',
+  'gateway.satisfactory.console.idle': 'Show the automatic sleep timeout and current conditions.',
+  'gateway.satisfactory.console.start': 'Wake the server, respecting panel restrictions.',
+  'gateway.satisfactory.console.stop':
+    'Save and force sleep, disconnecting players. Join can wake it again.',
+  'gateway.satisfactory.console.restart':
+    'Save and restart the running server, disconnecting players.',
+  'gateway.satisfactory.console.mods': 'Coming Soon :)',
+  'gateway.satisfactory.console.invalid':
+    'Unknown command or invalid arguments. Use nickhosting help.',
+  'gateway.satisfactory.console.nativeUnavailable':
+    'The backend is unavailable. Use Join or nickhosting start to wake a sleeping server.',
+  'gateway.satisfactory.console.state': 'State: {state}',
+  'gateway.satisfactory.console.stopping': 'Suspending the server',
+  'gateway.satisfactory.console.name': 'Server: {name}',
+  'gateway.satisfactory.console.address': 'Address: {address}',
+  'gateway.satisfactory.console.game': 'Game: Satisfactory',
+  'gateway.satisfactory.console.integrationVersion': 'Integration: {version}',
+  'gateway.satisfactory.console.observedBuild': 'Last observed game build (NetCL): {build}',
+  'gateway.satisfactory.console.unknown': 'Unavailable',
+  'gateway.satisfactory.console.timeout': 'Automatic sleep timeout: {seconds} seconds',
+  'gateway.satisfactory.console.idleDisabled': 'Automatic sleep is disabled.',
+  'gateway.satisfactory.console.idleConditions':
+    'Automatic sleep requires a world, no players, no client requests and no active operation.',
+  'gateway.satisfactory.console.idleActivity':
+    'This request counts as activity while online. Server Manager polling keeps the server awake.',
+  'gateway.satisfactory.console.players': 'Connected players: {count}',
+  'gateway.satisfactory.console.noWorld': 'No world is verified; automatic sleep is prevented.',
+  'gateway.satisfactory.console.world': 'A world is available.',
+  'gateway.satisfactory.console.operation': 'A server operation is in progress.',
+  'gateway.satisfactory.console.startAccepted':
+    'Start requested. Use nickhosting status to check progress.',
+  'gateway.satisfactory.console.starting': 'The server is already starting.',
+  'gateway.satisfactory.console.online': 'The server is already running.',
+  'gateway.satisfactory.console.sleeping': 'The server is already sleeping.',
+  'gateway.satisfactory.console.stopAccepted':
+    'Sleep requested. The world will be saved before shutdown; players will be disconnected. Join or nickhosting start can wake the server again.',
+  'gateway.satisfactory.console.restartAccepted':
+    'Restart requested. The world will be saved; players will be disconnected. Use nickhosting status to check progress.',
+  'gateway.satisfactory.console.restartSleeping': 'The server is sleeping. Use nickhosting start.',
+  'gateway.satisfactory.console.restricted':
+    'The panel currently prevents this action. Check the server state and settings in NickPanel.',
+  'gateway.satisfactory.console.saveUnavailable':
+    'Saving cannot be verified: the server API credential is not configured in NickPanel. No stop was requested.',
+  'gateway.satisfactory.console.busy': 'The server is busy or changing state. Try again shortly.',
   'gateway.states.waking': 'Starting the game',
   'gateway.states.online': 'Ready to play',
   'gateway.states.blocked': 'Unavailable',
@@ -182,6 +231,57 @@ export const it: Record<MessageKey, string> = {
   'games.minecraft.management.players': 'Giocatori',
   'gateway.states.sleeping': 'In sospensione',
   'gateway.satisfactory.sleepingSession': '{name} — Server in sospensione; premi Join per avviarlo',
+  'gateway.satisfactory.console.help': 'Elenca i comandi o descrive un comando.',
+  'gateway.satisfactory.console.status': 'Mostra lo stato attuale del server.',
+  'gateway.satisfactory.console.info': 'Mostra nome e indirizzo pubblico del server.',
+  'gateway.satisfactory.console.version':
+    'Mostra la versione dell’integrazione e l’ultima build del gioco osservata.',
+  'gateway.satisfactory.console.idle': 'Mostra timeout e condizioni della sospensione automatica.',
+  'gateway.satisfactory.console.start': 'Risveglia il server rispettando i vincoli del pannello.',
+  'gateway.satisfactory.console.stop':
+    'Salva e forza la sospensione, disconnettendo i giocatori. Join può risvegliarlo.',
+  'gateway.satisfactory.console.restart':
+    'Salva e riavvia il server acceso, disconnettendo i giocatori.',
+  'gateway.satisfactory.console.mods': 'Coming Soon :)',
+  'gateway.satisfactory.console.invalid':
+    'Comando sconosciuto o argomenti non validi. Usa nickhosting help.',
+  'gateway.satisfactory.console.nativeUnavailable':
+    'Il backend non è disponibile. Usa Join o nickhosting start per risvegliare un server sospeso.',
+  'gateway.satisfactory.console.state': 'Stato: {state}',
+  'gateway.satisfactory.console.stopping': 'Sospensione del server in corso',
+  'gateway.satisfactory.console.name': 'Server: {name}',
+  'gateway.satisfactory.console.address': 'Indirizzo: {address}',
+  'gateway.satisfactory.console.game': 'Gioco: Satisfactory',
+  'gateway.satisfactory.console.integrationVersion': 'Integrazione: {version}',
+  'gateway.satisfactory.console.observedBuild': 'Ultima build del gioco osservata (NetCL): {build}',
+  'gateway.satisfactory.console.unknown': 'Non disponibile',
+  'gateway.satisfactory.console.timeout': 'Timeout di sospensione automatica: {seconds} secondi',
+  'gateway.satisfactory.console.idleDisabled': 'La sospensione automatica è disabilitata.',
+  'gateway.satisfactory.console.idleConditions':
+    'La sospensione automatica richiede un mondo, nessun giocatore, nessuna richiesta client e nessuna operazione attiva.',
+  'gateway.satisfactory.console.idleActivity':
+    'Questa richiesta conta come attività a server acceso. Il polling del Server Manager mantiene il server acceso.',
+  'gateway.satisfactory.console.players': 'Giocatori connessi: {count}',
+  'gateway.satisfactory.console.noWorld':
+    'Nessun mondo verificato: la sospensione automatica è impedita.',
+  'gateway.satisfactory.console.world': 'Un mondo è disponibile.',
+  'gateway.satisfactory.console.operation': 'È in corso un’operazione sul server.',
+  'gateway.satisfactory.console.startAccepted':
+    'Avvio richiesto. Usa nickhosting status per verificarne lo stato.',
+  'gateway.satisfactory.console.starting': 'Il server è già in avvio.',
+  'gateway.satisfactory.console.online': 'Il server è già acceso.',
+  'gateway.satisfactory.console.sleeping': 'Il server è già sospeso.',
+  'gateway.satisfactory.console.stopAccepted':
+    'Sospensione richiesta. Il mondo verrà salvato prima dell’arresto; i giocatori saranno disconnessi. Join o nickhosting start potranno risvegliare il server.',
+  'gateway.satisfactory.console.restartAccepted':
+    'Riavvio richiesto. Il mondo verrà salvato; i giocatori saranno disconnessi. Usa nickhosting status per verificarne lo stato.',
+  'gateway.satisfactory.console.restartSleeping': 'Il server è sospeso. Usa nickhosting start.',
+  'gateway.satisfactory.console.restricted':
+    'Il pannello impedisce questa azione. Controlla stato e impostazioni del server in NickPanel.',
+  'gateway.satisfactory.console.saveUnavailable':
+    'Impossibile verificare il salvataggio: la credenziale API del server non è configurata in NickPanel. Nessun arresto richiesto.',
+  'gateway.satisfactory.console.busy':
+    'Il server è occupato o sta cambiando stato. Riprova tra poco.',
   'gateway.states.waking': 'Avvio del gioco',
   'gateway.states.online': 'Pronto per giocare',
   'gateway.states.blocked': 'Non disponibile',

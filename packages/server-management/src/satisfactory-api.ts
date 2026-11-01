@@ -9,6 +9,7 @@ import {
   SatisfactoryApi,
   type SatisfactoryApiTransport,
 } from '../../../games/satisfactory/src/api.js';
+import { decodeNativePlayerIdentity } from '../../../games/satisfactory/src/native-auth.js';
 import { authorizeServer } from './registry.js';
 import { readSatisfactoryTlsIdentity } from './satisfactory-tls.js';
 
@@ -24,7 +25,10 @@ export function satisfactoryPinnedTransport(
   endpoint: { address: string; port: number },
   certificatePem: string,
   token: string,
+  playerId?: string,
 ): SatisfactoryApiTransport {
+  if (playerId !== undefined && !decodeNativePlayerIdentity(playerId))
+    throw new DomainError('validation_failed');
   const secret = tokenSchema.parse(token),
     expected = new X509Certificate(certificatePem).raw;
   if (
@@ -56,6 +60,7 @@ export function satisfactoryPinnedTransport(
                 : undefined,
             headers: {
               Authorization: `Bearer ${secret}`,
+              ...(playerId ? { 'X-FactoryGame-PlayerId': playerId } : {}),
               'Content-Type': 'application/json; charset=utf-8',
               'Content-Length': String(payload.length),
             },
@@ -71,7 +76,15 @@ export function satisfactoryPinnedTransport(
             }
             if ((res.statusCode ?? 500) < 200 || (res.statusCode ?? 500) >= 300) {
               res.resume();
-              reject(new DomainError('integration_unavailable'));
+              reject(
+                new DomainError(
+                  playerId && res.statusCode === 401
+                    ? 'unauthenticated'
+                    : playerId && res.statusCode === 403
+                      ? 'forbidden'
+                      : 'integration_unavailable',
+                ),
+              );
               return;
             }
             const chunks: Buffer[] = [];
@@ -132,6 +145,7 @@ export async function resolveSatisfactoryApi(
   codec: SecretCodec,
   serverId: string,
   overrideToken?: string,
+  playerId?: string,
 ): Promise<SatisfactoryApi> {
   const { endpoint } = await target(db, serverId);
   const identity = await readSatisfactoryTlsIdentity(db, codec, serverId);
@@ -147,7 +161,9 @@ export async function resolveSatisfactoryApi(
       : undefined;
   const token = overrideToken ?? (stored ? codec.decrypt(stored.envelope, name) : undefined);
   if (!token) throw new DomainError('configuration_invalid');
-  return new SatisfactoryApi(satisfactoryPinnedTransport(endpoint, identity.certificatePem, token));
+  return new SatisfactoryApi(
+    satisfactoryPinnedTransport(endpoint, identity.certificatePem, token, playerId),
+  );
 }
 async function locked<T>(
   db: Kysely<Database>,
