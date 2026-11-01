@@ -242,6 +242,7 @@ describe('M3 Core service authentication and managed control plane', () => {
     'private-state-read',
     'private-state-write',
     'application-observation',
+    'protocol-state-read',
   ])('rejects browser and wrong-Gateway access to %s', async (endpoint) => {
     const input = {
       routeId: route.id,
@@ -281,6 +282,7 @@ describe('M3 Core service authentication and managed control plane', () => {
     'private-state-read',
     'private-state-write',
     'application-observation',
+    'protocol-state-read',
   ])('rejects wrong protocol handlers for %s', async (endpoint) => {
     const response = await request(`${prefix()}/${endpoint}`, {
       routeId: route.id,
@@ -420,7 +422,15 @@ describe('M3 Core service authentication and managed control plane', () => {
     const tcp = await satisfactoryRoute('tcp');
     expect((await request(`${prefix()}/application-observation`, tcp)).status).toBe(403);
   });
-  it('persists fresh UDP protocol state and does not churn revisions for timestamp-only observations', async () => {
+  it('does not fabricate missing protocol state and rejects reads through TCP', async () => {
+    const input = await satisfactoryRoute('udp');
+    expect(await (await request(`${prefix()}/protocol-state-read`, input)).json()).toEqual({
+      state: null,
+    });
+    const tcp = await satisfactoryRoute('tcp');
+    expect((await request(`${prefix()}/protocol-state-read`, tcp)).status).toBe(403);
+  });
+  it('persists UDP state outside route authority and hydrates only the matching game route', async () => {
     const input = await satisfactoryRoute('udp');
     const state = satisfactoryState();
     expect((await request(`${prefix()}/protocol-state`, { ...input, state })).status).toBe(204);
@@ -430,13 +440,32 @@ describe('M3 Core service authentication and managed control plane', () => {
     if (!selected) throw new Error('Missing Satisfactory fixture route');
     route = selected;
     const revision = route.revision;
-    expect(route.protocol?.satisfactory).toEqual(state);
+    expect(route.protocol?.satisfactory).toBeUndefined();
+    expect(revision).toBe(input.routeRevision);
+    const cached = await request(`${prefix()}/protocol-state-read`, input);
+    expect(cached.status).toBe(200);
+    expect(cached.headers.get('cache-control')).toBe('no-store');
+    expect(await cached.json()).toEqual({ state });
+    expect(
+      (await request(`${prefix()}/protocol-state-read`, { ...input, routeRevision: revision + 1 }))
+        .status,
+    ).toBe(412);
+    expect(
+      (await request(`${prefix()}/protocol-state-read`, { ...input, serverId: randomUUID() }))
+        .status,
+    ).toBe(400);
     expect(
       (
         await request(`${prefix()}/protocol-state`, {
           routeId: route.id,
           routeRevision: revision,
-          state: { ...state, observedAt: new Date(Date.now() + 1000).toISOString() },
+          state: {
+            ...state,
+            name: 'Changed factory',
+            netCL: 513885,
+            substates: [{ id: 0, version: 7 }],
+            observedAt: new Date(Date.now() + 1000).toISOString(),
+          },
         })
       ).status,
     ).toBe(204);

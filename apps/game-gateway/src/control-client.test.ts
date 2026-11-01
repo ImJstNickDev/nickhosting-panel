@@ -26,6 +26,32 @@ const snapshot = {
 };
 
 describe('authenticated bounded Gateway control client', () => {
+  it('reads validated protocol presentation separately from snapshot authority', async () => {
+    const state = {
+      state: 3,
+      netCL: 12345,
+      flags: '1',
+      substates: [],
+      name: 'Factory',
+      observedAt: new Date().toISOString(),
+    };
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ state }));
+    const client = createGatewayControlClient({ ...settings, fetcher });
+    const input = { routeId: randomUUID(), routeRevision: 7 };
+    expect(await client.loadProtocolState?.(input)).toEqual(state);
+    expect(String(fetcher.mock.calls[0]?.[0])).toContain('/protocol-state-read');
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual(input);
+    expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get('authorization')).toBe(
+      `Bearer ${token}`,
+    );
+    fetcher.mockImplementation(async () => Response.json({ state: null }));
+    expect(await client.loadProtocolState?.(input)).toBeUndefined();
+    fetcher.mockImplementation(async () =>
+      Response.json({ state: { ...state, flags: 'invented' } }),
+    );
+    await expect(client.loadProtocolState?.(input)).rejects.toThrow();
+    client.close();
+  });
   it('waits for a bounded sleep completion and accepts empty fallback without altering ordinary timeout', async () => {
     const request = {
       routeId: randomUUID(),

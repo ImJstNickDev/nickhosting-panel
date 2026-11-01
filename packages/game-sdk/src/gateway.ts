@@ -68,7 +68,7 @@ export type GatewayMinecraftProtocol = z.infer<typeof gatewayMinecraftProtocolSc
 
 export const gatewaySatisfactoryStateSchema = z
   .object({
-    state: z.number().int().min(0).max(3),
+    state: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]),
     netCL: z.number().int().min(0).max(4294967295),
     flags: z
       .string()
@@ -226,6 +226,10 @@ export interface GatewayTlsIdentity {
 }
 
 export interface GatewayControl {
+  loadProtocolState?(request: {
+    routeId: string;
+    routeRevision: number;
+  }): Promise<GatewaySatisfactoryState | undefined>;
   /** Authenticated, per-route application observation. No credentials cross this boundary. */
   observeApplication?(request: {
     routeId: string;
@@ -287,6 +291,7 @@ export interface GatewaySessionDiagnostic {
   action: 'status' | 'login' | 'incompatible' | 'transfer';
 }
 export interface GatewayProtocolContext {
+  loadState?(): Promise<GatewaySatisfactoryState | undefined>;
   observeApplication?(): Promise<GatewayProtocolObservation>;
   persistState?(state: GatewaySatisfactoryState): Promise<void>;
   input?: Uint8Array;
@@ -342,6 +347,8 @@ export interface GatewayProtocolAdapter {
   readonly readinessSource?: 'provider_running';
   supports(route: Readonly<GatewayRoute>): boolean;
   classify(input: Uint8Array, context: GatewayProtocolContext): GatewayIntent;
+  /** Hydrate presentation data without changing route authority, before a bounded status reply. */
+  prepareResponse?(context: GatewayProtocolContext): Promise<void>;
   response(context: GatewayProtocolContext, state: GatewayResponseMode): Uint8Array | undefined;
   /** Optional stateful TCP status/ping dialogue; old datagram/fixture adapters
    * retain the stateless classify/response contract. Used only while forwarding is fenced. */

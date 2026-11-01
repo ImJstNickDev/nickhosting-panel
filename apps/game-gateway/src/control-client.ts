@@ -250,6 +250,17 @@ export function createGatewayControlClient(
     async savePrivateState(input) {
       await request('private-state-write', input);
     },
+    async loadProtocolState(input) {
+      const value = z
+        .object({ routeId: z.uuid(), routeRevision: z.number().int().positive() })
+        .strict()
+        .parse(input);
+      const result = z
+        .object({ state: gatewaySatisfactoryStateSchema.nullable() })
+        .strict()
+        .parse(await request('protocol-state-read', value));
+      return result.state ?? undefined;
+    },
     async reportProtocolState(input) {
       const value = z
         .object({

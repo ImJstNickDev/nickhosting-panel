@@ -10,7 +10,7 @@ import {
   type GatewayMinecraftProtocol,
   type GatewayRoute,
   gatewayMinecraftProtocolSchema,
-  gatewaySatisfactoryStateSchema,
+  gatewayRouteSchema,
   gatewaySnapshotSchema,
 } from '@nickhosting/game-sdk';
 import { minecraftGatewayDeclaration } from '@nickhosting/minecraft';
@@ -330,257 +330,252 @@ export async function listGatewayRoutes(db: DB, context: AuthContext) {
     .limit(10000)
     .execute();
 }
+/** Fresh route construction shared by full snapshots and individual control RPCs.
+ * Scoped reads keep the same lock, eligibility joins and payload revision logic;
+ * they never materialize or renew unrelated routes. */
+async function buildGatewayRoutes(tx: Kysely<Database>, env: Environment, routeId?: string) {
+  await lockResources(tx);
+  const config = await gatewayConfiguration(tx, env),
+    gatewayId = config.gatewayId;
+  const now = Date.now();
+  const rows = await tx
+    .selectFrom('gateway_routes as route')
+    .innerJoin('managed_servers as server', 'server.id', 'route.server_id')
+    .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
+    .leftJoin('gateway_server_states as policy', 'policy.server_id', 'server.id')
+    .innerJoin('managed_nodes as node', 'node.id', 'server.node_id')
+    .innerJoin('server_allocations as allocation', 'allocation.id', 'route.allocation_id')
+    .innerJoin('user', 'user.id', 'server.owner_id')
+    .selectAll('route')
+    .select([
+      'server.node_id',
+      'server.name as server_name',
+      'policy.gateway_messages',
+      'policy.startup_deadline_at',
+      'policy.readiness_timeout_seconds',
+      'server.runtime_state',
+      'server.active_operation_id',
+      'mapping.game_id',
+      'mapping.runtime_id',
+      'policy.game_version',
+      'policy.protocol_id as stored_handler_id',
+      'allocation.address',
+      'allocation.backend_address',
+      'allocation.port',
+      'allocation.role',
+      'user.locale',
+    ])
+    .where('route.gateway_id', '=', gatewayId)
+    .$if(routeId !== undefined, (query) => query.where('route.id', '=', routeId as string))
+    .where('route.enabled', '=', true)
+    .where('server.deleted_at', 'is', null)
+    .where('server.connection_mode', '=', 'gateway')
+    .where('server.pterodactyl_uuid', 'is not', null)
+    // An active reinstall may be between provider startup configuration and
+    // registry confirmation. Withdraw only this route until the operation
+    // releases it; never validate or renew a route with a transitional egg.
+    .where((eb) =>
+      eb.not(
+        eb.exists(
+          eb
+            .selectFrom('server_operations as installing')
+            .select('installing.job_id')
+            .whereRef('installing.job_id', '=', 'server.active_operation_id')
+            .whereRef('installing.server_id', '=', 'server.id')
+            .where('installing.action', '=', 'reinstall'),
+        ),
+      ),
+    )
+    .where('node.enabled', '=', true)
+    .where('node.physical_host_id', '=', config.gatewayPhysicalHostId)
+    .orderBy('route.id')
+    .limit(10001)
+    .execute();
+  if (rows.length > 10000) throw new DomainError('configuration_invalid');
+  const presentationVariables = await getGatewayPresentationVariables(
+    tx,
+    rows.map((row) => ({
+      id: row.server_id,
+      runtimeId: row.runtime_id,
+      gameVersion: row.game_version ?? '',
+    })),
+  );
+  // One batched lookup, selecting the latest operation before checking success.
+  // Filtering for successful stops in SQL would resurrect an older proof after a
+  // newer failed/uncertain operation. No per-route operation/reservation query.
+  const serverIds = [
+    ...new Set(
+      rows
+        .filter((row) => row.runtime_state === 'offline' || row.active_operation_id !== null)
+        .map((row) => row.server_id),
+    ),
+  ];
+  const completedOperations = serverIds.length
+    ? await tx
+        .selectFrom('server_operations as operation')
+        .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+        .leftJoin(
+          'resource_reservations as reservation',
+          'reservation.server_id',
+          'operation.server_id',
+        )
+        .select([
+          'operation.server_id',
+          'operation.job_id',
+          'operation.action',
+          'operation.phase',
+          'operation.effect_state',
+          'operation.plan',
+          'job.state',
+          'job.completed_at',
+          'reservation.server_id as reserved_server_id',
+        ])
+        .where('operation.server_id', 'in', serverIds)
+        .distinctOn('operation.server_id')
+        .orderBy('operation.server_id')
+        .orderBy('job.created_at', 'desc')
+        .orderBy('job.id', 'desc')
+        .execute()
+    : [];
+  const latestOperations = new Map(
+    completedOperations.map((operation) => [operation.server_id, operation]),
+  );
+  const routes: GatewayRoute[] = [];
+  for (const row of rows) {
+    let state: Awaited<ReturnType<typeof getGatewayState>>;
+    let minecraft: GatewayMinecraftProtocol | undefined;
+    try {
+      state = await getGatewayState(tx, row.server_id, { env });
+      if (row.game_id === 'minecraft') {
+        minecraft = await requireMinecraftGatewayProtocol(
+          tx,
+          row.server_id,
+          { handlerId: state.protocolId, gameVersion: state.gameVersion },
+          env,
+          new Date(now),
+        );
+        if (row.transport !== 'tcp' || row.role !== 'game') continue;
+      }
+    } catch (error) {
+      if (
+        (row.game_id === 'minecraft' || row.stored_handler_id === 'minecraft-java') &&
+        (error instanceof DomainError || error instanceof z.ZodError)
+      )
+        continue;
+      throw error;
+    }
+    const operation = latestOperations.get(row.server_id);
+    let completedSleep: GatewayRoute['completedSleep'];
+    if (
+      state.state === 'sleeping' &&
+      row.runtime_state === 'offline' &&
+      row.active_operation_id === null &&
+      operation &&
+      !operation.reserved_server_id &&
+      operation.state === 'succeeded' &&
+      operation.completed_at &&
+      operation.completed_at.getTime() <= now &&
+      operation.action === 'stop' &&
+      operation.phase === 'complete' &&
+      operation.effect_state === 'confirmed' &&
+      operation.plan.stopConfirmed === true
+    ) {
+      const marker = z
+        .object({
+          kind: z.literal('sleep'),
+          generation: z.uuid(),
+          quiescenceUntil: z.iso.datetime({ offset: true }),
+        })
+        .safeParse(operation.plan.gatewayAutomation);
+      const confirmedAt = z.iso
+        .datetime({ offset: true })
+        .safeParse(operation.plan.stopConfirmedAt);
+      if (
+        marker.success &&
+        marker.data.generation === state.generation &&
+        confirmedAt.success &&
+        Date.parse(confirmedAt.data) <= operation.completed_at.getTime()
+      ) {
+        completedSleep = {
+          jobId: operation.job_id,
+          generation: marker.data.generation,
+          quiescenceUntil: marker.data.quiescenceUntil,
+          completedAt: operation.completed_at.toISOString(),
+        };
+      }
+    }
+    const payload = {
+      id: row.id,
+      serverId: row.server_id,
+      nodeId: row.node_id,
+      allocationId: row.allocation_id,
+      generation: state.generation,
+      ...(completedSleep ? { completedSleep } : {}),
+      ...(state.sleepEligibleAt ? { sleepEligibleAt: state.sleepEligibleAt } : {}),
+      ...(state.wakeJobId ? { wakeJobId: state.wakeJobId } : {}),
+      public: { address: row.public_address, port: row.public_port, transport: row.transport },
+      backend: { allocationAddress: row.address, address: row.backend_address, port: row.port },
+      protocol: {
+        handlerId: state.protocolId,
+        gameVersion: state.gameVersion,
+        role: row.role,
+        ...(minecraft ? { minecraft } : {}),
+      },
+      mode: state.state,
+      wakeEnabled: state.wakeEnabled,
+      presentation: {
+        serverName: row.server_name,
+        variables: presentationVariables.get(row.server_id),
+        ...(operation?.action === 'stop' &&
+        row.active_operation_id === operation.job_id &&
+        ['queued', 'running', 'uncertain'].includes(operation.state)
+          ? { stopping: true }
+          : {}),
+        messages: gatewayMessageOverridesSchema.parse(row.gateway_messages ?? {}),
+        ...(state.errorCode === 'resources_unavailable'
+          ? { blockedReason: 'capacity_denied' as const }
+          : state.errorCode === 'integration_unavailable'
+            ? { blockedReason: 'unavailable' as const }
+            : {}),
+        ...(state.state === 'waking' && row.startup_deadline_at && row.readiness_timeout_seconds
+          ? {
+              ...(state.startupEstimate
+                ? {
+                    estimatedStartupSeconds: Math.min(
+                      86400,
+                      Math.ceil(state.startupEstimate.p90Ms / 1000),
+                    ),
+                  }
+                : {}),
+              startupBeganAt: new Date(
+                row.startup_deadline_at.getTime() - row.readiness_timeout_seconds * 1000,
+              ).toISOString(),
+            }
+          : {}),
+      },
+      locale: row.locale === 'it' ? ('it' as const) : ('en' as const),
+    };
+    const hash = digest(payload),
+      revision = Number(row.revision) + (row.payload_hash && row.payload_hash !== hash ? 1 : 0);
+    if (!Number.isSafeInteger(revision)) throw new DomainError('configuration_invalid');
+    await tx
+      .updateTable('gateway_routes')
+      .set({
+        payload_hash: hash,
+        revision: String(revision),
+        updated_at: new Date(),
+        lease_expires_at: sql<Date>`greatest(lease_expires_at, ${new Date(now + config.gatewayLeaseSeconds * 1000 + 1000)})`,
+      })
+      .where('id', '=', row.id)
+      .execute();
+    routes.push(gatewayRouteSchema.parse({ ...payload, revision }));
+  }
+  return { config, gatewayId, now, routes };
+}
 /** One serialized full snapshot, with persisted monotonic content revisions. */
 export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment = {}) {
   const snapshot = async (tx: Kysely<Database>) => {
-    await lockResources(tx);
-    const config = await gatewayConfiguration(tx, env),
-      gatewayId = config.gatewayId;
-    const now = Date.now();
-    const rows = await tx
-      .selectFrom('gateway_routes as route')
-      .innerJoin('managed_servers as server', 'server.id', 'route.server_id')
-      .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
-      .leftJoin('gateway_server_states as policy', 'policy.server_id', 'server.id')
-      .innerJoin('managed_nodes as node', 'node.id', 'server.node_id')
-      .innerJoin('server_allocations as allocation', 'allocation.id', 'route.allocation_id')
-      .innerJoin('user', 'user.id', 'server.owner_id')
-      .selectAll('route')
-      .select([
-        'server.node_id',
-        'server.name as server_name',
-        'policy.gateway_messages',
-        'policy.startup_deadline_at',
-        'policy.readiness_timeout_seconds',
-        'server.runtime_state',
-        'server.active_operation_id',
-        'mapping.game_id',
-        'mapping.runtime_id',
-        'policy.game_version',
-        'policy.protocol_id as stored_handler_id',
-        'allocation.address',
-        'allocation.backend_address',
-        'allocation.port',
-        'allocation.role',
-        'user.locale',
-      ])
-      .where('route.gateway_id', '=', gatewayId)
-      .where('route.enabled', '=', true)
-      .where('server.deleted_at', 'is', null)
-      .where('server.connection_mode', '=', 'gateway')
-      .where('server.pterodactyl_uuid', 'is not', null)
-      // An active reinstall may be between provider startup configuration and
-      // registry confirmation. Withdraw only this route until the operation
-      // releases it; never validate or renew a route with a transitional egg.
-      .where((eb) =>
-        eb.not(
-          eb.exists(
-            eb
-              .selectFrom('server_operations as installing')
-              .select('installing.job_id')
-              .whereRef('installing.job_id', '=', 'server.active_operation_id')
-              .whereRef('installing.server_id', '=', 'server.id')
-              .where('installing.action', '=', 'reinstall'),
-          ),
-        ),
-      )
-      .where('node.enabled', '=', true)
-      .where('node.physical_host_id', '=', config.gatewayPhysicalHostId)
-      .orderBy('route.id')
-      .limit(10001)
-      .execute();
-    if (rows.length > 10000) throw new DomainError('configuration_invalid');
-    const presentationVariables = await getGatewayPresentationVariables(
-      tx,
-      rows.map((row) => ({
-        id: row.server_id,
-        runtimeId: row.runtime_id,
-        gameVersion: row.game_version ?? '',
-      })),
-    );
-    // One batched lookup, selecting the latest operation before checking success.
-    // Filtering for successful stops in SQL would resurrect an older proof after a
-    // newer failed/uncertain operation. No per-route operation/reservation query.
-    const serverIds = [
-      ...new Set(
-        rows
-          .filter((row) => row.runtime_state === 'offline' || row.active_operation_id !== null)
-          .map((row) => row.server_id),
-      ),
-    ];
-    const completedOperations = serverIds.length
-      ? await tx
-          .selectFrom('server_operations as operation')
-          .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
-          .leftJoin(
-            'resource_reservations as reservation',
-            'reservation.server_id',
-            'operation.server_id',
-          )
-          .select([
-            'operation.server_id',
-            'operation.job_id',
-            'operation.action',
-            'operation.phase',
-            'operation.effect_state',
-            'operation.plan',
-            'job.state',
-            'job.completed_at',
-            'reservation.server_id as reserved_server_id',
-          ])
-          .where('operation.server_id', 'in', serverIds)
-          .distinctOn('operation.server_id')
-          .orderBy('operation.server_id')
-          .orderBy('job.created_at', 'desc')
-          .orderBy('job.id', 'desc')
-          .execute()
-      : [];
-    const latestOperations = new Map(
-      completedOperations.map((operation) => [operation.server_id, operation]),
-    );
-    const routes: GatewayRoute[] = [];
-    for (const row of rows) {
-      let state: Awaited<ReturnType<typeof getGatewayState>>;
-      let minecraft: GatewayMinecraftProtocol | undefined;
-      let satisfactory: NonNullable<
-        import('@nickhosting/game-sdk').GatewayRoute['protocol']
-      >['satisfactory'];
-      try {
-        state = await getGatewayState(tx, row.server_id, { env });
-        if (row.game_id === 'satisfactory') {
-          const observation = await tx
-            .selectFrom('satisfactory_server_state')
-            .select('snapshot')
-            .where('server_id', '=', row.server_id)
-            .executeTakeFirst();
-          if (observation)
-            satisfactory = gatewaySatisfactoryStateSchema.parse(observation.snapshot);
-        }
-        if (row.game_id === 'minecraft') {
-          minecraft = await requireMinecraftGatewayProtocol(
-            tx,
-            row.server_id,
-            { handlerId: state.protocolId, gameVersion: state.gameVersion },
-            env,
-            new Date(now),
-          );
-          if (row.transport !== 'tcp' || row.role !== 'game') continue;
-        }
-      } catch (error) {
-        if (
-          (row.game_id === 'minecraft' || row.stored_handler_id === 'minecraft-java') &&
-          (error instanceof DomainError || error instanceof z.ZodError)
-        )
-          continue;
-        throw error;
-      }
-      const operation = latestOperations.get(row.server_id);
-      let completedSleep: GatewayRoute['completedSleep'];
-      if (
-        state.state === 'sleeping' &&
-        row.runtime_state === 'offline' &&
-        row.active_operation_id === null &&
-        operation &&
-        !operation.reserved_server_id &&
-        operation.state === 'succeeded' &&
-        operation.completed_at &&
-        operation.completed_at.getTime() <= now &&
-        operation.action === 'stop' &&
-        operation.phase === 'complete' &&
-        operation.effect_state === 'confirmed' &&
-        operation.plan.stopConfirmed === true
-      ) {
-        const marker = z
-          .object({
-            kind: z.literal('sleep'),
-            generation: z.uuid(),
-            quiescenceUntil: z.iso.datetime({ offset: true }),
-          })
-          .safeParse(operation.plan.gatewayAutomation);
-        const confirmedAt = z.iso
-          .datetime({ offset: true })
-          .safeParse(operation.plan.stopConfirmedAt);
-        if (
-          marker.success &&
-          marker.data.generation === state.generation &&
-          confirmedAt.success &&
-          Date.parse(confirmedAt.data) <= operation.completed_at.getTime()
-        ) {
-          completedSleep = {
-            jobId: operation.job_id,
-            generation: marker.data.generation,
-            quiescenceUntil: marker.data.quiescenceUntil,
-            completedAt: operation.completed_at.toISOString(),
-          };
-        }
-      }
-      const payload = {
-        id: row.id,
-        serverId: row.server_id,
-        nodeId: row.node_id,
-        allocationId: row.allocation_id,
-        generation: state.generation,
-        ...(completedSleep ? { completedSleep } : {}),
-        ...(state.sleepEligibleAt ? { sleepEligibleAt: state.sleepEligibleAt } : {}),
-        ...(state.wakeJobId ? { wakeJobId: state.wakeJobId } : {}),
-        public: { address: row.public_address, port: row.public_port, transport: row.transport },
-        backend: { allocationAddress: row.address, address: row.backend_address, port: row.port },
-        protocol: {
-          handlerId: state.protocolId,
-          gameVersion: state.gameVersion,
-          role: row.role,
-          ...(minecraft ? { minecraft } : {}),
-          ...(satisfactory ? { satisfactory } : {}),
-        },
-        mode: state.state,
-        wakeEnabled: state.wakeEnabled,
-        presentation: {
-          serverName: row.server_name,
-          variables: presentationVariables.get(row.server_id),
-          ...(operation?.action === 'stop' &&
-          row.active_operation_id === operation.job_id &&
-          ['queued', 'running', 'uncertain'].includes(operation.state)
-            ? { stopping: true }
-            : {}),
-          messages: gatewayMessageOverridesSchema.parse(row.gateway_messages ?? {}),
-          ...(state.errorCode === 'resources_unavailable'
-            ? { blockedReason: 'capacity_denied' as const }
-            : state.errorCode === 'integration_unavailable'
-              ? { blockedReason: 'unavailable' as const }
-              : {}),
-          ...(state.state === 'waking' && row.startup_deadline_at && row.readiness_timeout_seconds
-            ? {
-                ...(state.startupEstimate
-                  ? {
-                      estimatedStartupSeconds: Math.min(
-                        86400,
-                        Math.ceil(state.startupEstimate.p90Ms / 1000),
-                      ),
-                    }
-                  : {}),
-                startupBeganAt: new Date(
-                  row.startup_deadline_at.getTime() - row.readiness_timeout_seconds * 1000,
-                ).toISOString(),
-              }
-            : {}),
-        },
-        locale: row.locale === 'it' ? ('it' as const) : ('en' as const),
-      };
-      const hash = digest(payload),
-        revision = Number(row.revision) + (row.payload_hash && row.payload_hash !== hash ? 1 : 0);
-      if (!Number.isSafeInteger(revision)) throw new DomainError('configuration_invalid');
-      await tx
-        .updateTable('gateway_routes')
-        .set({
-          payload_hash: hash,
-          revision: String(revision),
-          updated_at: new Date(),
-          lease_expires_at: sql<Date>`greatest(lease_expires_at, ${new Date(now + config.gatewayLeaseSeconds * 1000 + 1000)})`,
-        })
-        .where('id', '=', row.id)
-        .execute();
-      routes.push({ ...payload, revision });
-    }
+    const { config, gatewayId, now, routes } = await buildGatewayRoutes(tx, env);
     const previous = await tx
       .selectFrom('gateway_control_state')
       .selectAll()
@@ -628,8 +623,9 @@ export async function requireGatewayRoute(
   env: Environment = {},
   options: { revisionPrecondition?: boolean } = {},
 ) {
-  const snapshot = await getGatewaySnapshot(db, env),
-    route = snapshot.routes.find((row) => row.id === routeId);
+  const resolve = (tx: Kysely<Database>) => buildGatewayRoutes(tx, env, routeId);
+  const selected = db.isTransaction ? await resolve(db) : await db.transaction().execute(resolve);
+  const route = selected.routes.find((row) => row.id === routeId);
   if (!route) throw new DomainError('not_found');
   // A supplied route revision is an authenticated HTTP precondition. Keep this
   // distinguishable from unknown topology/ownership failures so Gateway can

@@ -85,6 +85,37 @@ describe('Satisfactory gateway', () => {
       backend.close();
     }
   });
+  it('hydrates offline query state through the bounded control read without putting it in route authority', async () => {
+    const states = new Map<string, import('./protocol.js').SatisfactoryQueryState>();
+    const current = createSatisfactoryGatewayAdapter({
+      read: (id) => states.get(id),
+      write: (id, state) => {
+        states.set(id, state);
+      },
+    });
+    const c = context(encodeSatisfactoryPoll(42n));
+    delete c.route.protocol?.satisfactory;
+    const original = structuredClone(c.route);
+    c.loadState = vi.fn(async () => persisted);
+    await Promise.all([current.prepareResponse?.(c), current.prepareResponse?.(c)]);
+    expect(c.loadState).toHaveBeenCalledOnce();
+    expect(c.route).toEqual(original);
+    expect(
+      decodeSatisfactoryState(current.response(c, 'sleeping') ?? new Uint8Array(), 42n),
+    ).toMatchObject({ state: 0, netCL: persisted.netCL, name: persisted.name });
+    await current.prepareResponse?.(c);
+    expect(c.loadState).toHaveBeenCalledOnce();
+  });
+  it('bounds failed or empty cache reads and never manufactures offline query data', async () => {
+    const current = createSatisfactoryGatewayAdapter({ read: () => undefined, write: () => {} });
+    const c = context(encodeSatisfactoryPoll(42n));
+    delete c.route.protocol?.satisfactory;
+    c.loadState = vi.fn(async () => undefined);
+    await current.prepareResponse?.(c);
+    await current.prepareResponse?.(c);
+    expect(c.loadState).toHaveBeenCalledOnce();
+    expect(current.response(c, 'sleeping')).toBeUndefined();
+  });
   it('echoes each request cookie from persistent metadata after a restart without waking', () => {
     for (const cookie of [0n, 42n, 0xffffffffffffffffn]) {
       const c = context(encodeSatisfactoryPoll(cookie));

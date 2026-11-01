@@ -940,6 +940,31 @@ describe('persistent Gateway fixture forwarding', () => {
     await applying;
     expect(f.gateway.health().ready).toBe(true);
   });
+  it('awaits presentation hydration for a status reply without changing route authority or waking', async () => {
+    const backend = await udpFixture();
+    const current = route(backend.port, 'udp', 'sleeping');
+    let hydrated = false;
+    const loadProtocolState = vi.fn(async () => {
+      await delay(10);
+      hydrated = true;
+      return undefined;
+    });
+    const adapter = fixtureProtocol({
+      classify: () => ({ kind: 'status' }),
+      prepareResponse: async (context) => {
+        await context.loadState?.();
+      },
+      response: () => (hydrated ? Buffer.from('hydrated') : undefined),
+    });
+    const f = plane([current], { protocols: [adapter], control: { loadProtocolState } });
+    await f.gateway.applySnapshot(f.snapshot());
+    expect((await datagram(backend.port, 'status')).toString()).toBe('hydrated');
+    expect(loadProtocolState).toHaveBeenCalledWith({
+      routeId: current.id,
+      routeRevision: current.revision,
+    });
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+  });
   it('does not count Lightweight Query polling as gameplay, including a reused UDP endpoint', async () => {
     const backend = await udpFixture();
     backend.socket.removeAllListeners('message');

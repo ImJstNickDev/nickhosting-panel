@@ -153,6 +153,14 @@ export async function createGatewayRuntime(
       const probeContext = {
         route,
         signal: controller.signal,
+        persistState: async (state: import('@nickhosting/game-sdk').GatewaySatisfactoryState) => {
+          if (controller.signal.aborted) return;
+          await client.reportProtocolState?.({
+            routeId: route.id,
+            routeRevision: route.revision,
+            state,
+          });
+        },
         ...(route.mode === 'waking'
           ? {
               onProbeDiagnostic: (

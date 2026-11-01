@@ -26,7 +26,8 @@ describe('Satisfactory TLS identity', () => {
         validateSatisfactoryTlsIdentity(await generateSatisfactoryTlsIdentity(randomUUID())),
       ).toBeDefined();
     } finally {
-      process.env.PATH = oldPath;
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
       await rm(directory, { recursive: true, force: true });
     }
   }, 60000);

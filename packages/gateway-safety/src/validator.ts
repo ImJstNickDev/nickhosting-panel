@@ -471,10 +471,11 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     ownedBindings: readonly GatewayEndpoint[],
     listener: boolean,
     batch?: ProviderBatch,
+    observe?: NetworkObserver['observe'],
   ) {
     const validationId = randomUUID();
     return timed(route, validationId, 'inspect_total', () =>
-      inspectDetails(route, ownedBindings, listener, validationId, batch),
+      inspectDetails(route, ownedBindings, listener, validationId, batch, observe),
     );
   }
   async function inspectDetails(
@@ -483,6 +484,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     listener: boolean,
     validationId: string,
     batch?: ProviderBatch,
+    observe?: NetworkObserver['observe'],
   ) {
     const route = gatewayRouteSchema.parse(routeValue);
     if (!exactBindableAddress(route.public.address) || !privateBackend(route.backend.address))
@@ -516,10 +518,11 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
                 nodeInventories,
               })),
     );
-    // Actual sockets/Docker topology and local context are still fresh on every
-    // probe. Settle both branches before abandoning a failed inspection.
+    // Initial snapshot checks may share timestamped host evidence. Final bind
+    // checks and standalone probes read it again; every route enforces its age.
+    // Settle both branches before abandoning a failed inspection.
     const results = await Promise.allSettled([
-      timed(route, validationId, 'host_observation', () => options.observer.observe()),
+      timed(route, validationId, 'host_observation', observe ?? (() => options.observer.observe())),
       providerRead,
     ]);
     for (const result of results) if (result.status === 'rejected') throw result.reason;
@@ -768,8 +771,9 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     route: GatewayRoute,
     ownedBindings: readonly GatewayEndpoint[],
     batch?: ProviderBatch,
+    observe?: NetworkObserver['observe'],
   ) {
-    const state = await inspect(route, ownedBindings, true, batch);
+    const state = await inspect(route, ownedBindings, true, batch, observe);
     const accepted = (backendReady: boolean) => {
       // Proof reads, node challenges and protocol responses may outlive the
       // provider inventory, especially when it was shared earlier in this batch.
@@ -872,6 +876,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     route: GatewayRoute,
     ownedBindings: readonly GatewayEndpoint[],
     batch?: ProviderBatch,
+    observe?: NetworkObserver['observe'],
   ) {
     // Serialize renewals: an older successful inspection must never restore
     // authority after a newer failed inspection. Revoke while checks run.
@@ -883,7 +888,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       await preceding?.work.catch(() => undefined);
       validatedProvider.delete(route.id);
       try {
-        return await validateListener(route, ownedBindings, batch);
+        return await validateListener(route, ownedBindings, batch, observe);
       } catch (error) {
         validatedProvider.delete(route.id);
         failureToken(route.id, true);
@@ -938,7 +943,27 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     validate,
     createValidationBatch(routes = []) {
       const batch = createProviderBatch(routes);
-      return { validate: (route, ownedBindings) => validate(route, ownedBindings, batch) };
+      let host: Promise<NetworkObservation> | undefined;
+      const checked = new Set<string>();
+      return {
+        validate(route, ownedBindings) {
+          // A route is inspected once in the initial snapshot pass. Rechecking
+          // it before native bind must see newly opened sockets and topology.
+          const first = !checked.has(route.id);
+          checked.add(route.id);
+          return validate(
+            route,
+            ownedBindings,
+            batch,
+            first
+              ? async () => {
+                  host ??= options.observer.observe().then((value) => structuredClone(value));
+                  return structuredClone(await host);
+                }
+              : undefined,
+          );
+        },
+      };
     },
     validateBackend,
     async probeLeasedBackend(routeValue) {

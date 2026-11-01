@@ -474,6 +474,27 @@ export function registerGatewayRoutes(
       playerCount: state.numConnectedPlayers,
     });
   });
+  app.post(`${prefix}/protocol-state-read`, async (c) => {
+    const parsed = z
+      .strictObject({ routeId: z.uuid(), routeRevision: z.number().int().positive() })
+      .safeParse(await options.body(c));
+    if (!parsed.success) throw new DomainError('validation_failed');
+    const selected = await route(parsed.data);
+    await gatewaySafetyContext(db, selected);
+    if (
+      selected.protocol?.handlerId !== 'satisfactory' ||
+      selected.protocol.role !== 'game' ||
+      selected.public.transport !== 'udp'
+    )
+      throw new DomainError('forbidden');
+    const row = await db
+      .selectFrom('satisfactory_server_state')
+      .select('snapshot')
+      .where('server_id', '=', selected.serverId)
+      .executeTakeFirst();
+    c.header('Cache-Control', 'no-store');
+    return c.json({ state: row ? gatewaySatisfactoryStateSchema.parse(row.snapshot) : null });
+  });
   app.post(`${prefix}/protocol-state`, async (c) => {
     const parsed = z
       .object({

@@ -27,7 +27,10 @@ import {
   resolveUncertainOperation,
 } from './lifecycle.js';
 import { applyMinecraftWorldRemoval } from './minecraft-content.js';
-import { wakeInstallationOperation } from './provider-installation-events.js';
+import {
+  recordNativeInstallationCompletion,
+  wakeInstallationOperation,
+} from './provider-installation-events.js';
 import { enqueueServerOperation } from './registry.js';
 import { pendingUploadFixture } from './test-fixtures.js';
 
@@ -475,6 +478,123 @@ async function fixture(
 }
 
 describe('durable provider lifecycle with real PostgreSQL', () => {
+  it.each(['valid', 'wrong_uuid', 'old_effect', 'status_only', 'host_running', 'old_job'] as const)(
+    'recovers only an exact native installation receipt with fresh host proof: %s',
+    async (kind) => {
+      const f = await fixture('reinstall', {
+        installationEffectPrepared: true,
+        stopConfirmed: true,
+      });
+      const effectStartedAt = new Date(f.now().getTime() - 60_000);
+      await f.db
+        .updateTable('server_operations')
+        .set({
+          phase: 'reinstall',
+          effect_state: 'uncertain',
+          effect_started_at: effectStartedAt,
+        })
+        .where('job_id', '=', f.jobId)
+        .execute();
+      f.adapter.confirmInstallation.mockResolvedValue({ confirmed: false });
+      f.options.confirmInitialInstallationStopped = vi.fn(async () => kind !== 'host_running');
+      if (kind === 'status_only') {
+        await f.db
+          .insertInto('server_events')
+          .values({
+            server_id: f.serverId,
+            job_id: f.jobId,
+            actor_id: null,
+            subject_id: null,
+            support_session_id: null,
+            message_key: 'servers.operation.installation_updated',
+            data: JSON.stringify({ state: 'completed', occurredAt: f.now().toISOString() }),
+          })
+          .execute();
+      } else {
+        expect(
+          await recordNativeInstallationCompletion(f.db, {
+            serverId: f.serverId,
+            jobId: f.jobId,
+            providerUuid: f.remote.uuid,
+            observedAt: f.now(),
+          }),
+        ).toBe(true);
+        // Duplicate native delivery remains one immutable receipt.
+        await recordNativeInstallationCompletion(f.db, {
+          serverId: f.serverId,
+          jobId: f.jobId,
+          providerUuid: f.remote.uuid,
+          observedAt: f.now(),
+        });
+        const receipts = await f.db
+          .selectFrom('server_events')
+          .selectAll()
+          .where('job_id', '=', f.jobId)
+          .execute();
+        expect(receipts).toHaveLength(1);
+        if (kind === 'wrong_uuid')
+          await f.db
+            .updateTable('server_events')
+            .set({
+              data: JSON.stringify({ ...receipts[0]?.data, providerUuid: randomUUID() }),
+            })
+            .where('job_id', '=', f.jobId)
+            .execute();
+        if (kind === 'old_effect')
+          await f.db
+            .updateTable('server_operations')
+            .set({
+              effect_started_at: new Date(effectStartedAt.getTime() + 1),
+            })
+            .where('job_id', '=', f.jobId)
+            .execute();
+        if (kind === 'old_job')
+          await f.db
+            .updateTable('server_events')
+            .set({ job_id: null })
+            .where('job_id', '=', f.jobId)
+            .execute();
+      }
+      await f.run();
+      f.tick();
+      await f.run();
+      expect((await f.operation()).plan.installConfirmed === true).toBe(kind === 'valid');
+      expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+      if (kind === 'valid') expect(f.adapter.confirmInstallation).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['before_effect', 'wrong_provider', 'inactive', 'modpacks'] as const)(
+    'does not persist an uncorrelated native installation event: %s',
+    async (kind) => {
+      const f = await fixture(
+        'reinstall',
+        kind === 'modpacks' ? { modpackOperationId: randomUUID() } : {},
+      );
+      await f.db
+        .updateTable('server_operations')
+        .set({
+          phase: 'reinstall',
+          effect_started_at: new Date(f.now().getTime() + (kind === 'before_effect' ? 1 : -1)),
+        })
+        .where('job_id', '=', f.jobId)
+        .execute();
+      if (kind === 'inactive')
+        await f.db
+          .updateTable('managed_servers')
+          .set({ active_operation_id: null })
+          .where('id', '=', f.serverId)
+          .execute();
+      expect(
+        await recordNativeInstallationCompletion(f.db, {
+          serverId: f.serverId,
+          jobId: f.jobId,
+          providerUuid: kind === 'wrong_provider' ? randomUUID() : f.remote.uuid,
+          observedAt: f.now(),
+        }),
+      ).toBe(false);
+    },
+  );
+
   it('does not dispatch a Modpacks synthetic reinstall through generic lifecycle', async () => {
     const f = await fixture('reinstall', { modpackOperationId: randomUUID() });
     const before = await f.operation();
@@ -3636,6 +3756,23 @@ describe('unlocked reconciliation collection and atomic stale-result fencing', (
 });
 
 describe('terminal failed installation reservation recovery', () => {
+  it('recovers an Owner-resolved unknown installation only after fresh physical stop proof', async () => {
+    const f = await failedInstallation('reinstall');
+    await f.db
+      .updateTable('server_operations')
+      .set({ phase: 'owner_resolved_failed' })
+      .where('job_id', '=', f.jobId)
+      .execute();
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => false);
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(await f.installationReservation()).toBeDefined();
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(await f.installationReservation()).toBeUndefined();
+    expect((await f.server()).installation_state).toBe('failed');
+    expect((await f.operation()).plan.installConfirmed).not.toBe(true);
+  });
+
   it('retains Modpacks installer reservations for its own recovery authority', async () => {
     const f = await failedInstallation('reinstall');
     await f.db

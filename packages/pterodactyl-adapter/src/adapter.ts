@@ -542,7 +542,7 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         identifier,
         input,
         false,
-        300000,
+        3600_000,
         options.containerObserver,
       );
     },
@@ -558,7 +558,7 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         identifier,
         input,
         true,
-        300000,
+        3600_000,
         options.containerObserver,
       ).finally(() => fileDownloads.invalidate(identifier));
     },

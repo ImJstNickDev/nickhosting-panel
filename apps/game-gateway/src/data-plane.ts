@@ -229,6 +229,17 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   const observationContext = (route: GatewayRoute, signal: AbortSignal) => ({
     route,
     signal,
+    loadState: options.control.loadProtocolState
+      ? async () => {
+          if (signal.aborted) throw new DomainError('integration_unavailable');
+          const state = await options.control.loadProtocolState?.({
+            routeId: route.id,
+            routeRevision: route.revision,
+          });
+          if (signal.aborted) throw new DomainError('integration_unavailable');
+          return state;
+        }
+      : undefined,
     observeApplication: options.control.observeApplication
       ? async () => {
           if (signal.aborted) throw new DomainError('integration_unavailable');
@@ -407,8 +418,17 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         signal: AbortSignal.timeout(policy.classificationTimeoutMs),
       });
       if (intent.kind === 'need-more') return { pending: true };
-      if (intent.kind === 'status')
-        return { bytes: response(route, responseMode(listener), input) };
+      if (intent.kind === 'status') {
+        if (handler.prepareResponse)
+          await bounded(
+            (signal) =>
+              handler.prepareResponse?.({ ...observationContext(route, signal), input }) ??
+              Promise.resolve(),
+          );
+        return active(listener) && listener.route === route
+          ? { bytes: response(route, responseMode(listener), input) }
+          : {};
+      }
       if (intent.kind !== 'join') return {};
       const mode =
         route.mode === 'sleeping' || route.mode === 'blocked' ? await wake(route) : route.mode;
@@ -959,8 +979,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       }
       await Promise.all(rejected.map((listener) => closeListener(listener)));
     };
-    // Share only provider source reads for this snapshot. Each route and final
-    // bind still checks its own current authority, topology and reachability.
+    // Share provider reads and timestamped initial host evidence for this snapshot.
+    // Every route retains its authority/age checks; final binds reread topology.
     const validation = options.safety.createValidationBatch?.(next.routes) ?? options.safety;
     // Independent servers share a bounded read-only validation pool. Roles of
     // one server remain ordered: a failed role withholds its siblings, and a

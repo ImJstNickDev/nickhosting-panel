@@ -1400,6 +1400,36 @@ export async function processServerOperation(
     });
     const observeInstallation = async () => {
       if (operation.plan.installConfirmed === true) return true;
+      // A separately leased collector can retain a real native completion across
+      // lifecycle timeouts/restarts. Correlate its exact effect before fresh host
+      // and identity checks; signed Panel status updates remain wake hints only.
+      if (operation.effect_started_at && options.confirmInitialInstallationStopped) {
+        const receipt = await db
+          .selectFrom('server_events')
+          .select('id')
+          .where('server_id', '=', server.id)
+          .where('job_id', '=', jobId)
+          .where('message_key', '=', 'servers.operation.installation_updated')
+          .where(sql<string>`data->>'source'`, '=', 'native_installation_completed')
+          .where(sql<string>`data->>'providerUuid'`, '=', server.pterodactyl_uuid ?? '')
+          .where(
+            sql<string>`data->>'effectStartedAt'`,
+            '=',
+            operation.effect_started_at.toISOString(),
+          )
+          .executeTakeFirst();
+        if (receipt && (await options.confirmInitialInstallationStopped(server.id, db))) {
+          const current = await ownedRemote(db, server, options);
+          if (
+            installed(current) &&
+            !current.status &&
+            (await installationCallbacks(false).authorize())
+          ) {
+            await installationCallbacks(false).onConfirmed();
+            return true;
+          }
+        }
+      }
       await options.adapter.confirmInstallation(
         server.pterodactyl_id ?? 0,
         server.pterodactyl_identifier ?? '',
@@ -3563,7 +3593,7 @@ export async function reconcileManagedServer(
       .select(['operation.job_id', 'operation.plan'])
       .where('reservation.server_id', '=', server.id)
       .where('operation.action', 'in', ['provision', 'reinstall'])
-      .where('operation.phase', '=', 'failed')
+      .where('operation.phase', 'in', ['failed', 'owner_resolved_failed'])
       .where('job.state', '=', 'failed')
       .where('job.completed_at', 'is not', null)
       .executeTakeFirst();

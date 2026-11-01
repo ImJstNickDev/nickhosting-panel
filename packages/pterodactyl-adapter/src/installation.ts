@@ -25,7 +25,7 @@ export async function confirmInstallation(
   identifier: string,
   options: InstallationConfirmationOptions,
   reinstall = false,
-  timeoutMs = 300000,
+  timeoutMs = 3600_000,
   observer?: ContainerObserver,
 ): Promise<{ confirmed: boolean }> {
   const measure = <T>(name: string, work: () => Promise<T>): Promise<T> =>

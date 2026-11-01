@@ -1,7 +1,7 @@
 import { timingSafeEqual, X509Certificate } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createServer, request } from 'node:https';
-import type { Socket } from 'node:net';
+import { isIP, type Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { TLSSocket } from 'node:tls';
 import type { GatewayTcpContext } from '@nickhosting/game-sdk';
@@ -249,7 +249,7 @@ export async function acceptSatisfactoryHttps(
         minVersion: 'TLSv1.2',
         headers: {
           ...incoming.headers,
-          host: `${context.route.backend.address}:${context.route.backend.port}`,
+          host: `${isIP(context.route.backend.address) === 6 ? `[${context.route.backend.address}]` : context.route.backend.address}:${context.route.backend.port}`,
         },
         signal: context.signal,
         timeout: 30000,

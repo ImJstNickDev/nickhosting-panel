@@ -33,8 +33,11 @@ Existing allocation ownership, binding checks, leases and connection limits appl
 Lightweight Query implements the documented binary envelope, uint64 cookie and
 flags, NetCL, substates and UTF-8 server name. Responses use observed backend data,
 with persisted cache in `satisfactory_server_state`. No invented NetCL is sent
-when no backend observation exists. Identical state samples do not change route
-revisions. Offline/waking responses use the documented Offline/Loading states.
+when no backend observation exists. Query observations are kept outside routing
+authority and cannot change route revisions. After a Gateway restart, offline
+queries hydrate the observed cache through a revision-checked internal endpoint.
+Only actual backend probes establish readiness. Offline/waking responses use the
+documented Offline/Loading states.
 
 HTTPS uses a stable per-server identity in both Gateway and backend. The Gateway
 terminates incoming TLS and creates a separate upstream TLS session, pinning the
@@ -258,3 +261,32 @@ connections remain in the lease/topology revocation set while only active joins
 and mutations count as gameplay work. Query-only UDP relays stay passive; gameplay
 on the same endpoint promotes activity, and later polls cannot renew that activity
 window. New gameplay work is fenced during quiescence.
+
+The runtime also coalesces unfinished host-inventory reads and shares one immutable
+host observation across the initial checks of a validation batch. The original
+observation timestamp remains authoritative; expired evidence is rejected. A second
+check of a route, including its final pre-bind check, rereads host sockets/topology.
+Nothing is cached across completed batches. This avoids repeated Docker/process
+scans exhausting the Gateway CPU budget and creating gaps between listener leases.
+
+SMR browsing omits its search filter when empty; nonempty searches require at least
+three characters, matching the upstream API. Custom management sections declare
+explicit UI write permissions while API authorization remains authoritative. The
+Satisfactory sections require `server:manage` for changes and retain read-only
+browsing for `server:read`.
+
+Long Steam installations retain a bounded one-hour native event subscription. The
+existing worker installation collector also persists an actual authenticated
+completion event in `server_events`, correlated with the active job, provider UUID
+and exact effect-start timestamp, before waking the lifecycle worker. Recovery
+requires that exact receipt plus fresh managed identity and host proof that both
+installer and game are stopped. Ordinary Panel status updates never substitute for
+completion. This closes the gap where a download longer than the old five-minute
+window completed after its confirmation subscriber had disconnected.
+
+
+Control requests for one route rebuild only that route with the same fresh policy,
+identity, eligibility and evidence checks under the existing resource lock. They do
+not rebuild every unrelated route or renew unrelated leases. Full snapshots remain
+the only writer of aggregate snapshot revisions. This removes the serialized
+all-route work previously repeated by every context/proof/cache request.

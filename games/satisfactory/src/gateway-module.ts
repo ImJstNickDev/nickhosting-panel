@@ -68,6 +68,7 @@ export async function probeSatisfactoryQuery(
 export function createSatisfactoryGatewayAdapter(
   store: SatisfactoryGatewayStateStore,
 ): GatewayProtocolAdapter {
+  const loads = new Map<string, { attemptedAt: number; work: Promise<void> }>();
   const observations = new Map<string, { generation: string; at: number }>();
   const applicationSamples = new Map<
     string,
@@ -155,6 +156,27 @@ export function createSatisfactoryGatewayAdapter(
           ? 'status'
           : 'ignore',
     }),
+    async prepareResponse(context) {
+      if (store.read(context.route.serverId) || !context.loadState) return;
+      const id = context.route.serverId;
+      const current = loads.get(id);
+      if (current && Date.now() - current.attemptedAt < 10_000) {
+        await current.work;
+        return;
+      }
+      const attemptedAt = Date.now();
+      const work = (async () => {
+        try {
+          const state = await context.loadState?.();
+          if (state && !context.signal.aborted && !store.read(id))
+            store.write(id, { ...state, flags: BigInt(state.flags) });
+        } catch {
+          // Missing durable status does not invent a build number or readiness.
+        }
+      })();
+      boundInsert(loads, id, { attemptedAt, work });
+      await work;
+    },
     response(context, mode) {
       const request = context.input && decodeSatisfactoryPoll(context.input);
       const persisted = context.route.protocol?.satisfactory;
@@ -216,13 +238,18 @@ export function createSatisfactoryGatewayAdapter(
       try {
         const state = await probeSatisfactoryQuery(context);
         store.write(context.route.serverId, state);
-        if (context.route.public.transport === 'udp')
-          await context.persistState?.({
-            ...state,
-            flags: state.flags.toString(),
-            substates: [...state.substates],
-            observedAt: new Date().toISOString(),
-          });
+        if (context.route.public.transport === 'udp') {
+          try {
+            await context.persistState?.({
+              ...state,
+              flags: state.flags.toString(),
+              substates: [...state.substates],
+              observedAt: new Date().toISOString(),
+            });
+          } catch {
+            // Persistence availability cannot change the actual protocol reply.
+          }
+        }
         if (state.state === 1 || state.state === 3)
           boundInsert(observations, context.route.serverId, {
             generation: context.route.generation,
