@@ -1,0 +1,71 @@
+# PREPARATION ONLY. Requires exact Owner approval before activation.
+# Append to the full existing real-dev overlay chain. One approved server mount;
+# future servers require additional explicit mounts, not mounting all Wings data.
+services:
+  api:
+    environment: { NH_DEV_SFTP_ENABLED: "true" }
+  worker:
+    environment: { NH_DEV_SFTP_ENABLED: "true" }
+  sftpgo-users:
+    image: drakkan/sftpgo:v2.7.6@sha256:1edd28d80de2a008863fbfc58c8ff7db47b1b410bae48d4e6076192337809b11
+    user: "${NH_SFTP_USERS_UID:?Verified managed-server file owner UID required}:${NH_SFTP_USERS_GID:?Verified managed-server file owner GID required}"
+    # Bypass any image entrypoint: no recursive ownership/permission initialization.
+    entrypoint: [sftpgo]
+    command: [serve, --config-dir, /var/lib/sftpgo, --config-file, /etc/sftpgo/sftpgo.json, --grace-time, "15", --log-level, info, --log-file-path, ""]
+    working_dir: /var/lib/sftpgo
+    environment:
+      SFTPGO_DATA_PROVIDER__DRIVER: sqlite
+      SFTPGO_DATA_PROVIDER__NAME: /var/lib/sftpgo/sftpgo.db
+      SFTPGO_DATA_PROVIDER__BACKUPS_PATH: /var/lib/sftpgo/backups
+      SFTPGO_DATA_PROVIDER__TRACK_QUOTA: "2"
+      SFTPGO_DATA_PROVIDER__CREATE_DEFAULT_ADMIN: "true"
+      SFTPGO_DEFAULT_ADMIN_USERNAME: ${NH_SFTP_USERS_ADMIN:?Dedicated SFTP users administrator required}
+      SFTPGO_DEFAULT_ADMIN_PASSWORD: ${NH_SFTP_USERS_PASSWORD:?Dedicated SFTP users administrator secret required}
+      SFTPGO_SFTPD__BINDINGS__0__PORT: "2022"
+      SFTPGO_SFTPD__HOST_KEY_ALGORITHMS: ssh-ed25519
+      SFTPGO_SFTPD__HOST_KEYS: /var/lib/sftpgo/id_ed25519
+      SFTPGO_SFTPD__ENABLED_SSH_COMMANDS: ""
+      SFTPGO_SFTPD__KEYBOARD_INTERACTIVE_AUTHENTICATION: "false"
+      SFTPGO_FTPD__BINDINGS__0__PORT: "0"
+      SFTPGO_WEBDAVD__BINDINGS__0__PORT: "0"
+      SFTPGO_HTTPD__BINDINGS__0__PORT: "8080"
+      SFTPGO_HTTPD__BINDINGS__0__ENABLE_WEB_ADMIN: "false"
+      SFTPGO_HTTPD__BINDINGS__0__ENABLE_WEB_CLIENT: "false"
+      SFTPGO_HTTPD__BINDINGS__0__ENABLE_REST_API: "true"
+      SFTPGO_HTTPD__BINDINGS__0__RENDER_OPENAPI: "false"
+      SFTPGO_HTTPD__HIDE_SUPPORT_LINK: "true"
+      SFTPGO_TELEMETRY__BIND_PORT: "0"
+    volumes:
+      - type: bind
+        source: "${NH_MOUNTDATA_ROOT:-./mountdata}/dev/sftpgo-users"
+        target: /var/lib/sftpgo
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${NH_SFTP_USERS_SERVER_DIRECTORY:?Exact approved managed-server directory required}
+        target: /srv/nickhosting-sftp/servers/${NH_SFTP_USERS_SERVER_UUID:?Verified provider UUID required}
+        read_only: false
+        bind: { create_host_path: false, propagation: rprivate }
+    # Existing egress bridge permits the explicitly published SSH binding;
+    # the internal data network alone is not a public-ingress design.
+    networks: [data, egress]
+    ports:
+      - target: 2022
+        published: "${NH_SFTP_USERS_PORT:?Approved host TCP port required}"
+        host_ip: "${NH_SFTP_USERS_BIND_IP:?Explicit approved host bind address required}"
+        protocol: tcp
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1
+    healthcheck:
+      test: [CMD, sftpgo, ping, --config-dir, /var/lib/sftpgo, --config-file, /etc/sftpgo/sftpgo.json]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+    logging: { driver: json-file, options: { max-size: 10m, max-file: "3" } }

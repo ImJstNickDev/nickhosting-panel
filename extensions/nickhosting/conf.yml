@@ -1,0 +1,17 @@
+info:
+  name: NickHosting
+  identifier: nickhosting
+  description: NickHosting provider bridge, account keys, change feed, bulk transfer URLs and directory batches.
+  version: 1.8.2
+  target: beta-2026-08
+  author: NickHosting
+admin:
+  view: admin/view.blade.php
+  controller: admin/controller.php
+requests:
+  app: app
+  routers:
+    application: routes/application.php
+    client: routes/client.php
+data:
+  directory: private

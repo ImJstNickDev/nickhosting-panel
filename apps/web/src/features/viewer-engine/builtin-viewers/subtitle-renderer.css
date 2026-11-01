@@ -1,0 +1,49 @@
+.motion-subtitles {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  pointer-events: none;
+  user-select: none;
+  overflow: hidden;
+}
+.motion-caption-text,
+.motion-caption-ass {
+  position: absolute;
+  pointer-events: none;
+  width: var(--motion-caption-width);
+  height: var(--motion-caption-height);
+  left: var(--motion-caption-left);
+  top: var(--motion-caption-top);
+}
+.motion-caption-text {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  box-sizing: border-box;
+  padding: 3%;
+  gap: 0.15em;
+  font-family: Arial, sans-serif;
+  font-size: calc(
+    clamp(16px, var(--motion-caption-height) * 0.045, 40px) *
+    var(--motion-caption-scale, 1)
+  );
+  line-height: 1.3;
+  color: white;
+  text-align: center;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-shadow: 0 1px 2px #000;
+}
+.motion-caption-cue {
+  max-width: 95%;
+}
+.motion-caption-cue > span {
+  padding: 0.08em 0.25em;
+  border-radius: 0.15em;
+  background: #000b;
+  box-decoration-break: clone;
+}
+.motion-caption-cue [part="timed"][data-future] {
+  opacity: 0.65;
+}

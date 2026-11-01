@@ -1,0 +1,60 @@
+# Optional read-only viewer transport. Preparation only: separate exact Owner approval
+# is required before creating the service or mounting existing Wings data.
+# Add after the currently selected dev overlays; never replace their selection.
+services:
+  sftpgo-viewer:
+    image: drakkan/sftpgo:v2.7.6@sha256:1edd28d80de2a008863fbfc58c8ff7db47b1b410bae48d4e6076192337809b11
+    user: "${NH_VIEWER_SFTPGO_UID:?Verified Wings data reader UID required}:${NH_VIEWER_SFTPGO_GID:?Verified Wings data reader GID required}"
+    # Bypass any image entrypoint: no recursive ownership/permission initialization.
+    entrypoint: [sftpgo]
+    command: [serve, --config-dir, /var/lib/sftpgo, --config-file, /etc/sftpgo/sftpgo.json, --grace-time, "15", --log-level, info, --log-file-path, ""]
+    working_dir: /var/lib/sftpgo
+    environment:
+      SFTPGO_DATA_PROVIDER__DRIVER: sqlite
+      SFTPGO_DATA_PROVIDER__NAME: /var/lib/sftpgo/sftpgo.db
+      SFTPGO_DATA_PROVIDER__BACKUPS_PATH: /var/lib/sftpgo/backups
+      SFTPGO_DATA_PROVIDER__TRACK_QUOTA: "0"
+      SFTPGO_DATA_PROVIDER__CREATE_DEFAULT_ADMIN: "true"
+      SFTPGO_DEFAULT_ADMIN_USERNAME: ${NH_VIEWER_SFTPGO_ADMIN:?Dedicated viewer administrator required}
+      SFTPGO_DEFAULT_ADMIN_PASSWORD: ${NH_VIEWER_SFTPGO_PASSWORD:?Dedicated viewer administrator secret required}
+      SFTPGO_SFTPD__BINDINGS__0__PORT: "2022"
+      SFTPGO_SFTPD__HOST_KEY_ALGORITHMS: ssh-ed25519
+      SFTPGO_SFTPD__HOST_KEYS: /var/lib/sftpgo/id_ed25519
+      SFTPGO_SFTPD__ENABLED_SSH_COMMANDS: ""
+      SFTPGO_SFTPD__KEYBOARD_INTERACTIVE_AUTHENTICATION: "false"
+      SFTPGO_FTPD__BINDINGS__0__PORT: "0"
+      SFTPGO_WEBDAVD__BINDINGS__0__PORT: "0"
+      SFTPGO_HTTPD__BINDINGS__0__PORT: "8080"
+      SFTPGO_HTTPD__BINDINGS__0__ENABLE_WEB_ADMIN: "false"
+      SFTPGO_HTTPD__BINDINGS__0__ENABLE_WEB_CLIENT: "false"
+      SFTPGO_HTTPD__BINDINGS__0__ENABLE_REST_API: "true"
+      SFTPGO_HTTPD__BINDINGS__0__RENDER_OPENAPI: "false"
+      SFTPGO_HTTPD__HIDE_SUPPORT_LINK: "true"
+      SFTPGO_TELEMETRY__BIND_PORT: "0"
+    volumes:
+      - type: bind
+        source: "${NH_MOUNTDATA_ROOT:-./mountdata}/dev/sftpgo-viewer"
+        target: /var/lib/sftpgo
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${NH_VIEWER_WINGS_DATA_ROOT:?Exact existing Wings volumes root required}
+        target: /srv/nickhosting-viewer/servers
+        read_only: true
+        bind: { create_host_path: false, propagation: rprivate }
+    networks: [data]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1
+    healthcheck:
+      test: [CMD, sftpgo, ping, --config-dir, /var/lib/sftpgo, --config-file, /etc/sftpgo/sftpgo.json]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+    logging: { driver: json-file, options: { max-size: 10m, max-file: "3" } }

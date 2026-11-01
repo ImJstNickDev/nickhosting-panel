@@ -1,0 +1,93 @@
+.dg-context-menu {
+  position: fixed;
+  z-index: 1200;
+  width: max-content;
+  min-width: min(210px, calc(100vw - 16px));
+  max-width: min(310px, calc(100vw - 16px));
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: #202b37;
+  box-shadow: 0 5px 20px #172b4226;
+  font-size: 0.8rem;
+}
+.dg-context-menu > button {
+  display: flex;
+  align-items: center;
+  justify-content: start;
+  gap: 9px;
+  width: 100%;
+  min-height: 32px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font-weight: 400;
+  text-align: left;
+}
+.dg-context-menu > button:hover,
+.dg-context-menu > button:focus {
+  background: color-mix(in srgb, var(--blue) 9%, var(--surface));
+  filter: none;
+}
+.dg-context-menu > button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+.dg-context-menu > button[data-danger] {
+  color: #a02525;
+}
+.dg-context-menu > button[aria-disabled="true"] {
+  color: var(--muted);
+  opacity: 0.65;
+  cursor: default;
+}
+.dg-context-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  flex: 0 0 16px;
+}
+.dg-context-icon > svg {
+  width: 16px;
+  height: 16px;
+}
+.dg-context-chevron {
+  margin-left: auto;
+}
+.dg-context-note {
+  padding: 6px 9px 9px;
+  margin-bottom: 3px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.dg-workspace .dg-row-target {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: inherit;
+  text-align: right;
+  font-size: inherit;
+  font-weight: inherit;
+}
+.dg-workspace .dg-row-target:focus-visible {
+  outline-offset: 2px;
+}
+@media (pointer: coarse) {
+  .dg-context-menu > button {
+    min-height: 44px;
+  }
+  .dg-workspace .dg-row-target {
+    min-height: 36px;
+  }
+}

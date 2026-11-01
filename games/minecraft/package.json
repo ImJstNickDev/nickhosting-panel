@@ -2,16 +2,26 @@
   "name": "@nickhosting/minecraft",
   "private": true,
   "type": "module",
-  "exports": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./ui": "./src/ui/index.ts",
+    "./viewers": "./src/viewers/index.tsx"
+  },
   "dependencies": {
     "@nickhosting/core": "workspace:*",
     "@nickhosting/game-sdk": "workspace:*",
     "zod": "4.6.5",
     "@nickhosting/content-providers": "workspace:*",
-    "prismarine-nbt": "2.8.0"
+    "prismarine-nbt": "2.8.0",
+    "smol-toml": "1.9.1",
+    "yaml": "2.9.1"
+  },
+  "peerDependencies": {
+    "react": "19.3.0"
   },
   "devDependencies": {
     "yazl": "3.3.1",
-    "@types/yazl": "3.3.1"
+    "@types/yazl": "3.3.1",
+    "@types/react": "19.3.0"
   }
 }

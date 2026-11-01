@@ -19,9 +19,15 @@ beforeEach(() => {
   mocks.lookup.mockResolvedValue([{ address: '1.1.1.1', family: 4 }]);
 });
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(paths.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
-function response(statusCode: number, body: Buffer, headers: Record<string, string> = {}) {
+function response(
+  statusCode: number,
+  body: Buffer,
+  headers: Record<string, string> = {},
+  afterResponse?: (stream: PassThrough) => void,
+) {
   mocks.request.mockImplementationOnce((_url, options, callback) => {
     const req = Object.assign(new EventEmitter(), {
       setTimeout: vi.fn(),
@@ -30,6 +36,7 @@ function response(statusCode: number, body: Buffer, headers: Record<string, stri
         const res = Object.assign(new PassThrough(), { statusCode, headers });
         queueMicrotask(() => {
           callback(res);
+          afterResponse?.(res);
           res.end(body);
           req.emit('close');
         });
@@ -55,6 +62,40 @@ async function destination() {
   paths.push(root);
   return join(root, 'download');
 }
+/** A live response whose body/headers can arrive independently of request creation. */
+function pendingResponse(statusCode = 200, headers: Record<string, string> = {}) {
+  const stream = Object.assign(new PassThrough(), { statusCode, headers });
+  let respond: () => void = () => {
+    throw new Error('Request has not started');
+  };
+  let idle: () => void = () => {
+    throw new Error('Idle timeout has not been installed');
+  };
+  const destroy = vi.fn();
+  mocks.request.mockImplementationOnce((_url, options, callback) => {
+    const req = Object.assign(new EventEmitter(), {
+      setTimeout: vi.fn((_milliseconds: number, onTimeout: () => void) => {
+        idle = onTimeout;
+      }),
+      destroy,
+      end: vi.fn(),
+    });
+    destroy.mockImplementation((error?: Error) => {
+      stream.destroy(error);
+      if (error) req.emit('error', error);
+      req.emit('close');
+    });
+    // Also handle failures before the caller starts consuming the response.
+    stream.on('error', () => {});
+    stream.on('close', () => req.emit('close'));
+    const abort = () => req.destroy(options.signal.reason);
+    options.signal?.addEventListener('abort', abort, { once: true });
+    req.on('close', () => options.signal?.removeEventListener('abort', abort));
+    respond = () => callback(stream);
+    return req;
+  });
+  return { stream, destroy, respond: () => respond(), idle: () => idle() };
+}
 const body = Buffer.from('fixture content');
 const artifact = {
   path: 'config/a.txt',
@@ -64,6 +105,311 @@ const artifact = {
   kind: 'override' as const,
   serverSide: 'required' as const,
 };
+it('allows an active download to outlive the metadata deadline without restarting it', async () => {
+  const path = await destination();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const peer = pendingResponse();
+  const result = client({ timeoutMs: 100, downloadTimeoutMs: 500, attempts: 1 }).download(
+    artifact,
+    path,
+  );
+  await vi.advanceTimersByTimeAsync(90);
+  peer.respond();
+  await vi.advanceTimersByTimeAsync(0);
+  for (const byte of body) {
+    peer.stream.write(Buffer.from([byte]));
+    await vi.advanceTimersByTimeAsync(20);
+  }
+  peer.stream.end();
+  await expect(result).resolves.toMatchObject({ size: body.length });
+  expect(peer.destroy).not.toHaveBeenCalled();
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  expect(await readFile(path)).toEqual(body);
+  expect(vi.getTimerCount()).toBe(0);
+});
+it('keeps the short deadline when a download never receives response headers', async () => {
+  const path = await destination();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const peer = pendingResponse();
+  const result = client({ timeoutMs: 100, downloadTimeoutMs: 500, attempts: 1 }).download(
+    artifact,
+    path,
+  );
+  const rejected = expect(result).rejects.toMatchObject({ code: 'integration_unavailable' });
+  await vi.advanceTimersByTimeAsync(100);
+  await rejected;
+  expect(peer.destroy).toHaveBeenCalledExactlyOnceWith(new Error('content_timeout'));
+  await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+it('does not grant the long transfer budget to a pending redirect target', async () => {
+  const path = await destination();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const redirect = pendingResponse(302, { location: '/target' });
+  const target = pendingResponse();
+  const result = client({ timeoutMs: 100, downloadTimeoutMs: 500, attempts: 1 }).download(
+    artifact,
+    path,
+  );
+  const rejected = expect(result).rejects.toMatchObject({ code: 'integration_unavailable' });
+  await vi.advanceTimersByTimeAsync(90);
+  redirect.respond();
+  await vi.advanceTimersByTimeAsync(100);
+  await rejected;
+  expect(redirect.stream.destroyed).toBe(true);
+  expect(target.destroy).toHaveBeenCalledExactlyOnceWith(new Error('content_timeout'));
+  expect(mocks.request).toHaveBeenCalledTimes(2);
+  await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(vi.getTimerCount()).toBe(0);
+});
+it('retains the absolute metadata deadline even while response bytes keep arriving', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const peer = pendingResponse();
+  const result = client({ timeoutMs: 100, downloadTimeoutMs: 500, attempts: 1 }).text(
+    artifact.urls[0] as string,
+  );
+  const rejected = expect(result).rejects.toMatchObject({ code: 'integration_unavailable' });
+  await vi.advanceTimersByTimeAsync(0);
+  peer.respond();
+  await vi.advanceTimersByTimeAsync(0);
+  for (let chunk = 0; chunk < 5; chunk++) {
+    peer.stream.write('a');
+    await vi.advanceTimersByTimeAsync(20);
+  }
+  await rejected;
+  expect(peer.destroy).toHaveBeenCalledExactlyOnceWith(new Error('content_timeout'));
+});
+it('caps even active download bodies at the independent transfer deadline', async () => {
+  const path = await destination();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const peer = pendingResponse();
+  const result = client({ timeoutMs: 100, downloadTimeoutMs: 250, attempts: 1 }).download(
+    artifact,
+    path,
+  );
+  const rejected = expect(result).rejects.toMatchObject({ code: 'integration_unavailable' });
+  await vi.advanceTimersByTimeAsync(0);
+  peer.respond();
+  await vi.advanceTimersByTimeAsync(0);
+  for (let chunk = 0; chunk < 5; chunk++) {
+    peer.stream.write('a');
+    await vi.advanceTimersByTimeAsync(50);
+  }
+  await rejected;
+  expect(peer.destroy).toHaveBeenCalledExactlyOnceWith(new Error('content_timeout'));
+  await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(vi.getTimerCount()).toBe(0);
+});
+it.each(['idle', 'abort'] as const)(
+  'interrupts a download on %s without waiting for its longer transfer deadline',
+  async (cause) => {
+    const path = await destination();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const peer = pendingResponse();
+    const controller = new AbortController();
+    const result = client({ timeoutMs: 100, downloadTimeoutMs: 500, attempts: 1 }).download(
+      artifact,
+      path,
+      { signal: controller.signal },
+    );
+    const rejected = expect(result).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    peer.respond();
+    await vi.advanceTimersByTimeAsync(0);
+    peer.stream.write('a');
+    if (cause === 'idle') peer.idle();
+    else controller.abort(new Error('cancelled'));
+    await rejected;
+    expect(peer.destroy).toHaveBeenCalledTimes(1);
+    await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(vi.getTimerCount()).toBe(0);
+  },
+);
+it.each([0, -1, Number.NaN, 1.5, 2 ** 31])('rejects an invalid download timeout %s', (value) => {
+  expect(() => client({ downloadTimeoutMs: value })).toThrow();
+});
+it('uses bounded authenticated JSON POST for read-only bulk metadata', async () => {
+  response(200, Buffer.from('{"data":[]}'));
+  await expect(
+    client().jsonPost(
+      'https://cdn.modrinth.com/mods/files',
+      { fileIds: [1, 2] },
+      { headers: { 'x-api-key': 'fixture' } },
+    ),
+  ).resolves.toEqual({ data: [] });
+  expect(mocks.request.mock.calls[0]?.[1]).toMatchObject({
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': 'fixture' },
+  });
+  await expect(
+    client().jsonPost('https://cdn.modrinth.com/mods/files', 'x'.repeat(256 * 1024)),
+  ).rejects.toThrow();
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+});
+it('limits HTML metadata and preserves the existing redirect refusal', async () => {
+  response(200, Buffer.from('<h1>Pack</h1>'));
+  await expect(client().text('https://cdn.modrinth.com/page')).resolves.toBe('<h1>Pack</h1>');
+  response(200, Buffer.from('too long'));
+  await expect(client({ maxJsonBytes: 3 }).text('https://cdn.modrinth.com/page')).rejects.toThrow();
+});
+it('bounds unknown-size provider archives and seals streamed SHA256', async () => {
+  const path = await destination();
+  response(200, body);
+  expect(
+    await client().downloadModpack(
+      {
+        filename: 'pack.zip',
+        urls: artifact.urls,
+        hashes: { md5: createHash('md5').update(body).digest('hex') },
+      },
+      path,
+    ),
+  ).toEqual({ size: body.length, sha256: createHash('sha256').update(body).digest('hex') });
+});
+it('admits an unknown-size file from its existing GET headers before writing any bytes', async () => {
+  const path = await destination();
+  response(200, body, { 'content-length': String(body.length) });
+  const onSize = vi.fn(async (bytes: number) => {
+    expect(bytes).toBe(body.length);
+    await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+  await expect(
+    client().downloadModpack({ filename: 'mod.jar', urls: artifact.urls, hashes: {} }, path, {
+      maxBytes: 64,
+      onSize,
+    }),
+  ).resolves.toMatchObject({ size: body.length });
+  expect(onSize).toHaveBeenCalledExactlyOnceWith(body.length);
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  expect(mocks.request.mock.calls[0]?.[1].method).toBe('GET');
+  expect(await readFile(path)).toEqual(body);
+});
+it('reserves the bounded remaining allowance when Content-Length is absent', async () => {
+  const path = await destination();
+  response(200, body);
+  const onSize = vi.fn(async (_bytes: number) => {});
+  await expect(
+    client().downloadModpack({ filename: 'mod.jar', urls: artifact.urls, hashes: {} }, path, {
+      maxBytes: 32,
+      onSize,
+    }),
+  ).resolves.toMatchObject({ size: body.length });
+  expect(onSize).toHaveBeenCalledExactlyOnceWith(32);
+  const tooSmall = await destination();
+  response(200, body);
+  await expect(
+    client().downloadModpack({ filename: 'mod.jar', urls: artifact.urls, hashes: {} }, tooSmall, {
+      maxBytes: body.length - 1,
+      onSize,
+    }),
+  ).rejects.toMatchObject({ code: 'validation_failed' });
+  await expect(readFile(tooSmall)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+it.each(['-1', '1.5', '9007199254740992', String(body.length - 1), String(body.length + 1)])(
+  'rejects invalid or dishonest Content-Length %s and removes incomplete bytes',
+  async (length) => {
+    const path = await destination();
+    response(200, body, { 'content-length': length });
+    await expect(
+      client().downloadModpack({ filename: 'mod.jar', urls: artifact.urls, hashes: {} }, path, {
+        maxBytes: 32,
+        onSize: async () => {},
+      }),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+    expect(mocks.request).toHaveBeenCalledTimes(1);
+    await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  },
+);
+it('rejects a declared size over the remaining budget before reservation or disk writes', async () => {
+  const path = await destination();
+  response(200, body, { 'content-length': String(body.length) });
+  const onSize = vi.fn(async () => {});
+  await expect(
+    client().downloadModpack({ filename: 'mod.jar', urls: artifact.urls, hashes: {} }, path, {
+      maxBytes: body.length - 1,
+      onSize,
+    }),
+  ).rejects.toMatchObject({ code: 'validation_failed' });
+  expect(onSize).not.toHaveBeenCalled();
+  await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+it('does not remove existing data when reservation fails before opening the destination', async () => {
+  const path = await destination();
+  await writeFile(path, 'preserve');
+  response(200, body, { 'content-length': String(body.length) });
+  await expect(
+    client().downloadModpack({ filename: 'mod.jar', urls: artifact.urls, hashes: {} }, path, {
+      maxBytes: 32,
+      onSize: async () => {
+        throw new Error('quota');
+      },
+    }),
+  ).rejects.toThrow('quota');
+  expect(await readFile(path, 'utf8')).toBe('preserve');
+});
+it('honors cancellation during admission without creating a destination', async () => {
+  const path = await destination();
+  const controller = new AbortController();
+  let stream: PassThrough | undefined;
+  response(200, body, { 'content-length': String(body.length) }, (value) => {
+    stream = value;
+  });
+  await expect(
+    client().downloadModpack({ filename: 'mod.jar', urls: artifact.urls, hashes: {} }, path, {
+      signal: controller.signal,
+      maxBytes: 32,
+      onSize: async () => controller.abort(new Error('cancelled')),
+    }),
+  ).rejects.toThrow('cancelled');
+  expect(stream?.destroyed).toBe(true);
+  await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+it.each(['disconnect', 'abort'] as const)(
+  'handles a response error during pending admission and joins reservation before %s cleanup',
+  async (failure) => {
+    const path = await destination();
+    const controller = new AbortController();
+    let stream: PassThrough | undefined;
+    let admitted = false;
+    response(200, body, { 'content-length': String(body.length) }, (value) => {
+      stream = value;
+    });
+    await expect(
+      client().downloadModpack({ filename: 'mod.jar', urls: artifact.urls, hashes: {} }, path, {
+        signal: controller.signal,
+        maxBytes: 32,
+        onSize: async () => {
+          await new Promise<void>((resolve) => {
+            setImmediate(() => {
+              if (failure === 'abort') controller.abort(new Error('cancelled'));
+              stream?.destroy(new Error('response failed during admission'));
+              setImmediate(resolve);
+            });
+          });
+          admitted = true;
+        },
+      }),
+    ).rejects.toThrow(failure === 'abort' ? 'cancelled' : 'response failed during admission');
+    expect(admitted).toBe(true);
+    expect(stream?.destroyed).toBe(true);
+    await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  },
+);
+it('does not bypass size or digest failures in modpack downloads', async () => {
+  response(200, body);
+  await expect(
+    client({ maxDownloadBytes: 2 }).downloadModpack(
+      { filename: 'pack.zip', urls: artifact.urls, hashes: {} },
+      await destination(),
+    ),
+  ).rejects.toThrow();
+  response(200, body);
+  await expect(
+    client().downloadModpack(
+      { filename: 'pack.zip', urls: artifact.urls, hashes: { md5: 'a'.repeat(32) } },
+      await destination(),
+    ),
+  ).rejects.toThrow();
+});
 it('pins validated DNS to the HTTPS socket and streams integrity-checked bytes', async () => {
   const path = await destination();
   response(200, body);
@@ -85,13 +431,173 @@ it('refuses the whole DNS answer set when one address is private', async () => {
   await expect(client().json('https://cdn.modrinth.com/a')).rejects.toThrow();
   expect(mocks.request).not.toHaveBeenCalled();
 });
-it('never follows redirects or forwards a provider key to redirected origins', async () => {
+it('never follows metadata redirects or forwards a provider key to redirected origins', async () => {
   response(302, Buffer.from('redirect'), { location: 'https://evil.test/steal' });
   await expect(
     client().json('https://cdn.modrinth.com/a', { headers: { 'x-api-key': 'fixture-key' } }),
   ).rejects.toThrow();
   expect(mocks.request).toHaveBeenCalledTimes(1);
 });
+const curseforgeOrigins = [
+  'https://api.curseforge.com',
+  'https://edge.forgecdn.net',
+  'https://mediafilez.forgecdn.net',
+];
+const archivePath = '/files/2914/377/DIVERSITY%203%20PACKAGE%20v1.6.6.zip';
+const edgeUrl = `https://edge.forgecdn.net${archivePath}`;
+const downloadUrl = `https://mediafilez.forgecdn.net${archivePath}`;
+const worldArtifact = {
+  ...artifact,
+  urls: [edgeUrl],
+  hashes: { sha1: createHash('sha1').update(body).digest('hex') },
+};
+it('follows the CurseForge CDN redirect with independently pinned DNS and no metadata API key', async () => {
+  const http = client({ allowedOrigins: curseforgeOrigins });
+  response(200, Buffer.from('{"ok":true}'));
+  await http.json('https://api.curseforge.com/v1/mods/1', {
+    headers: { 'x-api-key': 'fixture-private-key' },
+  });
+  let redirected: PassThrough | undefined;
+  response(302, Buffer.from('redirect'), { location: downloadUrl }, (stream) => {
+    redirected = stream;
+  });
+  response(200, body);
+  const path = await destination();
+  expect(await http.download(worldArtifact, path)).toEqual({
+    sha256: createHash('sha256').update(body).digest('hex'),
+    size: body.length,
+  });
+  expect(await readFile(path)).toEqual(body);
+  expect(redirected?.destroyed).toBe(true);
+  expect(mocks.lookup.mock.calls.map(([host]) => host)).toEqual([
+    'api.curseforge.com',
+    'edge.forgecdn.net',
+    'mediafilez.forgecdn.net',
+  ]);
+  expect(mocks.request.mock.calls.map(([url]) => url.href)).toEqual([
+    'https://api.curseforge.com/v1/mods/1',
+    edgeUrl,
+    downloadUrl,
+  ]);
+  for (const [, options] of mocks.request.mock.calls.slice(1))
+    expect(options.headers).toEqual({
+      'Accept-Encoding': 'identity',
+      'User-Agent': 'NickHosting-test',
+    });
+});
+it.each([301, 303, 307, 308])(
+  'supports HTTP %s for approved archive download redirects',
+  async (status) => {
+    response(status, Buffer.from('redirect'), { location: downloadUrl });
+    response(200, body);
+    await expect(
+      client({ allowedOrigins: curseforgeOrigins }).download(worldArtifact, await destination()),
+    ).resolves.toMatchObject({ size: body.length });
+  },
+);
+it('continues to reject metadata redirects even when both origins are approved', async () => {
+  response(302, Buffer.from('redirect'), { location: downloadUrl });
+  await expect(
+    client({ allowedOrigins: curseforgeOrigins }).json('https://api.curseforge.com/v1/mods/1', {
+      headers: { 'x-api-key': 'fixture-private-key' },
+    }),
+  ).rejects.toMatchObject({ code: 'integration_unavailable', status: 503 });
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+});
+it.each([
+  'https://evil.test/archive.zip',
+  'http://mediafilez.forgecdn.net/archive.zip',
+  'https://user:password@mediafilez.forgecdn.net/archive.zip',
+  'https://127.0.0.1/archive.zip',
+  `${downloadUrl}#fragment`,
+])('rejects unapproved redirect location %s before opening another socket', async (location) => {
+  response(302, Buffer.from('redirect'), { location });
+  const path = await destination();
+  await expect(
+    client({ allowedOrigins: curseforgeOrigins }).download(worldArtifact, path),
+  ).rejects.toMatchObject({ code: 'validation_failed', status: 400 });
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  expect(mocks.lookup).toHaveBeenCalledTimes(1);
+  await expect(readFile(path)).rejects.toThrow();
+});
+it('rejects private or mixed DNS answers on a redirect before opening the target socket', async () => {
+  mocks.lookup.mockResolvedValueOnce([{ address: '1.1.1.1', family: 4 }]);
+  mocks.lookup.mockResolvedValueOnce([
+    { address: '1.1.1.1', family: 4 },
+    { address: '127.0.0.1', family: 4 },
+  ]);
+  response(302, Buffer.from('redirect'), { location: downloadUrl });
+  await expect(
+    client({ allowedOrigins: curseforgeOrigins }).download(worldArtifact, await destination()),
+  ).rejects.toMatchObject({ code: 'validation_failed' });
+  expect(mocks.lookup).toHaveBeenCalledTimes(2);
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+});
+it('allows relative locations up to three redirects and rejects a fourth without retries', async () => {
+  for (const location of ['/one', '/two', '/three']) response(302, Buffer.alloc(0), { location });
+  response(200, body);
+  await expect(
+    client({ allowedOrigins: curseforgeOrigins }).download(worldArtifact, await destination()),
+  ).resolves.toMatchObject({ size: body.length });
+  expect(mocks.request).toHaveBeenCalledTimes(4);
+  mocks.request.mockClear();
+  for (const location of ['/one', '/two', '/three', '/four'])
+    response(302, Buffer.alloc(0), { location });
+  const path = await destination();
+  await expect(
+    client({ allowedOrigins: curseforgeOrigins }).download(worldArtifact, path),
+  ).rejects.toMatchObject({ code: 'integration_unavailable', status: 503 });
+  expect(mocks.request).toHaveBeenCalledTimes(4);
+  await expect(readFile(path)).rejects.toThrow();
+});
+it('detects a redirect loop without issuing the repeated request', async () => {
+  response(302, Buffer.alloc(0), { location: downloadUrl });
+  response(302, Buffer.alloc(0), { location: edgeUrl });
+  await expect(
+    client({ allowedOrigins: curseforgeOrigins }).download(worldArtifact, await destination()),
+  ).rejects.toMatchObject({ code: 'integration_unavailable', status: 503 });
+  expect(mocks.request).toHaveBeenCalledTimes(2);
+});
+it.each<{ status: number; headers: Record<string, string> }>([
+  { status: 302, headers: {} },
+  { status: 302, headers: { location: 'https://[' } },
+  { status: 305, headers: { location: downloadUrl } },
+  { status: 403, headers: {} },
+  { status: 404, headers: {} },
+])(
+  'reports refused provider responses as unavailable, not internal errors: %j',
+  async ({ status, headers }) => {
+    response(status, Buffer.alloc(0), headers);
+    await expect(
+      client({ allowedOrigins: curseforgeOrigins }).download(worldArtifact, await destination()),
+    ).rejects.toMatchObject({ code: 'integration_unavailable', status: 503 });
+    expect(mocks.request).toHaveBeenCalledTimes(1);
+  },
+);
+it('honors cancellation between redirect hops without creating a partial destination', async () => {
+  const controller = new AbortController();
+  response(302, Buffer.alloc(0), { location: downloadUrl }, () => controller.abort());
+  const path = await destination();
+  await expect(
+    client({ allowedOrigins: curseforgeOrigins }).download(worldArtifact, path, {
+      signal: controller.signal,
+    }),
+  ).rejects.toThrow();
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  await expect(readFile(path)).rejects.toThrow();
+});
+it.each([Buffer.alloc(body.length + 1, 1), Buffer.alloc(body.length, 1)])(
+  'retains size/hash verification and partial-file cleanup after redirects: %j',
+  async (bytes) => {
+    response(302, Buffer.alloc(0), { location: downloadUrl });
+    response(200, bytes);
+    const path = await destination();
+    await expect(
+      client({ allowedOrigins: curseforgeOrigins }).download(worldArtifact, path),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+    await expect(readFile(path)).rejects.toThrow();
+  },
+);
 it('bounds metadata and refuses compressed responses', async () => {
   response(200, Buffer.from('123456'));
   await expect(client({ maxJsonBytes: 5 }).json('https://cdn.modrinth.com/a')).rejects.toThrow();
@@ -136,4 +642,48 @@ it('honors cancellation before network or disk side effects', async () => {
   await expect(client().download(artifact, path, { signal: controller.signal })).rejects.toThrow();
   expect(mocks.request).not.toHaveBeenCalled();
   await expect(readFile(path)).rejects.toThrow();
+});
+
+it('bounds and hashes a SpiGet exact version download without inventing its advertised size', async () => {
+  const path = await destination();
+  const http = client({ allowedOrigins: ['https://api.spiget.org'], attempts: 1 });
+  const jar = {
+    path: 'plugins/example.jar',
+    urls: ['https://api.spiget.org/v2/resources/1/versions/10/download/proxy'],
+    size: 1000,
+    hashes: {},
+    kind: 'plugin' as const,
+    serverSide: 'required' as const,
+    projectId: '1',
+    versionId: '10',
+    integrity: 'spiget-tls' as const,
+  };
+  response(200, body);
+  expect(await http.download(jar, path)).toEqual({
+    sha256: createHash('sha256').update(body).digest('hex'),
+    size: body.length,
+  });
+  expect(await readFile(path)).toEqual(body);
+});
+it('refuses a SpiGet response larger than its bounded ceiling and removes partial bytes', async () => {
+  const path = await destination();
+  const http = client({ allowedOrigins: ['https://api.spiget.org'], attempts: 1 });
+  response(200, body);
+  await expect(
+    http.download(
+      {
+        path: 'plugins/example.jar',
+        urls: ['https://api.spiget.org/v2/resources/1/versions/10/download/proxy'],
+        size: 1,
+        hashes: {},
+        kind: 'plugin',
+        serverSide: 'required',
+        projectId: '1',
+        versionId: '10',
+        integrity: 'spiget-tls',
+      },
+      path,
+    ),
+  ).rejects.toThrow();
+  await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
 });

@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { createIdentity, type IdentityMail } from '@nickhosting/auth';
+import { SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { translate } from '@nickhosting/i18n';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -16,6 +17,7 @@ describe('runtime uses live Owner configuration', () => {
     const bootstrap = randomBytes(32).toString('base64url');
     const mails: IdentityMail[] = [];
     const identity = createIdentity({
+      secretCodec: new SecretCodec({ activeKeyId: 'fixture', keys: { fixture: randomBytes(32) } }),
       pool: database.pool,
       baseURL: 'http://localhost:3999',
       authSecret: secret,

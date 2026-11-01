@@ -14,15 +14,23 @@ import {
   saveBootstrapConfiguration,
 } from '@nickhosting/database';
 import { renderMail } from '@nickhosting/i18n';
-import { validateConnection } from '@nickhosting/pterodactyl-adapter';
-import { createManagementRuntime } from '@nickhosting/server-management';
+import { createPrivateTransferCache } from '@nickhosting/jobs';
+import { createTransportCoordinator, validateConnection } from '@nickhosting/pterodactyl-adapter';
+import {
+  createDirectoryIdentityCache,
+  createManagementRuntime,
+} from '@nickhosting/server-management';
 import { createTransport } from 'nodemailer';
 import { createApp } from './app.js';
+import { closeFileViewers, closeViewerArchives } from './file-viewers.js';
 
 /** Explicit factory: importing API modules never opens sockets or changes the DB. */
 export async function createRuntime(env: Readonly<Record<string, string | undefined>>) {
   if (!env.DATABASE_URL) throw new DomainError('configuration_invalid');
   const database = createDatabase(env.DATABASE_URL);
+  const transportCoordinator = createTransportCoordinator();
+  let directoryIdentityCache: ReturnType<typeof createDirectoryIdentityCache> | undefined;
+  let transferCache: ReturnType<typeof createPrivateTransferCache> | undefined;
   try {
     const setup = await database.pool.query('SELECT id FROM instance_setup WHERE id=1');
     const secrets = parseSecretEnvironment(env, { requireSetupToken: setup.rowCount === 0 });
@@ -35,6 +43,15 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
     const logger = createLogger((record) => process.stdout.write(`${JSON.stringify(record)}\n`), {
       level: initial.values.logLevel,
     });
+    if (env.REDIS_URL && env.NH_JOB_PREFIX)
+      transferCache = createPrivateTransferCache({
+        redisUrl: env.REDIS_URL,
+        prefix: env.NH_JOB_PREFIX,
+        databaseUrl: env.DATABASE_URL,
+        codec,
+        logger,
+      });
+    directoryIdentityCache = createDirectoryIdentityCache(undefined, transferCache);
     let cached: { signature: string; identity: Identity } | undefined;
     const sendMail = async (message: IdentityMail) => {
       if (message.to.endsWith('.invalid')) return;
@@ -85,6 +102,7 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
       if (cached?.signature === signature) return cached.identity;
       const value = createIdentity({
         pool: database.pool,
+        secretCodec: codec,
         baseURL: values.apiUrl,
         publicURL: values.publicUrl,
         authSecret: secrets.authSecret,
@@ -102,7 +120,6 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
           await validateConnection({
             baseURL: env.NH_PTERODACTYL_BASE_URL ?? input.pterodactylBaseURL,
             applicationKey: env.NH_PTERODACTYL_APPLICATION_KEY ?? input.pterodactylApplicationKey,
-            clientKey: env.NH_PTERODACTYL_CLIENT_KEY ?? input.pterodactylClientKey,
           });
           await saveBootstrapConfiguration(tx, codec, input, actorUserId, env);
         },
@@ -111,9 +128,20 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
       return value;
     };
     const app = createApp({
+      provisioningCache: transferCache,
       database,
       codec,
-      management: () => createManagementRuntime({ db: database.db, codec, env }),
+      management: () =>
+        createManagementRuntime({
+          db: database.db,
+          codec,
+          env,
+          logger,
+          transportCoordinator,
+          directoryIdentityCache,
+          transferCache,
+        }),
+      logger,
       defaultLocale: async () => (await getSettings(database.db, env)).values.defaultLocale,
       identity,
       env,
@@ -124,8 +152,22 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
       },
       log: (data) => logger.log('warn', 'api.request_failed', data),
     });
-    return { app, database, logger, config: initial.values, close: () => database.db.destroy() };
+    return {
+      app,
+      database,
+      logger,
+      config: initial.values,
+      close: async () => {
+        directoryIdentityCache?.close();
+        await closeViewerArchives(database.db);
+        await closeFileViewers(database.db);
+        await transferCache?.close();
+        return database.db.destroy();
+      },
+    };
   } catch (error) {
+    directoryIdentityCache?.close();
+    await transferCache?.close();
     await database.db.destroy();
     throw error;
   }

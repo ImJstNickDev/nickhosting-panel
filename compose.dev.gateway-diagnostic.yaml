@@ -1,0 +1,10 @@
+# One-off diagnostic ONLY, with separate operation-specific Owner approval.
+# Never add this file to COMPOSE_FILE or use it with `up`.
+# Tests whether Docker's AppArmor profile causes the host-namespace EACCES.
+# Does not grant root, add capabilities or disable seccomp. The documented
+# `run --entrypoint node ... -e` override is mandatory: never run Gateway main.
+services:
+  gateway:
+    security_opt: !override
+      - no-new-privileges:true
+      - apparmor:unconfined

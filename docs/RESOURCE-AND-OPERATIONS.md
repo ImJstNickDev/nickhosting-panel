@@ -60,6 +60,25 @@ A server can be *process running* but *game loading*. A sleeping server can be *
 8. **Backup/restore**: durable operations, confirmation for destructive restore, progress and verification; quota/backup retention policy.
 9. **External drift**: read reconciliation discovers admin-created starts/changes; never automatically import or mutate existing unrelated servers.
 
+## Background observation and concurrent operations
+
+Periodic provider/host reads run without the exclusive lifecycle server lock and
+without an open database transaction. The last accepted observation remains
+available with its original timestamp; an in-flight refresh does not extend its
+freshness or relax resource-admission limits.
+
+Applying an observation is a short, database-only transaction. It checks that the
+captured server state, lifecycle history and relevant provider/resource bindings
+have not changed while collecting. An operation that started and finished during
+the read still invalidates that observation. Installation/runtime/readiness,
+metrics, reservations and events are committed together or not at all. A newer
+observation, changed binding or busy server defers the pass; it is not reported as
+a successful refresh. Reconciliation never retries a provider mutation.
+
+Resource-admission and incompatible user/lifecycle effects retain their existing
+serialization. This separation removes remote read latency from the periodic
+server lock, not the protection against concurrent wipe/delete/upload operations.
+
 ## Server ownership during live tests
 
 Codex may create, mutate and destroy **only** explicitly proven new test servers. Track Pterodactyl UUID, operation/PR ID and creation timestamp in durable untracked provenance. A matching naming convention is insufficient. Any uncertainty → stop and ask. Do not degrade production node resources.

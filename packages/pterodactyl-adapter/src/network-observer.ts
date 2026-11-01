@@ -6,6 +6,37 @@ import { posix } from 'node:path';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 
+export type NetworkObservationFailure =
+  | 'namespace'
+  | 'daemon_command'
+  | 'daemon_identity'
+  | 'container_list'
+  | 'network_list'
+  | 'container_inspect'
+  | 'network_inspect'
+  | 'container_parse'
+  | 'network_parse'
+  | 'container_bindings'
+  | 'container_inventory'
+  | 'network_inventory'
+  | 'container_churn'
+  | 'socket_observation'
+  | 'interfaces'
+  | 'observation_timeout';
+
+/** Only a fixed category crosses the observer boundary, never Docker output. */
+export class NetworkObservationError extends DomainError {
+  constructor(readonly reason: NetworkObservationFailure) {
+    super('integration_unavailable');
+  }
+}
+class MissingContainers extends Error {
+  constructor(readonly ids: string[]) {
+    super('missing containers');
+  }
+}
+class ContainerChurn extends Error {}
+
 export interface NetworkEndpoint {
   address: string;
   port: number;
@@ -60,7 +91,7 @@ export interface NetworkObserverDependencies {
   link(path: string): Promise<string>;
   directory(path: string): Promise<string[]>;
   interfaces(): string[];
-  docker(args: readonly string[], socket: string): Promise<string>;
+  docker(args: readonly string[], socket: string, timeoutMs?: number): Promise<string>;
   now(): number;
 }
 const production: NetworkObserverDependencies = {
@@ -72,14 +103,14 @@ const production: NetworkObserverDependencies = {
       .flatMap((addresses) => addresses ?? [])
       .map((address) => address.address),
   now: Date.now,
-  docker: (args, socket) =>
+  docker: (args, socket, timeoutMs = 10000) =>
     new Promise((resolve, reject) => {
       execFile(
         'docker',
         ['--host', `unix://${socket}`, ...args],
         {
           encoding: 'utf8',
-          timeout: 10000,
+          timeout: Math.min(10000, timeoutMs),
           maxBuffer: 4 * 1024 * 1024,
           killSignal: 'SIGKILL',
           shell: false,
@@ -87,9 +118,52 @@ const production: NetworkObserverDependencies = {
             Object.entries(process.env).filter(([key]) => !key.startsWith('DOCKER_')),
           ),
         },
-        (error, stdout) => {
-          if (error) reject(new DomainError('integration_unavailable'));
-          else resolve(stdout);
+        (error, stdout, stderr) => {
+          if (!error) {
+            resolve(stdout);
+            return;
+          }
+          // Docker can remove a listed container while Wings recreates it. Only
+          // this exact CLI failure is eligible for corroboration and one retry.
+          const requested = args.slice(4);
+          const lines = typeof stderr === 'string' ? stderr.trim().split('\n') : [];
+          const missing = lines.map(
+            (line) =>
+              /^(?:Error: No such object: |Error response from daemon: No such container: )([a-f0-9]{64})$/.exec(
+                line,
+              )?.[1],
+          );
+          if (
+            args[0] === 'container' &&
+            args[1] === 'inspect' &&
+            error.code === 1 &&
+            !error.killed &&
+            !error.signal &&
+            missing.length > 0 &&
+            missing.every(
+              (value): value is string => value !== undefined && requested.includes(value),
+            )
+          ) {
+            try {
+              if (typeof stdout !== 'string' || stdout.length > 4 * 1024 * 1024) throw new Error();
+              const rows = stdout.trim()
+                ? stdout
+                    .trim()
+                    .split('\n')
+                    .map((line) => containerSchema.parse(JSON.parse(line)).id)
+                : [];
+              const expected = requested.filter((value) => !missing.includes(value)).sort();
+              if (
+                new Set(missing).size !== missing.length ||
+                rows.sort().join() !== expected.join()
+              )
+                throw new Error();
+            } catch {
+              reject(new NetworkObservationError('container_parse'));
+              return;
+            }
+            reject(new MissingContainers(missing));
+          } else reject(new Error('Docker command failed'));
         },
       );
     }),
@@ -264,182 +338,295 @@ export function createNetworkObserver(
   )
     throw new DomainError('configuration_invalid');
   const io = { ...production, ...dependencies };
-  async function command(args: readonly string[]) {
-    const value = await io.docker(args, config.dockerSocket);
-    if (typeof value !== 'string' || value.length > 4 * 1024 * 1024) throw new Error();
-    return value.trim();
-  }
-  async function ids(kind: 'container' | 'network') {
-    const text = await command([
-      kind,
-      'ls',
-      ...(kind === 'container' ? ['--all'] : []),
-      '--no-trunc',
-      '--format',
-      '{{.ID}}',
-    ]);
-    const rows = text ? text.split('\n').map((row) => id.parse(row)) : [];
-    if (new Set(rows).size !== rows.length || rows.length > 10000) throw new Error();
-    return rows.sort();
-  }
   return {
     async observe() {
-      try {
-        const started = io.now();
-        const [namespaceId, hostNamespaceId] = await Promise.all([
-          io.link('/proc/self/ns/net'),
-          io.link(`${config.hostProcDirectory}/ns/net`),
-        ]);
-        if (
-          !namespace(namespaceId) ||
-          namespaceId !== hostNamespaceId ||
-          hostNamespaceId !== config.expectedHostNamespaceId
-        )
-          throw new Error();
-        const dockerDaemonId = JSON.parse(
-          await command(['info', '--format', '{{json .ID}}']),
-        ) as unknown;
-        if (dockerDaemonId !== config.expectedDockerDaemonId) throw new Error();
+      const started = io.now();
+      const deadline = started + 15000;
+      let expired = false;
+      function remaining() {
+        const value = deadline - io.now();
+        if (expired || value <= 0) throw new NetworkObservationError('observation_timeout');
+        return value;
+      }
+      async function stage<T>(
+        reason: NetworkObservationFailure,
+        run: () => T | Promise<T>,
+      ): Promise<T> {
+        remaining();
+        try {
+          const result = await run();
+          remaining();
+          return result;
+        } catch (error) {
+          if (error instanceof NetworkObservationError || error instanceof MissingContainers)
+            throw error;
+          throw new NetworkObservationError(reason);
+        }
+      }
+      async function command(args: readonly string[], reason: NetworkObservationFailure) {
+        return stage(reason, async () => {
+          const value = await io.docker(args, config.dockerSocket, remaining());
+          if (typeof value !== 'string' || value.length > 4 * 1024 * 1024) throw new Error();
+          return value.trim();
+        });
+      }
+      async function ids(kind: 'container' | 'network') {
+        return stage(kind === 'container' ? 'container_list' : 'network_list', async () => {
+          const text = await command(
+            [
+              kind,
+              'ls',
+              ...(kind === 'container' ? ['--all'] : []),
+              '--no-trunc',
+              '--format',
+              '{{.ID}}',
+            ],
+            kind === 'container' ? 'container_list' : 'network_list',
+          );
+          const rows = text ? text.split('\n').map((row) => id.parse(row)) : [];
+          if (new Set(rows).size !== rows.length || rows.length > 10000) throw new Error();
+          return rows.sort();
+        });
+      }
+      async function attempt(): Promise<NetworkObservation> {
+        const [namespaceId, hostNamespaceId] = await stage('namespace', async () => {
+          const values = await Promise.all([
+            io.link('/proc/self/ns/net'),
+            io.link(`${config.hostProcDirectory}/ns/net`),
+          ]);
+          if (
+            !namespace(values[0]) ||
+            values[0] !== values[1] ||
+            values[1] !== config.expectedHostNamespaceId
+          )
+            throw new Error();
+          return values;
+        });
+        const daemon = await command(['info', '--format', '{{json .ID}}'], 'daemon_command');
+        await stage('daemon_identity', () => {
+          if (JSON.parse(daemon) !== config.expectedDockerDaemonId) throw new Error();
+        });
         const [beforeContainers, beforeNetworks] = await Promise.all([
           ids('container'),
           ids('network'),
         ]);
         const rawContainers: z.infer<typeof containerSchema>[] = [];
-        // Bounded batches avoid command-line limits and fail if any container disappears mid-inspection.
         const networks: ObservedNetwork[] = [];
-        await Promise.all([
+        // Settle both inventories before considering a retry: an independent
+        // malformed network response must never be hidden by container churn.
+        const inspections = await Promise.allSettled([
           (async () => {
             for (let start = 0; start < beforeContainers.length; start += 64) {
-              const batch = beforeContainers.slice(start, start + 64);
-              const result = await command([
-                'container',
-                'inspect',
-                '--format',
-                containerFormat,
-                ...batch,
-              ]);
-              for (const line of result.split('\n')) {
-                const row = containerSchema.parse(JSON.parse(line));
-                rawContainers.push(row);
-              }
+              const result = await command(
+                [
+                  'container',
+                  'inspect',
+                  '--format',
+                  containerFormat,
+                  ...beforeContainers.slice(start, start + 64),
+                ],
+                'container_inspect',
+              );
+              await stage('container_parse', () => {
+                const rows = result
+                  .split('\n')
+                  .map((line) => containerSchema.parse(JSON.parse(line)));
+                if (
+                  rows
+                    .map((row) => row.id)
+                    .sort()
+                    .join() !== beforeContainers.slice(start, start + 64).join()
+                )
+                  throw new NetworkObservationError('container_inventory');
+                rawContainers.push(...rows);
+              });
             }
           })(),
           (async () => {
             for (let start = 0; start < beforeNetworks.length; start += 64) {
-              const result = await command([
-                'network',
-                'inspect',
-                '--format',
-                networkFormat,
-                ...beforeNetworks.slice(start, start + 64),
-              ]);
-              for (const line of result.split('\n')) {
-                const row = networkSchema.parse(JSON.parse(line));
-                networks.push({ ...row, options: row.options ?? {} });
-              }
+              const result = await command(
+                [
+                  'network',
+                  'inspect',
+                  '--format',
+                  networkFormat,
+                  ...beforeNetworks.slice(start, start + 64),
+                ],
+                'network_inspect',
+              );
+              await stage('network_parse', () => {
+                const rows = result
+                  .split('\n')
+                  .map((line) => networkSchema.parse(JSON.parse(line)));
+                if (
+                  rows
+                    .map((row) => row.id)
+                    .sort()
+                    .join() !== beforeNetworks.slice(start, start + 64).join()
+                )
+                  throw new NetworkObservationError('network_inventory');
+                networks.push(...rows.map((row) => ({ ...row, options: row.options ?? {} })));
+              });
             }
           })(),
         ]);
-        const containers: ObservedContainer[] = rawContainers.map((row) => {
-          let reason: 'stopped' | 'internal-network' | undefined;
-          if (
-            !row.running &&
-            ['created', 'exited'].includes(row.status) &&
-            Object.values(row.activeBindings ?? {}).every((value) => !value?.length)
-          )
-            reason = 'stopped';
-          else if (
-            row.running &&
-            row.status === 'running' &&
-            row.networkNames.length > 0 &&
-            row.networkNames.every((name) => {
-              const network = networks.find((candidate) => candidate.name === name);
-              return (
-                network?.driver === 'bridge' &&
-                network.internal &&
-                [undefined, 'nat'].includes(
-                  network.options['com.docker.network.bridge.gateway_mode_ipv4'],
-                ) &&
-                [undefined, 'nat'].includes(
-                  network.options['com.docker.network.bridge.gateway_mode_ipv6'],
-                )
-              );
-            })
-          )
-            reason = 'internal-network';
-          const records: NonNullable<ObservedContainer['unassignedPublications']> = [];
-          return {
-            ...row,
-            configuredBindings: dockerBindings(
-              row.configuredBindings,
-              row.running ? row.activeBindings : undefined,
-              reason ? { reason, records } : undefined,
-            ),
-            activeBindings: dockerBindings(row.activeBindings),
-            unassignedPublications: records,
-          };
-        });
+        for (const result of inspections) {
+          if (result.status === 'rejected' && !(result.reason instanceof MissingContainers))
+            throw result.reason;
+        }
+        if (
+          networks
+            .map((row) => row.id)
+            .sort()
+            .join() !== beforeNetworks.join()
+        )
+          throw new NetworkObservationError('network_inventory');
+        for (const result of inspections) {
+          if (result.status === 'rejected') {
+            const missing = result.reason as MissingContainers;
+            const [current, currentNetworks] = await Promise.all([
+              ids('container'),
+              ids('network'),
+            ]);
+            if (currentNetworks.join() !== beforeNetworks.join())
+              throw new NetworkObservationError('network_inventory');
+            if (
+              missing.ids.every(
+                (value) => beforeContainers.includes(value) && !current.includes(value),
+              )
+            )
+              throw new ContainerChurn();
+            throw new NetworkObservationError('container_inspect');
+          }
+        }
+        if (
+          rawContainers
+            .map((row) => row.id)
+            .sort()
+            .join() !== beforeContainers.join()
+        )
+          throw new NetworkObservationError('container_inventory');
+        const containers: ObservedContainer[] = await stage('container_bindings', () =>
+          rawContainers.map((row) => {
+            let reason: 'stopped' | 'internal-network' | undefined;
+            if (
+              !row.running &&
+              ['created', 'exited'].includes(row.status) &&
+              Object.values(row.activeBindings ?? {}).every((value) => !value?.length)
+            )
+              reason = 'stopped';
+            else if (
+              row.running &&
+              row.status === 'running' &&
+              row.networkNames.length > 0 &&
+              row.networkNames.every((name) => {
+                const network = networks.find((candidate) => candidate.name === name);
+                return (
+                  network?.driver === 'bridge' &&
+                  network.internal &&
+                  [undefined, 'nat'].includes(
+                    network.options['com.docker.network.bridge.gateway_mode_ipv4'],
+                  ) &&
+                  [undefined, 'nat'].includes(
+                    network.options['com.docker.network.bridge.gateway_mode_ipv6'],
+                  )
+                );
+              })
+            )
+              reason = 'internal-network';
+            const records: NonNullable<ObservedContainer['unassignedPublications']> = [];
+            return {
+              ...row,
+              configuredBindings: dockerBindings(
+                row.configuredBindings,
+                row.running ? row.activeBindings : undefined,
+                reason ? { reason, records } : undefined,
+              ),
+              activeBindings: dockerBindings(row.activeBindings),
+              unassignedPublications: records,
+            };
+          }),
+        );
         const [afterContainers, afterNetworks] = await Promise.all([
           ids('container'),
           ids('network'),
         ]);
-        if (
-          containers
-            .map((row) => row.id)
-            .sort()
-            .join() !== beforeContainers.join() ||
-          networks
-            .map((row) => row.id)
-            .sort()
-            .join() !== beforeNetworks.join() ||
-          afterContainers.join() !== beforeContainers.join() ||
-          afterNetworks.join() !== beforeNetworks.join()
-        )
-          throw new Error();
-        const ownedInodes = new Set<string>();
-        for (const descriptor of await io.directory('/proc/self/fd')) {
+        if (afterNetworks.join() !== beforeNetworks.join())
+          throw new NetworkObservationError('network_inventory');
+        if (afterContainers.join() !== beforeContainers.join()) throw new ContainerChurn();
+        return stage('socket_observation', async () => {
+          const ownedInodes = new Set<string>();
+          for (const descriptor of await io.directory('/proc/self/fd')) {
+            remaining();
+            try {
+              const match = /^socket:\[(\d+)\]$/.exec(await io.link(`/proc/self/fd/${descriptor}`));
+              if (match?.[1]) ownedInodes.add(match[1]);
+            } catch {
+              /* A descriptor may close during observation; it cannot establish ownership. */
+            }
+          }
+          const sockets: ObservedSocket[] = [];
+          for (const transport of ['tcp', 'udp'] as const) {
+            for (const ipv6 of [false, true]) {
+              remaining();
+              sockets.push(
+                ...parseProcSockets(
+                  await io.read(`${config.hostProcDirectory}/net/${transport}${ipv6 ? '6' : ''}`),
+                  transport,
+                  ipv6,
+                  ownedInodes,
+                ),
+              );
+            }
+          }
+          const interfaceAddresses = await stage('interfaces', () => {
+            const addresses = io.interfaces();
+            if (!addresses.length || addresses.some((address) => !isIP(address))) throw new Error();
+            return addresses;
+          });
+          await stage('namespace', async () => {
+            if ((await io.link('/proc/self/ns/net')) !== namespaceId) throw new Error();
+            remaining();
+            if ((await io.link(`${config.hostProcDirectory}/ns/net`)) !== hostNamespaceId)
+              throw new Error();
+          });
+          return {
+            observedAt: started,
+            namespaceId,
+            hostNamespaceId,
+            dockerDaemonId: config.expectedDockerDaemonId,
+            interfaceAddresses,
+            sockets,
+            containers,
+            networks,
+          };
+        });
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const complete = async () => {
+        for (let number = 0; number < 2; number++) {
           try {
-            const match = /^socket:\[(\d+)\]$/.exec(await io.link(`/proc/self/fd/${descriptor}`));
-            if (match?.[1]) ownedInodes.add(match[1]);
-          } catch {
-            /* A descriptor may close during observation; it cannot establish ownership. */
+            return await attempt();
+          } catch (error) {
+            remaining();
+            if (!(error instanceof ContainerChurn)) throw error;
+            if (number === 1) throw new NetworkObservationError('container_churn');
           }
         }
-        const sockets: ObservedSocket[] = [];
-        for (const transport of ['tcp', 'udp'] as const) {
-          for (const ipv6 of [false, true]) {
-            sockets.push(
-              ...parseProcSockets(
-                await io.read(`${config.hostProcDirectory}/net/${transport}${ipv6 ? '6' : ''}`),
-                transport,
-                ipv6,
-                ownedInodes,
-              ),
-            );
-          }
-        }
-        const interfaceAddresses = io.interfaces();
-        if (!interfaceAddresses.length || interfaceAddresses.some((address) => !isIP(address)))
-          throw new Error();
-        if (
-          (await io.link('/proc/self/ns/net')) !== namespaceId ||
-          (await io.link(`${config.hostProcDirectory}/ns/net`)) !== hostNamespaceId ||
-          io.now() - started > 15000
-        )
-          throw new Error();
-        return {
-          observedAt: started,
-          namespaceId,
-          hostNamespaceId,
-          dockerDaemonId: config.expectedDockerDaemonId,
-          interfaceAddresses,
-          sockets,
-          containers,
-          networks,
-        };
-      } catch {
-        // No Docker stderr, paths, provider metadata or secret-bearing source appears in errors.
-        throw new DomainError('integration_unavailable');
+        throw new NetworkObservationError('container_churn');
+      };
+      try {
+        return await Promise.race([
+          complete(),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => {
+              expired = true;
+              reject(new NetworkObservationError('observation_timeout'));
+            }, remaining());
+          }),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
       }
     },
   };

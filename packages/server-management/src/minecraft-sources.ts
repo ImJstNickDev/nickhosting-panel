@@ -1,30 +1,71 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
-import { lstat, open, statfs } from 'node:fs/promises';
-import { join, resolve, sep } from 'node:path';
+import { type BigIntStats, constants } from 'node:fs';
+import { lstat, open } from 'node:fs/promises';
+import { join } from 'node:path';
 import {
+  artifactSchema,
   type ContentArtifact,
+  type ContentFileVerification,
   type ContentHttp,
+  type CurseForgeProvider,
+  contentFileUnchanged,
   contentStageDirectory,
   hashesSchema,
   ModrinthProvider,
   SafeContentHttp,
 } from '@nickhosting/content-providers';
-import { type AuthContext, DomainError } from '@nickhosting/core';
-import { type Database, getSettings, recordAudit } from '@nickhosting/database';
+import { type AuthContext, contentPolicyValues, DomainError } from '@nickhosting/core';
+import {
+  assertStoragePolicyIdle,
+  type Database,
+  getSettings,
+  recordAudit,
+} from '@nickhosting/database';
 import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources } from './admission.js';
+import {
+  assertContentAdmission,
+  contentStorageRoot,
+  reserveContentStaging,
+} from './content-admission.js';
 import { currentInteractiveContext } from './interactive-context.js';
+import { minecraftWorldProjectId } from './minecraft-world-catalog-contracts.js';
 import { authorizeServer, ownerOnly, parse } from './registry.js';
-import { unresolvedTransferBytes } from './transfer-capacity.js';
-import { uploadStagingAvailableBytes } from './upload-admission.js';
 
 type Source = Selectable<Database['minecraft_sources']>;
 const identifier = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
+const statInteger = z.string().regex(/^[0-9]+$/);
+const sourceFileIdentitySchema = z.strictObject({
+  dev: statInteger,
+  ino: statInteger,
+  mode: statInteger,
+  uid: statInteger,
+  gid: statInteger,
+  nlink: z.literal('1'),
+  size: statInteger,
+  mtimeNs: z.string().regex(/^-?[0-9]+$/),
+  ctimeNs: z.string().regex(/^-?[0-9]+$/),
+});
+const sourceDirectoryIdentitySchema = sourceFileIdentitySchema.pick({
+  dev: true,
+  ino: true,
+  mode: true,
+  uid: true,
+  gid: true,
+});
+const sourceSealSchema = z.strictObject({
+  version: z.literal(1),
+  sourceId: z.uuid(),
+  identityDigest: digest,
+  sha256: digest,
+  file: sourceFileIdentitySchema,
+  directory: sourceDirectoryIdentitySchema,
+});
+type SourceSeal = z.infer<typeof sourceSealSchema>;
 export const minecraftSourceUploadSchema = z.strictObject({
-  kind: z.enum(['world', 'modpack']),
+  kind: z.enum(['world', 'modpack', 'datapack']),
   serverId: z.uuid().optional(),
   idempotencyKey: identifier,
   bytes: z
@@ -40,11 +81,20 @@ export const minecraftSourceModrinthSchema = z.strictObject({
   serverId: z.uuid().optional(),
   idempotencyKey: identifier,
 });
+export const minecraftSourceWorldCatalogSchema = z.strictObject({
+  provider: z.literal('curseforge'),
+  projectId: minecraftWorldProjectId,
+  versionId: minecraftWorldProjectId,
+  serverId: z.uuid(),
+  idempotencyKey: identifier,
+});
 export interface MinecraftSourceOptions {
   /** Internal worker composition only. Must revalidate the exact durable job. */
   authorize?: (db: Kysely<Database>, previous: AuthContext) => Promise<AuthContext>;
   /** Isolated tests can substitute provider HTTP, never a browser input. */
   http?: ContentHttp;
+  /** Configured by protected server-side provider composition, never browser input. */
+  curseforge?: CurseForgeProvider;
   /** Only test snapshots; production observes the real configured filesystem. */
   observeDisk?: (directory: string) => Promise<{ available: bigint; total: bigint }>;
 }
@@ -68,26 +118,122 @@ function sourcePath(source: Source): string {
   parse(z.uuid(), source.id);
   return join(source.storage_root, source.id, 'archive.bin');
 }
-function sourceRoot(setting: string): string {
-  const root = resolve(setting);
-  const mountdata = `${resolve('./mountdata')}${sep}`;
-  if (!root.startsWith(mountdata) || root === mountdata || /[\0\r\n]/.test(root))
-    throw new DomainError('configuration_invalid');
-  return root;
+function sourceDirectoryIdentity(info: BigIntStats) {
+  return {
+    dev: String(info.dev),
+    ino: String(info.ino),
+    mode: String(info.mode),
+    uid: String(info.uid),
+    gid: String(info.gid),
+  };
 }
-async function observeDisk(directory: string) {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+function sourceFileIdentity(info: BigIntStats) {
+  return {
+    ...sourceDirectoryIdentity(info),
+    nlink: String(info.nlink),
+    size: String(info.size),
+    mtimeNs: String(info.mtimeNs),
+    ctimeNs: String(info.ctimeNs),
+  };
+}
+function sameIdentity(actual: Record<string, string>, expected: Record<string, string>) {
+  return Object.keys(expected).every((key) => actual[key] === expected[key]);
+}
+
+/** A seal is server-owned storage evidence, never the client's claimed digest.
+ * The sole writer owns an exclusive generated file in a private directory. It
+ * hashes the bytes it writes, closes its writer, then makes the file read-only
+ * and syncs both file and directory before the DB can publish the seal. Ordinary
+ * edits, chmod/chown, hard links or replacement invalidate the stored identity.
+ * Host administrators and storage corruption are outside this trust boundary;
+ * outgoing world streams still verify every file against the extracted manifest.
+ */
+async function withSourceFile<T>(
+  row: Source,
+  work: (
+    file: Awaited<ReturnType<typeof open>>,
+    directory: Awaited<ReturnType<typeof open>>,
+    directoryIdentity: BigIntStats,
+  ) => Promise<T>,
+): Promise<T> {
+  await contentStageDirectory(row.storage_root);
+  const path = join(row.storage_root, row.id);
+  const directory = await open(
+    path,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+  );
   try {
-    const result = await Promise.race([
-      statfs(directory, { bigint: true }),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new DomainError('integration_unavailable')), 5000);
-      }),
-    ]);
-    return { available: uploadStagingAvailableBytes(result), total: result.blocks * result.bsize };
+    const info = await directory.stat({ bigint: true });
+    if (!info.isDirectory() || (info.mode & 0o077n) !== 0n) throw new DomainError('conflict');
+    const file = await open(sourcePath(row), constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const result = await work(file, directory, info);
+      const current = await lstat(path, { bigint: true });
+      if (
+        !current.isDirectory() ||
+        current.isSymbolicLink() ||
+        !sameIdentity(sourceDirectoryIdentity(current), sourceDirectoryIdentity(info))
+      )
+        throw new DomainError('conflict');
+      return result;
+    } finally {
+      await file.close();
+    }
   } finally {
-    clearTimeout(timer);
+    await directory.close();
   }
+}
+async function sealSource(row: Source, verified: ContentFileVerification): Promise<SourceSeal> {
+  return withSourceFile(row, async (file, directory, directoryIdentity) => {
+    const before = await file.stat({ bigint: true });
+    if (
+      verified.path !== sourcePath(row) ||
+      !before.isFile() ||
+      before.nlink !== 1n ||
+      before.size !== BigInt(row.declared_bytes) ||
+      before.uid !== directoryIdentity.uid ||
+      !sameIdentity(sourceFileIdentity(before), sourceFileIdentity(verified.identity))
+    )
+      throw new DomainError('conflict');
+    if ((before.mode & 0o7777n) !== 0o400n) await file.chmod(0o400);
+    await file.sync();
+    await directory.sync();
+    const identity = await file.stat({ bigint: true });
+    if (!(await contentFileUnchanged(sourcePath(row), identity))) throw new DomainError('conflict');
+    return sourceSealSchema.parse({
+      version: 1,
+      sourceId: row.id,
+      identityDigest: row.identity_digest,
+      sha256: verified.sha256,
+      file: sourceFileIdentity(identity),
+      directory: sourceDirectoryIdentity(directoryIdentity),
+    });
+  });
+}
+async function verifySourceSeal(row: Source): Promise<ContentFileVerification> {
+  const parsed = sourceSealSchema.safeParse(row.source_seal);
+  if (
+    !parsed.success ||
+    parsed.data.sourceId !== row.id ||
+    parsed.data.identityDigest !== row.identity_digest ||
+    parsed.data.sha256 !== row.actual_sha256
+  )
+    throw new DomainError('conflict');
+  const seal = parsed.data;
+  return withSourceFile(row, async (file, _directory, directoryIdentity) => {
+    const identity = await file.stat({ bigint: true });
+    if (
+      !identity.isFile() ||
+      identity.nlink !== 1n ||
+      identity.size !== BigInt(row.declared_bytes) ||
+      (identity.mode & 0o7777n) !== 0o400n ||
+      !sameIdentity(sourceFileIdentity(identity), seal.file) ||
+      !sameIdentity(sourceDirectoryIdentity(directoryIdentity), seal.directory) ||
+      !(await contentFileUnchanged(sourcePath(row), identity))
+    )
+      throw new DomainError('conflict');
+    return { path: sourcePath(row), sha256: seal.sha256, identity };
+  });
 }
 async function current(
   db: Kysely<Database>,
@@ -99,17 +245,48 @@ async function current(
     ? options.authorize(db, context)
     : currentInteractiveContext(db, context, env);
 }
+function sourcePermission(kind: Source['kind']) {
+  return kind === 'world' ? 'game.minecraft.worlds.import' : `game.minecraft.${kind}s.write`;
+}
 async function authorizeScope(
   db: Kysely<Database>,
   context: AuthContext,
   serverId: string | undefined,
+  kind: Source['kind'],
 ) {
   if (!serverId) {
     if (context.sessionType !== 'regular') throw new DomainError('forbidden');
     return context.subjectUserId;
   }
-  return (await authorizeServer(db, context, serverId, 'server:manage')).owner_id;
+  return (await authorizeServer(db, context, serverId, sourcePermission(kind))).owner_id;
 }
+
+/** Catalog browsing and acquisition use the same local managed-server boundary. */
+export async function authorizeMinecraftWorldCatalog(
+  db: Kysely<Database>,
+  context: AuthContext,
+  serverId: string,
+  permission: string = 'game.minecraft.worlds.read',
+) {
+  const server = await authorizeServer(
+    db,
+    context,
+    serverId,
+    permission === 'server:read'
+      ? 'game.minecraft.worlds.read'
+      : permission === 'server:manage'
+        ? 'game.minecraft.worlds.import'
+        : permission,
+  );
+  const mapping = await db
+    .selectFrom('runtime_egg_mappings')
+    .select('game_id')
+    .where('id', '=', server.mapping_id)
+    .executeTakeFirst();
+  if (mapping?.game_id !== 'minecraft') throw new DomainError('not_found');
+  return server;
+}
+
 async function ownedSource(
   db: Kysely<Database>,
   context: AuthContext,
@@ -121,13 +298,14 @@ async function ownedSource(
     .selectFrom('minecraft_sources')
     .selectAll()
     .where('id', '=', reference)
+    .where('game_id', '=', 'minecraft')
     .executeTakeFirst();
   if (!row) throw new DomainError('not_found');
   // Project managers may prepare sources for that server, but never reuse them
   // outside its exact scope; unbound wizard sources are private to the subject.
   if (row.server_id) {
     if (serverId !== undefined && row.server_id !== serverId) throw new DomainError('forbidden');
-    if ((await authorizeScope(db, context, row.server_id)) !== row.owner_user_id)
+    if ((await authorizeScope(db, context, row.server_id, row.kind)) !== row.owner_user_id)
       throw new DomainError('forbidden');
   } else {
     if (serverId !== undefined) {
@@ -137,7 +315,7 @@ async function ownedSource(
         .where('source_id', '=', row.id)
         .where('server_id', '=', serverId)
         .executeTakeFirst();
-      if (!binding || (await authorizeScope(db, context, serverId)) !== row.owner_user_id)
+      if (!binding || (await authorizeScope(db, context, serverId, row.kind)) !== row.owner_user_id)
         throw new DomainError('forbidden');
     } else if (row.owner_user_id !== context.subjectUserId || context.sessionType !== 'regular')
       throw new DomainError('forbidden');
@@ -167,22 +345,51 @@ async function rowLock<T>(
     }
   });
 }
-async function hashSource(row: Source, authorize: () => Promise<unknown>) {
+const sourceAuthorizationIntervalMs = 500;
+/** One authority check per time window, shared by streaming and the stalled-body
+ * timer. Boundaries force a fresh check; archive chunks never each query SQL. */
+function sourceAuthorization(check: () => Promise<unknown>, signal?: AbortSignal) {
+  let checkedAt = performance.now();
+  let checking: Promise<void> | undefined;
+  return async (force = false): Promise<void> => {
+    signal?.throwIfAborted();
+    if (checking) return checking;
+    if (!force && performance.now() - checkedAt < sourceAuthorizationIntervalMs) return;
+    checking = (async () => {
+      await check();
+      signal?.throwIfAborted();
+      checkedAt = performance.now();
+    })().finally(() => {
+      checking = undefined;
+    });
+    return checking;
+  };
+}
+async function hashSource(
+  row: Source,
+  authorize: (force?: boolean) => Promise<void>,
+): Promise<ContentFileVerification> {
+  await authorize();
   await contentStageDirectory(row.storage_root);
   const directory = join(row.storage_root, row.id);
   const info = await lstat(directory);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new DomainError('conflict');
   const file = await open(sourcePath(row), constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
-    const before = await file.stat();
-    if (!before.isFile() || before.nlink !== 1 || before.size !== Number(row.declared_bytes))
+    const before = await file.stat({ bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || before.size !== BigInt(row.declared_bytes))
       throw new DomainError('conflict');
     const hashes = hashesSchema.parse(row.expected_hashes);
     const checks = Object.fromEntries(
       Object.keys({ ...hashes, sha256: '' }).map((name) => [name, createHash(name)]),
     );
     let bytes = 0;
-    for await (const chunk of file.createReadStream({ autoClose: false, highWaterMark: 65536 })) {
+    // Local source hashing benefits from larger bounded reads. This does not
+    // change browser/provider upload buffering or authority refresh intervals.
+    for await (const chunk of file.createReadStream({
+      autoClose: false,
+      highWaterMark: 1024 ** 2,
+    })) {
       await authorize();
       bytes += chunk.length;
       if (bytes > Number(row.declared_bytes)) throw new DomainError('conflict');
@@ -191,16 +398,15 @@ async function hashSource(row: Source, authorize: () => Promise<unknown>) {
     const actual = Object.fromEntries(
       Object.entries(checks).map(([key, hash]) => [key, hash.digest('hex')]),
     );
-    const after = await file.stat();
     if (
       bytes !== Number(row.declared_bytes) ||
-      after.size !== before.size ||
-      after.mtimeMs !== before.mtimeMs ||
+      !(await contentFileUnchanged(sourcePath(row), before)) ||
       Object.entries(hashes).some(([key, value]) => actual[key] !== value) ||
       (row.actual_sha256 !== null && actual.sha256 !== row.actual_sha256)
     )
       throw new DomainError('conflict');
-    return actual.sha256 as string;
+    await authorize(true);
+    return { path: sourcePath(row), sha256: actual.sha256 as string, identity: before };
   } finally {
     await file.close();
   }
@@ -218,7 +424,7 @@ export async function bindMinecraftSource(
 ) {
   const actor = await current(db, context, env, options);
   const row = await ownedSource(db, actor, reference);
-  const server = await authorizeServer(db, actor, serverId, 'server:manage');
+  const server = await authorizeServer(db, actor, serverId, sourcePermission(row.kind));
   if (
     row.state !== 'ready' ||
     row.owner_user_id !== server.owner_id ||
@@ -233,123 +439,8 @@ export async function bindMinecraftSource(
   await recordAudit(db, actor, 'minecraft.source.bound', { sourceId: reference, serverId });
 }
 
-/** Durable workers call this after their normal authorization and before any
- * expanded output/download. No second lifecycle or job system is introduced. */
-export async function reserveMinecraftStaging(
-  db: Kysely<Database>,
-  context: AuthContext,
-  jobId: string,
-  serverId: string,
-  expandedBytes: number,
-  env: Environment = {},
-  options: Pick<MinecraftSourceOptions, 'observeDisk'> = {},
-) {
-  parse(z.uuid(), jobId);
-  parse(z.uuid(), serverId);
-  if (
-    !Number.isSafeInteger(expandedBytes) ||
-    expandedBytes < 0 ||
-    expandedBytes > Number.MAX_SAFE_INTEGER - 65536
-  )
-    throw new DomainError('validation_failed');
-  return db.transaction().execute(async (tx) => {
-    await lockResources(tx);
-    const job = await tx
-      .selectFrom('operation_jobs as job')
-      .innerJoin('server_operations as operation', 'operation.job_id', 'job.id')
-      .innerJoin('managed_servers as server', 'server.id', 'operation.server_id')
-      .select([
-        'job.actor_id',
-        'job.subject_id',
-        'job.resource_owner_id',
-        'job.state',
-        'server.id',
-        'server.active_operation_id',
-        'operation.action',
-      ])
-      .where('job.id', '=', jobId)
-      .where('server.id', '=', serverId)
-      .where('server.deleted_at', 'is', null)
-      .executeTakeFirst();
-    if (
-      !job ||
-      job.actor_id !== context.actorUserId ||
-      job.subject_id !== context.subjectUserId ||
-      job.state !== 'running' ||
-      job.active_operation_id !== jobId ||
-      !['provision', 'minecraft-content', 'reinstall', 'wipe'].includes(job.action)
-    )
-      throw new DomainError('forbidden');
-    await authorizeServer(tx, context, serverId, 'server:manage');
-    const { values } = await getSettings(tx, env);
-    const root = sourceRoot(values.minecraftContentRoot);
-    const bytes = BigInt(expandedBytes) + 65536n;
-    const identity = createHash('sha256')
-      .update(JSON.stringify({ jobId, serverId, bytes: String(bytes), root }))
-      .digest('hex');
-    const existing = await tx
-      .selectFrom('minecraft_staging_claims')
-      .selectAll()
-      .where('job_id', '=', jobId)
-      .executeTakeFirst();
-    if (existing) {
-      if (existing.identity_digest !== identity || existing.state !== 'reserved')
-        throw new DomainError('conflict');
-      return { jobId, identityDigest: identity, reservedBytes: Number(bytes) };
-    }
-    await contentStageDirectory(root);
-    const sources = await tx
-      .selectFrom('minecraft_sources')
-      .select(['owner_user_id', 'reserved_bytes'])
-      .where('state', '!=', 'released')
-      .execute();
-    const stages = await tx
-      .selectFrom('minecraft_staging_claims')
-      .select(['owner_user_id', 'reserved_bytes'])
-      .where('state', '=', 'reserved')
-      .execute();
-    const total = [...sources, ...stages].reduce(
-      (sum, row) => sum + BigInt(row.reserved_bytes),
-      0n,
-    );
-    const user = [...sources, ...stages]
-      .filter((row) => row.owner_user_id === job.resource_owner_id)
-      .reduce((sum, row) => sum + BigInt(row.reserved_bytes), 0n);
-    if (
-      total + bytes > BigInt(values.minecraftSourceGlobalBytes) ||
-      user + bytes > BigInt(values.minecraftSourceUserBytes)
-    )
-      throw new DomainError('resources_unavailable');
-    const disk = await (options.observeDisk ?? observeDisk)(root);
-    const percent =
-      (disk.total * BigInt(Math.ceil(values.minecraftSourceFreePercent * 100))) / 10000n;
-    const margin =
-      percent > BigInt(values.minecraftSourceFreeBytes)
-        ? percent
-        : BigInt(values.minecraftSourceFreeBytes);
-    if (disk.available < (await unresolvedTransferBytes(tx)) + bytes + margin)
-      throw new DomainError('resources_unavailable');
-    await tx
-      .insertInto('minecraft_staging_claims')
-      .values({
-        job_id: jobId,
-        server_id: serverId,
-        owner_user_id: job.resource_owner_id,
-        actor_user_id: context.actorUserId,
-        reserved_bytes: String(bytes),
-        storage_root: root,
-        identity_digest: identity,
-      })
-      .execute();
-    await recordAudit(tx, context, 'minecraft.staging.reserved', {
-      jobId,
-      serverId,
-      reservedBytes: Number(bytes),
-      identityDigest: identity,
-    });
-    return { jobId, identityDigest: identity, reservedBytes: Number(bytes) };
-  });
-}
+/** Compatibility export for existing Minecraft worker composition. */
+export const reserveMinecraftStaging = reserveContentStaging;
 
 export function createMinecraftSourceStore(
   db: Kysely<Database>,
@@ -367,7 +458,13 @@ export function createMinecraftSourceStore(
     hashes: unknown;
     projectId?: string;
     versionId?: string;
+    integrity?: 'spiget-tls';
   }) {
+    if (input.integrity && (input.kind !== 'plugin' || input.origin !== 'spiget'))
+      throw new DomainError('provenance_mismatch');
+    const expectedHashes = input.integrity
+      ? z.strictObject({}).parse(input.hashes)
+      : hashesSchema.parse(input.hashes);
     const identity = createHash('sha256')
       .update(
         JSON.stringify({
@@ -375,7 +472,8 @@ export function createMinecraftSourceStore(
           origin: input.origin,
           serverId: input.serverId ?? null,
           bytes: input.bytes,
-          hashes: hashesSchema.parse(input.hashes),
+          hashes: expectedHashes,
+          integrity: input.integrity,
           projectId: input.projectId ?? null,
           versionId: input.versionId ?? null,
         }),
@@ -384,11 +482,12 @@ export function createMinecraftSourceStore(
     return db.transaction().execute(async (tx) => {
       await lockResources(tx);
       const actor = await reauthorize(tx);
-      const ownerId = await authorizeScope(tx, actor, input.serverId);
+      const ownerId = await authorizeScope(tx, actor, input.serverId, input.kind);
       const existing = await tx
         .selectFrom('minecraft_sources')
         .selectAll()
         .where('owner_user_id', '=', ownerId)
+        .where('game_id', '=', 'minecraft')
         .where((eb) =>
           eb.or([
             eb('idempotency_key', '=', input.idempotencyKey),
@@ -407,51 +506,21 @@ export function createMinecraftSourceStore(
         return existing[0];
       }
       const { values } = await getSettings(tx, env);
-      const root = sourceRoot(values.minecraftSourceRoot);
+      const root = contentStorageRoot(values.contentSourceRoot, env);
       await contentStageDirectory(root);
-      const claims = await tx
-        .selectFrom('minecraft_sources')
-        .select(['owner_user_id', 'reserved_bytes', 'state'])
-        .where('state', '!=', 'released')
-        .execute();
-      const expansions = await tx
-        .selectFrom('minecraft_staging_claims')
-        .select(['owner_user_id', 'reserved_bytes'])
-        .where('state', '=', 'reserved')
-        .execute();
-      const total = [...claims, ...expansions].reduce(
-        (sum, row) => sum + BigInt(row.reserved_bytes),
-        0n,
-      );
-      const owned = claims.filter((row) => row.owner_user_id === ownerId);
-      const userBytes = [
-        ...owned,
-        ...expansions.filter((row) => row.owner_user_id === ownerId),
-      ].reduce((sum, row) => sum + BigInt(row.reserved_bytes), 0n);
-      const pending = (rows: typeof claims) => rows.filter((row) => row.state !== 'ready').length;
+      await assertStoragePolicyIdle(tx);
       const bytes = BigInt(input.bytes) + 65536n;
-      if (
-        total + bytes > BigInt(values.minecraftSourceGlobalBytes) ||
-        userBytes + bytes > BigInt(values.minecraftSourceUserBytes) ||
-        pending(claims) >= values.minecraftSourceConcurrent ||
-        pending(owned) >= values.minecraftSourceUserConcurrent
-      )
-        throw new DomainError('resources_unavailable');
-      // Fresh under the shared resource lock. All claims remain charged even if
-      // statfs already reflects their bytes; conservative double accounting is intentional.
-      const disk = await (options.observeDisk ?? observeDisk)(root);
-      const percent =
-        (disk.total * BigInt(Math.ceil(values.minecraftSourceFreePercent * 100))) / 10000n;
-      const margin =
-        percent > BigInt(values.minecraftSourceFreeBytes)
-          ? percent
-          : BigInt(values.minecraftSourceFreeBytes);
-      if (disk.available < (await unresolvedTransferBytes(tx)) + bytes + margin)
-        throw new DomainError('resources_unavailable');
+      await assertContentAdmission(
+        tx,
+        values,
+        { gameId: 'minecraft', ownerId, bytes, root },
+        options,
+      );
       const row = await tx
         .insertInto('minecraft_sources')
         .values({
           id: randomUUID(),
+          game_id: 'minecraft',
           actor_user_id: actor.actorUserId,
           owner_user_id: ownerId,
           server_id: input.serverId ?? null,
@@ -482,8 +551,13 @@ export function createMinecraftSourceStore(
   }
   async function executeTransfer(
     reference: string,
-    transfer: (row: Source, signal: AbortSignal, authorize: () => Promise<void>) => Promise<void>,
+    transfer: (
+      row: Source,
+      signal: AbortSignal,
+      authorize: () => Promise<void>,
+    ) => Promise<ContentFileVerification | undefined>,
     signal?: AbortSignal,
+    boundedSpiget = false,
   ) {
     return rowLock(db, reference, async (connection) => {
       let row = await ownedSource(connection, await reauthorize(connection), reference);
@@ -501,34 +575,69 @@ export function createMinecraftSourceStore(
       row = claimed;
       const controller = new AbortController();
       const abort = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
-      const authorize = async () => {
-        abort.throwIfAborted();
-        await ownedSource(connection, await reauthorize(connection), reference);
-      };
+      // The exact source and actor were checked above under this source lock.
+      const authorize = sourceAuthorization(
+        async () => ownedSource(connection, await reauthorize(connection), reference),
+        abort,
+      );
       // Revocation must interrupt stalled provider/raw uploads too, rather than
       // waiting indefinitely for another body chunk. At most one query is in flight.
       let checking: Promise<void> | undefined;
       const timer = setInterval(() => {
         if (!checking)
-          checking = authorize()
+          checking = authorize(true)
             .catch(() => controller.abort(new DomainError('forbidden')))
             .finally(() => {
               checking = undefined;
             });
-      }, 500);
+      }, sourceAuthorizationIntervalMs);
       timer.unref();
       try {
         await contentStageDirectory(join(row.storage_root, row.id));
-        await transfer(row, abort, authorize);
-        await authorize();
-        const sha256 = await hashSource(row, authorize);
+        // Direct uploads return the server's digest of the successful writes.
+        // Provider acquisition retains its full-file verification fallback.
+        const verified =
+          (await transfer(row, abort, authorize)) ?? (await hashSource(row, authorize));
+        if (boundedSpiget) {
+          const bytes = verified.identity.size;
+          if (
+            row.kind !== 'plugin' ||
+            row.origin !== 'spiget' ||
+            bytes < 1n ||
+            bytes > BigInt(row.declared_bytes)
+          )
+            throw new DomainError('provenance_mismatch');
+          // SpiGet supplies no upstream hash and rounds its advertised size. Only
+          // its canonical TLS endpoint may use a ceiling; publication seals exact bytes.
+          row = {
+            ...row,
+            declared_bytes: String(bytes),
+            reserved_bytes: String(bytes + 65536n),
+            expected_hashes: { sha256: verified.sha256 },
+          };
+        }
+        const seal = await sealSource(row, verified);
+        const { sha256 } = verified;
+        // Do not let the background check share this pinned connection with the
+        // final transaction. The transaction reauthorizes once more before ready.
+        clearInterval(timer);
+        await checking;
+        abort.throwIfAborted();
         await connection.transaction().execute(async (tx) => {
           await lockResources(tx);
           const currentActor = await reauthorize(tx);
           await ownedSource(tx, currentActor, reference);
           await tx
             .updateTable('minecraft_sources')
-            .set({ state: 'ready', actual_sha256: sha256, updated_at: new Date() })
+            .set({
+              state: 'ready',
+              declared_bytes: row.declared_bytes,
+              reserved_bytes: row.reserved_bytes,
+              expected_hashes: JSON.stringify(row.expected_hashes),
+              actual_sha256: sha256,
+              source_seal: JSON.stringify(seal),
+              updated_at: new Date(),
+            })
             .where('id', '=', row.id)
             .execute();
           await recordAudit(tx, currentActor, 'minecraft.source.ready', {
@@ -544,6 +653,9 @@ export function createMinecraftSourceStore(
           updated_at: new Date(),
         });
       } catch (error) {
+        clearInterval(timer);
+        controller.abort(error);
+        await checking;
         // Even when the provider removed its partial file, keep the claim. A
         // crashed process cannot assert filesystem cleanup on a future retry.
         await connection
@@ -563,13 +675,46 @@ export function createMinecraftSourceStore(
   }
   async function resolveSource(reference: string, kind: Source['kind'], serverId?: string) {
     return rowLock(db, reference, async (connection) => {
-      const row = await ownedSource(connection, await reauthorize(connection), reference, serverId);
+      let row = await ownedSource(connection, await reauthorize(connection), reference, serverId);
       if (row.state !== 'ready' || row.kind !== kind || (!serverId && row.server_id))
         throw new DomainError('conflict');
-      const sha256 = await hashSource(row, async () =>
+      const authorize = sourceAuthorization(async () =>
         ownedSource(connection, await reauthorize(connection), reference, serverId),
       );
-      return { path: sourcePath(row), sha256 };
+      if (row.source_seal == null) {
+        // Old sources have no publication seal. Verify their actual bytes once
+        // under the source lock before upgrading; a bad non-null seal never
+        // falls back to recertifying changed storage.
+        const previous = await hashSource(row, authorize);
+        const seal = await sealSource(row, previous);
+        await authorize(true);
+        row = await connection
+          .updateTable('minecraft_sources')
+          .set({ source_seal: JSON.stringify(seal), updated_at: new Date() })
+          .where('id', '=', row.id)
+          .where('state', '=', 'ready')
+          .returningAll()
+          .executeTakeFirstOrThrow();
+      }
+      const verified = await verifySourceSeal(row);
+      // A seal removes byte passes, never a current session/job/scope check.
+      await authorize(true);
+      return {
+        path: verified.path,
+        sha256: verified.sha256,
+        ...(kind === 'datapack'
+          ? {
+              catalogSource: {
+                provider: row.origin,
+                projectId: row.provider_project_id,
+                versionId: row.provider_version_id,
+              },
+            }
+          : {}),
+        // Only world staging consumes this in-process proof. It is not stored
+        // in a job plan or exposed by the public source metadata projection.
+        ...(kind === 'world' ? { verified } : {}),
+      };
     });
   }
   return {
@@ -578,6 +723,7 @@ export function createMinecraftSourceStore(
       const sources = await db
         .selectFrom('minecraft_sources')
         .selectAll()
+        .where('game_id', '=', 'minecraft')
         .where('state', '!=', 'released')
         .orderBy('created_at', 'asc')
         .limit(500)
@@ -591,6 +737,7 @@ export function createMinecraftSourceStore(
           'identity_digest as identityDigest',
           'state',
         ])
+        .where('game_id', '=', 'minecraft')
         .where('state', '=', 'reserved')
         .orderBy('created_at', 'asc')
         .limit(500)
@@ -630,6 +777,7 @@ export function createMinecraftSourceStore(
           };
           abort.addEventListener('abort', cancel, { once: true });
           let received = 0;
+          const hash = createHash('sha256');
           try {
             for (;;) {
               await authorize();
@@ -641,12 +789,24 @@ export function createMinecraftSourceStore(
               while (offset < chunk.value.length) {
                 const result = await file.write(chunk.value, offset, chunk.value.length - offset);
                 if (result.bytesWritten === 0) throw new DomainError('integration_unavailable');
+                hash.update(chunk.value.subarray(offset, offset + result.bytesWritten));
                 offset += result.bytesWritten;
               }
             }
             await authorize();
             if (received !== bytes) throw new DomainError('validation_failed');
-            await file.sync();
+            const sha256 = hash.digest('hex');
+            if (sha256 !== hashesSchema.parse(source.expected_hashes).sha256)
+              throw new DomainError('conflict');
+            const identity = await file.stat({ bigint: true });
+            if (
+              !identity.isFile() ||
+              identity.nlink !== 1n ||
+              identity.size !== BigInt(bytes) ||
+              !(await contentFileUnchanged(sourcePath(source), identity))
+            )
+              throw new DomainError('conflict');
+            return { path: sourcePath(source), sha256, identity };
           } finally {
             abort.removeEventListener('abort', cancel);
             await reader.cancel().catch(() => {});
@@ -659,19 +819,17 @@ export function createMinecraftSourceStore(
     },
     async acquireModrinth(input: unknown, signal?: AbortSignal) {
       const value = parse(minecraftSourceModrinthSchema, input);
-      await authorizeScope(db, await reauthorize(), value.serverId);
+      await authorizeScope(db, await reauthorize(), value.serverId, 'modpack');
       const { values } = await getSettings(db, env);
-      if (!options.http && !values.minecraftMetadataUserAgent)
+      const policy = contentPolicyValues(values, 'minecraft');
+      if (!options.http && !values.contentMetadataUserAgent)
         throw new DomainError('configuration_invalid');
       const http =
         options.http ??
         new SafeContentHttp({
-          allowedOrigins: ['https://api.modrinth.com', ...values.minecraftDownloadOrigins],
-          userAgent: values.minecraftMetadataUserAgent as string,
-          maxDownloadBytes: Math.min(
-            values.minecraftSourceGlobalBytes,
-            values.minecraftSourceUserBytes,
-          ),
+          allowedOrigins: ['https://api.modrinth.com', ...policy.downloadOrigins],
+          userAgent: values.contentMetadataUserAgent as string,
+          maxDownloadBytes: Math.min(policy.sourceGlobalBytes, policy.sourceUserBytes),
         });
       const artifact = await new ModrinthProvider(http).modpackArchive(
         value.projectId,
@@ -698,12 +856,188 @@ export function createMinecraftSourceStore(
           // Reuse the audited provider downloader: SSRF protection, identity URL
           // allowlists, streaming, hash verification, timeouts and bounded retries.
           await http.download(artifact as ContentArtifact, sourcePath(source), { signal: abort });
+          return undefined;
+        },
+        signal,
+      );
+    },
+    async acquireDatapack(
+      input: unknown,
+      signal?: AbortSignal,
+      resolvedArtifact?: ContentArtifact,
+    ) {
+      const value = parse(
+        z.strictObject({
+          provider: z.enum(['modrinth', 'curseforge']),
+          projectId: identifier,
+          versionId: identifier,
+          serverId: z.uuid(),
+          idempotencyKey: identifier,
+        }),
+        input,
+      );
+      await authorizeScope(db, await reauthorize(), value.serverId, 'datapack');
+      const { values } = await getSettings(db, env);
+      const policy = contentPolicyValues(values, 'minecraft');
+      if (!options.http && !values.contentMetadataUserAgent)
+        throw new DomainError('configuration_invalid');
+      const http =
+        options.http ??
+        new SafeContentHttp({
+          allowedOrigins: ['https://api.modrinth.com', ...policy.downloadOrigins],
+          userAgent: values.contentMetadataUserAgent as string,
+          maxDownloadBytes: Math.min(policy.sourceGlobalBytes, policy.sourceUserBytes),
+        });
+      const provider =
+        value.provider === 'modrinth' ? new ModrinthProvider(http) : options.curseforge;
+      if (!provider) throw new DomainError('integration_unavailable');
+      const artifact =
+        resolvedArtifact ??
+        (await provider.datapackArchive(value.projectId, value.versionId, signal));
+      if (artifact.projectId !== value.projectId || artifact.versionId !== value.versionId)
+        throw new DomainError('provenance_mismatch');
+      if (
+        !Number.isSafeInteger(artifact.size) ||
+        artifact.size < 1 ||
+        artifact.size > Number.MAX_SAFE_INTEGER - 65536
+      )
+        throw new DomainError('validation_failed');
+      const row = await reserve({
+        ...value,
+        origin: value.provider,
+        kind: 'datapack',
+        bytes: artifact.size,
+        hashes: artifact.hashes,
+        projectId: artifact.projectId,
+        versionId: artifact.versionId,
+      });
+      const source = await executeTransfer(
+        row.id,
+        async (current, abort) => {
+          const path = sourcePath(current);
+          const result = await provider.http.download(artifact, path, { signal: abort });
+          return { path, sha256: result.sha256, identity: await lstat(path, { bigint: true }) };
+        },
+        signal,
+      );
+      return { ...source, filename: artifact.path.split('/').at(-1) ?? `${value.projectId}.zip` };
+    },
+    /** Internal catalog acquisition: same bounded source store and verified downloader as datapacks. */
+    async acquireMod(
+      input: {
+        kind?: 'mod' | 'plugin';
+        provider: 'modrinth' | 'curseforge' | 'hangar' | 'spiget';
+        projectId: string;
+        versionId: string;
+        serverId: string;
+        idempotencyKey: string;
+      },
+      artifact: ContentArtifact,
+      signal?: AbortSignal,
+    ) {
+      await authorizeScope(db, await reauthorize(), input.serverId, input.kind ?? 'mod');
+      artifact = parse(artifactSchema, artifact);
+      const kind = input.kind ?? 'mod';
+      const directory = kind === 'plugin' ? 'plugins' : 'mods';
+      if (
+        (kind === 'mod' && !['modrinth', 'curseforge'].includes(input.provider)) ||
+        artifact.kind !== kind ||
+        artifact.projectId !== input.projectId ||
+        artifact.versionId !== input.versionId ||
+        !new RegExp(`^${directory}/[^/\\\\\\p{C}]+\\.jar$`, 'u').test(artifact.path) ||
+        artifact.size < 1
+      )
+        throw new DomainError('provenance_mismatch');
+      const http = options.http;
+      if (!http) throw new DomainError('configuration_invalid');
+      const row = await reserve({
+        ...input,
+        kind,
+        origin: input.provider,
+        bytes: artifact.size,
+        hashes: artifact.hashes,
+        integrity: artifact.integrity,
+      });
+      return executeTransfer(
+        row.id,
+        async (source, abort) => {
+          const path = sourcePath(source);
+          const result = await http.download(artifact, path, { signal: abort });
+          return { path, sha256: result.sha256, identity: await lstat(path, { bigint: true }) };
+        },
+        signal,
+        artifact.integrity === 'spiget-tls',
+      );
+    },
+    async acquireWorldCatalog(input: unknown, signal?: AbortSignal) {
+      const value = parse(minecraftSourceWorldCatalogSchema, input);
+      const actor = await reauthorize();
+      const server = await authorizeMinecraftWorldCatalog(
+        db,
+        actor,
+        value.serverId,
+        'server:manage',
+      );
+      const provider = options.curseforge;
+      if (!provider) throw new DomainError('integration_unavailable');
+      const existing = await db
+        .selectFrom('minecraft_sources')
+        .selectAll()
+        .where('owner_user_id', '=', server.owner_id)
+        .where('idempotency_key', '=', value.idempotencyKey)
+        .executeTakeFirst();
+      if (existing) {
+        if (
+          existing.game_id !== 'minecraft' ||
+          existing.server_id !== value.serverId ||
+          existing.origin !== 'curseforge' ||
+          existing.kind !== 'world' ||
+          existing.provider_project_id !== value.projectId ||
+          existing.provider_version_id !== value.versionId ||
+          existing.state === 'released'
+        )
+          throw new DomainError('conflict');
+        if (existing.state === 'ready') return publicSource(existing);
+        if (existing.state !== 'reserved') throw new DomainError('operation_uncertain');
+      }
+      const artifact = await provider.worldArchive(value.projectId, value.versionId, signal);
+      if (
+        artifact.projectId !== value.projectId ||
+        artifact.versionId !== value.versionId ||
+        !Number.isSafeInteger(artifact.size) ||
+        artifact.size < 1 ||
+        artifact.size > Number.MAX_SAFE_INTEGER - 65536
+      )
+        throw new DomainError('validation_failed');
+      const row = await reserve({
+        ...value,
+        origin: 'curseforge',
+        kind: 'world',
+        bytes: artifact.size,
+        hashes: artifact.hashes,
+      });
+      return executeTransfer(
+        row.id,
+        async (source, abort) => {
+          const path = sourcePath(source);
+          // The audited downloader verifies every advertised hash while writing.
+          // Reuse that digest, then seal the exact file identity: no second archive read.
+          const result = await provider.http.download(artifact, path, { signal: abort });
+          if (result.size !== artifact.size || !digest.safeParse(result.sha256).success)
+            throw new DomainError('conflict');
+          return { path, sha256: result.sha256, identity: await lstat(path, { bigint: true }) };
         },
         signal,
       );
     },
     archiveResolver: async (reference: string, serverId: string) =>
       (await resolveSource(reference, 'modpack', serverId)).path,
+    jarArchiveResolver: (reference: string, serverId: string, kind: 'mod' | 'plugin') =>
+      resolveSource(reference, kind, serverId),
+    modArchiveResolver: (reference: string, serverId: string) =>
+      resolveSource(reference, 'mod', serverId),
+    datapackArchiveResolver: (reference: string, serverId: string) =>
+      resolveSource(reference, 'datapack', serverId),
     worldArchiveResolver: (reference: string, serverId: string) =>
       resolveSource(reference, 'world', serverId),
     resolveForCreation: (reference: string) => resolveSource(reference, 'modpack'),
@@ -735,6 +1069,7 @@ export function createMinecraftSourceStore(
           .selectFrom('minecraft_staging_claims')
           .selectAll()
           .where('job_id', '=', jobId)
+          .where('game_id', '=', 'minecraft')
           .executeTakeFirst();
         if (!row) throw new DomainError('not_found');
         const job = await tx
@@ -796,6 +1131,7 @@ export function createMinecraftSourceStore(
             .selectFrom('minecraft_sources')
             .selectAll()
             .where('id', '=', reference)
+            .where('game_id', '=', 'minecraft')
             .executeTakeFirst();
           if (!row) throw new DomainError('not_found');
           if (row.identity_digest !== value.identityDigest || row.state === 'released')

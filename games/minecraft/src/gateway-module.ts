@@ -4,7 +4,8 @@ import {
   type GatewayRoute,
   gatewayMinecraftProtocolSchema,
 } from '@nickhosting/game-sdk';
-import { createMinecraftProtocolAdapter } from './protocol.js';
+import { minecraftGatewayDeclarations, minecraftGatewaySupported } from './compatibility.js';
+import { createMinecraftProtocolAdapter, minecraftReadinessSource } from './protocol.js';
 
 /** Local trusted module for NH_GATEWAY_PROTOCOL_MODULES. No registry/network reads or provider keys. */
 export function createMinecraftGatewayModuleAdapter(
@@ -22,9 +23,39 @@ export function createMinecraftGatewayModuleAdapter(
     )
       return;
     const parsed = gatewayMinecraftProtocolSchema.safeParse(route.protocol.minecraft);
-    if (
-      !parsed.success ||
-      parsed.data.release !== route.protocol.gameVersion ||
+    if (!parsed.success || parsed.data.release !== route.protocol.gameVersion) return;
+    if (parsed.data.supportSource === 'integration') {
+      const declaration = parsed.data;
+      const historical =
+        declaration.declarationId === 'minecraft-java/vanilla' &&
+        declaration.declarationVersion === 1 &&
+        declaration.release === '26.1' &&
+        declaration.family === 'netty' &&
+        declaration.protocolId === 775;
+      const runtime = (
+        Object.keys(minecraftGatewayDeclarations) as Array<
+          keyof typeof minecraftGatewayDeclarations
+        >
+      ).find((profile) => {
+        const expected = minecraftGatewayDeclarations[profile];
+        return (
+          declaration.declarationId === expected.id &&
+          declaration.declarationVersion === expected.version
+        );
+      });
+      if (
+        !historical &&
+        (!runtime ||
+          !minecraftGatewaySupported({
+            release: declaration.release,
+            releaseType: 'release',
+            profile: runtime,
+            family: declaration.family,
+            protocolId: declaration.protocolId,
+          }))
+      )
+        return;
+    } else if (
       Date.parse(parsed.data.evidenceExpiresAt) <= (options.now?.() ?? new Date()).getTime()
     )
       return;
@@ -37,6 +68,7 @@ export function createMinecraftGatewayModuleAdapter(
         acceptsTransfers: parsed.data.acceptsTransfers,
         probeTimeoutMs: options.probeTimeoutMs,
         maxStatusBytes: options.maxStatusBytes,
+        responses: parsed.data.responses,
       });
       cached = { identity, adapter };
       cache.set(route, cached);
@@ -45,6 +77,8 @@ export function createMinecraftGatewayModuleAdapter(
   };
   return {
     id: 'minecraft-java',
+    startupHint: 'provider_running',
+    readinessSource: minecraftReadinessSource,
     supports: (route) => !!select(route),
     classify: () => ({ kind: 'unsupported' }),
     response: () => undefined,
@@ -57,9 +91,20 @@ export function createMinecraftGatewayModuleAdapter(
           select(context.route) === adapter
             ? session.classify(input)
             : { kind: 'unsupported', consumedBytes: input.length },
+        classificationIdleMs: session.classificationIdleMs,
+        finalize: (input) =>
+          select(context.route) === adapter && session.finalize
+            ? session.finalize(input)
+            : { kind: 'unsupported', consumedBytes: input.length },
         response: (state) =>
           select(context.route) === adapter ? session.response(state) : { close: true },
       };
+    },
+    async observe(context: GatewayProtocolContext) {
+      const adapter = select(context.route);
+      if (!adapter?.observe) return { ready: false, idle: false };
+      const result = await adapter.observe(context);
+      return select(context.route) === adapter ? result : { ready: false, idle: false };
     },
     async probeReadiness(context: GatewayProtocolContext) {
       const adapter = select(context.route);

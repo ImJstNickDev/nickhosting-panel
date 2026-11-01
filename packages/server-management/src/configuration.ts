@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { type AuthContext, DomainError } from '@nickhosting/core';
-import { type Database, recordAudit } from '@nickhosting/database';
+import {
+  assertStoragePolicyIdle,
+  type Database,
+  getSettings,
+  recordAudit,
+} from '@nickhosting/database';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
 import { z } from 'zod';
@@ -16,6 +21,7 @@ import {
   validatedBackendInventory,
 } from './allocation-pool.js';
 import { ownerOnly, parse } from './registry.js';
+import { storageCommitments } from './storage-accounting.js';
 import { uploadPolicyOverrides, uploadPolicySchema } from './upload-policy.js';
 
 /** Explicit environment override wins over the Owner's per-node verified bound. */
@@ -120,6 +126,7 @@ export async function setPhysicalHost(
   }
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
+    await assertStoragePolicyIdle(tx);
     const hostId = value.id ?? randomUUID();
     const previous = await tx
       .selectFrom('physical_hosts')
@@ -174,16 +181,12 @@ export async function setPhysicalHost(
       .selectFrom('managed_servers as server')
       .innerJoin('managed_nodes as node', 'node.id', 'server.node_id')
       .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
-      .select(['server.limits', 'mapping.feature_limits'])
+      .select(['server.id', 'server.limits', 'server.pterodactyl_id', 'mapping.feature_limits'])
       .where('node.physical_host_id', '=', hostId)
       .where('server.deleted_at', 'is', null)
       .execute();
-    if (
-      occupied.reduce(
-        (sum, server) => sum + server.limits.disk * (1 + server.feature_limits.backups),
-        0,
-      ) > value.storagePoolMiB
-    )
+    const storage = await storageCommitments(tx, occupied, env);
+    if ([...storage.values()].reduce((sum, value) => sum + value, 0) > value.storagePoolMiB)
       throw new DomainError('conflict');
     await tx
       .insertInto('physical_hosts')
@@ -210,7 +213,7 @@ export async function setManagedNode(
         id: z.uuid().optional(),
         physicalHostId: z.uuid(),
         pterodactylNodeId: z.number().int().positive(),
-        provisionUserId: z.number().int().positive(),
+        provisionUserId: z.number().int().positive().optional(),
         installerMemoryMiB: z.number().int().positive().max(1048576).default(1024),
         installerCpuPercent: z.number().int().positive().max(100000).default(100),
         memoryOverheadPercent: z.number().int().min(100).max(400).default(115),
@@ -224,9 +227,11 @@ export async function setManagedNode(
     effectiveNodeOverhead({ memory_overhead_percent: value.memoryOverheadPercent }, env);
   const remoteNode = await adapter.getNode(value.pterodactylNodeId);
   if (remoteNode.id !== value.pterodactylNodeId) throw new DomainError('validation_failed');
-  const users = await adapter.listUsers();
-  if (!users.some((u) => u.id === value.provisionUserId))
-    throw new DomainError('validation_failed');
+  if (value.provisionUserId !== undefined) {
+    const users = await adapter.listUsers();
+    if (!users.some((u) => u.id === value.provisionUserId))
+      throw new DomainError('validation_failed');
+  }
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
     const nodeId = value.id ?? randomUUID();
@@ -243,6 +248,23 @@ export async function setManagedNode(
           .where('id', '=', value.id)
           .executeTakeFirst()
       : undefined;
+    // Retained only for legacy node metadata. New server ownership is per user.
+    let provisionUserId = value.provisionUserId ?? previous?.provision_user_id;
+    if (provisionUserId === undefined) {
+      const { values: config } = await getSettings(tx, env);
+      const account = await tx
+        .selectFrom('provider_accounts as account')
+        .innerJoin('provider_change_feeds as feed', 'feed.instance_id', 'account.instance_id')
+        .select('account.provider_id')
+        .where('account.user_id', '=', context.subjectUserId)
+        .where('account.status', '=', 'ready')
+        .where('account.provider_url', '=', config.pterodactylBaseUrl?.replace(/\/$/, '') ?? '')
+        .whereRef('account.provider_url', '=', 'feed.provider_url')
+        .where('feed.enabled', '=', true)
+        .executeTakeFirst();
+      if (!account?.provider_id) throw new DomainError('integration_unavailable');
+      provisionUserId = account.provider_id;
+    }
     const pool =
       value.backendAllocationPool === undefined
         ? (previous?.backend_allocation_pool ?? null)
@@ -260,8 +282,10 @@ export async function setManagedNode(
     );
     const claims = await tx
       .selectFrom('server_allocations')
-      .selectAll()
-      .where('node_id', '=', nodeId)
+      .innerJoin('managed_servers', 'managed_servers.id', 'server_allocations.server_id')
+      .selectAll('server_allocations')
+      .select('managed_servers.connection_mode')
+      .where('server_allocations.node_id', '=', nodeId)
       .execute();
     if (
       claims.some(
@@ -270,6 +294,9 @@ export async function setManagedNode(
             (pin) =>
               pin.allocationId === claim.pterodactyl_allocation_id &&
               pin.address === claim.address &&
+              (claim.connection_mode !== 'gateway' || pin.delivery !== 'direct') &&
+              (claim.direct_endpoint === null ||
+                isDeepStrictEqual(pin.directEndpoint ?? null, claim.direct_endpoint)) &&
               backendAllocationAddress(pin) === claim.backend_address &&
               pin.port === claim.port,
           ),
@@ -313,7 +340,7 @@ export async function setManagedNode(
       previous &&
       (previous.physical_host_id !== value.physicalHostId ||
         previous.pterodactyl_node_id !== value.pterodactylNodeId ||
-        previous.provision_user_id !== value.provisionUserId) &&
+        previous.provision_user_id !== provisionUserId) &&
       (await tx
         .selectFrom('managed_servers')
         .select('id')
@@ -353,7 +380,7 @@ export async function setManagedNode(
       id: nodeId,
       physical_host_id: value.physicalHostId,
       pterodactyl_node_id: value.pterodactylNodeId,
-      provision_user_id: value.provisionUserId,
+      provision_user_id: provisionUserId,
       installer_memory_mib: value.installerMemoryMiB,
       installer_cpu_percent: value.installerCpuPercent,
       memory_overhead_percent: overhead,

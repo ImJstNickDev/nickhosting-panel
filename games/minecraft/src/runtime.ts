@@ -1,14 +1,41 @@
 import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import { foliaJavaMajor } from './folia-policy.js';
+import { forgeJavaMajor } from './forge-policy.js';
+import { neoforgeCatalogUrls, parseNeoForgeVersions } from './neoforge-catalog.js';
+import {
+  neoforgeArtifact,
+  neoforgeJavaMajor,
+  neoforgeMinecraftVersion,
+} from './neoforge-policy.js';
+import { paperJavaMajor } from './paper-policy.js';
+import { purpurBuildSchema, purpurVersionSchema } from './purpur-catalog.js';
+import { purpurJavaMajor } from './purpur-policy.js';
+import { quiltCatalogUrls, quiltInstallerListSchema } from './quilt-catalog.js';
+import { vanillaJavaMajor } from './vanilla-policy.js';
 
-export const minecraftRuntimeProfiles = ['vanilla', 'paper', 'folia', 'fabric', 'forge'] as const;
+export const minecraftRuntimeProfiles = [
+  'vanilla',
+  'paper',
+  'purpur',
+  'folia',
+  'fabric',
+  'quilt',
+  'forge',
+  'neoforge',
+] as const;
 export type MinecraftRuntimeProfile = (typeof minecraftRuntimeProfiles)[number];
 const exactVersion = z
   .string()
   .min(1)
   .max(96)
   .regex(/^[a-zA-Z0-9][a-zA-Z0-9._+-]*$/);
+const releaseVersion = z
+  .string()
+  .min(1)
+  .max(96)
+  .regex(/^[a-zA-Z0-9][a-zA-Z0-9._+ -]*[a-zA-Z0-9._+-]$|^[a-zA-Z0-9]$/);
 const javaVersion = z.number().int().min(8).max(100);
 const sha1 = z.string().regex(/^[a-f0-9]{40}$/i);
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/i);
@@ -17,12 +44,16 @@ const origins = new Set([
   'https://launchermeta.mojang.com',
   'https://piston-data.mojang.com',
   'https://launcher.mojang.com',
+  'https://api.purpurmc.org',
   'https://fill.papermc.io',
   'https://fill-data.papermc.io',
+  'https://meta.quiltmc.org',
+  'https://maven.quiltmc.org',
   'https://meta.fabricmc.net',
   'https://maven.fabricmc.net',
   'https://files.minecraftforge.net',
   'https://maven.minecraftforge.net',
+  'https://maven.neoforged.net',
 ]);
 
 function fail(reason: string): never {
@@ -51,6 +82,7 @@ export interface RuntimeSourceEvidence {
 export interface RuntimeArtifact {
   readonly role: 'server' | 'installer';
   readonly url: string;
+  readonly md5?: string;
   readonly sha1?: string;
   readonly sha256?: string;
   readonly size?: number;
@@ -67,8 +99,21 @@ export interface ResolvedMinecraftRuntime {
   readonly upstreamChannel?: string;
   readonly artifacts: readonly RuntimeArtifact[];
   readonly installation: {
-    readonly kind: 'server-jar' | 'fabric-installer' | 'forge-installer';
+    readonly kind:
+      | 'server-jar'
+      | 'fabric-installer'
+      | 'quilt-installer'
+      | 'forge-installer'
+      | 'neoforge-installer';
     readonly args: readonly string[];
+    /** Exact renamed universal JAR receipt for pre-1.13 Forge only. */
+    readonly serverJarSha1?: string;
+    readonly quiltLibraries?: readonly {
+      readonly path: string;
+      readonly sha1?: string;
+      readonly sha256?: string;
+    }[];
+    readonly quiltLauncherMainClass?: 'org.quiltmc.loader.impl.launch.server.QuiltServerLauncher';
   };
   readonly evidence: readonly RuntimeSourceEvidence[];
 }
@@ -166,9 +211,9 @@ function freeze<T>(value: T): T {
 }
 export const minecraftRuntimeRequestSchema = z
   .object({
-    release: exactVersion,
+    release: releaseVersion,
     profile: z.enum(minecraftRuntimeProfiles),
-    buildId: z.number().int().positive().optional(),
+    buildId: z.number().int().nonnegative().optional(),
     loaderVersion: exactVersion.optional(),
     installerVersion: exactVersion.optional(),
   })
@@ -182,14 +227,21 @@ export async function resolveMinecraftRuntime(
 ): Promise<ResolvedMinecraftRuntime> {
   const request = parse(minecraftRuntimeRequestSchema, input);
   if (
-    ['paper', 'folia'].includes(request.profile) !== (request.buildId !== undefined) ||
-    ['fabric', 'forge'].includes(request.profile) !== (request.loaderVersion !== undefined) ||
-    (request.profile === 'fabric') !== (request.installerVersion !== undefined)
+    ['paper', 'purpur', 'folia'].includes(request.profile) !== (request.buildId !== undefined) ||
+    ['fabric', 'quilt', 'forge', 'neoforge'].includes(request.profile) !==
+      (request.loaderVersion !== undefined) ||
+    ['fabric', 'quilt'].includes(request.profile) !== (request.installerVersion !== undefined)
   )
     throw new DomainError('validation_failed');
   const evidence: RuntimeSourceEvidence[] = [];
+  let quiltBytes = 0;
   const read = async (url: string) => {
     const document = await client.read(trustedMinecraftArtifactUrl(url));
+    if (request.profile === 'quilt') {
+      quiltBytes += document.bytes.byteLength;
+      if (quiltBytes > 8 * 1024 * 1024 || evidence.length >= 140)
+        return fail('quilt_metadata_budget_exceeded');
+    }
     evidence.push(document.evidence);
     return document;
   };
@@ -217,16 +269,28 @@ export async function resolveMinecraftRuntime(
     return fail('minecraft_metadata_integrity');
   const release = parse(
     z.object({
-      id: exactVersion,
-      javaVersion: z.object({ majorVersion: javaVersion }),
+      id: releaseVersion,
+      javaVersion: z.object({ majorVersion: javaVersion }).optional(),
       downloads: z.object({
-        server: z.object({ url: z.string(), sha1, size: z.number().int().positive() }),
+        server: z.object({ url: z.string(), sha1, size: z.number().int().positive() }).optional(),
       }),
     }),
     json(releaseDocument),
   );
   if (release.id !== request.release) return fail('minecraft_release_mismatch');
-  let javaMajor = release.javaVersion.majorVersion;
+  if (!release.downloads.server) return fail('minecraft_server_download_unavailable');
+  let javaMajor =
+    request.profile === 'vanilla' || request.profile === 'fabric' || request.profile === 'quilt'
+      ? vanillaJavaMajor(request.release, entry.type, release.javaVersion?.majorVersion)
+      : request.profile === 'neoforge'
+        ? neoforgeJavaMajor(request.release, release.javaVersion?.majorVersion)
+        : request.profile === 'forge'
+          ? forgeJavaMajor(request.release, release.javaVersion?.majorVersion)
+          : request.profile === 'paper' ||
+              request.profile === 'folia' ||
+              request.profile === 'purpur'
+            ? (release.javaVersion?.majorVersion ?? 8)
+            : (release.javaVersion?.majorVersion ?? fail('minecraft_java_unknown'));
   let upstreamSupport: string | undefined;
   let upstreamChannel: string | undefined;
   let artifacts: RuntimeArtifact[] = [
@@ -245,7 +309,11 @@ export async function resolveMinecraftRuntime(
         version: z.object({
           id: exactVersion,
           support: z.object({ status: z.string().max(100) }).optional(),
-          java: z.object({ version: z.object({ minimum: javaVersion }) }),
+          java: z.object({
+            version: z.object({
+              minimum: z.number().int().min(6).max(100),
+            }),
+          }),
         }),
         builds: z.array(z.number().int()).max(100_000),
       }),
@@ -271,7 +339,11 @@ export async function resolveMinecraftRuntime(
     upstreamSupport = version.version.support?.status;
     upstreamChannel = build.channel;
     const artifact = build.downloads['server:default'];
-    javaMajor = Math.max(javaMajor, version.version.java.version.minimum);
+    javaMajor = (request.profile === 'folia' ? foliaJavaMajor : paperJavaMajor)(
+      request.release,
+      version.version.java.version.minimum,
+      release.javaVersion?.majorVersion,
+    );
     artifacts = [
       {
         role: 'server',
@@ -280,16 +352,35 @@ export async function resolveMinecraftRuntime(
         size: artifact.size,
       },
     ];
+  } else if (request.profile === 'purpur') {
+    const base = `https://api.purpurmc.org/v2/purpur/${request.release}`;
+    const version = parse(purpurVersionSchema, json(await read(base)));
+    if (
+      version.version !== request.release ||
+      !version.builds.all.includes(String(request.buildId))
+    )
+      return fail('minecraft_build_unavailable');
+    const build = parse(purpurBuildSchema, json(await read(`${base}/${request.buildId}`)));
+    if (build.version !== request.release || Number(build.build) !== request.buildId)
+      return fail('minecraft_build_mismatch');
+    javaMajor = purpurJavaMajor(request.release, release.javaVersion?.majorVersion);
+    artifacts = [
+      {
+        role: 'server',
+        url: trustedMinecraftArtifactUrl(`${base}/${request.buildId}/download`),
+        md5: build.md5.toLowerCase(),
+      },
+    ];
   } else if (request.profile === 'fabric') {
     const pair = parse(
       z.object({
         loader: z.object({ version: exactVersion }),
-        intermediary: z.object({ version: exactVersion }),
-        launcherMeta: z.object({ min_java_version: javaVersion }),
+        intermediary: z.object({ version: releaseVersion }),
+        launcherMeta: z.object({ min_java_version: javaVersion.optional() }),
       }),
       json(
         await read(
-          `https://meta.fabricmc.net/v2/versions/loader/${request.release}/${request.loaderVersion}`,
+          `https://meta.fabricmc.net/v2/versions/loader/${encodeURIComponent(request.release)}/${request.loaderVersion}`,
         ),
       ),
     );
@@ -297,16 +388,17 @@ export async function resolveMinecraftRuntime(
     // Since 26.1 the official intermediary identity can be 0.0.0 (unobfuscated).
     // Exact server-profile inheritance establishes the requested game identity instead.
     const serverProfile = parse(
-      z.object({ inheritsFrom: exactVersion, mainClass: z.string().min(1).max(500) }),
+      z.object({ inheritsFrom: releaseVersion, mainClass: z.string().min(1).max(500) }),
       json(
         await read(
-          `https://meta.fabricmc.net/v2/versions/loader/${request.release}/${request.loaderVersion}/server/json`,
+          `https://meta.fabricmc.net/v2/versions/loader/${encodeURIComponent(request.release)}/${request.loaderVersion}/server/json`,
         ),
       ),
     );
     if (
       serverProfile.inheritsFrom !== request.release ||
-      !serverProfile.mainClass.startsWith('net.fabricmc.')
+      (!serverProfile.mainClass.startsWith('net.fabricmc.') &&
+        serverProfile.mainClass !== 'net.minecraft.launchwrapper.Launch')
     )
       return fail('minecraft_loader_mismatch');
     const installers = parse(
@@ -324,7 +416,12 @@ export async function resolveMinecraftRuntime(
       new TextDecoder().decode((await read(`${url}.sha256`)).bytes).trim(),
     );
     artifacts.push({ role: 'installer', url, sha256: hash.toLowerCase() });
-    javaMajor = Math.max(javaMajor, pair.launcherMeta.min_java_version);
+    // Fabric recommends Java 17 for 1.17–1.20.4. The shared Minecraft baseline
+    // already selects 17 for 1.18–1.20.4; only stable 1.17/1.17.1 need an override.
+    // Snapshot requirements remain metadata-led. https://wiki.fabricmc.net/install
+    const recommendedJava =
+      entry.type === 'release' && /^1\.17(?:\.1)?$/.test(request.release) ? 17 : javaMajor;
+    javaMajor = Math.max(javaMajor, recommendedJava, pair.launcherMeta.min_java_version ?? 8);
     installation = {
       kind: 'fabric-installer',
       args: [
@@ -336,6 +433,123 @@ export async function resolveMinecraftRuntime(
         '-downloadMinecraft',
       ],
     };
+  } else if (request.profile === 'quilt') {
+    const base = `https://meta.quiltmc.org/v3/versions/loader/${encodeURIComponent(request.release)}/${request.loaderVersion}`;
+    const pair = parse(
+      z.object({
+        loader: z.object({
+          version: exactVersion,
+          maven: z.string(),
+          hashes: z.object({ sha256 }),
+        }),
+      }),
+      json(await read(base)),
+    );
+    if (
+      pair.loader.version !== request.loaderVersion ||
+      pair.loader.maven !== `org.quiltmc:quilt-loader:${request.loaderVersion}`
+    )
+      return fail('minecraft_loader_mismatch');
+    const profile = parse(
+      z.object({
+        id: z.string(),
+        inheritsFrom: releaseVersion,
+        mainClass: z.literal('org.quiltmc.loader.impl.launch.knot.KnotServer'),
+        launcherMainClass: z.literal('org.quiltmc.loader.impl.launch.server.QuiltServerLauncher'),
+        libraries: z
+          .array(z.object({ name: z.string().min(1).max(500), url: z.string() }))
+          .min(1)
+          .max(128),
+      }),
+      json(await read(`${base}/server/json`)),
+    );
+    if (
+      profile.id !== `quilt-loader-${request.loaderVersion}-${request.release}` ||
+      profile.inheritsFrom !== request.release
+    )
+      return fail('minecraft_loader_mismatch');
+    for (const library of profile.libraries) {
+      const origin = new URL(trustedMinecraftArtifactUrl(library.url)).origin;
+      if (
+        !['https://maven.quiltmc.org', 'https://maven.fabricmc.net'].includes(origin) ||
+        !['https://maven.quiltmc.org/repository/release/', 'https://maven.fabricmc.net/'].includes(
+          library.url,
+        ) ||
+        !/^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*:[A-Za-z0-9_][A-Za-z0-9_.-]*:[A-Za-z0-9][A-Za-z0-9_.+-]*$/.test(
+          library.name,
+        )
+      )
+        return fail('minecraft_metadata_invalid');
+    }
+    if (
+      profile.libraries.filter(
+        (library) =>
+          library.name === pair.loader.maven &&
+          library.url === 'https://maven.quiltmc.org/repository/release/',
+      ).length !== 1
+    )
+      return fail('minecraft_loader_mismatch');
+    const quiltLibraries: NonNullable<
+      ResolvedMinecraftRuntime['installation']['quiltLibraries']
+    >[number][] = [];
+    for (const library of profile.libraries) {
+      const [group, artifact, version] = library.name.split(':');
+      const path = `${group?.replaceAll('.', '/')}/${artifact}/${version}/${artifact}-${version}.jar`;
+      if (quiltLibraries.some((item) => item.path === `libraries/${path}`))
+        return fail('minecraft_metadata_invalid');
+      if (library.name === pair.loader.maven) {
+        quiltLibraries.push({
+          path: `libraries/${path}`,
+          sha256: pair.loader.hashes.sha256.toLowerCase(),
+        });
+      } else {
+        const url = trustedMinecraftArtifactUrl(`${library.url}${path}.sha1`);
+        const hash = parse(sha1, new TextDecoder().decode((await read(url)).bytes).trim());
+        quiltLibraries.push({ path: `libraries/${path}`, sha1: hash.toLowerCase() });
+      }
+    }
+    const installers = parse(
+      quiltInstallerListSchema,
+      json(await read(quiltCatalogUrls.installers)),
+    );
+    const matched = installers.filter((item) => item.version === request.installerVersion);
+    if (matched.length !== 1 || !matched[0]) return fail('minecraft_installer_unavailable');
+    artifacts.push({
+      role: 'installer',
+      url: trustedMinecraftArtifactUrl(matched[0].url),
+      sha256: matched[0].hashes.sha256.toLowerCase(),
+      size: matched[0].file_size,
+    });
+    installation = {
+      kind: 'quilt-installer',
+      quiltLibraries,
+      quiltLauncherMainClass: profile.launcherMainClass,
+      args: [
+        'install',
+        'server',
+        request.release,
+        request.loaderVersion ?? '',
+        '--download-server',
+      ],
+    };
+  } else if (request.profile === 'neoforge') {
+    const artifact = neoforgeArtifact(request.release);
+    if (
+      !request.loaderVersion ||
+      neoforgeMinecraftVersion(request.loaderVersion) !== request.release
+    )
+      return fail('minecraft_loader_mismatch');
+    const metadataUrl =
+      artifact === 'forge' ? neoforgeCatalogUrls.legacy : neoforgeCatalogUrls.versions;
+    const versions = parseNeoForgeVersions(
+      new TextDecoder('utf-8', { fatal: true }).decode((await read(metadataUrl)).bytes),
+      artifact,
+    );
+    if (!versions.includes(request.loaderVersion)) return fail('minecraft_loader_unavailable');
+    const url = `https://maven.neoforged.net/releases/net/neoforged/${artifact}/${request.loaderVersion}/${artifact}-${request.loaderVersion}-installer.jar`;
+    const hash = parse(sha1, new TextDecoder().decode((await read(`${url}.sha1`)).bytes).trim());
+    artifacts.push({ role: 'installer', url, sha1: hash.toLowerCase() });
+    installation = { kind: 'neoforge-installer', args: ['--installServer'] };
   } else if (request.profile === 'forge') {
     const versions = parse(
       z.record(z.string(), z.array(exactVersion).max(100_000)),
@@ -349,7 +563,20 @@ export async function resolveMinecraftRuntime(
     const url = `https://maven.minecraftforge.net/net/minecraftforge/forge/${coordinate}/forge-${coordinate}-installer.jar`;
     const hash = parse(sha1, new TextDecoder().decode((await read(`${url}.sha1`)).bytes).trim());
     artifacts.push({ role: 'installer', url, sha1: hash.toLowerCase() });
-    installation = { kind: 'forge-installer', args: ['--installServer'] };
+    const serverJarSha1 =
+      Number(request.release.split('.')[1]) <= 12
+        ? parse(
+            sha1,
+            new TextDecoder()
+              .decode((await read(url.replace('-installer.jar', '-universal.jar.sha1'))).bytes)
+              .trim(),
+          ).toLowerCase()
+        : undefined;
+    installation = {
+      kind: 'forge-installer',
+      args: ['--installServer'],
+      ...(serverJarSha1 ? { serverJarSha1 } : {}),
+    };
   }
   return freeze({
     ...request,
@@ -388,7 +615,7 @@ const artifactPath = z
 export const minecraftRuntimeMappingSchema = z
   .object({
     profile: z.enum(minecraftRuntimeProfiles),
-    release: exactVersion,
+    release: releaseVersion,
     image: z.string().min(1).max(500),
     imageJavaMajor: javaVersion,
     declaredEggVariables: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/)).max(100),
@@ -407,7 +634,13 @@ export const minecraftRuntimeMappingSchema = z
       z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/),
       z.string().max(4096),
     ),
-    installationKind: z.enum(['server-jar', 'fabric-installer', 'forge-installer']),
+    installationKind: z.enum([
+      'server-jar',
+      'fabric-installer',
+      'quilt-installer',
+      'forge-installer',
+      'neoforge-installer',
+    ]),
     artifactPaths: z
       .object({ server: artifactPath.optional(), installer: artifactPath.optional() })
       .strict(),

@@ -19,11 +19,17 @@ import {
   recoverContentStageLock,
   safeArchivePath,
   safeContentPath,
-  stageContent,
+  stageContent as stageContentWithDiskPolicy,
   targetFromMrpack,
   validateDownloadUrl,
   visitArchive,
 } from './index.js';
+
+const stageContent: typeof stageContentWithDiskPolicy = (input, options) =>
+  stageContentWithDiskPolicy(input, {
+    diskPolicy: { minimumFreePercent: 0, minimumFreeBytes: 0 },
+    ...options,
+  });
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -468,6 +474,37 @@ describe('provider identity, side and dependency resolution', () => {
 });
 
 describe('streamed job-scoped staging and recovery', () => {
+  it('stages and recovers inside an explicit external storage boundary only', async () => {
+    const root = await workspace();
+    const boundary = join(root, 'external-storage');
+    const options = {
+      storageBoundary: boundary,
+      mountdataRoot: join(boundary, 'content'),
+      jobId: 'relocated',
+      http: httpFor({}),
+    };
+    const input = plan([]);
+    const first = await stageContent(input, options);
+    expect(first.directory).toBe(join(boundary, 'content/content-staging/relocated/files'));
+    await recoverContentStageLock({
+      ...options,
+      expectedPlanDigest: contentPlanDigest(input),
+      assertExclusiveJob: async () => {},
+    });
+    for (const outside of [boundary, `${boundary}-other`, join(root, 'mountdata')]) {
+      await expect(stageContent(input, { ...options, mountdataRoot: outside })).rejects.toThrow();
+      await expect(
+        recoverContentStageLock({
+          ...options,
+          mountdataRoot: outside,
+          expectedPlanDigest: contentPlanDigest(input),
+          assertExclusiveJob: async () => {
+            throw new Error('Must fail before authorizing a different directory');
+          },
+        }),
+      ).rejects.toMatchObject({ details: { contentReason: 'stage_job' } });
+    }
+  });
   it('stages verified files, reuses only rehashed files and persists exact plan identity', async () => {
     const root = await workspace();
     const bytes = await zipBytes({ 'fabric.mod.json': JSON.stringify({ environment: '*' }) });

@@ -16,6 +16,7 @@ import {
 import { cpus, totalmem } from 'node:os';
 import { resolve } from 'node:path';
 import { parseEnv } from 'node:util';
+import { storagePath } from '../deploy/storage-root.mjs';
 import { type AuthContext, DomainError, SecretCodec } from '../packages/core/src/index.js';
 import { createDatabase, migrate } from '../packages/database/src/index.js';
 import { createTestDatabase } from '../packages/database/src/testing.js';
@@ -120,7 +121,7 @@ const fixtureScript = [
   'done',
   '',
 ].join('\n');
-const ledgerDirectory = resolve('mountdata/test-assets');
+const ledgerDirectory = storagePath('test-assets');
 mkdirSync(ledgerDirectory, { recursive: true });
 const resumeIndex = process.argv.indexOf('--resume-ledger');
 const resumePath = resumeIndex < 0 ? undefined : resolve(defined(process.argv[resumeIndex + 1]));
@@ -507,6 +508,7 @@ try {
     );
     const gameId = 'm2-fixture';
     const manifest: GameManifest = {
+      serverPermissions: [],
       id: gameId,
       version: '1.0.0',
       nameKey: 'games.m2-fixture.name',

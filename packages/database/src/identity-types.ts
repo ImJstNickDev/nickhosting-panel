@@ -1,8 +1,10 @@
+import type { EncryptedSecret } from '@nickhosting/core';
 import type { Generated } from 'kysely';
 
 export interface AuthUser {
   id: string;
   name: string;
+  username: Generated<string>;
   email: string;
   emailVerified: Generated<boolean>;
   image: string | null;
@@ -39,6 +41,12 @@ export interface AuthAccount {
 }
 export interface AuthTables {
   user: AuthUser;
+  user_profile_photos: {
+    user_id: string;
+    content: Buffer;
+    revision: string;
+    updated_at: Generated<Date>;
+  };
   session: AuthSession;
   account: AuthAccount;
   verification: {
@@ -75,6 +83,7 @@ export interface AuthTables {
   invitation: {
     id: string;
     tokenHash: string;
+    tokenCiphertext: EncryptedSecret | null;
     remainingUses: number;
     maxUses: number;
     expiresAt: Date;

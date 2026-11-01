@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { AuthContext } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
+import { minecraftManifest } from '@nickhosting/minecraft';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setManagedNode } from './configuration.js';
+import { minecraftMappingDigest } from './minecraft-registry.js';
 import {
   authorizeServer,
   createManagedServer,
@@ -43,6 +45,296 @@ function mappingInput() {
 }
 
 describe('managed registry, projects, runtime mapping and allocation ownership', () => {
+  it('freezes the requested DNS choice, consumes its reservation atomically and rejects unavailable choices', async () => {
+    await f.db
+      .updateTable('game_integrations')
+      .set({
+        manifest: {
+          ...f.manifest,
+          connection: {
+            mode: 'custom-subdomain',
+            zoneSettingKey: 'dnsBaseDomain',
+            srv: { service: '_fixture', proto: 'tcp' },
+          },
+        },
+      })
+      .where('id', '=', f.gameId)
+      .execute();
+    const env = {
+      NH_DNS_INSTANCE_ID: randomUUID(),
+      NH_DNS_TARGET: '192.0.2.10',
+      NH_DNS_DOMAINS: JSON.stringify([
+        { id: 'primary', hostname: 'games.example.test', zoneId: 'a'.repeat(32), enabled: true },
+      ]),
+    };
+    await expect(
+      createManagedServer(
+        f.db,
+        f.adapter,
+        f.context,
+        { ...f.input(), connection: { domainId: 'missing', subdomain: 'cute-panda-bag' } },
+        env,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      createManagedServer(
+        f.db,
+        f.adapter,
+        f.context,
+        { ...f.input(), connection: { domainId: 'primary', subdomain: 'mail' } },
+        env,
+      ),
+    ).rejects.toThrow('validation_failed');
+    const reservationId = randomUUID();
+    const hostname = 'cute-panda-bag.games.example.test';
+    await f.db
+      .insertInto('dns_hostname_reservations')
+      .values({
+        hostname,
+        owner_id: reservationId,
+        release_after: new Date(Date.now() + 900_000),
+        wizard_user_id: f.context.subjectUserId,
+        wizard_game_id: f.gameId,
+        wizard_domain_id: 'primary',
+        wizard_subdomain: 'cute-panda-bag',
+      })
+      .execute();
+    const request = {
+      ...f.input(),
+      connection: { domainId: 'primary', subdomain: 'cute-panda-bag', reservationId },
+    };
+    // Omitting a hold token must not bypass its ownership.
+    await expect(
+      createManagedServer(
+        f.db,
+        f.adapter,
+        f.context,
+        { ...request, connection: { domainId: 'primary', subdomain: 'cute-panda-bag' } },
+        env,
+      ),
+    ).rejects.toThrow('conflict');
+    await f.db
+      .updateTable('dns_hostname_reservations')
+      .set({ wizard_user_id: f.owner.subjectUserId })
+      .where('hostname', '=', hostname)
+      .execute();
+    await expect(createManagedServer(f.db, f.adapter, f.context, request, env)).rejects.toThrow();
+    await f.db
+      .updateTable('dns_hostname_reservations')
+      .set({ wizard_user_id: f.context.subjectUserId, release_after: new Date(Date.now() - 1_000) })
+      .where('hostname', '=', hostname)
+      .execute();
+    await expect(createManagedServer(f.db, f.adapter, f.context, request, env)).rejects.toThrow();
+    expect(
+      await f.db
+        .selectFrom('managed_servers')
+        .select('id')
+        .where('mapping_id', '=', f.mappingId)
+        .execute(),
+    ).toEqual([]);
+    expect(
+      (
+        await f.db
+          .selectFrom('dns_hostname_reservations')
+          .select('owner_id')
+          .where('hostname', '=', hostname)
+          .executeTakeFirstOrThrow()
+      ).owner_id,
+    ).toBe(reservationId);
+    await f.db
+      .updateTable('dns_hostname_reservations')
+      .set({ release_after: new Date(Date.now() + 900_000) })
+      .where('hostname', '=', hostname)
+      .execute();
+    const result = await createManagedServer(f.db, f.adapter, f.context, request, env);
+    expect(
+      await f.db
+        .selectFrom('dns_hostname_reservations')
+        .selectAll()
+        .where('hostname', '=', hostname)
+        .executeTakeFirstOrThrow(),
+    ).toMatchObject({
+      owner_id: result.serverId,
+      release_after: null,
+      wizard_user_id: null,
+    });
+    expect(await createManagedServer(f.db, f.adapter, f.context, request, env)).toEqual(result);
+    const preference = await f.db
+      .selectFrom('server_dns_preferences')
+      .selectAll()
+      .where('server_id', '=', result.serverId)
+      .executeTakeFirstOrThrow();
+    expect(preference).toMatchObject({
+      domain_id: 'primary',
+      subdomain: 'cute-panda-bag',
+      enabled: true,
+      assignment_id: null,
+    });
+    await expect(
+      createManagedServer(
+        f.db,
+        f.adapter,
+        f.context,
+        { ...request, connection: { domainId: 'primary', subdomain: 'other-name' } },
+        env,
+      ),
+    ).rejects.toThrow('conflict');
+    expect(
+      await f.db
+        .selectFrom('dns_assignments')
+        .select('id')
+        .where('server_id', '=', result.serverId)
+        .execute(),
+    ).toEqual([]);
+  });
+
+  it('pins provisioning to the linked account rather than the node default and refuses pending accounts', async () => {
+    await f.db
+      .updateTable('provider_accounts')
+      .set({ provider_id: 99999 })
+      .where('user_id', '=', f.context.subjectUserId)
+      .execute();
+    const created = await createManagedServer(f.db, f.adapter, f.context, f.input());
+    const server = await f.db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', created.serverId)
+      .executeTakeFirstOrThrow();
+    expect(server.provider_user_id).toBe(99999);
+    const operation = await f.db
+      .selectFrom('server_operations')
+      .select('plan')
+      .where('job_id', '=', created.jobId)
+      .executeTakeFirstOrThrow();
+    expect(operation.plan.provision).toMatchObject({ userId: 99999 });
+    await f.db
+      .updateTable('provider_accounts')
+      .set({ status: 'pending' })
+      .where('user_id', '=', f.context.subjectUserId)
+      .execute();
+    await expect(createManagedServer(f.db, f.adapter, f.context, f.input())).rejects.toThrow(
+      'integration_unavailable',
+    );
+  });
+
+  it('creates an unlimited disk in shared storage and freezes idempotent retries', async () => {
+    const input = f.input();
+    const { disk: _disk, ...limits } = input.limits;
+    const request = { ...input, limits };
+    const result = await createManagedServer(f.db, f.adapter, f.context, request, {
+      NH_DEFAULT_SERVER_STORAGE_MIB: '512',
+    });
+    const stored = await f.db
+      .selectFrom('managed_servers')
+      .select('limits')
+      .where('id', '=', result.serverId)
+      .executeTakeFirstOrThrow();
+    expect(stored.limits.disk).toBe(0);
+    const plan = await f.db
+      .selectFrom('server_operations')
+      .select('plan')
+      .where('job_id', '=', result.jobId)
+      .executeTakeFirstOrThrow();
+    expect(plan.plan.provision).toMatchObject({ limits: { disk: 0 } });
+    expect(
+      await createManagedServer(f.db, f.adapter, f.context, request, {
+        NH_DEFAULT_SERVER_STORAGE_MIB: '1024',
+      }),
+    ).toEqual(result);
+  });
+  it('requires explicit disk under personal budgets and keeps global-pool admission', async () => {
+    const input = f.input();
+    const { disk: _disk, ...limits } = input.limits;
+    await expect(
+      createManagedServer(
+        f.db,
+        f.adapter,
+        f.context,
+        { ...input, limits },
+        {
+          NH_STORAGE_POLICY: 'PER_USER_BUDGET',
+        },
+      ),
+    ).rejects.toThrow('validation_failed');
+    await expect(
+      createManagedServer(
+        f.db,
+        f.adapter,
+        f.context,
+        {
+          ...input,
+          limits: { ...limits, disk: 0 },
+        },
+        { NH_STORAGE_POLICY: 'PER_USER_BUDGET' },
+      ),
+    ).rejects.toThrow('validation_failed');
+    await expect(
+      createManagedServer(
+        f.db,
+        f.adapter,
+        f.context,
+        { ...input, limits },
+        {
+          NH_DEFAULT_SERVER_STORAGE_MIB: '1000000',
+        },
+      ),
+    ).rejects.toThrow('storage_exhausted');
+  });
+  it('creates disk zero for an exempt user while personal storage budgets remain enabled', async () => {
+    await f.db
+      .insertInto('storage_user_budgets')
+      .values({ user_id: f.context.subjectUserId, storage_mib: '0' })
+      .execute();
+    const input = f.input();
+    const { disk: _disk, ...limits } = input.limits;
+    const created = await createManagedServer(
+      f.db,
+      f.adapter,
+      f.context,
+      { ...input, limits },
+      { NH_STORAGE_POLICY: 'PER_USER_BUDGET' },
+    );
+    const operation = await f.db
+      .selectFrom('server_operations')
+      .select('plan')
+      .where('job_id', '=', created.jobId)
+      .executeTakeFirstOrThrow();
+    expect(operation.plan.provision).toMatchObject({ limits: { disk: 0 } });
+  });
+  it('allows compute configuration for an exempt unlimited server but fences finite transitions', async () => {
+    const id = await f.server({ limits: { ...f.limits, disk: 0 } });
+    await f.db
+      .insertInto('storage_user_budgets')
+      .values({ user_id: f.context.subjectUserId, storage_mib: '0' })
+      .execute();
+    const env = { NH_STORAGE_POLICY: 'PER_USER_BUDGET' };
+    await expect(
+      enqueueServerOperation(
+        f.db,
+        f.context,
+        id,
+        {
+          action: 'configure',
+          idempotencyKey: randomUUID(),
+          limits: { ...f.limits, disk: 64 },
+        },
+        env,
+      ),
+    ).rejects.toThrow('conflict');
+    await expect(
+      enqueueServerOperation(
+        f.db,
+        f.context,
+        id,
+        {
+          action: 'configure',
+          idempotencyKey: randomUUID(),
+          limits: { ...f.limits, memory: 256, disk: 0 },
+        },
+        env,
+      ),
+    ).resolves.toMatchObject({ serverId: id });
+  });
   it('refuses lifecycle work while a persisted ambiguous upload still owns its server', async () => {
     const serverId = await f.server();
     await pendingUploadFixture(f.db, serverId);
@@ -115,6 +407,102 @@ describe('managed registry, projects, runtime mapping and allocation ownership',
       .where('server_id', '=', next.serverId)
       .execute();
     expect(others.every((row) => rows.every((old) => old.port !== row.port))).toBe(true);
+  });
+  it('distinguishes missing direct connection configuration from occupied configured ports', async () => {
+    f = await managementFixture(database.db, { interactive: true });
+    await f.db
+      .insertInto('game_integrations')
+      .values({
+        id: 'minecraft',
+        version: minecraftManifest.version,
+        manifest: minecraftManifest,
+      })
+      .onConflict((c) => c.column('id').doNothing())
+      .execute();
+    await f.db
+      .insertInto('game_rollouts')
+      .values({
+        integration_id: 'minecraft',
+        state: 'public',
+        allowlist: [],
+      })
+      .onConflict((c) => c.column('integration_id').doUpdateSet({ state: 'public', allowlist: [] }))
+      .execute();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'minecraft', runtime_id: 'vanilla' })
+      .where('id', '=', f.mappingId)
+      .execute();
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    const choiceId = randomUUID();
+    await f.db
+      .insertInto('minecraft_combinations')
+      .values({
+        id: choiceId,
+        mapping_id: f.mappingId,
+        combination: JSON.stringify({
+          profile: 'vanilla',
+          release: '1.21.1',
+          releaseType: 'release',
+          protocolId: 767,
+          family: 'netty',
+          javaMajor: 21,
+          runtimeDigest: 'a'.repeat(64),
+          protocolSource: { url: 'https://example.test/protocols', sha256: 'b'.repeat(64) },
+        }),
+        resolved_runtime: '{}',
+        binding: '{}',
+        mapping_digest: minecraftMappingDigest(mapping),
+        identity_digest: 'c'.repeat(64),
+        enabled: true,
+      })
+      .execute();
+    const input = f.input({ minecraft: { choiceId, configuration: { eula: true } } });
+    const env = { NH_GATEWAY_ENABLED: 'false' };
+    await expect(createManagedServer(f.db, f.adapter, f.context, input, env)).rejects.toMatchObject(
+      {
+        code: 'direct_connection_unavailable',
+        messageKey: 'errors.direct_connection_unavailable',
+        status: 409,
+      },
+    );
+    await f.db
+      .updateTable('managed_nodes')
+      .set({
+        backend_allocation_pool: JSON.stringify({
+          ...f.backendAllocationPool,
+          allocations: f.backendAllocationPool.allocations.map((pin) => ({
+            ...pin,
+            directEndpoint: { hostname: 'direct.example.test', port: pin.port },
+          })),
+        }),
+      })
+      .where('id', '=', f.nodeId)
+      .execute();
+    for (const allocation of f.inventory) allocation.assigned = true;
+    await expect(createManagedServer(f.db, f.adapter, f.context, input, env)).rejects.toMatchObject(
+      {
+        code: 'allocation_unavailable',
+      },
+    );
+    expect(
+      await f.db
+        .selectFrom('managed_servers')
+        .select('id')
+        .where('owner_id', '=', f.context.subjectUserId)
+        .execute(),
+    ).toHaveLength(0);
+    expect(
+      await f.db
+        .selectFrom('server_allocations')
+        .select('id')
+        .where('node_id', '=', f.nodeId)
+        .execute(),
+    ).toHaveLength(0);
   });
   it('never selects provider-assigned allocations and reports exhaustion transactionally', async () => {
     for (const allocation of f.inventory) allocation.assigned = true;
@@ -370,6 +758,70 @@ describe('managed registry, projects, runtime mapping and allocation ownership',
         idempotencyKey: randomUUID(),
       }),
     ).toMatchObject({ serverId: failed });
+  });
+  it('configures nodes without a provider-user selector and preserves deprecated values', async () => {
+    const input = { physicalHostId: f.hostId, pterodactylNodeId: f.providerNodeId };
+    await setManagedNode(f.db, f.adapter, f.owner, { ...input, id: f.nodeId });
+    expect(f.adapter.listUsers).not.toHaveBeenCalled();
+    expect(
+      (
+        await f.db
+          .selectFrom('managed_nodes')
+          .select('provision_user_id')
+          .where('id', '=', f.nodeId)
+          .executeTakeFirstOrThrow()
+      ).provision_user_id,
+    ).toBe(1);
+    const account = await f.db
+      .selectFrom('provider_accounts')
+      .selectAll()
+      .where('user_id', '=', f.context.subjectUserId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('provider_accounts')
+      .set({
+        instance_id: account.instance_id,
+        provider_url: account.provider_url,
+        provider_id: 500000,
+        provider_uuid: randomUUID(),
+        external_id: 'isolated-owner',
+        key_identifier: 'isolated-key',
+        key_envelope: account.key_envelope,
+        status: 'ready',
+      })
+      .where('user_id', '=', f.owner.subjectUserId)
+      .execute();
+    const providerNodeId = 999999;
+    vi.mocked(f.adapter.getNode).mockResolvedValue({ id: providerNodeId } as never);
+    const created = await setManagedNode(f.db, f.adapter, f.owner, {
+      ...input,
+      pterodactylNodeId: providerNodeId,
+    });
+    expect(
+      (
+        await f.db
+          .selectFrom('managed_nodes')
+          .select('provision_user_id')
+          .where('id', '=', created.id)
+          .executeTakeFirstOrThrow()
+      ).provision_user_id,
+    ).toBe(500000);
+    expect(f.adapter.listUsers).not.toHaveBeenCalled();
+    await f.db
+      .updateTable('provider_accounts')
+      .set({ status: 'pending' })
+      .where('user_id', '=', f.owner.subjectUserId)
+      .execute();
+    await expect(
+      setManagedNode(f.db, f.adapter, f.owner, { ...input, pterodactylNodeId: providerNodeId }),
+    ).rejects.toThrow('integration_unavailable');
+    await expect(
+      setManagedNode(f.db, f.adapter, f.owner, {
+        ...input,
+        pterodactylNodeId: providerNodeId,
+        provisionUserId: 987654,
+      }),
+    ).rejects.toThrow('validation_failed');
   });
   it('allows Owner disabling mappings and nodes while preserving live identity mappings', async () => {
     await f.server();

@@ -1,0 +1,24 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "build/runtime",
+    "rootDir": ".",
+    "sourceMap": false,
+    "declaration": false
+  },
+  "include": [
+    "apps/api/src/**/*.ts",
+    "apps/worker/src/**/*.ts",
+    "packages/*/src/**/*.ts",
+    "games/*/src/**/*.ts"
+  ],
+  "exclude": [
+    "**/*.test.ts",
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/testing/**",
+    "**/test-fixtures.ts",
+    "**/testing.ts"
+  ]
+}

@@ -12,7 +12,7 @@ export interface InstalledContentFile {
   sha256: string;
   projectId?: string;
   versionId?: string;
-  provider?: 'modrinth' | 'curseforge';
+  provider?: 'modrinth' | 'curseforge' | 'hangar' | 'spiget';
   dependencies?: string[];
   incompatible?: IncompatibleContent[];
 }
@@ -23,7 +23,9 @@ export interface InstalledContentChange {
 /** Pure decisions only. Core must verify the recorded SHA-256 against each live file before any write/delete. */
 export function installedContentChange(
   existing: readonly InstalledContentFile[],
-  change: ContentPlan | { remove: { provider: 'modrinth' | 'curseforge'; projectId: string } },
+  change:
+    | ContentPlan
+    | { remove: { provider: 'modrinth' | 'curseforge' | 'hangar' | 'spiget'; projectId: string } },
 ): InstalledContentChange {
   const paths = new Set<string>();
   for (const file of existing) {

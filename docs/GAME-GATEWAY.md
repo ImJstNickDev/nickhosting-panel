@@ -6,6 +6,53 @@ One long-running service **inside the `nickhosting-panel` deployment** (separate
 
 **Only server UUIDs explicitly marked NickHosting-managed** can be registered with the gateway. A game server created directly in Pterodactyl remains direct and must never be intercepted or imported automatically.
 
+## Optional per-server delivery
+
+An integration may support installation and direct play without supporting the Gateway
+protocol. The Owner-approved M5 amendment separates these capabilities. New servers
+use a frozen `connection_mode`: `gateway` only when declared and enabled, otherwise
+`direct` with explicit Owner-configured endpoints. Existing servers retain their mode.
+Direct servers are excluded from route snapshots, policy, wake/idle observation and
+queued Gateway effects. Their ordinary start/stop and authorized schedules continue
+to use M2 admission; direct play does not imply automatic wake or readiness detection.
+
+Compiled Minecraft declarations identify their own ID/version in service-only route
+metadata. They are not relabeled local test attestations. The Gateway validates the
+compiled declaration and its supported protocol family. Existing legacy attestation
+DTOs remain readable with their expiry checks. Authenticated control-plane routing,
+lease expiry, collision checks, process epochs and forwarding fences remain required.
+The v2 `minecraft/vanilla` declaration supports modern and historical Java wire
+families; missing historical player queries disable automatic idle sleep, not the
+responder. See [multiprotocol behavior and evidence](MINECRAFT-MULTIPROTOCOL.md).
+Historical v1 declarations remain valid only for their exact 26.1/775 pair.
+
+An explicit advertised direct hostname/port is a configuration fact, not proof of
+external reachability. No fallback to a private allocation address, no automatic
+public listener and no networking changes are authorized by direct mode.
+
+## Automatic registration during creation
+
+New Gateway-mode servers supplied by a trusted first-party module with a Gateway
+protocol binding reserve their public routes together with their private allocation
+claims. The node's Owner-configured pool must declare one unambiguous Gateway bind
+address; public and backend endpoints use the same numerical port on different IPs.
+Each allocation's declared TCP/UDP transports retain separate route identities.
+No endpoint is guessed from a provider alias, host interface or Docker bridge.
+
+The durable provisioning job activates its reserved routes only after provider
+identity, egg installation and game configuration have been verified. Route intent
+is pinned in the job: replay cannot choose another endpoint, duplicate registrations
+or undo an Owner's later disable action. A configuration/collision error is reported
+rather than treating a partially configured server as successfully connected.
+Direct servers and existing servers without automatic route intent are unchanged.
+
+Registration initializes the trusted protocol policy with inherited idle timing;
+it does not grant automatic-start consent. Manual-stop and maintenance suppression
+remain authoritative. The Gateway still validates fresh provider inventory, host
+listeners, Docker bindings and actual backend reachability before opening a listener,
+and requires game readiness before forwarding. Route configuration and a snapshot
+lease are not evidence of successful listener binding or external connectivity.
+
 ## Bind/forward model
 
 - Gateway takes a configured **public game endpoint** (bound interface/IP + port + TCP/UDP role).
@@ -29,7 +76,7 @@ One long-running service **inside the `nickhosting-panel` deployment** (separate
 4. `blocked`: when admission rejects for insufficient compute, return immediate in-game explanation if supported; otherwise provide a stable failure behavior and actionable panel diagnostics.
 5. `maintenance` or `manual-off`: do not auto-wake on join unless owner explicitly changes mode.
 
-Backend readiness is game-specific (Pterodactyl process running alone is insufficient). Wake time estimate derived from recent measured times until **actual readiness**, rejecting stale/unrepresentative samples. If no reliable estimate exists, don't fabricate one.
+Backend readiness follows the trusted integration contract. Minecraft accepts authenticated live Wings `running` for the exact admitted start and process; raw Docker `running` is insufficient. Initial network reachability proof remains mandatory (ADR 0016). Wake time estimate derived from recent measured times until **actual readiness**, rejecting stale/unrepresentative samples. If no reliable estimate exists, don't fabricate one.
 
 ## Future-only extension
 
@@ -56,3 +103,118 @@ for route leases, multiport evidence, forwarding fences and restart behavior.
 [Validation](M3-VALIDATION.md) distinguishes isolated fixture evidence from
 unverified production deployment prerequisites. No Minecraft/Satisfactory
 compatibility or production Gateway listener is claimed by M3.
+
+## M5 transition clarification
+
+Power confirmation uses fresh host-bound process identity where available, without
+waiting for Panel's cached resource state. Startup estimates use the last ten
+eligible measured cycles (minimum five) and never gate power or routing. Under the
+2026-10-11 Owner amendment, compiled Minecraft opts into live provider-running
+readiness; it does not repeat the game status probe after that authenticated event.
+Raw container state is not readiness and cannot establish network reachability.
+
+Idle quiescence fences gameplay and wake effects, not bounded protocol status/ping
+or login-disconnect replies. A safe public listener can remain available while its
+backend stops: matching binding proof and fresh ownership/topology/node checks are
+still mandatory. Backend readiness loss immediately suppresses forwarding; identity,
+collision or lease failure still closes the listener. Passive responder connections
+are excluded from active gameplay session counts.
+
+A confirmed start/restart cannot be downgraded by a cached Panel `offline`/`starting`
+resource sample when fresh host evidence proves the exact successful operation's
+process epoch and its reservation is retained. Missing, changed or unavailable
+process evidence stays conservative; external stops and manual suppression still
+win. This reconciliation proof does not grant game readiness.
+
+Minecraft supplies protocol samples for player counts and idle detection; failed
+samples leave player count unknown and cannot authorize sleep.
+The response-only `stopping` mode keeps status/login-disconnect replies available
+through quiescence without allowing gameplay or wake. It is not a persisted state
+and does not promise a fabricated fixed shutdown duration. Ordinary power and
+Gateway observations do not download the JAR (Owner amendment, 2026-10-10);
+installation/content/restore integrity checks remain. See [API details](M3-API.md).
+
+Live provider-running events may establish readiness only for integrations that
+explicitly declare the compiled `readinessSource: provider_running` capability.
+Core commits the event against the exact successful admitted start/restart,
+reservation, process epoch, route and generation. The receipt switches existing
+listeners within their original lease without another Panel/image/status request.
+Opening and renewal still validate identity, bindings, topology and collisions;
+initial backend reachability still needs a genuine proof. Online player polling
+uses lightweight local process confirmation instead of repeating image validation.
+Lost events, unavailable streams or missing committed start evidence use the legacy
+protocol fallback; fallback can wait until the bounded startup stream closes.
+See [ADR 0016](decisions/0016-provider-readiness.md).
+
+## Idle deadline and stop dispatch (M5 optimization)
+
+The authoritative `sleepEligibleAt` schedules one fresh observation at the idle
+deadline, in addition to normal polling. A pre-deadline in-flight sample cannot
+stand in for that observation. Equivalent snapshots do not reschedule elapsed
+deadlines repeatedly; provider cooldowns still apply. Unknown player counts,
+active sessions, changed policy/generation or expired route authority prevent sleep.
+
+An unchanged online or waking route may sample its actual game protocol using the
+original, unexpired full-validation evidence. This does not renew a lease, extend
+evidence age, open a listener or skip full collision/identity/topology validation
+on renewal. An expired or changed grant returns to full validation.
+
+Once idle is proven, the Gateway fences new joins while preserving status replies.
+The durable worker prepares its stop-confirmation WebSocket and observer in parallel;
+final provider identity and host authorization also overlap. Local authority is
+rechecked after the independent proofs and durable handoff, within the original
+fence. Wings owns execution of the egg's stop command: no per-stop egg fetch, JAR
+hash, Mojang lookup or image check occurs. Capacity remains reserved until ordered
+terminal status, exact host exit evidence and durable completion prove the stop.
+Completion shares the same attempt’s provider/host proofs instead of repeating
+those reads, but still checks the exact process after the stop.
+After confirmed stop commits, the worker immediately invokes the existing canonical
+Gateway reconciler. Its sleeping-state transaction publishes a PostgreSQL notification.
+A bounded authenticated completion request delivers the durable snapshot proof to the
+Gateway, which can release its exact local stop fence without waiting for another
+poll or adding a timer. This does not make process-exit confirmation or communication
+instantaneous. Lost notifications and reconciliation failures retain normal recovery.
+The receipt cannot renew the original listener lease, change endpoints, or overwrite
+a newer candidate configuration. See [completion contract](M3-API.md).
+
+A transient `container_churn` during listener validation preserves previously
+validated listeners as local protocol responders within their original lease.
+A new waking generation may change only the response text when server, node,
+allocation, endpoints, protocol and locale remain identical; it does not adopt
+the candidate route or extend authority. Forwarding, wake effects and readiness receipts are suppressed until fresh
+validation succeeds. Existing local status connections remain open; backend streams
+and UDP forwarding sessions close. New/changed routes, real collisions, unknown
+safety errors and expired leases still fail closed. One immediate validation retry
+is bounded; no indefinite retry or lease extension is introduced.
+
+
+## Message presentation boundary
+
+Gateway message kinds and text belong to the game integration. The common route
+`presentation.messages` is a bounded opaque state/channel/text record, carried for
+any registered protocol adapter. Core continues to supply operational facts such
+as stopping, block reason and historical startup estimate. Adapters decide which
+messages these facts imply and how to encode them; no generic MOTD/disconnect
+serializer or Minecraft text catalogue lives in Core or the data plane.
+
+The trusted SDK descriptor drives API validation and the shared WebPanel editor;
+it is not sent to public clients or carried in every routing snapshot. Existing
+Minecraft overrides keep their JSON shape. Snapshot revision changes for cosmetic
+edits still preserve established TCP/UDP forwarding and lifecycle generation.
+No extra provider reads, polling loop, readiness delay or lease extension is added.
+See [integration descriptors](GAME-INTEGRATIONS.md#integration-owned-gateway-message-descriptors).
+
+
+Optional `presentation.variables` carries bounded integration context strings
+(maximum32 keys,1024 characters/value); only the integration assigns their meaning.
+The control API includes this additive field only for clients advertising
+`presentation-variables-v1` in the comma-separated
+`X-NickHosting-Gateway-Features` header. This applies to normal snapshots,
+observation readiness receipts, sleep-completion receipts and startup SSE snapshots.
+Existing `completed-sleep-v1`, `readiness-receipt-v1` and startup features remain
+independent. This preserves strict older readers during API-first rolling updates.
+
+Minecraft uses locally batched binding/DNS data for version, runtime ID and
+confirmed public address; its adapter resolves runtime display names. The startup
+clock is published even when no historical duration estimate exists, so elapsed
+time does not depend on ETA. Rendering these values performs no provider calls.

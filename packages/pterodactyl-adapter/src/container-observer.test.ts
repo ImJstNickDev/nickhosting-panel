@@ -368,3 +368,46 @@ describe('independent process start identity', () => {
     expect(exec).not.toHaveBeenCalled();
   });
 });
+
+describe('exact completed process observation', () => {
+  const startedAt = '2026-10-09T11:00:00.000000001Z';
+  const finishedAt = '2026-10-09T11:00:02.000000002Z';
+  it('returns only the pinned container and exact start/finish timestamps', async () => {
+    const { observer, exec } = fixture([listed(), inspected({ startedAt, finishedAt }), listed()]);
+    await expect(observer.terminalProcess(uuid)).resolves.toEqual({
+      containerId,
+      startedAt,
+      finishedAt,
+    });
+    expect(exec.mock.calls[1]?.[1].join(' ')).toContain('.State.FinishedAt');
+    expect(exec.mock.calls[1]?.[1].join(' ')).not.toContain('.Config.Env');
+  });
+  it.each([
+    { status: 'created' },
+    { status: 'running', running: true },
+    { status: 'paused', paused: true },
+    { status: 'restarting', restarting: true },
+    { status: 'dead', dead: true },
+  ])('does not infer terminal completion from %j', async (state) => {
+    const { observer } = fixture([
+      listed(),
+      inspected({ startedAt, finishedAt, ...state }),
+      listed(),
+    ]);
+    await expect(observer.terminalProcess(uuid)).resolves.toBeNull();
+  });
+  it('rejects reversed timestamps and container replacement', async () => {
+    const wrongTime = fixture([
+      listed(),
+      inspected({ startedAt: finishedAt, finishedAt: startedAt }),
+      listed(),
+    ]);
+    await expect(wrongTime.observer.terminalProcess(uuid)).rejects.toThrow(
+      'integration_unavailable',
+    );
+    const replaced = fixture([listed(), inspected({ startedAt, finishedAt }), listed(otherId)]);
+    await expect(replaced.observer.terminalProcess(uuid)).rejects.toThrow(
+      'integration_unavailable',
+    );
+  });
+});

@@ -10,6 +10,19 @@ export async function reconcileServers(
   logger: ReturnType<typeof createLogger>,
   env: Readonly<Record<string, string | undefined>>,
 ) {
+  const transition = await db
+    .selectFrom('storage_policy_transitions')
+    .select('id')
+    .where('status', '=', 'applying')
+    .limit(1)
+    .executeTakeFirst();
+  if (transition) {
+    try {
+      await (await management()).storagePolicy.processPending();
+    } catch {
+      logger.log('warn', 'storage.policy_reconciliation_unavailable', {});
+    }
+  }
   const states = await db
     .selectFrom('gateway_server_states as state')
     .innerJoin('managed_servers as server', 'server.id', 'state.server_id')
@@ -29,7 +42,49 @@ export async function reconcileServers(
     .where('deleted_at', 'is', null)
     .limit(1)
     .executeTakeFirst();
-  if (!server) return;
+  if (!server) {
+    // Deleting the last server must not strand an interrupted credential
+    // revocation. Keep the unconfigured, empty installation cheap to reconcile.
+    const credential = await db
+      .selectFrom('external_sftp_credentials')
+      .select('id')
+      .where('state', '!=', 'revoked')
+      .limit(1)
+      .executeTakeFirst();
+    const dns = credential
+      ? undefined
+      : await db
+          .selectFrom('dns_assignments')
+          .select('id')
+          .where('state', 'not in', ['active', 'deleted'])
+          .limit(1)
+          .executeTakeFirst();
+    const abandonedClaim =
+      credential || dns
+        ? undefined
+        : await db
+            .selectFrom('dns_hostname_reservations as r')
+            .innerJoin('managed_servers as s', 's.id', 'r.owner_id')
+            .select('r.hostname')
+            .where('s.deleted_at', 'is not', null)
+            .where('r.release_after', 'is', null)
+            .limit(1)
+            .executeTakeFirst();
+    const shared =
+      credential || dns || abandonedClaim
+        ? []
+        : await db.selectFrom('game_integrations').select('manifest').execute();
+    if (
+      !credential &&
+      !dns &&
+      !abandonedClaim &&
+      !shared.some(
+        (game) =>
+          (game.manifest as { connection?: { mode?: string } }).connection?.mode === 'shared-host',
+      )
+    )
+      return;
+  }
   const result = await (await management()).reconcile();
   if (result.external.failed)
     logger.log('warn', 'servers.external_recovery_failed', { count: result.external.failed });

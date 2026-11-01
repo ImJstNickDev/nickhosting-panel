@@ -10,6 +10,50 @@ Secrets (Better Auth session secret, encryption key, Discord secret, Pterodactyl
 
 Do not use database seeding to create accounts or default live instance data. Migrations create schema only; initial Owner and Pterodactyl connection are created by a one-time protected setup wizard.
 
+The API and worker loggers use the effective `logLevel` setting at process startup
+(default `info`). Detailed upload/archive timings are collected and emitted only at `debug`;
+use `NH_LOG_LEVEL=debug` for a temporary diagnostic override, then restore the
+normal level after the investigation. Applying a logger-level change requires an
+reload of the affected process. Archive diagnostics separate concurrent upload
+and validation spans from Blueprint extraction, tree verification and publication;
+overlapping or nested spans must not be added as sequential time. Normal request errors and durable audit records remain
+available without upload timing diagnostics.
+
+World selection also emits one `servers.world_selection_timing` debug summary
+per worker delivery. It separates game configuration, authorization, host/process
+observations, database transactions and journals, directory batches, download-grant
+preparation/waits, Wings response/body reads, properties comparison and the write.
+`stages` contains aggregate counts/durations; `spanGroups` records each span's
+monotonic start offset and duration, including overlapping and nested work. Do not
+sum these spans as sequential time. The trace starts after the initial operation
+lookup: runtime construction, that lookup and queue delay remain outside `totalMs`
+and must be compared with the existing delivery/job timestamps.
+
+Instrumentation adds no provider requests or database queries. Labels are fixed
+code labels and ordinal file reads, without paths, file contents, credentials or
+signed URLs. The summary bounds aggregates to 64 labels and its timeline to 128
+labels/256 spans, grouped below the logger's array limit; dropped counters expose
+truncation. No detailed trace is collected at the normal `info` level.
+
+## Private transfer preparation
+
+API and worker optionally share transfer preparation through their existing
+`REDIS_URL`, `NH_JOB_PREFIX`, `DATABASE_URL` and application encryption key. No new
+service, migration, provider setting or credential is needed. The namespace hashes
+the database connection (including schema options) and job prefix. Values are sealed
+with the protected-store codec and key-bound authenticated encryption; provider
+bindings additionally isolate credentials, allowed origins and managed-server identity.
+Signed URLs remain backend-only and are consumed atomically once.
+
+The shared store has native expiry, at most 10,000 entries/64 MiB of encrypted
+payloads, and a maximum lifetime of 16 minutes. World inspection preparation expires
+after 15 minutes; signed grants also retain their provider expiry/safety margin.
+It is disposable performance state, not an authorization source or durable job
+record. Cache failure/eviction uses ordinary reads and fresh grant issuance; it must
+never reuse an ambiguously consumed token. No game file or account data is reset.
+Apply code through the usual API/worker lifecycle; rollback is a code revert, and
+old cache entries expire without cleanup or database rollback.
+
 ## Local environment context (never published)
 
 Keep machine-specific observations in `.codex/local/INFRASTRUCTURE.md`, excluded from Git. AGENTS.md directs Codex to read it before authorized infrastructure work. The local notes preserve the actual host, resolver, external network, current/stale installation paths and deployment hostnames; none are product defaults or approval to change infrastructure. A fresh clone needs Owner-supplied local context before infrastructure access. Never store credentials in documentation.
@@ -17,6 +61,12 @@ Keep machine-specific observations in `.codex/local/INFRASTRUCTURE.md`, excluded
 Public examples use localhost or reserved example addresses/domains. Keep the public website, web app and Pterodactyl ingress separate. Existing frontend networks are external; never recreate them or silently change DNS/proxy routing. Prefer internal Docker hostnames. Where external-name access requires a specific resolver, use the Owner-supplied value and verify resolution without changing DNS infrastructure.
 
 ## Compose and bind mounts
+
+For the inspected provider directory-ownership defect and the prerequisites for
+a coordinated Panel/Wings/Blueprint upgrade, see
+[provider upgrade readiness](PROVIDER-UPGRADE-READINESS.md). Updating a container
+image alone is not sufficient when Panel application code lives in a persistent
+volume; preserve the matching database and code rollback boundary.
 
 - Project-owned Docker Compose files can be authored in the repo but **not deployed to live host without approval** if they change live services/ports/networks/configuration.
 - Use project-local persistent bind mounts exclusively under `./mountdata/`: e.g. `./mountdata/postgres/`, `./mountdata/redis/`, `./mountdata/sftpgo/`, `./mountdata/uploads/`, `./mountdata/test-assets/` and project logs if needed. `mountdata/` is gitignored, never initialize it with real secrets in Git.
@@ -54,6 +104,18 @@ claims and stores both immutable addresses. These declarations do not establish
 Gateway reachability: M3 must check the actual container bindings and its own
 network namespace, plus public-listener collisions against unrelated direct
 allocations, before any listener bind. No existing network is changed by M2.
+
+### Minecraft Fabric Gateway delivery
+
+Fabric uses the existing Minecraft TCP Gateway for resolved modern protocol
+versions, including sleep/wake and automatic route provisioning after installation.
+It uses the same Owner-configured backend allocation pool as Vanilla; a direct
+endpoint is unnecessary while Gateway is enabled. No extra allocation range,
+provider egg change or network change is needed to enable this capability.
+
+A genuinely unsupported protocol, or an explicitly disabled Gateway, still requires
+an Owner-configured `directEndpoint` to use direct delivery. Never infer public
+reachability from a private backend allocation.
 
 Browser uploads require a separate trusted Wings origin allowlist
 (`NH_PTERODACTYL_UPLOAD_ORIGINS`) and a verified per-host `uploadPolicy`.
@@ -105,3 +167,134 @@ The [isolated fixture proposal](M3-TEST-INFRASTRUCTURE.md) has its own narrowly
 approved resources and rollback. It does not establish production reachability
 or authorize changes to the existing external frontend network. The SFTPGo 2.7.6
 exception remains tracked by issue #18 before production release.
+
+## M5 WebPanel build and development
+
+`apps/web` is the React application. `scripts/dev.sh pnpm dev:web` binds Vite to
+loopback. Set `NH_WEB_API_PROXY` in the development command environment to the
+local Core API origin when using separate development processes; `/api` and
+`/v1` are forwarded with the original Origin header. Add the exact development
+origin to the existing API trusted-origin configuration. Never use a wildcard
+origin or disable the existing CSRF/invitation checks to make development work.
+
+`scripts/dev.sh pnpm build` compiles catalogs and writes static assets to
+`apps/web/dist/`. `scripts/dev.sh pnpm --filter @nickhosting/web preview` provides
+a loopback review server. A production host must serve these assets with SPA
+fallback for browser routes and proxy `/api/auth/*` and `/v1/*` to Core on the
+same public HTTPS origin. Preserve streaming/backpressure for uploads, downloads
+and console SSE, and do not impose an arbitrary small transfer-body limit.
+Assets are not a new Pterodactyl proxy, Gateway listener or separately deployed
+authentication service. Applying reverse-proxy/host/container configuration
+requires the existing operation-specific approval; M5 does not deploy it.
+
+Only public presentation is compiled into the browser. Runtime configuration and
+secrets remain server-side with defaults → Owner DB → environment precedence.
+The new `NH_SFTP_PUBLIC_HOSTNAME` and `NH_SFTP_PUBLIC_PORT` declare the public SFTP
+endpoint. The UI never derives it from a private SFTPGo administrative URL.
+Absent endpoint/provider configuration is shown as unavailable. Revocation's
+retained-SSH-transport limitation remains the separate issue #18 release gate.
+
+Apply the existing migration command before running changed services. M5 adds
+schedule/run tables and internal service-contact records. Run API and worker
+from the same reviewed revision. Worker polling uses PostgreSQL due claims and
+existing durable jobs; Redis delivery alone is not the source of truth. Health
+marks missing/stale worker or Gateway contact unknown; merely loading the Owner
+page does not prove those services healthy or deploy them.
+
+## Isolated browser verification
+
+`scripts/dev.sh pnpm test:browser` uses the verified isolated M2 service wrapper,
+a disposable PostgreSQL schema per suite, and fresh loopback HTTP ports. The
+actual React/Vite app, Hono API, Better Auth, migrations, authorization and job
+processor run together. External Pterodactyl, DNS, identity/content metadata and
+Discord boundaries use documented fixtures. No test route replaces a NickHosting
+API handler. Browser suites never create users by seeding database identities.
+
+Playwright's pinned Chromium is installed in the current user's cache. On this
+validation host, missing Chromium shared libraries were obtained using
+`apt-get download` and extracted with `dpkg-deb -x` under the user's cache;
+`LD_LIBRARY_PATH` is scoped to the spawned browser. No OS package was installed or
+upgraded. Other development hosts can use their approved compatible browser
+installation; installing OS dependencies is a separate infrastructure decision.
+The harness closes its browser/listener and drops only its test schema. It does
+not start, restart or clean Docker services.
+
+Raw screenshots remain ignored under `.codex/local/m5-browser/`. Only reviewed,
+sanitized browser screenshots may be copied to `docs/screenshots/m5/`. Governance
+accepts PNG files only in that directory, validates their envelope/checksums and
+rejects embedded metadata and trailing payloads. Pixel privacy still requires
+manual review. Original artworks and dependency notices remain separate from
+screenshot evidence.
+
+Install the pinned user-local test browser with
+`scripts/dev.sh pnpm exec playwright install chromium` if absent. Do not append
+`--with-deps` or install OS packages without their own approval. The production
+build includes `THIRD-PARTY-NOTICES.md` and `THIRD-PARTY-WORKER-NOTICES.txt`; retain
+both alongside static assets. See [M5 dependency provenance](M5-DEPENDENCIES.md).
+
+## Persistent development and separate production configuration
+
+The Owner-approved M5 architecture is specified in [M5 environments](M5-ENVIRONMENTS.md):
+`compose.dev.yaml` provides HTTPS-proxied Vite HMR and isolated persistent review
+state; `compose.prod.yaml` uses compiled immutable artifacts and independent
+credentials/storage. The development hostname and external network in those
+configuration examples were explicitly supplied for this task; other private
+infrastructure notes remain unpublished. Read the exact activation proposal and
+rollback before any Docker operation. The prepared configuration does not grant
+activation, NPM/DNS mutation or production deployment approval.
+
+### Creation storage defaults
+
+`defaultServerStorageMiB` / `NH_DEFAULT_SERVER_STORAGE_MIB` controls the finite
+server disk allowance assigned when creation omits disk under `GLOBAL_POOL`.
+Default: 4096 MiB, preserving the previous wizard default. It follows normal
+configuration precedence and does not change existing server limits. Shared-pool
+creation hides the disk picker; allocation and backup reservations still count
+against physical pool/free-space safety. `PER_USER_BUDGET` creation requires an
+explicit disk value. This setting is not an unlimited-storage or auto-expansion
+implementation.
+
+Minecraft metadata requests default to the public NickHosting application identity
+and project repository contact; Owner `contentMetadataUserAgent` or
+`NH_CONTENT_METADATA_USER_AGENT` can override it. Catalog discovery needs no
+private provider key for Mojang metadata. Compatibility report verification still
+requires the existing private `NH_MINECRAFT_EVIDENCE_KEY` and legitimately produced
+identity-matching evidence; metadata discovery does not create or replace that key.
+
+## Shared content limits and integration overrides (2026-10-16)
+
+Owner Settings → Content owns temporary source/work directories, aggregate staging
+bytes, per-user bytes, concurrency, free-space margins, download origins and the
+metadata HTTP user agent. These are platform resources, not Minecraft resources.
+Integration → Content limits can restrict that integration's budgets and origins;
+blank numeric values inherit. Minimum disk headroom can only increase. Global
+byte/concurrency ceilings count all integrations together, including active source
+transfers and staging jobs. Ready archives keep their byte charge; uncertain work
+keeps its reservation. Integration overrides do not allocate extra physical space.
+
+Canonical settings are `contentSourceRoot`, `contentWorkRoot`,
+`contentSourceGlobalBytes`, `contentSourceUserBytes`, `contentSourceConcurrent`,
+`contentSourceUserConcurrent`, `contentSourceFreeBytes`, `contentSourceFreePercent`,
+`contentDownloadOrigins`, `contentMetadataUserAgent` and `gameContentPolicies`.
+Their environment names use `NH_CONTENT_*` and `NH_GAME_CONTENT_POLICIES`; see
+[the example](../.env.example). Existing `minecraftSource*`,
+`minecraftContentRoot`, `minecraftDownloadOrigins`, `minecraftMetadataUserAgent`
+and matching `NH_MINECRAFT_*` variables remain accepted aliases. If both old and
+new names exist in one source, the canonical name wins. Environment still takes
+precedence over DB settings and locks the canonical field in the UI. API reads
+return canonical names; legacy PATCH and reset names remain accepted.
+
+Migration `035_content_policy.sql` adds the integration identity to existing
+source/staging ledgers and normalizes stored setting names without replacing
+values already stored under the canonical name. Historical rows belong to
+Minecraft. Historical table names, reservation digests and storage roots remain
+unchanged so existing jobs and retained archives can recover. No directory is
+moved, emptied or recreated by the migration. Apply it before activating the new
+API/worker code. Development and production require their own explicit migration;
+this documentation does not authorize production deployment.
+
+For rollback, stop affected content work and restore the previous application
+revision plus the saved platform settings document (old code cannot read the new
+canonical setting names). Added columns/indexes can remain. Do not drop ledgers,
+reset the database or delete staged data. Reconcile active/uncertain operations
+before any rollback that changes their owning implementation.

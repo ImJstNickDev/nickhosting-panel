@@ -2,15 +2,21 @@
   "name": "@nickhosting/content-providers",
   "private": true,
   "type": "module",
-  "exports": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./world-catalog": "./src/world-catalog.ts",
+    "./mod-catalog": "./src/mod-catalog.ts",
+    "./modpack-catalog": "./src/modpack-catalog.ts"
+  },
   "dependencies": {
     "@nickhosting/core": "workspace:*",
     "zod": "4.6.5",
-    "yauzl": "3.4.0"
+    "yauzl": "3.4.0",
+    "yazl": "3.3.1",
+    "parse5": "7.3.0"
   },
   "devDependencies": {
     "@types/yauzl": "3.4.0",
-    "yazl": "3.3.1",
     "@types/yazl": "3.3.1"
   }
 }

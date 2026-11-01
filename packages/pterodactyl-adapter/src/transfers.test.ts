@@ -1,10 +1,13 @@
 import { once } from 'node:events';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it, vi } from 'vitest';
 import { createPterodactylAdapter } from './adapter.js';
 import { createDownloadProxy } from './downloads.js';
 import { createTransferGuard } from './transfer-guard.js';
+import { createTransportCoordinator, PterodactylError } from './transport.js';
+import { isUploadCancelled, isUploadNotDispatched } from './upload-dispatch.js';
 import { createUploadProxy } from './uploads.js';
 
 async function withHttp(
@@ -46,6 +49,88 @@ function bytes(length: number, onPull?: (produced: number) => void) {
 }
 
 describe('real HTTP streaming transfers', () => {
+  it('never coalesces one-use upload URL issuance across parallel scoped adapters', async () => {
+    let lookups = 0;
+    const used = new Set<string>();
+    const base = 'https://wings.example.test';
+    const coordinator = createTransportCoordinator();
+    const configuration = {
+      ...options,
+      baseURL: base,
+      uploadOrigins: [base],
+      coordinator,
+      fetcher: async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url).includes('/files/list')) return Response.json({ object: 'list', data: [] });
+        if (String(url).endsWith('/files/rename')) return new Response(null, { status: 204 });
+        if (String(url).includes('/api/client/')) {
+          const token = String(++lookups);
+          await delay(15);
+          return Response.json({ attributes: { url: `${base}/upload/file?token=${token}` } });
+        }
+        const token = new URL(String(url)).searchParams.get('token');
+        if (!token) throw new Error('Missing fixture token');
+        expect(used.has(token)).toBe(false);
+        used.add(token);
+        await new Response(init?.body).arrayBuffer();
+        return new Response(null, { status: 204 });
+      },
+    };
+    const adapters = [
+      createPterodactylAdapter(configuration),
+      createPterodactylAdapter(configuration),
+    ];
+    const sends = await Promise.all(
+      adapters.map((adapter, index) => adapter.prepareUpload('fixture', `file-${index}.bin`)),
+    );
+    expect(lookups).toBe(2);
+    await Promise.all(sends.map((send) => send({ body: bytes(1), contentLength: 1, maxBytes: 1 })));
+    expect(used.size).toBe(2);
+  });
+  it('prepares a private single-use handoff without writing, then rechecks authorization before streaming', async () => {
+    let writes = 0,
+      lookups = 0;
+    const base = 'https://wings.example.test';
+    const adapter = createPterodactylAdapter({
+      ...options,
+      baseURL: base,
+      uploadOrigins: [base],
+      fetcher: async (url, init) => {
+        if (String(url).includes('/files/list')) return Response.json({ object: 'list', data: [] });
+        if (String(url).endsWith('/files/rename')) return new Response(null, { status: 204 });
+        if (String(url).includes('/api/client/')) {
+          lookups++;
+          return Response.json({
+            object: 'signed_url',
+            attributes: { url: `${base}/upload/file?token=private-fixture` },
+          });
+        }
+        expect(new Headers(init?.headers).has('authorization')).toBe(false);
+        writes++;
+        await new Response(init?.body).arrayBuffer();
+        return new Response(null, { status: 204 });
+      },
+    });
+    const send = await adapter.prepareUpload('fixture', 'world/file.bin');
+    expect(lookups).toBe(1);
+    expect(writes).toBe(0);
+    expect(typeof send).toBe('function');
+    await send({ body: bytes(10), contentLength: 10, maxBytes: 10 });
+    expect(writes).toBe(1);
+    await expect(send({ body: bytes(1), contentLength: 1, maxBytes: 1 })).rejects.toThrow();
+    expect(writes).toBe(1);
+    const revoked = await adapter.prepareUpload('fixture', 'world/other.bin');
+    await expect(
+      revoked({
+        body: bytes(1),
+        contentLength: 1,
+        maxBytes: 1,
+        authorize: async () => {
+          throw new Error('revoked');
+        },
+      }),
+    ).rejects.toThrow();
+    expect(writes).toBe(1);
+  });
   it('downloads more than 1 GiB with bounded buffers and slow-consumer backpressure', async () => {
     const length = 1024 ** 3 + 64 * 1024;
     let produced = 0;
@@ -123,7 +208,8 @@ describe('real HTTP streaming transfers', () => {
           tail = Buffer.concat([tail, chunk]).subarray(-100);
           if (uploaded % (2 * 1024 ** 2) < chunk.length) await delay(1);
         }
-        expect(uploaded).toBe(Number(request.headers['content-length']));
+        expect(request.headers['content-length']).toBeUndefined();
+        expect(request.headers['transfer-encoding']).toBe('chunked');
         response.writeHead(204).end();
       },
       async (origin) => {
@@ -146,6 +232,206 @@ describe('real HTTP streaming transfers', () => {
     expect(tail.toString()).toMatch(/\r\n--nh-[a-f0-9-]+--\r\n$/);
     const suffix = /\r\n--nh-[a-f0-9-]+--\r\n$/.exec(tail.toString())?.[0];
     expect(uploaded - start - Buffer.byteLength(suffix ?? '')).toBe(length);
+  });
+
+  it.each(['parser-400', 'other-400', 'server-500', 'lost-response'])(
+    'raw transport does not infer no filesystem writes from multipart rejection: %s',
+    async (reply) => {
+      const controller = new AbortController();
+      let cancelled = false,
+        parsed = false,
+        writes = 0;
+      const source = new ReadableStream<Uint8Array>(
+        {
+          async pull(output) {
+            await delay(2);
+            if (!cancelled) output.enqueue(new Uint8Array(1024));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      await withHttp(
+        async (request, response) => {
+          expect(request.headers['content-length']).toBeUndefined();
+          request.once('data', () => controller.abort());
+          try {
+            await new Response(Readable.toWeb(request) as ReadableStream<Uint8Array>, {
+              headers: { 'Content-Type': request.headers['content-type'] ?? '' },
+            }).formData();
+            writes++;
+          } catch {
+            parsed = true;
+          }
+          if (reply === 'lost-response') {
+            response.destroy();
+            return;
+          }
+          response.writeHead(reply === 'server-500' ? 500 : 400, {
+            'Content-Type': 'application/json',
+          });
+          response.end(
+            JSON.stringify({
+              error:
+                reply === 'parser-400'
+                  ? 'Failed to get multipart form data from request.'
+                  : 'Unrelated private provider failure',
+            }),
+          );
+        },
+        async (origin) => {
+          const result = await createUploadProxy({
+            ...options,
+            baseURL: origin,
+            uploadOrigins: [origin],
+          })(`${origin}/upload/file?token=fixture`, 'world.dat', {
+            body: source,
+            contentLength: 1024 ** 2,
+            maxBytes: 1024 ** 2,
+            signal: controller.signal,
+            idleTimeoutMs: 1000,
+          }).catch((error: unknown) => error);
+          expect(parsed).toBe(false);
+          expect(writes).toBe(1);
+          expect(cancelled).toBe(true);
+          expect(isUploadCancelled(result)).toBe(false);
+          expect(isUploadNotDispatched(result)).toBe(false);
+          if (reply !== 'parser-400') expect(result).toMatchObject({ outcome: 'unknown' });
+          expect(String(result)).not.toContain('private');
+        },
+      );
+    },
+  );
+
+  it('recognizes cancellation after final authorization but before the multipart terminal boundary', async () => {
+    const controller = new AbortController();
+    let checks = 0;
+    let writes = 0;
+    await withHttp(
+      async (request, response) => {
+        try {
+          await new Response(Readable.toWeb(request) as ReadableStream<Uint8Array>, {
+            headers: { 'Content-Type': request.headers['content-type'] ?? '' },
+          }).formData();
+          writes++;
+          response.writeHead(204).end();
+        } catch {
+          response.writeHead(400, { 'Content-Type': 'application/json' }).end(
+            JSON.stringify({
+              error: 'Failed to get multipart form data from request.',
+            }),
+          );
+        }
+      },
+      async (origin) => {
+        const result = await createUploadProxy({
+          ...options,
+          baseURL: origin,
+          uploadOrigins: [origin],
+        })(`${origin}/upload/file?token=fixture`, 'world.dat', {
+          body: bytes(1),
+          contentLength: 1,
+          maxBytes: 1,
+          signal: controller.signal,
+          authorize: async () => {
+            if (++checks === 2) controller.abort();
+          },
+        }).catch((error: unknown) => error);
+        expect(checks).toBe(2);
+        expect(writes).toBe(1);
+        expect(result).toMatchObject({ outcome: 'rejected', upstreamStatus: 204 });
+        expect(isUploadCancelled(result)).toBe(false);
+      },
+    );
+  });
+
+  it.each(['confirmed', 'lost-response', 'parser-400'])(
+    'does not call a late browser abort cancellation proof after the full form: %s',
+    async (reply) => {
+      const controller = new AbortController();
+      let writes = 0;
+      await withHttp(
+        async (request, response) => {
+          const form = await new Response(Readable.toWeb(request) as ReadableStream<Uint8Array>, {
+            headers: { 'Content-Type': request.headers['content-type'] ?? '' },
+          }).formData();
+          expect((form.get('files') as File).size).toBe(1);
+          writes++;
+          controller.abort();
+          if (reply === 'lost-response') response.destroy();
+          else if (reply === 'parser-400')
+            response.writeHead(400, { 'Content-Type': 'application/json' }).end(
+              JSON.stringify({
+                error: 'Failed to get multipart form data from request.',
+              }),
+            );
+          else response.writeHead(204).end();
+        },
+        async (origin) => {
+          const result = await createUploadProxy({
+            ...options,
+            baseURL: origin,
+            uploadOrigins: [origin],
+          })(`${origin}/upload/file?token=fixture`, 'world.dat', {
+            body: bytes(1),
+            contentLength: 1,
+            maxBytes: 1,
+            signal: controller.signal,
+          }).catch((error: unknown) => error);
+          expect(writes).toBe(1);
+          expect(isUploadCancelled(result)).toBe(false);
+          expect(isUploadNotDispatched(result)).toBe(false);
+          if (reply === 'confirmed') expect(result).toBeUndefined();
+          else expect(result).toMatchObject({ outcome: 'unknown' });
+        },
+      );
+    },
+  );
+
+  it('handles browser body failure delivered before its abort signal without destroying the rejection response', async () => {
+    const controller = new AbortController();
+    let output: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const source = new ReadableStream<Uint8Array>({
+      start(value) {
+        output = value;
+      },
+    });
+    await withHttp(
+      async (request, response) => {
+        request.once('data', () => {
+          output?.error(new Error('browser disconnected'));
+          setImmediate(() => controller.abort());
+        });
+        try {
+          await new Response(Readable.toWeb(request) as ReadableStream<Uint8Array>, {
+            headers: { 'Content-Type': request.headers['content-type'] ?? '' },
+          }).formData();
+          throw new Error('Unexpected complete multipart');
+        } catch {
+          response.writeHead(400, { 'Content-Type': 'application/json' }).end(
+            JSON.stringify({
+              error: 'Failed to get multipart form data from request.',
+            }),
+          );
+        }
+      },
+      async (origin) => {
+        const result = await createUploadProxy({
+          ...options,
+          baseURL: origin,
+          uploadOrigins: [origin],
+        })(`${origin}/upload/file?token=fixture`, 'world.dat', {
+          body: source,
+          contentLength: 1,
+          maxBytes: 1,
+          signal: controller.signal,
+          idleTimeoutMs: 1000,
+        }).catch((error: unknown) => error);
+        expect(isUploadCancelled(result)).toBe(false);
+      },
+    );
   });
 
   it('cancels the upstream socket when the downstream cancels', async () => {
@@ -301,6 +587,107 @@ describe('real HTTP streaming transfers', () => {
 });
 
 describe('stream validation and provider isolation', () => {
+  it('does not treat a generic rejected provider error as proof of no upload dispatch', () => {
+    expect(isUploadNotDispatched(new PterodactylError('unavailable', 'client', 'rejected'))).toBe(
+      false,
+    );
+  });
+  it.each(['aborted', 'invalid-target', 'authorization-failed', 'authorization-aborted'])(
+    'proves no POST was dispatched for %s and cancels the unused source',
+    async (failure) => {
+      const controller = new AbortController();
+      const cancel = vi.fn();
+      const fetcher = vi.fn<typeof fetch>();
+      if (failure === 'aborted') controller.abort();
+      const error = await createUploadProxy({
+        ...options,
+        baseURL: 'https://panel.example.test',
+        uploadOrigins: ['https://wings.example.test'],
+        fetcher,
+      })(
+        failure === 'invalid-target'
+          ? 'https://untrusted.example.test/upload/file'
+          : 'https://wings.example.test/upload/file',
+        'file.bin',
+        {
+          body: new ReadableStream({ cancel }, { highWaterMark: 0 }),
+          contentLength: 1,
+          maxBytes: 1,
+          signal: controller.signal,
+          authorize: async () => {
+            if (failure === 'authorization-failed') throw new Error('revoked');
+            if (failure === 'authorization-aborted') controller.abort();
+          },
+        },
+      ).catch((error: unknown) => error);
+      expect(isUploadNotDispatched(error)).toBe(true);
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(cancel).toHaveBeenCalledOnce();
+    },
+  );
+  it.each(['failed', 'aborted'])(
+    'proves no upload was dispatched when signed URL acquisition is %s',
+    async (failure) => {
+      const controller = new AbortController();
+      const waiting = Promise.withResolvers<Response>();
+      const cancel = vi.fn();
+      const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => {
+        if (failure === 'failed') return new Response(null, { status: 403 });
+        controller.abort();
+        return waiting.promise;
+      });
+      const adapter = createPterodactylAdapter({
+        ...options,
+        baseURL: 'https://panel.example.test',
+        uploadOrigins: ['https://wings.example.test'],
+        fetcher,
+      });
+      const error = await adapter
+        .uploadFile('fixture', 'file.bin', {
+          body: new ReadableStream({ cancel }, { highWaterMark: 0 }),
+          contentLength: 1,
+          maxBytes: 1,
+          signal: controller.signal,
+        })
+        .catch((error: unknown) => error);
+      expect(isUploadNotDispatched(error)).toBe(true);
+      waiting.resolve(
+        Response.json({ attributes: { url: 'https://wings.example.test/upload/file' } }),
+      );
+      await delay(1);
+      expect(fetcher.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
+      expect(cancel).toHaveBeenCalledOnce();
+    },
+  );
+  it.each(['synchronous-throw', 'lost-response', 'abort', 'timeout', 'early-success'])(
+    'retains uncertainty after invoking the upload POST for %s',
+    async (failure) => {
+      const controller = new AbortController();
+      const fetcher = vi.fn<typeof fetch>().mockImplementation(() => {
+        if (failure === 'synchronous-throw') throw new Error('not proof of delivery');
+        if (failure === 'lost-response') return Promise.reject(new Error('response lost'));
+        if (failure === 'early-success')
+          return Promise.resolve(new Response(null, { status: 204 }));
+        if (failure === 'abort') controller.abort();
+        return new Promise<Response>(() => {});
+      });
+      const error = await createUploadProxy({
+        ...options,
+        baseURL: 'https://panel.example.test',
+        uploadOrigins: ['https://wings.example.test'],
+        fetcher,
+      })('https://wings.example.test/upload/file', 'file.bin', {
+        body: bytes(1),
+        contentLength: 1,
+        maxBytes: 1,
+        signal: controller.signal,
+        idleTimeoutMs: 10,
+      }).catch((error: unknown) => error);
+      expect(error).toMatchObject({ outcome: 'unknown' });
+      expect(isUploadNotDispatched(error)).toBe(false);
+      expect(fetcher).toHaveBeenCalledOnce();
+    },
+  );
   it('handles already-aborted downloads and uploads without invoking work or leaking rejected promises', async () => {
     const rejections: unknown[] = [];
     const observe = (reason: unknown) => {
@@ -448,7 +835,7 @@ describe('stream validation and provider isolation', () => {
     await expect(
       adapter.uploadFile('fixture', 'file.bin', { body: bytes(1), contentLength: 1, maxBytes: 1 }),
     ).rejects.toMatchObject({ reason: 'unavailable' });
-    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
   it.each([1, 3])('rejects upload length mismatch with actual size %i', async (size) => {
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async (_, init) => {

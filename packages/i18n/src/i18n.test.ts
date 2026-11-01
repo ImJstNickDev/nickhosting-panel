@@ -92,6 +92,11 @@ describe('English/Italian foundation catalogs', () => {
     expect(localizeAuthError('INVALID_EMAIL_OR_PASSWORD', 'it').message).toBe(
       italian['auth.invalid_credentials'],
     );
+    for (const locale of supportedLocales)
+      expect(localizeAuthError('SESSION_NOT_FRESH', locale)).toEqual({
+        messageKey: 'auth.step_up_required',
+        message: translate(locale, 'auth.step_up_required'),
+      });
     expect(localizeError(new Error('private upstream response'), 'it').message).not.toContain(
       'private',
     );

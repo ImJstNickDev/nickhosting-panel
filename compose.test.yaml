@@ -12,7 +12,7 @@ services:
     ports:
       - "127.0.0.1::5432"
     volumes:
-      - ./mountdata/m1-tests/postgres:/var/lib/postgresql
+      - { type: bind, source: "${NH_MOUNTDATA_ROOT:-./mountdata}/m1-tests/postgres", target: /var/lib/postgresql, bind: { create_host_path: false } }
     mem_limit: 384m
     cpus: 1
     restart: "no"
@@ -29,7 +29,7 @@ services:
     ports:
       - "127.0.0.1::6379"
     volumes:
-      - ./mountdata/m1-tests/redis:/data
+      - { type: bind, source: "${NH_MOUNTDATA_ROOT:-./mountdata}/m1-tests/redis", target: /data, bind: { create_host_path: false } }
     mem_limit: 192m
     cpus: 1
     restart: "no"

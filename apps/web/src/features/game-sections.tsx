@@ -1,0 +1,1292 @@
+import {
+  type GameUiContext,
+  type TrustedGameUiModule,
+  type UiField,
+  type UiForm,
+  type UiOption,
+  type UiSectionData,
+  type UiValues,
+  uiOptionSchema,
+  validateUiValues,
+  visibleFields,
+} from '@nickhosting/game-sdk/ui';
+import { useQuery } from '@tanstack/react-query';
+import { type FormEvent, Suspense, useEffect, useId, useRef, useState } from 'react';
+import { Link } from 'react-router';
+import { z } from 'zod';
+import { ApiError, api, idempotencyKey, queryClient } from '../api/client.js';
+import { hashFile } from '../api/hash.js';
+import { useT } from '../app/i18n.js';
+import { useUnsavedChanges } from '../components/navigation-guard.js';
+import { Tooltip } from '../components/tooltip.js';
+import {
+  Check,
+  Dialog,
+  Empty,
+  ErrorNotice,
+  Input,
+  Loading,
+  Notice,
+  Section,
+  Select,
+  Textarea,
+  Time,
+} from '../components/ui.js';
+import type { GameSectionAcceptedOptions, GameSectionViewProps } from './game-section-view.js';
+import {
+  availableGameSections,
+  gameUiClient,
+  gameUiRegistry,
+  getGameFormView,
+  getGameSectionView,
+} from './integrations.js';
+import { useServer } from './service-contracts.js';
+
+export function GameFields({
+  module,
+  fields,
+  values,
+  onChange,
+  serverId,
+  disabled = false,
+  errors = {},
+  onChoices,
+  refreshToken = 0,
+}: {
+  module: TrustedGameUiModule;
+  fields: readonly UiField[];
+  values: UiValues;
+  onChange: (id: string, value: unknown) => void;
+  serverId?: string;
+  disabled?: boolean;
+  errors?: Record<string, string>;
+  onChoices?: (field: string, choices: UiOption[]) => void;
+  refreshToken?: number;
+}) {
+  return (
+    <>
+      {visibleFields(fields, values).map((field) => (
+        <GameField
+          key={field.id}
+          {...{ module, field, values, onChange, serverId, disabled, onChoices, refreshToken }}
+          error={errors[field.id]}
+        />
+      ))}
+    </>
+  );
+}
+function GameField({
+  module,
+  field,
+  values,
+  onChange,
+  serverId,
+  disabled,
+  error,
+  onChoices,
+  refreshToken,
+}: {
+  module: TrustedGameUiModule;
+  field: UiField;
+  values: UiValues;
+  onChange: (id: string, value: unknown) => void;
+  serverId?: string;
+  disabled: boolean;
+  error?: string;
+  onChoices?: (field: string, choices: UiOption[]) => void;
+  refreshToken: number;
+}) {
+  const t = useT(),
+    id = useId();
+  const value = values[field.id];
+  const [multiline, setMultiline] = useState(Array.isArray(value) ? value.join('\n') : '');
+  const [options, setOptions] = useState<UiOption[]>(field.type === 'choice' ? field.options : []),
+    [loading, setLoading] = useState(false),
+    [failure, setFailure] = useState<unknown>();
+  const [progress, setProgress] = useState<{
+      phase: 'hashing' | 'uploading';
+      sent: number;
+      total: number;
+    }>(),
+    [busy, setBusy] = useState(false);
+  const [identity, setIdentity] = useState<{ name: string; uuid: string; input: string }>();
+  const [archiveName, setArchiveName] = useState<string>();
+  const [fileSelection, setFileSelection] = useState(0);
+  const transfer = useRef<AbortController | undefined>(undefined);
+  const requestKey = useRef<string | undefined>(undefined);
+  const depends =
+    field.type === 'choice' && field.source
+      ? JSON.stringify(
+          Object.fromEntries(field.source.dependsOn.map((key) => [key, values[key] ?? null])),
+        )
+      : '';
+  const handler = field.type === 'choice' ? field.source?.handler : undefined;
+  const notifyChoices = useRef(onChoices);
+  notifyChoices.current = onChoices;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: confirmed jobs must refresh remote choices even when the form dependencies did not change.
+  useEffect(() => {
+    if (!handler) return;
+    const abort = new AbortController();
+    setLoading(true);
+    setFailure(undefined);
+    Promise.resolve()
+      .then(() =>
+        module.handlers[handler]?.(gameUiClient, {
+          serverId,
+          values: JSON.parse(depends),
+          signal: abort.signal,
+        }),
+      )
+      .then((result) => {
+        if (abort.signal.aborted) return;
+        const parsed = z.array(uiOptionSchema).max(10000).parse(result);
+        setOptions(parsed);
+        notifyChoices.current?.(field.id, parsed);
+      })
+      .catch((error) => {
+        if (!abort.signal.aborted) {
+          setFailure(error);
+          setOptions([]);
+          notifyChoices.current?.(field.id, []);
+        }
+      })
+      .finally(() => {
+        if (!abort.signal.aborted) setLoading(false);
+      });
+    return () => abort.abort();
+    // Values referenced by a choices handler are explicitly declared in its descriptor.
+  }, [handler, depends, module, serverId, field.id, refreshToken]);
+  useEffect(() => () => transfer.current?.abort(), []);
+  useEffect(() => {
+    if (field.type === 'archive' && !value && !busy) setArchiveName(undefined);
+  }, [field.type, value, busy]);
+  const hint = field.helpKey ? t(field.helpKey) : undefined;
+  async function upload(file: File) {
+    if (field.type !== 'archive' || busy) return;
+    const abort = new AbortController();
+    transfer.current = abort;
+    setBusy(true);
+    setFailure(undefined);
+    setArchiveName(file.name);
+    onChange(field.id, undefined);
+    requestKey.current = idempotencyKey();
+    try {
+      setProgress({ phase: 'hashing', sent: 0, total: file.size });
+      const sha256 = await hashFile(file, {
+        signal: abort.signal,
+        onProgress: (sent) => setProgress({ phase: 'hashing', sent, total: file.size }),
+      });
+      setProgress({ phase: 'uploading', sent: 0, total: file.size });
+      const client = {
+        ...gameUiClient,
+        upload: (path: string, body: Blob, options: { bytes: number; signal?: AbortSignal }) =>
+          gameUiClient.upload?.(path, body, {
+            ...options,
+            onProgress: (sent, total) => setProgress({ phase: 'uploading', sent, total }),
+          }),
+      };
+      const result = z
+        .object({ id: z.uuid(), state: z.literal('ready') })
+        .passthrough()
+        .parse(
+          await module.handlers[field.handler]?.(client as typeof gameUiClient, {
+            serverId,
+            values: { file, sha256 },
+            signal: abort.signal,
+            idempotencyKey: requestKey.current,
+          }),
+        );
+      onChange(field.id, result.id);
+    } catch (cause) {
+      if (cause instanceof DOMException && cause.name === 'AbortError')
+        setFailure(new ApiError('cancelled', 'gameUi.transferCancelled'));
+      else setFailure(cause);
+    } finally {
+      setBusy(false);
+      setProgress(undefined);
+      transfer.current = undefined;
+      setFileSelection((previous) => previous + 1);
+    }
+  }
+  async function lookup() {
+    if ((field.type !== 'text' && field.type !== 'textarea') || !field.lookupHandler) return;
+    setBusy(true);
+    setFailure(undefined);
+    setIdentity(undefined);
+    try {
+      const result = z.object({ name: z.string(), uuid: z.string() }).parse(
+        await module.handlers[field.lookupHandler]?.(gameUiClient, {
+          serverId,
+          values: { [field.id]: value },
+        }),
+      );
+      setIdentity({ ...result, input: String(value) });
+    } catch (error) {
+      setFailure(error);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function preview() {
+    if (field.type !== 'preview') return;
+    setBusy(true);
+    setFailure(undefined);
+    try {
+      const result = z
+        .array(z.string())
+        .max(field.maxItems)
+        .parse(await module.handlers[field.handler]?.(gameUiClient, { serverId, values }));
+      onChange(field.id, result);
+    } catch (cause) {
+      setFailure(cause);
+    } finally {
+      setBusy(false);
+    }
+  }
+  const shared = {
+    id,
+    disabled: disabled || busy,
+    'aria-invalid': Boolean(error),
+    'aria-describedby': error ? `${id}-error` : undefined,
+  };
+  return (
+    <div className="stack">
+      {field.type === 'boolean' ? (
+        <Check
+          {...shared}
+          label={t(field.labelKey)}
+          checked={value === true}
+          required={field.required && field.mustBeTrue}
+          onChange={(event) => onChange(field.id, event.target.checked)}
+        />
+      ) : null}
+      {field.type === 'text' || field.type === 'textarea' ? (
+        field.type === 'textarea' ? (
+          <Textarea
+            {...shared}
+            label={t(field.labelKey)}
+            value={typeof value === 'string' ? value : ''}
+            required={field.required}
+            minLength={field.minLength}
+            maxLength={field.maxLength}
+            onChange={(event) => onChange(field.id, event.target.value)}
+          />
+        ) : (
+          <Input
+            {...shared}
+            label={t(field.labelKey)}
+            hint={hint}
+            value={typeof value === 'string' ? value : ''}
+            required={field.required}
+            minLength={field.minLength}
+            maxLength={field.maxLength}
+            onChange={(event) => onChange(field.id, event.target.value)}
+          />
+        )
+      ) : null}
+      {field.type === 'number' ? (
+        <Input
+          {...shared}
+          label={t(field.labelKey)}
+          type="number"
+          min={field.min}
+          max={field.max}
+          step={field.integer ? 1 : 'any'}
+          required={field.required}
+          value={typeof value === 'number' ? value : ''}
+          onChange={(event) =>
+            onChange(field.id, event.target.value === '' ? undefined : Number(event.target.value))
+          }
+        />
+      ) : null}
+      {field.type === 'choice' ? (
+        <>
+          <Select
+            {...shared}
+            label={t(field.labelKey)}
+            required={field.required}
+            disabled={disabled || loading || busy}
+            value={typeof value === 'string' ? value : ''}
+            onChange={(event) => onChange(field.id, event.target.value)}
+          >
+            <option value="">
+              {loading
+                ? t('web.loading')
+                : options.length
+                  ? t('gameUi.select')
+                  : t('gameUi.noOptions')}
+            </option>
+            {options.map((option) => (
+              <option key={option.value} value={option.value} disabled={option.disabled}>
+                {option.labelKey ? t(option.labelKey) : option.label}
+              </option>
+            ))}
+          </Select>
+          {loading && <span role="status">{t('web.loading')}</span>}
+        </>
+      ) : null}
+      {field.type === 'multi-text' ? (
+        <Textarea
+          {...shared}
+          label={t(field.labelKey)}
+          value={multiline}
+          required={field.required}
+          onChange={(event) => {
+            setMultiline(event.target.value);
+            onChange(
+              field.id,
+              event.target.value
+                .split(/\r?\n/)
+                .filter((line) => line.trim())
+                .map((line) => line.trim()),
+            );
+          }}
+        />
+      ) : null}
+      {field.type === 'archive' ? (
+        <>
+          <Input
+            key={fileSelection}
+            {...shared}
+            label={t(field.labelKey)}
+            type="file"
+            accept={field.accept.join(',')}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void upload(file);
+            }}
+          />
+          {typeof value === 'string' && (
+            <p role="status">
+              <span>{t('gameUi.archived')}</span>
+              {archiveName && <>: {archiveName}</>}
+            </p>
+          )}
+          {progress && (
+            <>
+              <label htmlFor={`${id}-progress`}>{t(`gameUi.${progress.phase}`)}</label>
+              <progress id={`${id}-progress`} value={progress.sent} max={progress.total} />
+              <button type="button" className="secondary" onClick={() => transfer.current?.abort()}>
+                {t('web.cancel')}
+              </button>
+            </>
+          )}
+        </>
+      ) : null}
+      {field.type === 'archive' && field.catalog && (
+        <ArchiveCatalog
+          module={module}
+          field={field}
+          serverId={serverId}
+          disabled={disabled || busy}
+          onSelected={(id) => onChange(field.id, id)}
+        />
+      )}
+      {field.type === 'preview' ? (
+        <>
+          <button
+            type="button"
+            className="secondary"
+            disabled={disabled || busy}
+            onClick={() => void preview()}
+          >
+            {t(field.labelKey)}
+          </button>
+          {Array.isArray(value) ? (
+            value.length ? (
+              <ul>
+                {value.map((path) => (
+                  <li key={String(path)}>
+                    <code>{String(path)}</code>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p>{t('gameUi.emptyPreview')}</p>
+            )
+          ) : (
+            <p>{t('gameUi.previewRequired')}</p>
+          )}
+        </>
+      ) : null}
+      {field.type === 'file' ? (
+        <Input
+          {...shared}
+          label={t(field.labelKey)}
+          type="file"
+          accept={field.accept.join(',')}
+          required={field.required}
+          onChange={(event) => onChange(field.id, event.target.files?.[0])}
+        />
+      ) : null}
+      {(field.type === 'text' || field.type === 'textarea') && field.lookupHandler && (
+        <>
+          <button
+            type="button"
+            className="secondary"
+            disabled={disabled || busy || !value}
+            onClick={() => void lookup()}
+          >
+            {t('gameUi.lookup')}
+          </button>
+          {identity && identity.input === value && (
+            <p role="status">
+              {t('gameUi.verifiedIdentity')}: {identity.name} <code>{identity.uuid}</code>
+            </p>
+          )}
+        </>
+      )}
+      {field.documentation && (
+        <a href={field.documentation.url} target="_blank" rel="noreferrer">
+          {t(field.documentation.labelKey)}
+        </a>
+      )}
+      {error && (
+        <p className="field-error" id={`${id}-error`}>
+          {t(`gameUi.${error}`)}
+        </p>
+      )}
+      {failure !== undefined && <ErrorNotice error={failure} />}
+    </div>
+  );
+}
+
+export function GameSections({
+  serverId,
+  sectionId,
+  gameId,
+}: {
+  serverId: string;
+  sectionId: string;
+  gameId: string;
+}) {
+  const t = useT(),
+    server = useServer(serverId),
+    module = gameUiRegistry.get(gameId),
+    section = module?.descriptor.sections.find((s) => s.id === sectionId);
+  const permissions = [
+    ...Object.entries(server.data?.permissions ?? {}).flatMap(([name, allowed]) =>
+      allowed ? [`server:${name}`] : [],
+    ),
+    ...(server.data?.permissionKeys ?? []),
+  ];
+  const canManageSection = Boolean(
+    section?.requiredPermissions.some(
+      (read) =>
+        read.endsWith('.read') &&
+        permissions.some(
+          (permission) =>
+            permission.startsWith(read.slice(0, -4)) &&
+            permission !== read &&
+            !permission.endsWith('.download'),
+        ),
+    ),
+  );
+  const hasSectionPermission = Boolean(
+    section?.requiredPermissions.every((permission) => permissions.includes(permission)),
+  );
+  const canReadSection = Boolean(
+    server.data &&
+      module &&
+      availableGameSections(server.data, module).some((candidate) => candidate.id === sectionId),
+  );
+  const loaded = useQuery({
+    queryKey: ['game-section', serverId, gameId, sectionId],
+    enabled: Boolean(module && section && canReadSection),
+    // An operation can finish while this section is unmounted and clear the active ID.
+    refetchOnMount: 'always',
+    queryFn: ({ signal }) =>
+      module?.handlers[section?.loader ?? '']?.(gameUiClient, {
+        serverId,
+        values: { sectionId: section?.id },
+        signal,
+      }) as Promise<UiSectionData>,
+  });
+  const [trackedOperation, setTrackedOperation] = useState<{
+    serverId: string;
+    id: string;
+    gameId?: string;
+    sectionId?: string;
+    confirmedUpdate?: GameSectionAcceptedOptions['confirmedUpdate'];
+    refetchSectionOnSuccess?: boolean;
+    quickUntil?: number;
+  }>();
+  const [operationEventsConnected, setOperationEventsConnected] = useState(false);
+  const operationId =
+    trackedOperation?.serverId === serverId
+      ? trackedOperation.id
+      : canReadSection
+        ? (server.data?.activeOperationId ?? undefined)
+        : undefined;
+  const setOperationId = (id: string, options?: GameSectionAcceptedOptions) =>
+    setTrackedOperation({
+      serverId,
+      id,
+      gameId,
+      sectionId,
+      confirmedUpdate: options?.confirmedUpdate,
+      refetchSectionOnSuccess: options?.refetchSectionOnSuccess,
+      quickUntil: options?.quickCompletion ? Date.now() + 5000 : undefined,
+    });
+  const [completedOperationId, setCompletedOperationId] = useState<string>();
+  const [refreshToken, setRefreshToken] = useState(0);
+  const refreshedOperation = useRef<string | undefined>(undefined);
+  const refreshedOutcome = useRef<string | undefined>(undefined);
+  const patchedOperation = useRef<string | undefined>(undefined);
+  const operationServer = useRef(serverId);
+  useEffect(() => {
+    if (operationServer.current === serverId) return;
+    operationServer.current = serverId;
+    refreshedOperation.current = undefined;
+    refreshedOutcome.current = undefined;
+    patchedOperation.current = undefined;
+    setTrackedOperation(undefined);
+    setCompletedOperationId(undefined);
+    setRefreshToken(0);
+  }, [serverId]);
+  useEffect(() => {
+    if (!canReadSection || !server.data?.activeOperationId) return;
+    const id = server.data.activeOperationId;
+    setTrackedOperation((current) =>
+      current?.serverId === serverId && current.id === id ? current : { serverId, id },
+    );
+  }, [canReadSection, serverId, server.data?.activeOperationId]);
+  const operation = useQuery({
+    queryKey: ['game-operation', serverId, operationId],
+    enabled: Boolean(operationId && canReadSection),
+    queryFn: async ({ signal }) => {
+      const result = await api<{
+        serverId: string;
+        state: string;
+        effectState: string | null;
+        fileTransfer?: GameSectionViewProps['fileTransfer'];
+      }>(`/v1/platform/jobs/${operationId}`, {
+        signal,
+      });
+      if (result.serverId !== serverId)
+        throw new ApiError('not_found', 'errors.not_found', undefined, 404);
+      return result;
+    },
+    refetchInterval: (query) => {
+      const result = query.state.data;
+      const interval =
+        trackedOperation?.serverId === serverId &&
+        trackedOperation.id === operationId &&
+        !operationEventsConnected &&
+        Date.now() < (trackedOperation.quickUntil ?? 0)
+          ? 250
+          : 1000;
+      if (result && ['uncertain', 'prepared'].includes(result.effectState ?? ''))
+        return result.state === 'failed' ? 5000 : interval;
+      return result && ['succeeded', 'failed'].includes(result.state) ? false : interval;
+    },
+  });
+  const operationState = operation.data?.state;
+  const effectState = operation.data?.effectState;
+  const operationTerminal = operationState === 'succeeded' || operationState === 'failed';
+  useEffect(() => {
+    if (!canReadSection || !operationId || operationTerminal) return;
+    const queryKey = ['game-operation', serverId, operationId];
+    let closed = false;
+    const refresh = () => {
+      // A read already in flight may describe the state before the commit.
+      // Discard it before requesting the authoritative outcome after the hint.
+      void queryClient.cancelQueries({ queryKey, exact: true }).then(() => {
+        if (!closed) return queryClient.refetchQueries({ queryKey, exact: true });
+      });
+    };
+    const events = new EventSource(`/v1/servers/${serverId}/events/stream?after=latest`, {
+      withCredentials: true,
+    });
+    events.addEventListener('ready', () => {
+      setOperationEventsConnected(true);
+      refresh();
+    });
+    events.addEventListener('activity', (event: MessageEvent<string>) => {
+      try {
+        const value = JSON.parse(event.data) as Record<string, unknown>;
+        if (
+          value.serverId === serverId ||
+          (value.server_id === serverId &&
+            value.job_id === operationId &&
+            ['servers.operation.succeeded', 'servers.operation.failed'].includes(
+              String(value.message_key),
+            ))
+        )
+          refresh();
+      } catch {
+        // Malformed notifications cannot confirm an effect. Polling remains available.
+      }
+    });
+    events.onerror = () => setOperationEventsConnected(false);
+    return () => {
+      closed = true;
+      events.close();
+      setOperationEventsConnected(false);
+    };
+  }, [canReadSection, operationId, operationTerminal, serverId]);
+  useEffect(() => {
+    if (
+      !canReadSection ||
+      !operationId ||
+      !operation.dataUpdatedAt ||
+      !operationState ||
+      !['succeeded', 'failed'].includes(operationState) ||
+      (refreshedOperation.current === operationId &&
+        refreshedOutcome.current === `${operationState}:${effectState}`)
+    )
+      return;
+    let cancelled = false;
+    void (async () => {
+      const update =
+        trackedOperation?.serverId === serverId &&
+        trackedOperation.id === operationId &&
+        trackedOperation.gameId === gameId &&
+        trackedOperation.sectionId === sectionId
+          ? trackedOperation.confirmedUpdate
+          : undefined;
+      const patchKey = `${serverId}:${gameId}:${sectionId}:${operationId}`;
+      if (
+        operationState === 'succeeded' &&
+        effectState === 'confirmed' &&
+        update &&
+        patchedOperation.current !== patchKey
+      ) {
+        const queryKey = ['game-section', serverId, gameId, sectionId];
+        // An older inventory response must not undo a confirmed change.
+        await queryClient.cancelQueries({ queryKey, exact: true });
+        if (cancelled) return;
+        patchedOperation.current = patchKey;
+        queryClient.setQueryData<UiSectionData>(queryKey, (current) =>
+          current ? update(current) : current,
+        );
+      }
+      const sectionAlreadyUpdated =
+        operationState === 'succeeded' &&
+        effectState === 'confirmed' &&
+        patchedOperation.current === patchKey &&
+        trackedOperation?.refetchSectionOnSuccess === false;
+      const [sectionResult, serverResult] = await Promise.all([
+        sectionAlreadyUpdated ? undefined : loaded.refetch(),
+        server.refetch(),
+      ]);
+      if (cancelled || sectionResult?.error || serverResult.error) return;
+      refreshedOperation.current = operationId;
+      refreshedOutcome.current = `${operationState}:${effectState}`;
+      setRefreshToken((previous) => previous + 1);
+      if (operationState === 'succeeded' && effectState === 'confirmed')
+        setCompletedOperationId(operationId);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    canReadSection,
+    operationId,
+    operationState,
+    effectState,
+    operation.dataUpdatedAt,
+    loaded.refetch,
+    server.refetch,
+    trackedOperation,
+    serverId,
+    gameId,
+    sectionId,
+  ]);
+  const patchedCompletion =
+    operationState === 'succeeded' &&
+    effectState === 'confirmed' &&
+    patchedOperation.current === `${serverId}:${gameId}:${sectionId}:${operationId}`;
+  const pendingOperation = Boolean(
+    operationId &&
+      (!operation.data ||
+        ['uncertain', 'prepared'].includes(operation.data.effectState ?? '') ||
+        ['queued', 'running'].includes(operation.data.state) ||
+        (!patchedCompletion &&
+          (refreshedOperation.current !== operationId ||
+            refreshedOutcome.current !== `${operationState}:${effectState}`))),
+  );
+  const serverOperationPending = Boolean(
+    server.data?.activeOperationId &&
+      !(patchedCompletion && server.data.activeOperationId === operationId),
+  );
+  if (!module || !section) return <Empty text={t('gameUi.missingSection')} />;
+  const SectionView = getGameSectionView(section.renderer);
+  const refreshError = server.error ?? loaded.error;
+  const recoverableOperationId =
+    canManageSection &&
+    server.data?.activeOperationId === operationId &&
+    operationState === 'uncertain' &&
+    !operation.error &&
+    !refreshError
+      ? operationId
+      : undefined;
+  const retryReads = () => {
+    void server.refetch();
+    void loaded.refetch();
+    if (operationId) void operation.refetch();
+  };
+  if (server.isPending) return <Loading />;
+  if (server.error && !server.data) return <ErrorNotice error={server.error} retry={retryReads} />;
+  if (!hasSectionPermission) return <Notice>{t('gameUi.noPermission')}</Notice>;
+  if (!canReadSection) return <Empty text={t('gameUi.missingSection')} />;
+  if (loaded.isPending) return <Loading />;
+  // Retain custom view state (including frozen uncertain submission keys) when a
+  // background read fails. Stale data is visible, but mutations remain blocked.
+  if (
+    refreshError &&
+    (!server.data ||
+      !loaded.data ||
+      (refreshError instanceof ApiError && [401, 403, 404].includes(refreshError.status)))
+  )
+    return <ErrorNotice error={refreshError} retry={retryReads} />;
+  if (!server.data || !loaded.data) return <Empty />;
+
+  return (
+    <>
+      {Boolean(refreshError) && <ErrorNotice error={refreshError} retry={retryReads} />}
+      {operation.error && (
+        <ErrorNotice error={operation.error} retry={() => void operation.refetch()} />
+      )}
+      {operationId && (operationState === 'failed' || effectState === 'uncertain') && (
+        <Notice>
+          {t(
+            ['uncertain', 'prepared'].includes(effectState ?? '')
+              ? 'gameUi.saveUncertain'
+              : SectionView
+                ? 'gameUi.operationFailed'
+                : 'gameUi.saveFailed',
+          )}{' '}
+          <Link to={`/activity/${operationId}`}>{t('web.viewActivity')}</Link>
+        </Notice>
+      )}
+      {!SectionView && loaded.data.metadata?.installed === false && (
+        <Notice>{t('gameUi.profileNotReady')}</Notice>
+      )}
+      {SectionView && (
+        <Suspense fallback={<Loading />}>
+          <SectionView
+            key={`${serverId}-${section.id}`}
+            data={loaded.data}
+            serverId={serverId}
+            serverName={server.data.name}
+            runtimeState={server.data.runtimeState}
+            canManage={canManageSection}
+            permissionKeys={server.data.permissionKeys}
+            pending={pendingOperation || serverOperationPending || Boolean(refreshError)}
+            recoverableOperationId={recoverableOperationId}
+            operation={
+              operation.data && {
+                state: operation.data.state,
+                effectState: operation.data.effectState,
+              }
+            }
+            fileTransfer={pendingOperation ? operation.data?.fileTransfer : undefined}
+            onAccepted={(jobId, options) => {
+              setOperationId(jobId, options);
+              void server.refetch();
+            }}
+            reload={() => loaded.refetch({ throwOnError: true })}
+          />
+        </Suspense>
+      )}
+      {!SectionView && section.columns.length > 0 && (
+        <Section title={t(section.titleKey)}>
+          {loaded.data.rows.length ? (
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    {section.columns.map((column) => (
+                      <th key={column.id}>{t(column.labelKey)}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {loaded.data.rows.map((row, index) => (
+                    <tr key={`${String(row.id ?? row.path ?? row.name ?? index)}`}>
+                      {section.columns.map((column) => (
+                        <td key={column.id}>
+                          {column.format === 'date' && typeof row[column.id] === 'string' ? (
+                            <Time value={row[column.id] as string} />
+                          ) : column.format === 'message' && typeof row[column.id] === 'string' ? (
+                            t(String(row[column.id]))
+                          ) : (
+                            String(row[column.id] ?? '—')
+                          )}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <Empty text={t('gameUi.noRows')} />
+          )}
+        </Section>
+      )}
+      {!SectionView &&
+        section.forms.map((form) => {
+          const capability = form.action?.requiredCapabilities.every(
+            (cap) =>
+              server.data.capabilities?.[
+                cap as keyof NonNullable<typeof server.data.capabilities>
+              ] === true,
+          );
+          const profileCapability = form.action?.requiredCapabilities.every(
+            (cap) => loaded.data.metadata?.[cap] !== false,
+          );
+          if (capability === false || profileCapability === false) return null;
+          return (
+            <GameActionForm
+              key={`${serverId}-${form.id}`}
+              {...{ module, form, serverId }}
+              serverName={server.data.name}
+              data={loaded.data}
+              canManage={
+                form.action?.requiredPermissions.every((p) => permissions.includes(p)) ?? false
+              }
+              state={server.data.runtimeState}
+              activeOperation={
+                pendingOperation || Boolean(server.data.activeOperationId) || Boolean(refreshError)
+              }
+              unresolvedOperation={
+                effectState === 'uncertain' ||
+                (operationState === 'failed' && effectState === 'prepared')
+              }
+              refreshToken={refreshToken}
+              completedOperationId={completedOperationId}
+              onAccepted={(jobId) => {
+                setOperationId(jobId, { quickCompletion: form.submitChangedOnly === true });
+                void server.refetch();
+              }}
+            />
+          );
+        })}
+    </>
+  );
+}
+function GameActionForm({
+  module,
+  form,
+  serverId,
+  serverName,
+  data,
+  canManage,
+  state,
+  activeOperation,
+  unresolvedOperation,
+  onAccepted,
+  refreshToken,
+  completedOperationId,
+}: {
+  module: TrustedGameUiModule;
+  form: UiForm;
+  serverId: string;
+  serverName: string;
+  data: UiSectionData;
+  canManage: boolean;
+  state: string;
+  activeOperation: boolean;
+  unresolvedOperation: boolean;
+  onAccepted: (jobId: string) => void;
+  refreshToken: number;
+  completedOperationId?: string;
+}) {
+  const t = useT();
+  const [values, setValues] = useState<Record<string, unknown>>({ ...data.values }),
+    [choices, setChoices] = useState<Record<string, UiOption[]>>({}),
+    [errors, setErrors] = useState<Record<string, string>>({});
+  const [failure, setFailure] = useState<unknown>(),
+    [busy, setBusy] = useState(false),
+    [confirm, setConfirm] = useState(false),
+    [job, setJob] = useState<string>();
+  const key = useRef(idempotencyKey()),
+    summary = useRef<HTMLDivElement>(null);
+  const dirty = useRef(new Map<string, number>());
+  const editRevision = useRef(0);
+  const submitted = useRef<{ jobId: string; revision: number } | undefined>(undefined);
+  const synchronizedJob = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (completedOperationId && completedOperationId === job && synchronizedJob.current !== job) {
+      if (submitted.current?.jobId === job) {
+        for (const [name, revision] of dirty.current)
+          if (revision <= submitted.current.revision) dirty.current.delete(name);
+      }
+      synchronizedJob.current = job;
+    }
+    setValues((previous) => ({
+      ...data.values,
+      ...Object.fromEntries([...dirty.current.keys()].map((name) => [name, previous[name]])),
+    }));
+  }, [data.values, completedOperationId, job]);
+  const fields = data.editableFields
+    ? form.fields.filter((f) => data.editableFields?.includes(f.id))
+    : form.fields;
+  // Destructive actions retain the shared confirmation view.
+  const View = form.action?.destructive ? undefined : getGameFormView(form.renderer);
+  const changedFields = fields.filter(
+    (field) => !Object.is(values[field.id], data.values[field.id]),
+  );
+  const hasChanges = changedFields.length > 0;
+  useUnsavedChanges(hasChanges || busy, busy);
+  const blocked =
+    !canManage || activeOperation || (form.action?.requiresStopped && state !== 'offline');
+  const context: GameUiContext = {
+    serverId,
+    values: Object.fromEntries(
+      (form.submitChangedOnly ? changedFields : fields)
+        .filter((f) => visibleFields(fields, values).includes(f))
+        .map((f) => [f.id, values[f.id]])
+        .filter(([, v]) => v !== undefined),
+    ),
+    idempotencyKey: key.current,
+  };
+  const onChange = (id: string, value: unknown) => {
+    dirty.current.set(id, ++editRevision.current);
+    setValues((previous) => ({ ...previous, [id]: value }));
+    setErrors((previous) => ({ ...previous, [id]: '' }));
+    key.current = idempotencyKey();
+  };
+  async function submit(event?: FormEvent) {
+    event?.preventDefault();
+    if (!form.action || blocked || busy || (form.submitChangedOnly && !hasChanges)) return;
+    const invalid = validateUiValues(
+      form.submitChangedOnly ? changedFields : fields,
+      values,
+      choices,
+    );
+    setErrors(Object.fromEntries(invalid.map((e) => [e.field, e.code])));
+    if (invalid.length) {
+      setTimeout(() => summary.current?.focus(), 0);
+      return;
+    }
+    if (form.action.destructive && !confirm) {
+      setConfirm(true);
+      return;
+    }
+    setBusy(true);
+    setFailure(undefined);
+    const submittedRevision = editRevision.current;
+    try {
+      const result = z
+        .object({ jobId: z.uuid() })
+        .passthrough()
+        .parse(await module.handlers[form.action.handler]?.(gameUiClient, context));
+      setJob(result.jobId);
+      submitted.current = { jobId: result.jobId, revision: submittedRevision };
+      key.current = idempotencyKey();
+      setConfirm(false);
+      onAccepted(result.jobId);
+    } catch (error) {
+      setFailure(error);
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (View) {
+    const reset = () => {
+      dirty.current.clear();
+      setValues({ ...data.values });
+      setErrors({});
+      setFailure(undefined);
+      key.current = idempotencyKey();
+    };
+    return (
+      <form
+        aria-label={t(form.titleKey)}
+        onSubmit={(event) => void submit(event)}
+        aria-busy={busy || activeOperation}
+      >
+        <Suspense
+          fallback={
+            <div
+              className="game-form-skeleton"
+              role="status"
+              aria-busy="true"
+              aria-label={t('web.loading')}
+            />
+          }
+        >
+          <View
+            {...{ fields, values, errors, data, onChange, serverName }}
+            disabled={Boolean(blocked) || busy}
+            dirty={hasChanges}
+            feedback={
+              <>
+                {!canManage ? (
+                  <Notice>{t('gameUi.noPermission')}</Notice>
+                ) : form.action?.requiresStopped && state !== 'offline' ? (
+                  <Notice>{t('gameUi.stopFirst')}</Notice>
+                ) : null}
+                {Object.values(errors).some(Boolean) && (
+                  <div ref={summary} role="alert" tabIndex={-1}>
+                    {t('gameUi.required')}
+                  </div>
+                )}
+                {failure !== undefined && <ErrorNotice error={failure} />}
+                {fields.length === 0 && (
+                  <Empty text={t(form.emptyMessageKey ?? 'gameUi.noFields')} />
+                )}
+              </>
+            }
+            actions={
+              canManage && hasChanges && form.action ? (
+                <>
+                  <Tooltip content={t('gameUi.resetChanges')}>
+                    <button
+                      type="button"
+                      className="game-form-reset"
+                      aria-label={t('gameUi.resetChanges')}
+                      disabled={busy || activeOperation}
+                      onClick={reset}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        width="18"
+                        height="18"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.7"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M3 10a9 9 0 1 1 2 8M3 4v6h6" />
+                      </svg>
+                    </button>
+                  </Tooltip>
+                  <button type="submit" disabled={Boolean(blocked) || busy}>
+                    {busy || (activeOperation && !unresolvedOperation)
+                      ? t('web.pending')
+                      : t(form.action.labelKey)}
+                  </button>
+                </>
+              ) : null
+            }
+          />
+        </Suspense>
+      </form>
+    );
+  }
+  return (
+    <Section title={t(form.titleKey)}>
+      {fields.length === 0 && form.fields.length > 0 ? (
+        <Empty text={t(form.emptyMessageKey ?? 'gameUi.noFields')} />
+      ) : (
+        <form className="form" onSubmit={(event) => void submit(event)} aria-busy={busy}>
+          {!canManage ? (
+            <Notice>{t('gameUi.noPermission')}</Notice>
+          ) : form.action?.requiresStopped && state !== 'offline' ? (
+            <Notice>{t('gameUi.stopFirst')}</Notice>
+          ) : null}
+          {Object.values(errors).some(Boolean) && (
+            <div ref={summary} role="alert" tabIndex={-1}>
+              <p>{t('gameUi.required')}</p>
+            </div>
+          )}
+          {failure !== undefined && <ErrorNotice error={failure} />}
+          <fieldset disabled={Boolean(blocked) || busy}>
+            <GameFields
+              {...{ module, fields, values, onChange, serverId, errors, refreshToken }}
+              onChoices={(id, options) =>
+                setChoices((previous) => ({ ...previous, [id]: options }))
+              }
+            />
+          </fieldset>
+          {form.action && (
+            <div className="form-footer">
+              <button
+                className={form.action.destructive ? 'danger' : undefined}
+                type="submit"
+                disabled={Boolean(blocked) || busy}
+              >
+                {t(form.action.labelKey)}
+              </button>
+            </div>
+          )}
+        </form>
+      )}
+      <Dialog
+        open={confirm}
+        title={t('gameUi.confirmAction')}
+        onClose={() => {
+          if (!busy) setConfirm(false);
+        }}
+      >
+        <div className="stack">
+          <p>{form.action?.confirmationKey && t(form.action.confirmationKey)}</p>
+          <button className="danger" type="button" disabled={busy} onClick={() => void submit()}>
+            {form.action && t(form.action.labelKey)}
+          </button>
+        </div>
+      </Dialog>
+    </Section>
+  );
+}
+
+function ArchiveCatalog({
+  module,
+  field,
+  serverId,
+  disabled,
+  onSelected,
+}: {
+  module: TrustedGameUiModule;
+  field: Extract<UiField, { type: 'archive' }>;
+  serverId?: string;
+  disabled: boolean;
+  onSelected: (id: string) => void;
+}) {
+  const t = useT();
+  const [query, setQuery] = useState(''),
+    [hits, setHits] = useState<{ projectId: string; title: string; description: string }[]>(),
+    [projectId, setProjectId] = useState(''),
+    [versions, setVersions] = useState<{ versionId: string; name: string; version: string }[]>([]),
+    [versionId, setVersionId] = useState(''),
+    [busy, setBusy] = useState(false),
+    [failure, setFailure] = useState<unknown>();
+  const abort = useRef<AbortController | undefined>(undefined),
+    key = useRef(idempotencyKey());
+  useEffect(() => () => abort.current?.abort(), []);
+  async function search() {
+    if (!field.catalog) return;
+    setBusy(true);
+    setFailure(undefined);
+    setProjectId('');
+    setVersionId('');
+    setVersions([]);
+    const controller = new AbortController();
+    abort.current = controller;
+    try {
+      const data = z
+        .object({
+          hits: z.array(
+            z.object({ projectId: z.string(), title: z.string(), description: z.string() }),
+          ),
+        })
+        .parse(
+          await module.handlers[field.catalog.searchHandler]?.(gameUiClient, {
+            serverId,
+            values: { query },
+            signal: controller.signal,
+          }),
+        );
+      setHits(data.hits);
+    } catch (error) {
+      setFailure(error);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function choose(project: string) {
+    if (!field.catalog) return;
+    setProjectId(project);
+    setVersionId('');
+    setVersions([]);
+    setBusy(true);
+    setFailure(undefined);
+    key.current = idempotencyKey();
+    try {
+      setVersions(
+        z.array(z.object({ versionId: z.string(), name: z.string(), version: z.string() })).parse(
+          await module.handlers[field.catalog.versionsHandler]?.(gameUiClient, {
+            serverId,
+            values: { projectId: project },
+          }),
+        ),
+      );
+    } catch (error) {
+      setFailure(error);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function acquire() {
+    if (!field.catalog || !projectId || !versionId) return;
+    setBusy(true);
+    setFailure(undefined);
+    try {
+      const source = z.object({ id: z.string().uuid(), state: z.literal('ready') }).parse(
+        await module.handlers[field.catalog.acquireHandler]?.(gameUiClient, {
+          serverId,
+          idempotencyKey: key.current,
+          values: { projectId, versionId },
+        }),
+      );
+      onSelected(source.id);
+    } catch (error) {
+      setFailure(error);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <details>
+      <summary>{t('gameUi.providerSearch')}</summary>
+      <div className="stack">
+        <Input
+          label={t('gameUi.search')}
+          value={query}
+          maxLength={256}
+          disabled={disabled || busy}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <button
+          type="button"
+          className="secondary"
+          disabled={disabled || busy}
+          onClick={() => void search()}
+        >
+          {t('gameUi.search')}
+        </button>
+        {failure !== undefined && <ErrorNotice error={failure} />} {busy && <Loading />}
+        {hits?.length === 0 && <Empty />}
+        {hits && hits.length > 0 && (
+          <Select
+            label={t('gameUi.providerSearch')}
+            disabled={disabled || busy}
+            value={projectId}
+            onChange={(event) => void choose(event.target.value)}
+          >
+            <option value="">{t('gameUi.select')}</option>
+            {hits.map((hit) => (
+              <option value={hit.projectId} key={hit.projectId}>
+                {hit.title}
+              </option>
+            ))}
+          </Select>
+        )}
+        {projectId && (
+          <Select
+            label={t('gameUi.packVersion')}
+            value={versionId}
+            disabled={disabled || busy}
+            onChange={(event) => {
+              setVersionId(event.target.value);
+              key.current = idempotencyKey();
+            }}
+          >
+            <option value="">{versions.length ? t('gameUi.select') : t('gameUi.noOptions')}</option>
+            {versions.map((version) => (
+              <option key={version.versionId} value={version.versionId}>
+                {version.name}
+              </option>
+            ))}
+          </Select>
+        )}
+        {versionId && (
+          <button
+            type="button"
+            className="secondary"
+            disabled={disabled || busy}
+            onClick={() => void acquire()}
+          >
+            {t('gameUi.selectPack')}
+          </button>
+        )}
+      </div>
+    </details>
+  );
+}

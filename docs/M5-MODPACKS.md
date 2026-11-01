@@ -1,0 +1,502 @@
+# Minecraft Modpacks (M5)
+
+The Minecraft integration provides an installed-pack view, a searchable catalog,
+full-page project details and a durable one-click Install flow. Browsing and
+Check for Updates are read-only. Install records the selected version and options,
+then opens Console while the worker prepares and applies the exact plan. Blockers
+remain available in Review installation; a clean plan needs no second confirmation.
+Application uses the ordinary managed server boundary, stops a running process, optionally
+creates a confirmed backup, installs the exact required runtime and publishes the
+prepared files. A previously running server resumes through normal admission.
+Failed or interrupted effects never trigger a blind second installer invocation.
+
+## Providers
+
+| Provider | Catalog | Server installation source |
+| --- | --- | --- |
+| Modrinth | Projects and exact versions | `.mrpack`, pinned manifest files and server overrides; explicitly client-only entries excluded |
+| CurseForge | Modpacks and exact file versions | Official server pack where available, otherwise the pinned manifest with one bulk file-resolution request; distribution restrictions remain enforced |
+| Feed The Beast | Public pack/version metadata | Exact version file manifest; client-only files excluded |
+| Technic | Official platform metadata | Official matching server ZIP; client-only Solder bundles are not presented as server packages |
+| VoidsWrath | Official published catalog/pages | Explicit server download link; an unresolved Minecraft/loader requirement blocks installation |
+| ATLauncher | Official public catalog and version metadata | Official server ZIP when supplied; otherwise the exact server declarations in `Configs.json`, plus its hashed `Configs.zip` and server-side files |
+
+Catalog metadata is cached with bounded size and TTL. Artifact acquisition uses
+the shared HTTPS transport, configured download origins, cancellation, byte limits
+and hash validation. Publisher origins are declared by the Minecraft integration;
+custom mirrors remain Owner settings. Provider API credentials stay server-side.
+Known-size files retain bounded parallel downloads. Files without a manifest size
+are admitted sequentially using the existing GET response's validated length,
+before writing; absent headers use a bounded remaining allowance. Streaming limits
+and hashes still apply, and progress omits the byte total until all sizes are known.
+
+The installer reference examined during research was not copied or executed.
+VoidsWrath in that reference used an installer vendor's JSON index, not an official
+VoidsWrath API. This implementation reads the official pages instead.
+
+ATLauncher recipes use its public server installation metadata: explicit `server`
+flags, separate server downloads and exact loader requirements. Configuration ZIPs
+retain their declared server-relative root. Browser-only downloads, unresolved
+dependencies, custom installer actions, patched legacy JARs and unsupported runtime
+requirements remain visible blockers rather than being silently skipped. The
+provider README's restriction concerning a third-party launcher is not treated as
+a blanket prohibition on every server download; this is not a license grant for
+redistributing its launcher assets or packs.
+
+References: [official public version API](https://wiki.atlauncher.com/api-docs/v1/objects/pack-version/),
+[server file declarations](https://github.com/ATLauncher/ATLauncher/blob/master/src/main/java/com/atlauncher/data/json/Mod.java),
+and [server installation/configuration ordering](https://github.com/ATLauncher/ATLauncher/blob/master/src/main/java/com/atlauncher/workers/InstanceInstaller.java).
+
+## Runtime and files
+
+Pack-required Minecraft and loader versions remain exact. Existing runtime
+mappings, rollout and integration capabilities decide eligibility. This change
+**does not implement or enable NeoForge or Quilt**. Forge is supported by the
+subsequent Forge runtime addition when an Owner-enabled Forge Enhanced mapping
+and an exact compatible catalog entry are available. Unsupported runtime
+requirements remain visible blockers. Fabric uses the existing latest-installer policy
+and the pack's exact loader version.
+
+A runtime change retains server identity, node, allocations and public routes.
+Different port-role/feature requirements cannot silently replace an existing
+mapping. Runtime installation is attested separately from game configuration, so
+it does not reapply the original creation wizard or player lists. Image changes
+use the existing first-process verification rather than pinning the old stopped
+container's image.
+
+Preparation performs one local extraction/hash pass. Scripts belonging to the
+game (for example KubeJS) are pack content; host launchers and installer binaries
+are not executed. Paths, links and archive expansion limits are validated before
+publication. The private staging budget includes the STORE ZIP used for Fileman's
+bulk transfer. At most 10,000 changed files are published in one reviewed plan.
+
+Opaque mod JARs are inspected only for the metadata used to classify them. Duplicate
+unrelated resources and case-distinct Java resource names are not interpreted as
+filesystem collisions. Actual metadata ambiguity remains an error, and archives
+whose members are extracted still receive the normal path/collision checks.
+
+Fileman supplies shared metadata batches, signed streams, bulk archive transfer
+and publication receipts. Publication moves replaced files into an operation-owned
+rollback directory before moving new data into place; it verifies batched metadata
+because an HTTP 204 alone does not prove that Wings moved every source. Rollback
+files are retained during uncertainty and cleaned only after a durable applied
+receipt. There is no recursive cleanup of unrelated server data.
+
+## Updates and replacement
+
+- Check for Updates compares the installed version with the provider’s latest
+  available stable recommendation, reports no update or opens that pack with the
+  new version selected. It never prepares or applies a pack by itself.
+- Install defaults Keep worlds and Create a backup first to off. World reset is
+  an explicit part of this intent, including an update; protected runtime and
+  identity paths remain excluded. Users can enable either option before Install.
+- Existing manual prepare/apply API clients retain their explicit review behavior.
+  Locally changed configuration conflicts still require a file decision.
+- Pack `server.properties` is merged through the existing Minecraft parser using
+  supported gameplay settings. Network/authentication settings, operator and
+  whitelist policy, world selection and generation settings remain local.
+  Later local changes preserve the properties file unless explicitly overridden.
+- Native provider actions are not assumed to be atomic. An uncertain runtime or
+  publication remains fenced until read-only reconciliation proves the outcome.
+- A restart failure does not erase a successful installation receipt. The UI
+  reports that a start is still required.
+- A failed preparation can be retried without prepared pack metadata. The new
+  attempt retains the selected version, mode, world policy and file decisions;
+  transport retries reuse its idempotency key. Project names/descriptions resolve
+  independently from preparation, including after a page reload.
+
+Manual archive upload remains on the pre-existing backend contract; the new UI
+currently exposes the six provider catalogs rather than routing uploaded archives
+through the old destructive replacement flow.
+
+## Persistence and APIs
+
+Migration `050_minecraft_modpacks.sql` adds operation/receipt storage and the
+narrow runtime-image transition marker. Operations retain private session IDs
+(not bearer tokens), actor/subject identities, resource reservations, exact
+selection, plan digest, publication/runtime journals and lease state. Public
+snapshots omit filesystem staging paths, credentials and internal journals.
+
+Routes are under `/v1/servers/:id/minecraft/modpacks`:
+
+- `GET /`, `/catalog`, `/catalog/categories?provider=…`, `/catalog/search`, `/catalog/:provider/:projectId` and
+  `/catalog/:provider/:projectId/versions`.
+- `POST /prepare`, `POST /apply`.
+- `DELETE /operations/:id`, `POST /operations/:id/recover`.
+
+CSRF/session handling remains in the normal API middleware. Current server
+membership is checked for requests and background effects. Preparation does not
+hold the server mutation lock; application uses the existing server lock and
+fences other file/lifecycle mutations. The worker consumes durable rows with
+notification wakeups and a bounded fallback poll. It does not enqueue the same
+work in both the generic lifecycle processor and the modpack processor.
+
+## Validation and deployment
+
+Tests cover provider fixtures, exact pinned recipes, staging, sanitized ZIPs,
+properties, shared inventory, publication and recovery; isolated PostgreSQL tests
+cover leases, session authority, runtime changes and the operation fence. Browser
+fixtures exercise discover, preparation, review, blocked, uncertain and installed
+states in English/Italian, including mobile and keyboard interaction. Screenshots
+are under `docs/screenshots/m5/modpacks-*`; they are fixture evidence, not a claim
+that a real pack was installed on the live provider.
+
+Validation on 2026-10-21: the provider/planner/properties suite passed 426 tests;
+API, worker and publication checks passed 27 tests. The final six-file isolated
+integration suite passed 87 cases, with the two subsequent pre-effect recovery
+regressions also passing. Firefox covered 12 screen/flow cases and a separate
+keyboard regression (Tab, Enter, arrows and Escape), plus three existing Plugins
+regressions. Desktop/mobile accessibility scans reported no serious or critical
+violations. Root/web typechecks, EN/IT catalog checks, frontend/runtime builds
+and scoped Biome passed. Existing large-bundle build warnings remain.
+
+All runtime/file mutations in these checks used isolated fixtures; no real modpack
+installation is claimed by this validation.
+
+Recovery validation on 2026-10-21 reproduced the Antimatter Chemistry 1.4.10
+failure against its original server archive. Its CraftTweaker JAR contains repeated
+unrelated `META-INF` resources; a later JourneyMap JAR contains case-distinct license
+names. Metadata-only scanning now prepares all 902 server data files locally with
+the exact Minecraft 1.12.2 / Forge 14.23.5.2860 requirement. No game server was
+modified. Retry/name regressions include desktop/mobile Firefox screenshots in
+`docs/screenshots/m5/modpacks-failed-metadata-*`.
+
+The same isolated check prepared official ATLauncher Fossilized v2.1.14: 786
+staged server files, including two downloads without manifest sizes, and exact
+Minecraft 1.12.2 / Forge 14.23.5.2864 requirements. It used the declared origins and
+stayed below the 1 GiB test staging budget. Focused validation passed 267 unit
+tests, 19 isolated integration tests and 14 Firefox cases; typechecks, frontend
+build, scoped Biome and independent review passed. Existing large-bundle warnings
+and absent private Minecraft preview assets in the isolated checkout remain build
+warnings. These are preparation checks, not real server installations.
+
+The live default ATLauncher version page exposed five older Fossilized recipes
+with duplicate declared mod paths. Known invalid recipe metadata now marks only
+that version unavailable; transport, cancellation and provenance failures still
+propagate. Direct preparation remains strict. The corrected page returned 15
+available and five unavailable versions, and authenticated dev Firefox checks
+confirmed Antimatter's name, enabled retry, HTTPS, secure HMR and mobile layout.
+No actual preparation retry/application was submitted through the live UI.
+
+Activation requires a new development dependency image, the explicit migration,
+and recreation of only API, worker and Vite with the existing Compose overlays.
+No Blueprint release, Panel/Wings edit, DNS change or game-server test is required
+for activation. PR #21 remains open and unmerged. Issue #18 and production release
+boundaries remain unchanged.
+
+Development activation completed with explicit Owner approval on 2026-10-21.
+Only migration050 was applied; all49 previous checksums were preserved. Only API,
+worker and Vite were recreated with the reviewed dependency image. All13 observed
+development/provider services remained healthy; the other10 container identities,
+images and start times were unchanged. Mounts, network attachments, published ports,
+environment hashes and existing user/server/session counts were preserved.
+
+Authenticated read-only Firefox checks passed HTTPS, WSS HMR, desktop/mobile
+catalog and project views, plus search/details/version reads for all six providers.
+The first live check caught upstream400 responses for empty FTB/Technic searches;
+empty browsing now uses their official public catalogs, hydrates only visible
+results with at most four simultaneous requests, and shares the metadata cache.
+All25 catalog regressions passed after this correction. No frontend errors,
+horizontal overflow or mutation requests occurred in the final browser pass.
+ATLauncher was initially browse-only; the server descriptor support above supersedes
+that restriction. Client-only/missing-server-package restrictions remain visible.
+New operation/receipt tables and runtime-transition markers were empty
+immediately after activation. A subsequent preparation remained blocked by its
+runtime requirement, with no held storage, published files or runtime effects;
+its record was preserved. Independent infrastructure and correction reviews
+passed; rollback was not needed.
+
+Rollback retains the additive database schema and operation/receipt history.
+Before reverting active code, ensure no modpack application is in progress or
+uncertain. Restore the prior source revision and service images; never drop the
+new tables or delete staged/retired game files to force an operation out of the
+queue.
+
+### Interrupted runtime configuration
+
+The Application API startup PATCH can return a server without allocation
+relationships. Runtime transitions confirm that write with the normal full server
+GET before checking identity and the exact egg, image, startup and environment.
+An incomplete PATCH representation is not evidence of a different server.
+
+**Verify and resume** can reuse an existing prepared operation when its durable
+journal proves that stopping (and any requested backup) completed, the exact
+startup configuration is already present, and neither installation nor publication
+was dispatched. Recovery checks current authority and the original reviewed file
+plan, then queues the same operation under the current caller. It preserves staged
+downloads, backup and prior running state; it does not repeat the startup PATCH,
+stop or backup. A possibly dispatched installer remains uncertain and is never
+replayed by this path. Publication has the separate bounded recovery below.
+
+Console and Activity project the modpack operation's actual state and phase rather
+than the synthetic reinstall job's default phase. An uncertain operation links
+directly to its Modpacks review without an indefinite preparation animation.
+Gateway snapshots withdraw the route of an active reinstall until that operation
+releases the server. Existing route configuration is preserved, other routes stay
+eligible, and provider identity validation remains unchanged.
+
+Regression coverage includes incomplete PATCH responses, valid full GET identity,
+unchanged/partially advanced registry bindings, replacement Owner recovery after
+session revocation, ambiguous installer/publication rejection, and preserved
+stop/backup/staging. Isolated runtime/service/context/publication checks passed
+52 cases; route registry/context checks passed58 cases (the context suite overlaps).
+Seven API cases, 34 Firefox cases, focused projection units, root/web typechecks,
+EN/IT catalogs, frontend build and independent code/visual review passed. Existing
+large-chunk and private Minecraft-asset warnings remain in isolated builds.
+
+The real game-section wrapper allows recovery while the server is busy only for
+its exact active, uncertain operation, with current manage permission and successful
+reads. Other actions stay disabled. Nine wrapper regressions cover this exception,
+permission loss, mismatched/running jobs, failed refreshes and duplicate submissions.
+
+Development source reload and authenticated read-only Firefox checks passed:
+Console shows the uncertain operation, its review link opens the existing prepared
+pack, and **Verify and resume** is enabled on desktop and mobile. HTTPS and secure
+HMR work, with no page errors, overflow or mutation requests. All eleven dev
+services and the observed Panel/Wings containers are healthy; scoped container
+identities, images, start times, mounts, networks and ports are unchanged. No
+migration, manual restart or real recovery was executed. The existing installation
+awaits the Owner's explicit recovery action.
+
+Reviewed uncertainty states:
+[desktop English](screenshots/m5/modpack-runtime-uncertain-en-desktop.png) and
+[mobile Italian](screenshots/m5/modpack-runtime-uncertain-it-mobile.png).
+These checks use isolated providers and database schemas; they do not claim a real
+Forge installation. Source rollback must preserve the pending operation and its
+prepared files, and must not run underneath an active runtime transition.
+
+## Retained publication recovery (Blueprint 1.8.1)
+
+After a verified runtime installation, Verify and resume can continue publication
+from an exact retained archive receipt. It reuses the original manifest, ingestion
+claim and request; it does not rebuild, upload or decompress the archive again.
+Recovery is admitted only before publication rename batches/rollback have begun,
+with the original completed stop/backup/runtime journal prefix. The bridge verifies
+an already extracted or already renamed complete tree and rejects partial,
+changed, extra or symlink entries. Connection-scoped locking serializes receipt
+reconciliation; losing that connection cannot overwrite a newer result.
+
+Current authorization is checked again. A different authorized Owner can recover
+an existing retained archive claim; recovery before the first upload still requires
+the original job actor. Publication without a runtime transition remains outside
+this bounded recovery path. The earlier replacement-Owner service test did not
+establish end-to-end admission of a first upload by a different Owner.
+
+Normal archive extraction now trusts the synchronous successful Wings response.
+Blueprint does not recursively list the extracted tree on that path. Unknown
+outcomes still require exact manifest reconciliation before continuation; archive
+preflight and recovery listings avoid the defective aggregate Pool path in the
+installed Panel libraries. Guzzle/Promises and Panel configuration remain unchanged.
+The earlier official-dependency update proposal was not activated.
+
+The normal modpack path also skips a second enumeration of staged archive members.
+It guards original destinations before retirement, then reads back final destinations
+after rename (Wings may acknowledge a rename whose source is absent). Actual file
+mtimes are captured there and persisted for future change detection. New in-flight
+stage journals may omit mtimes until that readback: do not downgrade to older code
+while such publication is active. Existing journals remain accepted.
+
+Blueprint 1.8.2 applies the same installed-library compatibility fix to batched
+directory reads used by publication admission: requests run in bounded concurrent
+chunks and are awaited directly, without Guzzle Pool/EachPromise aggregation.
+The configured concurrency, per-directory errors, deadlines and byte budgets remain.
+This avoids changing shared Panel dependencies.
+
+Publication inspection traverses from root and batches only existing required child
+directories. Known-absent branches are not queried: Wings can return a generic
+error for missing paths. Errors for an observed existing directory, or a file/symlink
+ancestor, still stop publication. Each parent is read once per phase.
+
+### Activation evidence (2026-10-21)
+
+Blueprint 1.8.2 installed through the native Blueprint command. Shared Panel
+Composer files and Guzzle/Promises sources remained unchanged; full before/after
+ownership/mode metadata matched across 32 game roots. Only NickHosting dev API and
+worker required a restart to load the final shared-package change.
+
+The retained Antimatter Chemistry operation completed through the existing Owner
+recovery action: 902 applied files, cleaned staging, released transfer claim and
+server operation lock. The game remained stopped; no repeat installer, archive
+upload or extraction. Focused coverage includes 31 publication units, earlier
+107 recovery integration cases plus receipt-settlement regression, two final bridge
+integration cases, 512 PHP harness checks on installed dependencies, 15 package
+checks, typecheck/Biome and independent review. The real 48-directory cold-call
+probe passed three times with the extension-only directory fix.
+
+### Server archive manifest recognition
+
+A server ZIP may contain an inventory named `manifest.json` which is not a
+CurseForge pack manifest. Generic server archives identify CurseForge metadata by
+its `manifestType` marker before interpreting it. A declared CurseForge manifest
+still receives full validation and must agree with the companion pack's runtime;
+unrelated inventories do not override that runtime. Dedicated CurseForge manifest
+archives remain strict. This handles server bundles such as VerityCraft without
+weakening download integrity checks or changing staging budgets.
+
+JAR metadata inspection has a separate bounded entry-scan allowance (250,000),
+independent of the 20,000 files permitted for archive extraction. JAR resources
+remain opaque: only selected metadata records are read, with the existing size,
+compression, duplicate and integrity checks. Resource-heavy mods such as Chipped
+can therefore be inspected without incorrectly treating their internal resources
+as files being published to the game server.
+
+### Upload admission and pre-upload recovery
+
+Content preparation budgets and the physical host's Fileman upload policy are
+separate. Modpack application preflights the publication archive against the host
+policy before stopping the server or changing its runtime; atomic admission is
+still repeated when the transfer takes its capacity claim. The host's declared
+per-file ceiling must agree with Wings' actual maximum upload size.
+
+A locally rejected upload can resume without rerunning the installer. This is a
+separate recovery case from a dispatched archive commit: no upload claim or receipt,
+no commit request, no remote scratch/stage/rollback directory, unchanged original
+publication targets, and the retained local ZIP must match the durable transfer
+binding. Existing runtime verification and operation locks remain required. Recovery
+reads the local ZIP seal, not every game file through Wings. Ambiguous or dispatched
+transfers continue to use the existing receipt-based recovery path.
+
+## Catalog interaction (October 2026)
+
+Discover shows provider categories at the left when available. Modrinth filters
+server-capable environments before pagination; CurseForge supports categoryId but
+no documented server-pack-only search parameter. No extra request per search
+result is introduced. Project details replace the results, retaining the list,
+filters and scroll position for Back. Versions use a compact picker with more
+versions loaded inside it; descriptions load sanitized HTTPS images lazily.
+Mods and Plugins share the full-page detail/Back behavior; Datapack browsing is
+inline instead of a dialog. Their existing selection/preparation queues remain.
+
+`selection.install = {backupBefore: boolean}` is an optional persisted intent on
+POST /prepare. Explicit Install fences NickHosting starts from acceptance. Once
+the manifest supplies a pinned supported runtime, the worker stops the server
+once, completes an optional backup, then prepares that runtime concurrently with
+pack downloads. Review-only preparation still has no server effects.
+
+Migration 052 adds the private `runtime_preparation` checkpoint. The same worker
+lease and server scope continue from preparation into application; the exact
+manifest, plan and delete set are persisted before publication. Pack downloads
+and local extraction overlap the installer. Remote properties/inventory reads and
+hidden staging wait for installer completion: native Pterodactyl file routes reject
+non-admin clients while installation is active. Visible publication waits for both. No external Pterodactyl starts during this installation are an Owner
+operational guarantee. The retained scope reuses its stopped-process proof;
+a restarted/recovered worker must establish fresh proof.
+
+Failures after early lifecycle effects stay uncertain and retain their fence and
+checkpoint. Verify & Resume can redownload the same pinned selection, retaining
+a confirmed backup/runtime rather than replaying them. A dispatched installer
+whose completion cannot be proven is never blindly redispatched. Cancellation is
+available before the early-runtime boundary. After a fully confirmed runtime,
+an interrupted operation with no publication can instead be explicitly abandoned:
+the UI explains that the new runtime remains, existing pack files are unchanged,
+and the server stays stopped. Incomplete effects cannot be discarded. Navigation/reload does not
+cancel durable Install intent. Console projects preparation and later provider
+progress, including blocked/failure states.
+
+### Debug timing
+
+With the existing log level set to `debug`, modpack attempts emit bounded
+`servers.modpack_preparation_timing`, `servers.modpack_application_timing` and
+`servers.modpack_worker_timing` summaries. Correlate by `operationId`; preparation
+attempts also carry their lease attempt ID. An explicit Install worker timing
+now spans preparation and application; application timing includes the retained
+early-runtime scope. These overlap the download report and must not be summed. These are diagnostics, not persisted
+user activity or additional provider checks. At normal log levels they are disabled.
+
+Reports contain monotonic elapsed time, per-stage count/total/maximum and bounded
+span offsets so concurrent downloads and nested stages can be distinguished.
+Do not add inclusive stage totals to obtain wall time: the archive extraction span includes
+extraction/hash work, and download time includes transport, local writing and
+hashing. Installer confirmation includes the upstream installer and observation
+latency; its request/read/confirmation spans distinguish that from API dispatch.
+No paths, signed URLs, credentials or raw provider errors are logged. Repeating a
+pack swap can compare the same artifact set, but provider/local caches and a
+runtime change can materially change the result.
+
+### Installation work scheduling
+
+A worker that has durably queued application immediately yields it back to the
+bounded two-slot scheduler; only cleanup/no-progress retries retain a cooldown.
+Competing completions cannot postpone an earlier scheduled wake. Review-only
+preparation and later Apply remain separate claims. Explicit Install retains its
+claim and server scope through concurrent preparation and application.
+
+Publication verifies successful retirement at the moved roots before installing
+new files, then verifies descendants once when producing the final receipt.
+Uncertain recovery still checks the complete retained tree. Installer channel
+reauthorization uses current local authority; provider identity/startup is checked
+at dispatch and confirmation instead of at each channel authorization callback.
+Independent host/installer observations run concurrently. Runtime installation
+has its own capacity admission; pack download/storage admission continues in its
+parallel branch. Failed downloads may therefore leave the new runtime installed,
+but never publish an incomplete pack.
+
+### Local archive preparation
+
+ZIP/JAR inventories retain yauzl's ZIP/ZIP64 parser and entry/size/path checks, but
+read their local metadata through a bounded 256 KiB read-ahead window. This avoids
+two filesystem reads for every central-directory entry. Selected member streams
+have independent bounded buffers; cancelling a member does not close the shared
+archive descriptor. No whole-JAR buffer or persistent metadata cache is created.
+
+A provider's explicit required/optional server declaration is authoritative during
+pack staging. JAR side inspection remains for missing/unknown declarations and
+archive overrides. Provider digests and local file seals remain checked while
+streaming. Known-size downloads start largest-first within the existing concurrency
+and temporary-space budgets; unknown-size downloads retain serialized admission.
+The final transfer ZIP still uses the existing STORE writer and file-seal checks.
+
+### Native installer/file-access barrier and download deadlines
+
+Pack downloads and local extraction run concurrently with runtime preparation,
+but the first live file read waits for the installer to finish. This includes
+properties merging, inventory and hidden archive staging: the native Client API
+rejects file access while installing, including Blueprint routes that use its
+middleware. No Panel, Wings or Blueprint changes are needed. The waiting phase
+is reported as runtime preparation, and fetching the initial pack archive is
+reported as downloading rather than reading metadata.
+
+`SafeContentHttp` keeps the existing 120-second DNS/header/metadata and socket
+inactivity timeout. A successful archive response gets a separate bounded
+30-minute body deadline (`downloadTimeoutMs`); redirects do not. A healthy slow
+transfer no longer restarts every two minutes. Size, origin and streamed digest
+checks remain unchanged, as do cancellation and the bounded retry count.
+
+The first Owner tests of parallel installation are regression evidence, not clean
+performance benchmarks: the first pack repeated preparation after a file-access
+failure; the second failed inventory during installation and then spent 360.8 s
+on a new attempt whose initial archive download exhausted three deadlines.
+Completed stage timings remain usable individually; total installation time
+includes manual recovery and repeated work and must not be compared as a normal
+successful installation.
+
+### Provider selector presentation
+
+The Modpacks catalog dropdown aligns every provider to the left and displays its
+identification mark beside its name, including the selected trigger. All six
+marks are served locally; official sources and ownership are recorded in
+`apps/web/src/integrations/minecraft/provider-logos/README.md`. Existing catalog availability, keyboard
+selection, accessible names and search behavior are unchanged. The provider-only
+CSS class leaves other selectors unchanged.
+
+### Multiple category filters
+
+Categories are independent toggle buttons with title-cased provider names,
+semantic decorative icons and a check mark on each selected category. All
+categories clears the selection. Filters survive the trip into pack details and
+back; changing providers clears them, and changing filters resets pagination.
+The mobile category strip remains horizontally scrollable.
+
+The controller accepts `categories: string[]` and sends repeated `category`
+parameters to `GET /v1/servers/:id/minecraft/modpacks/catalog/search`. The shared
+limit is ten entries, validated before deduplication and canonical sorting;
+legacy single-category requests remain supported. At the limit, only unselected
+categories are disabled and a translated notice explains the limit. Selected
+categories and All categories remain usable.
+
+Filtering occurs at the provider before pagination: Modrinth uses separate
+[AND facets](https://docs.modrinth.com/api/operations/searchprojects/); CurseForge
+uses its native [categoryIds array](https://docs.curseforge.com/rest-api/#search-mods),
+whose documentation does not specify AND/OR semantics. The UI does not promise
+a universal boolean matching rule or filter just the loaded result page. Providers
+without a category taxonomy retain their existing category-free view.

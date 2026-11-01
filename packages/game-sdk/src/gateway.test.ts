@@ -37,6 +37,28 @@ describe('strict Gateway control contracts', () => {
       }).backend.address,
     ).toBe('fd00::1');
   });
+  it('accepts completed sleep only for the exact sleeping generation and strict proof', () => {
+    const completedSleep = {
+      jobId: randomUUID(),
+      generation: route.generation,
+      quiescenceUntil: snapshot.expiresAt,
+      completedAt: snapshot.issuedAt,
+    };
+    expect(gatewayRouteSchema.parse({ ...route, completedSleep }).completedSleep).toEqual(
+      completedSleep,
+    );
+    for (const patch of [
+      { mode: 'online' },
+      { generation: randomUUID() },
+      { completedSleep: { ...completedSleep, jobId: 'foreign' } },
+      { completedSleep: { ...completedSleep, completedAt: 'yesterday' } },
+      { completedSleep: { ...completedSleep, quiescenceUntil: 'tomorrow' } },
+      { completedSleep: { ...completedSleep, token: 'forbidden' } },
+    ])
+      expect(gatewayRouteSchema.safeParse({ ...route, completedSleep, ...patch }).success).toBe(
+        false,
+      );
+  });
   it('rejects unknown privileged fields, invalid endpoint values and non-UUID ownership', () => {
     for (const invalid of [
       { ...route, apiKey: 'secret' },

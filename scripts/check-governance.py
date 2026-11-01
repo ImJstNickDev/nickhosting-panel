@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Check the Git index before publication; heuristic scans are not a secret audit."""
 
+import hashlib
 import ipaddress
 import os
 from pathlib import Path, PurePosixPath
 import posixpath
 import re
 import subprocess
+import struct
+import zlib
 import sys
 import tempfile
 import tomllib
@@ -17,13 +20,72 @@ def git(*args, cwd=None, input=None):
     return subprocess.run(["git", *args], cwd=cwd, input=input, capture_output=True)
 
 
+# Reviewed official provider marks; exact paths and hashes, never arbitrary binaries.
+PROVIDER_MARKS = {
+    "apps/web/src/integrations/minecraft/provider-logos/curseforge.ico": "b1c9f08adaa8f91957bcd20e2796814557683ed051173ae31779752632efc5b9",
+    "apps/web/src/integrations/minecraft/provider-logos/ftb.png": "40ecb82b09c672c9220f17ff770e8b4394c1b4b022faa1854c9b8bb22ba13f14",
+    "apps/web/src/integrations/minecraft/provider-logos/modrinth.png": "893398804334d69eb89d0d3748a454e6ea530df62cf1894b4f50535dc4a4ae86",
+    "apps/web/src/integrations/minecraft/provider-logos/technic.ico": "80707aa58b73ff234d13c8d5242bcb2f5804d984190ec40d44cdc12a48cd867d",
+    "apps/web/src/integrations/minecraft/provider-logos/voidswrath.png": "c006fccc62d1bcc560d3bd015ca930a534f7abd35e6485575719d8716bba634f",
+}
+
+
+# Owner-supplied Minecraft runtime logos, pinned after image inspection.
+RUNTIME_MARKS = {
+    "games/minecraft/src/ui/assets/runtime-logos/arclight.jpeg": "1a2d8daacb07511f33b95b7c312460fc7dafde1c201367c1a72ca387b6c1d971",
+    "games/minecraft/src/ui/assets/runtime-logos/fabric.png": "a41878c3c4c5790cfc920eabf98d3404103a74a6f3df69d632ceb220c9ec9dc7",
+    "games/minecraft/src/ui/assets/runtime-logos/folia.png": "3d1756e0cd952d067826de6e38de073a01b83a9b23791917d87fbaea6ad46180",
+    "games/minecraft/src/ui/assets/runtime-logos/forge.png": "fe0d6e109bbc2437c269d3b5f8f329b19a9193be935c380a466f24631cfbe1bb",
+    "games/minecraft/src/ui/assets/runtime-logos/neoforge.png": "3d1b1c1ed65721672c3bcf36a9b8fa0bfc7ff0890ca886961e1009f9a2574bd1",
+    "games/minecraft/src/ui/assets/runtime-logos/paper.png": "6eff7892a29d00b698a952388777d42233c154ba836f4d73617e66adba542241",
+    "games/minecraft/src/ui/assets/runtime-logos/purpur.png": "2df195e596dbc11778fd40b4703f311b48793f4a73f6ed61586cb5538a7706d9",
+    "games/minecraft/src/ui/assets/runtime-logos/vanilla.png": "c50baf7daa929eaf5e7d3c5322059e23319e0e76f6114dfe7e4c8be2b75b9b4b",
+}
+
+
+def safe_provider_mark(path, blob):
+    return (PROVIDER_MARKS | RUNTIME_MARKS).get(path) == hashlib.sha256(blob).hexdigest()
+
+
+def safe_review_png(path, blob):
+    """Only browser review PNGs, without embedded text/metadata or trailing data.
+
+    Pixel content still requires a human privacy review; this is not redaction.
+    """
+    if not re.fullmatch(r"docs/screenshots/m5/[a-z0-9-]+\.png", path):
+        return False
+    if not 33 <= len(blob) <= 5 * 1024 * 1024 or blob[:8] != b"\x89PNG\r\n\x1a\n":
+        return False
+    offset, kinds = 8, []
+    while offset + 12 <= len(blob):
+        size = struct.unpack(">I", blob[offset:offset + 4])[0]
+        kind = blob[offset + 4:offset + 8]
+        end = offset + size + 12
+        if end > len(blob) or kind not in (b"IHDR", b"IDAT", b"IEND"):
+            return False
+        data = blob[offset + 8:end - 4]
+        if zlib.crc32(kind + data) != struct.unpack(">I", blob[end - 4:end])[0]:
+            return False
+        if kind == b"IHDR":
+            if kinds or size != 13:
+                return False
+            width, height = struct.unpack(">II", data[:8])
+            if not 1 <= width <= 4000 or not 1 <= height <= 12000:
+                return False
+        if kind == b"IEND" and (size or end != len(blob)):
+            return False
+        kinds.append(kind)
+        offset = end
+    return offset == len(blob) and kinds[:1] == [b"IHDR"] and kinds[-1:] == [b"IEND"] and b"IDAT" in kinds
+
+
 def main():
     root_result = git("rev-parse", "--show-toplevel")
     if root_result.returncode:
         print("FAIL: run inside the initialized project Git repository")
         return 1
     root = Path(os.fsdecode(root_result.stdout.strip()))
-    failures, files = [], {}
+    failures, files, images, marks = [], {}, set(), set()
     entries = git("ls-files", "--stage", "-z", cwd=root)
     if entries.returncode:
         print("FAIL: cannot read Git index")
@@ -38,6 +100,12 @@ def main():
             failures.append(f"{path}: unresolved, symlink or non-regular index entry")
             continue
         blob = git("show", f":{path}", cwd=root)
+        if not blob.returncode and safe_review_png(path, blob.stdout):
+            images.add(path)
+            continue
+        if not blob.returncode and safe_provider_mark(path, blob.stdout):
+            marks.add(path)
+            continue
         try:
             if blob.returncode or b"\0" in blob.stdout:
                 raise ValueError()
@@ -81,7 +149,7 @@ def main():
                     failures.append(f"{path}: private-network IP address")
                     break
 
-    directories = {str(parent) for path in files
+    directories = {str(parent) for path in set(files) | images
                    for parent in PurePosixPath(path).parents}
     links = 0
     for path, content in files.items():
@@ -100,7 +168,7 @@ def main():
             resolved = posixpath.normpath(posixpath.join(
                 str(PurePosixPath(path).parent), unquote(parsed.path)))
             links += 1
-            if resolved not in files and resolved not in directories:
+            if resolved not in files and resolved not in images and resolved not in directories:
                 failures.append(f"{path}: missing indexed link target {target}")
 
     tomls = {}
@@ -146,7 +214,7 @@ def main():
     whitespace = git("diff", "--cached", "--check", cwd=root)
     if whitespace.returncode:
         failures.append("git diff --cached --check failed; inspect locally before publishing")
-    print(f"Checked {len(files)} indexed text files, {links} relative links, "
+    print(f"Checked {len(files)} indexed text files, {len(images)} review PNGs, {len(marks)} pinned brand marks, {links} relative links, "
           f"{len(tomls)} TOML files and {len(excluded) + len(allowed)} ignore cases.")
     for failure in failures:
         print(f"FAIL: {failure}")

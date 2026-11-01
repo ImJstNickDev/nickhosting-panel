@@ -132,7 +132,7 @@ this reordering neither starts M5 nor authorizes deployment. See the dated
 
 - Complete invite → signup/link/recover/secure account → create an eligible Minecraft Vanilla server → configure/manage → sleep/wake → files → backup/restore → account/session settings journeys. Owner setup, quotas, integrations/allowlists, runtime settings and isolated assisted sessions work end to end.
 - All requirements in [M5 common integration readiness](M5-COMMON-INTEGRATION.md) have explicit API/job/browser evidence, failure/recovery coverage and documented deployment prerequisites. Shared platform gaps must be resolved in M5 rather than deferred to game expansion.
-- Only evidence-backed, Owner-enabled combinations appear in ordinary creation. Vanilla is the only runtime with M4 real-server verification; Paper/Folia/Fabric/Forge and other unverified combinations remain hidden from ordinary users. Owner/tester access follows existing rollout and signed-evidence rules. Satisfactory is not an M5 dependency and has no pretend functional UI.
+- **Owner amendments (2026-10-10 and 2026-10-19):** trusted integration declarations govern Vanilla, Fabric and Paper installation, with Owner-enabled mappings and rollout. Fabric chooses independently cached Minecraft/Loader versions and freezes an exact snapshot only at creation; no preregistered pair or signed per-pair report is required. Vanilla remains the only M4 real-server-verified runtime, and this change does not claim every Fabric pair or Gateway compatibility is verified. The 2026-10-21 Paper amendment adds cached Minecraft versions with the newest exact build selected at creation and the shared modern Gateway declaration; it does not claim real-client certification. The 2026-10-21 Forge amendment adds local Maven/promotions discovery, exact per-Minecraft loader selection, Forge Enhanced installation support and the modern Gateway declaration for its supported range; no per-pair signed report is required. Undeclared runtimes retain prior evidence/testing controls; the later scoped Folia amendment is documented below. See [current policy](M5-COMMON-INTEGRATION.md#owner-fabric-policy-amendment--2026-10-19). Satisfactory remains outside M5.
 - Every offered action reaches a real authorized API and its verified result; loading, empty, denied, unavailable and partial-failure states remain useful. Appropriate external-provider mocks do not establish real deployment or game compatibility.
 - Browser screenshots and automated/manual accessibility evidence cover desktop/mobile, English/Italian, supported game management, Owner flows and edge states. Fix must-fix visual/usability/accessibility defects; document remaining limitations without claiming unverified WCAG conformance.
 - Document task flows before visual implementation, exercise real loading/empty/error/blocked/uncertain jobs, review useful information density and every English/Italian string, and obtain independent UX/content review explicitly checking verbosity, marketing filler, repetitive descriptions and generic AI/SaaS styling. Iterate on real screenshots.
@@ -145,6 +145,32 @@ Issue #18 stays open as a cross-milestone **production-release gate**, detached
 from the former frontend milestone. It is neither an implicit M5 implementation
 requirement nor permission to defer the defect to M6. This document records the
 approved tracking plan; GitHub metadata must be verified separately.
+
+**Scoped M5 follow-up, 2026-10-31:** the Owner requested NeoForge runtime
+integration using the supplied egg. Implement its exact catalog/version/egg and
+management contracts on the current M5 review baseline. This does not begin M6,
+authorize deployment or certify real NeoForge client/modpack behavior. A subsequent
+explicit Owner choice enables the shared modern Gateway declaration with protocol
+and version guards. The player-lookup follow-up races official services against
+`mc-api.io` as explicitly requested, retaining name/UUID verification and recording
+the winning providers. See
+[NeoForge policy](M5-COMMON-INTEGRATION.md#neoforge-runtime-follow-up--2026-10-31).
+
+**Scoped M5 follow-up, 2026-10-31:** the Owner also requested Purpur using the
+supplied egg. Add its exact-build catalog, runtime mapping, shared Gateway and
+plugin-compatible management to the existing flow. See [Purpur scope and validation](M5-PURPUR.md).
+
+**Scoped M5 follow-up, 2026-10-31:** the Owner requested Folia using the supplied
+Pterodactyl egg. Add Fill catalog, pinned build binding, Java image selection,
+Gateway declaration and existing management flows with explicit Folia plugin
+compatibility. See [Folia scope and validation](M5-FOLIA.md). This is not live-client
+certification or production deployment.
+
+**Scoped M5 follow-up, 2026-10-31:** the Owner requested Quilt after importing an
+exact-version egg. Add official metadata discovery, Minecraft/loader selection,
+frozen installer, installed launcher/library verification and existing management
+flows. See [Quilt scope and validation](M5-QUILT.md). No production deployment or
+real-client certification is included.
 
 ## M6 — Satisfactory & Game Integration Expansion (PR)
 

@@ -1,0 +1,402 @@
+.minecraft-datapacks {
+  width: 100%;
+  margin-inline: auto;
+  container-type: inline-size;
+}
+.datapack-toolbar,
+.datapack-tools,
+.datapack-row,
+.datapack-row-actions,
+.datapack-change,
+.datapack-upload,
+.datapack-apply {
+  display: flex;
+  align-items: center;
+}
+.datapack-toolbar {
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.datapack-world {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.datapack-world select {
+  max-width: 240px;
+  min-height: 38px;
+}
+.datapack-tools,
+.datapack-row-actions {
+  gap: 3px;
+}
+
+.datapack-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.datapack-row {
+  flex-wrap: wrap;
+  gap: 14px;
+  min-height: 84px;
+  padding: 14px 18px;
+}
+.datapack-row + .datapack-row {
+  border-top: 1px solid var(--line);
+}
+.datapack-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  background: var(--surface-subtle, #f1f3f5);
+  color: var(--muted);
+}
+.datapack-identity {
+  flex: 1;
+  min-width: 0;
+}
+.datapack-identity strong {
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+.datapack-identity p {
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.datapack-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 4px;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.datapack-compatibility--incompatible,
+.datapack-compatibility--invalid {
+  color: var(--danger, #a13226);
+}
+.datapack-note {
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--muted);
+  margin: 10px 0;
+}
+.datapack-empty {
+  padding: 38px 20px;
+  text-align: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.datapack-no-worlds {
+  display: flex;
+  min-height: min(48dvh, 360px);
+  padding: 24px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  color: var(--muted);
+  text-align: center;
+}
+.datapack-no-worlds > svg {
+  width: 44px;
+  height: 44px;
+  stroke-width: 1.3;
+}
+.datapack-no-worlds p {
+  margin: 0;
+  font-size: 0.9rem;
+}
+.datapack-changes {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  background: var(--surface-subtle, #f1f3f5);
+}
+.datapack-change {
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+}
+.datapack-change + .datapack-change {
+  border-top: 1px solid var(--line);
+}
+.datapack-change > span,
+.datapack-upload > span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+  font-size: 0.82rem;
+}
+.datapack-change small,
+.datapack-upload small {
+  color: var(--muted);
+  font-size: 0.73rem;
+}
+.datapack-upload {
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.datapack-upload progress {
+  width: 100px;
+  height: 5px;
+  accent-color: var(--blue);
+}
+.datapack-apply {
+  justify-content: space-between;
+  gap: 20px;
+  margin-top: 18px;
+  min-height: 44px;
+}
+.datapack-apply p {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 0 0 5px;
+}
+.datapack-apply a {
+  font-size: 0.78rem;
+}
+.datapack-apply > button {
+  margin-left: auto;
+  white-space: nowrap;
+}
+@container (max-width: 620px) {
+  .datapack-world {
+    flex-basis: 100%;
+  }
+  .datapack-world select {
+    flex: 1;
+    max-width: none;
+  }
+  .datapack-row {
+    padding: 14px;
+    gap: 10px;
+  }
+  .datapack-apply {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+}
+@container (max-width: 420px) {
+  .datapack-row {
+    flex-wrap: wrap;
+  }
+  .datapack-identity {
+    flex-basis: calc(100% - 50px);
+  }
+  .datapack-row-actions {
+    margin-left: 46px;
+  }
+  .datapack-toolbar {
+    gap: 8px;
+  }
+
+  .datapack-upload {
+    flex-wrap: wrap;
+  }
+}
+.datapack-inspection {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-left: 50px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+.datapack-inspection p {
+  margin: 0;
+}
+.datapack-inspection-skeleton {
+  height: 16px;
+  width: 180px;
+  border-radius: 4px;
+  background: var(--line);
+  opacity: 0.5;
+}
+
+.datapack-skeleton {
+  display: grid;
+  gap: 1px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  min-height: 252px;
+  background: var(--surface);
+}
+.datapack-skeleton > span {
+  height: 84px;
+  background: var(--line);
+  opacity: 0.25;
+}
+
+.datapack-dependencies {
+  width: min(640px, calc(100vw - 32px));
+}
+.datapack-dependencies h3 {
+  margin: 20px 0 10px;
+  font-size: 0.86rem;
+}
+.datapack-dependencies p {
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+.datapack-dependency-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow: auto;
+}
+.datapack-dependency-items li {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.8rem;
+}
+.datapack-dependency-items li > span:first-child {
+  min-width: 0;
+}
+.datapack-dependency-items small,
+.datapack-dependency-conflicts small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.73rem;
+  overflow-wrap: anywhere;
+}
+.datapack-dependency-items strong {
+  overflow-wrap: anywhere;
+}
+.datapack-dependency-items li > span:last-child {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.datapack-dependency-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.datapack-dependency-options button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface);
+  color: inherit;
+  border: 1px solid var(--line);
+  padding: 8px 12px;
+  font-size: 0.8rem;
+}
+.datapack-dependency-options button[aria-pressed="true"] {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+.datapack-dependency-blockers p {
+  padding: 12px;
+  background: var(--surface-subtle, #f1f3f5);
+  border-left: 2px solid var(--danger, #a13226);
+}
+.datapack-dependency-blockers span {
+  display: block;
+  color: var(--muted);
+}
+.datapack-dependency-conflicts ul {
+  list-style: none;
+  padding: 0;
+  font-size: 0.82rem;
+}
+.datapack-dependency-conflicts li {
+  margin: 10px 0;
+}
+.datapack-dependencies footer {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 22px;
+}
+.datapack-dependencies .dialog-close-icon {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+}
+.datapack-dependencies .dialog-close-icon:hover {
+  background: var(--surface-subtle, #f1f3f5);
+}
+
+.minecraft-datapacks > [hidden] {
+  display: none;
+}
+.minecraft-datapack-store {
+  min-width: 0;
+  min-height: 480px;
+}
+.datapack-store-header {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+.datapack-store-header h3 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+.minecraft-datapack-store .world-catalog-body {
+  height: min(68vh, 820px);
+  scrollbar-gutter: stable;
+}
+.minecraft-datapack-store .world-catalog-toolbar > input {
+  min-width: 0;
+}
+.minecraft-datapack-store .catalog-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+}
+.minecraft-datapack-store .catalog-back:hover {
+  color: var(--text);
+}
+@media (max-width: 560px) {
+  .datapack-store-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+}

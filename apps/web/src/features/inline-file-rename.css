@@ -1,0 +1,70 @@
+.fm-inline-rename {
+  width: max-content;
+  min-width: 0;
+  max-width: 100%;
+}
+.fm-inline-rename-field {
+  display: grid;
+  max-width: 100%;
+}
+.fm-inline-rename-sizer {
+  grid-area: 1 / 1;
+  visibility: hidden;
+  white-space: pre;
+  font: inherit;
+  padding: 3px 2px;
+  border: 1px solid transparent;
+}
+.fm-inline-rename input {
+  grid-area: 1 / 1;
+  width: 0;
+  min-width: 100%;
+  min-height: 32px;
+  padding: 3px 2px;
+  font: inherit;
+  color: inherit;
+  background: #f5f7f9;
+  border: 1px solid transparent;
+  border-bottom-color: #8494a0;
+  border-radius: 3px;
+}
+.fm-inline-rename input:focus {
+  outline: none;
+  box-shadow: none;
+  border-color: transparent;
+  border-bottom-color: #566876;
+}
+.fm-inline-rename input[aria-invalid="true"] {
+  border-bottom-color: #a32020;
+}
+.fm-inline-rename-error-popup {
+  position: fixed;
+  z-index: 600;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 7px 9px;
+  border: 1px solid #e4c7c7;
+  border-radius: 4px;
+  background: #fff;
+  box-shadow: 0 3px 10px #14293e18;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  color: #a32020;
+}
+.fm-inline-rename-error-popup .notice {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+}
+.fm-inline-rename-error-popup .notice p {
+  margin: 0;
+}
+@media (forced-colors: active) {
+  .fm-inline-rename input:focus {
+    outline: 1px solid Highlight;
+    outline-offset: 1px;
+  }
+}

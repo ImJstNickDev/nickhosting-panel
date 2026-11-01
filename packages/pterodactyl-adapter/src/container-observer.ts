@@ -23,6 +23,12 @@ export interface ContainerObserver {
   stopped(uuid: string, kind: 'server' | 'installer'): Promise<boolean>;
   /** Optional for injected observers; production exposes independently observed process identity. */
   processStartedAt?(uuid: string): Promise<string | null>;
+  /** Exact completed process, never an absent/created/transitional container. */
+  terminalProcess?(uuid: string): Promise<{
+    containerId: string;
+    startedAt: string;
+    finishedAt: string;
+  } | null>;
   /** Docker .Image configuration content hash, not a registry manifest digest or Java proof. */
   imageIdentity?(uuid: string): Promise<string | null>;
 }
@@ -73,6 +79,12 @@ const startedAtSchema = z
 const processSchema = inspectedSchema.extend({
   state: inspectedSchema.shape.state.extend({ startedAt: startedAtSchema }),
 });
+const terminalSchema = inspectedSchema.extend({
+  state: inspectedSchema.shape.state.extend({
+    startedAt: startedAtSchema,
+    finishedAt: startedAtSchema,
+  }),
+});
 const imageSchema = inspectedSchema.extend({ image: z.string().regex(/^sha256:[a-f0-9]{64}$/) });
 
 const listFormat = '{"id":{{json .ID}},"name":{{json .Names}}}';
@@ -86,6 +98,10 @@ const inspectFormat =
 const processFormat = inspectFormat.replace(
   '"status":{{json .State.Status}}',
   '"status":{{json .State.Status}},"startedAt":{{json .State.StartedAt}}',
+);
+const terminalFormat = processFormat.replace(
+  '"startedAt":{{json .State.StartedAt}}',
+  '"startedAt":{{json .State.StartedAt}},"finishedAt":{{json .State.FinishedAt}}',
 );
 const imageFormat = inspectFormat.replace('"state":{', '"image":{{json .Image}},"state":{');
 
@@ -110,6 +126,7 @@ export function createContainerObserver(
   options: { exec?: ContainerObserverExec } = {},
 ): ContainerObserver & {
   processStartedAt(uuid: string): Promise<string | null>;
+  terminalProcess: NonNullable<ContainerObserver['terminalProcess']>;
   imageIdentity(uuid: string): Promise<string | null>;
 } {
   if (
@@ -231,6 +248,32 @@ export function createContainerObserver(
         const nanoseconds = BigInt(seconds) * 1_000_000n + BigInt(fraction.padEnd(9, '0'));
         if (nanoseconds <= 0n || nanoseconds > BigInt(Date.now()) * 1_000_000n) throw new Error();
         return state.startedAt;
+      } catch {
+        throw new DomainError('integration_unavailable');
+      }
+    },
+    async terminalProcess(uuid: string) {
+      const name = containerName(uuid, 'server');
+      try {
+        const row = await inspect(name, 'server', terminalSchema, terminalFormat);
+        if (!row) return null;
+        const state = row.state;
+        if (
+          state.running ||
+          state.restarting ||
+          state.paused ||
+          state.dead ||
+          state.status !== 'exited'
+        )
+          return null;
+        const nanos = (value: string) =>
+          BigInt(Date.parse(`${value.slice(0, 19)}Z`)) * 1_000_000n +
+          BigInt((value.split('.')[1]?.slice(0, -1) ?? '').padEnd(9, '0'));
+        const started = nanos(state.startedAt),
+          finished = nanos(state.finishedAt);
+        if (started <= 0n || finished < started || finished > BigInt(Date.now()) * 1_000_000n)
+          throw new Error();
+        return { containerId: row.id, startedAt: state.startedAt, finishedAt: state.finishedAt };
       } catch {
         throw new DomainError('integration_unavailable');
       }

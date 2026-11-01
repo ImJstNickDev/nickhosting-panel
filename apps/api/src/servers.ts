@@ -1,37 +1,59 @@
-import { type AuthContext, DomainError } from '@nickhosting/core';
+import { randomUUID } from 'node:crypto';
+import { posix } from 'node:path';
+import { type AuthContext, type createLogger, DomainError } from '@nickhosting/core';
 import { type createDatabase, recordAudit } from '@nickhosting/database';
-import { relativePath } from '@nickhosting/pterodactyl-adapter';
+import {
+  isUploadCancelled,
+  isUploadNotDispatched,
+  isUploadNotPublished,
+  type PrivateTransferCache,
+  relativePath,
+  type ServerFile,
+} from '@nickhosting/pterodactyl-adapter';
 import {
   assignServerDns,
   authorizeServer,
   backendAllocationPoolOverrides,
+  backupSchemaAvailable,
   createManagedServer,
   createProject,
+  createServerSchema,
   createSftpCredential,
+  createUploadTiming,
   deleteServerDns,
   effectiveBackendAllocationPool,
   effectiveNodeOverhead,
   effectiveUploadPolicy,
   enqueueServerOperation,
+  getGameConnectionAvailability,
+  getGameConnectionOptions,
+  getServerConnectionOptions,
+  getServerPermissionKeys,
   listServerDns,
   listServers,
   listSftpCredentials,
   type ManagementRuntime,
+  operationSchema,
   ownerOnly,
   parse,
   previewServerDns,
   publicServer,
+  reconcileServerUserSftpCredentials,
   recoverUploadIngestion,
+  reserveGameConnection,
   reserveUploadIngestion,
   resolveHostOverride,
   resolveUncertainOperation,
+  revealSftpCredential,
   revokeSftpCredential,
   rotateSftpCredential,
+  serverStorageLimitBytes,
   setManagedNode,
   setPhysicalHost,
   setProjectMember,
   setRuntimeMapping,
   setUserLimits,
+  suggestGameConnection,
   updateServerDns,
   uploadPolicyOverrides,
 } from '@nickhosting/server-management';
@@ -39,11 +61,28 @@ import type { Context, Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import type { Variables } from './app.js';
+import { createBackupEventStream } from './backup-events-stream.js';
+import { createConsoleCommandRelays } from './console-command-relays.js';
+import { registerFileBrowsingRoutes } from './file-browsing.js';
+import { createFileDirectoryPlan, fileDirectoryAncestors } from './file-directory-plan.js';
+import { createFileOperationTrace } from './file-operation-trace.js';
+import {
+  applyFileChunks,
+  registerFileOperationRoutes,
+  validateFileDeletes,
+  validateFileMoves,
+} from './file-operations.js';
+import { registerUploadBatchRoutes } from './file-upload-batches.js';
+import { registerProvisioningRoutes } from './provisioning.js';
+import { createServerEventStream } from './server-events-stream.js';
 import { boundedEventWriter } from './stream-buffer.js';
 
 type C = Context<{ Variables: Variables }>;
 export interface ServerRouteOptions {
+  provisioningCache?: PrivateTransferCache;
+  logger?: ReturnType<typeof createLogger>;
   db: ReturnType<typeof createDatabase>['db'];
+  pool?: ReturnType<typeof createDatabase>['pool'];
   env: Readonly<Record<string, string | undefined>>;
   principal: (c: C, regularOnly?: boolean) => Promise<AuthContext>;
   management: () => Promise<ManagementRuntime>;
@@ -63,6 +102,13 @@ export function registerServerRoutes(
   options: ServerRouteOptions,
 ) {
   const { db, env, principal, management } = options;
+  const commandRelays = createConsoleCommandRelays();
+  const backupEvents = options.pool ? createBackupEventStream(options.pool) : undefined;
+  const serverEvents = options.pool ? createServerEventStream(options.pool) : undefined;
+  registerProvisioningRoutes(app, options);
+  registerFileBrowsingRoutes(app, options);
+  registerFileOperationRoutes(app, options);
+  const runBatchUpload = registerUploadBatchRoutes(app, options);
   const owner = async (c: C) => {
     const context = await principal(c, true);
     ownerOnly(context);
@@ -123,9 +169,13 @@ export function registerServerRoutes(
     await recoverUploadIngestion(db, await owner(c), c.req.param('claimId'), await body(c), env);
     return c.body(null, 204);
   });
-  app.put('/v1/owner/resource-hosts', async (c) =>
-    c.json(await setPhysicalHost(db, await owner(c), await body(c), env)),
-  );
+  app.put('/v1/owner/resource-hosts', async (c) => {
+    const context = await owner(c);
+    const input = await body(c);
+    const { id } = parse(z.object({ id: z.uuid().optional() }).passthrough(), input);
+    if (id) await (await management()).refreshStorage(db, { hostId: id });
+    return c.json(await setPhysicalHost(db, context, input, env));
+  });
   app.get('/v1/owner/nodes', async (c) => {
     await owner(c);
     const nodes = await db.selectFrom('managed_nodes').selectAll().execute();
@@ -147,7 +197,23 @@ export function registerServerRoutes(
   });
   app.get('/v1/owner/runtime-mappings', async (c) => {
     await owner(c);
-    return c.json(await db.selectFrom('runtime_egg_mappings').selectAll().execute());
+    return c.json(
+      await db
+        .selectFrom('runtime_egg_mappings as mapping')
+        .selectAll('mapping')
+        .select((eb) =>
+          eb
+            .exists(
+              eb
+                .selectFrom('managed_servers as server')
+                .select('server.id')
+                .whereRef('server.mapping_id', '=', 'mapping.id')
+                .where('server.deleted_at', 'is', null),
+            )
+            .as('inUse'),
+        )
+        .execute(),
+    );
   });
   app.put('/v1/owner/runtime-mappings', async (c) => {
     const context = await owner(c);
@@ -156,7 +222,7 @@ export function registerServerRoutes(
     );
   });
   app.put('/v1/owner/user-limits', async (c) => {
-    await setUserLimits(db, await owner(c), await body(c));
+    await setUserLimits(db, await owner(c), await body(c), env);
     return c.body(null, 204);
   });
   app.post('/v1/owner/reconcile', async (c) => {
@@ -185,15 +251,32 @@ export function registerServerRoutes(
     c.json(await createProject(db, await principal(c), await body(c)), 201),
   );
   app.put('/v1/projects/:id/members', async (c) => {
-    await setProjectMember(db, await principal(c), c.req.param('id'), await body(c));
+    const affected = await setProjectMember(
+      db,
+      await principal(c),
+      c.req.param('id'),
+      await body(c),
+    );
+    if (affected.length) {
+      const service = await management();
+      for (const subject of affected)
+        await reconcileServerUserSftpCredentials(
+          db,
+          subject.serverId,
+          subject.userId,
+          service.externalOptions,
+        );
+    }
     return c.body(null, 204);
   });
   app.get('/v1/servers', async (c) => c.json(await listServers(db, await principal(c))));
   app.post('/v1/servers', async (c) => {
     const context = await principal(c),
       service = await management();
+    const input = parse(createServerSchema, await body(c));
+    await service.refreshStorage(db, { mappingId: input.mappingId });
     await service.refreshObservations();
-    return c.json(await createManagedServer(db, service.adapter, context, await body(c), env), 202);
+    return c.json(await createManagedServer(db, service.adapter, context, input, env), 202);
   });
   app.get('/v1/servers/:id', async (c) => {
     const server = await authorizeServer(db, await principal(c), c.req.param('id'));
@@ -205,11 +288,64 @@ export function registerServerRoutes(
     return c.json({ ...publicServer(server), ports });
   });
   app.post('/v1/servers/:id/operations', async (c) => {
-    const context = await principal(c);
-    const input = await body(c);
-    await authorizeServer(db, context, c.req.param('id'), 'server:operate');
-    await (await management()).refreshObservations();
-    return c.json(await enqueueServerOperation(db, context, c.req.param('id'), input, env), 202);
+    const started = performance.now();
+    const stages: Record<string, number> = {};
+    let action: string | undefined;
+    let jobId: string | undefined;
+    let outcome = 'failed';
+    async function stage<T>(name: string, work: () => Promise<T>) {
+      const before = performance.now();
+      try {
+        return await work();
+      } finally {
+        stages[name] = Math.round((performance.now() - before) * 1000) / 1000;
+      }
+    }
+    try {
+      const context = await stage('principalMs', () => principal(c));
+      const input = parse(operationSchema, await body(c));
+      action = input.action;
+      await stage('accessCheckMs', () =>
+        authorizeServer(
+          db,
+          context,
+          c.req.param('id'),
+          ['start', 'stop', 'restart', 'kill'].includes(input.action)
+            ? 'console.power'
+            : input.action === 'backup'
+              ? 'backups.create'
+              : input.action === 'restore'
+                ? 'backups.restore'
+                : input.action === 'minecraft-content'
+                  ? 'server:read'
+                  : 'server:manage',
+        ),
+      );
+      if (input.action !== 'kill' && input.action !== 'stop')
+        await stage('hostSamplingMs', async () => {
+          const service = await management();
+          if (input.action === 'configure') await service.refreshStorage(db, c.req.param('id'));
+          await service.refreshObservations(db, c.req.param('id'));
+        });
+      const result = await stage('enqueueMs', () =>
+        enqueueServerOperation(db, context, c.req.param('id'), input, env),
+      );
+      jobId = result.jobId;
+      outcome = 'accepted';
+      return c.json(result, 202);
+    } finally {
+      try {
+        options.logger?.log('info', 'servers.operation_request', {
+          jobId,
+          action,
+          outcome,
+          ...stages,
+          durationMs: Math.round((performance.now() - started) * 1000) / 1000,
+        });
+      } catch {
+        // Diagnostics cannot change the outcome of a durable request.
+      }
+    }
   });
   app.post('/v1/owner/servers/:id/resolve', async (c) => {
     const context = await owner(c),
@@ -221,11 +357,17 @@ export function registerServerRoutes(
         context,
         c.req.param('id'),
         await body(c),
+        env,
       ),
     );
   });
   app.get('/v1/servers/:id/operations', async (c) => {
-    const server = await authorizeServer(db, await principal(c), c.req.param('id'));
+    const server = await authorizeServer(
+      db,
+      await principal(c),
+      c.req.param('id'),
+      'activity.read',
+    );
     const rows = await db
       .selectFrom('server_operations as s')
       .innerJoin('operation_jobs as j', 'j.id', 's.job_id')
@@ -248,7 +390,12 @@ export function registerServerRoutes(
     return c.json(rows.map((row) => ({ ...row, messageKey: `jobs.${row.state}` })));
   });
   app.get('/v1/servers/:id/events', async (c) => {
-    const server = await authorizeServer(db, await principal(c), c.req.param('id'));
+    const server = await authorizeServer(
+      db,
+      await principal(c),
+      c.req.param('id'),
+      'activity.read',
+    );
     const after = parse(z.string().regex(/^\d{1,18}$/), c.req.query('after') ?? '0');
     return c.json(
       await db
@@ -263,33 +410,99 @@ export function registerServerRoutes(
   });
   app.get('/v1/servers/:id/events/stream', async (c) => {
     const server = await authorizeServer(db, await principal(c), c.req.param('id'));
-    let after = parse(z.string().regex(/^\d{1,18}$/), c.req.query('after') ?? '0');
+    // EventSource resumes from the last emitted ID, even when its original URL
+    // selected latest. Never discard events by resetting latest on reconnect.
+    const requested = parse(
+      z.union([z.literal('latest'), z.string().regex(/^\d{1,18}$/)]),
+      c.req.header('Last-Event-ID') ?? c.req.query('after') ?? '0',
+    );
     return streamSSE(c, async (stream) => {
-      const end = Date.now() + 900000;
-      while (!stream.aborted && Date.now() < end) {
-        try {
+      let after = requested === 'latest' ? '0' : requested;
+      let dirty = false;
+      let lost = false;
+      let wake: (() => void) | undefined;
+      const changed = () => {
+        dirty = true;
+        wake?.();
+      };
+      stream.onAbort(() => wake?.());
+      let release: (() => void) | undefined;
+      try {
+        // Subscribe before sampling a cursor/reading. An overlapping commit
+        // either appears in that read or wakes the next one.
+        if (serverEvents)
+          release = await serverEvents.subscribe(server.id, changed, () => {
+            lost = true;
+            wake?.();
+          });
+        if (requested === 'latest') {
+          const last = await db
+            .selectFrom('server_events')
+            .select('id')
+            .where('server_id', '=', server.id)
+            .orderBy('id', 'desc')
+            .limit(1)
+            .executeTakeFirst();
+          after = last?.id ?? '0';
+        }
+        await authorizeServer(db, await principal(c), server.id);
+        // Read current job state after ready: it may have completed before this
+        // initial latest cursor was sampled. The event is only a read hint.
+        await stream.writeSSE({
+          id: after,
+          event: 'ready',
+          data: JSON.stringify({ serverId: server.id }),
+        });
+        const end = Date.now() + 900000;
+        while (!stream.aborted && !lost && Date.now() < end) {
+          dirty = false;
           await authorizeServer(db, await principal(c), server.id);
-        } catch {
-          return;
+          const events = await db
+            .selectFrom('server_events')
+            .selectAll()
+            .where('server_id', '=', server.id)
+            .where('id', '>', after)
+            .orderBy('id')
+            .limit(100)
+            .execute();
+          for (const event of events) {
+            // Authority is not carried over a slow client write or a batch.
+            const current = await principal(c);
+            const currentServer = await authorizeServer(db, current, server.id);
+            const canReadActivity = (
+              await getServerPermissionKeys(db, current, currentServer)
+            ).includes('activity.read');
+            if (stream.aborted || lost) return;
+            await stream.writeSSE({
+              id: event.id,
+              event: 'activity',
+              data: JSON.stringify(canReadActivity ? event : { serverId: server.id }),
+            });
+            after = event.id;
+          }
+          if (events.length === 100) continue;
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(done, 2000);
+            function done() {
+              clearTimeout(timer);
+              wake = undefined;
+              resolve();
+            }
+            wake = done;
+            if (dirty || lost || stream.aborted) done();
+          });
         }
-        const events = await db
-          .selectFrom('server_events')
-          .selectAll()
-          .where('server_id', '=', server.id)
-          .where('id', '>', after)
-          .orderBy('id')
-          .limit(100)
-          .execute();
-        for (const event of events) {
-          await stream.writeSSE({ id: event.id, event: 'activity', data: JSON.stringify(event) });
-          after = event.id;
-        }
-        await stream.sleep(2000);
+      } catch {
+        // A revoked session or disconnected listener ends this delivery. The
+        // client retains its cursor and ordinary authorized job polling.
+        return;
+      } finally {
+        release?.();
       }
     });
   });
   app.get('/v1/servers/:id/metrics', async (c) => {
-    const server = await authorizeServer(db, await principal(c), c.req.param('id'));
+    const server = await authorizeServer(db, await principal(c), c.req.param('id'), 'console.read');
     return c.json(
       await db
         .selectFrom('server_metrics')
@@ -304,8 +517,13 @@ export function registerServerRoutes(
     const context = await principal(c),
       service = await management();
     return c.json(
-      await service.access(context, c.req.param('id'), false, (id) =>
-        service.adapter.getResources(id),
+      await service.access(
+        context,
+        c.req.param('id'),
+        false,
+        (id) => service.adapter.getResources(id),
+        undefined,
+        'console.read',
       ),
     );
   });
@@ -313,17 +531,44 @@ export function registerServerRoutes(
     const context = await principal(c),
       service = await management();
     return c.json(
-      await service.access(context, c.req.param('id'), false, (id) =>
-        service.adapter.listFiles(id, c.req.query('path') ?? ''),
+      await service.listFiles(
+        context,
+        c.req.param('id'),
+        c.req.query('path') ?? '',
+        c.req.query('prepareDownloads') !== 'false',
       ),
     );
+  });
+  app.post('/v1/servers/:id/files/directories', async (c) => {
+    const context = await principal(c);
+    const { directories } = parse(
+      z.strictObject({ directories: z.array(z.string().max(4096)).min(1).max(48) }),
+      await body(c),
+    );
+    const service = await management();
+    return c.json({
+      results: await service.listDirectories(
+        context,
+        c.req.param('id'),
+        directories,
+        c.req.raw.signal,
+      ),
+    });
   });
   app.get('/v1/servers/:id/files/content', async (c) => {
     const context = await principal(c),
       service = await management();
     const serverId = c.req.param('id');
-    const id = await service.access(context, serverId, false, async (identifier) => identifier);
-    const download = await service.adapter.downloadFile(id, c.req.query('path') ?? '', {
+    const id = await service.fileReadAccess(context, serverId, async (identifier) => identifier);
+    const path = c.req.query('path') ?? '';
+    const filename = posix.basename(relativePath(path));
+    const fallback = filename.replace(/[^\x20-\x7e]|["\\]/g, '_');
+    const encodedFilename = encodeURIComponent(filename).replace(
+      /['()*]/g,
+      (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+    );
+    const disposition = `attachment; filename="${fallback}"; filename*=UTF-8''${encodedFilename}`;
+    const download = await service.adapter.downloadFile(id, path, {
       signal: c.req.raw.signal,
       authorize: () => service.authorizeTransfer(context, serverId, false),
     });
@@ -335,13 +580,21 @@ export function registerServerRoutes(
           : { 'content-length': String(download.contentLength) }),
         'cache-control': 'no-store',
         'x-content-type-options': 'nosniff',
-        'content-disposition': 'attachment',
+        'content-disposition': disposition,
       },
     });
   });
   app.put('/v1/servers/:id/files/upload', async (c) => {
-    const context = await principal(c),
-      service = await management();
+    const trace = options.logger?.isEnabled('debug') ?? false;
+    const started = trace ? performance.now() : 0;
+    const timing =
+      trace && (c.req.query('batchId') !== undefined || c.req.query('entryId') !== undefined)
+        ? createUploadTiming()
+        : undefined;
+    const context = await (timing
+        ? timing.measure('request.principal', () => principal(c))
+        : principal(c)),
+      service = await (timing ? timing.measure('request.runtime', management) : management());
     const declared = c.req.header('x-nh-upload-length');
     const rawLength = c.req.header('content-length');
     if (
@@ -355,164 +608,563 @@ export function registerServerRoutes(
     )
       throw new DomainError('validation_failed');
     const contentLength = Number(declared);
+    const overwriteValues = c.req.queries('overwrite');
+    if (overwriteValues && overwriteValues.length !== 1) throw new DomainError('validation_failed');
+    const overwrite =
+      parse(z.enum(['false', 'true']).default('true'), overwriteValues?.[0]) === 'true';
     const path = c.req.query('path') ?? '';
     relativePath(path);
+    if (c.req.query('batchId') !== undefined || c.req.query('entryId') !== undefined)
+      return runBatchUpload(c, {
+        path,
+        overwrite,
+        contentLength,
+        started,
+        timing,
+        context,
+        service,
+      });
     const slash = path.lastIndexOf('/');
     const directory = slash === -1 ? '' : path.slice(0, slash);
     const name = path.slice(slash + 1);
     const serverId = c.req.param('id');
     const release = options.acquireUploadSlot();
+    const durations: Record<string, number> = {};
+    const milliseconds = (since: number) => Math.round((performance.now() - since) * 1000) / 1000;
+    const measure = async <T>(stage: string, work: () => Promise<T>): Promise<T> => {
+      if (!trace) return work();
+      const since = performance.now();
+      try {
+        return await work();
+      } finally {
+        durations[stage] = milliseconds(since);
+      }
+    };
+    let outcome = 'failed';
     try {
-      await service.access(context, serverId, true, async (id, connection, current) => {
-        await service.assertFileMutation(serverId, [path], connection);
-        const server = await authorizeServer(connection, current, serverId, 'server:manage');
-        const maxBytes = server.limits.disk * 1024 * 1024;
-        if (!Number.isSafeInteger(maxBytes) || contentLength > maxBytes)
-          throw new DomainError('validation_failed', 413);
-        const [resources, files] = await Promise.all([
-          service.adapter.getResources(id),
-          service.adapter.listFiles(id, directory),
+      await service.uploadAccess(context, serverId, async (id, connection, current) => {
+        if (trace) durations.accessMs = milliseconds(started);
+        const directories = new Map<string, Promise<ServerFile[]>>();
+        const listFiles = (root: string) => {
+          let listing = directories.get(root);
+          if (!listing) {
+            listing = service.adapter.listFiles(id, root).then((files) => {
+              // Refuse the leaf collision after the game guard has checked its ancestors.
+              // This is a preflight observation, not an atomic external no-clobber guarantee.
+              if (
+                !overwrite &&
+                root === directory &&
+                files.some((file) => file.name.toLowerCase() === name.toLowerCase())
+              )
+                throw new DomainError('file_exists');
+              return files;
+            });
+            directories.set(root, listing);
+          }
+          return listing;
+        };
+        const [preflight, observed] = await Promise.allSettled([
+          measure('pathsMs', async () => {
+            await service.assertFileMutation(serverId, [path], connection, {
+              providerIdentifier: id,
+              listFiles,
+            });
+            const server = await authorizeServer(connection, current, serverId, 'files.write');
+            const maxBytes = serverStorageLimitBytes(server.limits.disk);
+            if (maxBytes !== null && contentLength > maxBytes)
+              throw new DomainError('validation_failed', 413);
+            return { maxBytes, files: await listFiles(directory) };
+          }),
+          measure('resourcesMs', () => service.adapter.getResources(id)),
         ]);
+        // Drain every started read before the pinned connection/server lock can be released.
+        // Game/authorization failures keep precedence over the independent resource read.
+        if (preflight.status === 'rejected') throw preflight.reason;
+        if (observed.status === 'rejected') throw observed.reason;
+        const { maxBytes, files } = preflight.value;
+        const resources = observed.value;
         const existing = files.find((file) => file.name === name);
         if (existing && (!existing.is_file || existing.is_symlink))
           throw new DomainError('conflict');
         // Native Wings filesystem quotas remain authoritative against concurrent
         // game/provider writes. This conservative preflight never invents storage.
-        if (resources.resources.disk_bytes - (existing?.size ?? 0) + contentLength > maxBytes)
+        if (
+          maxBytes !== null &&
+          resources.resources.disk_bytes - (existing?.size ?? 0) + contentLength > maxBytes
+        )
           throw new DomainError('validation_failed', 413);
         await service.authorizeTransfer(current, serverId, true, connection);
-        await recordAudit(connection, current, 'server.files.requested', {
+        const metadata = {
           serverId,
+          operationId: randomUUID(),
+          source: 'panel',
           action: 'upload',
+          path,
+          count: 1,
           bytes: contentLength,
+        };
+        await recordAudit(connection, current, 'server.files.requested', {
+          ...metadata,
+          outcome: 'requested',
         });
-        const claim = await reserveUploadIngestion(
-          connection,
-          current,
-          serverId,
-          contentLength,
-          env,
-        );
-        try {
-          await service.adapter.uploadFile(id, path, {
-            body:
-              c.req.raw.body ??
-              new ReadableStream({
-                start(controller) {
-                  controller.close();
-                },
-              }),
-            contentLength,
-            maxBytes,
-            signal: c.req.raw.signal,
-            authorize: () => service.authorizeTransfer(current, serverId, true, connection),
+        const claim = await measure('admissionMs', () =>
+          reserveUploadIngestion(connection, current, serverId, contentLength, env),
+        ).catch(async (error: unknown) => {
+          await recordAudit(connection, current, 'server.files.incomplete', {
+            ...metadata,
+            outcome: 'failed',
+            completed: 0,
           });
-          await claim.complete();
+          throw error;
+        });
+        try {
+          await measure('providerMs', () =>
+            service.adapter.uploadFile(id, path, {
+              readDirectory: async () => files,
+              body:
+                c.req.raw.body ??
+                new ReadableStream({
+                  start(controller) {
+                    controller.close();
+                  },
+                }),
+              contentLength,
+              maxBytes: maxBytes ?? contentLength,
+              signal: c.req.raw.signal,
+              authorize: () => service.authorizeTransfer(current, serverId, true, connection),
+            }),
+          );
+          await measure('settlementMs', () => claim.complete());
+        } catch (error) {
+          if (isUploadNotDispatched(error)) await claim.rejectBeforeDispatch();
+          else if (isUploadCancelled(error)) await claim.cancelConfirmed();
+          else if (isUploadNotPublished(error)) await claim.rejectBeforePublication();
+          await recordAudit(connection, current, 'server.files.incomplete', {
+            ...metadata,
+            completed: 0,
+            outcome:
+              isUploadNotDispatched(error) ||
+              (isUploadNotPublished(error) && !isUploadCancelled(error))
+                ? 'failed'
+                : isUploadCancelled(error)
+                  ? 'cancelled'
+                  : 'uncertain',
+          });
+          throw error;
         } finally {
           await claim.unlock();
         }
         await recordAudit(connection, current, 'server.files.uploaded', {
-          serverId,
-          bytes: contentLength,
+          ...metadata,
+          outcome: 'succeeded',
+          completed: 1,
         });
       });
+      outcome = 'succeeded';
     } finally {
       release();
+      // One diagnostic per transfer, with no paths, content or upstream URLs.
+      // Overlapping path/resource durations must not be summed as elapsed time.
+      try {
+        if (trace)
+          options.logger?.log('debug', 'server.files_upload', {
+            requestId: c.get('requestId'),
+            serverId,
+            bytes: contentLength,
+            outcome,
+            ...durations,
+            durationMs: milliseconds(started),
+          });
+      } catch {}
     }
     return c.body(null, 204);
   });
   app.post('/v1/servers/:id/files', async (c) => {
-    const context = await principal(c),
-      service = await management();
-    const input = parse(
-      z.discriminatedUnion('action', [
-        z
-          .object({ action: z.literal('write'), path: z.string(), content: z.string().max(60000) })
-          .strict(),
-        z.object({ action: z.literal('mkdir'), root: z.string(), name: z.string() }).strict(),
-        z
-          .object({
-            action: z.literal('delete'),
-            root: z.string(),
-            files: z.array(z.string()).min(1).max(100),
-            confirm: z.literal(true),
-          })
-          .strict(),
-        z
-          .object({
-            action: z.literal('rename'),
-            root: z.string(),
-            files: z
-              .array(z.object({ from: z.string(), to: z.string() }).strict())
-              .min(1)
-              .max(100),
-          })
-          .strict(),
-      ]),
-      await body(c),
-    );
-    await service.access(context, c.req.param('id'), true, async (id, connection, current) => {
-      const paths: string[] = [];
-      if (input.action === 'write') {
-        relativePath(input.path);
-        paths.push(input.path);
-      } else {
-        relativePath(input.root, true);
-        const names =
-          input.action === 'mkdir'
-            ? [input.name]
-            : input.action === 'delete'
-              ? input.files
-              : input.files.flatMap((file) => [file.from, file.to]);
-        for (const name of names) {
-          relativePath(name);
-          paths.push([input.root, name].filter(Boolean).join('/'));
+    const trace = createFileOperationTrace(c, options.logger, 'mutation');
+    const { timing } = trace;
+    let outcome: 'succeeded' | 'failed' = 'failed';
+    let response: Response | undefined;
+    let release: (() => void) | undefined;
+    try {
+      const context = await timing.measure('files.principal', () => principal(c)),
+        service = await timing.measure('files.management', management);
+      const input = parse(
+        z.discriminatedUnion('action', [
+          z
+            .object({
+              action: z.literal('write'),
+              path: z.string(),
+              content: z.string().max(60000),
+            })
+            .strict(),
+          z.object({ action: z.literal('mkdir'), root: z.string(), name: z.string() }).strict(),
+          z
+            .object({
+              action: z.literal('delete'),
+              root: z.string(),
+              files: z.array(z.string()).min(1),
+              confirm: z.literal(true),
+            })
+            .strict(),
+          z
+            .object({
+              action: z.literal('rename'),
+              root: z.string(),
+              files: z.array(z.object({ from: z.string(), to: z.string() }).strict()).min(1),
+              overwrite: z.array(z.string()).optional(),
+            })
+            .strict(),
+        ]),
+        await timing.measure('files.body', () => body(c)),
+      );
+      release = options.acquireUploadSlot();
+      await timing.measure('files.access', () =>
+        (input.action === 'delete' ? service.cleanupAccess : service.fileMutationAccess)(
+          context,
+          c.req.param('id'),
+          async (id, connection, current, server) => {
+            if (input.action === 'rename')
+              await authorizeServer(connection, current, c.req.param('id'), 'files.delete');
+            const paths: string[] = [];
+            if (input.action === 'write') {
+              relativePath(input.path);
+              paths.push(input.path);
+            } else {
+              relativePath(input.root, true);
+              const names =
+                input.action === 'mkdir'
+                  ? [input.name]
+                  : input.action === 'delete'
+                    ? input.files
+                    : input.files.flatMap((file) => [file.from, file.to]);
+              for (const name of names) {
+                relativePath(name);
+                paths.push([input.root, name].filter(Boolean).join('/'));
+              }
+            }
+            if (input.action === 'delete') validateFileDeletes(input.root, input.files);
+            const directories =
+              input.action === 'rename'
+                ? createFileDirectoryPlan({
+                    batch: (paths) =>
+                      service.fileDirectoryBatch(id, server, paths, c.req.raw.signal),
+                    single: (path) => service.adapter.listFiles(id, path),
+                    timing: trace.enabled ? timing : undefined,
+                  })
+                : undefined;
+            if (directories)
+              await timing.measure('files.directories', () =>
+                directories.prime(
+                  fileDirectoryAncestors(
+                    paths.map((path) => path.split('/').slice(0, -1).join('/')),
+                  ),
+                ),
+              );
+            await timing.measure('files.mutationGuard', () =>
+              service.assertFileMutation(
+                c.req.param('id'),
+                paths,
+                connection,
+                directories ? { providerIdentifier: id, listFiles: directories.list } : undefined,
+              ),
+            );
+            const metadata = {
+              operationId: randomUUID(),
+              source: 'panel',
+              serverId: c.req.param('id'),
+              action: input.action,
+              count:
+                input.action === 'delete' || input.action === 'rename' ? input.files.length : 1,
+              ...(input.action === 'write' ? { path: input.path } : { root: input.root }),
+              entries:
+                input.action === 'rename'
+                  ? input.files.slice(0, 100).map(({ from, to }) => ({
+                      path: [input.root, from].filter(Boolean).join('/'),
+                      target: [input.root, to].filter(Boolean).join('/'),
+                    }))
+                  : paths.slice(0, 100).map((path) => ({ path })),
+              ...(input.action === 'rename'
+                ? { overwrite: (input.overwrite ?? []).slice(0, 100) }
+                : {}),
+            };
+            await timing.measure('files.auditRequested', () =>
+              recordAudit(connection, current, 'server.files.requested', {
+                ...metadata,
+                outcome: 'requested',
+              }),
+            );
+            let dispatched = false;
+            let completed = 0;
+            try {
+              if (input.action === 'write')
+                await timing.measure('files.write', () => {
+                  dispatched = true;
+                  return service.adapter.writeFile(id, input.path, input.content);
+                });
+              else if (input.action === 'mkdir')
+                await timing.measure('files.mkdir', () => {
+                  dispatched = true;
+                  return service.adapter.createDirectory(id, input.root, input.name);
+                });
+              else if (input.action === 'delete')
+                await applyFileChunks(
+                  input.files,
+                  () =>
+                    timing.measure('files.authorize', () =>
+                      service.authorizeCleanupTransfer(
+                        current,
+                        c.req.param('id'),
+                        connection,
+                        trace.enabled ? timing : undefined,
+                      ),
+                    ),
+                  (files) =>
+                    timing.measure('files.delete', async () => {
+                      dispatched = true;
+                      await service.adapter.deleteFiles(id, input.root, files);
+                      completed += files.length;
+                    }),
+                );
+              else if (directories) {
+                await authorizeServer(connection, current, c.req.param('id'), 'files.delete');
+                await timing.measure('files.movePlan', () =>
+                  validateFileMoves(
+                    { listFiles: (_identifier, path = '') => directories.list(path) },
+                    id,
+                    input.root,
+                    input.files,
+                    input.overwrite,
+                    trace.enabled ? timing : undefined,
+                  ),
+                );
+                await applyFileChunks(
+                  input.files,
+                  () =>
+                    timing.measure('files.authorize', async () => {
+                      await authorizeServer(connection, current, c.req.param('id'), 'files.delete');
+                      return service.authorizeTransfer(
+                        current,
+                        c.req.param('id'),
+                        true,
+                        connection,
+                        trace.enabled ? timing : undefined,
+                      );
+                    }),
+                  (files) =>
+                    timing.measure('files.rename', async () => {
+                      dispatched = true;
+                      await service.adapter.renameFiles(id, input.root, files);
+                      completed += files.length;
+                    }),
+                );
+              }
+              await recordAudit(connection, current, 'server.files.completed', {
+                ...metadata,
+                completed: metadata.count,
+                outcome: 'succeeded',
+              });
+            } catch (error) {
+              await recordAudit(connection, current, 'server.files.incomplete', {
+                ...metadata,
+                completed,
+                outcome: completed > 0 ? 'partial' : dispatched ? 'uncertain' : 'failed',
+              });
+              throw error;
+            }
+          },
+          trace.enabled ? timing : undefined,
+        ),
+      );
+      outcome = 'succeeded';
+      response = c.body(null, 204);
+      return response;
+    } finally {
+      release?.();
+      trace.finish(outcome, response);
+    }
+  });
+  app.get('/v1/servers/:id/backups/events', async (c) => {
+    const server = await authorizeServer(db, await principal(c), c.req.param('id'), 'backups.read');
+    if (!backupEvents) throw new DomainError('integration_unavailable');
+    return streamSSE(c, async (stream) => {
+      let dirty = true;
+      let lost = false;
+      let wake: (() => void) | undefined;
+      const release = await backupEvents.subscribe(
+        server.id,
+        () => {
+          dirty = true;
+          wake?.();
+        },
+        () => {
+          lost = true;
+          wake?.();
+        },
+      );
+      stream.onAbort(() => wake?.());
+      try {
+        const end = Date.now() + 900_000;
+        while (!stream.aborted && !lost && Date.now() < end) {
+          // Authorization precedes every event/heartbeat, never held across remote work.
+          await authorizeServer(db, await principal(c), server.id, 'backups.read');
+          if (dirty) {
+            dirty = false;
+            await stream.writeSSE({
+              event: 'change',
+              data: JSON.stringify({ serverId: server.id }),
+            });
+          } else await stream.writeSSE({ event: 'heartbeat', data: '{}' });
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(done, 15_000);
+            function done() {
+              clearTimeout(timer);
+              wake = undefined;
+              resolve();
+            }
+            wake = done;
+            if (dirty || lost || stream.aborted) done();
+          });
         }
+      } finally {
+        release();
       }
-      await service.assertFileMutation(c.req.param('id'), paths, connection);
-      await recordAudit(connection, current, 'server.files.requested', {
-        serverId: c.req.param('id'),
-        action: input.action,
-      });
-      if (input.action === 'write') await service.adapter.writeFile(id, input.path, input.content);
-      else if (input.action === 'mkdir')
-        await service.adapter.createDirectory(id, input.root, input.name);
-      else if (input.action === 'delete')
-        await service.adapter.deleteFiles(id, input.root, input.files);
-      else await service.adapter.renameFiles(id, input.root, input.files);
     });
-    return c.body(null, 204);
   });
   app.get('/v1/servers/:id/backups', async (c) => {
     const context = await principal(c),
       service = await management();
     return c.json(
-      await service.access(context, c.req.param('id'), false, (id) =>
-        service.adapter.listBackups(id),
+      await service.access(
+        context,
+        c.req.param('id'),
+        false,
+        async (id) => {
+          const [backups, labels] = await Promise.all([
+            service.adapter.listBackups(id),
+            (await backupSchemaAvailable(db))
+              ? db
+                  .selectFrom('backup_labels')
+                  .select(['backup_id', 'name'])
+                  .where('server_id', '=', c.req.param('id'))
+                  .execute()
+              : [],
+          ]);
+          const names = new Map(labels.map((entry) => [entry.backup_id, entry.name]));
+          return backups.map((backup) => ({
+            ...backup,
+            name: names.get(backup.uuid) ?? backup.name,
+          }));
+        },
+        undefined,
+        'backups.read',
       ),
     );
+  });
+  app.patch('/v1/servers/:id/backups/:backupId', async (c) => {
+    const context = await principal(c),
+      service = await management();
+    const input = parse(
+      z
+        .object({
+          name: z.string().trim().min(1).max(191).optional(),
+          isLocked: z.boolean().optional(),
+        })
+        .strict()
+        .refine((value) => value.name !== undefined || value.isLocked !== undefined),
+      await body(c),
+    );
+    const backupId = parse(z.uuid(), c.req.param('backupId'));
+    if (!(await backupSchemaAvailable(db))) throw new DomainError('configuration_invalid');
+    await service.access(
+      context,
+      c.req.param('id'),
+      true,
+      async (identifier, connection, current) => {
+        const backup = await service.adapter.getBackup(identifier, backupId);
+        if (input.isLocked !== undefined && backup.is_locked !== input.isLocked)
+          await service.adapter.toggleBackupLock(identifier, backupId);
+        if (input.name !== undefined)
+          await connection
+            .insertInto('backup_labels')
+            .values({ server_id: c.req.param('id'), backup_id: backupId, name: input.name })
+            .onConflict((conflict) =>
+              conflict.columns(['server_id', 'backup_id']).doUpdateSet({ name: input.name }),
+            )
+            .execute();
+        await recordAudit(connection, current, 'server.backup.updated', {
+          serverId: c.req.param('id'),
+          backupId,
+          ...input,
+        });
+      },
+      undefined,
+      'server:manage',
+    );
+    return c.body(null, 204);
   });
   app.delete('/v1/servers/:id/backups/:backupId', async (c) => {
     const context = await principal(c),
       service = await management();
     parse(z.object({ confirm: z.literal(true) }).strict(), await body(c));
-    await service.access(context, c.req.param('id'), true, async (id, connection, current) => {
-      await recordAudit(connection, current, 'server.backup.delete_requested', {
-        serverId: c.req.param('id'),
-        backupId: c.req.param('backupId'),
-      });
-      await service.adapter.deleteBackup(id, c.req.param('backupId'));
-    });
+    await service.cleanupAccess(
+      context,
+      c.req.param('id'),
+      async (id, connection, current) => {
+        const metadata = {
+          serverId: c.req.param('id'),
+          backupId: c.req.param('backupId'),
+          operationId: randomUUID(),
+          source: 'panel',
+          action: 'backup_delete',
+        };
+        await recordAudit(connection, current, 'server.backup.delete_requested', {
+          ...metadata,
+          outcome: 'requested',
+        });
+        try {
+          await service.adapter.deleteBackup(id, c.req.param('backupId'));
+          await recordAudit(connection, current, 'server.backup.deleted', {
+            ...metadata,
+            outcome: 'succeeded',
+          });
+        } catch (error) {
+          await recordAudit(connection, current, 'server.backup.delete_incomplete', {
+            ...metadata,
+            outcome: 'uncertain',
+          });
+          throw error;
+        }
+      },
+      undefined,
+      'backups.delete',
+    );
     return c.body(null, 204);
   });
   app.get('/v1/servers/:id/backups/:backupId/download', async (c) => {
     const context = await principal(c),
       service = await management();
     const serverId = c.req.param('id');
-    const id = await service.access(context, serverId, false, async (identifier) => identifier);
+    const id = await service.access(
+      context,
+      serverId,
+      false,
+      async (identifier) => identifier,
+      undefined,
+      'backups.download',
+    );
     const download = await service.adapter.downloadBackup(id, c.req.param('backupId'), {
       signal: c.req.raw.signal,
-      authorize: () => service.authorizeTransfer(context, serverId, false),
+      authorize: () =>
+        service.authorizeTransfer(
+          context,
+          serverId,
+          false,
+          db,
+          undefined,
+          undefined,
+          false,
+          'backups.download',
+        ),
     });
     return new Response(download.body, {
       headers: {
@@ -521,7 +1173,7 @@ export function registerServerRoutes(
           ? {}
           : { 'content-length': String(download.contentLength) }),
         'cache-control': 'no-store',
-        'content-disposition': 'attachment',
+        'content-disposition': `attachment; filename="backup-${parse(z.uuid(), c.req.param('backupId'))}.tar.gz"`,
         'x-content-type-options': 'nosniff',
       },
     });
@@ -530,25 +1182,94 @@ export function registerServerRoutes(
     const context = await principal(c),
       service = await management();
     const input = parse(z.object({ command: z.string().min(1).max(4096) }).strict(), await body(c));
-    await service.access(context, c.req.param('id'), true, async (id, connection, current) => {
-      await recordAudit(connection, current, 'server.console.command', {
-        serverId: c.req.param('id'),
-      });
-      await service.adapter.sendCommand(id, input.command);
-    });
+    await service.access(
+      context,
+      c.req.param('id'),
+      true,
+      async (id, connection, current, server) => {
+        const metadata = {
+          serverId: c.req.param('id'),
+          operationId: randomUUID(),
+          source: 'panel',
+          command: input.command,
+        };
+        await recordAudit(connection, current, 'server.console.command', {
+          ...metadata,
+          outcome: 'requested',
+        });
+        let dispatched = false;
+        try {
+          const relay = commandRelays.find(
+            current,
+            c.req.param('id'),
+            JSON.stringify([
+              id,
+              server.pterodactyl_id,
+              server.pterodactyl_uuid,
+              server.external_id,
+            ]),
+            await service.consoleBindingForServer(c.req.param('id')),
+          );
+          // Choose transport before dispatch. A WS error may follow a sent frame: never replay it.
+          dispatched = true;
+          if (relay) await relay.sendCommand(input.command);
+          else await service.adapter.sendCommand(id, input.command);
+          // Provider acknowledgement confirms dispatch, never game-side execution.
+          await recordAudit(connection, current, 'server.console.dispatched', {
+            ...metadata,
+            outcome: 'dispatched',
+          });
+        } catch (error) {
+          await recordAudit(connection, current, 'server.console.failed', {
+            ...metadata,
+            outcome: dispatched ? 'uncertain' : 'failed',
+          });
+          throw error;
+        }
+      },
+      undefined,
+      'console.command',
+    );
     return c.body(null, 204);
   });
   app.get('/v1/servers/:id/console', async (c) => {
     const context = await principal(c),
       service = await management();
-    const identifier = await service.access(context, c.req.param('id'), false, async (id) => id);
+    const { identifier, identity, server } = await service.access(
+      context,
+      c.req.param('id'),
+      false,
+      async (id, _connection, _current, server) => ({
+        identifier: id,
+        server,
+        identity: JSON.stringify([
+          id,
+          server.pterodactyl_id,
+          server.pterodactyl_uuid,
+          server.external_id,
+        ]),
+      }),
+      undefined,
+      'console.read',
+    );
+    let canSendCommands = false;
+    try {
+      await authorizeServer(db, context, c.req.param('id'), 'console.command');
+      canSendCommands = true;
+    } catch (error) {
+      if (!(error instanceof DomainError) || error.code !== 'forbidden') throw error;
+    }
     return streamSSE(c, async (stream) => {
+      let unregister = () => {};
+      let relayClosed = false;
       let done!: () => void;
       const closed = new Promise<void>((resolve) => {
         done = resolve;
       });
       const controller = new AbortController();
       stream.onAbort(() => {
+        relayClosed = true;
+        unregister();
         controller.abort();
         done();
       });
@@ -560,32 +1281,84 @@ export function registerServerRoutes(
           done();
         },
       );
+      let authorizationDenied = false;
+      let heartbeat: ReturnType<typeof setInterval> | undefined;
       try {
+        const providerBinding = await service.consoleBindingForServer(c.req.param('id'));
+        const observeDisk = service.observeConsoleDisk(server, providerBinding);
         const relay = await service.adapter.relayConsole(identifier, {
-          signal: controller.signal,
-          authorize: async () => {
+          canSendCommands,
+          authorizeCommand: async () => {
             try {
-              await authorizeServer(db, await principal(c), c.req.param('id'));
-              return true;
+              await authorizeServer(db, await principal(c), c.req.param('id'), 'console.command');
+              return providerBinding === (await service.consoleBindingForServer(c.req.param('id')));
             } catch {
               return false;
             }
           },
+          signal: controller.signal,
+          authorize: async () => {
+            try {
+              await authorizeServer(db, await principal(c), c.req.param('id'), 'console.read');
+              return providerBinding === (await service.consoleBindingForServer(c.req.param('id')));
+            } catch {
+              authorizationDenied = true;
+              return false;
+            }
+          },
           onEvent: (event) => {
-            output.send({ event: event.type, data: JSON.stringify(event) });
-            if (event.type === 'closed') void output.drain().then(done);
+            if (authorizationDenied)
+              output.send({
+                event: 'error',
+                data: JSON.stringify({ type: 'error', code: 'forbidden' }),
+              });
+            else {
+              observeDisk(event);
+              output.send({ event: event.type, data: JSON.stringify(event) });
+            }
+            if (event.type === 'closed') {
+              relayClosed = true;
+              unregister();
+              void output.drain().then(done);
+            }
           },
         });
         try {
+          if (providerBinding !== (await service.consoleBindingForServer(c.req.param('id')))) {
+            throw new DomainError('integration_unavailable');
+          }
+          if (canSendCommands && !relayClosed && !controller.signal.aborted)
+            unregister = commandRelays.register(
+              context,
+              c.req.param('id'),
+              identity,
+              providerBinding,
+              relay,
+            );
+          if (c.req.query('history') !== '0') await relay.requestLogs();
+          output.send({ event: 'connected', data: JSON.stringify({ type: 'connected' }) });
+          // Offline Wings can remain silent. Keep the HTTP stream active without
+          // polling the provider; relay authorization checks still run independently.
+          heartbeat = setInterval(() => {
+            if (!authorizationDenied && !controller.signal.aborted)
+              output.send({ event: 'heartbeat', data: JSON.stringify({ type: 'heartbeat' }) });
+          }, 10000);
+          heartbeat.unref();
           await closed;
         } finally {
+          unregister();
           relay.close();
         }
-      } catch {
+      } catch (error) {
         // No upstream exception details or credentials in an already-open stream.
-        output.send({ event: 'error', data: JSON.stringify({ code: 'integration_unavailable' }) });
+        const code =
+          authorizationDenied || (error instanceof DomainError && error.code === 'forbidden')
+            ? 'forbidden'
+            : 'integration_unavailable';
+        output.send({ event: 'error', data: JSON.stringify({ type: 'error', code }) });
         await output.drain();
       } finally {
+        if (heartbeat) clearInterval(heartbeat);
         output.close();
         controller.abort();
       }
@@ -606,6 +1379,21 @@ export function registerServerRoutes(
         service.externalOptions,
       ),
       201,
+    );
+  });
+  app.post('/v1/servers/:id/sftp/:credentialId/password', async (c) => {
+    c.header('cache-control', 'no-store');
+    const context = await principal(c, true),
+      service = await management();
+    return c.json(
+      await revealSftpCredential(
+        db,
+        context,
+        c.req.param('id'),
+        c.req.param('credentialId'),
+        await body(c),
+        service.externalOptions,
+      ),
     );
   });
   app.post('/v1/servers/:id/sftp/:credentialId/rotate', async (c) => {
@@ -636,6 +1424,38 @@ export function registerServerRoutes(
       ),
     );
   });
+  for (const kind of ['availability', 'reservation', 'suggestion'] as const)
+    app.post(`/v1/games/:id/connection-${kind}`, async (c) => {
+      try {
+        const context = await principal(c, true),
+          service = await management();
+        const operation =
+          kind === 'availability'
+            ? getGameConnectionAvailability
+            : kind === 'suggestion'
+              ? suggestGameConnection
+              : reserveGameConnection;
+        return c.json(
+          await operation(db, context, c.req.param('id'), await body(c), service.externalOptions),
+          kind === 'reservation' ? 201 : 200,
+        );
+      } catch (error) {
+        if (error instanceof DomainError && error.code === 'rate_limited') {
+          const retry = error.details?.retryAfterMs;
+          c.header(
+            'Retry-After',
+            String(Math.ceil((typeof retry === 'number' ? retry : 1000) / 1000)),
+          );
+        }
+        throw error;
+      }
+    });
+  app.get('/v1/games/:id/connection-options', async (c) =>
+    c.json(await getGameConnectionOptions(db, await principal(c), c.req.param('id'), env)),
+  );
+  app.get('/v1/servers/:id/connection-options', async (c) =>
+    c.json(await getServerConnectionOptions(db, await principal(c), c.req.param('id'), env)),
+  );
   app.get('/v1/servers/:id/dns', async (c) =>
     c.json(await listServerDns(db, await principal(c), c.req.param('id'))),
   );

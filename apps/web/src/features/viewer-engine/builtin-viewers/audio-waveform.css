@@ -1,0 +1,44 @@
+.wave-envelope {
+  position: relative;
+  width: 100%;
+  height: 128px;
+  overflow: hidden;
+  pointer-events: none;
+}
+.wave-envelope svg {
+  display: block;
+  width: 100%;
+  height: 128px;
+  fill: none;
+}
+.wave-envelope-unplayed {
+  fill: #b6c7cb;
+}
+.wave-envelope-played {
+  fill: #345c65;
+}
+.wave-envelope-rail {
+  position: absolute;
+  inset: 62px 0 auto;
+  height: 4px;
+  border-radius: 2px;
+  background: #b6c7cb;
+}
+.wave-envelope > span {
+  position: absolute;
+  inset: auto 0 10px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.wave-envelope-bar {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 160ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .wave-envelope-bar {
+    transition: none;
+  }
+}

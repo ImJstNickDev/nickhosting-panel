@@ -1,0 +1,63 @@
+# Explicit opt-in only, after an operation-specific Owner approval.
+# Requires compose.dev.yaml + compose.dev.real.yaml + compose.dev.observer.yaml.
+# Host networking is required by the existing independent namespace/collision checks.
+# No ports are inferred: Owner routes and node probe endpoints need separate approval.
+services:
+  api:
+    environment: &gateway-core
+      NH_DEV_GATEWAY_ENABLED: "true"
+      NH_DEV_GATEWAY_ID: ${NH_DEV_GATEWAY_ID:?Dedicated development Gateway UUID required}
+      NH_DEV_GATEWAY_CONTROL_TOKEN: ${NH_DEV_GATEWAY_CONTROL_TOKEN:?Dedicated development Gateway token required}
+  worker:
+    environment: *gateway-core
+  gateway:
+    profiles: [gateway]
+    image: nickhosting-dev-app:local
+    user: "${NH_DEV_UID:?Development UID required}:${NH_DEV_GID:?Development GID required}"
+    group_add: ["${NH_DEV_DOCKER_GID:?Host Docker socket group required}"]
+    entrypoint: [node, --import, tsx, /app/apps/game-gateway/src/main.ts]
+    # Deliberately no env_file: no database, Owner, auth or provider secrets.
+    environment:
+      NH_GATEWAY_ID: ${NH_DEV_GATEWAY_ID:?Dedicated development Gateway UUID required}
+      NH_GATEWAY_CONTROL_TOKEN: ${NH_DEV_GATEWAY_CONTROL_TOKEN:?Dedicated development Gateway token required}
+      NH_GATEWAY_CORE_URL: ${NH_DEV_PUBLIC_URL:?HTTPS development origin required}
+      NH_GATEWAY_DIAGNOSTICS_SOCKET: /run/nickhosting-gateway/diagnostics.sock
+      NH_GATEWAY_PROTOCOL_MODULES: '["/app/games/minecraft/src/gateway-module.ts"]'
+    network_mode: host
+    depends_on:
+      api: { condition: service_healthy }
+      web: { condition: service_healthy }
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+      - /run/nickhosting-gateway:rw,noexec,nosuid,size=1m,mode=0700,uid=${NH_DEV_UID:?Development UID required},gid=${NH_DEV_GID:?Development GID required}
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_grace_period: 90s
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1
+    logging: { driver: json-file, options: { max-size: 10m, max-file: "3" } }
+    volumes:
+      # Read-only mount does not restrict Docker API authority (issue #22).
+      - { type: bind, source: /var/run/docker.sock, target: /var/run/docker.sock, read_only: true, bind: { create_host_path: false } }
+      # Must identify an independent host process and be readable by the service.
+      # Never use /proc/self or relax host permissions to make this check pass.
+      - { type: bind, source: "${NH_DEV_GATEWAY_HOST_PROC:?Verified readable host process proc directory required}", target: /run/nickhosting-host-proc, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: ./apps/game-gateway/src, target: /app/apps/game-gateway/src, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: ./packages/core/src, target: /app/packages/core/src, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: ./packages/game-sdk/src, target: /app/packages/game-sdk/src, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: ./packages/gateway-safety/src, target: /app/packages/gateway-safety/src, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: ./packages/pterodactyl-adapter/src, target: /app/packages/pterodactyl-adapter/src, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: ./games/minecraft/src, target: /app/games/minecraft/src, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: ./tsconfig.json, target: /app/tsconfig.json, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: ./deploy/gateway-health.mjs, target: /app/deploy/gateway-health.mjs, read_only: true, bind: { create_host_path: false } }
+    healthcheck:
+      test: [CMD, node, /app/deploy/gateway-health.mjs]
+      interval: 15s
+      timeout: 5s
+      # Existing Gateway deliberately drains previous leases for 31 seconds.
+      start_period: 60s
+      retries: 3

@@ -1,4 +1,5 @@
 import { type DomainErrorCode, safeError } from '@nickhosting/core';
+import { authErrorKeys } from './auth-errors.js';
 import { en, it, type MessageKey } from './catalogs.js';
 
 export { en, it, type MessageKey } from './catalogs.js';
@@ -120,40 +121,6 @@ export function localizeError(
   const safe = safeError(error);
   return { ...safe, message: translate(locale, safe.messageKey) };
 }
-
-const authErrorKeys: Readonly<Record<string, MessageKey>> = {
-  INVITATION_INVALID: 'errors.invitation_invalid',
-  invitation_invalid: 'errors.invitation_invalid',
-  account_not_linked: 'auth.account_conflict',
-  unable_to_link_account: 'auth.account_conflict',
-  state_mismatch: 'auth.invalid_code',
-  INVALID_EMAIL_OR_PASSWORD: 'auth.invalid_credentials',
-  INVALID_PASSWORD: 'auth.invalid_credentials',
-  USER_NOT_FOUND: 'auth.invalid_credentials',
-  EMAIL_NOT_VERIFIED: 'auth.email_not_verified',
-  USER_ALREADY_EXISTS: 'auth.account_conflict',
-  USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL: 'auth.account_conflict',
-  ACCOUNT_ALREADY_LINKED: 'auth.account_conflict',
-  OAUTH_ACCOUNT_ALREADY_LINKED: 'auth.account_conflict',
-  INVALID_TOKEN: 'auth.invalid_code',
-  TOKEN_EXPIRED: 'auth.invalid_code',
-  INVALID_TWO_FACTOR_COOKIE: 'auth.invalid_code',
-  INVALID_CODE: 'auth.invalid_code',
-  INVALID_BACKUP_CODE: 'auth.recovery_invalid',
-  SESSION_EXPIRED: 'auth.session_expired',
-  PASSWORD_TOO_SHORT: 'auth.password_too_short',
-  PASSWORD_TOO_LONG: 'auth.password_too_long',
-  SOCIAL_PROVIDER_NOT_FOUND: 'auth.oauth_unavailable',
-  FAILED_TO_GET_USER_INFO: 'auth.oauth_unavailable',
-  ACCOUNT_NOT_LINKED: 'auth.link_required',
-  FRESH_SESSION_REQUIRED: 'auth.step_up_required',
-  CHALLENGE_NOT_FOUND: 'auth.passkey_unavailable',
-  AUTHENTICATION_FAILED: 'auth.passkey_unavailable',
-  FAILED_TO_VERIFY_AUTHENTICATION: 'auth.passkey_unavailable',
-  TOO_MANY_REQUESTS: 'errors.rate_limited',
-  UNAUTHORIZED: 'errors.unauthenticated',
-  FORBIDDEN: 'errors.forbidden',
-};
 
 /** Unknown provider errors never expose raw provider English messages or private metadata. */
 export function localizeAuthError(

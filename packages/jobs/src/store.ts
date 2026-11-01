@@ -7,7 +7,7 @@ import {
   domainErrorCodes,
   safeError,
 } from '@nickhosting/core';
-import type { Database } from '@nickhosting/database';
+import { type Database, notifyJobOutbox } from '@nickhosting/database';
 import { type Kysely, type Selectable, sql, type Transaction } from 'kysely';
 import { z } from 'zod';
 import { commandDigest, type JobCommand, parseCommand, retryDelayMs } from './contracts.js';
@@ -120,11 +120,13 @@ export async function enqueueCommand(
         .executeTakeFirstOrThrow());
     if (row.command_hash !== digest || row.max_attempts !== parsed.data.maxAttempts)
       throw new DomainError('conflict');
-    if (inserted)
+    if (inserted) {
       await tx
         .insertInto('job_outbox')
         .values({ job_id: row.id, last_dispatched_at: null })
         .execute();
+      await notifyJobOutbox(tx);
+    }
     return status(row);
   });
 }

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
+import { minecraftPropertyEnumValue } from './property-enums.js';
 
 function invalid(reason: string): never {
   throw new DomainError('validation_failed', 400, { reason });
@@ -76,6 +77,31 @@ export function parseMinecraftProperties(source: string): Readonly<Record<string
     ),
   );
 }
+/** Internal text serializer. Callers authorize and validate the property keys/values. */
+function mergedPropertyLines(
+  parsed: PropertyLine[],
+  changes: Readonly<Record<string, string>>,
+): string {
+  const replacement = new Map(Object.entries(changes));
+  if ([...replacement].some(([key, value]) => !key || key.includes('\0') || value.includes('\0')))
+    return invalid('minecraft_properties_invalid');
+  const lines = parsed.map((line) => {
+    if (!line.key || !replacement.has(line.key)) return line.raw;
+    const value = replacement.get(line.key) ?? '';
+    replacement.delete(line.key);
+    return `${escapeProperty(line.key)}=${escapeProperty(value)}`;
+  });
+  if (lines.at(-1) === '') lines.pop();
+  for (const [key, value] of replacement)
+    lines.push(`${escapeProperty(key)}=${escapeProperty(value)}`);
+  return `${lines.join('\n')}\n`;
+}
+export function mergeMinecraftPropertiesText(
+  source: string,
+  changes: Readonly<Record<string, string>>,
+): string {
+  return mergedPropertyLines(propertyLines(source), changes);
+}
 const booleans = new Set([
   'pvp',
   'white-list',
@@ -94,6 +120,14 @@ const numeric: Record<string, [number, number]> = {
   'spawn-protection': [0, 29_999_984],
   'player-idle-timeout': [0, 2_147_483_647],
 };
+export const minecraftEditablePropertyKeys: readonly string[] = Object.freeze([
+  ...booleans,
+  ...Object.keys(numeric),
+  'difficulty',
+  'gamemode',
+  'motd',
+]);
+
 /** Product fields exclude bind addresses, ports, RCON, online-mode and service credentials. */
 export function editMinecraftProperties(
   source: string,
@@ -129,24 +163,19 @@ export function editMinecraftProperties(
       if (
         value.length > 256 ||
         [...value].some(
-          (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+          (character) =>
+            (character.charCodeAt(0) < 32 && character !== '\n') || character.charCodeAt(0) === 127,
         )
       )
         return invalid('minecraft_property_motd');
     } else return invalid('minecraft_property_protected');
     // Release-specific support comes from a verified generated-property schema, not semver guesses.
-    replacement.set(key, value);
+    replacement.set(
+      key,
+      minecraftPropertyEnumValue(key, value, parsed.find((line) => line.key === key)?.value),
+    );
   }
-  const lines = parsed.map((line) => {
-    if (!line.key || !replacement.has(line.key)) return line.raw;
-    const value = replacement.get(line.key) ?? '';
-    replacement.delete(line.key);
-    return `${escapeProperty(line.key)}=${escapeProperty(value)}`;
-  });
-  if (lines.at(-1) === '') lines.pop();
-  for (const [key, value] of replacement)
-    lines.push(`${escapeProperty(key)}=${escapeProperty(value)}`);
-  const content = `${lines.join('\n')}\n`;
+  const content = mergedPropertyLines(parsed, Object.fromEntries(replacement));
   return {
     content,
     beforeSha256: createHash('sha256').update(source).digest('hex'),
@@ -174,14 +203,19 @@ export interface MinecraftVerifiedPlayer {
   readonly uuid: string;
   readonly name: string;
   readonly verifiedAt: string;
-  readonly source: 'mojang';
+  readonly source: 'mojang' | 'mc-api.io' | 'mixed';
+}
+export interface MinecraftIdentityResult {
+  readonly id: string;
+  readonly name: string;
+  readonly source?: 'mojang' | 'mc-api.io';
 }
 /** Provider identities, never an avatar response, establish authority. Both directions must agree. */
 export async function verifyMinecraftPlayer(
   name: string,
   provider: {
-    lookupName(name: string): Promise<{ id: string; name: string }>;
-    lookupUuid(uuid: string): Promise<{ id: string; name: string }>;
+    lookupName(name: string): Promise<MinecraftIdentityResult>;
+    lookupUuid(uuid: string): Promise<MinecraftIdentityResult>;
   },
   now = new Date(),
 ): Promise<MinecraftVerifiedPlayer> {
@@ -200,7 +234,10 @@ export async function verifyMinecraftPlayer(
     uuid,
     name: canonicalName,
     verifiedAt: now.toISOString(),
-    source: 'mojang',
+    source:
+      (byName.source ?? 'mojang') === (byUuid.source ?? 'mojang')
+        ? (byName.source ?? 'mojang')
+        : 'mixed',
   });
 }
 export function minecraftAvatarUrl(
@@ -222,7 +259,9 @@ export function planMinecraftPlayerList(
   source: string,
   kind: 'whitelist' | 'operators',
   action: 'add' | 'remove',
-  player: MinecraftVerifiedPlayer,
+  player: Omit<MinecraftVerifiedPlayer, 'source'> & {
+    readonly source: MinecraftVerifiedPlayer['source'] | 'server-file';
+  },
   options: { operatorLevel?: number; bypassesPlayerLimit?: boolean } = {},
 ): {
   path: 'whitelist.json' | 'ops.json';
@@ -233,7 +272,7 @@ export function planMinecraftPlayerList(
 } {
   if (
     Buffer.byteLength(source) > 4 * 1024 * 1024 ||
-    player.source !== 'mojang' ||
+    !['mojang', 'mc-api.io', 'mixed', 'server-file'].includes(player.source) ||
     !Number.isFinite(Date.parse(player.verifiedAt))
   )
     return invalid('minecraft_player_list');
@@ -410,10 +449,12 @@ export function planMinecraftWorldImport(
     .map((entry) => entry.path.slice(0, -'level.dat'.length));
   if (roots.length !== 1 || roots[0] === undefined) return invalid('minecraft_world_level_data');
   const sourceRoot = roots[0];
+  // Download packages may include artwork and instructions beside the world.
+  // Validate the whole inventory above, then promote only the unique level.dat root.
+  // sourceRoot includes its trailing slash (or is empty for a root-level world).
   const files = entries
-    .filter((entry) => entry.type === 'file')
+    .filter((entry) => entry.type === 'file' && entry.path.startsWith(sourceRoot))
     .map((entry) => {
-      if (!entry.path.startsWith(sourceRoot)) return invalid('minecraft_world_multiple_roots');
       const relative = entry.path.slice(sourceRoot.length);
       // Never promote runnable code, properties, symlinks or files outside the isolated world root.
       if (
@@ -426,7 +467,7 @@ export function planMinecraftWorldImport(
   return {
     targetWorld,
     sourceRoot,
-    totalBytes,
+    totalBytes: files.reduce((sum, file) => sum + file.size, 0),
     files,
     requiresStoppedServer: true,
     requiresNbtValidation: true,
@@ -458,7 +499,9 @@ export function planMinecraftWorldSelection(
   };
 }
 
-/** Fixed Mojang origins only; no avatar data, third-party mirrors or redirects establish identity. */
+/** Race the official lookup chain against the Owner-approved mc-api.io Java
+ * profile service. Each direction validates its requested identity before it can
+ * win; verifyMinecraftPlayer still requires name/UUID agreement. */
 export function createMinecraftIdentityProvider(options: {
   userAgent: string;
   fetch?: typeof fetch;
@@ -469,60 +512,185 @@ export function createMinecraftIdentityProvider(options: {
   const timeout = options.timeoutMs ?? 10_000;
   if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 30_000)
     throw new DomainError('configuration_invalid');
-  const request = async (url: string): Promise<{ id: string; name: string }> => {
-    let response: Response;
-    try {
-      response = await (options.fetch ?? fetch)(url, {
-        redirect: 'error',
-        credentials: 'omit',
-        headers: { 'User-Agent': options.userAgent, Accept: 'application/json' },
-        signal: AbortSignal.timeout(timeout),
-      });
-    } catch {
-      throw new DomainError('integration_unavailable');
-    }
-    if (!response.ok || !response.body) {
-      await response.body?.cancel();
-      throw new DomainError('integration_unavailable');
-    }
-    const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let bytes = 0;
-    try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        bytes += value.byteLength;
-        if (bytes > 64 * 1024) throw new DomainError('integration_unavailable');
-        chunks.push(value);
+  const unavailable = (reason: string) =>
+    new DomainError('integration_unavailable', 503, { reason });
+  type Expected = { kind: 'name' | 'uuid'; value: string };
+  const request = async (
+    url: string,
+    budget: number,
+    source: 'mojang' | 'mc-api.io',
+    expected: Expected,
+    signal: AbortSignal,
+  ): Promise<MinecraftIdentityResult> => {
+    const controller = new AbortController();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancel: () => void = () => {};
+    const deadline = new Promise<never>((_, reject) => {
+      cancel = () => {
+        controller.abort();
+        reject(unavailable('minecraft_identity_cancelled'));
+      };
+      signal.addEventListener('abort', cancel, { once: true });
+      if (signal.aborted) cancel();
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(unavailable('minecraft_identity_transport'));
+      }, budget);
+    });
+    const work = async () => {
+      if (signal.aborted) throw unavailable('minecraft_identity_cancelled');
+      let response: Response;
+      try {
+        response = await (options.fetch ?? fetch)(url, {
+          redirect: 'error',
+          credentials: 'omit',
+          headers: { 'User-Agent': options.userAgent, Accept: 'application/json' },
+          signal: controller.signal,
+        });
+      } catch {
+        throw unavailable('minecraft_identity_transport');
       }
-    } finally {
-      await reader.cancel().catch(() => {});
-      reader.releaseLock();
-    }
-    let result: unknown;
+      if (controller.signal.aborted) {
+        void response.body?.cancel().catch(() => {});
+        throw unavailable('minecraft_identity_transport');
+      }
+      if (response.status === 404 || response.status === 204) {
+        void response.body?.cancel().catch(() => {});
+        throw new DomainError('not_found', 404, { reason: 'minecraft_player_not_found' });
+      }
+      if (!response.ok || !response.body) {
+        void response.body?.cancel().catch(() => {});
+        throw unavailable(
+          response.status === 429 || response.status >= 500
+            ? 'minecraft_identity_upstream_retryable'
+            : 'minecraft_identity_response',
+        );
+      }
+      reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let bytes = 0;
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          bytes += value.byteLength;
+          if (bytes > 64 * 1024) throw unavailable('minecraft_identity_response');
+          chunks.push(value);
+        }
+      } catch (error) {
+        if (error instanceof DomainError) throw error;
+        throw unavailable('minecraft_identity_transport');
+      }
+      try {
+        const result: unknown = JSON.parse(Buffer.concat(chunks, bytes).toString('utf8'));
+        if (
+          !result ||
+          typeof result !== 'object' ||
+          !('name' in result) ||
+          typeof result.name !== 'string' ||
+          ('error' in result && result.error === true) ||
+          'xuid' in result ||
+          ('edition' in result && result.edition !== 'JAVA')
+        )
+          throw unavailable('minecraft_identity_response');
+        const rawId =
+          source === 'mc-api.io'
+            ? 'uuid' in result
+              ? result.uuid
+              : undefined
+            : 'id' in result
+              ? result.id
+              : undefined;
+        if (typeof rawId !== 'string') throw unavailable('minecraft_identity_response');
+        const identity = {
+          id: minecraftUuid(rawId),
+          name: minecraftPlayerName(result.name),
+          source,
+        };
+        if (
+          (expected.kind === 'name' &&
+            identity.name.toLowerCase() !== expected.value.toLowerCase()) ||
+          (expected.kind === 'uuid' && identity.id !== expected.value)
+        )
+          throw unavailable('minecraft_identity_response');
+        return identity;
+      } catch {
+        throw unavailable('minecraft_identity_response');
+      }
+    };
     try {
-      result = JSON.parse(Buffer.concat(chunks, bytes).toString('utf8'));
-    } catch {
-      throw new DomainError('integration_unavailable');
+      // Race cancellation as well as transport timeout: a loser that ignores its
+      // abort signal must not retain a hanging lookup or start an official retry.
+      return await Promise.race([work(), deadline]);
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', cancel);
+      controller.abort();
+      if (reader) {
+        void reader.cancel().catch(() => {});
+        reader.releaseLock();
+      }
     }
-    if (
-      !result ||
-      typeof result !== 'object' ||
-      !('id' in result) ||
-      !('name' in result) ||
-      typeof result.id !== 'string' ||
-      typeof result.name !== 'string'
-    )
-      throw new DomainError('integration_unavailable');
-    return { id: minecraftUuid(result.id), name: minecraftPlayerName(result.name) };
+  };
+  const official = (url: string, retryUrl: string, expected: Expected, signal: AbortSignal) => {
+    const started = performance.now();
+    return request(url, Math.max(1, Math.floor(timeout / 2)), 'mojang', expected, signal).catch(
+      (error: unknown) => {
+        const remaining = Math.floor(timeout - (performance.now() - started));
+        if (
+          signal.aborted ||
+          !(error instanceof DomainError) ||
+          !['minecraft_identity_transport', 'minecraft_identity_upstream_retryable'].includes(
+            String(error.details?.reason),
+          ) ||
+          remaining < 1
+        )
+          throw error;
+        return request(retryUrl, remaining, 'mojang', expected, signal);
+      },
+    );
+  };
+  const race = async (url: string, retryUrl: string, mirrorUrl: string, expected: Expected) => {
+    const controller = new AbortController();
+    try {
+      return await Promise.any([
+        official(url, retryUrl, expected, controller.signal),
+        request(mirrorUrl, timeout, 'mc-api.io', expected, controller.signal),
+      ]);
+    } catch (error) {
+      if (
+        error instanceof AggregateError &&
+        error.errors.length === 2 &&
+        error.errors.every(
+          (failure: unknown) => failure instanceof DomainError && failure.code === 'not_found',
+        )
+      )
+        throw new DomainError('not_found', 404, { reason: 'minecraft_player_not_found' });
+      throw unavailable('minecraft_identity_unavailable');
+    } finally {
+      controller.abort();
+    }
   };
   return {
-    lookupName: (name: string) =>
-      request(`https://api.mojang.com/users/profiles/minecraft/${minecraftPlayerName(name)}`),
-    lookupUuid: (uuid: string) =>
-      request(
-        `https://sessionserver.mojang.com/session/minecraft/profile/${minecraftUuid(uuid).replaceAll('-', '')}`,
-      ),
+    lookupName: (name: string) => {
+      const selected = minecraftPlayerName(name);
+      return race(
+        `https://api.mojang.com/users/profiles/minecraft/${selected}`,
+        `https://api.minecraftservices.com/minecraft/profile/lookup/name/${selected}`,
+        `https://mc-api.io/profile/${selected}/JAVA`,
+        { kind: 'name', value: selected },
+      );
+    },
+    lookupUuid: (uuid: string) => {
+      const selected = minecraftUuid(uuid);
+      const compact = selected.replaceAll('-', '');
+      return race(
+        `https://sessionserver.mojang.com/session/minecraft/profile/${compact}`,
+        `https://api.minecraftservices.com/minecraft/profile/lookup/${compact}`,
+        `https://mc-api.io/profile/${selected}`,
+        { kind: 'uuid', value: selected },
+      );
+    },
   };
 }

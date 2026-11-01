@@ -71,7 +71,14 @@ non-caret command or `^C` (case-insensitive native Docker stop), corroborated by
 fresh ordered `stopping` → `offline` transition on the authenticated backend
 WebSocket, an independent exact-container Docker observation proving the process
 is no longer running, and no earlier unresolved power operation. Wings can report
-offline after losing its output stream while the container remains alive. Reject
+offline after losing its output stream while the container remains alive. A lost
+WebSocket receipt is recoverable from the existing host-bound Docker terminal
+process record, provided its start timestamp exactly matches the pre-dispatch
+baseline and its finish follows durable effect preparation. Recovery shares the
+current provider/host proofs, persists the receipt source and uses the same atomic
+completion; it never resends power or waits for provider resource-cache expiry.
+A missing baseline, replacement process or unavailable physical proof stays
+uncertain. This fallback runs only for a prepared Stop, not unrelated operations. Reject
 unsupported stop profiles rather than modifying eggs or Wings. Unknown/caret signal modes remain
 fail-closed. Restart confirmation uses the exact running Docker process start
 timestamp
@@ -220,3 +227,112 @@ Production mounts, networking and external-service changes still require exact
 Owner approval. A draft implementation or documented design is not evidence that
 all acceptance checks passed; the milestone remains subject to independent
 review and the coordinator's validation report.
+
+## M5 amendment — 2026-10-11: force-stop escalation
+
+The Console follows Pterodactyl's stopping-state affordance: Stop is disabled
+offline and becomes Kill during stopping, with an explicit data-loss warning.
+Use the existing adapter's Client power endpoint and native `kill` signal;
+Pterodactyl grants it through `control.stop`. References are the official
+[v1.11.11 UI](https://github.com/pterodactyl/panel/blob/v1.11.11/resources/scripts/components/server/console/PowerButtons.tsx)
+and [request permissions](https://github.com/pterodactyl/panel/blob/v1.11.11/app/Http/Requests/Api/Client/Servers/SendPowerRequest.php).
+
+NickHosting escalates its existing stop operation rather than creating a second
+job behind the server lock. A private `policy_snapshot.stopEscalation` receipt
+binds the requester, current session, idempotency key and exact parent operation;
+it is separate from the lifecycle's replaceable plan. The session ID is an internal
+revocation binding, never a bearer token or public API field. Current permission,
+managed identity and stopping/process evidence are required again at dispatch.
+The cooperative stop-confirmation callback checks for requests every 500ms without
+additional provider polling when none exists. Recovery consumes only a still
+requested effect; prepared/unknown effects cannot be replayed automatically.
+This amendment introduces no new database schema or provider integration.
+
+Kill acceptance withdraws automatic-wake consent. The original stop remains the
+single active operation and retains resource reservations until actual physical
+stopped proof. An HTTP acknowledgement is not evidence of a stopped container.
+A stop performed only in Pterodactyl has no NickHosting parent operation to
+escalate through this endpoint. No direct-server import or unrestricted force
+power API is introduced.
+
+
+### 2026-10-11 amendment — Reuse interactive console transport
+
+Interactive commands may reuse the authenticated API-owned Wings WebSocket
+already serving that exact session and managed server. Credentials never enter
+the browser. Keep live write authorization, full managed identity verification,
+lifecycle locking, pending-operation exclusion and audit before dispatch.
+Choose REST only before any WebSocket send if no matching handle exists; never
+replay a potentially delivered command. Dispatch does not establish execution.
+The registry is bounded and process-local, with complete identity and provider
+configuration fences and disconnect cleanup.
+
+Stop/Kill enqueue does not sample host capacity: it does not acquire new compute.
+Other operation sampling targets the affected server's host. Admission and final
+worker proofs remain authoritative. Lifecycle may explicitly own the final
+local authorization after all slow proofs, avoiding a duplicate nested guard;
+standalone authorizers keep their final check. Durable power effects remain on
+the existing supported Client HTTP API in this amendment. No direct browser
+power channel or bypass of durable jobs/admission is introduced.
+
+## 2026-10-11 amendment — Delegate clean Start preflight to Wings
+
+Owner approved removing repeated remote ownership and runtime validation from
+the command-dispatch path of an existing server's fresh Start. The backend still
+resolves the power target exclusively from its managed registry and rechecks
+current NickHosting authorization; frontend visibility is not an access boundary.
+
+A planned Start reads one Application server snapshot, in parallel with physical
+sampling, to compare actual limits with the atomic reservation's configured
+limits. Stored ID/UUID/client identifier and configured provider node are compared
+against that same response and the local registry; no separate ownership/allocation inventory query is performed. A limit
+mismatch rejects rather than silently under-reserving resources.
+
+The initial Client resources GET, repeated final Application identity GET and
+per-Start image/launch/egg validation are removed. Wings is authoritative for its
+current process state, suspension/install restrictions and actual configured
+launch. NickHosting retains durable preparation, final local revocation and
+Gateway/schedule fences. The local-only final authorization is accepted only for
+a prepared Start with its own active operation and starting reservation.
+
+Consequences: remote runtime/launch changes are not proactively detected before
+a clean Start. Provisioning/configuration validation and strict recovery/
+confirmation remain; readiness can still fail independently of successful power
+dispatch. Allocation/user/external-ID drift checks remain in recovery: such
+external edits may allow dispatch but block completion with reservations retained.
+A fresh limits snapshot cannot prevent an out-of-band change after that
+snapshot (neither could the preceding final-read design); concurrent external
+limit edits are not an atomic contract with NickHosting admission.
+
+Restart, provisioning initial_start, stop/kill, destructive operations and
+prepared/uncertain recovery keep their existing proofs. No blind replay or
+synthetic offline telemetry is introduced. This amendment changes dispatch
+validation, not the persistence/recovery guarantees or production-release gates.
+
+## 2026-10-11 amendment — Periodic physical observations
+
+The worker runs a provider-independent observation loop on a one-second target
+cadence, without overlapping ticks. API/worker admission reads reuse PostgreSQL
+observations no older than four seconds (or a stricter configured age). Legacy
+settings above four seconds cannot extend this cap. A missing/stale sample causes
+a coordinated fresh collection; unavailable observations continue to reject
+admission. Stop/Kill still do not sample capacity.
+
+A retained collector computes physical CPU deltas between ticks; first/stale
+baselines warm up for 250ms. Memory and filesystem reads run concurrently. CPU
+capacity is host-wide, not the application container quota. Disk remains statfs,
+never recursive filesystem scanning. Sample timestamps conservatively precede
+the asynchronous reads.
+
+Per-host PostgreSQL advisory try-locks deduplicate producers across processes.
+Requests wait at most 600ms for a competing producer; periodic ticks skip locked
+hosts. Samples bind host/observer/effective disk path and host edits are fenced
+with a row lock. Newer observations cannot be overwritten by late older results;
+invalid future observations are replaced transactionally or retained on failure.
+No sample is granted permanent freshness. Shutdown awaits in-flight collection.
+
+Admission retains its existing serialized conservative accounting of game and
+installer commitments. Reusing a measurement does not reuse already-reserved
+capacity. This change does not add credits based on asynchronously observed
+managed-server usage or redefine the accounting policy. No schema migration,
+provider credentials or Docker/network configuration changes are required.

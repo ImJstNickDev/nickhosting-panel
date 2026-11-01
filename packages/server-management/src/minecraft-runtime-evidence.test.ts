@@ -1,9 +1,12 @@
+import { neoforgeEggBinding, type ResolvedMinecraftRuntime } from '@nickhosting/minecraft';
 import { describe, expect, it } from 'vitest';
 import { assertMinecraftDeclaredEnvironment } from './minecraft-registry.js';
 import {
   assertMinecraftFabricLaunch,
   assertMinecraftJavaLaunch,
+  assertMinecraftVerifiedLaunch,
 } from './minecraft-runtime-evidence.js';
+import { minecraftProvisionStartup } from './minecraft-startup.js';
 
 const environment = { SERVER_MEMORY: '1024', SERVER_JARFILE: 'server.jar' };
 const startup =
@@ -68,6 +71,46 @@ describe('attested Fabric launch shape', () => {
   });
 });
 
+describe('Purpur Vector API startup', () => {
+  const purpurStartup =
+    'java --add-modules=jdk.incubator.vector -XX:MaxRAMPercentage=95.0 -Dterminal.jline=false -Dterminal.ansi=true -jar {{SERVER_JARFILE}}';
+  it('accepts the exact advertised egg command before installation and after launch', () => {
+    expect(() =>
+      assertMinecraftVerifiedLaunch(purpurStartup, environment, 'purpur', 'server.jar', null),
+    ).not.toThrow();
+    expect(() =>
+      assertMinecraftJavaLaunch(
+        purpurStartup.replace('{{SERVER_JARFILE}}', 'server.jar'),
+        {},
+        {
+          kind: 'jar',
+          path: 'server.jar',
+        },
+      ),
+    ).not.toThrow();
+  });
+  it.each([
+    '--add-modules=ALL-MODULE-PATH',
+    '--add-modules=other.module',
+    '--add-modules=jdk.incubator.vector,other.module',
+    '--add-modules=jdk.incubator.vector.extra',
+    '--add-modules jdk.incubator.vector',
+    '--add-modules=jdk.incubator.vector --module-path=other.jar',
+    '--add-modules=jdk.incubator.vector --patch-module=jdk.incubator.vector=other.jar',
+    '--add-modules=jdk.incubator.vector -javaagent:other.jar',
+  ])('keeps unsupported module/agent option blocked: %s', (option) => {
+    expect(() =>
+      assertMinecraftVerifiedLaunch(
+        `java ${option} -jar {{SERVER_JARFILE}}`,
+        environment,
+        'purpur',
+        'server.jar',
+        null,
+      ),
+    ).toThrow('configuration_invalid');
+  });
+});
+
 describe('frozen complete Minecraft egg environment', () => {
   it('requires the exact actual set with every default captured explicitly', () => {
     expect(() =>
@@ -126,4 +169,138 @@ describe('verified Forge argument file launch', () => {
   ])('rejects unverified indirection %s', (startup) => {
     expect(() => assertMinecraftJavaLaunch(startup, {}, target)).toThrow('configuration_invalid');
   });
+});
+
+describe('Forge Enhanced resolved launch plan', () => {
+  const template =
+    'java -Xms128M -Xmx{{SERVER_MEMORY}}M -Dterminal.jline=false -Dterminal.ansi=true $( [[  ! -f unix_args.txt ]] && printf %s "-jar {{SERVER_JARFILE}}" || printf %s "@unix_args.txt" )';
+  const choice = (release: string, loaderVersion: string, javaMajor: number) => {
+    const path =
+      javaMajor < 16
+        ? 'server.jar'
+        : `libraries/net/minecraftforge/forge/${release}-${loaderVersion}/unix_args.txt`;
+    return {
+      mapping: { startup: template },
+      row: {
+        binding: {
+          profile: 'forge',
+          release,
+          image: `fixture-java:${javaMajor}`,
+          imageJavaMajor: javaMajor,
+          installationKind: 'forge-installer',
+          declaredEggVariables: ['MC_VERSION', 'FORGE_VERSION', 'SERVER_JARFILE'],
+          bindings: { release: 'MC_VERSION', loaderCoordinate: 'FORGE_VERSION' },
+          fixedVariables: { SERVER_JARFILE: 'server.jar' },
+          artifactPaths: { server: path, installer: 'installer.jar' },
+          supportedProperties: [],
+        },
+        resolved_runtime: {
+          profile: 'forge',
+          release,
+          loaderVersion,
+          javaMajor,
+          installation: { kind: 'forge-installer', args: [] },
+          artifacts: [],
+        },
+      },
+    } as unknown as Parameters<typeof minecraftProvisionStartup>[0];
+  };
+  it.each([
+    ['1.12.2', '14.23.5.2860', 8, '-jar server.jar'],
+    ['1.20.1', '47.4.0', 17, '@libraries/net/minecraftforge/forge/1.20.1-47.4.0/unix_args.txt'],
+    ['1.21.1', '52.0.28', 21, '@libraries/net/minecraftforge/forge/1.21.1-52.0.28/unix_args.txt'],
+  ] as const)(
+    'freezes %s into the exact launch without modifying the mapping',
+    (release, loader, java, target) => {
+      const input = choice(release, loader, java);
+      const resolved = minecraftProvisionStartup(input);
+      expect(resolved).toBe(
+        `java -Xms128M -Xmx{{SERVER_MEMORY}}M -Dterminal.jline=false -Dterminal.ansi=true ${target}`,
+      );
+      expect(input.mapping.startup).toBe(template);
+      expect(() =>
+        assertMinecraftVerifiedLaunch(resolved, environment, 'forge', undefined, null, input),
+      ).not.toThrow();
+      expect(() =>
+        assertMinecraftVerifiedLaunch(
+          'java -jar another.jar',
+          environment,
+          'forge',
+          undefined,
+          null,
+          input,
+        ),
+      ).toThrow();
+      if (java >= 16)
+        expect(() =>
+          assertMinecraftVerifiedLaunch(
+            'java @unix_args.txt',
+            environment,
+            'forge',
+            undefined,
+            null,
+            input,
+          ),
+        ).toThrow();
+    },
+  );
+  it('keeps report-backed Forge args support for a custom binding', () => {
+    const path = 'libraries/net/minecraftforge/forge/1.21.1-52.0.28/unix_args.txt';
+    const report = { server: { installedFiles: [{ path }] } } as unknown as Parameters<
+      typeof assertMinecraftVerifiedLaunch
+    >[4];
+    expect(() =>
+      assertMinecraftVerifiedLaunch(`java @${path}`, {}, 'forge', undefined, report),
+    ).not.toThrow();
+    expect(() =>
+      assertMinecraftVerifiedLaunch(`java @${path}`, {}, 'forge', undefined, null),
+    ).toThrow();
+  });
+});
+
+describe('NeoForge resolved launch plan', () => {
+  it.each([
+    ['1.20.1', '1.20.1-47.1.106', 17, 'forge'],
+    ['1.21.1', '21.1.72', 21, 'neoforge'],
+    ['26.1', '26.1.0.1-beta', 25, 'neoforge'],
+  ] as const)(
+    'pins %s startup to its exact generated argument file',
+    (release, loaderVersion, javaMajor, artifact) => {
+      const runtime: ResolvedMinecraftRuntime = {
+        profile: 'neoforge',
+        release,
+        releaseType: 'release',
+        loaderVersion,
+        javaMajor,
+        installation: { kind: 'neoforge-installer', args: ['--installServer'] },
+        artifacts: [],
+        evidence: [],
+      };
+      const binding = neoforgeEggBinding({
+        runtime,
+        variables: ['MC_VERSION', 'NEOFORGE_VERSION'].map((env_variable) => ({ env_variable })),
+        environment: {},
+        staticImage: `fixture-java:${javaMajor}`,
+      });
+      const choice = {
+        row: { binding, resolved_runtime: runtime },
+        mapping: { startup: 'java -Xmx{{SERVER_MEMORY}}M @unix_args.txt nogui' },
+      } as unknown as Parameters<typeof minecraftProvisionStartup>[0];
+      const resolved = minecraftProvisionStartup(choice);
+      expect(resolved).toBe(
+        `java -Xmx{{SERVER_MEMORY}}M @libraries/net/neoforged/${artifact}/${loaderVersion}/unix_args.txt nogui`,
+      );
+      expect(() =>
+        assertMinecraftVerifiedLaunch(resolved, environment, 'neoforge', undefined, null, choice),
+      ).not.toThrow();
+      for (const startup of [
+        'java @unix_args.txt',
+        'java -jar server.jar',
+        'java @libraries/net/neoforged/neoforge/wrong/unix_args.txt',
+      ])
+        expect(() =>
+          assertMinecraftVerifiedLaunch(startup, environment, 'neoforge', undefined, null, choice),
+        ).toThrow();
+    },
+  );
 });

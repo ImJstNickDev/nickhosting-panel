@@ -1,0 +1,94 @@
+/* File dialogs use the same quiet close affordance as their icon toolbar. */
+.file-manager .dialog-close-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.file-manager .dialog-close-icon:hover:not(:disabled) {
+  background: #edf1f5;
+  color: var(--text);
+}
+dialog.fm-move-flow {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100svh - 32px);
+  overflow: auto;
+  padding: 1.5rem;
+  border-radius: 10px;
+}
+.fm-selection-summary {
+  margin: 0 0 1rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  max-height: 4.5rem;
+  overflow: auto;
+}
+.fm-move-path {
+  display: grid;
+  gap: 0.25rem;
+  margin-top: 0.875rem;
+  text-align: left;
+}
+.fm-move-path > span {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.fm-move-path output {
+  font-family: monospace;
+  overflow-wrap: anywhere;
+  max-height: 4rem;
+  overflow: auto;
+}
+.fm-move-submit {
+  justify-content: flex-end;
+  margin-top: 1.25rem;
+}
+.fm-move-flow.fm-move-confirm .section-heading {
+  position: relative;
+  padding-inline: 2rem;
+}
+.fm-move-flow.fm-move-confirm .dialog-close-icon {
+  position: absolute;
+  right: -0.5rem;
+  top: -0.5rem;
+}
+.fm-conflict-file {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  max-height: 6rem;
+  overflow: auto;
+  margin-block: 1rem;
+}
+.fm-move-confirm p {
+  line-height: 1.55;
+}
+.fm-conflict-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem 1rem;
+  margin-top: 1.75rem;
+}
+.fm-conflict-actions button {
+  min-height: 48px;
+  padding: 0.75rem;
+  white-space: normal;
+}
+.fm-conflict-actions .secondary {
+  color: var(--text);
+}
+@media (max-width: 480px) {
+  dialog.fm-move-flow {
+    padding: 1.25rem;
+  }
+  .fm-conflict-actions {
+    gap: 0.75rem;
+  }
+}

@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { parseEnv } from 'node:util';
+import { resolveStorageRoot, storagePath } from '../deploy/storage-root.mjs';
 
 const argumentsList = process.argv.slice(2);
 const m2 = argumentsList[0] === '--m2';
@@ -10,18 +11,16 @@ const composeFile = m2 ? 'compose.m2-test.yaml' : 'compose.test.yaml';
 const envFile = m2 ? '.env.m2-test.local' : '.env.test.local';
 
 // Reads only this project's already-approved services; never starts containers.
-const values = Object.fromEntries(
-  readFileSync(envFile, 'utf8')
-    .trim()
-    .split('\n')
-    .map((line) => {
-      const at = line.indexOf('=');
-      return [line.slice(0, at), line.slice(at + 1)];
-    }),
-);
+const values = parseEnv(readFileSync(envFile, 'utf8'));
+// The same host root is used by Compose and filesystem-backed test fixtures.
+const storageRoot = resolveStorageRoot({ env: { ...values, ...process.env } });
+const serviceEnv = { ...process.env, NH_MOUNTDATA_ROOT: storageRoot };
 function endpoint(service: string, containerPort: string) {
   const args = ['compose', '--env-file', envFile, '-f', composeFile];
-  const found = spawnSync('docker', [...args, 'ps', '-q', service], { encoding: 'utf8' });
+  const found = spawnSync('docker', [...args, 'ps', '-q', service], {
+    encoding: 'utf8',
+    env: serviceEnv,
+  });
   if (found.status !== 0 || !found.stdout.trim())
     throw new Error('Approved test service is unavailable');
   const inspected = spawnSync('docker', ['inspect', found.stdout.trim()], { encoding: 'utf8' });
@@ -55,7 +54,7 @@ if (!pgPassword || !redisPassword) throw new Error('Missing isolated test creden
 const postgresEndpoint = endpoint('postgres', '5432');
 const redisEndpoint = endpoint('redis', '6379');
 const env: NodeJS.ProcessEnv = {
-  ...process.env,
+  ...serviceEnv,
   NH_TEST_VERIFIED_DATABASE_HOST: postgresEndpoint.split(':')[0],
   NH_TEST_VERIFIED_REDIS_HOST: redisEndpoint.split(':')[0],
   NH_TEST_DATABASE_URL: `postgresql://nickhosting_test:${encodeURIComponent(pgPassword)}@${postgresEndpoint}/nickhosting_test`,
@@ -71,7 +70,7 @@ if (m2) {
     NH_TEST_SFTPGO_ADMIN_USERNAME: values.NH_TEST_SFTPGO_ADMIN,
     NH_TEST_SFTPGO_ADMIN_PASSWORD: values.NH_TEST_SFTPGO_PASSWORD,
     NH_TEST_SFTPGO_DATA_ROOT: '/srv/sftpgo/data',
-    NH_TEST_SFTPGO_LOCAL_DATA_ROOT: resolve('mountdata/m2-tests/sftpgo/data'),
+    NH_TEST_SFTPGO_LOCAL_DATA_ROOT: storagePath('m2-tests/sftpgo/data', { env: serviceEnv }),
   });
 }
 const [command, ...args] = argumentsList;

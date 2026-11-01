@@ -1,0 +1,32 @@
+<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 640" fill="none">
+  <!-- Original NickHosting illustration: voxel loom and spool, not the Fabric project logo. -->
+  <path fill="#c3b49d" d="M0 0h480v640H0z"/>
+  <path fill="#d8cdb9" d="M0 0h480v256H0z"/>
+  <path fill="#e9dfca" d="M36 38h144v146H36z"/>
+  <path fill="#b4c4b1" d="M48 50h120v122H48z"/>
+  <path fill="#dce0c6" d="M48 50h120v48H48z"/>
+  <path stroke="#e9dfca" stroke-width="10" d="M108 50v122M48 110h120"/>
+  <path fill="#a29176" d="M0 256h480v384H0z"/>
+  <path fill="#8d795d" d="m0 514 252-126 228 112v140H0z"/>
+  <path stroke="#a99473" stroke-width="3" d="m0 580 290-144m-148 204 279-139M34 495l278 145m-183-191 351 178"/>
+  <path fill="#715b42" d="M94 154h24v326H94zm250 0h24v326h-24z"/>
+  <path fill="#a98b61" d="M104 148h16v324h-16zm250 0h16v324h-16z"/>
+  <path fill="#775e41" d="M94 164h274v26H94zm0 216h274v30H94z"/>
+  <path fill="#bea478" d="M104 148h266v19H104z"/>
+  <path fill="#e2d6b9" d="M134 185h194v196H134z"/>
+  <path stroke="#c4b18c" stroke-width="3" d="M144 185v196m12-196v196m12-196v196m12-196v196m12-196v196m12-196v196m12-196v196m12-196v196m12-196v196m12-196v196m12-196v196m12-196v196m12-196v196m12-196v196m12-196v196"/>
+  <path fill="#69857e" d="M134 266h194v115H134z"/>
+  <path stroke="#90a398" stroke-width="5" d="M134 278h194m-194 13h194m-194 13h194m-194 13h194m-194 13h194m-194 13h194m-194 13h194m-194 13h194"/>
+  <path stroke="#a6b3a2" stroke-width="3" d="M148 266v115m22-115v115m22-115v115m22-115v115m22-115v115m22-115v115m22-115v115m22-115v115m22-115v115"/>
+  <path fill="#c7ac7c" d="m101 380 17-9h250l-17 9z"/>
+  <path fill="#d7c29e" d="m185 315 91-45 12 7-91 45z"/>
+  <path fill="#f3e5c9" d="m197 322 91-45v9l-91 45z"/>
+  <path fill="#5c4936" d="m300 475 49-24 69 34-48 24z"/>
+  <path fill="#b49769" d="m300 464 49-24 69 34-48 24z"/>
+  <path fill="#dbcaab" d="m316 392 33-16 51 25v70l-30 15-54-27z"/>
+  <path fill="#bba27b" d="m370 417 30-16v70l-30 15z"/>
+  <path stroke="#f2e5cc" stroke-width="3" d="m316 407 54 27m-54-16 54 27m-54-16 54 27m-54-16 54 27"/>
+  <path fill="#c8b080" d="m301 383 48-24 69 34-48 24z"/>
+  <path fill="#92764f" d="m344 380 8-4 15 7-9 4z"/>
+  <path stroke="#d8c6a5" stroke-width="4" d="M325 466c-57 34-133 19-143-15s31-40 48-44"/>
+</svg>

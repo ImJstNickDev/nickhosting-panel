@@ -1,0 +1,221 @@
+.account-security {
+  max-width: 100%;
+  width: 100%;
+  margin-inline: auto;
+  display: grid;
+  gap: 18px;
+}
+.account-security-section {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 24px;
+}
+.account-security-heading,
+.account-security-actions,
+.account-security-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.account-security-heading-text,
+.account-security-item-label {
+  flex: 1;
+  min-width: 0;
+}
+.account-security-heading h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0;
+}
+.account-security-symbol {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: #eff3f6;
+  color: #436176;
+  flex-shrink: 0;
+}
+.account-security-actions {
+  gap: 4px;
+  flex-shrink: 0;
+}
+.account-security-action,
+.account-security-icon {
+  border: 0;
+  color: #34516b;
+  background: transparent;
+  min-height: 36px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  font-weight: 500;
+  font-size: 0.85rem;
+  transition:
+    background-color 120ms,
+    color 120ms;
+}
+.account-security-action svg {
+  width: 17px;
+  height: 17px;
+}
+.account-security-icon {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  flex-shrink: 0;
+}
+.account-security-action:hover:not(:disabled),
+.account-security-icon:hover:not(:disabled) {
+  background: #edf2f5;
+  color: #164cb1;
+  filter: none;
+}
+.account-security-destructive:hover:not(:disabled) {
+  background: #fbefee;
+  color: #a12c2c;
+}
+.account-security-state {
+  display: block;
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-top: 3px;
+}
+.account-security-state.enabled {
+  color: #336c51;
+}
+.account-security-drawer {
+  border-top: 1px solid var(--line);
+  margin-top: 20px;
+  padding: 20px 0 0 50px;
+}
+.account-security-drawer .field label {
+  font-size: 0.85rem;
+}
+.account-security-drawer .field {
+  max-width: 100%;
+}
+.account-security-drawer input {
+  min-height: 40px;
+  border-color: #8494a0;
+  border-radius: 6px;
+  background: #fcfdfd;
+}
+.account-security-drawer input:focus {
+  border-color: var(--field-focus);
+}
+.account-security-drawer .form-footer {
+  justify-content: flex-end;
+}
+.account-security-drawer > .field {
+  margin-block: 16px;
+}
+.account-security-hint,
+.account-security-empty {
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  margin: 0;
+}
+.account-security-empty {
+  padding: 14px 0 0 50px;
+}
+.account-security-item {
+  padding-block: 18px;
+  border-top: 1px solid var(--line);
+}
+.account-security-heading + .account-passkey,
+.account-security-heading + .account-security-item {
+  margin-top: 18px;
+}
+.account-passkey:last-of-type .account-security-item,
+.account-session:last-of-type {
+  padding-bottom: 0;
+}
+.account-security-item-icon {
+  width: 38px;
+  display: grid;
+  place-items: center;
+  color: #6a7d8a;
+  flex-shrink: 0;
+}
+.account-security-item-label strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-weight: 500;
+  font-size: 0.9rem;
+}
+.account-security-item-label small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-top: 4px;
+}
+.account-session {
+  align-items: flex-start;
+}
+.account-session details {
+  margin-top: 6px;
+}
+.account-session summary {
+  color: var(--muted);
+  font-size: 0.78rem;
+  cursor: pointer;
+  width: fit-content;
+}
+.account-session details > div {
+  margin-top: 8px;
+}
+.account-session .session-agent {
+  display: block;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.account-security-signout > fieldset {
+  display: none;
+}
+.account-security-signout .form-footer {
+  justify-content: flex-end;
+}
+.account-security-signout button {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: #4b5964;
+  border-radius: 7px;
+}
+@media (max-width: 700px) {
+  .account-security-section {
+    padding: 18px;
+  }
+  .account-security-heading {
+    flex-wrap: wrap;
+  }
+  .account-security-heading-text {
+    flex-basis: calc(100% - 50px);
+  }
+  .account-security-heading > .account-security-actions {
+    margin-left: 41px;
+    max-width: calc(100% - 41px);
+    flex-wrap: wrap;
+  }
+  .account-security-drawer {
+    padding-left: 0;
+  }
+  .account-security-item-icon {
+    display: none;
+  }
+  .account-security-item {
+    gap: 8px;
+  }
+  .account-security-empty {
+    padding-left: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .account-security-action,
+  .account-security-icon {
+    transition: none;
+  }
+}

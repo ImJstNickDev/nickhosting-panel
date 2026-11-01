@@ -1,0 +1,44 @@
+.minecraft-mod-restart {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.625rem 0.875rem;
+  margin-block-end: 0.75rem;
+  border-radius: 0.625rem;
+  color: inherit;
+  background: color-mix(in srgb, var(--muted) 8%, var(--surface));
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.minecraft-mod-restart svg {
+  flex: none;
+  opacity: 0.65;
+}
+
+.minecraft-mod-restart span {
+  flex: 1;
+  min-width: 0;
+}
+
+.minecraft-mod-restart a {
+  flex: none;
+}
+
+.minecraft-mod-restart .minecraft-mod-restart-retry {
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  padding: 0.25rem 0.5rem;
+  font-size: inherit;
+}
+
+@media (max-width: 480px) {
+  .minecraft-mod-restart {
+    flex-wrap: wrap;
+  }
+
+  .minecraft-mod-restart a {
+    margin-inline-start: 1.6875rem;
+  }
+}

@@ -2,6 +2,7 @@ import type { ColumnType, Generated } from 'kysely';
 
 export interface MinecraftSourceTables {
   minecraft_staging_claims: {
+    game_id: Generated<string>;
     job_id: string;
     server_id: string;
     owner_user_id: string;
@@ -18,18 +19,21 @@ export interface MinecraftSourceTables {
     created_at: Generated<Date>;
   };
   minecraft_sources: {
+    game_id: Generated<string>;
     id: string;
     actor_user_id: string;
     owner_user_id: string;
     server_id: string | null;
     idempotency_key: string;
     identity_digest: string;
-    kind: 'world' | 'modpack';
-    origin: 'upload' | 'modrinth';
+    kind: 'world' | 'modpack' | 'datapack' | 'mod' | 'plugin';
+    origin: 'upload' | 'modrinth' | 'curseforge' | 'hangar' | 'spiget';
     declared_bytes: string;
     reserved_bytes: string;
     expected_hashes: ColumnType<unknown, string, string>;
     actual_sha256: string | null;
+    /** Private immutable source seal; never accepted from a browser or exposed in DTOs. */
+    source_seal: ColumnType<unknown | null, string | null | undefined, string | null>;
     storage_root: string;
     provider_project_id: string | null;
     provider_version_id: string | null;

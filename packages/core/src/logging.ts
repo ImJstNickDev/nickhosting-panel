@@ -57,9 +57,11 @@ export function createLogger(
   options: { level?: LogLevel; now?: () => Date } = {},
 ) {
   const ranks: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
+  const isEnabled = (level: LogLevel) => ranks[level] >= ranks[options.level ?? 'info'];
   return {
+    isEnabled,
     log(level: LogLevel, event: string, data: Readonly<Record<string, unknown>> = {}): void {
-      if (ranks[level] < ranks[options.level ?? 'info']) return;
+      if (!isEnabled(level)) return;
       if (!/^[a-z][a-z0-9_.-]{0,95}$/.test(event))
         throw new TypeError('Invalid log event identifier');
       sink({

@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, mkdtemp, open, realpath, rm, statfs } from 'node:fs/promises';
 import { basename, join, resolve, sep } from 'node:path';
+import { resolveStorageRoot } from '../deploy/storage-root.mjs';
 import { canonicalMinecraftJarSha256 } from '../games/minecraft/src/generated-launcher.js';
 import { minecraftWorldName, parseMinecraftProperties } from '../games/minecraft/src/management.js';
 import {
@@ -67,6 +68,7 @@ export interface MinecraftInstallationOptions {
   workDirectory: string;
   userAgent: string;
   /** Isolated-test seams only. */
+  storageRoot?: string;
   metadata?: RuntimeMetadataClient;
   fetch?: typeof fetch;
 }
@@ -165,11 +167,10 @@ async function capture(
   validateMinecraftRuntimeMapping(options.runtime, options.binding);
   assert.match(options.identifier, /^[a-zA-Z0-9_-]{1,100}$/);
   const root = resolve(options.workDirectory);
+  const assets = join(options.storageRoot ?? resolveStorageRoot(), 'test-assets');
   assert(
-    root
-      .split(sep)
-      .some((part, i, parts) => part === 'mountdata' && parts[i + 1] === 'test-assets'),
-    'Capture must use ignored test-assets storage',
+    root === assets || root.startsWith(`${assets}${sep}`),
+    'Capture must use configured test-assets storage',
   );
   assert.equal(await realpath(root), root, 'Symlinked work directory refused');
   const info = await lstat(root);
@@ -559,6 +560,13 @@ async function capture(
     const world = minecraftWorldName(text(parsed['level-name']));
     const level = await read(`${world}/level.dat`, { collect: 8 * MAX_METADATA });
     const observedWorld = inspectMinecraftLevelDat(level.bytes, { release: runtime.release });
+    assert(observedWorld.dataVersion !== undefined, 'World does not declare a data version');
+    assert(
+      !observedWorld.versionName ||
+        observedWorld.versionName === runtime.release ||
+        observedWorld.detectedRelease === runtime.release,
+      'Observed world release differs from the tested runtime',
+    );
     await options.assertOwned();
     return {
       artifactSha256,

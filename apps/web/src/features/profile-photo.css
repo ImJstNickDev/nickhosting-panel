@@ -1,0 +1,209 @@
+.profile-photo-control {
+  display: block;
+  position: relative;
+  padding: 30px 0 18px;
+  border-radius: 12px;
+}
+.profile-photo-row {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 24px;
+}
+button.profile-photo-avatar {
+  position: relative;
+  width: 88px;
+  height: 88px;
+  min-height: 0;
+  padding: 0;
+  background: #eaf0f3;
+  border: 1px solid #cdd7dd;
+  border-radius: 50%;
+  overflow: visible;
+  transition:
+    border-color 150ms,
+    transform 150ms;
+}
+button.profile-photo-avatar:hover:not(:disabled) {
+  border-color: #657f90;
+  transform: translateY(-2px);
+  filter: none;
+}
+.profile-photo-camera {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  background: var(--surface);
+  border: 1px solid #bdcbd3;
+  border-radius: 50%;
+  color: #3b5262;
+}
+.profile-photo-camera svg {
+  width: 15px;
+  height: 15px;
+}
+.profile-photo-details {
+  min-width: 0;
+}
+.profile-photo-name {
+  font-size: 1.75rem;
+  font-weight: 650;
+  letter-spacing: -0.035em;
+  overflow-wrap: anywhere;
+}
+.profile-photo-username {
+  color: var(--muted);
+  font-size: 0.87rem;
+  overflow-wrap: anywhere;
+  margin-top: 2px;
+}
+.profile-photo-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.profile-photo-remove {
+  color: #856565;
+}
+.profile-photo-control > .notice {
+  margin-top: 12px;
+  margin-bottom: 0;
+}
+.profile-photo-feedback {
+  min-height: 20px;
+  padding: 4px 0 0 112px;
+}
+.profile-photo-status {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.profile-photo-drop-hint {
+  position: absolute;
+  inset: 6px -12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: 2px dashed #486c83;
+  border-radius: 12px;
+  background: #edf4f9f5;
+  color: #274a62;
+  font-weight: 550;
+  pointer-events: none;
+}
+dialog.profile-photo-dialog {
+  width: min(416px, calc(100vw - 32px));
+  padding: 1.5rem;
+}
+.profile-photo-dialog h2 {
+  font-size: 1.2rem;
+}
+.profile-photo-editor {
+  display: grid;
+  gap: 1rem;
+}
+.profile-photo-crop {
+  position: relative;
+  display: block;
+  width: min(100%, 280px);
+  aspect-ratio: 1;
+  min-height: 0;
+  justify-self: center;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 8px;
+  background: #e9eff3;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.profile-photo-crop:hover {
+  filter: none;
+}
+.profile-photo-crop:active {
+  cursor: grabbing;
+}
+.profile-photo-crop img {
+  position: absolute;
+  max-width: none;
+  pointer-events: none;
+}
+.profile-photo-crop::after {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  border: 1px solid #ffffffd9;
+  border-radius: 50%;
+  box-shadow: 0 0 0 150px #14273680;
+  pointer-events: none;
+}
+.profile-photo-hint {
+  font-size: 0.875rem;
+}
+.profile-photo-zoom {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+.profile-photo-zoom label {
+  font-weight: 600;
+}
+.profile-photo-zoom input {
+  min-width: 0;
+  min-height: 36px;
+  padding: 0;
+  border: 0;
+  accent-color: var(--blue);
+}
+.profile-photo-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+.profile-photo-editor > .notice {
+  margin-bottom: 0;
+}
+@media (max-width: 400px) {
+  dialog.profile-photo-dialog {
+    padding: 1.25rem;
+  }
+}
+
+@media (max-width: 600px) {
+  .profile-photo-control {
+    padding: 24px 0 12px;
+  }
+  .profile-photo-row {
+    grid-template-columns: 72px minmax(0, 1fr) auto;
+    gap: 14px;
+  }
+  button.profile-photo-avatar {
+    width: 72px;
+    height: 72px;
+  }
+  .profile-photo-name {
+    font-size: 1.4rem;
+  }
+  .profile-photo-feedback {
+    padding-left: 86px;
+  }
+  .profile-photo-username {
+    font-size: 0.8rem;
+  }
+  .profile-photo-drop-hint {
+    inset-inline: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  button.profile-photo-avatar {
+    transition: none;
+  }
+  button.profile-photo-avatar:hover:not(:disabled) {
+    transform: none;
+  }
+}

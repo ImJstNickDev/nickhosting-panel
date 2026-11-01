@@ -10,6 +10,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseEnv } from 'node:util';
 import { probeNodeEndpoint, startNodeProbe } from '../apps/game-gateway/src/node-probe.js';
+import { isOutsideWorkspace, storagePath } from '../deploy/storage-root.mjs';
 import { probeMinecraftStatus } from '../games/minecraft/src/protocol.js';
 import { fetchMinecraftProtocols } from '../games/minecraft/src/releases.js';
 import {
@@ -340,9 +341,9 @@ export async function preflightMinecraftLive(
 }
 function ledgerPath(path: string) {
   const value = resolve(path);
-  assert.equal(dirname(value), resolve('mountdata/test-assets'));
+  assert.equal(dirname(value), storagePath('test-assets'));
   assert.match(basename(value), /^m4-live-[a-f0-9-]{36}\.json$/);
-  requireIgnored(value);
+  if (!isOutsideWorkspace(value)) requireIgnored(value);
   return value;
 }
 /** The journal is durable before a remote effect and after its confirmed result. */
@@ -371,10 +372,10 @@ export async function saveMinecraftLiveLedger(path: string, ledger: MinecraftLiv
 export async function createMinecraftLiveLedger(plan: MinecraftLivePlan, planSha256: string) {
   assertPlan(plan);
   const { adapter, originHash } = await api(plan);
-  for (const name of await readdir(resolve('mountdata/test-assets'))) {
+  for (const name of await readdir(storagePath('test-assets'))) {
     if (!/^m4-live-[a-f0-9-]{36}\.json$/.test(name)) continue;
     const previous = JSON.parse(
-      await readFile(resolve('mountdata/test-assets', name), 'utf8'),
+      await readFile(storagePath(`test-assets/${name}`), 'utf8'),
     ) as MinecraftLiveLedger;
     assert(
       previous.assets.every((asset) => asset.deletedAt),
@@ -398,7 +399,7 @@ export async function createMinecraftLiveLedger(plan: MinecraftLivePlan, planSha
     events: [],
   };
   assert.equal(ledger.branch, 'milestone/m4-minecraft');
-  const path = resolve('mountdata/test-assets', `m4-live-${runId}.json`);
+  const path = storagePath(`test-assets/m4-live-${runId}.json`);
   await saveMinecraftLiveLedger(path, ledger);
   return { ledger, path };
 }

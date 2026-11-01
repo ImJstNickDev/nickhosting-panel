@@ -1,0 +1,356 @@
+.ve-body:has(> .folio) {
+  padding: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.folio {
+  display: flex;
+  flex-direction: column;
+  height: clamp(420px, 75svh, 1100px);
+  min-width: 0;
+  background: var(--surface);
+  color: inherit;
+  font-size: 0.8rem;
+  overflow: hidden;
+}
+/* The document engine must follow the application's theme, including native controls. */
+.ve-body > .folio {
+  color-scheme: inherit;
+}
+.folio-scroll,
+.folio-sidebar {
+  scrollbar-color: color-mix(in srgb, var(--muted) 55%, var(--surface)) transparent;
+}
+@media (forced-colors: active) {
+  .folio-scroll,
+  .folio-sidebar {
+    scrollbar-color: auto;
+  }
+}
+.folio-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 5px 12px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.folio-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.folio .folio-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  box-shadow: none;
+}
+.folio .folio-button:hover:not(:disabled),
+.folio .folio-button[aria-pressed="true"] {
+  color: inherit;
+  background: color-mix(in srgb, var(--muted) 12%, transparent);
+}
+.folio :focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+.folio .folio-button:disabled {
+  opacity: 0.35;
+}
+.folio input {
+  font: inherit;
+  min-height: 30px;
+  height: 30px;
+  margin: 0;
+  padding: 4px 5px;
+  border: 0;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--muted) 5%, transparent);
+  box-shadow: none;
+}
+.folio .folio-page-number {
+  width: 42px;
+  text-align: center;
+}
+.folio-page-count {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.folio-zoom-value {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0;
+  font-weight: 400;
+  margin: 0;
+}
+.folio-zoom-value input {
+  width: 47px;
+  text-align: right;
+  background: transparent;
+}
+.folio-zoom-value span {
+  color: var(--muted);
+}
+.folio-find {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.folio-find input {
+  flex: 1;
+  min-width: 0;
+  max-width: 420px;
+}
+.folio-find [role="status"] {
+  color: var(--muted);
+  min-width: 45px;
+  text-align: center;
+  font-size: 0.75rem;
+}
+.folio-body {
+  position: relative;
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  min-height: 0;
+}
+.folio-stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  background: color-mix(in srgb, var(--muted) 12%, var(--surface));
+}
+.folio-scroll {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.folio .pdfViewer {
+  padding: 14px 0;
+  --page-border: 0;
+  --page-margin: 0 auto 14px;
+  --page-bg-color: white;
+}
+.folio .pdfViewer .page {
+  border: 0;
+  box-shadow: 0 1px 5px #0003;
+}
+.folio .pdfViewer .annotationLayer .popupWrapper {
+  max-width: min(320px, 80vw);
+}
+.folio-sidebar {
+  width: 190px;
+  min-width: 190px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+}
+.folio-sidebar > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  flex-shrink: 0;
+}
+.folio-sidebar nav {
+  overflow: auto;
+  padding: 4px;
+}
+.folio-thumbnails {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.folio .folio-thumbnail {
+  height: 172px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  color: var(--muted);
+  padding: 6px;
+  box-shadow: none;
+}
+.folio .folio-thumbnail:hover,
+.folio .folio-thumbnail[aria-current="page"] {
+  background: color-mix(in srgb, var(--blue) 8%, var(--surface));
+  color: inherit;
+}
+.folio-thumbnail-image {
+  height: 135px;
+  min-width: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.folio-thumbnail-image:not([data-ready="true"]) {
+  background: color-mix(in srgb, var(--muted) 10%, transparent);
+}
+.folio-thumbnail-image canvas {
+  max-width: 120px;
+  max-height: 135px;
+  box-shadow: 0 1px 4px #0003;
+}
+.folio-thumbnail-image:not([data-ready="true"]) canvas {
+  visibility: hidden;
+}
+.folio-outline {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.folio-outline .folio-outline {
+  padding-left: 12px;
+}
+.folio-outline-row {
+  display: flex;
+  align-items: center;
+}
+.folio-outline-row > button,
+.folio-outline-row > a {
+  min-height: 32px;
+  border: 0;
+  box-shadow: none;
+  border-radius: 4px;
+  color: inherit;
+  background: none;
+  font: inherit;
+  padding: 6px;
+  text-align: left;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+.folio-outline-row > button:hover,
+.folio-outline-row > a:hover {
+  background: color-mix(in srgb, var(--muted) 10%, transparent);
+}
+.folio-outline-row > .folio-outline-toggle {
+  min-width: 26px;
+  width: 26px;
+  flex-shrink: 0;
+  text-align: center;
+}
+.folio-sidebar-note {
+  margin: 14px;
+  color: var(--muted);
+}
+.folio-loading,
+.folio-feedback,
+.folio-password {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  background: var(--surface);
+  padding: 24px;
+}
+.folio-loading {
+  justify-content: flex-start;
+  align-items: stretch;
+  padding: 40px max(25px, 15%);
+}
+.folio-loading > div {
+  height: 24px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--muted) 12%, transparent);
+  animation: folio-pulse 1.4s ease-in-out infinite alternate;
+}
+.folio-loading > div:first-child {
+  width: 55%;
+  height: 36px;
+}
+.folio-loading > div:last-child {
+  width: 75%;
+}
+.folio-password label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.folio-password input {
+  border: 1px solid var(--line);
+  min-width: 230px;
+}
+.folio-password h3 {
+  margin: 0;
+}
+.folio-password [role="alert"] {
+  color: #b42318;
+}
+.folio-print-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 4px 10px;
+}
+.folio-print-frame {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  bottom: 0;
+  left: 0;
+  opacity: 0;
+  pointer-events: none;
+  border: 0;
+}
+@keyframes folio-pulse {
+  to {
+    opacity: 0.45;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .folio-loading > div {
+    animation: none;
+  }
+}
+@media (max-width: 600px) {
+  .folio {
+    height: 75svh;
+    min-height: 400px;
+  }
+  .folio-toolbar {
+    gap: 3px 8px;
+    padding: 5px;
+  }
+  .folio-sidebar {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 6;
+    box-shadow: 5px 0 12px #0002;
+    width: 170px;
+    min-width: 170px;
+  }
+  .folio-find {
+    padding: 5px;
+    gap: 0;
+  }
+  .folio-find [role="status"] {
+    font-size: 0.7rem;
+  }
+}
