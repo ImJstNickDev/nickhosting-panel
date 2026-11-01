@@ -552,6 +552,22 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             listener.route.mode === 'online' &&
             !quiescence.has(route.serverId),
           requestWake: () => (valid() ? wake(listener.route) : Promise.resolve('blocked')),
+          requestOfflineApi: options.control.requestOfflineApi
+            ? async (request) => {
+                const allowed = () =>
+                  valid() &&
+                  responseMode(listener) === 'sleeping' &&
+                  listener.route.wakeEnabled !== false;
+                if (!allowed()) throw new DomainError('integration_unavailable');
+                const result = await options.control.requestOfflineApi?.({
+                  routeId: listener.route.id,
+                  routeRevision: listener.route.revision,
+                  request,
+                });
+                if (!allowed() || !result) throw new DomainError('integration_unavailable');
+                return result;
+              }
+            : undefined,
           loadPrivateState: options.control.loadPrivateState
             ? async () => {
                 if (!valid()) throw new DomainError('integration_unavailable');

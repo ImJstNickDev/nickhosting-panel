@@ -48,11 +48,20 @@ HTTPS uses a stable per-server identity in both Gateway and backend. The Gateway
 terminates incoming TLS and creates a separate upstream TLS session, pinning the
 exact server certificate before forwarding request bytes. Existing sessions are
 not transplanted between TLS endpoints. Online API responses and credentials pass
-through unchanged. Offline HealthCheck reports slow. Read-only snapshots previously
-returned by the backend can be replayed to the same credential for at most five
-minutes. These encrypted snapshots are historical responses, not current backend
-authorization. VerifyAuthenticationToken is never positively emulated offline.
-No authentication tokens or multiplayer tickets are manufactured.
+through unchanged. Offline HealthCheck reports slow. Claimed, automatically sleeping
+instances support native PasswordlessLogin, PasswordLogin and VerifyAuthenticationToken
+for the verified build profile. Core reads the stopped instance's native credential
+state and computes the same persistent tokens as the backend. It never issues
+multiplayer tickets. Protected reads require a currently valid native player token;
+a previously cached successful response supplies no authentication authority.
+
+QueryServerState, GetServerOptions and GetAdvancedGameSettings retain schema-checked,
+encrypted backend observations. Core's live application observation also records
+QueryServerState, so this does not require a player to have opened Status previously.
+While sleeping, Status reports zero connected players and tick rate, a paused world,
+and a localized suspended/Join label on the last observed active session. It does
+not invent a world when the last native state had none. These are historical game
+values with an explicit sleeping presentation, not evidence of a running process.
 
 The exact Coffee Stain `JoinGameRequest` is recognized separately from polling.
 A strictly formed player join request can request wake even without a cached
@@ -63,25 +72,25 @@ before being forwarded unchanged. Application tokens, malformed requests, pollin
 and arbitrary TCP/UDP traffic never trigger wake. The backend alone validates the
 original credential and issues the multiplayer ticket; a rejected credential is
 forwarded as a rejection, never converted into a successful join.
-A rejected credential invalidates every cached player variant of that token; successful mutations
-clear server snapshots. The private cache is persisted encrypted through the
-existing authenticated control channel.
+A rejected online credential invalidates its transient bearer-cache entries; successful
+mutations clear that transient cache. The separate historical observations are
+refreshed by subsequent native reads and never grant authentication. Both use the
+existing encrypted store and authenticated Gateway control channel.
 
 Reliable TCP remains raw forwarding. Its readiness requires a recent game-query
 observation and a successful TCP connection. UDP polling does not request wake.
 
 ## Capability limits and acceptance evidence
 
-Coffee Stain's public controller headers establish the exact join function. A real client test confirmed that reporting Offline after automatic sleep prevents
-the Server Manager from proceeding. Sleeping routes now retain their last native
-ready presentation instead. A subsequent real-client test confirmed the next blocker: after HealthCheck,
-the client issued QueryServerState, GetServerOptions and VerifyAuthenticationToken.
-The read snapshots had expired and verification returned HTTP 503, producing
-`no_content` and an unauthenticated UI. Native authentication before Join is
-therefore a confirmed functional gap, not merely an untested client variation. A real JoinGameRequest can request
-wake regardless of cache age, but clients that stop before sending it require
-manual panel start. Polling does not silently start the backend. The manifest does not claim
-real-client-certified protocol wake merely because isolated protocol tests pass.
+Coffee Stain's public controller headers establish the exact join function. The
+Owner's native-client test exposed two blockers: reporting Offline prevented the
+Server Manager flow, and offline VerifyAuthenticationToken returned 503. Sleeping
+routes now preserve their last native Idle/Playing presentation; the native
+credential implementation below resolves authentication without waking on polling.
+Bidirectional interoperability and password revocation are verified against the
+real dedicated server. A complete visual Server Manager → Join → playable session
+acceptance check remains distinct from protocol-level evidence; the manifest does
+not claim real-client certification from API-only tests.
 
 The Settings section accepts a server application token, validates it against the
 pinned backend, and stores it encrypted. It never returns that token. State,
@@ -357,41 +366,83 @@ remaining native client authentication sequence to be investigated without recor
 secrets or treating automatic login/verification as play intent.
 
 
-## Native-client authentication evidence
+## Native offline authentication and interoperability
 
-Sanitized Gateway diagnostics from the Owner's test at 2026-11-01 16:58 UTC show
-HealthCheck succeeded while QueryServerState, GetServerOptions and
-VerifyAuthenticationToken were unavailable in sleeping mode. No JoinGameRequest
-was observed in that sequence. The response had no body, so the native client
-reported HTTP 503 with `no_content` and required authentication.
+The Owner explicitly requires **wake only for Join**. Login, token verification,
+UDP query, HealthCheck and Status reads do not start the backend. Manual stop and
+maintenance remain unavailable to offline authentication. An unclaimed server must
+be claimed while running; no offline claim or administrative mutation is emulated.
 
-The native authentication token is persistent and distinct from the short-lived
-entry ticket. The five-minute cache lifetime is NickHosting policy, not a documented
-native token expiry. Extending that cache alone cannot authenticate a first-seen
-credential. TLS identity is separate from the server secret/password state used
-for authentication. A safe memoized verification would require exact native
-verification evidence bound to a current credential epoch, requested privilege and
-player context; existing read-cache entries do not supply that proof.
+Core's service-only `/internal/gateway/:gatewayId/offline-api` requires the exact
+current route revision, Satisfactory game TCP role and automatic sleeping policy.
+The credential reader shares the existing lifecycle advisory lock, rejects queued
+or active jobs, verifies the managed provider identity and game allocation, and
+independently confirms both installer and server containers stopped before and
+after reading. It rejects symlink paths, unstable/oversized settings and unknown
+native formats/builds. At most two credential reads can acquire database connections at once; additional
+distinct reads fail without queuing. Identical overlapping authority reads coalesce
+and return independent copies, with no settled credential-authority cache. Existing
+Blueprint directory batches reduce metadata round trips without changing guards. Credentials never enter route snapshots,
+public API responses, logs or the Gateway's persisted read cache.
 
-Native client authentication can precede JoinGameRequest. Automatic-login metadata
-is local client pass-through context rather than a reliable wire indication of an
-explicit Join click. Waking on authentication would require an explicit behavior
-choice: it preserves passive UDP/HealthCheck, but merely selecting a server may
-wake its backend. No such change, fabricated authentication success or extended
-credential lifetime was applied in response to this diagnostic report.
+The supported profile is dedicated-server build **513885**, GVAS 3 / UE 5.6.1. The
+native password is SHA-512 of binary salt followed by UTF-8 password bytes. A native
+persistent player token combines the base64 privilege JSON and an HMAC-SHA-512
+fingerprint of the serialized player provider/replication bytes, privilege and
+corresponding stored password hash, using the native server secret. Verify takes
+the raw fingerprint plus PrivilegeLevel, and returns native empty HTTP 204 on
+success. Wrong password, invalid token, missing parameters and privilege failures
+retain native response semantics. Supported identities are absent/INVALID, Steam
+(provider 6, eight replication bytes), and Epic (provider 1, 32 ASCII hex bytes).
+Epic identifier casing is preserved; only outer wire hex is case-insensitive.
+Unknown identity encodings/build profiles fail closed. Application tokens and
+InitialAdmin are not accepted as offline player credentials.
 
-Primary contracts:
+The implementation was checked against a ledger-proven isolated dedicated server:
+- Native Client/Administrator tokens verify locally; locally generated tokens are
+  accepted by native VerifyAuthenticationToken and QueryServerState.
+- No-player, distinct Steam identities and both Epic identifier cases interoperate;
+  player/privilege changes and tampered signatures are rejected.
+- Native Client can read all three retained functions. No session enumeration or
+  administrative mutation is exposed through the offline endpoint.
+- Changing native client and administrator passwords revokes the previous tokens;
+  new tokens interoperate, including Unicode passwords. Original native settings
+  were restored byte-for-byte, original credentials reverified, and the test
+  server stopped again.
+- Native HTTP defaults to ISO-8859-1 when charset is absent. Gateway decoding
+  preserves this behavior; NickPanel's own native API transport explicitly sends
+  UTF-8. JSON escaping remains lossless in either case.
+
+The private native files used for interoperability inspection are excluded from
+Git. Committed tests use independently constructed synthetic settings and crypto
+vectors. Public HTTPS limits bound requests per server/peer and password attempts;
+the authenticated Core request is also size-bounded. Missing state returns a JSON
+native-style unavailable error rather than an empty 503 (`no_content`).
+
+TLS certificate persistence is independent of authentication. No multiplayer
+entry ticket is generated offline: Join still uses existing Core admission and
+wake, then forwards the original request to the real backend for final verification
+and its actual ticket. A cached success is never converted into current authority.
+
+Primary contract declarations:
 - [Native authentication types](https://github.com/satisfactorymodding/SatisfactoryModLoader/blob/master/Source/FactoryGame/Public/Server/FGDSAuthenticationTypes.h)
 - [Native authentication controller](https://github.com/satisfactorymodding/SatisfactoryModLoader/blob/master/Source/FactoryDedicatedServer/Public/Controller/FGServerAuthenticationController.h)
 - [Client authentication requester](https://github.com/satisfactorymodding/SatisfactoryModLoader/blob/master/Source/FactoryDedicatedClient/Public/RequestEmitters/FGClientAuthenticationRequester.h)
 
+No database migration or Blueprint update is required for this change. Deploy Core
+and restart the existing Gateway together. Rollback reverts the native offline hook
+and restarts those services; it does not change game files, native credentials, TLS
+identity, allocations or worlds. Encrypted historical observations can remain
+unused after rollback. A real Server Manager acceptance test is still required
+before claiming that the complete visible client flow has passed.
 
-The Owner explicitly selected **wake only for Join** after this finding. Do not
-expand wake to VerifyAuthenticationToken, PasswordlessLogin or status reads.
-Independent review rejected file-hash-only positive verification: stable persisted
-settings do not establish that the native in-memory credentials used by an earlier
-verification were the same, especially across concurrent changes or delayed writes.
-No positive offline verification was implemented. The native-client authentication
-blocker remains open; prior API-only wake tests do not close it. Until a correctly
-attested native authentication path exists, authentication requires a running
-backend and Join-only wake cannot provide the complete cold-client experience.
+Development verification on 2026-11-01: the existing public TLS endpoint returned
+PasswordlessLogin 200, VerifyAuthenticationToken 204, all three protected reads
+200 and invalid-token 401 while the backend remained offline with zero additional
+start jobs. The Owner then confirmed Status is visible in the unmodified game
+client. Its message requires creating/loading a game before Join, matching the
+last native observation that no world is loaded. That remaining initial-world
+setup is distinct from authentication; no Owner game files were changed to bypass
+it. Full Join acceptance requires a real loaded world and subsequent automatic
+sleep. Private native test credentials/settings were restored and its backend
+stopped. Historical per-function observation times are retained independently.

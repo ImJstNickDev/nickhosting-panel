@@ -56,7 +56,7 @@ export function satisfactoryPinnedTransport(
                 : undefined,
             headers: {
               Authorization: `Bearer ${secret}`,
-              'Content-Type': 'application/json',
+              'Content-Type': 'application/json; charset=utf-8',
               'Content-Length': String(payload.length),
             },
             signal: signal

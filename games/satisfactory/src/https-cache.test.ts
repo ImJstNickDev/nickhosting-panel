@@ -23,6 +23,78 @@ it('expires authorization without extending it on read or restore', () => {
   expect(cache.authorize(authorization, undefined)).toBe(false);
   expect(cache.snapshot()).toEqual([]);
 });
+it('retains each function observation time when another response refreshes the entry', () => {
+  let now = 1000;
+  const cache = new SatisfactoryHttpsCache(() => now);
+  cache.remember('QueryServerState', authorization, undefined, '{"data":{"serverGameState":{}}}');
+  now = 2000;
+  cache.remember('GetServerOptions', authorization, undefined, '{"data":{"serverOptions":{}}}');
+  expect(cache.snapshot()[0]?.observedAt).toEqual({
+    QueryServerState: 1000,
+    GetServerOptions: 2000,
+  });
+  const restored = new SatisfactoryHttpsCache(() => now);
+  restored.restore(cache.snapshot());
+  now = 3000;
+  restored.remember('GetServerOptions', authorization, undefined, '{"data":{"serverOptions":{}}}');
+  expect(restored.snapshot()[0]?.observedAt).toEqual({
+    QueryServerState: 1000,
+    GetServerOptions: 3000,
+  });
+  expect(restored.snapshot()[0]?.expiresAt).toBe(303000);
+  const detached = restored.snapshot();
+  const observedAt = detached[0]?.observedAt;
+  if (!observedAt) throw new Error('Missing fixture observation times');
+  observedAt.QueryServerState = 3000;
+  expect(restored.snapshot()[0]?.observedAt?.QueryServerState).toBe(1000);
+});
+it('restores legacy entries and preserves their inferred age on the first refresh', () => {
+  let now = 1000;
+  const original = new SatisfactoryHttpsCache(() => now);
+  original.remember(
+    'QueryServerState',
+    authorization,
+    undefined,
+    '{"data":{"serverGameState":{}}}',
+  );
+  const legacy = original.snapshot().map(({ observedAt: _observedAt, ...entry }) => entry);
+  now = 2000;
+  const cache = new SatisfactoryHttpsCache(() => now);
+  cache.restore(legacy);
+  expect(cache.snapshot()[0]?.observedAt).toBeUndefined();
+  expect(cache.read('QueryServerState', authorization, undefined)).toBeDefined();
+  now = 3000;
+  cache.remember('GetServerOptions', authorization, undefined, '{"data":{"serverOptions":{}}}');
+  expect(cache.snapshot()[0]?.observedAt).toEqual({
+    QueryServerState: 1000,
+    GetServerOptions: 3000,
+  });
+});
+it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+  'rejects nonfinite per-function observation times: %s',
+  (observedAt) => {
+    const original = new SatisfactoryHttpsCache(() => 1000);
+    original.remember('QueryServerState', authorization, undefined, '{"data":{}}');
+    const snapshot = original.snapshot();
+    const entry = snapshot[0];
+    if (!entry) throw new Error('Missing fixture entry');
+    entry.observedAt = { QueryServerState: observedAt };
+    const restored = new SatisfactoryHttpsCache(() => 2000);
+    expect(() => restored.restore(snapshot)).toThrow();
+    expect(restored.snapshot()).toEqual([]);
+  },
+);
+it.each([{ QueryServerState: 2001 }, { JoinGameRequest: 1000 }, { GetServerOptions: 1000 }])(
+  'rejects future or unmatched observation timestamps',
+  (observedAt) => {
+    const original = new SatisfactoryHttpsCache(() => 1000);
+    original.remember('QueryServerState', authorization, undefined, '{"data":{}}');
+    const snapshot = original.snapshot().map((entry) => ({ ...entry, observedAt }));
+    const restored = new SatisfactoryHttpsCache(() => 2000);
+    restored.restore(snapshot);
+    expect(restored.snapshot()).toEqual([]);
+  },
+);
 it('does not authenticate rejected responses, application tokens cannot request game wake', () => {
   const cache = new SatisfactoryHttpsCache();
   cache.remember('QueryServerState', authorization, undefined, '{"errorCode":"not_authorized"}');

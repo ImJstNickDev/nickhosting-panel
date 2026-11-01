@@ -13,11 +13,17 @@ import {
   setGatewayPolicy,
   setGatewayRoute,
 } from '@nickhosting/server-management';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SatisfactoryApi } from '../../../games/satisfactory/src/api.js';
+import {
+  createNativeAuthenticationToken,
+  decodeNativePlayerIdentity,
+} from '../../../games/satisfactory/src/native-auth.js';
 import * as satisfactoryApi from '../../../packages/server-management/src/satisfactory-api.js';
+import * as nativeCredentials from '../../../packages/server-management/src/satisfactory-native-credentials.js';
 import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
 import { createApp } from './app.js';
+import { persistSatisfactoryOfflineSnapshots } from './gateway-satisfactory-offline.js';
 
 const policy = {
   enabled: true,
@@ -190,7 +196,10 @@ beforeEach(async () => {
       ({
         adapter: f.adapter,
         refreshObservations: refreshHost,
-        lifecycle: { observeProcessStart: processStart },
+        lifecycle: {
+          observeProcessStart: processStart,
+          confirmInitialInstallationStopped: async () => true,
+        },
       }) as unknown as ManagementRuntime,
   });
 });
@@ -235,6 +244,271 @@ describe('M3 Core service authentication and managed control plane', () => {
     substates: [{ id: 0, version: 1 }],
     name: 'Factory',
     observedAt: new Date().toISOString(),
+  });
+  describe('native stopped Satisfactory API', () => {
+    afterEach(() => vi.restoreAllMocks());
+    const credentials = {
+      build: 513885,
+      serverName: 'Synthetic protected server',
+      serverSecret: 'A1'.repeat(256),
+      adminPassword: { hash: 'B2'.repeat(64), salt: 'C3'.repeat(32) },
+    };
+    const playerId = '060102030405060708';
+    const login = {
+      operation: 'PasswordlessLogin',
+      playerId,
+      data: { MinimumPrivilegeLevel: 'Client' },
+    };
+    async function setup(transport: 'tcp' | 'udp' = 'tcp') {
+      await satisfactoryRoute(transport);
+      await f.db
+        .updateTable('gateway_server_states')
+        .set({ state: 'sleeping', auto_wake_override: true })
+        .where('server_id', '=', serverId)
+        .execute();
+      await f.db
+        .updateTable('managed_servers')
+        .set({ intent: 'sleeping', runtime_state: 'offline', automatic_starts_paused: false })
+        .where('id', '=', serverId)
+        .execute();
+      const selected = (await getGatewaySnapshot(f.db, env)).routes.find(
+        (entry) => entry.id === route.id,
+      );
+      if (!selected) throw new Error('Missing offline route');
+      route = selected;
+      const authority = {
+        credentials,
+        digest: 'D4'.repeat(32),
+        generation: route.generation,
+        providerUuid: remote.uuid,
+        port: route.backend.port,
+      };
+      const spy = vi
+        .spyOn(nativeCredentials, 'readStoppedSatisfactoryCredentials')
+        .mockResolvedValue(authority);
+      return {
+        spy,
+        authority,
+        input: { routeId: route.id, routeRevision: route.revision, request: login },
+      };
+    }
+    it('rejects another game integration before invoking the native credential service', async () => {
+      const spy = vi.spyOn(nativeCredentials, 'readStoppedSatisfactoryCredentials');
+      expect(
+        (
+          await request(`${prefix()}/offline-api`, {
+            routeId: route.id,
+            routeRevision: route.revision,
+            request: login,
+          })
+        ).status,
+      ).toBe(403);
+      expect(spy).not.toHaveBeenCalled();
+    });
+    it('requires authenticated Gateway access and returns only a native token envelope, never credentials', async () => {
+      const { input, spy } = await setup();
+      const rejectedHeaders: Record<string, string>[] = [
+        { authorization: '' },
+        { authorization: 'Bearer wrong' },
+        { 'x-nh-support-token': 'support' },
+      ];
+      for (const headers of rejectedHeaders) {
+        expect((await request(`${prefix()}/offline-api`, input, headers)).status).toBe(401);
+      }
+      expect((await request(`/internal/gateway/${randomUUID()}/offline-api`, input)).status).toBe(
+        401,
+      );
+      expect(spy).not.toHaveBeenCalled();
+      const response = await request(`${prefix()}/offline-api`, input);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      const serialized = await response.text();
+      const player = decodeNativePlayerIdentity(playerId);
+      if (!player) throw new Error('fixture');
+      expect(JSON.parse(serialized)).toEqual({
+        status: 200,
+        body: {
+          data: {
+            authenticationToken: createNativeAuthenticationToken(credentials, 'Client', player),
+          },
+        },
+      });
+      for (const value of [
+        credentials.serverSecret,
+        credentials.adminPassword.hash,
+        credentials.adminPassword.salt,
+        'Synthetic protected server',
+        'providerUuid',
+        'digest',
+      ])
+        expect(serialized).not.toContain(value);
+      expect(spy).toHaveBeenCalledExactlyOnceWith(
+        expect.anything(),
+        serverId,
+        expect.objectContaining({ adapter: f.adapter, confirmStopped: expect.any(Function) }),
+      );
+    });
+    it('rejects stale revision and wrong transport/role before reading native credentials', async () => {
+      const { input, spy } = await setup('udp');
+      expect((await request(`${prefix()}/offline-api`, input)).status).toBe(403);
+      expect(
+        (await request(`${prefix()}/offline-api`, { ...input, routeRevision: route.revision + 1 }))
+          .status,
+      ).toBe(412);
+      expect(spy).not.toHaveBeenCalled();
+      await f.db
+        .updateTable('gateway_routes')
+        .set({ transport: 'tcp' })
+        .where('id', '=', route.id)
+        .execute();
+      await f.db
+        .updateTable('server_allocations')
+        .set({ role: 'reliable' })
+        .where('id', '=', route.allocationId)
+        .execute();
+      const selected = (await getGatewaySnapshot(f.db, env)).routes.find(
+        (entry) => entry.id === route.id,
+      );
+      if (!selected) throw new Error('fixture');
+      expect(
+        (await request(`${prefix()}/offline-api`, { ...input, routeRevision: selected.revision }))
+          .status,
+      ).toBe(403);
+      expect(spy).not.toHaveBeenCalled();
+    });
+    it.each(['manually_stopped', 'maintenance', 'online', 'waking'] as const)(
+      'rejects native auth in %s mode',
+      async (mode) => {
+        const { input, spy } = await setup();
+        await f.db
+          .updateTable('gateway_server_states')
+          .set({ state: mode })
+          .where('server_id', '=', serverId)
+          .execute();
+        const selected = (await getGatewaySnapshot(f.db, env)).routes.find(
+          (entry) => entry.id === route.id,
+        );
+        if (!selected) throw new Error('fixture');
+        expect(
+          (await request(`${prefix()}/offline-api`, { ...input, routeRevision: selected.revision }))
+            .status,
+        ).toBe(503);
+        expect(spy).not.toHaveBeenCalled();
+      },
+    );
+    it('rejects disabled wake, unavailable authority and mismatched generation', async () => {
+      const { input, spy, authority } = await setup();
+      spy.mockResolvedValueOnce(undefined);
+      expect((await request(`${prefix()}/offline-api`, input)).status).toBe(503);
+      spy.mockResolvedValueOnce({ ...authority, generation: `${authority.generation}0` });
+      expect((await request(`${prefix()}/offline-api`, input)).status).toBe(503);
+      await f.db
+        .updateTable('gateway_server_states')
+        .set({ auto_wake_override: false })
+        .where('server_id', '=', serverId)
+        .execute();
+      const selected = (await getGatewaySnapshot(f.db, env)).routes.find(
+        (entry) => entry.id === route.id,
+      );
+      if (!selected) throw new Error('fixture');
+      spy.mockClear();
+      expect(
+        (await request(`${prefix()}/offline-api`, { ...input, routeRevision: selected.revision }))
+          .status,
+      ).toBe(503);
+      expect(spy).not.toHaveBeenCalled();
+    });
+    it('reads encrypted native observations only after cryptographic auth, without borrowing old cache authorization', async () => {
+      const { input } = await setup();
+      const state = {
+        activeSessionName: 'Observed factory',
+        numConnectedPlayers: 4,
+        playerLimit: 4,
+        techTier: 3,
+        activeSchematic: '',
+        gamePhase: 'Phase 2',
+        isGameRunning: true,
+        totalGameDuration: 99,
+        isGamePaused: false,
+        averageTickRate: 60,
+        autoLoadSessionName: 'Observed factory',
+      };
+      await persistSatisfactoryOfflineSnapshots(f.db, codec, serverId, [
+        {
+          key: '1'.repeat(64),
+          tokenKey: '2'.repeat(64),
+          expiresAt: Date.now() - 3600000,
+          responses: {
+            QueryServerState: JSON.stringify({
+              data: { serverGameState: state },
+              authenticationToken: 'must-not-persist',
+            }),
+          },
+        },
+      ]);
+      const secret = await f.db
+        .selectFrom('encrypted_secrets')
+        .select('envelope')
+        .where('name', '=', `gateway.satisfactory.observations.${serverId}`)
+        .executeTakeFirstOrThrow();
+      expect(JSON.stringify(secret.envelope)).not.toContain('Observed factory');
+      expect(
+        codec.decrypt(secret.envelope, `gateway.satisfactory.observations.${serverId}`),
+      ).not.toContain('must-not-persist');
+      const player = decodeNativePlayerIdentity(playerId);
+      if (!player) throw new Error('fixture');
+      const authorization = `Bearer ${createNativeAuthenticationToken(credentials, 'Client', player)}`;
+      const query = {
+        ...input,
+        request: { operation: 'QueryServerState', playerId, authorization },
+      };
+      const response = await request(`${prefix()}/offline-api`, query);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        status: 200,
+        body: {
+          data: {
+            serverGameState: {
+              ...state,
+              numConnectedPlayers: 0,
+              averageTickRate: 0,
+              isGamePaused: true,
+              activeSessionName: expect.stringContaining('Observed factory'),
+            },
+          },
+        },
+      });
+      expect(
+        await (
+          await request(`${prefix()}/offline-api`, {
+            ...query,
+            request: { ...query.request, authorization: 'Bearer invalid' },
+          })
+        ).json(),
+      ).toEqual({ status: 401, body: { errorCode: 'invalid_token' } });
+      expect(
+        await (
+          await request(`${prefix()}/offline-api`, {
+            ...query,
+            request: { ...query.request, playerId: '060102030405060709' },
+          })
+        ).json(),
+      ).toEqual({ status: 401, body: { errorCode: 'invalid_token' } });
+    });
+    it('rechecks route authority after native reads instead of returning a token for a changed route', async () => {
+      const { input, spy, authority } = await setup();
+      spy.mockImplementationOnce(async () => {
+        await f.db
+          .updateTable('gateway_server_states')
+          .set({ auto_wake_override: false })
+          .where('server_id', '=', serverId)
+          .execute();
+        return authority;
+      });
+      const response = await request(`${prefix()}/offline-api`, input);
+      expect(response.status).toBe(412);
+      expect(await response.text()).not.toContain('authenticationToken');
+    });
   });
   it.each([
     'tls-identity',

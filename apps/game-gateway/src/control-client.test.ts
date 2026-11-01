@@ -26,6 +26,150 @@ const snapshot = {
 };
 
 describe('authenticated bounded Gateway control client', () => {
+  it('sends offline API credentials only inside an authenticated revision-bound control request', async () => {
+    const input = {
+      routeId: randomUUID(),
+      routeRevision: 7,
+      request: {
+        operation: 'PasswordLogin',
+        data: { MinimumPrivilegeLevel: 'Client', Password: 'fixture-password' },
+        authorization: 'Bearer fixture-player-token',
+        playerId: '0601100001aabbccdd',
+      },
+    };
+    const response = { status: 200, body: { data: { authenticationToken: 'fixture-result' } } };
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json(response));
+    const client = createGatewayControlClient({ ...settings, fetcher });
+    try {
+      expect(await client.requestOfflineApi?.(input)).toEqual(response);
+      const [url, options] = fetcher.mock.calls[0] ?? [];
+      expect(String(url)).toBe(`${settings.baseUrl}/internal/gateway/${gatewayId}/offline-api`);
+      expect(options?.method).toBe('POST');
+      expect(options?.redirect).toBe('error');
+      expect(new Headers(options?.headers).get('authorization')).toBe(`Bearer ${token}`);
+      expect(JSON.parse(String(options?.body))).toEqual(input);
+      expect(String(url)).not.toContain('fixture-password');
+      fetcher.mockImplementation(async () => Response.json({ status: 204 }));
+      expect(await client.requestOfflineApi?.(input)).toEqual({ status: 204 });
+    } finally {
+      client.close();
+    }
+  });
+  it.each([
+    { operation: '../wake' },
+    { operation: 'PasswordLogin', authorization: 'a'.repeat(8200) },
+    { operation: 'PasswordLogin', playerId: 'a'.repeat(2049) },
+    { operation: 'PasswordLogin', data: [] },
+    { operation: 'PasswordLogin', untrustedField: true },
+    { operation: 'PasswordLogin', data: { Password: 'a'.repeat(65536) } },
+    { operation: 'PasswordLogin', data: { Password: '測'.repeat(24000) } },
+  ])('rejects invalid offline API input before network access: $operation', async (request) => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ status: 204 }));
+    const client = createGatewayControlClient({ ...settings, fetcher });
+    try {
+      await expect(
+        client.requestOfflineApi?.({ routeId: randomUUID(), routeRevision: 1, request } as never),
+      ).rejects.toThrow();
+      expect(fetcher).not.toHaveBeenCalled();
+    } finally {
+      client.close();
+    }
+  });
+  it('rejects unserializable offline API data before network access', async () => {
+    const data: Record<string, unknown> = {};
+    data.cycle = data;
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ status: 204 }));
+    const client = createGatewayControlClient({ ...settings, fetcher });
+    try {
+      await expect(
+        client.requestOfflineApi?.({
+          routeId: randomUUID(),
+          routeRevision: 1,
+          request: { operation: 'PasswordLogin', data },
+        }),
+      ).rejects.toThrow();
+      expect(fetcher).not.toHaveBeenCalled();
+    } finally {
+      client.close();
+    }
+  });
+  it.each([
+    { status: 199 },
+    { status: 600 },
+    { status: 200, body: [] },
+    { status: 200, arbitrary: true },
+    { body: {} },
+  ])('rejects an invalid offline API control response $status', async (response) => {
+    const client = createGatewayControlClient({
+      ...settings,
+      fetcher: async () => Response.json(response),
+    });
+    try {
+      await expect(
+        client.requestOfflineApi?.({
+          routeId: randomUUID(),
+          routeRevision: 1,
+          request: { operation: 'QueryServerState' },
+        }),
+      ).rejects.toThrow();
+    } finally {
+      client.close();
+    }
+  });
+  it('bounds offline API response bytes and cancels the oversized stream', async () => {
+    const cancelled = vi.fn();
+    const client = createGatewayControlClient({
+      ...settings,
+      maxResponseBytes: 64,
+      fetcher: async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(Buffer.from('a'.repeat(65)));
+            },
+            cancel: cancelled,
+          }),
+        ),
+    });
+    try {
+      await expect(
+        client.requestOfflineApi?.({
+          routeId: randomUUID(),
+          routeRevision: 1,
+          request: { operation: 'QueryServerState' },
+        }),
+      ).rejects.toThrow('integration_unavailable');
+      expect(cancelled).toHaveBeenCalledOnce();
+    } finally {
+      client.close();
+    }
+  });
+  it('aborts an offline API control request at its configured deadline', async () => {
+    const aborted = vi.fn();
+    const client = createGatewayControlClient({
+      ...settings,
+      requestTimeoutMs: 20,
+      fetcher: async (_url, options) =>
+        new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => {
+            aborted();
+            reject(new Error('aborted'));
+          });
+        }),
+    });
+    try {
+      await expect(
+        client.requestOfflineApi?.({
+          routeId: randomUUID(),
+          routeRevision: 1,
+          request: { operation: 'QueryServerState' },
+        }),
+      ).rejects.toThrow('integration_unavailable');
+      expect(aborted).toHaveBeenCalledOnce();
+    } finally {
+      client.close();
+    }
+  });
   it('reads validated protocol presentation separately from snapshot authority', async () => {
     const state = {
       state: 3,

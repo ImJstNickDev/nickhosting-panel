@@ -37,6 +37,10 @@ import { z } from 'zod';
 import { resolveSatisfactoryApi } from '../../../packages/server-management/src/satisfactory-api.js';
 import type { Variables } from './app.js';
 import { gatewayClientFeatures, gatewayPresentationForClient } from './gateway-presentation.js';
+import {
+  persistSatisfactoryOfflineSnapshots,
+  registerSatisfactoryOfflineApi,
+} from './gateway-satisfactory-offline.js';
 import { registerGatewaySleepRoutes } from './gateway-sleep.js';
 import { registerGatewayStartupRoutes } from './gateway-startup.js';
 
@@ -125,6 +129,7 @@ export function registerGatewayRoutes(
   });
   registerGatewayStartupRoutes(app, options);
   registerGatewaySleepRoutes(app, { ...options, authenticate: authenticateGateway });
+  registerSatisfactoryOfflineApi(app, { ...options, route });
   const prefix = '/internal/gateway/:gatewayId';
   app.get(`${prefix}/configuration`, async (c) => {
     const values = await gatewayConfiguration(db, env);
@@ -468,6 +473,10 @@ export function registerGatewayRoutes(
     const api = await resolveSatisfactoryApi(db, codec, selected.serverId);
     const state = await api.state(AbortSignal.timeout(3000));
     await route(parsed.data);
+    await persistSatisfactoryOfflineSnapshots(db, codec, selected.serverId, [], {
+      operation: 'QueryServerState',
+      body: { data: { serverGameState: state } },
+    });
     return c.json({
       ready: true,
       idle: state.numConnectedPlayers === 0,
@@ -573,6 +582,7 @@ export function registerGatewayRoutes(
       const serialized = JSON.stringify(parsed.data.state);
       if (!serialized || Buffer.byteLength(serialized) > 262144)
         throw new DomainError('validation_failed');
+      await persistSatisfactoryOfflineSnapshots(db, codec, selected.serverId, parsed.data.state);
       const envelope = codec.encrypt(serialized, name);
       await db
         .insertInto('encrypted_secrets')

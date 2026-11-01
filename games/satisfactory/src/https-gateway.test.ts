@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer as createHttpsServer, request } from 'node:https';
 import { createServer } from 'node:net';
@@ -8,6 +9,7 @@ import type { GatewayTcpContext } from '@nickhosting/game-sdk';
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { SatisfactoryHttpsCache } from './https-cache.js';
 import { acceptSatisfactoryHttps } from './https-gateway.js';
+import { handleNativeOfflineApi } from './native-api.js';
 
 let directory: string;
 let identity: { privateKeyPem: string; certificatePem: string };
@@ -38,6 +40,138 @@ beforeAll(() => {
   };
 });
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
+it('authenticates native players and serves protected status while sleeping without any wake', async () => {
+  const password = 'Pässword🔐';
+  const credentials = {
+    build: 513885,
+    serverName: 'Synthetic',
+    serverSecret: '01'.repeat(256),
+    adminPassword: {
+      salt: 'ab'.repeat(32),
+      hash: createHash('sha512')
+        .update(Buffer.alloc(32, 0xab))
+        .update(password, 'utf8')
+        .digest('hex')
+        .toUpperCase(),
+    },
+  };
+  const wake = vi.fn();
+  const offline = vi.fn<NonNullable<GatewayTcpContext['requestOfflineApi']>>(async (input) =>
+    handleNativeOfflineApi(credentials, input, () => ({
+      data: { serverGameState: { activeSessionName: 'Observed world' } },
+    })),
+  );
+  const controller = new AbortController();
+  let mode = 'sleeping';
+  const context = {
+    tlsIdentity: async () => identity,
+    signal: controller.signal,
+    canForward: () => false,
+    requestWake: wake,
+    requestOfflineApi: offline,
+    mode: () => mode,
+    route: { serverId: 'native-offline-test', wakeEnabled: true },
+  } as unknown as GatewayTcpContext;
+  const server = createServer((socket) => {
+    void acceptSatisfactoryHttps(socket, context);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('bind');
+  const player = '0601100001aabbccdd';
+  const headers = {
+    'X-FactoryGame-PlayerId': player,
+    'Content-Type': 'application/json; charset=utf-8',
+  };
+  try {
+    const login = await exchange(
+      address.port,
+      'PasswordlessLogin',
+      headers,
+      JSON.stringify({ function: 'PasswordlessLogin', data: { MinimumPrivilegeLevel: 'Client' } }),
+    );
+    const token = JSON.parse(login.body).data.authenticationToken as string;
+    expect(login.status).toBe(200);
+    const verified = await exchange(
+      address.port,
+      'VerifyAuthenticationToken',
+      headers,
+      JSON.stringify({
+        function: 'VerifyAuthenticationToken',
+        data: { PrivilegeLevel: 'Client', AuthenticationToken: token.split('.')[1] },
+      }),
+    );
+    expect(verified).toEqual({ status: 204, body: '' });
+    expect(
+      (
+        await exchange(address.port, 'QueryServerState', {
+          ...headers,
+          Authorization: `Bearer ${token}`,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await exchange(address.port, 'QueryServerState', {
+          ...headers,
+          Authorization: 'Bearer invalid',
+        })
+      ).status,
+    ).toBe(401);
+    const body = JSON.stringify({
+      function: 'PasswordLogin',
+      data: { MinimumPrivilegeLevel: 'Administrator', Password: password },
+    });
+    expect(
+      JSON.parse((await exchange(address.port, 'PasswordLogin', headers, body)).body).data
+        .authenticationToken,
+    ).toBeTypeOf('string');
+    // Native missing-charset decoding is Latin1; escaped JSON remains lossless.
+    expect(
+      JSON.parse(
+        (
+          await exchange(
+            address.port,
+            'PasswordLogin',
+            { ...headers, 'Content-Type': 'application/json' },
+            body,
+          )
+        ).body,
+      ).errorCode,
+    ).toBe('wrong_password');
+    const escaped = body.replace(
+      /[\u0080-\uFFFF]/g,
+      (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`,
+    );
+    expect(
+      JSON.parse(
+        (
+          await exchange(
+            address.port,
+            'PasswordLogin',
+            { ...headers, 'Content-Type': 'application/json' },
+            escaped,
+          )
+        ).body,
+      ).data.authenticationToken,
+    ).toBeTypeOf('string');
+    const count = offline.mock.calls.length;
+    mode = 'manually_stopped';
+    expect(
+      (
+        await exchange(address.port, 'QueryServerState', {
+          ...headers,
+          Authorization: `Bearer ${token}`,
+        })
+      ).status,
+    ).toBe(503);
+    expect(offline).toHaveBeenCalledTimes(count);
+    expect(wake).not.toHaveBeenCalled();
+  } finally {
+    controller.abort();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
 async function exchange(
   port: number,
   fn: string,
@@ -275,7 +409,7 @@ it('keeps polling passive and obtains join tickets only from the backend', async
     await exchange(publicAddress.port, 'QueryServerState', { authorization });
     online = false;
     const cached = await exchange(publicAddress.port, 'QueryServerState', { authorization });
-    expect(cached.status).toBe(200);
+    expect(cached.status).toBe(503);
     expect(wake).not.toHaveBeenCalled();
     expect((await exchange(publicAddress.port, 'JoinGameRequest')).status).toBe(503);
     expect(wake).not.toHaveBeenCalled();

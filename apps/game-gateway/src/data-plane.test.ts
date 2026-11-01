@@ -2780,6 +2780,103 @@ describe('sleep protocol handling and observations', () => {
 });
 
 describe('lease, reconciliation and shutdown safety', () => {
+  async function offlineApiFixture(mode: GatewayMode = 'sleeping', wakeEnabled = true) {
+    const backend = await tcpFixture();
+    const current = { ...route(backend.port, 'tcp', mode), wakeEnabled };
+    let context: import('@nickhosting/game-sdk').GatewayTcpContext | undefined;
+    const requestOfflineApi = vi.fn<NonNullable<GatewayControl['requestOfflineApi']>>(async () => ({
+      status: 204,
+    }));
+    const f = plane([current], {
+      control: { requestOfflineApi },
+      protocols: [
+        fixtureProtocol({
+          managesTcpActivity: true,
+          managesTcpForwarding: true,
+          async acceptTcp(socket, accepted) {
+            context = accepted;
+            socket.write('accepted');
+          },
+        }),
+      ],
+    });
+    await f.gateway.applySnapshot(f.snapshot());
+    const client = connect(backend.port, '127.0.0.1');
+    client.on('error', () => {});
+    cleanups.push(async () => {
+      client.destroy();
+    });
+    await once(client, 'data');
+    expect(context?.requestOfflineApi).toBeTypeOf('function');
+    if (!context) throw new Error('Managed fixture context was not accepted');
+    return { ...f, current, context, requestOfflineApi };
+  }
+  it('keeps offline authentication revision-bound and passive', async () => {
+    const f = await offlineApiFixture();
+    const request = {
+      operation: 'PasswordLogin',
+      data: { MinimumPrivilegeLevel: 'Client', Password: 'fixture-password' },
+      playerId: '0601100001aabbccdd',
+    };
+    expect(await f.context.requestOfflineApi?.(request)).toEqual({ status: 204 });
+    expect(f.requestOfflineApi).toHaveBeenCalledExactlyOnceWith({
+      routeId: f.current.id,
+      routeRevision: f.current.revision,
+      request,
+    });
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+    await f.gateway.observe();
+    expect(f.control.reportObservation).not.toHaveBeenCalled();
+  });
+  it.each(['online', 'waking', 'blocked', 'maintenance', 'manually_stopped'] as const)(
+    'does not request offline authentication while the route is %s',
+    async (mode) => {
+      const f = await offlineApiFixture(mode);
+      await expect(
+        f.context.requestOfflineApi?.({ operation: 'PasswordlessLogin' }),
+      ).rejects.toThrow('integration_unavailable');
+      expect(f.requestOfflineApi).not.toHaveBeenCalled();
+      expect(f.control.requestWake).not.toHaveBeenCalled();
+    },
+  );
+  it('does not request offline authentication when wake is disabled', async () => {
+    const f = await offlineApiFixture('sleeping', false);
+    await expect(f.context.requestOfflineApi?.({ operation: 'PasswordlessLogin' })).rejects.toThrow(
+      'integration_unavailable',
+    );
+    expect(f.requestOfflineApi).not.toHaveBeenCalled();
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+  });
+  it.each(['mode', 'wake-disabled', 'generation', 'removed'] as const)(
+    'discards offline authentication when authority changes during the request: %s',
+    async (change) => {
+      const f = await offlineApiFixture();
+      const pending = Promise.withResolvers<{ status: number }>();
+      f.requestOfflineApi.mockImplementationOnce(async () => pending.promise);
+      const result = f.context.requestOfflineApi?.({ operation: 'PasswordlessLogin' });
+      const rejected = expect(result).rejects.toThrow('integration_unavailable');
+      await vi.waitFor(() => expect(f.requestOfflineApi).toHaveBeenCalledOnce());
+      await f.gateway.applySnapshot(
+        f.snapshot(
+          change === 'removed'
+            ? []
+            : [
+                {
+                  ...f.current,
+                  revision: 2,
+                  ...(change === 'mode' ? { mode: 'manually_stopped' as const } : {}),
+                  ...(change === 'wake-disabled' ? { wakeEnabled: false } : {}),
+                  ...(change === 'generation' ? { generation: randomUUID() } : {}),
+                },
+              ],
+          2,
+        ),
+      );
+      pending.resolve({ status: 204 });
+      await rejected;
+      expect(f.control.requestWake).not.toHaveBeenCalled();
+    },
+  );
   it('preserves an unforwarded managed waiter across churn while revoking attached backend streams', async () => {
     const backend = await tcpFixture();
     const r = route(backend.port, 'tcp', 'online');

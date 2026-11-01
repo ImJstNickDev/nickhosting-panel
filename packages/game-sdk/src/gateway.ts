@@ -19,6 +19,26 @@ export const gatewayModeSchema = z.enum([
 export type GatewayMode = z.infer<typeof gatewayModeSchema>;
 /** Ephemeral listener response; stopping is not persisted routing authority. */
 export type GatewayResponseMode = GatewayMode | 'stopping';
+export const gatewayOfflineApiRequestSchema = z
+  .strictObject({
+    operation: z.string().regex(/^[A-Za-z][A-Za-z0-9]{0,63}$/),
+    data: z.record(z.string(), z.unknown()).optional(),
+    authorization: z.string().max(8199).optional(),
+    playerId: z.string().max(2048).optional(),
+  })
+  .refine((value) => {
+    try {
+      return Buffer.byteLength(JSON.stringify(value)) <= 65536;
+    } catch {
+      return false;
+    }
+  });
+export type GatewayOfflineApiRequest = z.infer<typeof gatewayOfflineApiRequestSchema>;
+export const gatewayOfflineApiResponseSchema = z.strictObject({
+  status: z.number().int().min(200).max(599),
+  body: z.record(z.string(), z.unknown()).optional(),
+});
+export type GatewayOfflineApiResponse = z.infer<typeof gatewayOfflineApiResponseSchema>;
 export interface GatewayProtocolObservation {
   ready: boolean;
   idle?: boolean;
@@ -236,6 +256,11 @@ export interface GatewayControl {
     routeRevision: number;
   }): Promise<GatewayProtocolObservation>;
   loadPrivateState?(request: { routeId: string; routeRevision: number }): Promise<unknown>;
+  requestOfflineApi?(request: {
+    routeId: string;
+    routeRevision: number;
+    request: GatewayOfflineApiRequest;
+  }): Promise<GatewayOfflineApiResponse>;
   savePrivateState?(request: {
     routeId: string;
     routeRevision: number;
@@ -319,11 +344,14 @@ export interface GatewayProtocolSession {
 /** Trusted game code. Implementations must distinguish real protocol readiness
  * and player idleness; an open socket or no Gateway traffic proves neither. */
 export interface GatewayTcpContext extends GatewayProtocolContext {
+  /** Native game authentication and authorized reads against protected stopped
+   * instance state. This hook must never initiate a backend start. */
+  requestOfflineApi?(request: GatewayOfflineApiRequest): Promise<GatewayOfflineApiResponse>;
   /** Credential-free API diagnostics. Only fixed operation names and outcomes;
    * never include headers, request/response bodies or player identifiers. */
   onApiDiagnostic?(event: {
     operation: string;
-    outcome: 'health' | 'cached' | 'unavailable' | 'wake_result' | 'forwarding_attempt';
+    outcome: 'health' | 'cached' | 'native' | 'unavailable' | 'wake_result' | 'forwarding_attempt';
   }): void;
   /** Reserve a validated backend stream before opening it. Undefined refuses
    * forwarding; the idempotent release must run when that upstream closes. */

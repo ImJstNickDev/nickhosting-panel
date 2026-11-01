@@ -17,6 +17,7 @@ const entrySchema = z.strictObject({
   tokenKey: z.string().regex(/^[a-f0-9]{64}$/),
   expiresAt: z.number().finite(),
   responses: z.record(z.string(), z.string().max(maxBodyBytes)),
+  observedAt: z.record(z.string(), z.number().finite()).optional(),
 });
 export const satisfactoryHttpsCacheSchema = z.array(entrySchema).max(maxEntries);
 export type SatisfactoryHttpsCacheSnapshot = z.infer<typeof satisfactoryHttpsCacheSchema>;
@@ -59,10 +60,20 @@ export class SatisfactoryHttpsCache {
   private readonly entries = new Map<string, SatisfactoryHttpsCacheSnapshot[number]>();
   constructor(private readonly now: () => number = Date.now) {}
   restore(snapshot: unknown): void {
+    const now = this.now();
+    if (!Number.isFinite(now)) return;
     for (const entry of satisfactoryHttpsCacheSchema.parse(snapshot)) {
-      if (entry.expiresAt <= this.now() || entry.expiresAt > this.now() + authorizationLifetimeMs)
-        continue;
+      if (entry.expiresAt <= now || entry.expiresAt > now + authorizationLifetimeMs) continue;
       if (Object.keys(entry.responses).some((fn) => !satisfactoryCachedFunctions.has(fn))) continue;
+      if (
+        Object.entries(entry.observedAt ?? {}).some(
+          ([fn, observedAt]) =>
+            observedAt > now ||
+            !satisfactoryCachedFunctions.has(fn) ||
+            !Object.hasOwn(entry.responses, fn),
+        )
+      )
+        continue;
       if ((this.entries.get(entry.key)?.expiresAt ?? 0) <= entry.expiresAt)
         this.entries.set(entry.key, entry);
     }
@@ -73,6 +84,7 @@ export class SatisfactoryHttpsCache {
     return [...this.entries.values()].map((entry) => ({
       ...entry,
       responses: { ...entry.responses },
+      ...(entry.observedAt ? { observedAt: { ...entry.observedAt } } : {}),
     }));
   }
   reject(authorization: string | undefined, _playerId: string | undefined): void {
@@ -137,6 +149,8 @@ export class SatisfactoryHttpsCache {
         .safeParse(response).success
     )
       return;
+    const now = this.now();
+    if (!Number.isFinite(now)) return;
     this.trim();
     const entry = this.entries.get(key) ?? {
       key,
@@ -144,7 +158,16 @@ export class SatisfactoryHttpsCache {
       expiresAt: 0,
       responses: {},
     };
-    entry.expiresAt = this.now() + authorizationLifetimeMs;
+    // A legacy entry has one inferred observation time. Preserve that time before
+    // refreshing the shared retention window for a different function.
+    entry.observedAt = Object.fromEntries(
+      Object.keys(entry.responses).map((name) => [
+        name,
+        entry.observedAt?.[name] ?? entry.expiresAt - authorizationLifetimeMs,
+      ]),
+    );
+    entry.observedAt[fn] = now;
+    entry.expiresAt = now + authorizationLifetimeMs;
     entry.responses[fn] = body;
     this.entries.set(key, entry);
     this.trim();

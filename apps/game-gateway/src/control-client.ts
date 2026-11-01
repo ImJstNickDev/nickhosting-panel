@@ -3,6 +3,8 @@ import { DomainError } from '@nickhosting/core';
 import {
   type GatewayControl,
   gatewayObservationSchema,
+  gatewayOfflineApiRequestSchema,
+  gatewayOfflineApiResponseSchema,
   gatewaySatisfactoryStateSchema,
   gatewaySnapshotSchema,
   gatewayWakeRequestSchema,
@@ -246,6 +248,16 @@ export function createGatewayControlClient(
     },
     loadPrivateState(input) {
       return request('private-state-read', input);
+    },
+    async requestOfflineApi(input) {
+      const value = z
+        .strictObject({
+          routeId: z.uuid(),
+          routeRevision: z.number().int().positive(),
+          request: gatewayOfflineApiRequestSchema,
+        })
+        .parse(input);
+      return gatewayOfflineApiResponseSchema.parse(await request('offline-api', value));
     },
     async savePrivateState(input) {
       await request('private-state-write', input);

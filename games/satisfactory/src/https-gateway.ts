@@ -4,7 +4,7 @@ import { createServer, request } from 'node:https';
 import { isIP, type Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { TLSSocket } from 'node:tls';
-import type { GatewayTcpContext } from '@nickhosting/game-sdk';
+import { type GatewayTcpContext, gatewayOfflineApiRequestSchema } from '@nickhosting/game-sdk';
 import { z } from 'zod';
 import {
   SatisfactoryHttpsCache,
@@ -12,10 +12,27 @@ import {
   satisfactoryJoinFunction,
   satisfactoryPlayerCredential,
 } from './https-cache.js';
+import { supportsNativeOfflineOperation } from './native-api.js';
 
 const caches = new Map<string, SatisfactoryHttpsCache>();
 const writes = new Map<string, Promise<void>>();
 const hydration = new WeakMap<SatisfactoryHttpsCache, Promise<void>>();
+const offlineLimits = new Map<string, { since: number; requests: number; passwords: number }>();
+function permitOffline(serverId: string, peer: string, password: boolean): boolean {
+  const key = JSON.stringify([serverId, peer]),
+    now = Date.now();
+  let entry = offlineLimits.get(key);
+  if (!entry || now - entry.since >= 60000) {
+    for (const [key, value] of offlineLimits)
+      if (now - value.since >= 60000) offlineLimits.delete(key);
+    if (!entry && offlineLimits.size >= 10000) return false;
+    entry = { since: now, requests: 0, passwords: 0 };
+    offlineLimits.set(key, entry);
+  }
+  entry.requests++;
+  if (password) entry.passwords++;
+  return entry.requests <= 120 && entry.passwords <= 10;
+}
 function cacheFor(context: GatewayTcpContext): SatisfactoryHttpsCache {
   const id = context.route?.serverId ?? '';
   let cache = caches.get(id);
@@ -32,7 +49,9 @@ function cacheFor(context: GatewayTcpContext): SatisfactoryHttpsCache {
 function error(outgoing: ServerResponse, status = 503): void {
   if (!outgoing.headersSent)
     outgoing.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-  outgoing.end(undefined);
+  outgoing.end(
+    JSON.stringify({ errorCode: status === 429 ? 'rate_limit_exceeded' : 'server_unavailable' }),
+  );
 }
 function header(incoming: IncomingMessage, name: string): string | undefined {
   const value = incoming.headers[name];
@@ -82,8 +101,50 @@ function parseFunction(incoming: IncomingMessage, body: Buffer): string | undefi
     return undefined;
   }
 }
-/** A stable public TLS session remains here while the backend starts. The
- * backend alone authenticates users and issues multiplayer tickets. */
+function offlineRequest(incoming: IncomingMessage, body: Buffer) {
+  if (
+    !hasOneHeader(incoming, 'content-type') ||
+    incoming.headers['content-encoding'] ||
+    (incoming.headers.authorization !== undefined && !hasOneHeader(incoming, 'authorization')) ||
+    (incoming.headers['x-factorygame-playerid'] !== undefined &&
+      !hasOneHeader(incoming, 'x-factorygame-playerid'))
+  )
+    return undefined;
+  const parts = (header(incoming, 'content-type') ?? '').split(';').map((part) => part.trim());
+  if (parts.shift()?.toLowerCase() !== 'application/json') return undefined;
+  let charset = 'iso-8859-1';
+  if (parts.length > 1) return undefined;
+  if (parts.length) {
+    const match = /^charset=(?:"([^"]+)"|([^\s"]+))$/i.exec(parts[0] ?? '');
+    if (!match) return undefined;
+    charset = (match[1] ?? match[2] ?? '').toLowerCase();
+  }
+  try {
+    // Native HTTP defaults to ISO-8859-1, not UTF-8 or Windows-1252.
+    const text =
+      charset === 'iso-8859-1'
+        ? body.toString('latin1')
+        : charset === 'utf-8' || charset === 'utf-16le'
+          ? new TextDecoder(charset, { fatal: true }).decode(body)
+          : charset === 'us-ascii' && body.every((byte) => byte < 128)
+            ? body.toString('ascii')
+            : undefined;
+    if (text === undefined) return undefined;
+    const value = z
+      .strictObject({ function: z.string(), data: z.record(z.string(), z.unknown()).optional() })
+      .parse(JSON.parse(text));
+    return gatewayOfflineApiRequestSchema.parse({
+      operation: value.function,
+      data: value.data,
+      authorization: header(incoming, 'authorization'),
+      playerId: header(incoming, 'x-factorygame-playerid'),
+    });
+  } catch {
+    return undefined;
+  }
+}
+/** Stable public TLS remains here while the backend starts. Core verifies
+ * native stopped-instance authentication; only the backend issues entry tickets. */
 export async function acceptSatisfactoryHttps(
   socket: Socket,
   context: GatewayTcpContext,
@@ -102,7 +163,7 @@ export async function acceptSatisfactoryHttps(
   ]);
   function diagnostic(
     fn: string | undefined,
-    outcome: 'health' | 'cached' | 'unavailable' | 'wake_result' | 'forwarding_attempt',
+    outcome: 'health' | 'cached' | 'native' | 'unavailable' | 'wake_result' | 'forwarding_attempt',
   ): void {
     try {
       context.onApiDiagnostic?.({
@@ -203,15 +264,32 @@ export async function acceptSatisfactoryHttps(
       outgoing.end(JSON.stringify({ data: { health: 'slow', serverCustomData: '' } }));
       return;
     }
-    const authorization = header(incoming, 'authorization'),
-      playerId = header(incoming, 'x-factorygame-playerid');
-    // A cached successful read does not establish the backend token's current
-    // validity. Only the backend may positively verify authentication.
-    const cached = fn && cache.read(fn, authorization, playerId);
-    if (cached) {
-      diagnostic(fn, 'cached');
-      outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-      outgoing.end(cached);
+    if (fn && supportsNativeOfflineOperation(fn) && context.requestOfflineApi) {
+      const request = offlineRequest(incoming, body);
+      if (!request || context.mode() !== 'sleeping' || context.route.wakeEnabled === false) {
+        diagnostic(fn, 'unavailable');
+        error(outgoing);
+        return;
+      }
+      if (
+        !permitOffline(context.route.serverId, socket.remoteAddress ?? '', fn === 'PasswordLogin')
+      ) {
+        error(outgoing, 429);
+        return;
+      }
+      const response = await context.requestOfflineApi(request);
+      if (context.signal.aborted || outgoing.destroyed || context.mode() !== 'sleeping')
+        return error(outgoing);
+      diagnostic(fn, 'native');
+      outgoing.writeHead(response.status, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      outgoing.end(
+        response.status === 204
+          ? undefined
+          : JSON.stringify(response.body ?? { errorCode: 'server_unavailable' }),
+      );
       return;
     }
     // Like Minecraft Login Start, a syntactically valid join is an intention
