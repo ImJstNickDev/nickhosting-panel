@@ -1,5 +1,5 @@
 const entries: Record<string, [string, string]> = {
-  title: ['Overview', 'Panoramica'],
+  title: ['FICSIT Overview', 'Panoramica FICSIT'],
   live: ['Live server observation', 'Osservazione del server in tempo reale'],
   snapshot: [
     'Last known world state. These values are historical; they do not indicate current players or performance.',

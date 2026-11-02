@@ -1047,3 +1047,22 @@ and stale Worlds-capability behavior (six navigation tests pass). Missing Overvi
 alongside visible Mods cannot be explained by current permission/capability filtering.
 Restarted only dev Vite under standing authorization; health and public module responses
 pass. Existing browser sessions may need a full reload to discard the older module.
+
+### Registered manifest compatibility and FICSIT navigation
+
+A dev read confirmed `game_integrations.manifest.capabilities.worlds` was still false
+from initial registration. Restarting API/Vite does not update that persisted metadata.
+Trusted game modules may now explicitly declare `managementCapabilities` whose values
+come from their compiled manifest. Satisfactory opts in for players/mods/worlds;
+`describeServer` uses these values in both detail and list responses. No DB migration
+or metadata mutation is required. Lifecycle/wake/direct policy and permissions are
+unchanged, and Minecraft does not opt in. A database integration regression checks the
+stale-manifest case and preservation of stored `wake: unsupported` (37 tests passed).
+
+The sidebar places FICSIT Overview in Tools before Worlds and Mods, and labels the
+integration settings FICSIT Settings (localized in Italian). Navigation regression
+asserts Tools placement. Only development API restarted; no game data changed.
+Post-restart read-only verification through `getPlatformServer` against an existing dev
+Satisfactory instance returned `worlds:true`, `mods:true`, `players:false`; API healthy.
+Nine unit navigation/UI tests, 37 DB integration tests, two focused browser journeys
+and typecheck pass. No credentials, world or database metadata changed.

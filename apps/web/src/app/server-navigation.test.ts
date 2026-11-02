@@ -100,6 +100,8 @@ it('shows all Satisfactory management destinations from its compiled integration
   expect(items.filter((item) => item.active).map((item) => item.to)).toEqual([
     '/servers/server-fixture/game/worlds',
   ]);
+  expect(items.find((item) => item.to.endsWith('/overview'))?.group).toBe('serverNav.tools');
+  expect(items.find((item) => item.to.endsWith('/worlds'))?.group).toBe('serverNav.tools');
   const staleCapabilities = serverNavigation(
     { ...value, capabilities: { ...value.capabilities, worlds: false } },
     '',

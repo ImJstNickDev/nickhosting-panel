@@ -41,6 +41,9 @@ export interface TrustedGameModule {
   id: string;
   manifest: GameManifest;
   provisionAsResourceOwner: boolean;
+  /** Management screens shipped by this module use compiled declarations even
+   * when the registered manifest predates them. Never overrides lifecycle policy. */
+  managementCapabilities?: readonly ('players' | 'mods' | 'worlds')[];
   /** Trusted integration supplies presentation defaults; no lifecycle authority.
    * The manifest declares the editor contract, this hook resolves Owner settings. */
   resolveGatewayMessages?(

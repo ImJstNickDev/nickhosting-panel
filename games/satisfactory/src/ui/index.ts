@@ -7,7 +7,7 @@ import { satisfactorySettingsCatalogs } from './settings-catalog.js';
 
 const prefix = 'games.satisfactory.';
 const translations: Record<string, [string, string]> = {
-  'api.title': ['Server settings', 'Impostazioni server'],
+  'api.title': ['FICSIT Settings', 'Impostazioni FICSIT'],
   'api.token': ['Application token', 'Token applicazione'],
   'api.tokenHelp': [
     'In the game Server Manager console, run server.GenerateAPIToken and enter the result here. The token is verified against the running server and stored encrypted.',
@@ -108,7 +108,7 @@ export const satisfactoryUiDescriptor = gameUiDescriptorSchema.parse({
       titleKey: `${prefix}overview.title`,
       loader: 'overview',
       renderer: 'satisfactory-overview',
-      navigation: { group: 'server', order: 0, icon: 'activity', placement: 'sidebar' },
+      navigation: { group: 'tools', order: 10, icon: 'activity', placement: 'sidebar' },
       requiredPermissions: ['server:read'],
       managePermissions: ['server:manage'],
       requiredCapabilities: [],

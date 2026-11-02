@@ -11,6 +11,7 @@ import { ensureSatisfactoryTlsIdentity } from './satisfactory-tls.js';
 export const satisfactoryModule: TrustedGameModule = {
   id: 'satisfactory',
   manifest: satisfactoryManifest,
+  managementCapabilities: ['players', 'mods', 'worlds'],
   provisionAsResourceOwner: true,
   async assertProfileBinding(_db, _server, mapping) {
     if (mapping.game_id === 'satisfactory' && mapping.runtime_id !== 'dedicated')
