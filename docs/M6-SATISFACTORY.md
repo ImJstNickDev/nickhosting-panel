@@ -1077,3 +1077,28 @@ last-updated time; the absolute observation time remains available on hover. The
 are omitted, and failed refreshes retain an honest saved-state badge. Browser checks
 cover relative-time advancement, loading/empty/error data, desktop/mobile and Axe;
 updated EN/IT screenshots are included. No API or infrastructure change is needed.
+
+### Readable progression labels
+
+The integration-owned `ui/progression` resolver converts native Unreal object references
+into localized labels. Project Assembly shows the current phase with a bundled vector
+Space Elevator symbol; this is an original panel icon, not an extracted game asset.
+Phase 0 is Establishing Phase, **not** phase 1. The initial current/target distinction
+and phase 0–7 names are verified against
+[SCIM SpaceElevator.js, pinned revision](https://github.com/AnthorNet/SC-InteractiveMap/blob/fb56486f6750fca69e035f53cfec032ef1805390/src/Building/SpaceElevator.js).
+The next delivery is a different value and is not inferred by this display.
+
+Active milestone recognizes 48 vanilla progression/tutorial names from the
+[SatisfactoryTools 1.0 game-data export](https://github.com/greeny/SatisfactoryTools/blob/74b691c82ed69030f32cd9419d8c327c878e2ac8/data/data1.0.json),
+with original namespace checks consistent with the
+[modding asset tree](https://github.com/satisfactorymodding/SatisfactoryUnrealProject/tree/master/StarterProject/Content/FactoryGame/Schematics).
+These are a verified baseline, not a claim that all future game/mod assets are catalogued.
+Italian labels are NickPanel translations. Unknown references are converted to readable
+asset labels (or a neutral unknown label for malformed input), never fetched remotely
+or rendered as HTML. A mod reusing a vanilla basename does not get its translation.
+`None` and empty values indicate no active phase/milestone. No API, DB, game files,
+permissions, power operations or deployment changes are involved.
+Validation: eight game UI/resolver tests and the focused desktop EN/mobile IT browser
+journey pass, including native Phase_0/Schematic_1-1 inputs, dynamic freshness and Axe.
+Typecheck, scoped lint, translation parity and frontend build pass. Updated screenshots
+were inspected; the public dev frontend serves both progression resolvers.

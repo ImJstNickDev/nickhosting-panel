@@ -1,3 +1,7 @@
+export { satisfactoryPhaseLabel, satisfactorySchematicLabel } from './progression.js';
+
+import { satisfactoryProgressionCatalogs } from './progression-catalog.js';
+
 export { satisfactorySaveDirectory } from '../world-paths.js';
 
 import { defineTrustedGameUiModule, gameUiDescriptorSchema } from '@nickhosting/game-sdk/ui';
@@ -56,11 +60,13 @@ export const satisfactoryUiCatalogs = {
   en: {
     ...baseCatalogs.en,
     ...satisfactoryOverviewCatalogs.en,
+    ...satisfactoryProgressionCatalogs.en,
     ...satisfactorySettingsCatalogs.en,
   },
   it: {
     ...baseCatalogs.it,
     ...satisfactoryOverviewCatalogs.it,
+    ...satisfactoryProgressionCatalogs.it,
     ...satisfactorySettingsCatalogs.it,
   },
 };

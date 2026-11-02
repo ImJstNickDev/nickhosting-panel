@@ -186,8 +186,10 @@ it('renders live and historical overview honestly and exposes request errors', a
                   numConnectedPlayers: 2,
                   playerLimit: 4,
                   techTier: 6,
-                  activeSchematic: 'Tier 6 milestone',
-                  gamePhase: 'Phase 3',
+                  activeSchematic:
+                    "/Script/Engine.BlueprintGeneratedClass'/Game/FactoryGame/Schematics/Progression/Schematic_1-1.Schematic_1-1_C'",
+                  gamePhase:
+                    "/Script/FactoryGame.FGGamePhase'/Game/FactoryGame/GamePhases/GP_Project_Assembly_Phase_0.GP_Project_Assembly_Phase_0'",
                   isGameRunning: true,
                   totalGameDuration: 72000,
                   isGamePaused: false,
@@ -200,6 +202,9 @@ it('renders live and historical overview honestly and exposes request errors', a
   await page.goto(`${origin}satisfactory-worlds-fixture?overview`);
   await check(page.getByText('Northern factory', { exact: true })).toBeVisible();
   await check(page.getByText('Last updated 2 minutes ago', { exact: true })).toBeVisible();
+  await check(page.getByText('Phase 0 · Establishing Phase', { exact: true })).toBeVisible();
+  await check(page.getByText('Base Building', { exact: true })).toBeVisible();
+  await check(page.getByText(/\/Script\//)).toHaveCount(0);
   await check(page.getByRole('button', { name: 'Refresh', exact: true })).toHaveText('');
   await check(page.getByText(/Observed at:/)).toHaveCount(0);
   await page.screenshot({ path: `${shots}/satisfactory-overview-desktop-en.png`, fullPage: true });
@@ -213,6 +218,8 @@ it('renders live and historical overview honestly and exposes request errors', a
     true,
   );
   await check(page.getByText('Stato salvato', { exact: true })).toBeVisible();
+  await check(page.getByText('Fase 0 · Insediamento', { exact: true })).toBeVisible();
+  await check(page.getByText('Costruzione di base', { exact: true })).toBeVisible();
   await check(page.getByText('Ultimo aggiornamento 2 minuti fa', { exact: true })).toBeVisible();
   await page.clock.fastForward(60_000);
   await check(page.getByText('Ultimo aggiornamento 3 minuti fa', { exact: true })).toBeVisible();
@@ -225,6 +232,8 @@ it('renders live and historical overview honestly and exposes request errors', a
   await page.getByRole('button').click();
   await check(page.getByRole('alert')).toBeVisible();
   await check(page.getByText('Stato salvato', { exact: true })).toBeVisible();
+  await check(page.getByText('Fase 0 · Insediamento', { exact: true })).toBeVisible();
+  await check(page.getByText('Costruzione di base', { exact: true })).toBeVisible();
   failure = false;
   unavailable = true;
   await page.getByRole('button', { name: 'Aggiorna', exact: true }).click();

@@ -1,6 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import type { SatisfactoryGameState } from '../../../../../games/satisfactory/src/api.js';
+import {
+  type SatisfactoryProgressionLabel,
+  satisfactoryPhaseLabel,
+  satisfactorySchematicLabel,
+} from '../../../../../games/satisfactory/src/ui/progression.js';
 import { api } from '../../api/client.js';
 import { useFormat, useLocale, useT } from '../../app/i18n.js';
 import { Details, ErrorNotice } from '../../components/ui.js';
@@ -32,6 +37,8 @@ export function SatisfactoryOverviewSection(props: GameSectionViewProps) {
       }),
     refetchInterval: props.runtimeState === 'running' ? 15000 : false,
   });
+  const label = (value: SatisfactoryProgressionLabel) =>
+    value.kind === 'localized' ? t(value.key, value.values) : value.label;
   const state = query.data?.state;
   const source = query.error && state ? 'snapshot' : query.data?.source;
   const timestamp = query.data?.observedAt;
@@ -71,8 +78,25 @@ export function SatisfactoryOverviewSection(props: GameSectionViewProps) {
                   `${state.numConnectedPlayers} / ${state.playerLimit}`,
                 ],
                 [t(key('tier')), format.number(state.techTier)],
-                [t(key('phase')), state.gamePhase || '—'],
-                [t(key('schematic')), state.activeSchematic || '—'],
+                [
+                  t(key('phase')),
+                  <span className="ficsit-progression" key="project-assembly">
+                    <svg
+                      width="22"
+                      height="26"
+                      viewBox="0 0 24 28"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M10 1v18M14 1v18M6 19h12l4 6H2zM8 19v-5h8v5M5 26h14M4 7h16M7 4h10v6H7z" />
+                    </svg>
+                    <span>{label(satisfactoryPhaseLabel(state.gamePhase))}</span>
+                  </span>,
+                ],
+                [t(key('schematic')), label(satisfactorySchematicLabel(state.activeSchematic))],
                 [t(key('duration')), format.number(state.totalGameDuration / 3600)],
                 [t(key('paused')), t(key(state.isGamePaused ? 'yes' : 'no'))],
                 [t('games.satisfactory.api.tickRate'), format.number(state.averageTickRate)],

@@ -107,3 +107,11 @@
     flex-wrap: wrap;
   }
 }
+.ficsit-progression {
+  display: block;
+}
+.ficsit-progression > svg {
+  vertical-align: -6px;
+  margin-right: 8px;
+  color: #a95100;
+}
