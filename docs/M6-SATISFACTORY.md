@@ -893,3 +893,106 @@ were healthy after verification. No game-server test assets were created or
 mutated. Issue #18 and the remaining M6 playable-client acceptance are unchanged.
 Rollback: revert this commit after pending preview deliveries settle; existing
 plans, archive caches and recovery formats remain compatible, with no migration.
+
+
+### Mod-manager scaling: inventories, Apply and repeated selections
+
+Inventory now uses bounded four-way metadata, directory and file-stream work,
+with existing download-grant batching in windows of 64. Preview may reuse bounded
+descriptor bytes only inside that scan; Apply/reconciliation and capture always
+fingerprint fresh bytes. All errors stop scheduling and drain active readers.
+The actual-code synthetic 1 ms adapter benchmark improved from 604 to 188 ms for
+100 mods with three tiny files each (300 to 200 downloads); 10 mods improved from
+69 to 28 ms. This measures local orchestration with simulated transport, not a
+100-mod installation on the live provider.
+
+Apply reserves staging before scanning and captures before-images while hashing
+the initial inventory. Listed capture sizes must match the reserved managed
+manifest before any recovery file is written. Initial hashes perform destination
+preflight; unchanged outputs skip mutations. Changed outputs retain fresh
+pre-write ownership checks, and a final independent full inventory verifies all
+resulting bytes before state commit. Unchanged managed payloads now download twice
+(initial capture and final verification), down from six. Local prepared copies are
+bounded, private, hash-verified streams. Large baseline/receipt manifests are
+budgeted explicitly; retained recovery claims count actual remaining stage bytes.
+Retries preserve the original recovery journal and final drift detection.
+
+Checkbox version requests start only on click, with four concurrent requests and
+per-mod cancellation. Functional draft updates retain out-of-order selections;
+preview waits for pending checkbox lookups and prepares the latest complete draft.
+The lightweight recommendation query excludes unused changelogs/dependencies.
+Only public recommendation metadata is cached (30 s, 128 entries, 16 MiB); concurrent
+build reads coalesce in flight and each caller authorizes before and after. Own
+preview activity no longer triggers another UI inventory scan; unrelated operation
+completion, revision, external-mode and runtime changes still refresh it.
+
+Native registry snapshots (SQLite and WAL) are private verified copies, bound to
+CLI checksum, game build, target set and selected root constraints. Complete
+coverage may use the upstream offline resolver within 60 seconds of the original
+snapshot; reuse never extends expiry. Missing/new roots, changed identity, expired
+snapshots and explicit Resolve again use fresh online resolution. A failed offline
+attempt clears and rebuilds its private working tree before the online retry.
+The dependency graph still resolves as a whole for correctness; no claim of a
+per-added-mod delta solver is made. Archives and all output bytes retain SHA256
+verification. No extracted-file cache or parallel download service is introduced.
+
+Per-job limits use one validated contract: output defaults to 2 GiB (also capped
+by the server disk limit), archive cache 1 GiB, native metadata 64 MiB and 100,000
+output files. Environment overrides are NH_SATISFACTORY_MOD_MAX_BYTES,
+NH_SATISFACTORY_MOD_ARCHIVE_BYTES, NH_SATISFACTORY_MOD_METADATA_BYTES and
+NH_SATISFACTORY_MOD_MAX_FILES. Existing Owner/user/global staging quotas and disk
+admission remain authoritative. Preparation reserves the summed budgets plus
+64 MiB headroom; Apply reserves payloads, recovery and bounded manifests. Optional
+completed preview caches may be evicted on admission pressure, excluding recovery
+assets. Frozen plans must satisfy current limits before Apply. These limits permit
+larger modpacks but do not promise that any arbitrary 100-mod set fits configured
+storage or has compatible dependencies.
+
+The shared native sandbox accepts a validated per-job file-size ceiling from
+NH_CONTENT_MAX_FILE_BYTES (1 byte through 16 GiB), supplied by the trusted caller;
+other integrations keep the 512 MiB default. Landlock, seccomp, private stage
+ownership, environment clearing and aggregate monitoring remain enforced. The
+worker image must be rebuilt for this sandbox change. No database migration or
+Pterodactyl/Blueprint modification is required.
+
+
+Actual worker/storage native metadata-cache comparison, same small-mod fixtures:
+1/5/10 selected roots (2/6/11 resolved) prepared in 414/487/825 ms with a valid
+registry snapshot, versus the preceding archive-only runs at 1,087/1,101/1,209 ms.
+Native startup/resolution/metadata work fell from 765/753/724 to 178/194/240 ms.
+These are separate development runs with environmental variance. Outputs were
+identical (23/57/103 files, 14.05/16.50/23.03 MB); new roots correctly missed the
+metadata snapshot and subsequent covered selections hit it. Original expiry was
+preserved across reuse. No 100-mod real-server installation was performed.
+
+Actual full-browser PEP_Mod/SML previews measured 3.938 s (metadata hit), 3.786 s
+(expired snapshot, fresh resolution) and 3.040 s (metadata hit). Prepared Review
+paint took 27/13/13 ms. Each completed run issued one preview, with zero browser
+errors/alerts and no Apply, power or game-file mutations. An earlier attempt
+intersected source-watcher reloads and was discarded after an HTML error response;
+its preview job completed normally. These full-path results do not establish a
+300 ms end-to-end guarantee. Detailed stage diagnostics remain available for
+larger inventories and provider transport variability.
+
+Activation rebuilt the normal development image and recreated only the existing
+dev worker, after confirming zero running operation jobs. Ports, volumes, networks
+and Compose definitions were preserved. API/gateway/Vite followed existing source
+watchers; no manual restart of those services, migration, Blueprint update or
+Pterodactyl/Wings modification was required. All synthetic benchmark trees were
+cleaned. Rollback requires settling outstanding deliveries and rebuilding the
+previous worker image alongside reverting the application; older code retains
+its lower content limits and cannot manage newly admitted larger mod sets.
+
+
+Scaling validation: 31 worker, 12 inventory and 13 API integration cases passed,
+plus 26 registry regressions, 47 domain/cache/limits/sandbox cases and 13 browser
+journeys. The build singleflight fixture initially released its read before both
+callers finished authorization under parallel test load; a deterministic
+post-authorization barrier corrected the fixture and all 13 API cases passed on
+rerun. Coverage includes two-read unchanged Apply, exact retained recovery byte
+accounting, oversized baseline rejection before writing, lower-limit frozen-plan
+rejection, optional-cache eviction, cancellation/drain, stale metadata, complete
+offline-failure cleanup, explicit refresh and per-checkbox request cancellation.
+Full types, lint (warnings remain), i18n parity and frontend/runtime builds passed.
+Independent final review found no open must-fix findings. Issue #18 and the
+previously outstanding full playable-client M6 acceptance remain unchanged.

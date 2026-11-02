@@ -11,7 +11,14 @@ import {
   satisfactoryVersionPaths,
   satisfiesSatisfactoryModVersion,
 } from '../../../games/satisfactory/src/mods.js';
-import { readSatisfactoryModInventory } from '../../../games/satisfactory/src/mods-inventory.js';
+import {
+  mapSatisfactoryInventory,
+  readSatisfactoryModInventory,
+} from '../../../games/satisfactory/src/mods-inventory.js';
+import {
+  type SatisfactoryModLimits,
+  satisfactoryModDefaultLimits,
+} from '../../../games/satisfactory/src/mods-limits.js';
 import { lockResources } from './admission.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
@@ -23,7 +30,7 @@ export const satisfactoryManagedFileSchema = z.object({
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
   size: z.number().int().nonnegative(),
 });
-export const satisfactoryManagedFilesSchema = z.array(satisfactoryManagedFileSchema).max(20000);
+export const satisfactoryManagedFilesSchema = z.array(satisfactoryManagedFileSchema).max(1_000_000);
 export function sameSatisfactorySelection(first: unknown, second: unknown) {
   const normalize = (input: unknown) =>
     satisfactoryModSelectionSchema
@@ -65,11 +72,22 @@ export async function inspectSatisfactoryModInventory(
   adapter: PterodactylAdapter,
   server: Pick<Selectable<Database['managed_servers']>, 'id' | 'pterodactyl_identifier'>,
   authorize: () => Promise<void> = async () => {},
-  options: { signal?: AbortSignal; reuseListings?: true } = {},
+  options: {
+    signal?: AbortSignal;
+    limits?: SatisfactoryModLimits;
+    reuseListings?: true;
+    captureFile?: (
+      file: { path: string; size: number },
+      chunks: AsyncIterable<Uint8Array>,
+    ) => Promise<void>;
+  } = {},
 ) {
+  const limits = options.limits ?? satisfactoryModDefaultLimits;
   const identifier = server.pterodactyl_identifier;
   if (!identifier) throw new DomainError('integration_unavailable');
+  const cancellation = new AbortController();
   const deadline = AbortSignal.any([
+    cancellation.signal,
     AbortSignal.timeout(120000),
     ...(options.signal ? [options.signal] : []),
   ]);
@@ -87,6 +105,7 @@ export async function inspectSatisfactoryModInventory(
   const selection = satisfactoryModSelectionSchema.parse(state?.selection ?? []);
   const lock = satisfactoryModLockSchema.parse(state?.lock ?? emptySatisfactoryLock);
   let metadataBytes = 0;
+  const metadataFiles = new Map<string, Buffer>();
   // Preview may share one bounded listing snapshot between metadata and hashing.
   // Apply/reconciliation deliberately re-list and always fingerprint actual file bytes.
   const listings = new Map<string, Awaited<ReturnType<PterodactylAdapter['listFiles']>>>();
@@ -99,7 +118,7 @@ export async function inspectSatisfactoryModInventory(
     deadline.throwIfAborted();
     if (options.reuseListings) {
       listedEntries += entries.length;
-      if (listedEntries > 40000) throw new DomainError('conflict');
+      if (listedEntries > limits.maxFiles * 2) throw new DomainError('conflict');
       listings.set(path, entries);
     }
     return entries;
@@ -109,78 +128,138 @@ export async function inspectSatisfactoryModInventory(
     const bytes = Buffer.from(await adapter.readFile(identifier, path, maxBytes));
     deadline.throwIfAborted();
     metadataBytes += bytes.length;
-    if (metadataBytes > 67108864) throw new DomainError('conflict');
+    if (metadataBytes > limits.metadataBytes) throw new DomainError('conflict');
+    if (options.reuseListings && !options.captureFile && path.startsWith('FactoryGame/Mods/'))
+      metadataFiles.set(path, bytes);
     return bytes;
   };
-  const inventory = await readSatisfactoryModInventory({ listFiles, readFile, selection, lock });
+  const inventory = await readSatisfactoryModInventory({
+    listFiles,
+    readFile,
+    selection,
+    lock,
+    maxEntries: limits.maxFiles * 2,
+  });
   const files: SatisfactoryModFile[] = [];
-  let total = 0,
-    entriesSeen = 0;
-  const walk = async (path: string, depth = 0): Promise<void> => {
-    if (depth > 32) throw new DomainError('conflict');
-    for (const entry of await listFiles(path)) {
-      deadline.throwIfAborted();
-      if (++entriesSeen > 40000) throw new DomainError('conflict');
-      if (
-        !/^[A-Za-z0-9_. -]+$/.test(entry.name) ||
-        entry.name === '.' ||
-        entry.name === '..' ||
-        entry.is_symlink
-      )
-        throw new DomainError('conflict');
-      const name = `${path}/${entry.name}`;
-      if (name.length > 1024) throw new DomainError('conflict');
-      if (!entry.is_file) {
-        await walk(name, depth + 1);
-        continue;
-      }
-      total += entry.size;
-      if (total > 536870912 || files.length >= 20000) throw new DomainError('conflict');
-      const response = await adapter.downloadFile(identifier, name, {
-        maxBytes: Math.max(1, entry.size),
-        signal: deadline,
-        authorize: authorizeRead,
-      });
-      const digest = createHash('sha256');
-      let size = 0;
-      const reader = response.body.getReader();
-      try {
-        for (;;) {
-          deadline.throwIfAborted();
-          const chunk = await reader.read();
-          deadline.throwIfAborted();
-          if (chunk.done) break;
-          size += chunk.value.byteLength;
-          if (size > entry.size) throw new DomainError('conflict');
-          digest.update(chunk.value);
-        }
-      } finally {
-        await reader.cancel().catch(() => {});
-        reader.releaseLock();
-      }
-      if (size !== entry.size) throw new DomainError('conflict');
-      files.push({ path: name, size, sha256: digest.digest('hex') });
-    }
-  };
+  const pendingFiles: { path: string; size: number }[] = [];
+  let total = 0;
+  let entriesSeen = 0;
   const factory = (await listFiles('')).find((entry) => entry.name === 'FactoryGame');
   if (factory?.is_symlink || factory?.is_file) throw new DomainError('conflict');
   const mods = factory
     ? (await listFiles('FactoryGame')).find((entry) => entry.name === 'Mods')
     : undefined;
   if (mods?.is_symlink || mods?.is_file) throw new DomainError('conflict');
-  if (mods) await walk('FactoryGame/Mods');
+  let directories = mods ? ['FactoryGame/Mods'] : [];
+  for (let depth = 0; directories.length; depth++) {
+    if (depth > 32) throw new DomainError('conflict');
+    const children: string[] = [];
+    await mapSatisfactoryInventory(directories, async (path) => {
+      for (const entry of await listFiles(path)) {
+        deadline.throwIfAborted();
+        if (++entriesSeen > limits.maxFiles * 2) throw new DomainError('conflict');
+        if (
+          !/^[A-Za-z0-9_. -]+$/.test(entry.name) ||
+          entry.name === '.' ||
+          entry.name === '..' ||
+          entry.is_symlink
+        )
+          throw new DomainError('conflict');
+        const name = `${path}/${entry.name}`;
+        if (name.length > 1024) throw new DomainError('conflict');
+        if (!entry.is_file) children.push(name);
+        else {
+          if (!Number.isSafeInteger(entry.size) || entry.size < 0)
+            throw new DomainError('conflict');
+          total += entry.size;
+          if (total > limits.outputBytes || pendingFiles.length >= limits.maxFiles)
+            throw new DomainError('conflict');
+          pendingFiles.push({ path: name, size: entry.size });
+        }
+      }
+    });
+    directories = children;
+  }
+  // Prefetch only bounded windows of existing signed grants. Each body still
+  // passes its own revocable authorization and byte/hash checks.
+  for (let offset = 0; offset < pendingFiles.length; offset += 64) {
+    const window = pendingFiles.slice(offset, offset + 64);
+    await authorizeRead();
+    await adapter.prefetchDownloads?.(
+      identifier,
+      window.filter((file) => !metadataFiles.has(file.path)).map((file) => file.path),
+    );
+    deadline.throwIfAborted();
+    await mapSatisfactoryInventory(window, async (file) => {
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      try {
+        await authorizeRead();
+        const cached = metadataFiles.get(file.path);
+        const body =
+          cached && cached.length === file.size
+            ? new ReadableStream<Uint8Array>({
+                start(controller) {
+                  controller.enqueue(cached);
+                  controller.close();
+                },
+              })
+            : (
+                await adapter.downloadFile(identifier, file.path, {
+                  maxBytes: Math.max(1, file.size),
+                  signal: deadline,
+                  authorize: authorizeRead,
+                })
+              ).body;
+        reader = body.getReader();
+        const source = reader;
+        const digest = createHash('sha256');
+        let size = 0;
+        let consumed = false;
+        const chunks = async function* () {
+          for (;;) {
+            deadline.throwIfAborted();
+            const chunk = await source.read();
+            deadline.throwIfAborted();
+            if (chunk.done) {
+              consumed = true;
+              break;
+            }
+            size += chunk.value.byteLength;
+            if (size > file.size) throw new DomainError('conflict');
+            digest.update(chunk.value);
+            yield chunk.value;
+          }
+        };
+        if (options.captureFile) await options.captureFile(file, chunks());
+        else
+          for await (const _chunk of chunks()) {
+            /* Complete hash verification. */
+          }
+        if (!consumed || size !== file.size) throw new DomainError('conflict');
+        files.push({ ...file, sha256: digest.digest('hex') });
+      } catch (error) {
+        if (!cancellation.signal.aborted) cancellation.abort(error);
+        throw error;
+      } finally {
+        await reader?.cancel().catch(() => {});
+        reader?.releaseLock();
+      }
+    });
+  }
   files.sort((a, b) => a.path.localeCompare(b.path));
   const fingerprint = createHash('sha256').update(JSON.stringify(files)).digest('hex');
   const previous = satisfactoryManagedFilesSchema.parse(state?.files ?? []);
+  const currentHashes = new Map(files.map((file) => [file.path, file.sha256]));
+  const previousDirectories = new Set<string>();
+  for (const file of previous) {
+    const components = file.path.split('/');
+    for (let depth = 3; depth < components.length; depth++)
+      previousDirectories.add(components.slice(0, depth).join('/'));
+  }
   const diverged = state?.inventory_fingerprint
     ? state.inventory_fingerprint !== fingerprint
-    : previous.some(
-        (file) =>
-          !files.some((current) => current.path === file.path && current.sha256 === file.sha256),
-      ) ||
-      inventory.items.some(
-        (item) => item.managed && !previous.some((file) => file.path.startsWith(`${item.path}/`)),
-      );
+    : previous.some((file) => currentHashes.get(file.path) !== file.sha256) ||
+      inventory.items.some((item) => item.managed && !previousDirectories.has(item.path));
   const gameVersion = inventory.gameBuild;
   return {
     ...inventory,
@@ -221,9 +300,10 @@ export async function reconcileSatisfactoryMods(
   >,
   input: { fingerprint: string; revision: number; selection: unknown; profileId?: string },
   authorize: () => Promise<void>,
+  options: { limits?: SatisfactoryModLimits } = {},
 ) {
   if (server.runtime_state !== 'offline') throw new DomainError('conflict');
-  const inventory = await inspectSatisfactoryModInventory(db, adapter, server, authorize);
+  const inventory = await inspectSatisfactoryModInventory(db, adapter, server, authorize, options);
   if (inventory.fingerprint !== input.fingerprint) throw new DomainError('conflict');
   const selection = satisfactoryModSelectionSchema.parse(input.selection);
   if (
@@ -260,11 +340,18 @@ export async function reconcileSatisfactoryMods(
         !satisfiesSatisfactoryModVersion(mods[item.reference]!.version, item.version))
     )
       throw new DomainError('conflict');
-  const files = inventory.files.filter(
-    (file) =>
-      inventory.items.some((item) => item.managed && file.path.startsWith(`${item.path}/`)) ||
-      inventory.lockfiles.some((item) => item.path === file.path),
+  const managedDirectories = new Set(
+    inventory.items.filter((item) => item.managed).map((item) => item.path),
   );
+  const lockPaths = new Set(inventory.lockfiles.map((item) => item.path));
+  const files = inventory.files.filter((file) => {
+    const parts = file.path.split('/');
+    return (
+      managedDirectories.has(parts.slice(0, 3).join('/')) ||
+      managedDirectories.has(parts.slice(0, 4).join('/')) ||
+      lockPaths.has(file.path)
+    );
+  });
   await authorize();
   await db.transaction().execute(async (tx) => {
     await lockResources(tx);

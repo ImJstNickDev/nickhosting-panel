@@ -14,6 +14,7 @@ let database: Awaited<ReturnType<typeof createTestDatabase>>;
 let f: Awaited<ReturnType<typeof managementFixture>>;
 let actor: typeof f.context;
 let serverId: string;
+let authorizedTransfers = 0;
 let app: Hono<{ Variables: Variables }>;
 const version = Buffer.from(JSON.stringify({ Changelist: 513885 }));
 const listFiles = vi.fn(async (_id: string, path: string) =>
@@ -39,6 +40,7 @@ afterAll(async () => {
 afterEach(() => vi.unstubAllGlobals());
 beforeEach(async () => {
   vi.clearAllMocks();
+  authorizedTransfers = 0;
   readFile.mockImplementation(async () => version);
   if (defaultListing) listFiles.mockImplementation(defaultListing);
   f = await managementFixture(database.db, { interactive: true });
@@ -71,6 +73,7 @@ beforeEach(async () => {
     },
     authorizeTransfer: async (current: typeof actor, id: string) => {
       await authorizeServer(f.db, current, id, 'files.read');
+      authorizedTransfers++;
     },
     externalOptions: { verifyServer: async () => {} },
   } as unknown as ManagementRuntime;
@@ -403,4 +406,94 @@ it('reports active background previews and exposes ready only after the operatio
     phase: 'ready',
   });
   expect((await (await request('')).json()).activePreviewJobId).toBeNull();
+});
+
+it('uses slim cached recommendation metadata while rechecking current build and authorization', async () => {
+  const upstream = vi.fn(async (_url, init) => {
+    expect(JSON.parse(String(init?.body)).query).not.toMatch(/changelog|dependencies/);
+    return new Response(
+      JSON.stringify({
+        data: {
+          mod: {
+            versions: [
+              {
+                version: '1.0.0',
+                game_version: '>=513885',
+                targets: [{ targetName: 'LinuxServer' }],
+              },
+            ],
+          },
+        },
+      }),
+    );
+  });
+  vi.stubGlobal('fetch', upstream);
+  const first = await request('/versions/Example?recommendation=true');
+  expect(first.status).toBe(200);
+  expect(await first.json()).toEqual([
+    {
+      version: '1.0.0',
+      gameVersion: '>=513885',
+      targets: ['LinuxServer'],
+      compatibility: 'compatible',
+    },
+  ]);
+  readFile.mockResolvedValueOnce(Buffer.from(JSON.stringify({ Changelist: 100000 })));
+  const second = await request('/versions/Example?recommendation=true');
+  expect((await second.json())[0].compatibility).toBe('incompatible');
+  expect(upstream).toHaveBeenCalledTimes(1);
+  readFile.mockRejectedValueOnce(new DomainError('forbidden'));
+  expect((await request('/versions/Example?recommendation=true')).status).toBe(403);
+});
+
+it('coalesces concurrent build reads but never reuses a completed read', async () => {
+  const release = Promise.withResolvers<void>();
+  readFile.mockImplementation(async () => {
+    await release.promise;
+    return version;
+  });
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () =>
+      Response.json({
+        data: {
+          mod: {
+            versions: [
+              { version: '1.0.0', game_version: '', targets: [{ targetName: 'LinuxServer' }] },
+            ],
+          },
+        },
+      }),
+    ),
+  );
+  const first = request('/versions/Example?recommendation=true');
+  const second = request('/versions/Other?recommendation=true');
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  await vi.waitFor(() => expect(authorizedTransfers).toBe(2));
+  expect(readFile).toHaveBeenCalledTimes(1);
+  release.resolve();
+  expect((await first).status).toBe(200);
+  expect((await second).status).toBe(200);
+  await request('/versions/Example?recommendation=true');
+  expect(readFile).toHaveBeenCalledTimes(2);
+});
+
+it('persists explicit metadata refresh in preview identity and rejects a changed replay', async () => {
+  const body = {
+    selection: [],
+    vanilla: false,
+    revision: 0,
+    idempotencyKey: randomUUID(),
+    refreshMetadata: true,
+  };
+  const response = await request('/preview', body);
+  expect(response.status).toBe(202);
+  const accepted = await response.json();
+  const operation = await f.db
+    .selectFrom('server_operations')
+    .select('plan')
+    .where('job_id', '=', accepted.jobId)
+    .executeTakeFirstOrThrow();
+  expect(operation.plan.satisfactoryContent).toMatchObject({ refreshMetadata: true });
+  expect((await request('/preview', { ...body, refreshMetadata: false })).status).toBe(409);
 });

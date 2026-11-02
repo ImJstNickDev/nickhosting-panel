@@ -1,4 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createBrowserRouter, RouterProvider } from 'react-router';
 import { queryClient } from '../../src/api/client.js';
@@ -10,6 +11,34 @@ import '../../src/app/style.css';
 
 const settings = location.search.includes('settings');
 const Section = settings ? SatisfactorySettingsSection : SatisfactoryModsSection;
+
+function FixtureSection() {
+  const [pending, setPending] = useState(location.search.includes('pending'));
+  useEffect(() => {
+    const change = (event: Event) => setPending((event as CustomEvent<boolean>).detail);
+    window.addEventListener('fixture-pending', change);
+    return () => window.removeEventListener('fixture-pending', change);
+  }, []);
+  return (
+    <Section
+      data={{ values: {}, rows: [] }}
+      serverId="10000000-0000-4000-8000-000000000001"
+      serverName="Satisfactory"
+      runtimeState={
+        (settings || location.search.includes('running')) && !location.search.includes('offline')
+          ? 'running'
+          : 'offline'
+      }
+      canManage={!location.search.includes('readonly')}
+      permissionKeys={['server:manage', 'console.power']}
+      pending={pending}
+      onAccepted={(jobId) => {
+        document.body.dataset.job = jobId;
+      }}
+      reload={async () => {}}
+    />
+  );
+}
 
 const root = document.getElementById('root');
 if (!root) throw new Error('Missing fixture root');
@@ -24,24 +53,7 @@ createRoot(root).render(
               <NavigationGuardProvider>
                 <main style={{ padding: 24, maxWidth: 1000, margin: 'auto' }}>
                   <h1>Satisfactory</h1>
-                  <Section
-                    data={{ values: {}, rows: [] }}
-                    serverId="10000000-0000-4000-8000-000000000001"
-                    serverName="Satisfactory"
-                    runtimeState={
-                      (settings || location.search.includes('running')) &&
-                      !location.search.includes('offline')
-                        ? 'running'
-                        : 'offline'
-                    }
-                    canManage={!location.search.includes('readonly')}
-                    permissionKeys={['server:manage', 'console.power']}
-                    pending={location.search.includes('pending')}
-                    onAccepted={(jobId) => {
-                      document.body.dataset.job = jobId;
-                    }}
-                    reload={async () => {}}
-                  />
+                  <FixtureSection />
                 </main>
               </NavigationGuardProvider>
             ),

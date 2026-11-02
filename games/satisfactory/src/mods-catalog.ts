@@ -131,6 +131,83 @@ export async function satisfactoryModVersions(
     );
 }
 
+const recommendationSchema = z.object({
+  mod: z
+    .object({
+      versions: z
+        .array(
+          z.object({
+            version: z.string().max(256),
+            game_version: z.string().max(256),
+            targets: z.array(z.object({ targetName: z.string() }).nullable()).max(16),
+          }),
+        )
+        .max(10000),
+    })
+    .nullable(),
+});
+type RecommendationMetadata = { version: string; gameVersion: string; targets: string[] }[];
+// Public SMR metadata only. Authorization and actual server build are never cached.
+const recommendationCaches = new WeakMap<
+  typeof fetch,
+  Map<
+    string,
+    {
+      expires: number;
+      bytes: number;
+      value: Promise<RecommendationMetadata>;
+    }
+  >
+>();
+export async function satisfactoryModRecommendations(reference: string, fetcher = fetch) {
+  satisfactoryModReferenceSchema.parse(reference);
+  let cache = recommendationCaches.get(fetcher);
+  if (!cache) {
+    cache = new Map();
+    recommendationCaches.set(fetcher, cache);
+  }
+  const found = cache.get(reference);
+  if (found && found.expires > Date.now()) return found.value;
+  if (cache.size >= 128) cache.delete(cache.keys().next().value as string);
+  const value = (async () => {
+    const data = recommendationSchema.parse(
+      await graphql(
+        'query ModRecommendations($reference: ModReference!) { mod: getModByReference(modReference: $reference) { versions { version game_version targets { targetName } } } }',
+        { reference },
+        { fetch: fetcher, maximum: 4194304 },
+      ),
+    );
+    return (data.mod?.versions ?? [])
+      .filter((item) => item.targets.some((target) => target?.targetName === 'LinuxServer'))
+      .map((item) => ({
+        version: item.version,
+        gameVersion: item.game_version,
+        targets: item.targets.flatMap((target) => (target ? [target.targetName] : [])),
+      }))
+      .sort((a, b) =>
+        valid(a.version) && valid(b.version)
+          ? rcompare(a.version, b.version)
+          : b.version.localeCompare(a.version),
+      );
+  })();
+  const entry = { expires: Date.now() + 30000, bytes: 0, value };
+  cache.set(reference, entry);
+  try {
+    const result = await value;
+    entry.bytes = Buffer.byteLength(JSON.stringify(result));
+    let bytes = [...cache.values()].reduce((total, item) => total + item.bytes, 0);
+    for (const [key, item] of cache) {
+      if (bytes <= 16777216 && item.expires > Date.now()) continue;
+      cache.delete(key);
+      bytes -= item.bytes;
+    }
+    return result;
+  } catch (error) {
+    if (cache.get(reference) === entry) cache.delete(reference);
+    throw error;
+  }
+}
+
 const project = z.object({
   id: z.string().min(1).max(128),
   name: z.string().min(1).max(256),

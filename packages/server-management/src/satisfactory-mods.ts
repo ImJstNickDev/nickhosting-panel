@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { copyFile, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { lstat, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { DomainError } from '@nickhosting/core';
 import { getSettings } from '@nickhosting/database';
 import { sql } from 'kysely';
@@ -13,6 +14,12 @@ import {
   satisfactoryModSelectionSchema,
   satisfactoryVersionPaths,
 } from '../../../games/satisfactory/src/mods.js';
+import { transferVerifiedSatisfactoryCacheFile } from '../../../games/satisfactory/src/mods-download-cache.js';
+import { mapSatisfactoryInventory } from '../../../games/satisfactory/src/mods-inventory.js';
+import {
+  resolveSatisfactoryModLimits,
+  satisfactoryModWorkingHeadroomBytes,
+} from '../../../games/satisfactory/src/mods-limits.js';
 import { diffSatisfactoryMods } from '../../../games/satisfactory/src/mods-plan.js';
 import { contentStorageRoot, reserveContentStaging } from './content-admission.js';
 import type { GameLifecycleContext } from './lifecycle.js';
@@ -30,14 +37,25 @@ const fileSchema = z.object({
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
   size: z.number().int().nonnegative(),
 });
-const filesSchema = z.array(fileSchema).max(20000);
+const filesSchema = z.array(fileSchema).max(1_000_000);
 const receiptSchema = z.object({
   selection: satisfactoryModSelectionSchema,
   files: filesSchema,
   lock: satisfactoryModLockSchema,
   gameVersion: z.number().int().positive().optional(),
   requiredTargets: z.array(z.enum(['LinuxServer', 'Windows', 'WindowsServer'])).optional(),
-  downloadCacheBytes: z.number().int().nonnegative().max(536870912).optional(),
+  metadataCacheBytes: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(256 * 1024 ** 2 + 1048576)
+    .optional(),
+  downloadCacheBytes: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(16 * 1024 ** 3)
+    .optional(),
 });
 
 export async function processSatisfactoryMods(
@@ -53,8 +71,14 @@ export async function processSatisfactoryMods(
       planId: z.uuid().optional(),
       profileId: z.uuid().optional(),
       vanilla: z.boolean().default(false),
+      refreshMetadata: z.boolean().default(false),
     })
     .parse(context.operation().plan.satisfactoryContent);
+  const limits = resolveSatisfactoryModLimits(env, {
+    ...(context.server.limits.disk > 0
+      ? { outputBytesCap: context.server.limits.disk * 1024 ** 2 }
+      : {}),
+  });
   const identifier = context.server.pterodactyl_identifier;
   if (!identifier) throw new DomainError('integration_unavailable');
   await context.authorize();
@@ -122,7 +146,15 @@ export async function processSatisfactoryMods(
         await rm(join(stage, `${index}.bin`), { force: true });
       await context.db
         .updateTable('minecraft_staging_claims')
-        .set({ reserved_bytes: String(value.retainedBytes + 65536) })
+        .set({
+          reserved_bytes: String(
+            (await preparedStageBytes(
+              stage,
+              limits.outputBytes * 2 + limits.metadataBytes,
+              limits.maxFiles * 2 + 2048,
+            )) + 65536,
+          ),
+        })
         .where('job_id', '=', context.operation().job_id)
         .execute();
     }
@@ -133,6 +165,7 @@ export async function processSatisfactoryMods(
     return true;
   }
   await mkdir(stage, { recursive: true, mode: 0o700 });
+  let initialInventory: Awaited<ReturnType<typeof inspectSatisfactoryModInventory>> | undefined;
   let recoveryAppliedFiles: z.infer<typeof filesSchema> = [];
   let sourceStageJobId: string | null = null;
   if (command.mode) {
@@ -217,14 +250,79 @@ export async function processSatisfactoryMods(
     command.vanilla = plan?.vanilla ?? recovery!.vanilla;
     command.profileId = plan?.profile_id ?? recovery?.profileId ?? undefined;
     recoveryAppliedFiles = recovery?.appliedFiles ?? [];
+    const sourceFiles = filesSchema.parse(plan?.files ?? recovery!.files);
+    if (
+      sourceFiles.length > limits.maxFiles ||
+      sourceFiles.reduce((sum, file) => sum + file.size, 0) > limits.outputBytes
+    )
+      throw new DomainError('resources_unavailable');
+    const captureFiles = filesSchema.parse(managerState?.files ?? []);
+    const captureIndex = new Map(captureFiles.map((file, index) => [file.path, index]));
+    const { authorizeQueuedEffect } = await import('./runtime.js');
+    const actor = await authorizeQueuedEffect(
+      context.db,
+      context.operation().job_id,
+      context.server.id,
+      env,
+      context.adapter,
+    );
+    await reserveContentStaging(
+      context.db,
+      actor,
+      context.operation().job_id,
+      context.server.id,
+      sourceFiles.reduce((sum, file) => sum + file.size, 0) +
+        captureFiles.reduce((sum, file) => sum + file.size, 0) +
+        limits.metadataBytes +
+        65536,
+      env,
+    );
+    const capture = command.mode === 'apply' && !context.operation().plan.satisfactoryModsApplying;
     const inventory = await inspectSatisfactoryModInventory(
       context.db,
       context.adapter,
       context.server,
       context.authorize,
+      capture
+        ? {
+            limits,
+            captureFile: async (file, chunks) => {
+              const index = captureIndex.get(file.path);
+              if (index === undefined) {
+                for await (const _chunk of chunks) {
+                  /* fingerprint only */
+                }
+              } else {
+                if (file.size !== captureFiles[index]?.size) throw new DomainError('conflict');
+                await pipeline(
+                  Readable.from(chunks),
+                  createWriteStream(join(stage, `old-${index}.bin`), { mode: 0o600 }),
+                );
+              }
+            },
+          }
+        : { limits },
     );
+    initialInventory = inventory;
+    if (capture) {
+      const observed = new Map(inventory.files.map((file) => [file.path, file]));
+      for (const file of captureFiles) {
+        const actual = observed.get(file.path);
+        if (!actual || actual.size !== file.size || actual.sha256 !== file.sha256)
+          throw new DomainError('conflict');
+      }
+    }
+    const baselineJson = JSON.stringify(inventory.files);
+    const sourceReceipt = JSON.stringify({
+      selection: selected,
+      files: sourceFiles,
+      lock: plan?.lock ?? recovery!.lock,
+      gameVersion: plan?.game_version ?? recovery?.gameVersion,
+    });
+    if (Buffer.byteLength(baselineJson) + Buffer.byteLength(sourceReceipt) > limits.metadataBytes)
+      throw new DomainError('resources_unavailable');
     try {
-      await writeFile(join(stage, 'baseline.json'), JSON.stringify(inventory.files), {
+      await writeFile(join(stage, 'baseline.json'), baselineJson, {
         mode: 0o600,
         flag: 'wx',
       });
@@ -242,35 +340,19 @@ export async function processSatisfactoryMods(
         (plan && inventory.diverged))
     )
       throw new DomainError('conflict');
-    const { authorizeQueuedEffect } = await import('./runtime.js');
-    const actor = await authorizeQueuedEffect(
-      context.db,
-      context.operation().job_id,
-      context.server.id,
-      env,
-      context.adapter,
-    );
-    await reserveContentStaging(
-      context.db,
-      actor,
-      context.operation().job_id,
-      context.server.id,
-      1610612736,
-      env,
-    );
-    const sourceFiles = filesSchema.parse(plan?.files ?? recovery!.files);
-    for (let i = 0; i < sourceFiles.length; i++)
-      await copyFile(join(source, `${recovery ? 'old-' : ''}${i}.bin`), join(stage, `${i}.bin`));
-    await writeFile(
-      join(stage, 'receipt.json'),
-      JSON.stringify({
-        selection: selected,
-        files: sourceFiles,
-        lock: plan?.lock ?? recovery!.lock,
-        gameVersion: plan?.game_version ?? recovery?.gameVersion,
-      }),
-      { mode: 0o600 },
-    );
+    await mapSatisfactoryInventory(sourceFiles, async (file, i) => {
+      const destination = join(stage, `${i}.bin`);
+      await rm(destination, { force: true });
+      if (
+        !(await transferVerifiedSatisfactoryCacheFile(
+          join(source, `${recovery ? 'old-' : ''}${i}.bin`),
+          destination,
+          file,
+        ))
+      )
+        throw new DomainError('operation_uncertain');
+    });
+    await writeFile(join(stage, 'receipt.json'), sourceReceipt, { mode: 0o600 });
   }
   let receipt: z.infer<typeof receiptSchema>;
   let previewInventory: Awaited<ReturnType<typeof inspectSatisfactoryModInventory>> | undefined;
@@ -315,14 +397,46 @@ export async function processSatisfactoryMods(
       env,
     );
     if (root !== configuredRoot) throw new DomainError('configuration_invalid');
-    await reserveContentStaging(
-      context.db,
-      actor,
-      context.operation().job_id,
-      context.server.id,
-      1_610_612_736,
-      env,
-    );
+    for (;;) {
+      try {
+        await reserveContentStaging(
+          context.db,
+          actor,
+          context.operation().job_id,
+          context.server.id,
+          limits.workingBytes,
+          env,
+        );
+        break;
+      } catch (error) {
+        if (
+          command.mode !== 'preview' ||
+          !(error instanceof DomainError) ||
+          !['resources_unavailable', 'content_storage_unavailable'].includes(error.code)
+        )
+          throw error;
+        // Completed previews are optional caches, not recovery assets. Evict the
+        // oldest eligible plan before allowing optional caches to block admission.
+        const protectedJobs = priorRecovery.success
+          ? [priorRecovery.data.jobId, ...priorRecovery.data.supersededStageJobs]
+          : [];
+        const candidates = await context.db
+          .selectFrom('satisfactory_mod_plans as plan')
+          .innerJoin('operation_jobs as job', 'job.id', 'plan.job_id')
+          .select(['plan.id', 'plan.job_id'])
+          .where('plan.server_id', '=', context.server.id)
+          .where('plan.id', '!=', command.planId!)
+          .where('job.state', 'in', ['succeeded', 'failed'])
+          .orderBy('plan.created_at', 'asc')
+          .execute();
+        const victim = candidates.find(
+          (item) => item.job_id && !protectedJobs.includes(item.job_id),
+        );
+        if (!victim?.job_id) throw error;
+        await releaseStage(victim.job_id);
+        await context.db.deleteFrom('satisfactory_mod_plans').where('id', '=', victim.id).execute();
+      }
+    }
     const profile = command.profileId
       ? await context.db
           .selectFrom('satisfactory_mod_profiles')
@@ -361,7 +475,7 @@ export async function processSatisfactoryMods(
               context.adapter,
               context.server,
               context.authorize,
-              { signal: abort.signal, reuseListings: true },
+              { signal: abort.signal, reuseListings: true, limits },
             ).finally(() => {
               inventoryDurationMs = Math.round(performance.now() - preparationStarted);
             }),
@@ -377,9 +491,16 @@ export async function processSatisfactoryMods(
             (process.arch === 'arm64'
               ? 'a591eb87be517d9d03798184c210d7166141be19e37b9d4e5fe68c84f264c6bf'
               : '2af0f8815af93b097c7a97968569575b21cf451b7c345fbb62fae29096ee4a31'),
+          limits,
           stagingRoot: root,
           outputDirectory: stage,
           signal: abort.signal,
+          metadataCache: {
+            forceRefresh: command.refreshMetadata,
+            sourceDirectories: cacheSources.flatMap((source) =>
+              source.job_id ? [join(root, 'content-staging', z.uuid().parse(source.job_id))] : [],
+            ),
+          },
           downloadCache: {
             sourceDirectories: cacheSources.flatMap((source) =>
               source.job_id ? [join(root, 'content-staging', z.uuid().parse(source.job_id))] : [],
@@ -418,6 +539,7 @@ export async function processSatisfactoryMods(
         inventoryDurationMs,
         overlappedDurationMs: Math.round(performance.now() - preparationStarted),
         cacheSources: cacheSources.length,
+        metadataCacheUsed: prepared.metadataCacheUsed ?? false,
         files: prepared.files.length,
       });
     } catch {
@@ -425,6 +547,7 @@ export async function processSatisfactoryMods(
     }
     receipt = {
       downloadCacheBytes: prepared.downloadCacheBytes,
+      metadataCacheBytes: prepared.metadataCacheBytes,
       gameVersion: Number(JSON.parse(versionFile.toString('utf8')).Changelist),
       requiredTargets: profile
         ? z
@@ -439,7 +562,10 @@ export async function processSatisfactoryMods(
         size: file.size,
       })),
     };
-    await writeFile(join(stage, 'receipt.tmp'), JSON.stringify(receipt), { mode: 0o600 });
+    const receiptJson = JSON.stringify(receipt);
+    if (Buffer.byteLength(receiptJson) > satisfactoryModWorkingHeadroomBytes - 65536)
+      throw new DomainError('resources_unavailable');
+    await writeFile(join(stage, 'receipt.tmp'), receiptJson, { mode: 0o600 });
     await rename(join(stage, 'receipt.tmp'), join(stage, 'receipt.json'));
   }
   if (command.mode === 'preview') {
@@ -451,7 +577,7 @@ export async function processSatisfactoryMods(
         context.adapter,
         context.server,
         context.authorize,
-        { reuseListings: true },
+        { reuseListings: true, limits },
       ));
     if (inventory.diverged || inventory.gameVersion !== receipt.gameVersion)
       throw new DomainError('conflict');
@@ -486,7 +612,10 @@ export async function processSatisfactoryMods(
     await context.db
       .updateTable('minecraft_staging_claims')
       .set({
-        reserved_bytes: String((await preparedStageBytes(stage)) + 65536),
+        reserved_bytes: String(
+          (await preparedStageBytes(stage, limits.workingBytes, limits.maxFiles * 2 + 2048)) +
+            65536,
+        ),
       })
       .where('job_id', '=', context.operation().job_id)
       .execute();
@@ -507,6 +636,9 @@ export async function processSatisfactoryMods(
     if (index < 0) oldFiles.push(file);
     else oldFiles[index] = file;
   }
+  const oldByPath = new Map(oldFiles.map((file) => [file.path, file]));
+  const nextByPath = new Map(receipt.files.map((file) => [file.path, file]));
+  const initialByPath = new Map(initialInventory?.files.map((file) => [file.path, file]));
   // Validate managed ownership before every write; external SFTP changes remain conflicts.
   const readHash = async (path: string, maximum: number) => {
     const ancestors = path.split('/');
@@ -549,8 +681,8 @@ export async function processSatisfactoryMods(
   // Preflight all destinations before snapshot/mutation, including unmanaged collisions.
   if (command.mode && !context.operation().plan.satisfactoryModsApplying)
     for (const file of receipt.files) {
-      const old = oldFiles.find((value) => value.path === file.path);
-      const hash = await readHash(file.path, Math.max(file.size, old?.size ?? 0));
+      const old = oldByPath.get(file.path);
+      const hash = initialByPath.get(file.path)?.sha256 ?? null;
       if (hash !== null && hash !== file.sha256 && hash !== old?.sha256)
         throw new DomainError('conflict');
     }
@@ -559,27 +691,8 @@ export async function processSatisfactoryMods(
     command.mode !== 'rollback' &&
     !context.operation().plan.satisfactoryModsApplying
   ) {
-    for (const [index, file] of oldFiles.entries()) {
-      if ((await readHash(file.path, file.size)) !== file.sha256) throw new DomainError('conflict');
-      const response = await context.adapter.downloadFile(identifier, file.path, {
-        maxBytes: Math.max(1, file.size),
-        authorize: context.authorize,
-      });
-      const { pipeline } = await import('node:stream/promises');
-      const { createWriteStream } = await import('node:fs');
-      await pipeline(
-        Readable.fromWeb(response.body as never),
-        createWriteStream(join(stage, `old-${index}.bin`), { mode: 0o600 }),
-      );
-      const copied = createHash('sha256');
-      let copiedBytes = 0;
-      for await (const chunk of createReadStream(join(stage, `old-${index}.bin`))) {
-        copiedBytes += chunk.length;
-        copied.update(chunk);
-      }
-      if (copiedBytes !== file.size || copied.digest('hex') !== file.sha256)
-        throw new DomainError('conflict');
-    }
+    // Recovery bytes were captured and hashed in the initial full inventory.
+    if (!initialInventory) throw new DomainError('operation_uncertain');
     await context.db
       .updateTable('satisfactory_mod_states')
       .set({
@@ -609,6 +722,9 @@ export async function processSatisfactoryMods(
   }
   for (let index = 0; index < receipt.files.length; index++) {
     const file = receipt.files[index]!;
+    // Unchanged files need no mutation. The final fresh full fingerprint still
+    // detects any external change after the initial scan.
+    if (initialByPath.get(file.path)?.sha256 === file.sha256) continue;
     const parts = file.path.split('/');
     for (let depth = 0; depth < parts.length - 1; depth++) {
       const parent = parts.slice(0, depth).join('/'),
@@ -625,7 +741,7 @@ export async function processSatisfactoryMods(
           await context.adapter.createDirectory(identifier, parent, name);
         });
     }
-    const old = oldFiles.find((item) => item.path === file.path);
+    const old = oldByPath.get(file.path);
     const actual = await readHash(file.path, Math.max(file.size, old?.size ?? 0));
     if (actual === file.sha256) continue;
     if (actual !== null && actual !== old?.sha256) throw new DomainError('conflict');
@@ -651,11 +767,13 @@ export async function processSatisfactoryMods(
         },
       });
     });
-    if ((await readHash(file.path, file.size)) !== file.sha256)
+    // Managed Apply/rollback verify the entire resulting tree once before commit.
+    // Legacy dispatch has no final inventory and retains per-file verification.
+    if (!command.mode && (await readHash(file.path, file.size)) !== file.sha256)
       throw new DomainError('operation_uncertain');
   }
   for (const [index, old] of oldFiles.entries()) {
-    if (receipt.files.some((file) => file.path === old.path)) continue;
+    if (nextByPath.has(old.path)) continue;
     const actual = await readHash(old.path, old.size);
     if (actual === null) continue;
     if (actual !== old.sha256) throw new DomainError('conflict');
@@ -713,6 +831,7 @@ export async function processSatisfactoryMods(
       context.adapter,
       context.server,
       context.authorize,
+      { limits },
     );
     const baseline = filesSchema.parse(
       JSON.parse(await readFile(join(stage, 'baseline.json'), 'utf8')),
@@ -782,19 +901,23 @@ export async function processSatisfactoryMods(
   return true;
 }
 
-async function preparedStageBytes(directory: string): Promise<number> {
+async function preparedStageBytes(
+  directory: string,
+  maximumBytes: number,
+  maximumEntries: number,
+): Promise<number> {
   let bytes = 0;
   let entries = 0;
   const walk = async (path: string, depth: number): Promise<void> => {
     if (depth > 32) throw new DomainError('configuration_invalid');
     for (const entry of await readdir(path, { withFileTypes: true })) {
-      if (++entries > 40000 || entry.isSymbolicLink())
+      if (++entries > maximumEntries || entry.isSymbolicLink())
         throw new DomainError('configuration_invalid');
       const child = join(path, entry.name);
       if (entry.isDirectory()) await walk(child, depth + 1);
       else if (entry.isFile()) bytes += (await lstat(child)).size;
       else throw new DomainError('configuration_invalid');
-      if (bytes > 1610612736) throw new DomainError('configuration_invalid');
+      if (bytes > maximumBytes) throw new DomainError('configuration_invalid');
     }
   };
   await walk(directory, 0);

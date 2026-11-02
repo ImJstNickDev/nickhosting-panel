@@ -1004,7 +1004,10 @@ it('selects multiple mods with leading checkboxes and latest compatible minimum 
 it('prepares incrementally, keeps editing responsive and opens the matching ready review without another request', async () => {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
-  const inputs: { selection: { reference: string; version: string }[] }[] = [];
+  const inputs: {
+    selection: { reference: string; version: string }[];
+    refreshMetadata?: boolean;
+  }[] = [];
   let finishFirst = false;
   await page.route('**/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -1098,6 +1101,10 @@ it('prepares incrementally, keeps editing responsive and opens the matching read
     path: `${shots}/satisfactory-mods-incremental-ready-en.png`,
     fullPage: true,
   });
+  expect(inputs[0]?.refreshMetadata).toBeUndefined();
+  await page.getByRole('button', { name: 'Resolve again', exact: true }).click();
+  await check.poll(() => inputs.length).toBe(3);
+  expect(inputs[2]?.refreshMetadata).toBe(true);
   await context.close();
 });
 
@@ -1182,5 +1189,98 @@ it('revalidates a returned cached draft and replaces an evicted plan before allo
   await check(page.getByRole('button', { name: 'Apply changes', exact: true })).toBeEnabled();
   await page.getByRole('button', { name: 'Apply changes', exact: true }).click();
   await check.poll(() => applies).toEqual([expect.objectContaining({ planId: 'cached-3' })]);
+  await context.close();
+});
+
+it('bounds concurrent checkbox recommendations and coalesces a batch without resurrecting cancelled selections', async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const releases = new Map<string, () => Promise<void>>();
+  const requests: string[] = [];
+  const previews: { selection: { reference: string }[] }[] = [];
+  let inventoryReads = 0;
+  await page.route('**/v1/**', async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    if (path.endsWith('/catalog'))
+      return route.fulfill({
+        json: {
+          total: 8,
+          items: Array.from({ length: 8 }, (_, index) => ({
+            ...exampleProject,
+            id: `mod${index}`,
+            reference: `Mod${index}`,
+            name: `Mod ${index}`,
+          })),
+        },
+      });
+    if (path.includes('/versions/')) {
+      expect(url.searchParams.get('recommendation')).toBe('true');
+      const reference = path.split('/').at(-1)!;
+      requests.push(reference);
+      releases.set(reference, () => route.fulfill({ json: [exampleVersion] }));
+      return;
+    }
+    if (path.endsWith('/inventory')) {
+      inventoryReads++;
+      return route.fulfill({ json: emptyInventory() });
+    }
+    if (path.endsWith('/preview')) {
+      previews.push(route.request().postDataJSON());
+      await page.evaluate(() =>
+        window.dispatchEvent(new CustomEvent('fixture-pending', { detail: true })),
+      );
+      return route.fulfill({ status: 202, json: { jobId: 'batch-job', planId: 'batch-plan' } });
+    }
+    if (path.includes('/plans/'))
+      return route.fulfill({
+        json: {
+          id: 'batch-plan',
+          status: 'ready',
+          revision: 0,
+          selection: previews.at(-1)?.selection,
+          changes: [],
+          vanilla: false,
+          lock: { version: 1, mods: {} },
+          filesBytes: 0,
+        },
+      });
+    return route.fulfill({ json: emptySnapshot() });
+  });
+  await page.goto(`${origin}satisfactory-fixture`);
+  await page.getByRole('button', { name: 'Discover', exact: true }).first().click();
+  for (let index = 0; index < 8; index++) {
+    const checkbox = page.getByRole('checkbox', { name: `Select Mod ${index}`, exact: true });
+    await checkbox.check();
+    await check(checkbox).toBeChecked();
+  }
+  expect(requests).toHaveLength(4);
+  expect(previews).toHaveLength(0);
+  await page.getByRole('checkbox', { name: 'Select Mod 7', exact: true }).uncheck();
+  await page.getByRole('checkbox', { name: 'Select Mod 0', exact: true }).uncheck();
+  for (const reference of ['Mod3', 'Mod2', 'Mod1', 'Mod0'])
+    await releases.get(reference)!().catch(() => {});
+  await check.poll(() => requests.length).toBe(7);
+  for (const reference of ['Mod6', 'Mod5', 'Mod4'])
+    await releases.get(reference)!().catch(() => {});
+  await check.poll(() => previews.length).toBe(1);
+  expect(previews[0]?.selection.map((mod) => mod.reference).sort()).toEqual(
+    Array.from({ length: 6 }, (_, index) => `Mod${index + 1}`),
+  );
+  await page.getByRole('button', { name: 'Review changes', exact: true }).click();
+  await page.evaluate(() =>
+    window.dispatchEvent(new CustomEvent('fixture-pending', { detail: false })),
+  );
+  await check(page.getByRole('button', { name: 'Apply changes', exact: true })).toBeEnabled();
+  expect(inventoryReads).toBe(1);
+  expect(requests).not.toContain('Mod7');
+  await page.evaluate(() =>
+    window.dispatchEvent(new CustomEvent('fixture-pending', { detail: true })),
+  );
+  await check(page.getByRole('button', { name: 'Apply changes', exact: true })).toBeDisabled();
+  await page.evaluate(() =>
+    window.dispatchEvent(new CustomEvent('fixture-pending', { detail: false })),
+  );
+  await check.poll(() => inventoryReads).toBe(2);
   await context.close();
 });

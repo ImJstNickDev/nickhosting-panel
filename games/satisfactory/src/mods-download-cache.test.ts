@@ -151,13 +151,14 @@ describe('Satisfactory verified job-stage cache', () => {
     ).rejects.toThrow('cache_path_invalid');
   });
 
-  it('caps reusable archives at 512MiB and ignores unbounded or path-bearing indexes', async () => {
+  it('uses the configured archive budget and ignores unbounded or path-bearing indexes', async () => {
     const f = await fixture();
     const big = await open(join(f.native, key), 'w');
     await big.truncate(536_870_912);
     await big.close();
     expect(
       await persistSatisfactoryDownloadCache({
+        limits: { archiveBytes: 536_870_912 },
         stagingRoot: f.root,
         sourceDirectory: f.native,
         destinationDirectory: f.cache,

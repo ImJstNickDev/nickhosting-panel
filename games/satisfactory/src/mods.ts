@@ -11,6 +11,17 @@ import {
   seedSatisfactoryDownloadCache,
 } from './mods-download-cache.js';
 
+import {
+  type SatisfactoryModLimits,
+  satisfactoryModDefaultLimits,
+  satisfactoryModLimitsSchema,
+} from './mods-limits.js';
+import {
+  persistSatisfactoryMetadataCache,
+  satisfactoryMetadataCacheTtlMs,
+  seedSatisfactoryMetadataCache,
+} from './mods-metadata-cache.js';
+
 export const satisfactoryModReferenceSchema = z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,127}$/);
 export const satisfactoryModVersionSchema = z
   .string()
@@ -76,6 +87,8 @@ export async function prepareSatisfactoryMods(options: {
   outputDirectory?: string;
   /** Reuse only verified public archives from prior durable stages. */
   downloadCache?: { sourceDirectories: string[] };
+  metadataCache?: { sourceDirectories: string[]; forceRefresh?: boolean };
+  limits?: SatisfactoryModLimits;
   selection: SatisfactoryModSelection;
   vanilla?: boolean;
   requiredTargets?: z.infer<typeof satisfactoryModTargetsSchema>;
@@ -90,6 +103,9 @@ export async function prepareSatisfactoryMods(options: {
   files: SatisfactoryModFile[];
   lock: SatisfactoryModLock;
   downloadCacheBytes?: number;
+  metadataCacheBytes?: number;
+  metadataCacheUsed?: boolean;
+  metadataExpiresAt?: string;
   timings?: {
     setupMs: number;
     seedMs: number;
@@ -99,10 +115,11 @@ export async function prepareSatisfactoryMods(options: {
     totalMs: number;
   };
 }> {
+  const limits = satisfactoryModLimitsSchema.parse(options.limits ?? satisfactoryModDefaultLimits);
   const started = performance.now();
   const timings = { setupMs: 0, seedMs: 0, runMs: 0, publishMs: 0, cleanupMs: 0, totalMs: 0 };
   const selection = satisfactoryModSelectionSchema.parse(options.selection);
-  if (options.downloadCache && !options.outputDirectory)
+  if ((options.downloadCache || options.metadataCache) && !options.outputDirectory)
     throw new Error('satisfactory_mod_cache_output_required');
   const requiredTargets = satisfactoryModTargetsSchema.parse(
     options.requiredTargets ?? ['LinuxServer'],
@@ -144,40 +161,45 @@ export async function prepareSatisfactoryMods(options: {
   try {
     const game = join(root, 'game'),
       state = join(root, 'state');
-    await mkdir(join(game, 'Engine/Binaries/Linux'), { recursive: true, mode: 0o700 });
-    await mkdir(join(game, 'FactoryGame/Mods'), { recursive: true, mode: 0o700 });
-    await mkdir(state, { mode: 0o700 });
-    await writeFile(join(game, options.versionPath), options.versionFile, { mode: 0o600 });
-    await writeFile(join(game, 'FactoryServer.sh'), options.launcherFile, { mode: 0o600 });
-    await writeFile(
-      join(state, 'profiles.json'),
-      JSON.stringify({
-        version: 0,
-        selected_profile: 'NickHosting',
-        profiles: {
-          NickHosting: {
-            name: 'NickHosting',
-            required_targets: requiredTargets,
-            mods: Object.fromEntries(
-              selection.map((item) => [
-                item.reference,
-                { version: item.version.replaceAll(',', ' '), enabled: item.enabled !== false },
-              ]),
-            ),
+    const initializeWorkingTree = async () => {
+      await mkdir(join(game, 'Engine/Binaries/Linux'), { recursive: true, mode: 0o700 });
+      await mkdir(join(game, 'FactoryGame/Mods'), { recursive: true, mode: 0o700 });
+      await mkdir(state, { mode: 0o700 });
+      await writeFile(join(game, options.versionPath), options.versionFile, { mode: 0o600 });
+      await writeFile(join(game, 'FactoryServer.sh'), options.launcherFile, { mode: 0o600 });
+      await writeFile(
+        join(state, 'profiles.json'),
+        JSON.stringify({
+          version: 0,
+          selected_profile: 'NickHosting',
+          profiles: {
+            NickHosting: {
+              name: 'NickHosting',
+              required_targets: requiredTargets,
+              mods: Object.fromEntries(
+                selection.map((item) => [
+                  item.reference,
+                  { version: item.version.replaceAll(',', ' '), enabled: item.enabled !== false },
+                ]),
+              ),
+            },
           },
-        },
-      }),
-      { mode: 0o600 },
-    );
-    await writeFile(
-      join(state, 'installations.json'),
-      JSON.stringify({
-        version: 0,
-        selected_installation: game,
-        installations: [{ path: game, profile: 'NickHosting', vanilla: options.vanilla ?? false }],
-      }),
-      { mode: 0o600 },
-    );
+        }),
+        { mode: 0o600 },
+      );
+      await writeFile(
+        join(state, 'installations.json'),
+        JSON.stringify({
+          version: 0,
+          selected_installation: game,
+          installations: [
+            { path: game, profile: 'NickHosting', vanilla: options.vanilla ?? false },
+          ],
+        }),
+        { mode: 0o600 },
+      );
+    };
+    await initializeWorkingTree();
     timings.setupMs = Math.round(performance.now() - started);
     const seedStarted = performance.now();
     if (options.downloadCache && !options.vanilla)
@@ -186,28 +208,49 @@ export async function prepareSatisfactoryMods(options: {
         sourceDirectories: options.downloadCache.sourceDirectories,
         destinationDirectory: join(root, 'cache/downloadCache'),
         signal: options.signal,
+        limits,
       });
-    if (options.priorLock && !options.vanilla) {
-      const priorLock = satisfactoryModLockSchema.parse(options.priorLock);
-      // Even internal stored state must never seed non-public download locations.
-      for (const mod of Object.values(priorLock.mods))
-        for (const target of Object.values(mod.targets)) {
-          const url = new URL(target.link);
-          if (
-            url.protocol !== 'https:' ||
-            url.username ||
-            url.password ||
-            url.port ||
-            !['api.ficsit.app', 'storage.ficsit.app', 'ficsit.app'].includes(url.hostname)
-          )
-            throw new Error('satisfactory_mod_lock_url_invalid');
-        }
-      await writeFile(
-        join(game, 'FactoryGame/Mods/nick_hosting-lock.json'),
-        JSON.stringify(priorLock),
-        { mode: 0o600 },
-      );
-    }
+    const metadataIdentity = {
+      executableSha256: options.executableSha256,
+      gameBuild: Number(version.Changelist),
+      targets: requiredTargets,
+    };
+    let metadataSnapshot =
+      options.metadataCache && !options.metadataCache.forceRefresh && !options.vanilla
+        ? await seedSatisfactoryMetadataCache({
+            stagingRoot: options.stagingRoot,
+            sourceDirectories: options.metadataCache.sourceDirectories,
+            destinationDirectory: join(root, 'cache'),
+            identity: metadataIdentity,
+            selection,
+            maximumBytes: limits.metadataBytes,
+            signal: options.signal,
+          })
+        : null;
+    const seedPriorLock = async () => {
+      if (options.priorLock && !options.vanilla) {
+        const priorLock = satisfactoryModLockSchema.parse(options.priorLock);
+        // Even internal stored state must never seed non-public download locations.
+        for (const mod of Object.values(priorLock.mods))
+          for (const target of Object.values(mod.targets)) {
+            const url = new URL(target.link);
+            if (
+              url.protocol !== 'https:' ||
+              url.username ||
+              url.password ||
+              url.port ||
+              !['api.ficsit.app', 'storage.ficsit.app', 'ficsit.app'].includes(url.hostname)
+            )
+              throw new Error('satisfactory_mod_lock_url_invalid');
+          }
+        await writeFile(
+          join(game, 'FactoryGame/Mods/nick_hosting-lock.json'),
+          JSON.stringify(priorLock),
+          { mode: 0o600 },
+        );
+      }
+    };
+    await seedPriorLock();
     timings.seedMs = Math.round(performance.now() - seedStarted);
     const args = [
       '--local-dir',
@@ -216,6 +259,7 @@ export async function prepareSatisfactoryMods(options: {
       join(root, 'cache'),
       '--pretty=false',
       '--quiet',
+      ...(metadataSnapshot ? ['--offline'] : []),
       'apply',
       game,
     ];
@@ -230,7 +274,7 @@ export async function prepareSatisfactoryMods(options: {
           const walk = async (directory: string, depth = 0): Promise<void> => {
             if (depth > 32) throw new Error('satisfactory_mod_output_limit');
             for (const entry of await readdir(directory, { withFileTypes: true })) {
-              if (++entries > 40000 || entry.isSymbolicLink())
+              if (++entries > limits.maxFiles * 2 + 4096 || entry.isSymbolicLink())
                 throw new Error('satisfactory_mod_output_limit');
               const path = join(directory, entry.name);
               if (entry.isDirectory()) await walk(path, depth + 1);
@@ -240,8 +284,7 @@ export async function prepareSatisfactoryMods(options: {
                 } catch (error) {
                   if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
                 }
-                if (bytes > 1_610_612_736 - 1_048_576)
-                  throw new Error('satisfactory_mod_output_limit');
+                if (bytes > limits.workingBytes) throw new Error('satisfactory_mod_output_limit');
               }
             }
           };
@@ -269,6 +312,9 @@ export async function prepareSatisfactoryMods(options: {
               maxBuffer: 1_048_576,
               env: {
                 PATH: process.env.PATH,
+                NH_CONTENT_MAX_FILE_BYTES: String(
+                  Math.max(limits.outputBytes, limits.archiveBytes, limits.metadataBytes),
+                ),
                 HOME: root,
                 TMPDIR: root,
                 XDG_CONFIG_HOME: state,
@@ -285,7 +331,39 @@ export async function prepareSatisfactoryMods(options: {
         }
       });
     const runStarted = performance.now();
-    await run(options.executable, args, root, options.signal);
+    let metadataCapturedAt = metadataSnapshot?.capturedAt ?? Date.now();
+    try {
+      await run(options.executable, args, root, options.signal);
+    } catch (error) {
+      if (
+        !metadataSnapshot ||
+        options.signal?.aborted ||
+        (error as NodeJS.ErrnoException).code === 'ABORT_ERR'
+      )
+        throw error;
+      // An incomplete native registry or an offline resolver failure cannot
+      // contaminate the online retry. Keep only independently verified sources.
+      for (const entry of await readdir(root))
+        await rm(join(root, entry), { recursive: true, force: true });
+      await initializeWorkingTree();
+      if (options.downloadCache)
+        await seedSatisfactoryDownloadCache({
+          stagingRoot: options.stagingRoot,
+          sourceDirectories: options.downloadCache.sourceDirectories,
+          destinationDirectory: join(root, 'cache/downloadCache'),
+          signal: options.signal,
+          limits,
+        });
+      await seedPriorLock();
+      metadataSnapshot = null;
+      metadataCapturedAt = Date.now();
+      await run(
+        options.executable,
+        args.filter((arg) => arg !== '--offline'),
+        root,
+        options.signal,
+      );
+    }
     timings.runMs = Math.round(performance.now() - runStarted);
     const publishStarted = performance.now();
     // Upstream vanilla mode deliberately skips resolution and writes no lockfile.
@@ -315,6 +393,7 @@ export async function prepareSatisfactoryMods(options: {
             destinationDirectory: join(options.outputDirectory, 'download-cache'),
             lock,
             signal: options.signal,
+            limits,
           })
         : undefined;
     const entries: { path: string; source: string; size: number }[] = [];
@@ -331,7 +410,7 @@ export async function prepareSatisfactoryMods(options: {
           const stat = await lstat(source);
           const size = stat.size;
           total += size;
-          if (total > 536_870_912 || entries.length >= 20000)
+          if (total > limits.outputBytes || entries.length >= limits.maxFiles)
             throw new Error('satisfactory_mod_output_limit');
           entries.push({ path, source, size });
         } else throw new Error('satisfactory_mod_output_invalid');
@@ -363,12 +442,27 @@ export async function prepareSatisfactoryMods(options: {
     };
     const published = await Promise.allSettled([
       persistCache(),
+      options.metadataCache && options.outputDirectory
+        ? persistSatisfactoryMetadataCache({
+            stagingRoot: options.stagingRoot,
+            sourceDirectory: join(root, 'cache'),
+            destinationDirectory: join(options.outputDirectory, 'metadata-cache'),
+            identity: metadataIdentity,
+            lock,
+            capturedAt: metadataCapturedAt,
+            maximumBytes: limits.metadataBytes,
+            signal: options.signal,
+          })
+        : undefined,
       ...Array.from({ length: 4 }, publish),
     ]);
     const failed = published.find((result) => result.status === 'rejected');
     if (failed?.status === 'rejected') throw failed.reason;
     const persisted = published[0];
     const downloadCacheBytes = persisted?.status === 'fulfilled' ? persisted.value : undefined;
+    const metadataResult = published[1];
+    const metadataCacheBytes =
+      metadataResult?.status === 'fulfilled' ? metadataResult.value : undefined;
 
     timings.publishMs = Math.round(performance.now() - publishStarted);
     return {
@@ -376,6 +470,19 @@ export async function prepareSatisfactoryMods(options: {
       lock,
       timings,
       ...(downloadCacheBytes === undefined ? {} : { downloadCacheBytes }),
+      ...(metadataCacheBytes === undefined
+        ? {}
+        : {
+            metadataCacheBytes,
+            metadataCacheUsed: metadataSnapshot !== null,
+            ...(metadataCacheBytes
+              ? {
+                  metadataExpiresAt: new Date(
+                    metadataCapturedAt + satisfactoryMetadataCacheTtlMs,
+                  ).toISOString(),
+                }
+              : {}),
+          }),
     };
   } finally {
     const cleanupStarted = performance.now();

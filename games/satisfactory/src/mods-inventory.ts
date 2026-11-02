@@ -6,6 +6,7 @@ import {
   satisfactoryModReferenceSchema,
   satisfactoryVersionPaths,
 } from './mods.js';
+import { satisfactoryModDefaultLimits } from './mods-limits.js';
 
 export type SatisfactoryInventoryEntry = {
   name: string;
@@ -42,6 +43,31 @@ const descriptorSchema = z.object({
     .optional(),
 });
 
+/** Bounded work queue. A failure stops scheduling and drains in-flight reads. */
+export async function mapSatisfactoryInventory<T, R>(
+  items: readonly T[],
+  work: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  let failed = false;
+  let failure: unknown;
+  const worker = async () => {
+    while (!failed && next < items.length) {
+      const index = next++;
+      try {
+        results[index] = await work(items[index] as T, index);
+      } catch (error) {
+        if (!failed) failure = error;
+        failed = true;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, items.length) }, worker));
+  if (failed) throw failure;
+  return results;
+}
+
 /** Read bounded metadata through the existing adapter. Never follows symlinks,
  * downloads native binaries or infers ownership from the presence of a mod.
  * Lockfiles are observations only: do not seed a resolver from external locks.
@@ -51,6 +77,7 @@ export async function readSatisfactoryModInventory(input: {
   readFile: (path: string, maxBytes: number) => Promise<string | Buffer>;
   selection?: SatisfactoryModSelection;
   lock?: SatisfactoryModLock;
+  maxEntries?: number;
 }): Promise<SatisfactoryInventory> {
   const result: SatisfactoryInventory = { items: [], lockfiles: [], issues: [], gameBuild: null };
   let entriesSeen = 0;
@@ -60,7 +87,8 @@ export async function readSatisfactoryModInventory(input: {
     if (cached) return cached;
     const entries = await input.listFiles(path);
     entriesSeen += entries.length;
-    if (entriesSeen > 20000) throw new Error('satisfactory_inventory_limit');
+    if (entriesSeen > (input.maxEntries ?? satisfactoryModDefaultLimits.maxFiles * 2))
+      throw new Error('satisfactory_inventory_limit');
     if (
       entries.some(
         (entry) =>
@@ -148,23 +176,23 @@ export async function readSatisfactoryModInventory(input: {
   };
   for (const base of ['FactoryGame/Mods', 'FactoryGame/Mods/GameFeatures']) {
     if (base.endsWith('/GameFeatures') && !(await directory(base))) continue;
-    for (const entry of await list(base)) {
-      if (entry.name === 'GameFeatures' || entry.is_file) continue;
+    await mapSatisfactoryInventory(await list(base), async (entry) => {
+      if (entry.name === 'GameFeatures' || entry.is_file) return;
       const path = `${base}/${entry.name}`;
       if (entry.is_symlink) {
         result.issues.push({ path, reason: 'unsafe_path' });
-        continue;
+        return;
       }
       if (!satisfactoryModReferenceSchema.safeParse(entry.name).success) {
         result.issues.push({ path, reason: 'unknown_directory' });
-        continue;
+        return;
       }
       const files = await list(path);
       const descriptor = files.find((file) => file.name === `${entry.name}.uplugin`);
       const marker = files.find((file) => file.name === '.smm');
       // File-based removal can leave empty provider directories. They are not
       // installed mods; retain nonempty unknown trees as visible observations.
-      if (!descriptor && !marker && !(await hasContents(path))) continue;
+      if (!descriptor && !marker && !(await hasContents(path))) return;
       const issues: string[] = [];
       let metadata: z.infer<typeof descriptorSchema> | undefined;
       if (descriptor?.is_file && !descriptor.is_symlink && descriptor.size <= 1048576) {
@@ -175,8 +203,6 @@ export async function readSatisfactoryModInventory(input: {
         else issues.push('invalid_descriptor');
       } else issues.push(descriptor ? 'invalid_descriptor' : 'missing_descriptor');
       if (marker?.is_symlink || (marker && !marker.is_file)) issues.push('invalid_marker');
-      if (result.items.some((mod) => mod.reference === entry.name))
-        issues.push('duplicate_reference');
       const direct = selected.has(entry.name);
       result.items.push({
         reference: entry.name,
@@ -194,11 +220,17 @@ export async function readSatisfactoryModInventory(input: {
             .sort() ?? [],
         issues,
       });
-    }
+    });
   }
   result.items.sort(
     (a, b) => a.reference.localeCompare(b.reference) || a.path.localeCompare(b.path),
   );
+  const seen = new Set<string>();
+  for (const item of result.items) {
+    if (seen.has(item.reference)) item.issues.push('duplicate_reference');
+    seen.add(item.reference);
+  }
+  result.issues.sort((a, b) => a.path.localeCompare(b.path) || a.reason.localeCompare(b.reason));
   result.lockfiles.sort((a, b) => a.path.localeCompare(b.path));
   return result;
 }

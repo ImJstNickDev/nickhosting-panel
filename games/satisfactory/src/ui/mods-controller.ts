@@ -123,6 +123,12 @@ export function createSatisfactoryModsController(client: GameUiClient) {
       get<ModProject>(id, `/catalog/${encodeURIComponent(reference)}`, signal),
     versions: (id: string, reference: string, signal?: AbortSignal) =>
       get<ModVersion[]>(id, `/versions/${encodeURIComponent(reference)}`, signal),
+    recommendations: (id: string, reference: string, signal?: AbortSignal) =>
+      get<Pick<ModVersion, 'version' | 'compatibility'>[]>(
+        id,
+        `/versions/${encodeURIComponent(reference)}?recommendation=true`,
+        signal,
+      ),
     updates: (id: string, signal?: AbortSignal) => get<ModUpdates>(id, '/updates', signal),
     preview: (
       id: string,
@@ -132,6 +138,7 @@ export function createSatisfactoryModsController(client: GameUiClient) {
         revision: number;
         profileId?: string;
         idempotencyKey: string;
+        refreshMetadata?: boolean;
       },
     ) => post<{ planId: string; jobId: string }>(id, '/preview', input),
     plan: (id: string, planId: string, signal?: AbortSignal) =>

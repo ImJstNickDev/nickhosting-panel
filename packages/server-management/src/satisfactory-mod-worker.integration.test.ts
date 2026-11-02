@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
@@ -329,7 +329,7 @@ it('overlaps native preparation and the live byte inventory', async () => {
   try {
     await vi.waitFor(() => {
       expect(prepareSatisfactoryMods).toHaveBeenCalledTimes(1);
-      expect(adapter.downloadFile).toHaveBeenCalledTimes(1);
+      expect(adapter.downloadFile).toHaveBeenCalled();
     });
   } finally {
     release.resolve();
@@ -635,12 +635,43 @@ it('reclaims expired preview stages only after the server has no active operatio
     readFile(join(resolve(root), 'content-staging', plan.job_id!, '0.bin')),
   ).rejects.toMatchObject({ code: 'ENOENT' });
 });
+it('reads unchanged managed payloads only for capture and final verification', async () => {
+  const planId = await preview('1.0.0');
+  vi.mocked(adapter.downloadFile).mockClear();
+  const apply = await context({ mode: 'apply', revision: 0, planId });
+  await processSatisfactoryMods(apply, env);
+  const reads = vi
+    .mocked(adapter.downloadFile)
+    .mock.calls.filter((call) => call[1].endsWith('/binary.so'));
+  expect(reads).toHaveLength(2);
+  expect(adapter.uploadFile).not.toHaveBeenCalled();
+  const directory = join(root, 'content-staging', apply.operation().job_id);
+  const actualBytes = (
+    await Promise.all(
+      (await readdir(directory)).map(async (name) => (await lstat(join(directory, name))).size),
+    )
+  ).reduce((a, b) => a + b, 0);
+  const claim = await f.db
+    .selectFrom('minecraft_staging_claims')
+    .select('reserved_bytes')
+    .where('job_id', '=', apply.operation().job_id)
+    .executeTakeFirstOrThrow();
+  expect(Number(claim.reserved_bytes)).toBe(actualBytes + 65536);
+  const oldFiles = [...modFiles('1.0.0')];
+  const index = oldFiles.findIndex(([path]) => path.endsWith('/binary.so'));
+  expect(
+    await readFile(
+      join(root, 'content-staging', apply.operation().job_id, `old-${index}.bin`),
+      'utf8',
+    ),
+  ).toBe('binary-1.0.0');
+});
 it('verifies the bytes actually persisted in the recovery snapshot before mutating the server', async () => {
   const planId = await preview();
   const download = vi.mocked(adapter.downloadFile).getMockImplementation()!;
   let reads = 0;
   vi.mocked(adapter.downloadFile).mockImplementation(async (...args) => {
-    if (args[1].endsWith('/binary.so') && ++reads === 4)
+    if (args[1].endsWith('/binary.so') && ++reads === 1)
       return {
         body: new ReadableStream({
           start(controller) {
@@ -856,3 +887,55 @@ it.each([false, true])(
     expect(adapter.uploadFile).not.toHaveBeenCalled();
   },
 );
+
+it('evicts optional completed preview caches before rejecting staging capacity', async () => {
+  const first = await preview();
+  const plan = await f.db
+    .selectFrom('satisfactory_mod_plans')
+    .select('job_id')
+    .where('id', '=', first)
+    .executeTakeFirstOrThrow();
+  await f.db
+    .updateTable('minecraft_staging_claims')
+    .set({ reserved_bytes: String(4 * 1024 ** 3) })
+    .where('job_id', '=', plan.job_id!)
+    .execute();
+  const next = await preview('3.0.0');
+  expect(
+    await f.db
+      .selectFrom('satisfactory_mod_plans')
+      .select('id')
+      .where('id', '=', first)
+      .executeTakeFirst(),
+  ).toBeUndefined();
+  expect(
+    (
+      await f.db
+        .selectFrom('satisfactory_mod_plans')
+        .select('status')
+        .where('id', '=', next)
+        .executeTakeFirstOrThrow()
+    ).status,
+  ).toBe('ready');
+});
+
+it('rejects enlarged managed files before creating their recovery copy', async () => {
+  const planId = await preview();
+  files.set('FactoryGame/Mods/Example/binary.so', Buffer.alloc(1024));
+  const apply = await context({ mode: 'apply', revision: 0, planId });
+  await expect(processSatisfactoryMods(apply, env)).rejects.toThrow('conflict');
+  const index = [...modFiles('1.0.0').keys()].indexOf('FactoryGame/Mods/Example/binary.so');
+  await expect(
+    readFile(join(root, 'content-staging', apply.operation().job_id, `old-${index}.bin`)),
+  ).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(adapter.uploadFile).not.toHaveBeenCalled();
+});
+
+it('rechecks the current output budget before applying a frozen plan', async () => {
+  const planId = await preview();
+  const apply = await context({ mode: 'apply', revision: 0, planId });
+  await expect(
+    processSatisfactoryMods(apply, { ...env, NH_SATISFACTORY_MOD_MAX_BYTES: '1' }),
+  ).rejects.toThrow('resources_unavailable');
+  expect(adapter.uploadFile).not.toHaveBeenCalled();
+});

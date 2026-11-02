@@ -136,7 +136,7 @@ it('reuses listings only within an explicit preview and still hashes every file'
   expect(preview).toEqual(fresh);
   const listed = vi.mocked(adapter.listFiles).mock.calls.map(([, path]) => path);
   expect(new Set(listed).size).toBe(listed.length);
-  expect(adapter.downloadFile).toHaveBeenCalledTimes(fresh.files.length);
+  expect(adapter.downloadFile).toHaveBeenCalledTimes(fresh.files.length - 2);
   files.set('FactoryGame/Mods/Example/binary.so', Buffer.from('mutate'));
   const changed = await inspectSatisfactoryModInventory(f.db, adapter, current, undefined, {
     reuseListings: true,
@@ -327,4 +327,107 @@ it('preserves imported client/server profile identity and client-only roots duri
   expect(state.active_profile_id).toBe(profileId);
   expect(state.selection).toEqual(selection);
   expect(state.lock).toMatchObject({ mods: { ClientOnly: { version: '1.0.0' } } });
+});
+
+it('scans 100 mods with bounded parallel reads and reuses preview metadata bytes', async () => {
+  files.clear();
+  files.set(
+    'Engine/Binaries/Linux/UnrealServer-Linux-Shipping.version',
+    Buffer.from('{"Changelist":123456}'),
+  );
+  for (let index = 0; index < 100; index++) {
+    const base = `FactoryGame/Mods/Mod${index}`;
+    files.set(`${base}/Mod${index}.uplugin`, Buffer.from('{"VersionName":"1.0.0"}'));
+    files.set(`${base}/.smm`, Buffer.from('marker'));
+    files.set(`${base}/binary.so`, Buffer.from(`payload-${index}`));
+  }
+  let active = 0;
+  let peak = 0;
+  const prefetch = vi.fn(async () => {});
+  adapter.prefetchDownloads = prefetch;
+  vi.mocked(adapter.downloadFile).mockImplementation(async (_identifier, path) => {
+    peak = Math.max(peak, ++active);
+    return {
+      body: new ReadableStream<Uint8Array>({
+        async start(controller) {
+          await new Promise((resolve) => setTimeout(resolve, 1));
+          active--;
+          controller.enqueue(files.get(path)!);
+          controller.close();
+        },
+      }),
+    } as Awaited<ReturnType<PterodactylAdapter['downloadFile']>>;
+  });
+  const result = await inspectSatisfactoryModInventory(f.db, adapter, await server(), undefined, {
+    reuseListings: true,
+  });
+  expect(result.files).toHaveLength(300);
+  expect(result.items).toHaveLength(100);
+  expect(peak).toBeGreaterThan(1);
+  expect(peak).toBeLessThanOrEqual(4);
+  expect(active).toBe(0);
+  expect(adapter.downloadFile).toHaveBeenCalledTimes(200);
+  expect(adapter.readFile).toHaveBeenCalledTimes(101);
+  expect(prefetch).toHaveBeenCalledTimes(5);
+  expect(
+    prefetch.mock.calls.flatMap((call) => (call as unknown as [string, string[]])[1]),
+  ).toHaveLength(200);
+  const listed = vi.mocked(adapter.listFiles).mock.calls.map(([, path]) => path);
+  expect(new Set(listed).size).toBe(listed.length);
+});
+
+it('captures the exact freshly hashed bytes and rejects a partial capture consumer', async () => {
+  const captured = new Map<string, Buffer>();
+  const result = await inspectSatisfactoryModInventory(f.db, adapter, await server(), undefined, {
+    reuseListings: true,
+    captureFile: async (file, chunks) => {
+      const values: Uint8Array[] = [];
+      for await (const chunk of chunks) values.push(chunk);
+      captured.set(file.path, Buffer.concat(values));
+    },
+  });
+  expect(captured.size).toBe(result.files.length);
+  expect(adapter.downloadFile).toHaveBeenCalledTimes(result.files.length);
+  for (const file of result.files) expect(captured.get(file.path)).toEqual(files.get(file.path));
+  await expect(
+    inspectSatisfactoryModInventory(f.db, adapter, await server(), undefined, {
+      captureFile: async () => {},
+    }),
+  ).rejects.toThrow('conflict');
+});
+
+it('cancels and drains every active inventory stream when a capture fails', async () => {
+  let active = 0;
+  let cancelled = 0;
+  const gate = Promise.withResolvers<void>();
+  vi.mocked(adapter.downloadFile).mockImplementation(async () => {
+    active++;
+    return {
+      body: new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          await gate.promise;
+          controller.enqueue(Buffer.from('x'));
+        },
+        cancel() {
+          active--;
+          cancelled++;
+        },
+      }),
+    } as Awaited<ReturnType<PterodactylAdapter['downloadFile']>>;
+  });
+  let invoked = 0;
+  const pending = inspectSatisfactoryModInventory(f.db, adapter, await server(), undefined, {
+    captureFile: async (_file, chunks) => {
+      if (++invoked === 4) {
+        gate.resolve();
+        throw new Error('capture failed');
+      }
+      for await (const _chunk of chunks) {
+        /* Wait for sibling failure. */
+      }
+    },
+  });
+  await expect(pending).rejects.toThrow();
+  expect(cancelled).toBeGreaterThan(0);
+  expect(active).toBe(0);
 });

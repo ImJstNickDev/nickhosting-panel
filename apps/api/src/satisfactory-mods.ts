@@ -11,10 +11,12 @@ import {
 import {
   satisfactoryModCompatibility,
   satisfactoryModDetails,
+  satisfactoryModRecommendations,
   satisfactoryModSearchSchema,
   satisfactoryModVersions,
   searchSatisfactoryMods,
 } from '../../../games/satisfactory/src/mods-catalog.js';
+import { resolveSatisfactoryModLimits } from '../../../games/satisfactory/src/mods-limits.js';
 import {
   exportSatisfactoryProfile,
   importSatisfactoryProfile,
@@ -102,10 +104,33 @@ export function registerSatisfactoryModRoutes(
       ),
     );
   }
+  const builds = new WeakMap<object, Map<string, ReturnType<typeof readSatisfactoryGameBuild>>>();
   async function gameBuild(actor: Awaited<ReturnType<typeof options.principal>>, id: string) {
     return withFiles(actor, id, async (service, server, authorize) => {
       await authorize();
-      return readSatisfactoryGameBuild(service.adapter, server.pterodactyl_identifier!);
+      const identifier = server.pterodactyl_identifier!;
+      let pending = builds.get(service.adapter);
+      if (!pending) {
+        pending = new Map();
+        builds.set(service.adapter, pending);
+      }
+      const binding = `${server.id}:${server.pterodactyl_uuid}:${identifier}`;
+      let read = pending.get(binding);
+      if (!read) {
+        read = readSatisfactoryGameBuild(service.adapter, identifier);
+        if (pending.size < 128) {
+          pending.set(binding, read);
+          const current = read;
+          void read
+            .finally(() => {
+              if (pending.get(binding) === current) pending.delete(binding);
+            })
+            .catch(() => {});
+        }
+      }
+      const build = await read;
+      await authorize();
+      return build;
     });
   }
   app.get(base, async (c) => {
@@ -163,7 +188,9 @@ export function registerSatisfactoryModRoutes(
     await authorizeServer(options.db, actor, id, 'files.read');
     return c.json(
       await withFiles(actor, id, (service, verified, authorize, connection) =>
-        inspectSatisfactoryModInventory(connection, service.adapter, verified, authorize),
+        inspectSatisfactoryModInventory(connection, service.adapter, verified, authorize, {
+          limits: resolveSatisfactoryModLimits(options.env),
+        }),
       ),
     );
   });
@@ -183,13 +210,16 @@ export function registerSatisfactoryModRoutes(
     }
   });
   app.get(`${base}/versions/:reference`, async (c) => {
+    c.header('cache-control', 'no-store');
     const actor = await options.principal(c),
       id = c.req.param('id');
     await access(actor, id);
     try {
       const [build, versions] = await Promise.allSettled([
         gameBuild(actor, id),
-        satisfactoryModVersions(c.req.param('reference')),
+        c.req.query('recommendation') === 'true'
+          ? satisfactoryModRecommendations(c.req.param('reference'))
+          : satisfactoryModVersions(c.req.param('reference')),
       ]);
       if (build.status === 'rejected') throw build.reason;
       if (versions.status === 'rejected') throw versions.reason;
@@ -269,6 +299,7 @@ export function registerSatisfactoryModRoutes(
         revision,
         profileId: z.uuid().optional(),
         idempotencyKey: key,
+        refreshMetadata: z.boolean().default(false),
       })
       .safeParse(await c.req.json().catch(() => null));
     if (!input.success) throw new DomainError('validation_failed');
@@ -284,6 +315,7 @@ export function registerSatisfactoryModRoutes(
         command: {
           kind: 'mods',
           mode: 'preview',
+          ...(value.refreshMetadata ? { refreshMetadata: true } : {}),
           selection: value.selection,
           vanilla: value.vanilla,
           revision: value.revision,
@@ -370,6 +402,7 @@ export function registerSatisfactoryModRoutes(
           command: {
             kind: 'mods',
             mode: 'preview',
+            ...(value.refreshMetadata ? { refreshMetadata: true } : {}),
             selection: value.selection,
             vanilla: value.vanilla,
             revision: value.revision,
@@ -804,15 +837,22 @@ export function registerSatisfactoryModRoutes(
     if (!input.success) throw new DomainError('validation_failed');
     return c.json(
       await withFiles(actor, id, (service, verified, authorize, connection) =>
-        reconcileSatisfactoryMods(connection, service.adapter, verified, input.data, async () => {
-          await authorize();
-          await authorizeServer(
-            connection,
-            await currentInteractiveContext(connection, actor, options.env),
-            id,
-            'server:manage',
-          );
-        }),
+        reconcileSatisfactoryMods(
+          connection,
+          service.adapter,
+          verified,
+          input.data,
+          async () => {
+            await authorize();
+            await authorizeServer(
+              connection,
+              await currentInteractiveContext(connection, actor, options.env),
+              id,
+              'server:manage',
+            );
+          },
+          { limits: resolveSatisfactoryModLimits(options.env) },
+        ),
       ),
     );
   });

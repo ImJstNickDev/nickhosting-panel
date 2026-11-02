@@ -35,7 +35,7 @@ const controller = createSatisfactoryModsController({ request: api });
 const key = (name: string) => `games.satisfactory.mods.${name}`;
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 type Draft = { selection: ModChoice[]; vanilla: boolean; profileId?: string };
-type PreviewInput = Draft & { revision: number; idempotencyKey: string };
+type PreviewInput = Draft & { revision: number; idempotencyKey: string; refreshMetadata?: boolean };
 type PreviewAttempt = { signature: string; input: PreviewInput };
 type View = 'installed' | 'discover' | 'review';
 
@@ -60,6 +60,7 @@ function useIncrementalPreview(
   const [cache, setCache] = useState<Map<string, ModPlan>>(() => new Map());
   const [failure, setFailure] = useState<{ attempt: PreviewAttempt; cause: unknown }>();
   const [generation, setGeneration] = useState(0);
+  const forceRefresh = useRef('');
   const [validatedSignature, setValidatedSignature] = useState('');
   const [validationError, setValidationError] = useState<unknown>();
   const cacheRef = useRef(cache);
@@ -107,8 +108,13 @@ function useIncrementalPreview(
     const input = JSON.parse(signature) as Omit<PreviewInput, 'idempotencyKey'>;
     setActive({
       signature,
-      input: { ...input, idempotencyKey: `${idempotencyKey()}_${generation}` },
+      input: {
+        ...input,
+        idempotencyKey: `${idempotencyKey()}_${generation}`,
+        ...(forceRefresh.current === signature ? { refreshMetadata: true } : {}),
+      },
     });
+    forceRefresh.current = '';
   }, [signature, enabled, active, failure, cache, generation]);
   useEffect(() => {
     if (!active) return;
@@ -177,6 +183,7 @@ function useIncrementalPreview(
       setActive(failure.attempt);
       setFailure(undefined);
     } else {
+      forceRefresh.current = signature;
       setCache((previous) => {
         const next = new Map(previous);
         next.delete(signature);
@@ -228,6 +235,18 @@ function ModsWorkspace(props: GameSectionViewProps) {
   >();
   const [error, setError] = useState<unknown>();
   const [working, setWorking] = useState(false);
+  const [selecting, setSelecting] = useState<Set<string>>(() => new Set());
+  const selectionRequests = useRef(new Map<string, AbortController>());
+  const selectionQueue = useRef<(() => Promise<void>)[]>([]);
+  const selectionWorkers = useRef(0);
+  useEffect(
+    () => () => {
+      for (const request of selectionRequests.current.values()) request.abort();
+      selectionRequests.current.clear();
+      selectionQueue.current = [];
+    },
+    [],
+  );
   const [uncertain, setUncertain] = useState(false);
   const retry = useRef<(() => Promise<void>) | undefined>(undefined);
   const operationPending = useRef(false);
@@ -236,10 +255,17 @@ function ModsWorkspace(props: GameSectionViewProps) {
   const snapshot = useQuery({
     queryKey: ['satisfactory-mods', props.serverId, props.pending],
     queryFn: ({ signal }) => controller.snapshot(props.serverId, signal),
+    placeholderData: keepPreviousData,
     staleTime: 0,
   });
   const inventory = useQuery({
-    queryKey: ['satisfactory-mods-inventory', props.serverId, props.pending],
+    queryKey: [
+      'satisfactory-mods-inventory',
+      props.serverId,
+      snapshot.data?.revision,
+      snapshot.data?.externalMode,
+      props.runtimeState,
+    ],
     queryFn: ({ signal }) => controller.inventory(props.serverId, signal),
     enabled: !!snapshot.data,
     staleTime: 0,
@@ -272,6 +298,8 @@ function ModsWorkspace(props: GameSectionViewProps) {
     vanilla: data?.vanilla ?? false,
     profileId: data?.activeProfileId ?? undefined,
   };
+  const currentRef = useRef(current);
+  currentRef.current = current;
   const changed =
     !!draft &&
     (!same(current.selection, data?.selection) ||
@@ -283,7 +311,7 @@ function ModsWorkspace(props: GameSectionViewProps) {
   const plan = useIncrementalPreview(
     props.serverId,
     data && (changed || view === 'review') ? { ...current, revision: data.revision } : undefined,
-    mayPrepare && !props.pending,
+    mayPrepare && !props.pending && selecting.size === 0,
     async () => {
       await Promise.all([snapshot.refetch(), props.reload()]);
     },
@@ -291,23 +319,49 @@ function ModsWorkspace(props: GameSectionViewProps) {
   const ownPreview =
     plan.active || plan.blocked || (!!plan.jobId && data?.activePreviewJobId === plan.jobId);
   const selectionBusy = working || (props.pending && !ownPreview);
-  const busy = selectionBusy || plan.active || plan.blocked;
+  const busy = selectionBusy || plan.active || plan.blocked || selecting.size > 0;
   const canEditSelection = props.canManage && !selectionBusy && !uncertain && !!data;
-  const canEditProfile = canEditSelection && !plan.active && !plan.blocked;
+  const canEditProfile = canEditSelection && !plan.active && !plan.blocked && selecting.size === 0;
   const editable = canEditSelection && !data.externalMode;
+  useEffect(() => {
+    if (!props.canManage || !stopped || data?.externalMode) {
+      for (const request of selectionRequests.current.values()) request.abort();
+      selectionRequests.current.clear();
+      selectionQueue.current = [];
+      setSelecting((previous) => (previous.size ? new Set() : previous));
+    }
+  }, [props.canManage, stopped, data?.externalMode]);
   const validSearch = searchInput.trim().length === 0 || searchInput.trim().length >= 3;
   const planStale =
     plan.data?.status === 'ready' &&
     (plan.data.revision !== data?.revision ||
       (!!plan.data.expiresAt && Date.parse(plan.data.expiresAt) <= Date.now()));
   const planReady =
+    selecting.size === 0 &&
     !plan.active &&
     !plan.blocked &&
     plan.validated &&
     plan.data?.status === 'ready' &&
     plan.data.revision === data?.revision &&
     (!plan.data.expiresAt || Date.parse(plan.data.expiresAt) > Date.now());
-  useUnsavedChanges(changed || uncertain, working);
+  useUnsavedChanges(changed || uncertain || selecting.size > 0, working);
+  const unrelatedPending = useRef(false);
+  const lastPending = useRef(false);
+  const pendingInventoryKey = useRef('');
+  useEffect(() => {
+    if (!data) return;
+    const inventoryKey = JSON.stringify([data.revision, data.externalMode, props.runtimeState]);
+    if (props.pending && !lastPending.current) {
+      unrelatedPending.current = !ownPreview;
+      pendingInventoryKey.current = inventoryKey;
+    }
+    if (!props.pending && lastPending.current && unrelatedPending.current) {
+      unrelatedPending.current = false;
+      // Revision/runtime changes already select a fresh inventory query.
+      if (pendingInventoryKey.current === inventoryKey) void inventory.refetch();
+    }
+    lastPending.current = props.pending;
+  }, [props.pending, props.runtimeState, ownPreview, data, inventory.refetch]);
   useEffect(() => {
     if (view === 'review') viewHeading.current?.focus();
   }, [view]);
@@ -335,7 +389,87 @@ function ModsWorkspace(props: GameSectionViewProps) {
       operationPending.current = false;
     }
   }
+  function cancelSelections() {
+    for (const request of selectionRequests.current.values()) request.abort();
+    selectionRequests.current.clear();
+    selectionQueue.current = [];
+    setSelecting(new Set());
+  }
+  function pumpSelections() {
+    while (selectionWorkers.current < 4 && selectionQueue.current.length) {
+      const task = selectionQueue.current.shift();
+      if (!task) break;
+      selectionWorkers.current++;
+      void task().finally(() => {
+        selectionWorkers.current--;
+        pumpSelections();
+      });
+    }
+  }
+  function toggleSelection(item: ModProject, selected: boolean) {
+    selectionRequests.current.get(item.reference)?.abort();
+    selectionRequests.current.delete(item.reference);
+    if (!selected) {
+      setSelecting((previous) => {
+        const next = new Set(previous);
+        next.delete(item.reference);
+        return next;
+      });
+      setDraft((previous) => {
+        const base = previous ?? currentRef.current;
+        return {
+          ...base,
+          selection: base.selection.filter((value) => value.reference !== item.reference),
+        };
+      });
+      return;
+    }
+    const abort = new AbortController();
+    selectionRequests.current.set(item.reference, abort);
+    setSelecting((previous) => new Set(previous).add(item.reference));
+    setError(undefined);
+    selectionQueue.current.push(async () => {
+      try {
+        if (abort.signal.aborted) return;
+        const choices = await controller.recommendations(
+          props.serverId,
+          item.reference,
+          abort.signal,
+        );
+        if (abort.signal.aborted) return;
+        const recommended =
+          choices.find(
+            (value) => value.compatibility === 'compatible' && !value.version.includes('-'),
+          ) ?? choices.find((value) => value.compatibility !== 'incompatible');
+        if (recommended)
+          setDraft((previous) => {
+            const base = previous ?? currentRef.current;
+            return {
+              ...base,
+              selection: [
+                ...base.selection.filter((value) => value.reference !== item.reference),
+                { reference: item.reference, version: `>=${recommended.version}`, enabled: true },
+              ],
+            };
+          });
+        else choose(item);
+      } catch (cause) {
+        if (!abort.signal.aborted) setError(cause);
+      } finally {
+        if (selectionRequests.current.get(item.reference) === abort) {
+          selectionRequests.current.delete(item.reference);
+          setSelecting((previous) => {
+            const next = new Set(previous);
+            next.delete(item.reference);
+            return next;
+          });
+        }
+      }
+    });
+    pumpSelections();
+  }
   function edit(next: Draft) {
+    cancelSelections();
     setDraft(next);
   }
   function choose(item: ModProject) {
@@ -382,6 +516,7 @@ function ModsWorkspace(props: GameSectionViewProps) {
         }
         throw cause;
       }
+      cancelSelections();
       setDraft(undefined);
       plan.reset();
       setView('installed');
@@ -426,11 +561,13 @@ function ModsWorkspace(props: GameSectionViewProps) {
         } else if (action === 'rollback') {
           const result = await controller.rollback(props.serverId, revision, idem);
           props.onAccepted(result.jobId);
+          cancelSelections();
           setDraft(undefined);
         } else if (action === 'external') {
           const result = await controller.beginExternal(props.serverId, revision, idem);
           if (result.jobId) props.onAccepted(result.jobId);
           setExternalOpen(true);
+          cancelSelections();
           setDraft(undefined);
         } else if (action === 'reconcile' && inventory.data) {
           await controller.reconcile(props.serverId, {
@@ -439,6 +576,7 @@ function ModsWorkspace(props: GameSectionViewProps) {
             revision,
             profileId: current.profileId,
           });
+          cancelSelections();
           setDraft(undefined);
         } else if (action === 'deleteProfile' && profileEdit) {
           await controller.deleteProfile(props.serverId, profileEdit, revision);
@@ -860,6 +998,7 @@ function ModsWorkspace(props: GameSectionViewProps) {
                   className="mods-project"
                   key={item.reference}
                   data-selected={
+                    selecting.has(item.reference) ||
                     current.selection.some((selected) => selected.reference === item.reference) ||
                     undefined
                   }
@@ -867,36 +1006,12 @@ function ModsWorkspace(props: GameSectionViewProps) {
                   <ModsCheckbox
                     compact
                     label={t(key('selectMod'), { name: item.name })}
-                    checked={current.selection.some(
-                      (selected) => selected.reference === item.reference,
-                    )}
+                    checked={
+                      selecting.has(item.reference) ||
+                      current.selection.some((selected) => selected.reference === item.reference)
+                    }
                     disabled={!editable}
-                    onChange={(selected) => {
-                      if (selected)
-                        void execute(async () => {
-                          const choices = await controller.versions(props.serverId, item.reference);
-                          const recommended =
-                            choices.find(
-                              (value) =>
-                                value.compatibility === 'compatible' &&
-                                !value.version.includes('-'),
-                            ) ?? choices.find((value) => value.compatibility !== 'incompatible');
-                          if (recommended)
-                            replace({
-                              reference: item.reference,
-                              version: `>=${recommended.version}`,
-                              enabled: true,
-                            });
-                          else choose(item);
-                        });
-                      else
-                        edit({
-                          ...current,
-                          selection: current.selection.filter(
-                            (value) => value.reference !== item.reference,
-                          ),
-                        });
-                    }}
+                    onChange={(selected) => toggleSelection(item, selected)}
                   />
                   <button type="button" className="mods-project-open" onClick={() => choose(item)}>
                     <ModsArtwork image={item.logo ?? undefined} name={item.name} />
@@ -1019,7 +1134,7 @@ function ModsWorkspace(props: GameSectionViewProps) {
           )}
         </>
       )}
-      {changed && (
+      {(changed || selecting.size > 0) && (
         <div className="satisfactory-draft-footer">
           <span>{t(key('unapplied'))}</span>
           <button
@@ -1027,6 +1142,7 @@ function ModsWorkspace(props: GameSectionViewProps) {
             className="secondary"
             disabled={selectionBusy || uncertain}
             onClick={() => {
+              cancelSelections();
               setDraft(undefined);
             }}
           >

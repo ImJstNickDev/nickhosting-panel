@@ -158,7 +158,20 @@ int main(int argc, char **argv) {
     allow_path(fd, "/etc/localtime", read, 1);
     allow_path(fd, "/dev/urandom", read, 1);
     allow_path(fd, "/dev/null", LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE, 0);
-    struct rlimit file_limit = { .rlim_cur = 536870912, .rlim_max = 536870912 };
+    /* Caller supplies a validated, reserved per-job budget. Keep the existing
+     * default for other integrations and reject malformed/unbounded overrides. */
+    rlim_t max_file_bytes = 536870912;
+    const char *configured = getenv("NH_CONTENT_MAX_FILE_BYTES");
+    if (configured) {
+        if (!*configured) fail();
+        for (const char *p = configured; *p; p++) if (*p < '0' || *p > '9') fail();
+        errno = 0;
+        char *end;
+        unsigned long long value = strtoull(configured, &end, 10);
+        if (errno || *end || value < 1 || value > 17179869184ULL) fail();
+        max_file_bytes = (rlim_t)value;
+    }
+    struct rlimit file_limit = { .rlim_cur = max_file_bytes, .rlim_max = max_file_bytes };
     if (setrlimit(RLIMIT_FSIZE, &file_limit)) fail();
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) fail();
     if (syscall(SYS_landlock_restrict_self, fd, 0)) fail();

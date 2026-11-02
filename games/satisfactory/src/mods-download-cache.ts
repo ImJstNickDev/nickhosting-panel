@@ -5,17 +5,18 @@ import { isAbsolute, join, relative } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { z } from 'zod';
 import type { SatisfactoryModLock } from './mods.js';
+import { type SatisfactoryModLimits, satisfactoryModDefaultLimits } from './mods-limits.js';
 
-const MAX_BYTES = 536_870_912;
+const MAX_BYTES = 16 * 1024 ** 3;
 const MAX_INDEX_BYTES = 262_144;
-const MAX_ARTIFACT_BYTES = MAX_BYTES - MAX_INDEX_BYTES;
-const MAX_FILES = 512;
+
+const MAX_FILES = 4096;
 const cacheKey =
   /^[A-Za-z][A-Za-z0-9_]{0,127}_[0-9A-Za-z.+-]{1,128}_(?:LinuxServer|WindowsServer|Windows)\.zip$/;
 const entrySchema = z.strictObject({
   key: z.string().regex(cacheKey),
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
-  size: z.number().int().positive().max(MAX_ARTIFACT_BYTES),
+  size: z.number().int().positive().max(MAX_BYTES),
 });
 type CacheEntry = z.infer<typeof entrySchema>;
 const indexSchema = z.strictObject({
@@ -71,10 +72,10 @@ async function readIndex(directory: string): Promise<CacheEntry[]> {
 
 /** Seed through a no-follow descriptor into a distinct inode. Publishing after
  * the child exits moves its verified copy, avoiding extra peak disk usage. */
-async function transferVerified(
+export async function transferVerifiedSatisfactoryCacheFile(
   source: string,
   destination: string,
-  entry: CacheEntry,
+  entry: Pick<CacheEntry, 'size' | 'sha256'>,
   signal?: AbortSignal,
   move = false,
 ) {
@@ -145,7 +146,16 @@ export async function seedSatisfactoryDownloadCache(options: {
   sourceDirectories: string[];
   destinationDirectory: string;
   signal?: AbortSignal;
+  limits?: Pick<SatisfactoryModLimits, 'archiveBytes'>;
 }) {
+  const maximum =
+    z
+      .number()
+      .int()
+      .min(1_048_576)
+      .max(MAX_BYTES)
+      .parse(options.limits?.archiveBytes ?? satisfactoryModDefaultLimits.archiveBytes) -
+    MAX_INDEX_BYTES;
   if (options.sourceDirectories.length > 2)
     throw new Error('satisfactory_mod_cache_sources_invalid');
   await validateSatisfactoryCacheDirectory(options.stagingRoot, options.destinationDirectory);
@@ -158,14 +168,10 @@ export async function seedSatisfactoryDownloadCache(options: {
     await validateSatisfactoryCacheDirectory(options.stagingRoot, cache);
     for (const entry of await readIndex(cache)) {
       options.signal?.throwIfAborted();
-      if (
-        copied.has(entry.key) ||
-        copied.size >= MAX_FILES ||
-        bytes + entry.size > MAX_ARTIFACT_BYTES
-      )
+      if (copied.has(entry.key) || copied.size >= MAX_FILES || bytes + entry.size > maximum)
         continue;
       if (
-        await transferVerified(
+        await transferVerifiedSatisfactoryCacheFile(
           join(cache, entry.key),
           join(options.destinationDirectory, entry.key),
           entry,
@@ -188,7 +194,16 @@ export async function persistSatisfactoryDownloadCache(options: {
   destinationDirectory: string;
   lock: SatisfactoryModLock;
   signal?: AbortSignal;
+  limits?: Pick<SatisfactoryModLimits, 'archiveBytes'>;
 }) {
+  const maximum =
+    z
+      .number()
+      .int()
+      .min(1_048_576)
+      .max(MAX_BYTES)
+      .parse(options.limits?.archiveBytes ?? satisfactoryModDefaultLimits.archiveBytes) -
+    MAX_INDEX_BYTES;
   await validateSatisfactoryCacheDirectory(options.stagingRoot, options.sourceDirectory);
   await validateSatisfactoryCacheDirectory(options.stagingRoot, options.destinationDirectory);
   await rm(options.destinationDirectory, { recursive: true, force: true });
@@ -210,15 +225,11 @@ export async function persistSatisfactoryDownloadCache(options: {
         throw new Error('satisfactory_mod_download_integrity_failed');
       if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1)
         throw new Error('satisfactory_mod_cache_artifact_invalid');
-      if (
-        metadata.size === 0 ||
-        entries.length >= MAX_FILES ||
-        bytes + metadata.size > MAX_ARTIFACT_BYTES
-      )
+      if (metadata.size === 0 || entries.length >= MAX_FILES || bytes + metadata.size > maximum)
         continue;
       const entry = { key, sha256: artifact.hash, size: metadata.size };
       if (
-        !(await transferVerified(
+        !(await transferVerifiedSatisfactoryCacheFile(
           join(options.sourceDirectory, key),
           join(options.destinationDirectory, key),
           entry,

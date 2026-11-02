@@ -4,6 +4,7 @@ import {
   latestSatisfactoryModVersion,
   satisfactoryModCompatibility,
   satisfactoryModDetails,
+  satisfactoryModRecommendations,
   satisfactoryModVersions,
   searchSatisfactoryMods,
 } from './mods-catalog.js';
@@ -267,4 +268,54 @@ describe('SMR compatibility and details', () => {
       '2.0.0-beta.1',
     );
   });
+});
+
+it('fetches only recommendation fields and coalesces bounded public metadata without caching failures', async () => {
+  const fetcher = vi.fn(async (_url, init) => {
+    const query = JSON.parse(String(init?.body)).query;
+    expect(query).not.toMatch(/changelog|dependencies|required_on_remote/);
+    return new Response(
+      JSON.stringify({
+        data: {
+          mod: {
+            versions: [
+              { version: '1.0.0', game_version: '>=100', targets: [{ targetName: 'LinuxServer' }] },
+              { version: '2.0.0', game_version: '>=200', targets: [{ targetName: 'LinuxServer' }] },
+            ],
+          },
+        },
+      }),
+    );
+  }) as unknown as typeof fetch;
+  const [first, second] = await Promise.all([
+    satisfactoryModRecommendations('Example', fetcher),
+    satisfactoryModRecommendations('Example', fetcher),
+  ]);
+  expect(first).toEqual(second);
+  expect(first.map((item) => item.version)).toEqual(['2.0.0', '1.0.0']);
+  await satisfactoryModRecommendations('Example', fetcher);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  vi.mocked(fetcher).mockRejectedValueOnce(new Error('network'));
+  await expect(satisfactoryModRecommendations('Other', fetcher)).rejects.toThrow('network');
+  await satisfactoryModRecommendations('Other', fetcher);
+  expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
+it('expires and evicts recommendation metadata with a bounded entry count', async () => {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
+  try {
+    const fetcher = vi.fn(async () =>
+      Response.json({ data: { mod: { versions: [] } } }),
+    ) as unknown as typeof fetch;
+    await satisfactoryModRecommendations('First', fetcher);
+    clock.mockReturnValue(31001);
+    await satisfactoryModRecommendations('First', fetcher);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    for (let index = 0; index < 128; index++)
+      await satisfactoryModRecommendations(`Mod${index}`, fetcher);
+    await satisfactoryModRecommendations('First', fetcher);
+    expect(fetcher).toHaveBeenCalledTimes(131);
+  } finally {
+    clock.mockRestore();
+  }
 });

@@ -121,6 +121,7 @@ export const operationSchema = z.discriminatedUnion('action', [
     command: z.strictObject({
       kind: z.literal('mods'),
       mode: z.enum(['preview', 'apply', 'rollback']).optional(),
+      refreshMetadata: z.boolean().optional(),
       selection: satisfactoryModSelectionSchema.optional(),
       vanilla: z.boolean().optional(),
       revision: z.number().int().nonnegative().optional(),
