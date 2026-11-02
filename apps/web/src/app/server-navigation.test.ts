@@ -88,7 +88,7 @@ it('shows all Satisfactory management destinations from its compiled integration
   const value = {
     ...server(['files.read', 'settings.read'], 'dedicated'),
     gameId: 'satisfactory',
-    capabilities: satisfactoryManifest.capabilities,
+    capabilities: { ...satisfactoryManifest.capabilities, gatewayMessages: false },
   };
   const items = serverNavigation(value, '/servers/server-fixture/game/worlds', translate);
   expect(items.filter((item) => item.to.includes('/game/')).map((item) => item.to)).toEqual([

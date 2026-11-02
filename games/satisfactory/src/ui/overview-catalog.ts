@@ -1,15 +1,13 @@
 const entries: Record<string, [string, string]> = {
   title: ['FICSIT Overview', 'Panoramica FICSIT'],
-  live: ['Live server observation', 'Osservazione del server in tempo reale'],
-  snapshot: [
-    'Last known world state. These values are historical; they do not indicate current players or performance.',
-    'Ultimo stato noto del mondo. Questi valori sono storici: non indicano giocatori o prestazioni attuali.',
-  ],
+  live: ['Live', 'Live'],
+  snapshot: ['Saved state', 'Stato salvato'],
+  lastUpdated: ['Last updated {time}', 'Ultimo aggiornamento {time}'],
+  justNow: ['just now', 'ora'],
   unavailable: [
     'No world observation available yet.',
     'Nessuna osservazione del mondo ancora disponibile.',
   ],
-  observedAt: ['Observed at', 'Rilevato il'],
   tier: ['Technology tier', 'Tier tecnologico'],
   phase: ['Game phase', 'Fase di gioco'],
   schematic: ['Active schematic', 'Schema attivo'],

@@ -1,0 +1,109 @@
+.ficsit-overview {
+  --ficsit-orange: #ef8c24;
+  padding: 0;
+  max-width: 1080px;
+  margin-inline: auto;
+  overflow: hidden;
+  border-top: 4px solid var(--ficsit-orange);
+}
+.ficsit-overview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 24px;
+  border-bottom: 1px solid var(--line);
+}
+.ficsit-overview-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.ficsit-overview-header h2::before {
+  content: "";
+  width: 8px;
+  height: 22px;
+  background: var(--ficsit-orange);
+  transform: skew(-14deg);
+}
+.ficsit-overview-source {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.ficsit-overview-source.live {
+  border-color: #b7ccc0;
+  color: #315e43;
+  background: #f2f7f3;
+}
+.ficsit-overview > p,
+.ficsit-overview > [role="alert"] {
+  margin: 20px 24px;
+}
+.ficsit-overview .details {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  margin: 0 24px;
+  border-bottom: 1px solid var(--line);
+}
+.ficsit-overview .details > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 8px;
+  padding: 20px 16px 20px 0;
+  border-bottom: 1px solid var(--line);
+}
+.ficsit-overview .details > div:first-child {
+  grid-column: 1 / -1;
+}
+.ficsit-overview .details > div:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+.ficsit-overview .details dt {
+  font-size: 0.8rem;
+}
+.ficsit-overview .details dd {
+  font-variant-numeric: tabular-nums;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+.ficsit-overview .details > div:first-child dd {
+  font-size: 1.4rem;
+}
+.ficsit-overview-updated {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.ficsit-overview-updated .workspace-icon-action {
+  color: var(--muted);
+}
+@media (max-width: 600px) {
+  .ficsit-overview-header {
+    padding: 20px 16px;
+  }
+  .ficsit-overview .details {
+    margin-inline: 16px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ficsit-overview .details > div {
+    padding-block: 16px;
+  }
+  .ficsit-overview-updated {
+    flex-wrap: wrap;
+  }
+}

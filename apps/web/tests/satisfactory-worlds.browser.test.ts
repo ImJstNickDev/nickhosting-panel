@@ -164,8 +164,10 @@ it('shows empty and loading states, creates a world with confirmation, and never
 it('renders live and historical overview honestly and exposes request errors', async () => {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } }),
     page = await context.newPage();
+  await page.clock.install({ time: new Date('2026-11-02T10:02:00Z') });
   let snapshot = false,
-    failure = false;
+    failure = false,
+    unavailable = false;
   await page.route('**/v1/**', (route) =>
     failure
       ? route.fulfill({
@@ -175,26 +177,31 @@ it('renders live and historical overview honestly and exposes request errors', a
       : route.fulfill({
           json: {
             configured: true,
-            source: snapshot ? 'snapshot' : 'live',
-            observedAt: '2026-11-02T10:00:00Z',
-            state: {
-              activeSessionName: 'Northern factory',
-              numConnectedPlayers: 2,
-              playerLimit: 4,
-              techTier: 6,
-              activeSchematic: 'Tier 6 milestone',
-              gamePhase: 'Phase 3',
-              isGameRunning: true,
-              totalGameDuration: 72000,
-              isGamePaused: false,
-              averageTickRate: 29.8,
-              autoLoadSessionName: 'Northern factory',
-            },
+            source: unavailable ? 'unavailable' : snapshot ? 'snapshot' : 'live',
+            observedAt: unavailable ? null : '2026-11-02T10:00:00Z',
+            state: unavailable
+              ? null
+              : {
+                  activeSessionName: 'Northern factory',
+                  numConnectedPlayers: 2,
+                  playerLimit: 4,
+                  techTier: 6,
+                  activeSchematic: 'Tier 6 milestone',
+                  gamePhase: 'Phase 3',
+                  isGameRunning: true,
+                  totalGameDuration: 72000,
+                  isGamePaused: false,
+                  averageTickRate: 29.8,
+                  autoLoadSessionName: 'Northern factory',
+                },
           },
         }),
   );
   await page.goto(`${origin}satisfactory-worlds-fixture?overview`);
   await check(page.getByText('Northern factory', { exact: true })).toBeVisible();
+  await check(page.getByText('Last updated 2 minutes ago', { exact: true })).toBeVisible();
+  await check(page.getByRole('button', { name: 'Refresh', exact: true })).toHaveText('');
+  await check(page.getByText(/Observed at:/)).toHaveCount(0);
   await page.screenshot({ path: `${shots}/satisfactory-overview-desktop-en.png`, fullPage: true });
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   snapshot = true;
@@ -205,6 +212,11 @@ it('renders live and historical overview honestly and exposes request errors', a
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
     true,
   );
+  await check(page.getByText('Stato salvato', { exact: true })).toBeVisible();
+  await check(page.getByText('Ultimo aggiornamento 2 minuti fa', { exact: true })).toBeVisible();
+  await page.clock.fastForward(60_000);
+  await check(page.getByText('Ultimo aggiornamento 3 minuti fa', { exact: true })).toBeVisible();
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await page.screenshot({
     path: `${shots}/satisfactory-overview-snapshot-mobile-it.png`,
     fullPage: true,
@@ -212,5 +224,11 @@ it('renders live and historical overview honestly and exposes request errors', a
   failure = true;
   await page.getByRole('button').click();
   await check(page.getByRole('alert')).toBeVisible();
+  await check(page.getByText('Stato salvato', { exact: true })).toBeVisible();
+  failure = false;
+  unavailable = true;
+  await page.getByRole('button', { name: 'Aggiorna', exact: true }).click();
+  await check(page.getByText('Nessuna osservazione del mondo ancora disponibile.')).toBeVisible();
+  await check(page.locator('.ficsit-overview-updated time')).toHaveCount(0);
   await context.close();
 });

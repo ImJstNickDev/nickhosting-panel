@@ -1,10 +1,12 @@
 import { useQuery } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
 import type { SatisfactoryGameState } from '../../../../../games/satisfactory/src/api.js';
 import { api } from '../../api/client.js';
-import { useFormat, useT } from '../../app/i18n.js';
+import { useFormat, useLocale, useT } from '../../app/i18n.js';
 import { Details, ErrorNotice } from '../../components/ui.js';
+import { IconAction } from '../../components/workspace-controls.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
-import './settings.css';
+import './overview.css';
 
 type Overview = {
   configured: boolean;
@@ -15,6 +17,12 @@ type Overview = {
 export function SatisfactoryOverviewSection(props: GameSectionViewProps) {
   const t = useT(),
     format = useFormat();
+  const { locale } = useLocale();
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const key = (name: string) => `games.satisfactory.overview.${name}`;
   const query = useQuery({
     queryKey: ['satisfactory-overview', props.serverId, props.runtimeState],
@@ -25,30 +33,34 @@ export function SatisfactoryOverviewSection(props: GameSectionViewProps) {
     refetchInterval: props.runtimeState === 'running' ? 15000 : false,
   });
   const state = query.data?.state;
+  const source = query.error && state ? 'snapshot' : query.data?.source;
+  const timestamp = query.data?.observedAt;
+  const observedAt = timestamp ? Date.parse(timestamp) : Number.NaN;
+  const age = Math.max(0, (now - observedAt) / 1000);
+  const unit = age >= 86400 ? 'day' : age >= 3600 ? 'hour' : 'minute';
+  const divisor = unit === 'day' ? 86400 : unit === 'hour' ? 3600 : 60;
+  const relative = !Number.isFinite(observedAt)
+    ? ''
+    : age < 60
+      ? t(key('justNow'))
+      : new Intl.RelativeTimeFormat(locale === 'it' ? 'it' : 'en', { numeric: 'always' }).format(
+          -Math.floor(age / divisor),
+          unit,
+        );
   return (
-    <section className="workspace-surface satisfactory-settings">
-      <div className="form-footer">
+    <section className="workspace-surface ficsit-overview">
+      <header className="ficsit-overview-header">
         <h2>{t(key('title'))}</h2>
-        <button
-          type="button"
-          className="secondary"
-          disabled={query.isFetching}
-          onClick={() => void query.refetch()}
-        >
-          {t(key('refresh'))}
-        </button>
-      </div>
+        {source && source !== 'unavailable' && (
+          <span className={`ficsit-overview-source ${source}`}>{t(key(source))}</span>
+        )}
+      </header>
       {query.error && <ErrorNotice error={query.error} />}
       {query.isPending && <p role="status">{t('web.loading')}</p>}
       {query.data && (
         <>
-          <p>{t(key(query.data.source))}</p>
+          {query.data.source === 'unavailable' && <p>{t(key('unavailable'))}</p>}
           {!query.data.configured && <p>{t('games.satisfactory.api.unconfigured')}</p>}
-          {query.data.observedAt && (
-            <p>
-              {t(key('observedAt'))}: {format.date(query.data.observedAt)}
-            </p>
-          )}
           {state && (
             <Details
               values={[
@@ -69,6 +81,33 @@ export function SatisfactoryOverviewSection(props: GameSectionViewProps) {
           )}
         </>
       )}
+      <footer className="ficsit-overview-updated">
+        {timestamp && Number.isFinite(observedAt) && (
+          <time dateTime={timestamp} title={format.date(timestamp)}>
+            {t(key('lastUpdated'), { time: relative })}
+          </time>
+        )}
+        <IconAction
+          label={t(key('refresh'))}
+          disabled={query.isFetching}
+          onClick={() => void query.refetch()}
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.7"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M20 7v5h-5M4 17v-5h5" />
+            <path d="M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 17.9 17" />
+          </svg>
+        </IconAction>
+      </footer>
     </section>
   );
 }

@@ -1066,3 +1066,14 @@ Post-restart read-only verification through `getPlatformServer` against an exist
 Satisfactory instance returned `worlds:true`, `mods:true`, `players:false`; API healthy.
 Nine unit navigation/UI tests, 37 DB integration tests, two focused browser journeys
 and typecheck pass. No credentials, world or database metadata changed.
+
+### FICSIT Overview presentation
+
+Overview uses an integration-scoped industrial layout with orange accents and a compact
+live/saved-state badge. Removed the historical-state paragraph and standalone absolute
+timestamp. A centered footer pairs the accessible refresh icon with a localized relative
+last-updated time; the absolute observation time remains available on hover. The local
+30-second timer updates the label without extra backend requests. Missing timestamps
+are omitted, and failed refreshes retain an honest saved-state badge. Browser checks
+cover relative-time advancement, loading/empty/error data, desktop/mobile and Axe;
+updated EN/IT screenshots are included. No API or infrastructure change is needed.
