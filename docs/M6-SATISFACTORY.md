@@ -1040,3 +1040,10 @@ production infrastructure, migrations or test assets were changed.
 The combined Satisfactory Mods/Settings/Worlds/Overview browser regression passes all
 17 tests, including the existing mod manager journeys. Final lint passes with existing
 repository warnings; typecheck, translation parity and frontend build pass.
+
+Navigation follow-up: public dev Vite responses were verified to include all four
+Satisfactory renderers. A new shared-sidebar regression checks their order, selection,
+and stale Worlds-capability behavior (six navigation tests pass). Missing Overview
+alongside visible Mods cannot be explained by current permission/capability filtering.
+Restarted only dev Vite under standing authorization; health and public module responses
+pass. Existing browser sessions may need a full reload to discard the older module.
