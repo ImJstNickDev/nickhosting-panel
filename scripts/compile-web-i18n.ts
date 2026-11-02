@@ -14,6 +14,7 @@ import { ownerWebMessages } from '../packages/i18n/src/owner-web.js';
 import { platformWebMessages } from '../packages/i18n/src/platform-web.js';
 import { quillWebMessages } from '../packages/i18n/src/quill-web.js';
 import { satisfactoryWebMessages } from '../packages/i18n/src/satisfactory-web.js';
+import { satisfactoryWorldsMessages } from '../packages/i18n/src/satisfactory-worlds.js';
 import { serverNavigationWebMessages } from '../packages/i18n/src/server-navigation-web.js';
 import { serviceWebMessages } from '../packages/i18n/src/services-web.js';
 import { sftpWebMessages } from '../packages/i18n/src/sftp-web.js';
@@ -25,6 +26,7 @@ const catalogs: Record<string, Record<string, string>> = { en: { ...en }, it: { 
 for (const [key, pair] of Object.entries({
   ...webMessages,
   ...satisfactoryWebMessages,
+  ...satisfactoryWorldsMessages,
   ...accountSecurityWebMessages,
   ...contentSettingsWebMessages,
   ...platformWebMessages,

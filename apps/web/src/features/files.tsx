@@ -215,7 +215,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const reloadViewer = useMemo(() => readViewerBookmark(viewerKey), [viewerKey]);
   const restoreAttempt = useRef<string | undefined>(undefined);
   const [restoredViewerKey, setRestoredViewerKey] = useState<string>();
+  const requestedDirectory = new URLSearchParams(location.search).get('directory');
   const readDirectory = (key: string | undefined) => {
+    if (requestedDirectory !== null) {
+      const normalized = normalizeFilePath(requestedDirectory);
+      if (normalized !== undefined) return normalized;
+    }
     try {
       const path = key ? sessionStorage.getItem(key) : null;
       return path !== null && normalizeFilePath(path) !== undefined ? path : '';

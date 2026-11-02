@@ -206,7 +206,19 @@ const SatisfactoryModsSection = lazy(() =>
     default: module.SatisfactoryModsSection,
   })),
 );
+const SatisfactoryOverviewSection = lazy(() =>
+  import('../integrations/satisfactory/overview.js').then((module) => ({
+    default: module.SatisfactoryOverviewSection,
+  })),
+);
+const SatisfactoryWorldsSection = lazy(() =>
+  import('../integrations/satisfactory/worlds.js').then((module) => ({
+    default: module.SatisfactoryWorldsSection,
+  })),
+);
 const sectionViews = new Map<string, ComponentType<GameSectionViewProps>>([
+  ['satisfactory-overview', SatisfactoryOverviewSection],
+  ['satisfactory-worlds', SatisfactoryWorldsSection],
   ['satisfactory-mods', SatisfactoryModsSection],
   ['satisfactory-settings', SatisfactorySettingsSection],
   ['minecraft-players', MinecraftPlayersSection],

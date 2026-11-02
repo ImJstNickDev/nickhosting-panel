@@ -18,7 +18,7 @@ export const satisfactoryManifest = gameManifestSchema.parse({
     backups: true,
     players: false,
     mods: true,
-    worlds: false,
+    worlds: true,
     idleDetection: true,
     gracefulStop: true,
     readiness: true,

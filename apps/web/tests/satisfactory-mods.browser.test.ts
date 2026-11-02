@@ -208,11 +208,13 @@ it('reviews resolved changes before apply, reuses shared Minecraft layout, and s
   await context.close();
 });
 
-it('connects a write-only token, updates options and shows read-only player state in Italian', async () => {
+it('connects a write-only token, updates server and advanced options with acknowledgement and supports Italian read-only settings', async () => {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
   let configured = false;
   let option = '4';
+  let creativeModeEnabled = false;
+  let advancedValue = 'False';
   const mutations: unknown[] = [];
   const readBodies: unknown[] = [];
   const secret = 'fixture-opaque-token-never-returned';
@@ -223,6 +225,10 @@ it('connects a write-only token, updates options and shows read-only player stat
       mutations.push(body);
       if (path.endsWith('/token')) configured = true;
       if (path.endsWith('/options')) option = body.options['FG.DSAutoPause'];
+      if (path.endsWith('/advanced-settings')) {
+        creativeModeEnabled = true;
+        advancedValue = body.settings['FG.GameRules.NoBuildCost'];
+      }
       return route.fulfill({ status: 204 });
     }
     const body = path.endsWith('/state')
@@ -242,7 +248,13 @@ it('connects a write-only token, updates options and shows read-only player stat
             },
             pendingServerOptions: {},
           }
-        : { configured };
+        : path.endsWith('/advanced-settings')
+          ? {
+              sessionName: 'Factory',
+              creativeModeEnabled,
+              advancedGameSettings: { 'FG.GameRules.NoBuildCost': advancedValue },
+            }
+          : { configured };
     readBodies.push(body);
     return route.fulfill({ json: body });
   });
@@ -258,7 +270,7 @@ it('connects a write-only token, updates options and shows read-only player stat
   await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await check(page.getByText('Server API connected.', { exact: true })).toBeVisible();
   await check(token).toHaveValue('');
-  await check(page.getByText('Fixture factory', { exact: true })).toBeVisible();
+  await check(page.getByText('Advanced world settings', { exact: true })).toBeVisible();
   const field = page.getByLabel('Pause when no players are connected', { exact: true });
   await check(page.getByLabel('Autosave interval (seconds)', { exact: true })).toHaveValue('300.0');
   await check(page.getByLabel('Future.Option', { exact: true })).toHaveValue('unchanged');
@@ -269,7 +281,28 @@ it('connects a write-only token, updates options and shows read-only player stat
     .click();
   await check(page.getByText('Changes saved.', { exact: true })).toBeVisible();
   await check(field).toHaveValue('true');
-  expect(mutations).toEqual([{ token: secret }, { options: { 'FG.DSAutoPause': 'true' } }]);
+  const advancedField = page.getByLabel('Build without material costs', { exact: true });
+  await advancedField.fill('True');
+  const advancedSave = advancedField
+    .locator('xpath=ancestor::form')
+    .getByRole('button', { name: 'Save changes', exact: true });
+  await check(advancedSave).toBeDisabled();
+  await page
+    .getByLabel('Enable creative mode and apply these settings to the current world')
+    .check();
+  await advancedSave.click();
+  await check(
+    page.getByText('Creative mode is enabled for this world.', { exact: true }),
+  ).toBeVisible();
+  expect(mutations).toEqual([
+    { token: secret },
+    { options: { 'FG.DSAutoPause': 'true' } },
+    {
+      settings: { 'FG.GameRules.NoBuildCost': 'True' },
+      expectedSessionName: 'Factory',
+      confirmEnable: true,
+    },
+  ]);
   expect(JSON.stringify(readBodies)).not.toContain(secret);
   expect(await page.locator('body').innerText()).not.toContain(secret);
   expect(
@@ -280,13 +313,16 @@ it('connects a write-only token, updates options and shows read-only player stat
   await page.evaluate(() => localStorage.setItem('nh.locale', 'it'));
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${origin}satisfactory-fixture?settings&readonly`);
-  await check(page.getByText('Giocatori connessi', { exact: true })).toBeVisible();
-  await check(page.getByText('2 / 4', { exact: true })).toBeVisible();
+  await check(page.getByText('Impostazioni avanzate del mondo', { exact: true })).toBeVisible();
+  await check(
+    page.getByLabel('Costruisci senza costi di materiali', { exact: true }),
+  ).toBeDisabled();
   await check(page.locator('input[type=password]')).toHaveCount(0);
   await check(
     page.getByLabel('Pausa quando non ci sono giocatori connessi', { exact: true }),
   ).toBeDisabled();
-  await check(page.getByRole('button', { name: 'Salva modifiche', exact: true })).toBeDisabled();
+  for (const save of await page.getByRole('button', { name: 'Salva modifiche', exact: true }).all())
+    await check(save).toBeDisabled();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect(
     (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())
@@ -1282,5 +1318,63 @@ it('bounds concurrent checkbox recommendations and coalesces a batch without res
     window.dispatchEvent(new CustomEvent('fixture-pending', { detail: false })),
   );
   await check.poll(() => inventoryReads).toBe(2);
+  await context.close();
+});
+
+it('keeps advanced edits bound to their original world and avoids native reads while offline', async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  let sessionName = 'Original';
+  const reads: string[] = [];
+  let writes = 0;
+  await page.route('**/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() !== 'GET') {
+      writes++;
+      return route.fulfill({ status: 204 });
+    }
+    reads.push(path);
+    return route.fulfill({
+      json: path.endsWith('/advanced-settings')
+        ? {
+            sessionName,
+            creativeModeEnabled: true,
+            advancedGameSettings: { 'FG.GameRules.NoBuildCost': 'False' },
+          }
+        : path.endsWith('/options')
+          ? { serverOptions: {}, pendingServerOptions: {} }
+          : { configured: true },
+    });
+  });
+  await page.goto(`${origin}satisfactory-fixture?settings`);
+  const field = page.getByLabel('Build without material costs', { exact: true });
+  await field.fill('True');
+  sessionName = 'Another world';
+  await page.evaluate(
+    "import('/src/api/client.ts').then(({queryClient}) => queryClient.invalidateQueries({queryKey: ['satisfactory-advanced-settings']}))",
+  );
+  await check(
+    page.getByText('The active world changed. Cancel these edits before changing the new world.', {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await check(
+    field
+      .locator('xpath=ancestor::form')
+      .getByRole('button', { name: 'Save changes', exact: true }),
+  ).toBeDisabled();
+  await field
+    .locator('xpath=ancestor::form')
+    .getByRole('button', { name: 'Cancel', exact: true })
+    .click();
+  expect(writes).toBe(0);
+  reads.length = 0;
+  await page.goto(`${origin}satisfactory-fixture?settings&offline`);
+  await check(
+    page.getByText('Start the server to connect its API or edit settings.', { exact: true }),
+  ).toBeVisible();
+  expect(
+    reads.every((path) => !path.endsWith('/options') && !path.endsWith('/advanced-settings')),
+  ).toBe(true);
   await context.close();
 });

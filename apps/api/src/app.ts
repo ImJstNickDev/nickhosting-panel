@@ -46,6 +46,7 @@ import { PROVIDER_EVENTS_PATH, receiveProviderEvent } from './provider-events.js
 import { registerSatisfactoryRoutes } from './satisfactory.js';
 import { registerSatisfactoryApiRoutes } from './satisfactory-api.js';
 import { registerSatisfactoryModRoutes } from './satisfactory-mods.js';
+import { registerSatisfactoryOverviewRoutes } from './satisfactory-overview.js';
 import { registerScheduleRoutes } from './schedules.js';
 import { registerServerRoutes } from './servers.js';
 import { receiveSftpEvent, SFTP_EVENTS_PATH } from './sftp-events.js';
@@ -637,6 +638,7 @@ export function createApp(options: Options) {
     http: options.minecraftContentHttp,
   });
   registerSatisfactoryRoutes(app, { db, principal });
+  registerSatisfactoryOverviewRoutes(app, { db, codec: options.codec, principal });
   registerSatisfactoryApiRoutes(app, { db, codec: options.codec, principal });
   registerSatisfactoryModRoutes(app, {
     db,

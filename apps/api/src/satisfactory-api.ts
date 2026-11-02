@@ -3,7 +3,18 @@ import { authorizeServer } from '@nickhosting/server-management';
 import type { Hono } from 'hono';
 import { z } from 'zod';
 import {
+  satisfactoryAdvancedSettingsSchema,
+  satisfactoryAdvancedSettingsUpdateSchema,
+} from '../../../games/satisfactory/src/settings.js';
+import {
+  satisfactoryCreateWorldSchema,
+  satisfactoryLoadWorldSchema,
+  satisfactorySaveWorldSchema,
+} from '../../../games/satisfactory/src/worlds.js';
+import {
+  applySatisfactoryAdvancedSettings,
   applySatisfactoryOptions,
+  mutateSatisfactoryWorld,
   resolveSatisfactoryApi,
   satisfactoryApiConfigured,
   setSatisfactoryApiToken,
@@ -78,6 +89,63 @@ export function registerSatisfactoryApiRoutes(
       .safeParse(await c.req.json().catch(() => null));
     if (!input.success) throw new DomainError('validation_failed');
     await applySatisfactoryOptions(options.db, codec, context, id, input.data.options);
+    return c.body(null, 204);
+  });
+  app.get(`${base}/worlds`, async (c) => {
+    c.header('cache-control', 'no-store');
+    const codec = await access(await options.principal(c), c.req.param('id'));
+    return c.json(
+      await (await resolveSatisfactoryApi(options.db, codec, c.req.param('id'))).sessions(
+        c.req.raw.signal,
+      ),
+    );
+  });
+  for (const action of ['save', 'load', 'create'] as const) {
+    app.post(`${base}/worlds/${action}`, async (c) => {
+      const context = await options.principal(c),
+        id = c.req.param('id'),
+        codec = await access(context, id, true);
+      const body = await c.req.json().catch(() => null);
+      const parsed = (
+        action === 'save'
+          ? satisfactorySaveWorldSchema
+          : action === 'load'
+            ? satisfactoryLoadWorldSchema
+            : satisfactoryCreateWorldSchema
+      ).safeParse(body);
+      if (!parsed.success) throw new DomainError('validation_failed');
+      const request =
+        action === 'save'
+          ? { action, input: satisfactorySaveWorldSchema.parse(body) }
+          : action === 'load'
+            ? { action, input: satisfactoryLoadWorldSchema.parse(body) }
+            : { action, input: satisfactoryCreateWorldSchema.parse(body) };
+      await mutateSatisfactoryWorld(options.db, codec, context, id, request);
+      return c.body(null, 204);
+    });
+  }
+  app.get(`${base}/advanced-settings`, async (c) => {
+    c.header('cache-control', 'no-store');
+    const codec = await access(await options.principal(c), c.req.param('id'));
+    const api = await resolveSatisfactoryApi(options.db, codec, c.req.param('id'));
+    const [settings, state] = await Promise.all([
+      api.advancedSettings(c.req.raw.signal),
+      api.state(c.req.raw.signal),
+    ]);
+    return c.json({
+      ...satisfactoryAdvancedSettingsSchema.parse(settings),
+      sessionName: state.activeSessionName,
+    });
+  });
+  app.put(`${base}/advanced-settings`, async (c) => {
+    const context = await options.principal(c),
+      id = c.req.param('id'),
+      codec = await access(context, id, true);
+    const parsed = satisfactoryAdvancedSettingsUpdateSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) throw new DomainError('validation_failed');
+    await applySatisfactoryAdvancedSettings(options.db, codec, context, id, parsed.data);
     return c.body(null, 204);
   });
 }

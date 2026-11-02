@@ -57,3 +57,13 @@
     grid-template-columns: 1fr;
   }
 }
+.satisfactory-settings-confirm {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  line-height: 1.5;
+}
+.satisfactory-settings-confirm input {
+  flex: 0 0 auto;
+  margin-top: 5px;
+}

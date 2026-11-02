@@ -1,5 +1,9 @@
+export { satisfactorySaveDirectory } from '../world-paths.js';
+
 import { defineTrustedGameUiModule, gameUiDescriptorSchema } from '@nickhosting/game-sdk/ui';
 import { z } from 'zod';
+import { satisfactoryOverviewCatalogs } from './overview-catalog.js';
+import { satisfactorySettingsCatalogs } from './settings-catalog.js';
 
 const prefix = 'games.satisfactory.';
 const translations: Record<string, [string, string]> = {
@@ -26,6 +30,7 @@ const translations: Record<string, [string, string]> = {
   'api.pending': ['Pending value', 'Valore in attesa'],
 
   name: ['Satisfactory', 'Satisfactory'],
+  'worlds.title': ['Worlds', 'Mondi'],
   'mods.title': ['Mods', 'Mod'],
   'runtimes.dedicated': ['Dedicated server', 'Server dedicato'],
   'steps.configure': ['Configure server', 'Configura server'],
@@ -39,13 +44,25 @@ const translations: Record<string, [string, string]> = {
   'ports.game': ['Game and HTTPS', 'Gioco e HTTPS'],
   'ports.reliable': ['Reliable Messaging', 'Reliable Messaging'],
 };
-export const satisfactoryUiCatalogs = {
+const baseCatalogs = {
   en: Object.fromEntries(
     Object.entries(translations).map(([key, values]) => [prefix + key, values[0]]),
   ),
   it: Object.fromEntries(
     Object.entries(translations).map(([key, values]) => [prefix + key, values[1]]),
   ),
+};
+export const satisfactoryUiCatalogs = {
+  en: {
+    ...baseCatalogs.en,
+    ...satisfactoryOverviewCatalogs.en,
+    ...satisfactorySettingsCatalogs.en,
+  },
+  it: {
+    ...baseCatalogs.it,
+    ...satisfactoryOverviewCatalogs.it,
+    ...satisfactorySettingsCatalogs.it,
+  },
 };
 export const satisfactoryUiDescriptor = gameUiDescriptorSchema.parse({
   gameId: 'satisfactory',
@@ -86,6 +103,30 @@ export const satisfactoryUiDescriptor = gameUiDescriptorSchema.parse({
     defaults: { branch: 'public', autoUpdate: true },
   },
   sections: [
+    {
+      id: 'overview',
+      titleKey: `${prefix}overview.title`,
+      loader: 'overview',
+      renderer: 'satisfactory-overview',
+      navigation: { group: 'server', order: 0, icon: 'activity', placement: 'sidebar' },
+      requiredPermissions: ['server:read'],
+      managePermissions: ['server:manage'],
+      requiredCapabilities: [],
+      columns: [],
+      forms: [],
+    },
+    {
+      id: 'worlds',
+      titleKey: `${prefix}worlds.title`,
+      loader: 'worlds',
+      renderer: 'satisfactory-worlds',
+      navigation: { group: 'tools', order: 20, icon: 'world', placement: 'sidebar' },
+      requiredPermissions: ['server:read'],
+      managePermissions: ['server:manage'],
+      requiredCapabilities: ['worlds'],
+      columns: [],
+      forms: [],
+    },
     {
       id: 'server-settings',
       titleKey: `${prefix}api.title`,
@@ -143,6 +184,12 @@ export const satisfactoryUiModule = defineTrustedGameUiModule({
   descriptor: satisfactoryUiDescriptor,
   catalogs: satisfactoryUiCatalogs,
   handlers: {
+    async overview() {
+      return { values: {}, rows: [] };
+    },
+    async worlds() {
+      return { values: {}, rows: [] };
+    },
     async 'server-settings'() {
       return { values: {}, rows: [] };
     },

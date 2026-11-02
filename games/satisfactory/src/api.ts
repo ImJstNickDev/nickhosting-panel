@@ -106,6 +106,38 @@ export class SatisfactoryApi {
     if (!/^[a-zA-Z0-9_-]{1,80}$/.test(name)) throw new DomainError('validation_failed');
     await this.call('SaveGame', { SaveName: name }, signal);
   }
+  async createWorld(sessionName: string, signal?: AbortSignal): Promise<void> {
+    await this.call(
+      'CreateNewGame',
+      {
+        NewGameData: {
+          SessionName: sessionName,
+          StartingLocation: '',
+          SkipOnboarding: true,
+          AdvancedGameSettings: {},
+          CustomOptionsOnlyForModding: {},
+        },
+      },
+      signal,
+    );
+  }
+  async loadWorld(
+    saveName: string,
+    enableAdvancedGameSettings: boolean,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.call(
+      'LoadGame',
+      { SaveName: saveName, EnableAdvancedGameSettings: enableAdvancedGameSettings },
+      signal,
+    );
+  }
+  async applyAdvancedSettings(
+    settings: Record<string, string>,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.call('ApplyAdvancedGameSettings', { AppliedAdvancedGameSettings: settings }, signal);
+  }
   async shutdown(signal?: AbortSignal): Promise<void> {
     await this.call('Shutdown', undefined, signal);
   }

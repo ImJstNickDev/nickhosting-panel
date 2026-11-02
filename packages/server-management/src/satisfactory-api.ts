@@ -1,4 +1,4 @@
-import { timingSafeEqual, X509Certificate } from 'node:crypto';
+import { randomUUID, timingSafeEqual, X509Certificate } from 'node:crypto';
 import { request } from 'node:https';
 import { isIP } from 'node:net';
 import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
@@ -10,6 +10,14 @@ import {
   type SatisfactoryApiTransport,
 } from '../../../games/satisfactory/src/api.js';
 import { decodeNativePlayerIdentity } from '../../../games/satisfactory/src/native-auth.js';
+import {
+  satisfactoryAdvancedSettingsSchema,
+  satisfactoryAdvancedSettingsUpdateSchema,
+} from '../../../games/satisfactory/src/settings.js';
+import {
+  changeSatisfactoryWorld,
+  type SatisfactoryWorldAction,
+} from '../../../games/satisfactory/src/worlds.js';
 import { authorizeServer } from './registry.js';
 import { readSatisfactoryTlsIdentity } from './satisfactory-tls.js';
 
@@ -99,7 +107,10 @@ export function satisfactoryPinnedTransport(
             res.on('error', () => reject(new DomainError('integration_unavailable')));
             res.on('end', () => {
               try {
-                resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+                const text = Buffer.concat(chunks).toString('utf8');
+                // Map changes can acknowledge with HTTP 202 and an empty body.
+                // Keep undefined reserved for 204 authentication verification.
+                resolve(res.statusCode === 202 && text.length === 0 ? {} : JSON.parse(text));
               } catch {
                 reject(new DomainError('integration_unavailable'));
               }
@@ -116,7 +127,13 @@ async function target(db: Kysely<Database>, id: string) {
   const server = await db
     .selectFrom('managed_servers as s')
     .innerJoin('runtime_egg_mappings as m', 'm.id', 's.mapping_id')
-    .select(['s.id', 's.active_operation_id', 's.installation_state', 'm.game_id'])
+    .select([
+      's.id',
+      's.active_operation_id',
+      's.installation_state',
+      's.runtime_state',
+      'm.game_id',
+    ])
     .where('s.id', '=', id)
     .where('s.deleted_at', 'is', null)
     .executeTakeFirst();
@@ -236,6 +253,76 @@ export async function applySatisfactoryOptions(
     await recordAudit(connection, context, 'satisfactory.options.updated', {
       serverId: id,
       keys: Object.keys(options),
+    });
+  });
+}
+
+export async function mutateSatisfactoryWorld(
+  db: Kysely<Database>,
+  codec: SecretCodec,
+  context: AuthContext,
+  id: string,
+  request: SatisfactoryWorldAction,
+): Promise<void> {
+  await locked(db, context, id, async (connection) => {
+    const { server } = await target(connection, id);
+    if (server.installation_state !== 'installed' || server.runtime_state !== 'running')
+      throw new DomainError('conflict');
+    const api = await resolveSatisfactoryApi(connection, codec, id);
+    const safetySave = `nickhosting_before_${request.action}_${randomUUID().replaceAll('-', '')}`;
+    await recordAudit(connection, context, `satisfactory.world.${request.action}.requested`, {
+      serverId: id,
+      safetySave,
+    });
+    await changeSatisfactoryWorld(api, request, safetySave, () =>
+      authorizeServer(connection, context, id, 'server:manage').then(() => undefined),
+    );
+    await recordAudit(
+      connection,
+      context,
+      `satisfactory.world.${request.action}.${request.action === 'save' ? 'completed' : 'accepted'}`,
+      {
+        serverId: id,
+      },
+    );
+  });
+}
+export async function applySatisfactoryAdvancedSettings(
+  db: Kysely<Database>,
+  codec: SecretCodec,
+  context: AuthContext,
+  id: string,
+  input: unknown,
+): Promise<void> {
+  const parsed = satisfactoryAdvancedSettingsUpdateSchema.parse(input);
+  await locked(db, context, id, async (connection) => {
+    const { server } = await target(connection, id);
+    if (server.installation_state !== 'installed' || server.runtime_state !== 'running')
+      throw new DomainError('conflict');
+    const api = await resolveSatisfactoryApi(connection, codec, id);
+    const [state, current] = await Promise.all([
+      api.state(),
+      api.advancedSettings().then((value) => satisfactoryAdvancedSettingsSchema.parse(value)),
+    ]);
+    if (
+      !state.isGameRunning ||
+      state.activeSessionName !== parsed.expectedSessionName ||
+      (!current.creativeModeEnabled && !parsed.confirmEnable)
+    )
+      throw new DomainError('conflict');
+    if (
+      Object.keys(parsed.settings).some((key) => !Object.hasOwn(current.advancedGameSettings, key))
+    )
+      throw new DomainError('validation_failed');
+    await recordAudit(connection, context, 'satisfactory.advanced-settings.requested', {
+      serverId: id,
+      keys: Object.keys(parsed.settings),
+    });
+    await authorizeServer(connection, context, id, 'server:manage');
+    await api.applyAdvancedSettings(parsed.settings);
+    await recordAudit(connection, context, 'satisfactory.advanced-settings.updated', {
+      serverId: id,
+      keys: Object.keys(parsed.settings),
     });
   });
 }

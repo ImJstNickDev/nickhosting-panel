@@ -996,3 +996,47 @@ offline-failure cleanup, explicit refresh and per-checkbox request cancellation.
 Full types, lint (warnings remain), i18n parity and frontend/runtime builds passed.
 Independent final review found no open must-fix findings. Issue #18 and the
 previously outstanding full playable-client M6 acceptance remain unchanged.
+
+## Overview, Worlds and Settings — 2026-11-02
+
+The compiled Satisfactory UI module now declares Overview, Worlds and Settings alongside
+Mods. Worlds is an integration capability; the common shell only registers bundled
+renderers. Overview reads native state while running and the existing encrypted Gateway
+observations while offline. Historical data is labelled with its observation time and
+never presented as a live player count or current performance. Opening these screens
+does not enqueue a start or wake request.
+
+Worlds lists native sessions and save metadata with search and pagination. Save refuses
+name collisions. Create and Load require explicit confirmation and first save the active
+world to a uniquely named recovery save; failure of that save aborts the map change.
+Native map transitions are asynchronous acknowledgements, not proof that loading has
+finished. These operations reuse the platform lifecycle lock, authorization and audit
+trail. Import/download opens the existing Files workspace at the integration-declared
+SaveGames root; existing file permissions, transfer limits and upload/download pipelines
+apply. There is no duplicate save transfer service or new filesystem authority.
+
+Settings retains the encrypted application token and server options and adds native
+advanced world settings. Only keys returned by the running game can be updated. Enabling
+creative mode requires acknowledgement; the submitted session name is checked against
+fresh native state to reject a draft for a different world. Native API operations require
+a configured application token and a running backend; a stopped server remains stopped.
+
+No database migration, dependency installation, Pterodactyl modification or Blueprint
+update is required. Rollback is the previous application revision; preserve existing
+saves, credentials and Gateway observations. This does not add factory telemetry,
+mod-profile restore points or game-version rollback.
+
+Validation: 214 game/API/transport unit tests passed, plus the five new lifecycle-lock
+mutation service tests. Browser fixtures exercise real renderers against controlled API
+responses: desktop/mobile EN/IT, permissions, empty/error/offline states, confirmation,
+session-bound drafts, and live versus historical overview. Axe checks pass for the
+covered screens; screenshots are in `docs/screenshots/m6/satisfactory-{overview,worlds,settings}-*`.
+These are UI/contract tests, not a claim of new world mutations on the Owner's live server.
+Native request names and payloads follow the shipped Coffee Stain API documentation
+([verbatim mirror](https://github.com/robtme/satisfactory-server/wiki/Official-API-Docs)).
+Application type checks and production frontend build pass. Only the development API
+was restarted under the Owner's standing authorization; no game server data, power,
+production infrastructure, migrations or test assets were changed.
+The combined Satisfactory Mods/Settings/Worlds/Overview browser regression passes all
+17 tests, including the existing mod manager journeys. Final lint passes with existing
+repository warnings; typecheck, translation parity and frontend build pass.

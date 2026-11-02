@@ -113,3 +113,32 @@ it('keeps setup online if enumeration times out or the backend becomes unavailab
   expect(await api.canAutoSleep(unloaded, AbortSignal.abort())).toBe(false);
   expect(await api.canAutoSleep(unloaded)).toBe(false);
 });
+it('uses native world and advanced settings payloads without console interpolation', async () => {
+  const request = vi.fn().mockResolvedValue(undefined);
+  const api = new SatisfactoryApi({ request });
+  await api.createWorld('Factory');
+  await api.loadWorld('Factory_autosave', false);
+  await api.applyAdvancedSettings({ 'FG.Test': 'True' });
+  expect(request.mock.calls.map((call) => call[0])).toEqual([
+    {
+      function: 'CreateNewGame',
+      data: {
+        NewGameData: {
+          SessionName: 'Factory',
+          StartingLocation: '',
+          SkipOnboarding: true,
+          AdvancedGameSettings: {},
+          CustomOptionsOnlyForModding: {},
+        },
+      },
+    },
+    {
+      function: 'LoadGame',
+      data: { SaveName: 'Factory_autosave', EnableAdvancedGameSettings: false },
+    },
+    {
+      function: 'ApplyAdvancedGameSettings',
+      data: { AppliedAdvancedGameSettings: { 'FG.Test': 'True' } },
+    },
+  ]);
+});

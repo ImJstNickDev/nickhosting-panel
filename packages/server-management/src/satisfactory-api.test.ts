@@ -126,3 +126,29 @@ it('binds native Administrator verification to the caller player and requires a 
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+it('accepts empty 202 map-change acknowledgements without treating them as verified authentication', async () => {
+  const server = createServer(
+    { key: identity.privateKeyPem, cert: identity.certificatePem },
+    (req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(202);
+        res.end();
+      });
+    },
+  );
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('bind');
+  try {
+    expect(
+      await satisfactoryPinnedTransport(
+        { address: '127.0.0.1', port: address.port },
+        identity.certificatePem,
+        'secret',
+      ).request({ function: 'LoadGame', data: { SaveName: 'Factory' } }),
+    ).toEqual({});
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

@@ -10,12 +10,16 @@ const mocked = vi.hoisted(() => ({
   setToken: vi.fn(),
   configured: vi.fn(),
   apply: vi.fn(),
+  world: vi.fn(),
+  advanced: vi.fn(),
 }));
 vi.mock('@nickhosting/server-management', () => ({ authorizeServer: mocked.authorize }));
 vi.mock('../../../packages/server-management/src/satisfactory-api.js', () => ({
   setSatisfactoryApiToken: mocked.setToken,
   satisfactoryApiConfigured: mocked.configured,
   applySatisfactoryOptions: mocked.apply,
+  mutateSatisfactoryWorld: mocked.world,
+  applySatisfactoryAdvancedSettings: mocked.advanced,
   resolveSatisfactoryApi: vi.fn(),
 }));
 beforeEach(() => {
@@ -75,4 +79,42 @@ it('rejects malformed token writes without calling the secret store', async () =
   );
   expect(response.status).toBe(400);
   expect(mocked.setToken).not.toHaveBeenCalled();
+});
+
+it.each(['save', 'create', 'load'])('requires manage permission for world %s', async (action) => {
+  mocked.authorize.mockRejectedValue(new DomainError('forbidden'));
+  const response = await app().request(
+    `/v1/servers/11111111-1111-4111-8111-111111111111/satisfactory/api/worlds/${action}`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+  );
+  expect(response.status).toBe(403);
+  expect(mocked.authorize.mock.calls[0]?.[3]).toBe('server:manage');
+  expect(mocked.world).not.toHaveBeenCalled();
+});
+it('rejects unconfirmed world loads without calling the lifecycle service', async () => {
+  const response = await app().request(
+    '/v1/servers/11111111-1111-4111-8111-111111111111/satisfactory/api/worlds/load',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ saveName: 'Factory' }),
+    },
+  );
+  expect(response.status).toBe(400);
+  expect(mocked.world).not.toHaveBeenCalled();
+});
+it('passes validated world requests to the shared service', async () => {
+  const response = await app().request(
+    '/v1/servers/11111111-1111-4111-8111-111111111111/satisfactory/api/worlds/load',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ saveName: 'Factory', confirm: true }),
+    },
+  );
+  expect(response.status).toBe(204);
+  expect(mocked.world.mock.calls[0]?.[4]).toEqual({
+    action: 'load',
+    input: { saveName: 'Factory', confirm: true, enableAdvancedGameSettings: false },
+  });
 });
