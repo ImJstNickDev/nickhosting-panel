@@ -402,8 +402,15 @@ export function CreateServerPage() {
                         }
                       }}
                     >
-                      {art && <img src={art} alt="" width={480} height={240} />}
-                      <span>{t(extension.descriptor.nameKey)}</span>
+                      <span className="installer-game-art" aria-hidden="true">
+                        {art && <img src={art} alt="" width={480} height={240} />}
+                      </span>
+                      <span className="installer-game-label">
+                        <span>{t(extension.descriptor.nameKey)}</span>
+                        <span className="installer-game-selected" aria-hidden="true">
+                          ✓
+                        </span>
+                      </span>
                     </button>
                   );
                 })}
