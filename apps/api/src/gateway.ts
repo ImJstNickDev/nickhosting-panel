@@ -9,6 +9,7 @@ import {
 import { type createDatabase, getSecret, getSettings } from '@nickhosting/database';
 import {
   gatewayObservationSchema,
+  gatewayPrivateStateMaxBytes,
   gatewaySatisfactoryStateSchema,
   gatewayWakeRequestSchema,
 } from '@nickhosting/game-sdk';
@@ -33,6 +34,7 @@ import {
   verifyManagedIdentity,
 } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import { resolveSatisfactoryApi } from '../../../packages/server-management/src/satisfactory-api.js';
 import type { Variables } from './app.js';
@@ -134,6 +136,15 @@ export function registerGatewayRoutes(
   registerSatisfactoryOfflineApi(app, { ...options, route });
   registerSatisfactoryConsoleApi(app, { ...options, route });
   const prefix = '/internal/gateway/:gatewayId';
+  app.use(
+    `${prefix}/private-state-write`,
+    bodyLimit({
+      maxSize: gatewayPrivateStateMaxBytes + 4096,
+      onError: () => {
+        throw new DomainError('validation_failed', 413);
+      },
+    }),
+  );
   app.get(`${prefix}/configuration`, async (c) => {
     const values = await gatewayConfiguration(db, env);
     return c.json(
@@ -588,7 +599,7 @@ export function registerGatewayRoutes(
         return c.json(existing ? JSON.parse(codec.decrypt(existing.envelope, name)) : null);
       }
       const serialized = JSON.stringify(parsed.data.state);
-      if (!serialized || Buffer.byteLength(serialized) > 262144)
+      if (!serialized || Buffer.byteLength(serialized) > gatewayPrivateStateMaxBytes)
         throw new DomainError('validation_failed');
       await persistSatisfactoryOfflineSnapshots(db, codec, selected.serverId, parsed.data.state);
       const envelope = codec.encrypt(serialized, name);

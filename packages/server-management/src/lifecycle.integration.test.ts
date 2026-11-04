@@ -3075,6 +3075,28 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
     expect(f.adapter.power).not.toHaveBeenCalled();
   });
+  it('runs stopped maintenance under the lifecycle lock before releasing capacity and tolerates cleanup failure', async () => {
+    const f = await fixture('stop');
+    await f.prepareReservation();
+    f.setState('running');
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.adapter.stopWithConfirmation.mockImplementation(async (_id, _identifier, input) => {
+      await input.onConfirmed();
+      return { confirmed: true };
+    });
+    f.options.finalizeGameStop = vi.fn(async (context) => {
+      expect((await f.operation()).plan.stopConfirmed).toBe(true);
+      expect(await f.reservation()).toBeDefined();
+      // The physical proof remains available while stop capacity is reserved.
+      await context.assertStopped();
+      throw new Error('maintenance failed');
+    });
+    expect(await f.run()).toBe('succeeded');
+    expect(f.options.finalizeGameStop).toHaveBeenCalledOnce();
+    expect(await f.reservation()).toBeUndefined();
+    expect(await f.run()).toBe('duplicate');
+    expect(f.options.finalizeGameStop).toHaveBeenCalledOnce();
+  });
   it('does not recreate stopped capacity from a stale running reconciliation sample', async () => {
     const f = await fixture('stop');
     await f.prepareReservation();

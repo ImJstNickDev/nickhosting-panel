@@ -1102,3 +1102,75 @@ Validation: eight game UI/resolver tests and the focused desktop EN/mobile IT br
 journey pass, including native Phase_0/Schematic_1-1 inputs, dynamic freshness and Axe.
 Typecheck, scoped lint, translation parity and frontend build pass. Updated screenshots
 were inspected; the public dev frontend serves both progression resolvers.
+
+### Worlds: streamed sessions, saved observations and safety history
+
+The Worlds screen groups native save headers under their actual session. Its FICSIT
+layout shows the latest save and an expandable, searchable history with manual,
+autosave and platform safety categories. Technical filenames remain accessible in
+details. Safety labels require matching server-operation evidence, not just a filename
+prefix. The previously observed `nh-stop-<job UUID>` entries are lifecycle safety saves,
+not separate worlds; native `ServerSettings.*.sav` is not a world either.
+
+`GET /v1/servers/:id/satisfactory/api/worlds/stream` supplies authenticated NDJSON.
+It emits the existing encrypted Gateway observation first, including its actual age,
+then incrementally parses native session names and save headers over the existing
+certificate-pinned transport. The browser batches rendering and does not wait for the
+whole enumeration. Live records remain provisional until the full JSON envelope and
+schema pass validation. Disconnect, truncation, invalid JSON or a late native error
+cannot replace the last complete snapshot. There is no separate world-cache store.
+
+Backend process state and application readiness are distinct: during startup the saved
+list stays visible, actions requiring a ready native API remain disabled, and the UI
+refreshes until ready. Offline reads do not start the game. No prior observation is an
+unknown list, not proof of an empty server. World changes also invalidate the actual
+advanced-settings query key.
+
+Native enumeration accepts up to 16 MiB, 1,024 sessions and 32,768 save headers (4,096 per
+session). Other cached API functions retain 64 KiB limits. Private Gateway snapshots
+allow 32 MiB + 512 KiB to accommodate escaped JSON strings, with a route-specific body
+limit applied after Gateway authentication. Ordinary requests, routing snapshots and
+console responses retain their existing limits. Compressed captures have explicit
+input/output bounds and two concurrent capture slots; capture saturation never holds
+up native passthrough. Gateway observation caches have a 64 MiB process budget. Worlds
+streams, including cached reads, are pull-driven, cancellation-aware and globally limited to four;
+overlapping requests for the same server share completion.
+
+Migrations 061–062 add per-session retention policies and immutable, job-bound safety-save
+receipts. Fixed-size SHA-256 session keys support long Unicode names without exceeding
+PostgreSQL index limits; the database checks each key against the complete original name. Default retention is five verified platform saves per session; the UI accepts
+1–100, with `SATISFACTORY_SAFETY_SAVE_RETENTION` as the deployment override. Policies
+use the existing server permission and lifecycle lock. Automatic rotation runs after
+confirmed stop, preserves a verified recovery anchor, and rechecks file metadata and
+SHA-256 before deletion. Manual saves, autosaves and historical safety saves without
+content receipts are never enrolled automatically. Failed or ambiguous checks retain
+files. Maintenance failure does not turn a successful server stop into a failed one.
+
+The common Files workspace remains the upload/download authority. Its writes share the
+lifecycle lock. Direct external provider/SFTP writes cannot be made atomic with the
+provider's delete endpoint; hash and metadata checks detect prior changes but cannot
+provide compare-and-delete against a concurrent external writer. This does not change
+the separate issue #18 production-release gate.
+
+Rollback: restore the previous application revision while retaining migrations 061–062,
+policies, receipts, encrypted observations and all remaining world data. Retention
+deletions cannot be undone by a code rollback; restore an independent backup if needed.
+Do not restore an old database over later user writes. No Pterodactyl/Wings patch,
+Blueprint update or new transfer infrastructure is involved.
+
+Validation (2026-11-04): 344 unit/transport tests, 452 isolated database/Gateway/lifecycle
+integration tests and six real-browser Worlds journeys pass. Coverage includes native
+TLS records arriving before response completion, reordered JSON fields, large Unicode
+payloads, cached startup transitions, truncated responses, timeout of paused readers,
+global stream admission, long uncompressible session names, receipt changes and stop
+finalizer failure. Browser tests also exercise 2,500 saves with bounded rendered rows,
+EN/IT desktop/mobile layouts, keyboard labels and Axe checks. Typechecks, frontend and
+runtime builds pass; lint retains the existing 104 warnings and one informational item.
+
+Read-only development evidence: the stopped Satisfactory test instance supplied one
+cached session, seven saves and six journal-proven safety labels. First event 22 ms,
+completion 26 ms measured inside the API container; these exclude browser/network time.
+Its operation count stayed 68 before/after, with no wake or game-file mutation. Migrations
+061 and 062 were applied through the normal migrator after private backups; all earlier
+checksums were verified unchanged. The independent review findings on long-name indexes
+and cached-stream cancellation were corrected before final deployment.

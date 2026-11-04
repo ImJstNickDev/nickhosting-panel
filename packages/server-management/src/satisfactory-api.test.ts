@@ -152,3 +152,81 @@ it('accepts empty 202 map-change acknowledgements without treating them as verif
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+it('streams authenticated save headers across pinned TLS before the native response is complete', async () => {
+  const { SatisfactoryApi } = await import('../../../games/satisfactory/src/api.js');
+  const save = {
+    saveVersion: 1,
+    buildVersion: 123,
+    saveName: 'save',
+    mapName: 'Persistent_Level',
+    mapOptions: 'x'.repeat(16384),
+    sessionName: 'Factory',
+    playDurationSeconds: 1,
+    saveDateTime: '2026-11-02T00:00:00Z',
+    isModdedSave: false,
+    isEditedSave: false,
+    isCreativeModeEnabled: false,
+  };
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let finished = false;
+  let authorization: string | undefined;
+  const server = createServer(
+    { key: identity.privateKeyPem, cert: identity.certificatePem },
+    (req, res) => {
+      authorization = req.headers.authorization;
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.write(
+          `{"data":{"sessions":[{"sessionName":"Factory","saveHeaders":[${JSON.stringify(save)}`,
+        );
+        void gate.then(() => {
+          finished = true;
+          res.end(
+            `,${Array.from({ length: 5 }, () => JSON.stringify(save)).join(',')}]}],"currentSessionIndex":0}}`,
+          );
+        });
+      });
+    },
+  );
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('bind');
+  try {
+    const api = new SatisfactoryApi(
+      satisfactoryPinnedTransport(
+        { address: '127.0.0.1', port: address.port },
+        identity.certificatePem,
+        'private-token',
+      ),
+    );
+    const events = api.streamSessions();
+    expect((await events.next()).value).toMatchObject({ type: 'session', sessionName: 'Factory' });
+    expect((await events.next()).value).toMatchObject({ type: 'save', save });
+    expect(finished).toBe(false);
+    expect(authorization).toBe('Bearer private-token');
+    release();
+    const remaining = await collect(events);
+    expect(remaining.at(-1)).toMatchObject({
+      type: 'complete',
+      data: {
+        currentSessionIndex: 0,
+        sessions: [{ saveHeaders: Array.from({ length: 6 }, () => save), sessionName: 'Factory' }],
+      },
+    });
+  } finally {
+    release();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+async function collect<T>(source: AsyncIterable<T>): Promise<T[]> {
+  const result: T[] = [];
+  for await (const item of source) result.push(item);
+  return result;
+}

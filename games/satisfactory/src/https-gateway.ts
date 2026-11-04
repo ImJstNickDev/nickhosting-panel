@@ -19,6 +19,7 @@ import {
 } from './https-cache.js';
 import { captureSatisfactoryResponseBody } from './https-cache-response.js';
 import { supportsNativeOfflineOperation } from './native-api.js';
+import { satisfactoryResponseMaxBytes } from './response-limits.js';
 
 const caches = new Map<string, SatisfactoryHttpsCache>();
 const writes = new Map<string, Promise<void>>();
@@ -26,6 +27,17 @@ const hydration = new WeakMap<SatisfactoryHttpsCache, Promise<void>>();
 const pendingByServer = new Map<string, number>();
 let totalPendingRequests = 0;
 const maxPendingBodyBytes = 64 * 1024;
+let activeCaptures = 0;
+/** Capture is best effort; a saturated observation budget never blocks passthrough. */
+function trimCaches(): void {
+  let bytes = 0;
+  for (const cache of caches.values()) bytes += cache.byteLength;
+  for (const cache of caches.values()) {
+    if (bytes <= 64 * 1024 * 1024) break;
+    bytes -= cache.byteLength;
+    cache.clear();
+  }
+}
 const offlineLimits = new Map<string, { since: number; requests: number; passwords: number }>();
 function permitOffline(serverId: string, peer: string, password: boolean): boolean {
   const key = JSON.stringify([serverId, peer]),
@@ -189,6 +201,7 @@ export async function acceptSatisfactoryHttps(
       try {
         const persisted = await context.loadPrivateState?.();
         if (persisted) cache.restore(persisted);
+        trimCaches();
       } catch {
         /* Unavailable cache never grants offline authentication. */
       }
@@ -531,19 +544,39 @@ export async function acceptSatisfactoryHttps(
             cache.clear();
             persist();
           }
-          const capture = fn && satisfactoryCachedFunctions.has(fn) && status === 200;
+          const capture =
+            fn && satisfactoryCachedFunctions.has(fn) && status === 200 && activeCaptures < 2;
           const parts: Buffer[] = [];
           let length = 0;
           if (capture) {
+            activeCaptures++;
+            const captureLimit = satisfactoryResponseMaxBytes(fn) + 65536;
+            let released = false;
+            let decoding = false;
+            const release = () => {
+              if (released) return;
+              released = true;
+              activeCaptures--;
+              parts.length = 0;
+            };
+            response.once('close', () => {
+              if (!decoding) release();
+            });
             response.on('data', (chunk: Buffer) => {
               length += chunk.length;
-              if (length <= 262144) parts.push(chunk);
+              if (length <= captureLimit) parts.push(chunk);
+              else parts.length = 0;
             });
             response.on('end', () => {
-              if (length > 262144) return;
+              if (length > captureLimit) {
+                release();
+                return;
+              }
+              decoding = true;
               void captureSatisfactoryResponseBody(
                 Buffer.concat(parts),
                 response.headers['content-encoding'],
+                fn,
               )
                 .then((captured) => {
                   if (captured === undefined) return;
@@ -553,9 +586,11 @@ export async function acceptSatisfactoryHttps(
                     header(incoming, 'x-factorygame-playerid'),
                     captured,
                   );
+                  trimCaches();
                   persist();
                 })
-                .catch(() => undefined);
+                .catch(() => undefined)
+                .finally(release);
             });
           }
           outgoing.writeHead(status, response.headers);

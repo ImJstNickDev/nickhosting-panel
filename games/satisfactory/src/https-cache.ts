@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
+import { gatewayPrivateStateMaxBytes } from '@nickhosting/game-sdk';
 import { z } from 'zod';
+import {
+  satisfactoryEnumerationMaxBytes,
+  satisfactoryResponseMaxBytes,
+} from './response-limits.js';
 
 /** Read-only API calls declared by Coffee Stain's public dedicated-server controllers. */
 export const satisfactoryCachedFunctions = new Set([
@@ -11,15 +16,25 @@ export const satisfactoryCachedFunctions = new Set([
 export const satisfactoryJoinFunction = 'JoinGameRequest';
 const authorizationLifetimeMs = 5 * 60_000;
 const maxEntries = 128;
-const maxBodyBytes = 64 * 1024;
 const entrySchema = z.strictObject({
   key: z.string().regex(/^[a-f0-9]{64}$/),
   tokenKey: z.string().regex(/^[a-f0-9]{64}$/),
   expiresAt: z.number().finite(),
-  responses: z.record(z.string(), z.string().max(maxBodyBytes)),
+  responses: z
+    .record(z.string(), z.string().max(satisfactoryEnumerationMaxBytes))
+    .refine((responses) =>
+      Object.entries(responses).every(
+        ([operation, body]) =>
+          satisfactoryCachedFunctions.has(operation) &&
+          Buffer.byteLength(body) <= satisfactoryResponseMaxBytes(operation),
+      ),
+    ),
   observedAt: z.record(z.string(), z.number().finite()).optional(),
 });
-export const satisfactoryHttpsCacheSchema = z.array(entrySchema).max(maxEntries);
+export const satisfactoryHttpsCacheSchema = z
+  .array(entrySchema)
+  .max(maxEntries)
+  .refine((entries) => Buffer.byteLength(JSON.stringify(entries)) <= gatewayPrivateStateMaxBytes);
 export type SatisfactoryHttpsCacheSnapshot = z.infer<typeof satisfactoryHttpsCacheSchema>;
 function credentialKey(
   authorization: string | undefined,
@@ -58,6 +73,10 @@ export function satisfactoryPlayerCredential(authorization: string | undefined):
 }
 export class SatisfactoryHttpsCache {
   private readonly entries = new Map<string, SatisfactoryHttpsCacheSnapshot[number]>();
+  private storedBytes = 0;
+  get byteLength(): number {
+    return this.storedBytes;
+  }
   constructor(private readonly now: () => number = Date.now) {}
   restore(snapshot: unknown): void {
     const now = this.now();
@@ -92,19 +111,20 @@ export class SatisfactoryHttpsCache {
     if (!tokenKey) return;
     for (const [key, entry] of this.entries)
       if (entry.tokenKey === tokenKey) this.entries.delete(key);
+    this.trim();
   }
   clear(): void {
     this.entries.clear();
+    this.storedBytes = 0;
   }
   private trim(): void {
     for (const [key, entry] of this.entries)
       if (entry.expiresAt <= this.now()) this.entries.delete(key);
-    while (
-      this.entries.size > maxEntries ||
-      Buffer.byteLength(JSON.stringify([...this.entries.values()])) > 200 * 1024
-    ) {
+    this.storedBytes = Buffer.byteLength(JSON.stringify([...this.entries.values()]));
+    while (this.entries.size > maxEntries || this.byteLength > gatewayPrivateStateMaxBytes) {
       const first = this.entries.keys().next().value;
       if (first) this.entries.delete(first);
+      this.storedBytes = Buffer.byteLength(JSON.stringify([...this.entries.values()]));
     }
   }
   authorize(authorization: string | undefined, playerId: string | undefined): boolean {
@@ -135,7 +155,11 @@ export class SatisfactoryHttpsCache {
     body: string,
   ): void {
     const key = credentialKey(authorization, playerId);
-    if (!key || !satisfactoryCachedFunctions.has(fn) || Buffer.byteLength(body) > maxBodyBytes)
+    if (
+      !key ||
+      !satisfactoryCachedFunctions.has(fn) ||
+      Buffer.byteLength(body) > satisfactoryResponseMaxBytes(fn)
+    )
       return;
     let response: unknown;
     try {

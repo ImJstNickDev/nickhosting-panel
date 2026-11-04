@@ -118,3 +118,17 @@ it('passes validated world requests to the shared service', async () => {
     input: { saveName: 'Factory', confirm: true, enableAdvancedGameSettings: false },
   });
 });
+
+it('authorizes server reads before opening a Worlds stream or decrypting snapshots', async () => {
+  mocked.authorize.mockRejectedValueOnce(new DomainError('forbidden'));
+  const response = await app().request(
+    '/v1/servers/11111111-1111-4111-8111-111111111111/satisfactory/api/worlds/stream',
+  );
+  expect(response.status).toBe(403);
+  expect(mocked.authorize).toHaveBeenCalledWith(
+    expect.anything(),
+    expect.anything(),
+    '11111111-1111-4111-8111-111111111111',
+    'server:read',
+  );
+});

@@ -2,6 +2,25 @@ import type { ColumnType, Generated } from 'kysely';
 
 type Json = ColumnType<unknown, string, string>;
 export interface SatisfactoryModTables {
+  satisfactory_save_retention: {
+    server_id: string;
+    session_name: string;
+    session_key: string;
+    keep_count: number;
+    updated_at: Generated<Date>;
+  };
+  satisfactory_safety_saves: {
+    server_id: string;
+    save_name: string;
+    session_name: string;
+    job_id: string;
+    path: string;
+    sha256: string;
+    size: ColumnType<string, number, number>;
+    modified_at: string;
+    created_at: Generated<Date>;
+    deleted_at: Date | null;
+  };
   satisfactory_mod_states: {
     server_id: string;
     selection: Json;

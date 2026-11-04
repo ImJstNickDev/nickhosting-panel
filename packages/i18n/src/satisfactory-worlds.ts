@@ -12,6 +12,7 @@ export const satisfactoryWorldsMessages: Record<string, [string, string]> = {
     'La richiesta potrebbe essere arrivata al gioco. Chiudi questa finestra e aggiorna per verificare la sessione e i salvataggi prima di riprovare.',
   ],
   'games.satisfactory.worlds.title': ['Worlds', 'Mondi'],
+  'games.satisfactory.worlds.heading': ['FICSIT Worlds', 'Mondi FICSIT'],
   'games.satisfactory.worlds.refresh': ['Refresh', 'Aggiorna'],
   'games.satisfactory.worlds.save': ['Save world', 'Salva mondo'],
   'games.satisfactory.worlds.create': ['Create world', 'Crea mondo'],
@@ -21,8 +22,8 @@ export const satisfactoryWorldsMessages: Record<string, [string, string]> = {
     'Collega l’API del server nelle Impostazioni per gestire i mondi.',
   ],
   'games.satisfactory.worlds.startFirst': [
-    'Start the server to read and manage its saves. Opening this page does not wake it.',
-    'Avvia il server per leggere e gestire i salvataggi. Questa pagina non lo risveglia.',
+    'The server is stopped. Saved world information remains available; start it to manage saves.',
+    'Il server è spento. Le informazioni salvate restano disponibili; avvialo per gestire i salvataggi.',
   ],
   'games.satisfactory.worlds.readOnly': [
     'You can view saves but cannot change worlds.',
@@ -40,8 +41,8 @@ export const satisfactoryWorldsMessages: Record<string, [string, string]> = {
     'Request accepted. Refresh to check the current saves.',
     'Richiesta accettata. Aggiorna per verificare i salvataggi attuali.',
   ],
-  'games.satisfactory.worlds.search': ['Search sessions and saves', 'Cerca sessioni e salvataggi'],
-  'games.satisfactory.worlds.noMatches': ['No matching saves.', 'Nessun salvataggio trovato.'],
+  'games.satisfactory.worlds.search': ['Search worlds', 'Cerca mondi'],
+  'games.satisfactory.worlds.noMatches': ['No matching worlds.', 'Nessun mondo trovato.'],
   'games.satisfactory.worlds.empty': [
     'No saves available. Create a world to begin.',
     'Nessun salvataggio disponibile. Crea un mondo per iniziare.',
@@ -80,5 +81,75 @@ export const satisfactoryWorldsMessages: Record<string, [string, string]> = {
   'games.satisfactory.worlds.replaceWarning': [
     'A save with this name exists. Choose another name.',
     'Esiste un salvataggio con questo nome. Scegli un altro nome.',
+  ],
+  'games.satisfactory.worlds.live': ['Live', 'In tempo reale'],
+  'games.satisfactory.worlds.cached': ['Saved state', 'Stato salvato'],
+  'games.satisfactory.worlds.starting': [
+    'The server is starting. Saved worlds remain visible while the game becomes ready.',
+    'Il server si sta avviando. I mondi salvati restano visibili mentre il gioco si prepara.',
+  ],
+  'games.satisfactory.worlds.refreshing': ['Updating worlds…', 'Aggiornamento dei mondi…'],
+  'games.satisfactory.worlds.unknown': [
+    'No saved world information is available yet. Start the server to read its worlds.',
+    'Non sono ancora disponibili informazioni salvate sui mondi. Avvia il server per leggerle.',
+  ],
+  'games.satisfactory.worlds.worldPages': ['World pages', 'Pagine dei mondi'],
+  'games.satisfactory.worlds.transfers': [
+    'Import and export saves',
+    'Importa ed esporta salvataggi',
+  ],
+  'games.satisfactory.worlds.unnamed': ['Unnamed world', 'Mondo senza nome'],
+  'games.satisfactory.worlds.lastActiveSession': ['Last active session', 'Ultima sessione attiva'],
+  'games.satisfactory.worlds.saveCount': [
+    '{count, plural, one {# save} other {# saves}}',
+    '{count, plural, one {# salvataggio} other {# salvataggi}}',
+  ],
+  'games.satisfactory.worlds.loadLatest': ['Load latest save', 'Carica ultimo salvataggio'],
+  'games.satisfactory.worlds.loadLatestNamed': [
+    'Load latest save of {name}',
+    'Carica ultimo salvataggio di {name}',
+  ],
+  'games.satisfactory.worlds.latestSave': ['Latest save', 'Ultimo salvataggio'],
+  'games.satisfactory.worlds.history': ['Save history', 'Cronologia salvataggi'],
+  'games.satisfactory.worlds.searchSaves': ['Search saves', 'Cerca salvataggi'],
+  'games.satisfactory.worlds.saveType': ['Save type', 'Tipo di salvataggio'],
+  'games.satisfactory.worlds.all': ['All saves', 'Tutti i salvataggi'],
+  'games.satisfactory.worlds.manual': ['Manual save', 'Salvataggio manuale'],
+  'games.satisfactory.worlds.autosave': ['Autosave', 'Salvataggio automatico'],
+  'games.satisfactory.worlds.safety': [
+    'Platform safety save',
+    'Salvataggio di sicurezza della piattaforma',
+  ],
+  'games.satisfactory.worlds.noSaves': ['No matching saves.', 'Nessun salvataggio trovato.'],
+  'games.satisfactory.worlds.details': ['Save details', 'Dettagli salvataggio'],
+  'games.satisfactory.worlds.filename': ['Filename', 'Nome file'],
+  'games.satisfactory.worlds.retention': [
+    'Safety save retention',
+    'Conservazione dei salvataggi di sicurezza',
+  ],
+  'games.satisfactory.worlds.retentionHint': [
+    'Keeps this many verified platform safety saves for this world. Older verified copies are gradually removed after a new safety save and server stop. Manual saves, autosaves and unverified older files are preserved.',
+    'Conserva questo numero di salvataggi di sicurezza verificati per il mondo. Le copie verificate più vecchie vengono rimosse gradualmente dopo un nuovo salvataggio riuscito e l’arresto del server. I salvataggi manuali, automatici e i vecchi file non verificati restano intatti.',
+  ],
+  'games.satisfactory.worlds.retentionLocked': [
+    'Retention is set by the server environment.',
+    'La conservazione è definita dall’ambiente del server.',
+  ],
+  'games.satisfactory.worlds.retentionKeep': [
+    'Safety saves to keep',
+    'Salvataggi di sicurezza da conservare',
+  ],
+  'games.satisfactory.worlds.applyRetention': ['Save retention', 'Salva conservazione'],
+  'satisfactory.worlds.retention.capture_skipped': [
+    'Safety save preserved without automatic rotation.',
+    'Salvataggio di sicurezza conservato senza rotazione automatica.',
+  ],
+  'satisfactory.worlds.retention.deleted': [
+    'Older safety save removed.',
+    'Salvataggio di sicurezza precedente rimosso.',
+  ],
+  'satisfactory.worlds.retention.skipped': [
+    'Safety save preserved because its identity could not be confirmed.',
+    'Salvataggio di sicurezza conservato perché non è stato possibile confermarne l’identità.',
   ],
 };

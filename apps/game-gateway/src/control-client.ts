@@ -6,6 +6,7 @@ import {
   gatewayObservationSchema,
   gatewayOfflineApiRequestSchema,
   gatewayOfflineApiResponseSchema,
+  gatewayPrivateStateMaxBytes,
   gatewaySatisfactoryStateSchema,
   gatewaySnapshotSchema,
   gatewayWakeRequestSchema,
@@ -119,12 +120,21 @@ export function createGatewayControlClient(
       if (!reader) throw new DomainError('integration_unavailable');
       const chunks: Uint8Array[] = [];
       let bytes = 0;
+      const enumeration =
+        action === 'offline-api' &&
+        z
+          .object({ request: z.object({ operation: z.literal('EnumerateSessions') }) })
+          .safeParse(body).success;
+      const maxBytes =
+        action === 'private-state-read' || enumeration
+          ? gatewayPrivateStateMaxBytes + 4096
+          : options.maxResponseBytes;
       try {
         while (true) {
           const part = await reader.read();
           if (part.done) break;
           bytes += part.value.byteLength;
-          if (bytes > options.maxResponseBytes) {
+          if (bytes > maxBytes) {
             await reader.cancel();
             throw new DomainError('integration_unavailable');
           }

@@ -26,6 +26,21 @@ const snapshot = {
 };
 
 describe('authenticated bounded Gateway control client', () => {
+  it('allows large private metadata while preserving the configured bound on other responses', async () => {
+    const body = { metadata: 'x'.repeat(128 * 1024) };
+    const client = createGatewayControlClient({
+      ...settings,
+      fetcher: async () => Response.json(body),
+    });
+    try {
+      expect(await client.loadPrivateState?.({ routeId: randomUUID(), routeRevision: 1 })).toEqual(
+        body,
+      );
+      await expect(client.requestJson('snapshot')).rejects.toThrow();
+    } finally {
+      client.close();
+    }
+  });
   it('sends console credentials only through revision-bound Core and validates lifecycle receipts', async () => {
     const generation = randomUUID();
     const input = {

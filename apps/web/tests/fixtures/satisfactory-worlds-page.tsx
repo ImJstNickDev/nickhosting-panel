@@ -14,6 +14,14 @@ const Section = location.search.includes('overview')
   : SatisfactoryWorldsSection;
 
 function FixtureSection() {
+  const [runtimeState, setRuntimeState] = useState(
+    location.search.includes('offline') ? 'offline' : 'running',
+  );
+  useEffect(() => {
+    const change = (event: Event) => setRuntimeState((event as CustomEvent<string>).detail);
+    window.addEventListener('fixture-runtime', change);
+    return () => window.removeEventListener('fixture-runtime', change);
+  }, []);
   const [pending, setPending] = useState(location.search.includes('pending'));
   useEffect(() => {
     const change = (event: Event) => setPending((event as CustomEvent<boolean>).detail);
@@ -25,7 +33,7 @@ function FixtureSection() {
       data={{ values: {}, rows: [] }}
       serverId="10000000-0000-4000-8000-000000000001"
       serverName="Satisfactory"
-      runtimeState={location.search.includes('offline') ? 'offline' : 'running'}
+      runtimeState={runtimeState}
       canManage={!location.search.includes('readonly')}
       permissionKeys={['server:manage', 'console.power', 'files.read']}
       pending={pending}

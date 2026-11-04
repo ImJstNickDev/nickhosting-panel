@@ -1033,6 +1033,34 @@ describe('M3 Core service authentication and managed control plane', () => {
       ).status,
     ).toBe(400);
   });
+  it('accepts a large private snapshot only after Gateway authentication', async () => {
+    const input = await satisfactoryRoute();
+    const state = [
+      {
+        key: 'f'.repeat(64),
+        tokenKey: 'a'.repeat(64),
+        expiresAt: Date.now() + 60000,
+        responses: {
+          EnumerateSessions: JSON.stringify({
+            data: { sessions: [], currentSessionIndex: -1, padding: 'x'.repeat(128 * 1024) },
+          }),
+        },
+      },
+    ];
+    expect(
+      (
+        await request(
+          `${prefix()}/private-state-write`,
+          { ...input, state },
+          { authorization: 'Bearer invalid' },
+        )
+      ).status,
+    ).toBe(401);
+    expect((await request(`${prefix()}/private-state-write`, { ...input, state })).status).toBe(
+      204,
+    );
+    expect(await (await request(`${prefix()}/private-state-read`, input)).json()).toEqual(state);
+  });
   it('observes only authenticated live player state without exposing private session data', async () => {
     const input = await satisfactoryRoute('udp');
     expect((await request(`${prefix()}/application-observation`, input)).status).toBe(503);

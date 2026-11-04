@@ -91,6 +91,8 @@ export interface GameRuntimeHooks extends GameBackupHooks<GameLifecycleContext> 
   configureProvision(context: GameLifecycleContext): Promise<boolean>;
   /** Flush game state inside the existing durable stop/restart effect. */
   prepareStop?(context: GameLifecycleContext): Promise<void>;
+  /** Best-effort maintenance after confirmed stop, under the existing lifecycle lock. */
+  finalizeStop?(context: GameLifecycleContext): Promise<void>;
   verifyInitialInstallation?(
     context: GameLifecycleContext,
   ): Promise<import('./lifecycle.js').InitialInstallationOutputs | null>;

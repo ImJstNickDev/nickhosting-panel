@@ -47,6 +47,7 @@ import { registerSatisfactoryRoutes } from './satisfactory.js';
 import { registerSatisfactoryApiRoutes } from './satisfactory-api.js';
 import { registerSatisfactoryModRoutes } from './satisfactory-mods.js';
 import { registerSatisfactoryOverviewRoutes } from './satisfactory-overview.js';
+import { registerSatisfactorySaveRetentionRoutes } from './satisfactory-save-retention.js';
 import { registerScheduleRoutes } from './schedules.js';
 import { registerServerRoutes } from './servers.js';
 import { receiveSftpEvent, SFTP_EVENTS_PATH } from './sftp-events.js';
@@ -175,6 +176,13 @@ export function createApp(options: Options) {
   });
   app.use('*', async (c, next) => {
     // This route authenticates before reading and bounds actual bytes itself,
+    // including large private snapshots; Gateway middleware authenticates first.
+    if (
+      c.req.method === 'POST' &&
+      /^\/internal\/gateway\/[0-9a-f-]{36}\/private-state-write$/.test(c.req.path)
+    )
+      return next();
+    // Binary upload routes bound actual bytes in their own handlers,
     // including requests without Content-Length or with an incorrect value.
     if (c.req.method === 'PUT' && c.req.path === '/v1/web/profile-photo') return next();
     if (
@@ -640,6 +648,7 @@ export function createApp(options: Options) {
   registerSatisfactoryRoutes(app, { db, principal });
   registerSatisfactoryOverviewRoutes(app, { db, codec: options.codec, principal });
   registerSatisfactoryApiRoutes(app, { db, codec: options.codec, principal });
+  registerSatisfactorySaveRetentionRoutes(app, { db, principal, env: options.env });
   registerSatisfactoryModRoutes(app, {
     db,
     principal,

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { satisfactoryGameStateSchema, satisfactorySessionsSchema } from './api.js';
 import { satisfactoryHttpsCacheSchema } from './https-cache.js';
+import { satisfactoryResponseMaxBytes as satisfactoryReadMaxBytes } from './response-limits.js';
 
 const dictionaries = z.record(z.string().max(256), z.string().max(4096));
 const bodies = {
@@ -27,7 +28,8 @@ export function readOfflineSnapshots(input: unknown): OfflineSnapshots {
   for (const [operation, entry] of Object.entries(parsed.data)) {
     if (!Object.hasOwn(bodies, operation)) continue;
     try {
-      if (Buffer.byteLength(JSON.stringify(entry.body)) > 64 * 1024) continue;
+      if (Buffer.byteLength(JSON.stringify(entry.body)) > satisfactoryReadMaxBytes(operation))
+        continue;
     } catch {
       continue;
     }

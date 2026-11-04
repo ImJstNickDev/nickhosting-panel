@@ -1,4 +1,5 @@
 import { randomUUID, timingSafeEqual, X509Certificate } from 'node:crypto';
+import type { IncomingMessage } from 'node:http';
 import { request } from 'node:https';
 import { isIP } from 'node:net';
 import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
@@ -10,6 +11,7 @@ import {
   type SatisfactoryApiTransport,
 } from '../../../games/satisfactory/src/api.js';
 import { decodeNativePlayerIdentity } from '../../../games/satisfactory/src/native-auth.js';
+import { satisfactoryEnumerationMaxBytes } from '../../../games/satisfactory/src/response-limits.js';
 import {
   satisfactoryAdvancedSettingsSchema,
   satisfactoryAdvancedSettingsUpdateSchema,
@@ -46,80 +48,100 @@ export function satisfactoryPinnedTransport(
     endpoint.port > 65535
   )
     throw new DomainError('configuration_invalid');
+  async function response(
+    body: { function: string; data?: Record<string, unknown> },
+    signal?: AbortSignal,
+  ): Promise<IncomingMessage> {
+    return new Promise((resolve, reject) => {
+      const payload = Buffer.from(JSON.stringify(body));
+      const req = request(
+        {
+          hostname: endpoint.address,
+          port: endpoint.port,
+          path: '/api/v1',
+          method: 'POST',
+          agent: false,
+          ca: certificatePem,
+          rejectUnauthorized: true,
+          minVersion: 'TLSv1.2',
+          checkServerIdentity: (_host, cert) =>
+            !cert.raw || cert.raw.length !== expected.length || !timingSafeEqual(cert.raw, expected)
+              ? new Error('certificate_mismatch')
+              : undefined,
+          headers: {
+            Authorization: `Bearer ${secret}`,
+            ...(playerId ? { 'X-FactoryGame-PlayerId': playerId } : {}),
+            'Content-Type': 'application/json; charset=utf-8',
+            'Accept-Encoding': 'identity',
+            'Content-Length': String(payload.length),
+          },
+          signal: signal
+            ? AbortSignal.any([signal, AbortSignal.timeout(10000)])
+            : AbortSignal.timeout(10000),
+        },
+        (res) => {
+          if (
+            (res.statusCode ?? 500) < 200 ||
+            (res.statusCode ?? 500) >= 300 ||
+            (res.headers['content-encoding'] && res.headers['content-encoding'] !== 'identity')
+          ) {
+            res.resume();
+            reject(
+              new DomainError(
+                playerId && res.statusCode === 401
+                  ? 'unauthenticated'
+                  : playerId && res.statusCode === 403
+                    ? 'forbidden'
+                    : 'integration_unavailable',
+              ),
+            );
+          } else resolve(res);
+        },
+      );
+      req.on('error', () => reject(new DomainError('integration_unavailable')));
+      req.end(payload);
+    });
+  }
+  async function* chunks(res: IncomingMessage, maxBytes: number): AsyncGenerator<Uint8Array> {
+    let length = 0;
+    try {
+      for await (const chunk of res) {
+        const bytes = chunk as Buffer;
+        length += bytes.length;
+        if (length > maxBytes) throw new DomainError('integration_unavailable');
+        yield bytes;
+      }
+    } finally {
+      res.destroy();
+    }
+  }
   return {
-    request(body, signal) {
-      return new Promise((resolve, reject) => {
-        const payload = Buffer.from(JSON.stringify(body));
-        const req = request(
-          {
-            hostname: endpoint.address,
-            port: endpoint.port,
-            path: '/api/v1',
-            method: 'POST',
-            agent: false,
-            ca: certificatePem,
-            rejectUnauthorized: true,
-            minVersion: 'TLSv1.2',
-            checkServerIdentity: (_host, cert) =>
-              !cert.raw ||
-              cert.raw.length !== expected.length ||
-              !timingSafeEqual(cert.raw, expected)
-                ? new Error('certificate_mismatch')
-                : undefined,
-            headers: {
-              Authorization: `Bearer ${secret}`,
-              ...(playerId ? { 'X-FactoryGame-PlayerId': playerId } : {}),
-              'Content-Type': 'application/json; charset=utf-8',
-              'Content-Length': String(payload.length),
-            },
-            signal: signal
-              ? AbortSignal.any([signal, AbortSignal.timeout(10000)])
-              : AbortSignal.timeout(10000),
-          },
-          (res) => {
-            if (res.statusCode === 204) {
-              res.resume();
-              resolve(undefined);
-              return;
-            }
-            if ((res.statusCode ?? 500) < 200 || (res.statusCode ?? 500) >= 300) {
-              res.resume();
-              reject(
-                new DomainError(
-                  playerId && res.statusCode === 401
-                    ? 'unauthenticated'
-                    : playerId && res.statusCode === 403
-                      ? 'forbidden'
-                      : 'integration_unavailable',
-                ),
-              );
-              return;
-            }
-            const chunks: Buffer[] = [];
-            let length = 0;
-            res.on('data', (chunk: Buffer) => {
-              length += chunk.length;
-              if (length > 1048576) {
-                res.destroy();
-                reject(new DomainError('integration_unavailable'));
-              } else chunks.push(chunk);
-            });
-            res.on('error', () => reject(new DomainError('integration_unavailable')));
-            res.on('end', () => {
-              try {
-                const text = Buffer.concat(chunks).toString('utf8');
-                // Map changes can acknowledge with HTTP 202 and an empty body.
-                // Keep undefined reserved for 204 authentication verification.
-                resolve(res.statusCode === 202 && text.length === 0 ? {} : JSON.parse(text));
-              } catch {
-                reject(new DomainError('integration_unavailable'));
-              }
-            });
-          },
-        );
-        req.on('error', () => reject(new DomainError('integration_unavailable')));
-        req.end(payload);
-      });
+    async *streamRequest(body, signal) {
+      const res = await response(body, signal);
+      yield* chunks(
+        res,
+        body.function === 'EnumerateSessions' ? satisfactoryEnumerationMaxBytes : 1048576,
+      );
+    },
+    async request(body, signal) {
+      const res = await response(body, signal);
+      if (res.statusCode === 204) {
+        res.resume();
+        return undefined;
+      }
+      try {
+        const buffers: Uint8Array[] = [];
+        for await (const chunk of chunks(
+          res,
+          body.function === 'EnumerateSessions' ? satisfactoryEnumerationMaxBytes : 1048576,
+        ))
+          buffers.push(chunk);
+        const text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(buffers));
+        // Only HTTP 204 verifies authentication; empty 202 acknowledges map changes.
+        return res.statusCode === 202 && !text.length ? {} : (JSON.parse(text) as unknown);
+      } catch {
+        throw new DomainError('integration_unavailable');
+      }
     },
   };
 }

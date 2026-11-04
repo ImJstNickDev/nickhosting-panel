@@ -19,6 +19,9 @@ export const gatewayModeSchema = z.enum([
 export type GatewayMode = z.infer<typeof gatewayModeSchema>;
 /** Ephemeral listener response; stopping is not persisted routing authority. */
 export type GatewayResponseMode = GatewayMode | 'stopping';
+/** Bounded private protocol metadata, including JSON-escaped native response strings.
+ * Routing snapshots and inbound player requests retain their smaller independent limits. */
+export const gatewayPrivateStateMaxBytes = 32 * 1024 * 1024 + 512 * 1024;
 export const gatewayOfflineApiRequestSchema = z
   .strictObject({
     operation: z.string().regex(/^[A-Za-z][A-Za-z0-9]{0,63}$/),

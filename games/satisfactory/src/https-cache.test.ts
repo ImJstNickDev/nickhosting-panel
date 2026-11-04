@@ -2,6 +2,19 @@ import { expect, it } from 'vitest';
 import { SatisfactoryHttpsCache, satisfactoryPlayerCredential } from './https-cache.js';
 
 const authorization = `Bearer ${Buffer.from(JSON.stringify({ pl: 'Client' })).toString('base64')}.${'ab'.repeat(64)}`;
+it('retains enumeration beyond 64KiB through restore without widening other reads', () => {
+  const body = JSON.stringify({ data: { sessions: [], padding: 'x'.repeat(128 * 1024) } });
+  const cache = new SatisfactoryHttpsCache();
+  cache.remember('EnumerateSessions', authorization, undefined, body);
+  cache.remember('QueryServerState', authorization, undefined, body);
+  const restored = new SatisfactoryHttpsCache();
+  restored.restore(cache.snapshot());
+  expect(restored.read('EnumerateSessions', authorization, undefined)).toBe(body);
+  expect(restored.read('QueryServerState', authorization, undefined)).toBeUndefined();
+  expect(restored.byteLength).toBeGreaterThan(128 * 1024);
+  restored.clear();
+  expect(restored.byteLength).toBe(0);
+});
 it('persists only credential hashes and read envelopes, scoped by player where available', () => {
   const cache = new SatisfactoryHttpsCache(() => 1000);
   cache.remember('QueryServerState', authorization, '060102', '{"data":{"serverGameState":{}}}');

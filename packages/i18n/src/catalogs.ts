@@ -99,6 +99,8 @@ export const en = {
   'servers.operation.owner_resolution': 'The Owner resolved an uncertain operation.',
   'servers.operation.effect_prepared': 'Operation prepared.',
   'servers.operation.stop_confirmed': 'Server stop confirmed.',
+  'servers.operation.stop_maintenance_skipped':
+    'Server stopped. Save maintenance will be retried after a later stop.',
   'servers.operation.kill_unconfirmed':
     'Force stop could not be confirmed. Check the operation details.',
   'servers.operation.install_confirmed': 'Installation completion confirmed.',
@@ -292,6 +294,8 @@ export const it: Record<MessageKey, string> = {
   'servers.operation.owner_resolution': 'Il Proprietario ha risolto un’operazione incerta.',
   'servers.operation.effect_prepared': 'Operazione preparata.',
   'servers.operation.stop_confirmed': 'Arresto del server confermato.',
+  'servers.operation.stop_maintenance_skipped':
+    'Server arrestato. La manutenzione dei salvataggi verrà riprovata dopo un arresto successivo.',
   'servers.operation.kill_unconfirmed':
     'Impossibile confermare l’arresto forzato. Controlla i dettagli dell’operazione.',
   'servers.operation.install_confirmed': 'Completamento dell’installazione confermato.',

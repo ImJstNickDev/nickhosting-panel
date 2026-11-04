@@ -785,6 +785,9 @@ export async function createManagementRuntime(options: ManagementOptions) {
     prepareGameStop: async (context: import('./lifecycle.js').GameLifecycleContext) => {
       await (await gameRuntime(context.db, context.server.id))?.prepareStop?.(context);
     },
+    finalizeGameStop: async (context: import('./lifecycle.js').GameLifecycleContext) => {
+      await (await gameRuntime(context.db, context.server.id))?.finalizeStop?.(context);
+    },
     prepareBackup: async (
       context: import('./lifecycle.js').GameLifecycleContext,
       mode: 'offline' | 'live',

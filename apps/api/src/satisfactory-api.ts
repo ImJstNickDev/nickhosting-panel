@@ -20,6 +20,11 @@ import {
   setSatisfactoryApiToken,
 } from '../../../packages/server-management/src/satisfactory-api.js';
 import type { Variables } from './app.js';
+import {
+  satisfactoryWorldsDependencies,
+  satisfactoryWorldsStreamResponse,
+  streamSatisfactoryWorlds,
+} from './satisfactory-worlds-stream.js';
 import type { ServerRouteOptions } from './servers.js';
 export function registerSatisfactoryApiRoutes(
   app: Hono<{ Variables: Variables }>,
@@ -90,6 +95,17 @@ export function registerSatisfactoryApiRoutes(
     if (!input.success) throw new DomainError('validation_failed');
     await applySatisfactoryOptions(options.db, codec, context, id, input.data.options);
     return c.body(null, 204);
+  });
+  app.get(`${base}/worlds/stream`, async (c) => {
+    const id = c.req.param('id');
+    const codec = await access(await options.principal(c), id);
+    const abort = new AbortController();
+    const signal = AbortSignal.any([c.req.raw.signal, abort.signal, AbortSignal.timeout(30000)]);
+    return satisfactoryWorldsStreamResponse(
+      streamSatisfactoryWorlds(id, satisfactoryWorldsDependencies(options.db, codec, id), signal),
+      abort,
+      signal,
+    );
   });
   app.get(`${base}/worlds`, async (c) => {
     c.header('cache-control', 'no-store');

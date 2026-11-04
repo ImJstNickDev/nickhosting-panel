@@ -1,6 +1,27 @@
 import { deflateSync, gzipSync } from 'node:zlib';
 import { expect, it } from 'vitest';
 import { captureSatisfactoryResponseBody } from './https-cache-response.js';
+import { satisfactoryEnumerationMaxBytes } from './response-limits.js';
+
+it('captures large enumeration only, with bounded decompression', async () => {
+  const text = JSON.stringify({ data: { sessions: [], padding: 'x'.repeat(128 * 1024) } });
+  for (const [bytes, encoding] of [
+    [Buffer.from(text), 'identity'],
+    [gzipSync(text), 'gzip'],
+  ] as const) {
+    expect(await captureSatisfactoryResponseBody(bytes, encoding, 'EnumerateSessions')).toBe(text);
+    expect(
+      await captureSatisfactoryResponseBody(bytes, encoding, 'QueryServerState'),
+    ).toBeUndefined();
+  }
+  expect(
+    await captureSatisfactoryResponseBody(
+      gzipSync(Buffer.alloc(satisfactoryEnumerationMaxBytes + 1)),
+      'gzip',
+      'EnumerateSessions',
+    ),
+  ).toBeUndefined();
+});
 
 it('captures unchanged UTF8 native responses using identity, gzip and deflate', async () => {
   const text = JSON.stringify({

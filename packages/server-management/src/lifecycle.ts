@@ -144,6 +144,7 @@ export interface LifecycleOptions {
   /** Game hooks run under the same pinned server lock and durable effect journal. */
   configureGameProvision?: (context: GameLifecycleContext) => Promise<boolean>;
   prepareGameStop?: (context: GameLifecycleContext) => Promise<void>;
+  finalizeGameStop?: (context: GameLifecycleContext) => Promise<void>;
   /** Read-only, trusted integration attestation; never used for reinstall/wipe. */
   verifyInitialInstallation?: (
     context: GameLifecycleContext,
@@ -2294,6 +2295,20 @@ export async function processServerOperation(
           );
           await event('servers.operation.stop_confirmed', { source: 'terminal_process' }, tx);
         });
+      }
+      try {
+        const stoppedContext = gameContext();
+        // Capacity remains reserved until finish(). Maintenance may inspect
+        // files now, but must freshly prove physical shutdown before mutation.
+        stoppedContext.assertStopped = async () => {
+          if (!(await options.confirmAlreadyStopped?.(server.id, db)))
+            throw new DomainError('operation_uncertain');
+        };
+        await options.finalizeGameStop?.(stoppedContext);
+      } catch {
+        // Maintenance must not invalidate a physically confirmed stop. It is
+        // idempotent and will be retried during the next confirmed stop.
+        await event('servers.operation.stop_maintenance_skipped');
       }
       return finish(true, true, null, false, true);
     };

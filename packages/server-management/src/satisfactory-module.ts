@@ -134,12 +134,24 @@ export function createSatisfactoryModuleRuntime(
       }
       await context.authorize();
       const api = await resolveSatisfactoryApi(context.db, codec, context.server.id);
-      if ((await api.state()).isGameRunning) {
+      const state = await api.state();
+      if (state.isGameRunning) {
         await context.authorize();
-        await api.save(`nh-stop-${context.operation().job_id}`);
+        const name = `nh-stop-${context.operation().job_id}`;
+        await api.save(name);
+        await (await import('./satisfactory-save-retention.js')).captureSatisfactorySafetySave(
+          context,
+          state.activeSessionName,
+          name,
+        );
         await context.authorize();
       }
     },
+    finalizeStop: async (context) =>
+      (await import('./satisfactory-save-retention.js')).rotateSatisfactorySafetySaves(
+        context,
+        env,
+      ),
     verifyRestore: configure,
     processContent: async (context) =>
       (await import('./satisfactory-mods.js')).processSatisfactoryMods(context, env),
