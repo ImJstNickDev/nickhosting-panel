@@ -1,4 +1,4 @@
-import { canManageGameUiSection } from '@nickhosting/game-sdk/ui';
+import { canManageGameUiSection, gameUiDescriptorSchema } from '@nickhosting/game-sdk/ui';
 import { expect, it, vi } from 'vitest';
 import { satisfactoryUiModule } from './index.js';
 
@@ -40,4 +40,21 @@ it('creates with exactly the chosen mapping and configuration through the common
       }),
     }),
   );
+});
+
+it('declares shared hostname and explicit port in the common UI contract', () => {
+  expect(satisfactoryUiModule.descriptor.connectionModes).toEqual([
+    { mode: 'shared-host', showPort: true },
+  ]);
+  for (const invalid of [
+    { mode: 'shared-host', showPort: false },
+    { mode: 'shared-host', showPort: true, srv: { service: '_satisfactory', transport: 'tcp' } },
+  ]) {
+    expect(
+      gameUiDescriptorSchema.safeParse({
+        ...satisfactoryUiModule.descriptor,
+        connectionModes: [invalid],
+      }).success,
+    ).toBe(false);
+  }
 });

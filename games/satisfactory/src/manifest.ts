@@ -24,7 +24,7 @@ export const satisfactoryManifest = gameManifestSchema.parse({
     readiness: true,
     wake: 'manual',
   },
-  connection: { mode: 'static-host-port', hostnameSettingKey: 'gatewayHostname', showPort: true },
+  connection: { mode: 'shared-host', defaultLabel: 'satisfactory', allowCustomSubdomain: false },
   ports: satisfactoryPorts,
   runtimes: [
     {

@@ -364,6 +364,7 @@ export const gameUiDescriptorSchema = z
       .array(
         z.discriminatedUnion('mode', [
           z.object({ mode: z.literal('static-host-port'), showPort: z.literal(true) }).strict(),
+          z.object({ mode: z.literal('shared-host'), showPort: z.literal(true) }).strict(),
           z
             .object({
               mode: z.literal('custom-subdomain'),

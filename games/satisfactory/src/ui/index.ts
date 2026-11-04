@@ -162,7 +162,7 @@ export const satisfactoryUiDescriptor = gameUiDescriptorSchema.parse({
     { role: 'game', labelKey: `${prefix}ports.game`, transports: ['tcp', 'udp'], required: true },
     { role: 'reliable', labelKey: `${prefix}ports.reliable`, transports: ['tcp'], required: true },
   ],
-  connectionModes: [{ mode: 'static-host-port', showPort: true }],
+  connectionModes: [{ mode: 'shared-host', showPort: true }],
 });
 const creationSchema = z.object({
   mappingId: z.uuid(),

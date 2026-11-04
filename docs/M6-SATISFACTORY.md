@@ -24,6 +24,21 @@ before returning identity material with `Cache-Control: no-store`. The Gateway
 holds identities in memory while their listener remains valid. Clearing sessions
 invalidates the cached identity.
 
+## Connection hostname
+
+Satisfactory declares `shared-host` with the fixed default label `satisfactory`.
+The existing Owner DNS domain policy chooses the domain; no deployment domain is
+embedded in the integration. The common DNS pipeline publishes one DNS-only shared
+record per eligible domain and retains its ownership independently of individual
+servers. Per-server custom labels and SRV records are not supported. Connection
+addresses always include the assigned public game port, for example
+`satisfactory.example.test:27001`, including when the backend uses a different port.
+The UI descriptor declares the same shared-host mode and explicit-port presentation.
+
+Existing servers require explicit DNS opt-in through the existing assignment
+pipeline; changing the compiled manifest alone does not publish them. The panel
+exposes the shared address only after the DNS assignment is confirmed.
+
 ## Gateway
 
 Load the compiled `games/satisfactory/src/gateway-module.js` through the existing

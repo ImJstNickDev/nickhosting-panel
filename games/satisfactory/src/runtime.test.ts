@@ -1,3 +1,4 @@
+import { resolveConfig, resolveDnsOptions } from '@nickhosting/core';
 import { expect, it } from 'vitest';
 import { satisfactoryManifest } from './manifest.js';
 import {
@@ -52,5 +53,29 @@ it('declares implemented readiness and graceful stop for automatic gateway provi
     readiness: true,
     gracefulStop: true,
     wake: 'manual',
+  });
+});
+
+it('resolves a fixed shared hostname from Owner domains without SRV or custom labels', () => {
+  expect(satisfactoryManifest.connection).toEqual({
+    mode: 'shared-host',
+    defaultLabel: 'satisfactory',
+    allowCustomSubdomain: false,
+  });
+  const options = resolveDnsOptions(
+    resolveConfig({
+      dnsBaseDomain: 'example.test',
+      cloudflareZoneId: 'a'.repeat(32),
+      dnsTarget: '192.0.2.1',
+      dnsInstanceId: '8ed937a8-5d44-4495-a568-5b7140324dfa',
+    }).values,
+    satisfactoryManifest.connection,
+    satisfactoryManifest.id,
+  );
+  expect(options).toMatchObject({
+    configured: true,
+    customizable: false,
+    supportsSrv: false,
+    defaultHostname: 'satisfactory.example.test',
   });
 });
