@@ -151,6 +151,7 @@ export function createSatisfactoryModuleRuntime(
       (await import('./satisfactory-save-retention.js')).rotateSatisfactorySafetySaves(
         context,
         env,
+        codec,
       ),
     verifyRestore: configure,
     processContent: async (context) =>

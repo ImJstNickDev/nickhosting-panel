@@ -76,7 +76,7 @@ const example = {
           mapOptions: '',
           saveName: 'Factory_autosave_0',
           sessionName: 'Northern factory',
-          saveDateTime: '2026-11-02T10:00:00Z',
+          saveDateTime: '2026.11.02-10.00.00',
           playDurationSeconds: 72000,
           buildVersion: 400001,
           isModdedSave: true,
@@ -145,14 +145,22 @@ it('confirms load, prevents save collisions, preserves errors, searches and uses
   await check(page.getByRole('heading', { name: 'Northern factory' })).toBeVisible({
     timeout: 15000,
   });
+  await check(page.getByRole('heading', { name: 'Save history', exact: true })).toHaveCount(0);
+  await check(page.getByLabel('Safety saves to keep')).toHaveCount(0);
+  await page.screenshot({ path: `${shots}/satisfactory-worlds-desktop-en.png`, fullPage: true });
+  await page.getByRole('button', { name: 'Open Northern factory', exact: true }).click();
+  await check(page).toHaveURL(/world=Northern\+factory$/);
+  await check(page.getByRole('heading', { name: 'Save history', exact: true })).toBeVisible();
   await page.getByText('Import and export saves', { exact: true }).click();
-  await page.getByText('Save history', { exact: true }).click();
   await check(page.locator('strong', { hasText: /^Autosave$/ })).toBeVisible();
   await check(page.getByRole('link', { name: 'Upload or download save files' })).toHaveAttribute(
     'href',
     /files\?directory=\.config%2FEpic%2FFactoryGame%2FSaved%2FSaveGames$/,
   );
-  await page.screenshot({ path: `${shots}/satisfactory-worlds-desktop-en.png`, fullPage: true });
+  await page.screenshot({
+    path: `${shots}/satisfactory-worlds-detail-desktop-en.png`,
+    fullPage: true,
+  });
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await page.getByRole('button', { name: 'Save world', exact: true }).click();
   await page.getByLabel('Save name', { exact: true }).fill('Factory_autosave_0');
@@ -175,6 +183,7 @@ it('confirms load, prevents save collisions, preserves errors, searches and uses
   await page.getByRole('dialog').getByRole('button', { name: 'Load save', exact: true }).click();
   await check(page.getByRole('dialog')).toBeHidden();
   expect(calls.at(-1)?.body).toEqual({ saveName: 'Factory_autosave_0', confirm: true });
+  await page.getByRole('button', { name: 'All worlds', exact: true }).click();
   await page.getByRole('searchbox', { name: 'Search worlds', exact: true }).fill('missing');
   await check(page.getByText('No matching worlds.')).toBeVisible();
   await context.close();
@@ -215,7 +224,11 @@ it('shows empty and loading states, creates a world with confirmation, and reads
     ),
   ).toBeVisible();
   await check(page.getByRole('heading', { name: 'Northern factory' })).toBeVisible();
-  await page.getByText('Cronologia salvataggi', { exact: true }).click();
+  await page.screenshot({
+    path: `${shots}/satisfactory-worlds-offline-mobile-it.png`,
+    fullPage: true,
+  });
+  await page.getByRole('button', { name: 'Apri Northern factory', exact: true }).click();
   const before = nativeReads.length;
   await page.waitForTimeout(500);
   expect(nativeReads.length).toBe(before);
@@ -224,7 +237,7 @@ it('shows empty and loading states, creates a world with confirmation, and reads
     true,
   );
   await page.screenshot({
-    path: `${shots}/satisfactory-worlds-offline-mobile-it.png`,
+    path: `${shots}/satisfactory-worlds-detail-mobile-it.png`,
     fullPage: true,
   });
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
@@ -244,7 +257,7 @@ it('renders the first world before the stream ends and gates mutations until nat
     await page.goto(`${origin}satisfactory-worlds-fixture`);
     await check(page.getByRole('heading', { name: 'Northern factory' })).toBeVisible();
     expect(responseEnded).toBe(false);
-    await page.getByText('Save history', { exact: true }).click();
+    await page.getByRole('button', { name: 'Open Northern factory', exact: true }).click();
     await check(page.getByRole('button', { name: 'Load Factory_autosave_0' })).toBeDisabled();
     await check(page.locator('strong', { hasText: /^Autosave$/ })).toBeVisible();
     expect(finishStream).toBeTypeOf('function');
@@ -300,12 +313,14 @@ it('retains cached worlds during startup and failed live refreshes, labels prove
   });
   await page.goto(`${origin}satisfactory-worlds-fixture?offline`);
   await check(page.getByRole('heading', { name: 'Northern factory' })).toBeVisible();
-  await page.getByText('Save history', { exact: true }).click();
+  await page.getByRole('button', { name: 'Open Northern factory', exact: true }).click();
   await check(page.locator('strong', { hasText: 'Platform safety save' })).toBeVisible();
   await check(
     page.getByText('nh-stop-10000000-0000-4000-8000-000000000001.sav', { exact: true }),
   ).toBeHidden();
-  await page.getByText('Safety save retention', { exact: true }).click();
+  await check(
+    page.getByRole('heading', { name: 'Safety save retention', exact: true }),
+  ).toBeVisible();
   await page.getByLabel('Safety saves to keep').fill('8');
   await page.getByRole('button', { name: 'Save retention', exact: true }).click();
   await check(page.getByRole('button', { name: 'Save retention', exact: true })).toBeDisabled();
@@ -368,7 +383,7 @@ it('bounds rendered save history for large worlds and filters proven safety save
   await page.goto(`${origin}satisfactory-worlds-fixture`);
   await check(page.getByText('2,500 saves', { exact: true })).toBeVisible();
   await check(page.locator('.satisfactory-save-list > li')).toHaveCount(0);
-  await page.getByText('Save history', { exact: true }).click();
+  await page.getByRole('button', { name: 'Open Northern factory', exact: true }).click();
   await check(page.locator('.satisfactory-save-list > li')).toHaveCount(20);
   await check(page.getByText('1 of 125', { exact: true })).toBeVisible();
   await page.getByLabel('Save type', { exact: true }).selectOption('safety');
@@ -459,6 +474,110 @@ it('renders live and historical overview honestly and exposes request errors', a
   unavailable = true;
   await page.getByRole('button', { name: 'Aggiorna', exact: true }).click();
   await check(page.getByText('Nessuna osservazione del mondo ancora disponibile.')).toBeVisible();
-  await check(page.locator('.ficsit-overview-updated time')).toHaveCount(0);
+  await check(page.locator('.ficsit-updated time')).toHaveCount(0);
+  await context.close();
+});
+
+it('uses identical Overview framing and opens named worlds with browser history navigation', async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } }),
+    page = await context.newPage();
+  const named = structuredClone(example);
+  const name = 'Northern / Factory & città';
+  if (!named.sessions[0]) throw new Error('missing_fixture');
+  named.sessions[0].sessionName = name;
+  named.sessions.push({ ...structuredClone(named.sessions[0]), sessionName: 'Other factory' });
+  await page.route('**/v1/**', (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/overview'))
+      return route.fulfill({
+        json: {
+          configured: true,
+          state: null,
+          source: 'snapshot',
+          observedAt: '2026-11-02T10:00:00Z',
+        },
+      });
+    if (path.endsWith('/retention')) return route.fulfill({ json: retention });
+    return route.fulfill(streamBody(named));
+  });
+  const framing = () =>
+    page.locator('.ficsit-header').evaluate((header) => {
+      const heading = header.querySelector('h2');
+      if (!heading) throw new Error('missing_heading');
+      const title = getComputedStyle(heading),
+        slash = getComputedStyle(heading, '::before'),
+        frame = getComputedStyle(header);
+      return {
+        left: heading.getBoundingClientRect().left,
+        top: heading.getBoundingClientRect().top,
+        padding: frame.padding,
+        font: title.font,
+        spacing: title.letterSpacing,
+        slash: [slash.width, slash.height, slash.backgroundColor, slash.transform],
+      };
+    });
+  await page.goto(`${origin}satisfactory-worlds-fixture?overview`);
+  await check(page.getByRole('heading', { name: 'FICSIT Overview' })).toBeVisible();
+  const overviewFrame = await framing();
+  await page.goto(`${origin}satisfactory-worlds-fixture`);
+  await check(page.getByRole('heading', { name })).toBeVisible();
+  expect(await framing()).toEqual(overviewFrame);
+  await page.getByRole('button', { name: `Open ${name}`, exact: true }).click();
+  expect(new URL(page.url()).searchParams.get('world')).toBe(name);
+  await check(page.getByRole('heading', { name: 'Save history' })).toBeVisible();
+  await page.goBack();
+  await check(page.getByRole('button', { name: `Open ${name}`, exact: true })).toBeVisible();
+  await check(page.getByRole('heading', { name: 'Save history' })).toHaveCount(0);
+  await page.goForward();
+  await check(page.getByRole('heading', { name: 'Save history' })).toBeVisible();
+  await page.reload();
+  await check(page.getByRole('heading', { name: 'Save history' })).toBeVisible();
+  expect(new URL(page.url()).searchParams.get('world')).toBe(name);
+  await check(page.getByRole('button', { name: 'Save world', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'All worlds', exact: true }).click();
+  await page.getByRole('button', { name: 'Open Other factory', exact: true }).click();
+  await check(page.getByRole('heading', { name: 'Other factory', exact: true })).toBeVisible();
+  await check(page.getByRole('button', { name: 'Save world', exact: true })).toHaveCount(0);
+  await check(
+    page.getByRole('button', { name: 'Load latest save of Other factory', exact: true }),
+  ).toBeEnabled();
+  await page.getByLabel('Safety saves to keep').fill('7');
+  await page.getByRole('button', { name: 'All worlds', exact: true }).click();
+  await check(page.getByRole('dialog')).toBeVisible();
+  await page
+    .getByRole('dialog')
+    .getByRole('button', { name: 'Discard changes', exact: true })
+    .click();
+  await check(page.getByRole('button', { name: 'Open Other factory', exact: true })).toBeVisible();
+  await context.close();
+});
+
+it('formats native save timestamps and orders mixed native and ISO saves chronologically', async () => {
+  const context = await browser.newContext(),
+    page = await context.newPage();
+  const data = structuredClone(example),
+    template = data.sessions[0]?.saveHeaders[0];
+  if (!template || !data.sessions[0]) throw new Error('missing_fixture');
+  data.sessions[0].saveHeaders = [
+    { ...template, saveName: 'Older native', saveDateTime: '2026.11.01-10.00.00' },
+    { ...template, saveName: 'Newer ISO', saveDateTime: '2026-11-02T12:00:00+01:00' },
+    { ...template, saveName: 'Unknown date', saveDateTime: 'not-a-date' },
+  ];
+  await page.route('**/v1/**', (route) =>
+    new URL(route.request().url()).pathname.endsWith('/retention')
+      ? route.fulfill({ json: retention })
+      : route.fulfill(streamBody(data)),
+  );
+  await page.goto(`${origin}satisfactory-worlds-fixture`);
+  await page.getByRole('button', { name: 'Open Northern factory' }).click();
+  await check(page.locator('.satisfactory-save-list strong')).toHaveText([
+    'Newer ISO',
+    'Older native',
+    'Unknown date',
+  ]);
+  await check(page.locator('.satisfactory-save-date').nth(1)).not.toHaveText('—');
+  await check(page.locator('.satisfactory-save-date').nth(2)).toHaveText('—');
+  await page.getByRole('button', { name: 'Load latest save of Northern factory' }).click();
+  await check(page.getByRole('dialog')).toContainText('Newer ISO');
   await context.close();
 });

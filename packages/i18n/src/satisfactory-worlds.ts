@@ -13,6 +13,13 @@ export const satisfactoryWorldsMessages: Record<string, [string, string]> = {
   ],
   'games.satisfactory.worlds.title': ['Worlds', 'Mondi'],
   'games.satisfactory.worlds.heading': ['FICSIT Worlds', 'Mondi FICSIT'],
+  'games.satisfactory.worlds.open': ['Open world', 'Apri mondo'],
+  'games.satisfactory.worlds.openNamed': ['Open {name}', 'Apri {name}'],
+  'games.satisfactory.worlds.back': ['All worlds', 'Tutti i mondi'],
+  'games.satisfactory.worlds.missingWorld': [
+    'This world is not present in the latest saved list.',
+    'Questo mondo non è presente nell’ultimo elenco salvato.',
+  ],
   'games.satisfactory.worlds.refresh': ['Refresh', 'Aggiorna'],
   'games.satisfactory.worlds.save': ['Save world', 'Salva mondo'],
   'games.satisfactory.worlds.create': ['Create world', 'Crea mondo'],
@@ -128,8 +135,8 @@ export const satisfactoryWorldsMessages: Record<string, [string, string]> = {
     'Conservazione dei salvataggi di sicurezza',
   ],
   'games.satisfactory.worlds.retentionHint': [
-    'Keeps this many verified platform safety saves for this world. Older verified copies are gradually removed after a new safety save and server stop. Manual saves, autosaves and unverified older files are preserved.',
-    'Conserva questo numero di salvataggi di sicurezza verificati per il mondo. Le copie verificate più vecchie vengono rimosse gradualmente dopo un nuovo salvataggio riuscito e l’arresto del server. I salvataggi manuali, automatici e i vecchi file non verificati restano intatti.',
+    'Keep this many verified platform safety saves, including older nh-stop copies. Excess copies are removed after a new safety save and server stop. Manual saves and autosaves are preserved.',
+    'Conserva questo numero di salvataggi di sicurezza verificati, inclusi i vecchi nh-stop. Le copie in eccesso vengono rimosse dopo un nuovo salvataggio di sicurezza e l’arresto del server. I salvataggi manuali e automatici restano intatti.',
   ],
   'games.satisfactory.worlds.retentionLocked': [
     'Retention is set by the server environment.',
@@ -143,6 +150,14 @@ export const satisfactoryWorldsMessages: Record<string, [string, string]> = {
   'satisfactory.worlds.retention.capture_skipped': [
     'Safety save preserved without automatic rotation.',
     'Salvataggio di sicurezza conservato senza rotazione automatica.',
+  ],
+  'satisfactory.worlds.retention.adopted': [
+    'An older safety save was verified and included in automatic retention.',
+    'Un salvataggio di sicurezza precedente è stato verificato e incluso nella conservazione automatica.',
+  ],
+  'satisfactory.worlds.retention.adoption_skipped': [
+    'An older safety save could not be verified and was preserved.',
+    'Non è stato possibile verificare un salvataggio di sicurezza precedente, che è stato conservato.',
   ],
   'satisfactory.worlds.retention.deleted': [
     'Older safety save removed.',

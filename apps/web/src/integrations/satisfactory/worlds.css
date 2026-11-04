@@ -1,14 +1,11 @@
-.satisfactory-worlds {
+.satisfactory-worlds-body {
   display: grid;
   gap: 20px;
   padding: 24px;
-  max-width: 1200px;
-  margin-inline: auto;
-  border-top: 4px solid #ef8c24;
 }
-.satisfactory-worlds h2,
 .satisfactory-worlds h3,
-.satisfactory-worlds p {
+.satisfactory-worlds h4,
+.satisfactory-worlds-body p {
   margin: 0;
 }
 .satisfactory-worlds-toolbar,
@@ -19,32 +16,18 @@
   flex-wrap: wrap;
   gap: 16px;
 }
-.satisfactory-worlds-heading {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
+.satisfactory-worlds-toolbar:empty {
+  display: none;
 }
-.satisfactory-worlds h2 {
-  font-size: 1rem;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  font-weight: 800;
+.satisfactory-worlds-toolbar > .actions {
+  margin-left: auto;
 }
-.satisfactory-worlds h2::before {
-  content: "/";
-  color: #a34b00;
-  margin-right: 10px;
+.satisfactory-worlds h4 {
+  font-size: 0.95rem;
 }
 .satisfactory-worlds h3 {
   font-size: 1.1rem;
   overflow-wrap: anywhere;
-}
-.satisfactory-worlds-source {
-  font-size: 0.75rem;
-  padding: 4px 8px;
-  border: 1px solid var(--line);
-  color: var(--muted);
 }
 .satisfactory-worlds .actions {
   flex-wrap: wrap;
@@ -183,16 +166,8 @@
   color: var(--muted);
   max-width: 80ch;
 }
-.satisfactory-worlds-updated {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.75rem;
-  color: var(--muted);
-}
 @media (max-width: 750px) {
-  .satisfactory-worlds {
+  .satisfactory-worlds-body {
     padding: 16px;
   }
   .satisfactory-world-card {
@@ -210,4 +185,9 @@
   .satisfactory-worlds-details {
     gap: 12px 20px;
   }
+}
+
+.satisfactory-world-detail {
+  border: 0;
+  padding: 0;
 }

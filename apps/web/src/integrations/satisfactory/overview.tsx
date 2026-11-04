@@ -11,6 +11,7 @@ import { useFormat, useLocale, useT } from '../../app/i18n.js';
 import { Details, ErrorNotice } from '../../components/ui.js';
 import { IconAction } from '../../components/workspace-controls.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
+import { FicsitHeader, FicsitUpdated } from './ficsit.js';
 import './overview.css';
 
 type Overview = {
@@ -55,13 +56,12 @@ export function SatisfactoryOverviewSection(props: GameSectionViewProps) {
           unit,
         );
   return (
-    <section className="workspace-surface ficsit-overview">
-      <header className="ficsit-overview-header">
-        <h2>{t(key('title'))}</h2>
-        {source && source !== 'unavailable' && (
-          <span className={`ficsit-overview-source ${source}`}>{t(key(source))}</span>
-        )}
-      </header>
+    <section className="workspace-surface ficsit-surface ficsit-overview">
+      <FicsitHeader
+        title={t(key('title'))}
+        source={source && source !== 'unavailable' ? t(key(source)) : undefined}
+        live={source === 'live'}
+      />
       {query.error && <ErrorNotice error={query.error} />}
       {query.isPending && <p role="status">{t('web.loading')}</p>}
       {query.data && (
@@ -105,7 +105,7 @@ export function SatisfactoryOverviewSection(props: GameSectionViewProps) {
           )}
         </>
       )}
-      <footer className="ficsit-overview-updated">
+      <FicsitUpdated>
         {timestamp && Number.isFinite(observedAt) && (
           <time dateTime={timestamp} title={format.date(timestamp)}>
             {t(key('lastUpdated'), { time: relative })}
@@ -131,7 +131,7 @@ export function SatisfactoryOverviewSection(props: GameSectionViewProps) {
             <path d="M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 17.9 17" />
           </svg>
         </IconAction>
-      </footer>
+      </FicsitUpdated>
     </section>
   );
 }

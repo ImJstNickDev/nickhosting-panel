@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router';
+import { Link, useSearchParams } from 'react-router';
+import { satisfactorySaveTime } from '../../../../../games/satisfactory/src/save-time.js';
 import { satisfactorySaveDirectory } from '../../../../../games/satisfactory/src/world-paths.js';
 import { api } from '../../api/client.js';
 import { useFormat, useLocale, useT } from '../../app/i18n.js';
@@ -8,6 +9,7 @@ import { useUnsavedChanges } from '../../components/navigation-guard.js';
 import { ConfirmDialog, ErrorNotice, Input } from '../../components/ui.js';
 import { IconAction, Pagination, SearchField } from '../../components/workspace-controls.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
+import { FicsitHeader, FicsitUpdated } from './ficsit.js';
 import { type WorldSave as Save, useWorldsStream, type WorldSession } from './worlds-stream.js';
 import './worlds.css';
 
@@ -28,6 +30,16 @@ export function SatisfactoryWorldsSection(props: GameSectionViewProps) {
     format = useFormat(),
     client = useQueryClient();
   const { locale } = useLocale();
+  const [params, setParams] = useSearchParams();
+  const selectedName = params.get('world');
+  function openWorld(name?: string) {
+    setParams((previous) => {
+      const next = new URLSearchParams(previous);
+      if (name === undefined) next.delete('world');
+      else next.set('world', name);
+      return next;
+    });
+  }
   const base = `/v1/servers/${encodeURIComponent(props.serverId)}/satisfactory/api`;
   const online = props.runtimeState === 'running' || props.runtimeState === 'online';
   const [search, setSearch] = useState(''),
@@ -74,6 +86,7 @@ export function SatisfactoryWorldsSection(props: GameSectionViewProps) {
         ),
     [worlds.view.sessions, search],
   );
+  const selected = worlds.view.sessions.find((session) => session.sessionName === selectedName);
   const lastPage = Math.max(0, Math.ceil(sessions.length / 12) - 1),
     currentPage = Math.min(page, lastPage);
   const age = worlds.view.observedAt ? Math.max(0, (now - worlds.view.observedAt) / 1000) : 0;
@@ -155,111 +168,147 @@ export function SatisfactoryWorldsSection(props: GameSectionViewProps) {
     }
   }
   return (
-    <section className="workspace-surface satisfactory-worlds">
-      <header className="satisfactory-worlds-toolbar">
-        <div className="satisfactory-worlds-heading">
-          <h2>{t(key('heading'))}</h2>
-          {worlds.view.source && (
-            <span className="satisfactory-worlds-source">
-              {t(
+    <section className="workspace-surface ficsit-surface satisfactory-worlds">
+      <FicsitHeader
+        title={t(key('heading'))}
+        source={
+          worlds.view.source
+            ? t(
                 key(
                   worlds.view.source === 'live' && worlds.view.phase === 'ready'
                     ? 'live'
                     : 'cached',
                 ),
-              )}
-            </span>
+              )
+            : undefined
+        }
+        live={worlds.view.source === 'live' && worlds.view.phase === 'ready'}
+      />
+      <div className="satisfactory-worlds-body">
+        <div className="satisfactory-worlds-toolbar">
+          {selectedName !== null && (
+            <button type="button" className="secondary" onClick={() => openWorld()}>
+              {t(key('back'))}
+            </button>
           )}
+          <div className="actions">
+            {props.canManage && (
+              <>
+                {(selectedName === null ||
+                  (selected &&
+                    worlds.view.sessions.indexOf(selected) ===
+                      worlds.view.currentSessionIndex)) && (
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={!editable}
+                    onClick={() => choose({ kind: 'save' })}
+                  >
+                    {t(key('save'))}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={!editable}
+                  onClick={() => choose({ kind: 'create' })}
+                >
+                  {t(key('create'))}
+                </button>
+              </>
+            )}
+          </div>
         </div>
-        <div className="actions">
-          {props.canManage && (
-            <>
-              <button
-                type="button"
-                className="secondary"
-                disabled={!editable}
-                onClick={() => choose({ kind: 'save' })}
-              >
-                {t(key('save'))}
-              </button>
-              <button type="button" disabled={!editable} onClick={() => choose({ kind: 'create' })}>
-                {t(key('create'))}
-              </button>
-            </>
-          )}
-        </div>
-      </header>
-      {worlds.error != null && <ErrorNotice error={worlds.error} />}
-      {!worlds.view.configured && <p>{t(key('unconfigured'))}</p>}
-      {worlds.view.phase === 'starting' && <p role="status">{t(key('starting'))}</p>}
-      {worlds.view.phase === 'offline' && <p role="status">{t(key('startFirst'))}</p>}
-      {worlds.isFetching && <p role="status">{t(key('refreshing'))}</p>}
-      {!worlds.view.known && !worlds.isFetching && <p>{t(key('unknown'))}</p>}
-      {!props.canManage && <p>{t(key('readOnly'))}</p>}
-      {props.pending && <p role="status">{t(key('pending'))}</p>}
-      {completed && <p role="status">{t(key(loadingUntil ? 'loadingWorld' : 'completed'))}</p>}
-      {retentionError != null && <ErrorNotice error={retentionError} />}
-      {retention.error != null && <ErrorNotice error={retention.error} />}
-      {(worlds.view.known || worlds.view.sessions.length > 0) && (
-        <>
-          <SearchField
-            label={t(key('search'))}
-            value={search}
-            onChange={(event) => {
-              setSearch(event.target.value);
-              setPage(0);
-            }}
-          />
-          {sessions.length === 0 ? (
-            <p role="status">
-              {t(key(search.trim() ? 'noMatches' : worlds.view.known ? 'empty' : 'refreshing'))}
-            </p>
-          ) : (
-            <div className="satisfactory-worlds-list">
-              {sessions
-                .slice(currentPage * 12, (currentPage + 1) * 12)
-                .map(({ session, index }) => (
-                  <WorldCard
-                    key={session.sessionName}
-                    session={session}
-                    active={index === worlds.view.currentSessionIndex}
-                    historical={worlds.view.source !== 'live' || worlds.view.phase !== 'ready'}
-                    canManage={props.canManage}
-                    editable={editable}
-                    load={(save) => choose({ kind: 'load', save })}
-                    retention={retention.data}
-                    retentionBusy={retentionBusy}
-                    updateRetention={updateRetention}
-                  />
-                ))}
-            </div>
-          )}
-          {lastPage > 0 && (
-            <Pagination
-              label={t(key('worldPages'))}
-              previousLabel={t(key('previous'))}
-              nextLabel={t(key('next'))}
-              summary={t(key('page'), { page: currentPage + 1, total: lastPage + 1 })}
-              canPrevious={currentPage > 0}
-              canNext={currentPage < lastPage}
-              onPrevious={() => setPage(currentPage - 1)}
-              onNext={() => setPage(currentPage + 1)}
+        {worlds.error != null && <ErrorNotice error={worlds.error} />}
+        {!worlds.view.configured && <p>{t(key('unconfigured'))}</p>}
+        {worlds.view.phase === 'starting' && <p role="status">{t(key('starting'))}</p>}
+        {worlds.view.phase === 'offline' && <p role="status">{t(key('startFirst'))}</p>}
+        {worlds.isFetching && <p role="status">{t(key('refreshing'))}</p>}
+        {!worlds.view.known && !worlds.isFetching && <p>{t(key('unknown'))}</p>}
+        {!props.canManage && <p>{t(key('readOnly'))}</p>}
+        {props.pending && <p role="status">{t(key('pending'))}</p>}
+        {completed && <p role="status">{t(key(loadingUntil ? 'loadingWorld' : 'completed'))}</p>}
+        {retentionError != null && <ErrorNotice error={retentionError} />}
+        {retention.error != null && <ErrorNotice error={retention.error} />}
+        {selectedName === null && (worlds.view.known || worlds.view.sessions.length > 0) && (
+          <>
+            <SearchField
+              label={t(key('search'))}
+              value={search}
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setPage(0);
+              }}
             />
-          )}
-        </>
-      )}
-      {props.permissionKeys.includes('files.read') && (
-        <details className="satisfactory-worlds-transfers">
-          <summary>{t(key('transfers'))}</summary>
-          <Link
-            to={`/servers/${encodeURIComponent(props.serverId)}/files?directory=${encodeURIComponent(satisfactorySaveDirectory)}`}
-          >
-            {t(key('files'))}
-          </Link>
-          <p>{t(key('filesHint'))}</p>
-        </details>
-      )}
-      <footer className="satisfactory-worlds-updated">
+            {sessions.length === 0 ? (
+              <p role="status">
+                {t(key(search.trim() ? 'noMatches' : worlds.view.known ? 'empty' : 'refreshing'))}
+              </p>
+            ) : (
+              <div className="satisfactory-worlds-list">
+                {sessions
+                  .slice(currentPage * 12, (currentPage + 1) * 12)
+                  .map(({ session, index }) => (
+                    <WorldCard
+                      key={session.sessionName}
+                      session={session}
+                      active={index === worlds.view.currentSessionIndex}
+                      historical={worlds.view.source !== 'live' || worlds.view.phase !== 'ready'}
+                      canManage={props.canManage}
+                      editable={editable}
+                      load={(save) => choose({ kind: 'load', save })}
+                      retention={retention.data}
+                      retentionBusy={retentionBusy}
+                      updateRetention={updateRetention}
+                      open={() => openWorld(session.sessionName)}
+                    />
+                  ))}
+              </div>
+            )}
+            {lastPage > 0 && (
+              <Pagination
+                label={t(key('worldPages'))}
+                previousLabel={t(key('previous'))}
+                nextLabel={t(key('next'))}
+                summary={t(key('page'), { page: currentPage + 1, total: lastPage + 1 })}
+                canPrevious={currentPage > 0}
+                canNext={currentPage < lastPage}
+                onPrevious={() => setPage(currentPage - 1)}
+                onNext={() => setPage(currentPage + 1)}
+              />
+            )}
+          </>
+        )}
+        {selectedName !== null &&
+          (selected ? (
+            <WorldCard
+              key={selected.sessionName}
+              session={selected}
+              active={worlds.view.sessions.indexOf(selected) === worlds.view.currentSessionIndex}
+              historical={worlds.view.source !== 'live' || worlds.view.phase !== 'ready'}
+              canManage={props.canManage}
+              editable={editable}
+              load={(save) => choose({ kind: 'load', save })}
+              retention={retention.data}
+              retentionBusy={retentionBusy}
+              updateRetention={updateRetention}
+              detail
+            />
+          ) : (
+            <p role="status">{t(key(worlds.isFetching ? 'refreshing' : 'missingWorld'))}</p>
+          ))}
+        {props.permissionKeys.includes('files.read') && (
+          <details className="satisfactory-worlds-transfers">
+            <summary>{t(key('transfers'))}</summary>
+            <Link
+              to={`/servers/${encodeURIComponent(props.serverId)}/files?directory=${encodeURIComponent(satisfactorySaveDirectory)}`}
+            >
+              {t(key('files'))}
+            </Link>
+            <p>{t(key('filesHint'))}</p>
+          </details>
+        )}
+      </div>
+      <FicsitUpdated>
         {worlds.view.observedAt && (
           <time
             dateTime={new Date(worlds.view.observedAt).toISOString()}
@@ -288,7 +337,7 @@ export function SatisfactoryWorldsSection(props: GameSectionViewProps) {
             <path d="M20 7v5h-5M4 17v-5h5M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 17.9 17" />
           </svg>
         </IconAction>
-      </footer>
+      </FicsitUpdated>
       <ConfirmDialog
         open={Boolean(action)}
         title={action ? t(key(action.kind)) : ''}
@@ -344,7 +393,11 @@ function WorldCard({
   retention,
   retentionBusy,
   updateRetention,
+  detail = false,
+  open,
 }: {
+  detail?: boolean;
+  open?(): void;
   session: WorldSession;
   active: boolean;
   historical: boolean;
@@ -360,16 +413,26 @@ function WorldCard({
   const [search, setSearch] = useState(''),
     [kind, setKind] = useState('all'),
     [page, setPage] = useState(0);
-  const [expanded, setExpanded] = useState(false);
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (detail) heading.current?.focus();
+  }, [detail]);
   const keep =
     retention?.policies.find((policy) => policy.sessionName === session.sessionName)?.keep ??
     retention?.defaultKeep ??
     5;
   const [draftKeep, setDraftKeep] = useState(String(keep));
   useEffect(() => setDraftKeep(String(keep)), [keep]);
-  useUnsavedChanges(canManage && draftKeep !== String(keep), retentionBusy);
+  useUnsavedChanges(detail && canManage && draftKeep !== String(keep), retentionBusy);
   const sorted = useMemo(
-    () => [...session.saveHeaders].sort((a, b) => b.saveDateTime.localeCompare(a.saveDateTime)),
+    () =>
+      session.saveHeaders
+        .map((save) => {
+          const time = satisfactorySaveTime(save.saveDateTime);
+          return { save, time: Number.isFinite(time) ? time : Number.NEGATIVE_INFINITY };
+        })
+        .sort((a, b) => b.time - a.time)
+        .map(({ save }) => save),
     [session.saveHeaders],
   );
   const saves = useMemo(
@@ -384,15 +447,19 @@ function WorldCard({
   const latest = sorted[0],
     lastPage = Math.max(0, Math.ceil(saves.length / 20) - 1),
     currentPage = Math.min(page, lastPage);
-  const date = (save: Save) =>
-    Number.isFinite(Date.parse(save.saveDateTime)) ? format.date(save.saveDateTime) : '—';
+  const date = (save: Save) => {
+    const time = satisfactorySaveTime(save.saveDateTime);
+    return Number.isFinite(time) ? format.date(new Date(time).toISOString()) : '—';
+  };
   const label = (save: Save) =>
     category(save) === 'manual' ? save.saveName : t(key(category(save)));
   return (
-    <article className="satisfactory-world-card">
+    <article className={`satisfactory-world-card${detail ? ' satisfactory-world-detail' : ''}`}>
       <header className="satisfactory-world-card-header">
         <div>
-          <h3>{session.sessionName || t(key('unnamed'))}</h3>
+          <h3 ref={heading} tabIndex={detail ? -1 : undefined}>
+            {session.sessionName || t(key('unnamed'))}
+          </h3>
           <div className="satisfactory-worlds-meta">
             {active && (
               <span className="satisfactory-worlds-active">
@@ -404,7 +471,17 @@ function WorldCard({
             {latest?.isCreativeModeEnabled && <span>{t(key('creative'))}</span>}
           </div>
         </div>
-        {canManage && latest && (
+        {!detail && (
+          <button
+            type="button"
+            className="secondary"
+            onClick={open}
+            aria-label={t(key('openNamed'), { name: session.sessionName })}
+          >
+            {t(key('open'))}
+          </button>
+        )}
+        {detail && canManage && latest && (
           <button
             type="button"
             className="secondary"
@@ -432,111 +509,106 @@ function WorldCard({
           </div>
         </dl>
       )}
-      <details
-        className="satisfactory-world-history"
-        onToggle={(event) => setExpanded(event.currentTarget.open)}
-      >
-        <summary>{t(key('history'))}</summary>
-        {expanded && (
-          <>
-            <div className="satisfactory-history-filters">
-              <SearchField
-                label={t(key('searchSaves'))}
-                value={search}
+      {detail && (
+        <section className="satisfactory-world-history" aria-label={t(key('history'))}>
+          <h4>{t(key('history'))}</h4>
+          <div className="satisfactory-history-filters">
+            <SearchField
+              label={t(key('searchSaves'))}
+              value={search}
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setPage(0);
+              }}
+            />
+            <label>
+              {t(key('saveType'))}
+              <select
+                aria-label={t(key('saveType'))}
+                value={kind}
                 onChange={(event) => {
-                  setSearch(event.target.value);
+                  setKind(event.target.value);
                   setPage(0);
                 }}
-              />
-              <label>
-                {t(key('saveType'))}
-                <select
-                  aria-label={t(key('saveType'))}
-                  value={kind}
-                  onChange={(event) => {
-                    setKind(event.target.value);
-                    setPage(0);
-                  }}
-                >
-                  {['all', 'manual', 'autosave', 'safety'].map((type) => (
-                    <option key={type} value={type}>
-                      {t(key(type))}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            {saves.length === 0 ? (
-              <p>{t(key('noSaves'))}</p>
-            ) : (
-              <ul className="satisfactory-save-list">
-                {saves.slice(currentPage * 20, (currentPage + 1) * 20).map((save) => (
-                  <li key={save.saveName}>
-                    <div className="satisfactory-worlds-identity">
-                      <strong>{label(save)}</strong>
-                      <span className="satisfactory-save-date">{date(save)}</span>
-                      <details className="satisfactory-save-technical">
-                        <summary>{t(key('details'))}</summary>
-                        <dl>
-                          <div>
-                            <dt>{t(key('filename'))}</dt>
-                            <dd>
-                              <code>{save.saveName}.sav</code>
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>{t(key('build'))}</dt>
-                            <dd>{save.buildVersion}</dd>
-                          </div>
-                          <div>
-                            <dt>{t(key('playTime'))}</dt>
-                            <dd>
-                              {t(key('hours'), {
-                                value: format.number(save.playDurationSeconds / 3600),
-                              })}
-                            </dd>
-                          </div>
-                        </dl>
-                        <div className="satisfactory-worlds-meta">
-                          {save.isModdedSave && <span>{t(key('modded'))}</span>}
-                          {save.isEditedSave && <span>{t(key('edited'))}</span>}
-                          {save.isCreativeModeEnabled && <span>{t(key('creative'))}</span>}
-                        </div>
-                      </details>
-                    </div>
-                    {canManage && (
-                      <button
-                        type="button"
-                        className="secondary"
-                        disabled={!editable}
-                        aria-label={t(key('loadNamed'), { name: save.saveName })}
-                        onClick={() => load(save)}
-                      >
-                        {t(key('load'))}
-                      </button>
-                    )}
-                  </li>
+              >
+                {['all', 'manual', 'autosave', 'safety'].map((type) => (
+                  <option key={type} value={type}>
+                    {t(key(type))}
+                  </option>
                 ))}
-              </ul>
-            )}
-            {lastPage > 0 && (
-              <Pagination
-                label={t(key('pages'))}
-                previousLabel={t(key('previous'))}
-                nextLabel={t(key('next'))}
-                summary={t(key('page'), { page: currentPage + 1, total: lastPage + 1 })}
-                canPrevious={currentPage > 0}
-                canNext={currentPage < lastPage}
-                onPrevious={() => setPage(currentPage - 1)}
-                onNext={() => setPage(currentPage + 1)}
-              />
-            )}
-          </>
-        )}
-      </details>
-      {retention && (
-        <details className="satisfactory-world-retention">
-          <summary>{t(key('retention'))}</summary>
+              </select>
+            </label>
+          </div>
+          {saves.length === 0 ? (
+            <p>{t(key('noSaves'))}</p>
+          ) : (
+            <ul className="satisfactory-save-list">
+              {saves.slice(currentPage * 20, (currentPage + 1) * 20).map((save) => (
+                <li key={save.saveName}>
+                  <div className="satisfactory-worlds-identity">
+                    <strong>{label(save)}</strong>
+                    <span className="satisfactory-save-date">{date(save)}</span>
+                    <details className="satisfactory-save-technical">
+                      <summary>{t(key('details'))}</summary>
+                      <dl>
+                        <div>
+                          <dt>{t(key('filename'))}</dt>
+                          <dd>
+                            <code>{save.saveName}.sav</code>
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>{t(key('build'))}</dt>
+                          <dd>{save.buildVersion}</dd>
+                        </div>
+                        <div>
+                          <dt>{t(key('playTime'))}</dt>
+                          <dd>
+                            {t(key('hours'), {
+                              value: format.number(save.playDurationSeconds / 3600),
+                            })}
+                          </dd>
+                        </div>
+                      </dl>
+                      <div className="satisfactory-worlds-meta">
+                        {save.isModdedSave && <span>{t(key('modded'))}</span>}
+                        {save.isEditedSave && <span>{t(key('edited'))}</span>}
+                        {save.isCreativeModeEnabled && <span>{t(key('creative'))}</span>}
+                      </div>
+                    </details>
+                  </div>
+                  {canManage && (
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={!editable}
+                      aria-label={t(key('loadNamed'), { name: save.saveName })}
+                      onClick={() => load(save)}
+                    >
+                      {t(key('load'))}
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          {lastPage > 0 && (
+            <Pagination
+              label={t(key('pages'))}
+              previousLabel={t(key('previous'))}
+              nextLabel={t(key('next'))}
+              summary={t(key('page'), { page: currentPage + 1, total: lastPage + 1 })}
+              canPrevious={currentPage > 0}
+              canNext={currentPage < lastPage}
+              onPrevious={() => setPage(currentPage - 1)}
+              onNext={() => setPage(currentPage + 1)}
+            />
+          )}
+        </section>
+      )}
+      {detail && retention && (
+        <section className="satisfactory-world-retention" aria-label={t(key('retention'))}>
+          <h4>{t(key('retention'))}</h4>
           <p>{t(key('retentionHint'))}</p>
           {retention.environmentLocked && <p>{t(key('retentionLocked'))}</p>}
           <form
@@ -571,7 +643,7 @@ function WorldCard({
               </button>
             )}
           </form>
-        </details>
+        </section>
       )}
     </article>
   );

@@ -1106,9 +1106,12 @@ were inspected; the public dev frontend serves both progression resolvers.
 ### Worlds: streamed sessions, saved observations and safety history
 
 The Worlds screen groups native save headers under their actual session. Its FICSIT
-layout shows the latest save and an expandable, searchable history with manual,
-autosave and platform safety categories. Technical filenames remain accessible in
-details. Safety labels require matching server-operation evidence, not just a filename
+layout shows compact world cards. Opening one world switches to its own URL-addressable
+view, with searchable/paginated history and retention settings. Browser back/forward
+and reload preserve the selected session by name. Manual, autosave and platform safety
+categories remain available; technical filenames remain accessible in save details.
+Worlds and Overview use the same FICSIT surface, header, orange mark, source badge and
+last-updated footer components and styles. Safety labels require matching server-operation evidence, not just a filename
 prefix. The previously observed `nh-stop-<job UUID>` entries are lifecycle safety saves,
 not separate worlds; native `ServerSettings.*.sav` is not a world either.
 
@@ -1142,9 +1145,13 @@ PostgreSQL index limits; the database checks each key against the complete origi
 1–100, with `SATISFACTORY_SAFETY_SAVE_RETENTION` as the deployment override. Policies
 use the existing server permission and lifecycle lock. Automatic rotation runs after
 confirmed stop, preserves a verified recovery anchor, and rechecks file metadata and
-SHA-256 before deletion. Manual saves, autosaves and historical safety saves without
-content receipts are never enrolled automatically. Failed or ambiguous checks retain
-files. Maintenance failure does not turn a successful server stop into a failed one.
+SHA-256 before deletion. Manual saves and autosaves remain excluded. Owner-authorized
+legacy adoption includes old `nh-stop` files only when a successful same-server lifecycle
+job and native session/time metadata identify them. At confirmed stop, stable file
+metadata and a streamed SHA-256 establish an immutable receipt with the historical save
+time; existing receipts and deletion tombstones are never overwritten. Adoption records
+the current verified bytes, not an unavailable historical hash. Failed or ambiguous
+checks retain files. Maintenance failure does not turn a successful server stop into a failed one.
 
 The common Files workspace remains the upload/download authority. Its writes share the
 lifecycle lock. Direct external provider/SFTP writes cannot be made atomic with the
@@ -1174,3 +1181,36 @@ Its operation count stayed 68 before/after, with no wake or game-file mutation. 
 061 and 062 were applied through the normal migrator after private backups; all earlier
 checksums were verified unchanged. The independent review findings on long-name indexes
 and cached-stream cancellation were corrected before final deployment.
+
+### World detail views and historical safety-save adoption — 2026-11-04
+
+World history and retention now live inside a selected world instead of expanding
+every card in the list. The session-name URL preserves selection through reload and
+browser history; save actions cannot accidentally save the active world from another
+world's detail screen. Overview and Worlds share the actual FICSIT framing components
+and CSS, with browser assertions comparing title geometry, padding and the orange mark.
+The native dotted UTC save timestamp and ISO timestamps use one browser-safe parser
+for both display/sorting and retention provenance.
+
+Legacy adoption runs inside the existing confirmed-stop finalizer, after a fresh recovery
+save is captured. It checks successful completed same-server jobs, a unique matching
+native session header, storage location and timestamp window (including native
+second precision), then fingerprints the stable file. It adopts at most eight old
+files per pass within the shared ten-second maintenance budget, and removes at most
+two excess verified copies. Subsequent stops continue the backlog. Older files do not
+become the newest recovery anchor when enrolled. Missing evidence, changed metadata,
+symlinks and existing receipt/tombstone conflicts retain the file.
+
+No schema change or separate job/transfer pipeline is needed. Read-only inspection of
+the six historical files on the development test instance confirmed native UTC save
+times, successful operation windows and file modification times one second later.
+Actual enrollment and cleanup occur through subsequent normal stops; no game was
+started or stopped to force cleanup during this change.
+
+Follow-up validation: 25 unit/module/date tests, nine isolated database tests and
+eight browser journeys pass, including historical adoption/rotation, cross-server
+exclusion, native UTC formatting, URL history, unsaved edits and inactive-world actions.
+Typechecks, frontend/runtime builds, translation compilation and lint pass. API and
+worker were restarted under the standing development authorization; the public dev
+frontend serves the shared frame and detail navigation. All four dev services remain
+healthy. No migration, new game asset or Pterodactyl/Blueprint change was required.
