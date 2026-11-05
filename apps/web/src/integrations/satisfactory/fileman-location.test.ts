@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { gameDirectoryExists } from './fileman-location.js';
+import { availableGameDirectories, gameDirectoryExists } from './fileman-location.js';
 
 const directory = (name: string) => ({ name, is_file: false, is_symlink: false });
 it('does not request a missing optional directory or create it', async () => {
@@ -50,4 +50,29 @@ it('abandons stale navigation before reading the next component', async () => {
   });
   await expect(gameDirectoryExists('FactoryGame/Mods', list, controller.signal)).rejects.toThrow();
   expect(list).toHaveBeenCalledOnce();
+});
+
+it('shows only existing locations and deduplicates common ancestor reads', async () => {
+  const list = vi.fn(async (parent: string) =>
+    parent === '' ? [directory('FactoryGame')] : [directory('Mods')],
+  );
+  const result = await availableGameDirectories(
+    [{ path: 'FactoryGame/Mods' }, { path: 'FactoryGame/Logs' }, { path: 'Absent/Saves' }],
+    list,
+    new AbortController().signal,
+  );
+  expect(result).toEqual([{ path: 'FactoryGame/Mods' }]);
+  expect(list.mock.calls).toEqual([[''], ['FactoryGame']]);
+});
+it('does not turn discovery failures into an empty successful menu', async () => {
+  const failure = new Error('listing_failed');
+  await expect(
+    availableGameDirectories(
+      [{ path: 'FactoryGame/Mods' }],
+      async () => {
+        throw failure;
+      },
+      new AbortController().signal,
+    ),
+  ).rejects.toBe(failure);
 });

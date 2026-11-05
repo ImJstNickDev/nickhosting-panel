@@ -1,8 +1,4 @@
 const messages: Record<string, [string, string]> = {
-  folderMissing: [
-    'This folder has not been created yet.',
-    'Questa cartella non è ancora stata creata.',
-  ],
   locations: ['Game folders', 'Cartelle del gioco'],
   saves: ['Saves', 'Salvataggi'],
   mods: ['Mods', 'Mod'],

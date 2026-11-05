@@ -18,3 +18,25 @@ export async function gameDirectoryExists(
   }
   return true;
 }
+
+/** Only inspect the declared paths; shared ancestors are listed once per refresh. */
+export async function availableGameDirectories<T extends { path: string }>(
+  locations: readonly T[],
+  list: Parameters<typeof gameDirectoryExists>[1],
+  signal: AbortSignal,
+): Promise<T[]> {
+  const parents = new Map<string, ReturnType<typeof list>>();
+  const sharedList = (parent: string) => {
+    let result = parents.get(parent);
+    if (!result) {
+      result = list(parent);
+      parents.set(parent, result);
+    }
+    return result;
+  };
+  const exists = await Promise.all(
+    locations.map((item) => gameDirectoryExists(item.path, sharedList, signal)),
+  );
+  signal.throwIfAborted();
+  return locations.filter((_, index) => exists[index]);
+}

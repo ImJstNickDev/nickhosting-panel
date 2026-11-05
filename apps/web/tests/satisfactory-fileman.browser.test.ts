@@ -60,6 +60,8 @@ it('uses actual Fileman navigation and compiled Satisfactory viewer with bounded
     const identifier = server.pterodactyl_identifier;
     if (!identifier) throw new Error('Missing fixture provider identity');
     await provider.adapter.createDirectory(identifier, '', 'FactoryGame');
+    await provider.adapter.createDirectory(identifier, 'FactoryGame', 'Saved');
+    await provider.adapter.createDirectory(identifier, 'FactoryGame/Saved', 'Logs');
     const files = await provider.files();
     files.clear();
     files.set('Factory_A.sav', save());
@@ -137,24 +139,16 @@ it('uses actual Fileman navigation and compiled Satisfactory viewer with bounded
       path: 'test-results/satisfactory-save-desktop-en.png',
       fullPage: true,
     });
+    await page.getByRole('button', { name: 'Back to files', exact: true }).click();
     await page.getByRole('link', { name: 'Open Worlds', exact: true }).click();
     await browserExpect(page).toHaveURL(new RegExp(`/servers/${id}/game/worlds$`));
     await page.goto(base);
-    await browserExpect(page.locator('.satisfactory-save-viewer')).toBeVisible();
-    await page.getByRole('button', { name: 'Back to files', exact: true }).click();
-    await page.getByRole('combobox', { name: 'Game folders' }).selectOption('mods');
-    await browserExpect(page.getByRole('status').filter({ hasText: /folder.*not.*created/i }))
-      .toBeVisible()
-      .catch(async (error) => {
-        await page.screenshot({
-          path: 'test-results/satisfactory-folder-failure.png',
-          fullPage: true,
-        });
-        throw error;
-      });
+    const folders = page.getByRole('combobox', { name: 'Game folders' });
+    await browserExpect(folders.locator('option[value="logs"]')).toHaveCount(1);
+    await browserExpect(folders.locator('option[value="mods"]')).toHaveCount(0);
     expect(directoryRequests).not.toContain('FactoryGame/Mods');
     await page.screenshot({
-      path: 'test-results/satisfactory-folder-missing-en.png',
+      path: 'test-results/satisfactory-folders-filtered-en.png',
       fullPage: true,
     });
     await page.setViewportSize({ width: 390, height: 844 });
@@ -162,12 +156,24 @@ it('uses actual Fileman navigation and compiled Satisfactory viewer with bounded
       [],
     );
     await page.screenshot({
-      path: 'test-results/satisfactory-folder-missing-mobile-en.png',
+      path: 'test-results/satisfactory-folders-filtered-mobile-en.png',
       fullPage: true,
     });
     await page.setViewportSize({ width: 1440, height: 1000 });
     await provider.adapter.createDirectory(identifier, 'FactoryGame', 'Mods');
-    await page.reload();
+    await folders.focus();
+    await browserExpect(folders.locator('option[value="mods"]')).toHaveCount(1);
+    await provider.adapter.deleteFiles(identifier, 'FactoryGame', ['Mods']);
+    await folders.blur();
+    await folders.focus();
+    await browserExpect(folders.locator('option[value="mods"]')).toHaveCount(0);
+    await browserExpect(
+      page.getByRole('status').filter({ hasText: /folder.*not.*created/i }),
+    ).toHaveCount(0);
+    await provider.adapter.createDirectory(identifier, 'FactoryGame', 'Mods');
+    await folders.blur();
+    await folders.focus();
+    await browserExpect(folders.locator('option[value="mods"]')).toHaveCount(1);
     const request = page.waitForRequest(
       (r) =>
         new URL(r.url()).pathname === `/v1/servers/${id}/files` &&

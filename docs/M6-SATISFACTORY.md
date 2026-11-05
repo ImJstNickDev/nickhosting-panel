@@ -1422,3 +1422,17 @@ Regression checks: eight save/classification tests, six folder helper/host tests
 and the actual Fileman browser journey pass. Browser checks prove no absent-target
 request, no read for ServerSettings even with explicit viewer selection, and no
 server operation; desktop/mobile missing-folder screenshots accompany the change.
+
+The Owner subsequently chose to omit unavailable game-folder shortcuts entirely.
+The menu now lists only existing directories, using shared Fileman metadata and
+bounded, deduplicated parent-directory checks. Refreshing the menu discovers newly
+created folders; selecting a folder still rechecks its presence. A folder removed
+in the meantime disappears without navigating or showing a missing-folder message.
+Real permission/provider failures remain errors. This supersedes the earlier
+missing-folder status presentation, without creating directories automatically.
+
+Six helper tests and the focused Fileman browser journey pass, including folder
+creation/removal discovered on focus without a reload and no request to absent
+Mods. Desktop/mobile Axe checks and filtered-menu screenshots were reviewed.
+Types, frontend build and lint pass with the existing warnings. No migration,
+service restart or game-data operation was needed for this presentation change.

@@ -1,6 +1,6 @@
 import { defineTrustedFilemanExtension } from '@nickhosting/game-sdk/ui';
 import { satisfactoryFileKind, satisfactoryFileLocations } from '@nickhosting/satisfactory/ui';
-import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { queryClient } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
@@ -8,7 +8,7 @@ import { Tooltip } from '../../components/tooltip.js';
 import { ErrorNotice } from '../../components/ui.js';
 import { useFilemanNavigation } from '../../features/fileman/host.js';
 import { fileDirectoryQuery } from '../../features/service-contracts.js';
-import { gameDirectoryExists } from './fileman-location.js';
+import { availableGameDirectories, gameDirectoryExists } from './fileman-location.js';
 import './fileman.css';
 
 const key = (name: string) => `games.satisfactory.fileman.${name}`;
@@ -42,15 +42,57 @@ function Locations({ serverId }: { serverId: string }) {
   const { navigateDirectory } = useFilemanNavigation();
   const pending = useRef<AbortController | undefined>(undefined);
   const [checking, setChecking] = useState(false);
-  const [missing, setMissing] = useState(false);
+  const [available, setAvailable] = useState<(typeof satisfactoryFileLocations)[number][]>([]);
   const [error, setError] = useState<unknown>();
-  useEffect(() => () => pending.current?.abort(), []);
+  const refresh = useCallback(
+    async (fresh: boolean) => {
+      if (pending.current && !pending.current.signal.aborted) return;
+      const controller = new AbortController();
+      pending.current = controller;
+      const identity = JSON.stringify(fileDirectoryQuery(serverId, '').queryKey[3]);
+      try {
+        const locations = await availableGameDirectories(
+          satisfactoryFileLocations,
+          async (parent) => {
+            const assertCurrent = () => {
+              if (identity !== JSON.stringify(fileDirectoryQuery(serverId, '').queryKey[3]))
+                controller.abort();
+              controller.signal.throwIfAborted();
+            };
+            assertCurrent();
+            const entries = await queryClient.fetchQuery({
+              ...fileDirectoryQuery(serverId, parent, { prepareDownloads: false }),
+              staleTime: fresh ? 0 : 15_000,
+            });
+            assertCurrent();
+            return entries;
+          },
+          controller.signal,
+        );
+        if (!controller.signal.aborted) {
+          setAvailable(locations);
+          setError(undefined);
+        }
+      } catch (failure) {
+        if (!controller.signal.aborted) {
+          setAvailable([]);
+          setError(failure);
+        }
+      } finally {
+        if (pending.current === controller) pending.current = undefined;
+      }
+    },
+    [serverId],
+  );
+  useEffect(() => {
+    void refresh(false);
+    return () => pending.current?.abort();
+  }, [refresh]);
   async function openDirectory(target: string) {
     pending.current?.abort();
     const controller = new AbortController();
     pending.current = controller;
     setChecking(true);
-    setMissing(false);
     setError(undefined);
     const identity = JSON.stringify(fileDirectoryQuery(serverId, '').queryKey[3]);
     const checkIdentity = () => {
@@ -74,12 +116,15 @@ function Locations({ serverId }: { serverId: string }) {
       );
       if (!controller.signal.aborted) {
         if (exists) navigateDirectory?.(target);
-        else setMissing(true);
+        else setAvailable((items) => items.filter((item) => item.path !== target));
       }
     } catch (failure) {
       if (!controller.signal.aborted) setError(failure);
     } finally {
-      if (pending.current === controller) setChecking(false);
+      if (pending.current === controller) {
+        setChecking(false);
+        pending.current = undefined;
+      }
     }
   }
   if (!navigateDirectory) return null;
@@ -91,6 +136,8 @@ function Locations({ serverId }: { serverId: string }) {
           aria-label={t(key('locations'))}
           value=""
           disabled={checking}
+          onFocus={() => void refresh(true)}
+          onPointerDown={() => void refresh(true)}
           onChange={(event) => {
             const location = satisfactoryFileLocations.find(
               (item) => item.id === event.target.value,
@@ -101,7 +148,7 @@ function Locations({ serverId }: { serverId: string }) {
           <option value="" disabled>
             {t(key('locations'))}
           </option>
-          {satisfactoryFileLocations.map((item) => (
+          {available.map((item) => (
             <option key={item.id} value={item.id}>
               {t(key(item.id))}
             </option>
@@ -109,11 +156,6 @@ function Locations({ serverId }: { serverId: string }) {
         </select>
       </label>
       <WorldsLink serverId={serverId} />
-      {missing && (
-        <span className="satisfactory-file-location-status" role="status">
-          {t(key('folderMissing'))}
-        </span>
-      )}
       {Boolean(error) && <ErrorNotice error={error} />}
     </div>
   );
