@@ -3,6 +3,7 @@ import { stripVTControlCharacters } from 'node:util';
 import type { Database } from '@nickhosting/database';
 import type { PrivateTransferCache, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
+import { recordNativeInstallationCompletion } from './provider-installation-events.js';
 import { type InstallationTranscript, installationLogKey } from './provisioning.js';
 
 /** One worker-owned stream per operation. Browsers read the shared transcript,
@@ -61,6 +62,7 @@ export function createInstallationCollector(options: {
           's.external_id',
           's.node_id',
           'o.plan',
+          'o.effect_started_at',
           'j.state',
         ])
         .where('s.id', '=', serverId)
@@ -77,6 +79,7 @@ export function createInstallationCollector(options: {
             row.provider_user_id,
             row.external_id,
             row.node_id,
+            row.effect_started_at?.toISOString(),
           ])
         : undefined;
       if (binding && binding !== identity) return false;
@@ -110,6 +113,7 @@ export function createInstallationCollector(options: {
         const row = await authorized();
         if (!row || !(await options.lease(jobId, token, 'renew'))) break;
         let relay: Awaited<ReturnType<PterodactylAdapter['relayInstallation']>> | undefined;
+        let terminalReceipt: Promise<void> | undefined;
         let finished!: () => void;
         const end = new Promise<void>((resolve) => {
           finished = resolve;
@@ -155,10 +159,29 @@ export function createInstallationCollector(options: {
                 }
                 dirty = true;
               }
-              if (event.type === 'installation' && event.phase === 'completed') {
-                // Only a wake hint. The lifecycle still verifies its own terminal proof.
-                void options.wake(jobId).catch(() => undefined);
-                finished();
+              if (
+                event.type === 'installation' &&
+                event.phase === 'completed' &&
+                !terminalReceipt
+              ) {
+                const observedAt = new Date();
+                terminalReceipt = (async () => {
+                  const current = await authorized();
+                  if (!current || !(await options.lease(jobId, token, 'renew'))) return;
+                  await recordNativeInstallationCompletion(options.db, {
+                    serverId,
+                    jobId,
+                    providerUuid: current.pterodactyl_uuid as string,
+                    observedAt,
+                    ...(current.effect_started_at
+                      ? { effectStartedAt: current.effect_started_at }
+                      : {}),
+                  });
+                  // The lifecycle still verifies current provider identity and stopped containers.
+                  await options.wake(jobId);
+                })()
+                  .catch(() => undefined)
+                  .finally(finished);
               }
               if (event.type === 'closed' || event.type === 'error') finished();
             },
@@ -173,6 +196,7 @@ export function createInstallationCollector(options: {
           clearInterval(logTimer);
           signal.removeEventListener('abort', endStream);
           relay?.close();
+          await terminalReceipt;
           await flush();
         }
         if (!signal.aborted) await sleep(2000);

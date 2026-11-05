@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { authSessionId } from '@nickhosting/core';
+import { authSessionId, DomainError } from '@nickhosting/core';
 import {
   createDatabase,
   listenForGatewayChanges,
@@ -27,6 +27,7 @@ import {
   reconcileGatewayState,
   reportGatewayObservation,
   reportGatewayProviderRunning,
+  requestGatewayConsoleAction,
   requestGatewayWake,
   setGatewayPolicy,
 } from './gateway-orchestration.js';
@@ -2236,4 +2237,282 @@ it('rebinds Gateway readiness to the admitted process after an offline backup', 
   const resumed = await getGatewayState(f.db, serverId, options);
   expect(resumed.wakeJobId).toBe(operation.jobId);
   expect((await report(running, { wakeJobId: operation.jobId })).state).toBe('online');
+});
+
+describe('authenticated game console lifecycle', () => {
+  const playerId = `06${'00'.repeat(8)}`;
+  async function command(action: 'sleep' | 'restart', generation?: string) {
+    return requestGatewayConsoleAction(
+      f.db,
+      serverId,
+      {
+        action,
+        playerId,
+        generation: generation ?? (await getGatewayState(f.db, serverId, options)).generation,
+      },
+      options,
+    );
+  }
+  it.each([playerId, 'INVALID'])(
+    'attributes console start to verified native identity %s without changing wake authority',
+    async (playerId) => {
+      await configure();
+      const generation = (await getGatewayState(f.db, serverId, options)).generation;
+      await expect(
+        requestGatewayWake(
+          f.db,
+          serverId,
+          { generation, intent: 'join' },
+          {
+            ...options,
+            consolePlayerId: 'invalid native identity',
+          },
+        ),
+      ).rejects.toThrow('validation_failed');
+      expect((await row()).active_operation_id).toBeNull();
+      const result = await requestGatewayWake(
+        f.db,
+        serverId,
+        { generation, intent: 'join' },
+        {
+          ...options,
+          consolePlayerId: playerId,
+        },
+      );
+      expect(result.state).toBe('waking');
+      const audit = await f.db
+        .selectFrom('audit_events')
+        .select('metadata')
+        .where('action', '=', 'gateway.console.requested')
+        .where(sql<string>`metadata->>'serverId'`, '=', serverId)
+        .executeTakeFirstOrThrow();
+      expect(audit.metadata).toMatchObject({
+        serverId,
+        jobId: result.wakeJobId,
+        action: 'start',
+        playerId,
+        protocolId: policy.protocolId,
+      });
+      const operation = await f.db
+        .selectFrom('server_operations')
+        .select('plan')
+        .where('job_id', '=', result.wakeJobId as string)
+        .executeTakeFirstOrThrow();
+      expect(operation.plan.gatewayConsole).toBeUndefined();
+      expect(operation.plan.gatewayAutomation).toMatchObject({ kind: 'wake', generation });
+    },
+  );
+  it('retains canonical native anonymous identity in a forced-sleep marker and audit', async () => {
+    const fixture = await started();
+    await report(fixture);
+    const generation = (await getGatewayState(f.db, serverId, options)).generation;
+    const result = await requestGatewayConsoleAction(
+      f.db,
+      serverId,
+      {
+        action: 'sleep',
+        playerId: 'INVALID',
+        generation,
+      },
+      options,
+    );
+    expect(result.sleepJobId).not.toBeNull();
+    const operation = await f.db
+      .selectFrom('server_operations')
+      .select('plan')
+      .where('job_id', '=', result.sleepJobId as string)
+      .executeTakeFirstOrThrow();
+    expect(operation.plan.gatewayConsole).toMatchObject({
+      playerId: 'INVALID',
+      generation,
+      action: 'sleep',
+    });
+    await expect(
+      authorizeQueuedEffect(f.db, result.sleepJobId as string, serverId),
+    ).resolves.toBeDefined();
+    const audit = await f.db
+      .selectFrom('audit_events')
+      .select('metadata')
+      .where('action', '=', 'gateway.console.requested')
+      .where(sql<string>`metadata->>'jobId'`, '=', result.sleepJobId as string)
+      .executeTakeFirstOrThrow();
+    expect(audit.metadata).toMatchObject({ playerId: 'INVALID', action: 'sleep' });
+  });
+  it('force-sleeps with players and activity, saves first, then remains wakeable', async () => {
+    const fixture = await started();
+    await report(fixture, {
+      idle: false,
+      playerCount: 3,
+      activeSessions: 5,
+      quiescenceUntil: undefined,
+    });
+    const save = vi.fn(async () => {
+      expect(fixture.stop).not.toHaveBeenCalled();
+    });
+    fixture.lifecycle.prepareGameStop = save;
+    const result = await command('sleep');
+    expect(result).toMatchObject({ state: 'blocked', wakeEnabled: true });
+    expect(result.sleepJobId).not.toBeNull();
+    expect((await row()).intent).toBe('sleeping');
+    const plan = await f.db
+      .selectFrom('server_operations')
+      .select('plan')
+      .where('job_id', '=', result.sleepJobId as string)
+      .executeTakeFirstOrThrow();
+    expect(plan.plan.gatewayAutomation).toBeUndefined();
+    expect(plan.plan.gatewayConsole).toMatchObject({ action: 'sleep', playerId });
+    advance(1);
+    await report(fixture, {
+      idle: false,
+      playerCount: 3,
+      activeSessions: 5,
+      quiescenceUntil: undefined,
+    });
+    expect(await fixture.process(result.sleepJobId as string)).toBe('succeeded');
+    expect(save).toHaveBeenCalledOnce();
+    expect(fixture.stop).toHaveBeenCalledOnce();
+    expect(await reconcileGatewayState(f.db, serverId, options)).toMatchObject({
+      state: 'sleeping',
+      wakeEnabled: true,
+    });
+    expect((await row()).intent).toBe('sleeping');
+    expect((await command('sleep')).sleepJobId).toBeNull();
+    expect((await wake()).state).toBe('waking');
+  });
+  it('coalesces duplicate forced sleeps and rejects a conflicting command', async () => {
+    const fixture = await started();
+    await report(fixture);
+    const first = await command('sleep');
+    expect((await command('sleep')).sleepJobId).toBe(first.sleepJobId);
+    await expect(command('restart')).rejects.toThrow('conflict');
+    const jobs = await f.db
+      .selectFrom('server_operations')
+      .select('job_id')
+      .where('server_id', '=', serverId)
+      .where('action', '=', 'stop')
+      .execute();
+    expect(jobs).toHaveLength(1);
+  });
+  it('preserves automatic-start consent and revalidates it before dispatch', async () => {
+    const fixture = await started();
+    await report(fixture);
+    const result = await command('sleep');
+    await consent(false);
+    await expect(
+      authorizeQueuedEffect(f.db, result.sleepJobId as string, serverId),
+    ).rejects.toThrow('forbidden');
+    expect(fixture.stop).not.toHaveBeenCalled();
+  });
+  it('refuses stale generations and rolls back on route validation failure', async () => {
+    const fixture = await started();
+    await report(fixture);
+    await expect(command('sleep', randomUUID())).rejects.toThrow('conflict');
+    const validate = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new DomainError('conflict'));
+    await expect(
+      requestGatewayConsoleAction(
+        f.db,
+        serverId,
+        {
+          action: 'sleep',
+          playerId,
+          generation: fixture.state.generation,
+        },
+        { ...options, validateObservation: validate },
+      ),
+    ).rejects.toThrow('conflict');
+    expect((await row()).active_operation_id).toBeNull();
+    expect((await row()).intent).toBe('auto_wake_enabled');
+  });
+  it.each(['manually_stopped', 'maintenance'] as const)('cannot override %s', async (intent) => {
+    const fixture = await started();
+    await report(fixture);
+    await f.db.updateTable('managed_servers').set({ intent }).where('id', '=', serverId).execute();
+    await expect(command('sleep')).rejects.toThrow('forbidden');
+    await expect(command('restart')).rejects.toThrow('forbidden');
+  });
+  it('does not dispatch stop or pretend the power effect happened after a failed save', async () => {
+    const fixture = await started();
+    await report(fixture);
+    fixture.lifecycle.prepareGameStop = vi.fn(async () => {
+      throw new DomainError('configuration_invalid');
+    });
+    const result = await command('sleep');
+    expect(await fixture.process(result.sleepJobId as string)).toBe('failed');
+    expect(fixture.stop).not.toHaveBeenCalled();
+    const operation = await f.db
+      .selectFrom('server_operations')
+      .selectAll()
+      .where('job_id', '=', result.sleepJobId as string)
+      .executeTakeFirstOrThrow();
+    expect(operation.effect_state).toBe('none');
+    expect(operation.plan.powerEffectPrepared).toBeUndefined();
+    expect((await reconcileGatewayState(f.db, serverId, options)).state).not.toBe('sleeping');
+  });
+  it('recovers the original live process after a restart save fails before power', async () => {
+    const fixture = await started();
+    await report(fixture);
+    fixture.power.mockClear();
+    fixture.lifecycle.prepareGameStop = vi.fn(async () => {
+      throw new DomainError('configuration_invalid');
+    });
+    const result = await command('restart');
+    expect(await fixture.process(result.wakeJobId as string)).toBe('failed');
+    expect(fixture.power).not.toHaveBeenCalled();
+    const recovered = await reconcileGatewayState(f.db, serverId, options);
+    expect(recovered).toMatchObject({
+      state: 'blocked',
+      wakeJobId: null,
+      processStartedAt: fixture.processStartedAt(),
+    });
+    advance(1);
+    const observed = await reportGatewayObservation(
+      f.db,
+      serverId,
+      {
+        generation: result.generation,
+        wakeJobId: null,
+        processStartedAt: fixture.processStartedAt(),
+        observedAt: clock.toISOString(),
+        ready: true,
+        activeSessions: 0,
+      },
+      options,
+    );
+    expect(observed.state).toBe('online');
+  });
+  it('restarts through existing admission with save-before-power and native readiness', async () => {
+    const fixture = await started();
+    await report(fixture, { idle: false, playerCount: 2, activeSessions: 2 });
+    fixture.power.mockClear();
+    fixture.lifecycle.prepareGameStop = vi.fn(async () => {
+      expect(fixture.power).not.toHaveBeenCalled();
+    });
+    const before = (await getGatewayState(f.db, serverId, options)).generation;
+    const result = await command('restart');
+    expect(result.state).toBe('waking');
+    expect(result.generation).not.toBe(before);
+    expect((await command('restart')).wakeJobId).toBe(result.wakeJobId);
+    expect(await fixture.process(result.wakeJobId as string)).toBe('waiting');
+    advance(1000);
+    expect(await fixture.process(result.wakeJobId as string)).toBe('succeeded');
+    expect(fixture.power).toHaveBeenCalledOnce();
+    expect(fixture.lifecycle.prepareGameStop).toHaveBeenCalledOnce();
+    const after = await reportGatewayObservation(
+      f.db,
+      serverId,
+      {
+        generation: result.generation,
+        wakeJobId: result.wakeJobId,
+        processStartedAt: fixture.processStartedAt(),
+        observedAt: clock.toISOString(),
+        ready: true,
+        activeSessions: 0,
+      },
+      options,
+    );
+    expect(after.state).toBe('online');
+  });
 });

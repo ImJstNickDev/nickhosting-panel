@@ -654,5 +654,14 @@ describe('unified activity', () => {
     expect((await listUnifiedActivity(f.db, f.context, { serverId })).items[0]?.source).toBe(
       'system',
     );
+    await f.db
+      .updateTable('server_operations')
+      .set({ plan: JSON.stringify({ gatewayConsole: { action: 'sleep' } }) })
+      .where('job_id', '=', job.jobId)
+      .execute();
+    expect((await listUnifiedActivity(f.db, f.context, { serverId })).items[0]).toMatchObject({
+      source: 'system',
+      actorId: f.context.actorUserId,
+    });
   });
 });

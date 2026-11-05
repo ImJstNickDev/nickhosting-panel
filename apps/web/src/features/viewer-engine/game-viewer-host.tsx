@@ -1,10 +1,11 @@
 import type { GameViewerHost, GameViewerProps } from '@nickhosting/game-sdk/ui';
 import { type ComponentType, useEffect, useRef, useState } from 'react';
 import { queryClient } from '../../api/client.js';
-import { useT } from '../../app/i18n.js';
+import { useLocale, useT } from '../../app/i18n.js';
 import { readViewerBytes, viewerPath } from './core/access.js';
 import { trimArchivePages } from './core/archive-memory.js';
 import { archiveQuery } from './core/archive-query.js';
+import { readGameViewerPrefix } from './core/game-prefix-cache.js';
 import { selectableViewers, type ViewerId, type ViewerSource } from './core/registry.js';
 import { ViewerLoading } from './loading.js';
 
@@ -45,6 +46,7 @@ export function createGameViewerHost(options: {
   serverId: string;
   identity: string;
   t: GameViewerHost['t'];
+  locale?: string;
   onViewerChange: (id: ViewerId) => void;
 }): { host: GameViewerHost; dispose(): void } {
   const lifetime = new AbortController();
@@ -57,6 +59,19 @@ export function createGameViewerHost(options: {
   return {
     host: {
       t: options.t,
+      locale: options.locale,
+      async readPrefix(maxBytes, signal) {
+        const combined = signalFor(signal);
+        if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 65536)
+          throw new TypeError('invalid_viewer_read_limit');
+        return readGameViewerPrefix({
+          serverId: options.serverId,
+          identity: options.identity,
+          source: options.source,
+          maxBytes,
+          signal: combined,
+        });
+      },
       archive: {
         async list(directory, signal, query = '') {
           const combined = signalFor(signal);
@@ -113,6 +128,7 @@ export function GameViewerMount({
   onViewerChange: (id: ViewerId) => void;
 }) {
   const t = useT();
+  const { locale } = useLocale();
   const latest = useRef({ source, t, onViewerChange });
   latest.current = { source, t, onViewerChange };
   const key = JSON.stringify([serverId, identity, source]);
@@ -121,12 +137,13 @@ export function GameViewerMount({
     const scoped = createGameViewerHost({
       serverId,
       identity,
+      locale,
       source: latest.current.source,
       t: (key, values) => latest.current.t(key, values),
       onViewerChange: (id) => latest.current.onViewerChange(id),
     });
     setState({ key, host: scoped.host });
     return () => scoped.dispose();
-  }, [key, serverId, identity]);
+  }, [key, serverId, identity, locale]);
   return state?.key === key ? <Viewer source={source} host={state.host} /> : <ViewerLoading />;
 }

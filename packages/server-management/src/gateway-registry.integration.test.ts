@@ -60,6 +60,42 @@ const input = () => ({
   transport: 'tcp' as const,
 });
 describe('durable explicit Gateway route registry', () => {
+  it('keeps mutable Satisfactory protocol observations outside route authority', async () => {
+    await setGatewayRoute(f.db, f.owner, input(), env);
+    await f.db
+      .insertInto('game_integrations')
+      .values({ id: 'satisfactory', version: '1.0.0', manifest: {} })
+      .onConflict((c) => c.column('id').doNothing())
+      .execute();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'satisfactory', runtime_id: 'dedicated' })
+      .where('id', '=', f.mappingId)
+      .execute();
+    const observation = {
+      state: 3,
+      netCL: 123456,
+      flags: '0',
+      substates: [{ id: 0, version: 2 }],
+      name: 'Factory',
+      observedAt: new Date().toISOString(),
+    };
+    await f.db
+      .insertInto('satisfactory_server_state')
+      .values({ server_id: serverId, snapshot: observation })
+      .execute();
+    const first = await getGatewaySnapshot(f.db, env);
+    await f.db
+      .updateTable('satisfactory_server_state')
+      .set({ snapshot: { ...observation, state: 1, name: 'Updated factory', substates: [] } })
+      .where('server_id', '=', serverId)
+      .execute();
+    const second = await getGatewaySnapshot(f.db, env);
+    expect(first.routes[0]?.protocol?.satisfactory).toBeUndefined();
+    expect(second.routes[0]?.protocol?.satisfactory).toBeUndefined();
+    expect(second.routes[0]?.revision).toBe(first.routes[0]?.revision);
+  });
+
   it('withdraws an active reinstall without renewing its lease, then restores its route', async () => {
     const route = await setGatewayRoute(f.db, f.owner, input(), env);
     const before = await getGatewaySnapshot(f.db, env);
@@ -335,6 +371,128 @@ describe('durable explicit Gateway route registry', () => {
       await expect(
         setGatewayRoute(f.db, f.owner, { ...input(), publicAddress }, env),
       ).rejects.toThrow('validation_failed');
+    },
+  );
+  it('resolves one route without renewing unrelated routes or writing aggregate snapshot state', async () => {
+    const selected = await setGatewayRoute(f.db, f.owner, input(), env);
+    const sibling = await setGatewayRoute(f.db, f.owner, { ...input(), transport: 'udp' }, env);
+    const first = await getGatewaySnapshot(f.db, env);
+    const selectedRevision = first.routes.find((route) => route.id === selected.id)?.revision;
+    const unrelated = await f.db
+      .selectFrom('gateway_routes')
+      .selectAll()
+      .where('id', '=', sibling.id)
+      .executeTakeFirstOrThrow();
+    const aggregate = await f.db
+      .selectFrom('gateway_control_state')
+      .selectAll()
+      .where('gateway_id', '=', first.gatewayId)
+      .executeTakeFirstOrThrow();
+    await delay(5);
+    expect(await requireGatewayRoute(f.db, selected.id, selectedRevision, env)).toMatchObject({
+      id: selected.id,
+      revision: selectedRevision,
+    });
+    expect(
+      await f.db
+        .selectFrom('gateway_routes')
+        .selectAll()
+        .where('id', '=', sibling.id)
+        .executeTakeFirstOrThrow(),
+    ).toEqual(unrelated);
+    expect(
+      await f.db
+        .selectFrom('gateway_control_state')
+        .selectAll()
+        .where('gateway_id', '=', first.gatewayId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual(aggregate);
+    await setGatewayPolicy(f.db, f.context, serverId, { ...policy, mode: 'manually_stopped' });
+    await expect(
+      requireGatewayRoute(f.db, selected.id, selectedRevision, env, { revisionPrecondition: true }),
+    ).rejects.toMatchObject({ code: 'conflict', status: 412 });
+    const current = await requireGatewayRoute(f.db, selected.id, undefined, env);
+    expect(current.revision).toBeGreaterThan(selectedRevision ?? 0);
+    expect(current.mode).toBe('manually_stopped');
+    expect(
+      await f.db
+        .selectFrom('gateway_routes')
+        .selectAll()
+        .where('id', '=', sibling.id)
+        .executeTakeFirstOrThrow(),
+    ).toEqual(unrelated);
+    expect(
+      await f.db
+        .selectFrom('gateway_control_state')
+        .selectAll()
+        .where('gateway_id', '=', first.gatewayId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual(aggregate);
+    const next = await getGatewaySnapshot(f.db, env);
+    expect(next.revision).toBeGreaterThan(first.revision);
+    expect(next.routes.find((route) => route.id === selected.id)?.revision).toBe(current.revision);
+    expect(next.routes.find((route) => route.id === sibling.id)?.revision).toBeGreaterThan(
+      Number(unrelated.revision),
+    );
+  });
+  it.each([
+    'disabled-node',
+    'deleted-server',
+    'direct-server',
+    'missing-provider',
+    'disabled-route',
+  ] as const)(
+    'withdraws a scoped route immediately on %s without renewing its lease',
+    async (change) => {
+      const selected = await setGatewayRoute(f.db, f.owner, input(), env);
+      const before = await requireGatewayRoute(f.db, selected.id, undefined, env);
+      const stored = await f.db
+        .selectFrom('gateway_routes')
+        .selectAll()
+        .where('id', '=', selected.id)
+        .executeTakeFirstOrThrow();
+      if (change === 'disabled-node')
+        await f.db
+          .updateTable('managed_nodes')
+          .set({ enabled: false })
+          .where('id', '=', f.nodeId)
+          .execute();
+      if (change === 'deleted-server')
+        await f.db
+          .updateTable('managed_servers')
+          .set({ deleted_at: new Date() })
+          .where('id', '=', serverId)
+          .execute();
+      if (change === 'direct-server')
+        await f.db
+          .updateTable('managed_servers')
+          .set({ connection_mode: 'direct' })
+          .where('id', '=', serverId)
+          .execute();
+      if (change === 'missing-provider')
+        await f.db
+          .updateTable('managed_servers')
+          .set({ pterodactyl_id: null, pterodactyl_uuid: null, pterodactyl_identifier: null })
+          .where('id', '=', serverId)
+          .execute();
+      if (change === 'disabled-route')
+        await f.db
+          .updateTable('gateway_routes')
+          .set({ enabled: false })
+          .where('id', '=', selected.id)
+          .execute();
+      await expect(requireGatewayRoute(f.db, selected.id, before.revision, env)).rejects.toThrow(
+        'not_found',
+      );
+      expect(
+        (
+          await f.db
+            .selectFrom('gateway_routes')
+            .select('lease_expires_at')
+            .where('id', '=', selected.id)
+            .executeTakeFirstOrThrow()
+        ).lease_expires_at,
+      ).toEqual(stored.lease_expires_at);
     },
   );
   it('changes persistent snapshot and route revisions when consent or mode changes', async () => {

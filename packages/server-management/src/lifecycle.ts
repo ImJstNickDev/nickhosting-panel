@@ -13,6 +13,8 @@ import { parseCommand, processJob } from '@nickhosting/jobs';
 import {
   type ApplicationServer,
   type BuildUpdate,
+  isUploadNotDispatched,
+  isUploadNotPublished,
   type PterodactylAdapter,
   PterodactylError,
   limitsSchema as providerLimitsSchema,
@@ -30,6 +32,7 @@ import {
   resolveBackupMode,
 } from './backup-policy.js';
 import { effectiveNodeOverhead } from './configuration.js';
+import { isGatewayConsoleSleep } from './gateway-console-contract.js';
 import { reconcileGatewayState } from './gateway-orchestration.js';
 import {
   activateProvisionGateway,
@@ -72,6 +75,9 @@ export interface GameLifecycleContext {
   operation: () => Operation;
   authorize: () => Promise<void>;
   assertStopped: () => Promise<void>;
+  /** Ephemeral Core proof for read-only Satisfactory preview processing in this
+   * locked delivery. Never substitutes for Apply/rollback effect authorization. */
+  previewSourceVerified?: true;
   /** Trusted host guarantee for property/player edits: effect checks the physical
    * process immediately before dispatch, so integrations need not repeat it. */
   effectVerifiesStopped?: true;
@@ -139,6 +145,10 @@ export interface LifecycleOptions {
   } | null>;
   /** Game hooks run under the same pinned server lock and durable effect journal. */
   configureGameProvision?: (context: GameLifecycleContext) => Promise<boolean>;
+  finalizeGameStart?: (context: GameLifecycleContext) => Promise<boolean>;
+  cleanupGameSecrets?: (serverId: string, db: Kysely<Database>) => Promise<void>;
+  prepareGameStop?: (context: GameLifecycleContext) => Promise<void>;
+  finalizeGameStop?: (context: GameLifecycleContext) => Promise<void>;
   /** Read-only, trusted integration attestation; never used for reinstall/wipe. */
   verifyInitialInstallation?: (
     context: GameLifecycleContext,
@@ -148,6 +158,10 @@ export interface LifecycleOptions {
     serverId: string,
     connection: Kysely<Database>,
   ) => Promise<boolean>;
+  installationRetry?: (
+    context: GameLifecycleContext,
+    logs?: readonly { at: string; text: string }[],
+  ) => Promise<number>;
   processGameContent?: (context: GameLifecycleContext) => Promise<boolean>;
   verifyGameRestore?: (context: GameLifecycleContext) => Promise<boolean>;
   env?: Environment;
@@ -262,6 +276,7 @@ const isGatewaySleep = (operation: Operation) => {
 };
 
 const isScheduledStop = (operation: Operation) => {
+  if (operation.action === 'stop' && operation.plan.satisfactoryExternalEdit === true) return true;
   const marker = operation.plan.scheduleAutomation;
   return (
     operation.action === 'stop' &&
@@ -278,6 +293,21 @@ const installed = (remote: ApplicationServer) =>
   !remote.status && (remote.container.installed === true || remote.container.installed === 1);
 const installationPending = (remote: ApplicationServer) =>
   remote.status === 'installing' || !remote.container.installed;
+/** Only pre-effect mod mutations can own a reservation recreated by reconciliation. */
+const pendingSatisfactoryMods = (
+  operation: Pick<Operation, 'action' | 'phase' | 'effect_state' | 'plan'>,
+) => {
+  const content = operation.plan.satisfactoryContent as
+    | { kind?: string; mode?: string }
+    | undefined;
+  return (
+    operation.action === 'satisfactory-content' &&
+    operation.phase === 'planned' &&
+    operation.effect_state === 'none' &&
+    content?.kind === 'mods' &&
+    ['apply', 'rollback'].includes(content.mode ?? '')
+  );
+};
 const nowOf = (options: LifecycleOptions) => options.now?.() ?? new Date();
 const settleOf = (options: LifecycleOptions) => options.settleMs ?? 21_000;
 
@@ -744,6 +774,22 @@ export async function processServerOperation(
       alreadyStopped = false,
       confirmedStopped = false,
     ): Promise<Result> => {
+      if (
+        success &&
+        !release &&
+        !alreadyStopped &&
+        !confirmedStopped &&
+        ((operation.action === 'provision' && operation.phase === 'initial_start') ||
+          (['start', 'restart'].includes(operation.action) && operation.phase === 'power')) &&
+        options.finalizeGameStart
+      ) {
+        try {
+          if (!(await options.finalizeGameStart(gameContext()))) return wait('game_setup');
+        } catch (error) {
+          // Power is proven; a native setup failure must not repeat the start effect.
+          return finish(false, false, safeError(error).code);
+        }
+      }
       // Settings, player lists and selected-world metadata change no capacity.
       // Keep their atomic completion under the server lock without unrelated admission waits.
       const metadataOnly = metadataContent && !release && !alreadyStopped && !confirmedStopped;
@@ -800,7 +846,11 @@ export async function processServerOperation(
               .where('server_id', '=', server.id)
               .executeTakeFirst();
             if (compute || installation) return false;
-            if (!isGatewaySleep(operation) && !isScheduledStop(operation))
+            if (
+              !isGatewaySleep(operation) &&
+              !isScheduledStop(operation) &&
+              !isGatewayConsoleSleep(operation.plan)
+            )
               await tx
                 .updateTable('managed_servers')
                 .set({ intent: 'manually_stopped' })
@@ -851,6 +901,7 @@ export async function processServerOperation(
               .where('installation_state', 'in', ['pending', 'installing'])
               .execute();
           if (success && operation.action === 'delete') {
+            await options.cleanupGameSecrets?.(server.id, tx);
             await tx
               .updateTable('managed_servers')
               .set({ deleted_at: nowOf(options), runtime_state: 'offline', readiness: 'unknown' })
@@ -901,7 +952,9 @@ export async function processServerOperation(
                     runtime_state: 'offline' as const,
                     readiness: 'unknown' as const,
                     last_observed_at: nowOf(options),
-                    ...(!isGatewaySleep(operation) && !isScheduledStop(operation)
+                    ...(!isGatewaySleep(operation) &&
+                    !isScheduledStop(operation) &&
+                    !isGatewayConsoleSleep(operation.plan)
                       ? { intent: 'manually_stopped' as const }
                       : {}),
                   }
@@ -985,7 +1038,9 @@ export async function processServerOperation(
       if (
         success &&
         confirmedStopped &&
-        (isGatewaySleep(operation) || isScheduledStop(operation))
+        (isGatewaySleep(operation) ||
+          isScheduledStop(operation) ||
+          isGatewayConsoleSleep(operation.plan))
       ) {
         // Reuse the canonical durable transition now rather than waiting for a
         // worker tick. A crash/failure here is recovered by the same reconciler
@@ -1004,7 +1059,14 @@ export async function processServerOperation(
       minecraftContentSelectsWorld(operation.plan.minecraftContent);
     const offlineMetadataContent = metadataContent && !offlineWorldSelection;
     const worldFileContent = onlineWorldContent || metadataContent;
+    const satisfactoryPreview =
+      operation.action === 'satisfactory-content' &&
+      (operation.plan.satisfactoryContent as { kind?: string; mode?: string } | undefined)?.kind ===
+        'mods' &&
+      (operation.plan.satisfactoryContent as { mode?: string }).mode === 'preview';
+    let previewSourceVerified = false;
     let providerFileEffects = false;
+    let modUploadRetryDelay: number | null = null;
     let worldSelectionReadAuthorized = false;
     // Reuse this delivery's identity for game file operations. Metadata edits
     // share the browsing proof; long staging refreshes it.
@@ -1040,6 +1102,116 @@ export async function processServerOperation(
           await measure('reservation', () => assertQuiescentReservation(tx));
         }),
       );
+    };
+    const recoverModReservation = async (): Promise<boolean> => {
+      const reserved = await db
+        .selectFrom('resource_reservations')
+        .select('operation_id')
+        .where('server_id', '=', server.id)
+        .executeTakeFirst();
+      if (!reserved) return true;
+      if (reserved.operation_id !== jobId || !options.confirmAlreadyStopped) return false;
+      // Lifecycle already holds the server advisory lock. Match admission's row
+      // lock order and pin host/provider configuration while proving quiescence.
+      return db.transaction().execute(async (tx) => {
+        await lockResources(tx);
+        const node = await tx
+          .selectFrom('managed_nodes')
+          .selectAll()
+          .where('id', '=', server.node_id)
+          .forShare()
+          .executeTakeFirstOrThrow();
+        await tx
+          .selectFrom('physical_hosts')
+          .select('id')
+          .where('id', '=', node.physical_host_id)
+          .forUpdate()
+          .executeTakeFirstOrThrow();
+        await tx
+          .selectFrom('user')
+          .select('id')
+          .where('id', '=', server.owner_id)
+          .forUpdate()
+          .executeTakeFirstOrThrow();
+        const fresh = await tx
+          .selectFrom('managed_servers')
+          .selectAll()
+          .where('id', '=', server.id)
+          .forUpdate()
+          .executeTakeFirstOrThrow();
+        const current = await tx
+          .selectFrom('server_operations')
+          .selectAll()
+          .where('job_id', '=', jobId)
+          .forUpdate()
+          .executeTakeFirstOrThrow();
+        const reservation = await tx
+          .selectFrom('resource_reservations')
+          .selectAll()
+          .where('server_id', '=', server.id)
+          .forUpdate()
+          .executeTakeFirst();
+        if (!reservation) return true;
+        if (
+          fresh.deleted_at ||
+          fresh.active_operation_id !== jobId ||
+          fresh.node_id !== server.node_id ||
+          fresh.owner_id !== server.owner_id ||
+          fresh.installation_state !== 'installed' ||
+          current.lease_token !== token ||
+          !pendingSatisfactoryMods(current) ||
+          reservation.operation_id !== jobId ||
+          reservation.physical_host_id !== node.physical_host_id ||
+          (await tx
+            .selectFrom('installation_reservations')
+            .select('server_id')
+            .where('server_id', '=', server.id)
+            .executeTakeFirst())
+        )
+          return false;
+        await tx
+          .selectFrom('server_allocations')
+          .select('id')
+          .where('server_id', '=', server.id)
+          .forShare()
+          .execute();
+        await tx
+          .selectFrom('platform_settings')
+          .select('key')
+          .where('key', '=', 'platform')
+          .forShare()
+          .execute();
+        await tx
+          .selectFrom('encrypted_secrets')
+          .select('name')
+          .where('name', '=', 'pterodactylApplicationKey')
+          .forShare()
+          .execute();
+        await tx
+          .selectFrom('provider_accounts')
+          .select('user_id')
+          .where('user_id', '=', fresh.owner_id)
+          .forShare()
+          .execute();
+        const remote = await ownedRemote(tx, fresh, options);
+        if (!installed(remote)) return false;
+        const observerPreflight = options.verifyObservationHost?.(server.id, tx);
+        await observerPreflight;
+        if (
+          !(await options.confirmAlreadyStopped?.(server.id, tx, {
+            providerServer: Promise.resolve(remote),
+            observerPreflight,
+          }))
+        )
+          return false;
+        await tx
+          .deleteFrom('resource_reservations')
+          .where('server_id', '=', server.id)
+          .where('operation_id', '=', jobId)
+          .execute();
+        await event('servers.operation.stop_confirmed', { source: 'content_quiescence' }, tx);
+        return true;
+      });
     };
     const confirmWorldSelectionStopped = () =>
       trace('stop.final', async () => {
@@ -1093,9 +1265,15 @@ export async function processServerOperation(
       if (
         !onlineWorldContent &&
         !metadataContent &&
-        ['configure', 'reinstall', 'wipe', 'restore', 'delete', 'minecraft-content'].includes(
-          operation.action,
-        )
+        [
+          'configure',
+          'reinstall',
+          'wipe',
+          'restore',
+          'delete',
+          'minecraft-content',
+          'satisfactory-content',
+        ].includes(operation.action)
       )
         await requireQuiescentReservation();
       const attempts = z
@@ -1139,6 +1317,9 @@ export async function processServerOperation(
                   ? { rejected: false, rejectionCode: undefined }
                   : {}),
                 waitReason: null,
+                ...(phase.startsWith('installation_retry:')
+                  ? { installationFailureObservedAt: null }
+                  : {}),
                 effectAttempts: { ...attempts, [phase]: attempt },
                 ...(['power', 'initial_start'].includes(phase)
                   ? { powerEffectPrepared: true }
@@ -1181,6 +1362,7 @@ export async function processServerOperation(
         finalPowerIdentity ||
         worldFileContent ||
         ((operation.plan.gatewayAutomation !== undefined ||
+          operation.plan.gatewayConsole !== undefined ||
           operation.plan.scheduleAutomation !== undefined ||
           minecraftProvision) &&
           !(phase === 'power' && operation.action === 'stop' && options.authorizeIntent))
@@ -1319,7 +1501,41 @@ export async function processServerOperation(
       try {
         result = await timed('provider_effect', () => perform(verifiedServer));
       } catch (error) {
-        if (error instanceof PterodactylError && error.outcome === 'rejected') {
+        const modContent = operation.plan.satisfactoryContent as
+          | { kind?: string; mode?: string }
+          | undefined;
+        if (
+          operation.action === 'satisfactory-content' &&
+          modContent?.kind === 'mods' &&
+          ['apply', 'rollback'].includes(modContent.mode ?? '') &&
+          /^satisfactory\.mods\.upload\.\d+$/.test(phase) &&
+          error instanceof PterodactylError &&
+          error.reason === 'rate_limited' &&
+          error.outcome === 'rejected' &&
+          (isUploadNotPublished(error) || isUploadNotDispatched(error)) &&
+          attempt < job.max_attempts
+        ) {
+          // Only adapter-proven non-publication may retry. The next delivery
+          // rechecks destination hashes and resumes the existing receipt; it
+          // never replays an uncertain upload body or a power effect.
+          modUploadRetryDelay =
+            error.retryAfterMs !== undefined &&
+            Number.isFinite(error.retryAfterMs) &&
+            error.retryAfterMs >= 0
+              ? error.retryAfterMs
+              : 60_000;
+          await update({
+            effect_state: 'none',
+            plan: {
+              ...operation.plan,
+              rejected: false,
+              rejectionCode: undefined,
+              providerPreflightRetryAt: new Date(
+                nowOf(options).getTime() + modUploadRetryDelay,
+              ).toISOString(),
+            },
+          });
+        } else if (error instanceof PterodactylError && error.outcome === 'rejected') {
           await update({
             effect_state: 'none',
             plan: { ...operation.plan, rejected: true, rejectionCode: safeError(error).code },
@@ -1393,6 +1609,36 @@ export async function processServerOperation(
     });
     const observeInstallation = async () => {
       if (operation.plan.installConfirmed === true) return true;
+      // A separately leased collector can retain a real native completion across
+      // lifecycle timeouts/restarts. Correlate its exact effect before fresh host
+      // and identity checks; signed Panel status updates remain wake hints only.
+      if (operation.effect_started_at && options.confirmInitialInstallationStopped) {
+        const receipt = await db
+          .selectFrom('server_events')
+          .select('id')
+          .where('server_id', '=', server.id)
+          .where('job_id', '=', jobId)
+          .where('message_key', '=', 'servers.operation.installation_updated')
+          .where(sql<string>`data->>'source'`, '=', 'native_installation_completed')
+          .where(sql<string>`data->>'providerUuid'`, '=', server.pterodactyl_uuid ?? '')
+          .where(
+            sql<string>`data->>'effectStartedAt'`,
+            '=',
+            operation.effect_started_at.toISOString(),
+          )
+          .executeTakeFirst();
+        if (receipt && (await options.confirmInitialInstallationStopped(server.id, db))) {
+          const current = await ownedRemote(db, server, options);
+          if (
+            installed(current) &&
+            !current.status &&
+            (await installationCallbacks(false).authorize())
+          ) {
+            await installationCallbacks(false).onConfirmed();
+            return true;
+          }
+        }
+      }
       await options.adapter.confirmInstallation(
         server.pterodactyl_id ?? 0,
         server.pterodactyl_identifier ?? '',
@@ -1404,6 +1650,84 @@ export async function processServerOperation(
     const settled = () =>
       operation.effect_started_at !== null &&
       nowOf(options).getTime() - operation.effect_started_at.getTime() >= settleOf(options);
+    const retryFailedInstallation = async (): Promise<boolean> => {
+      if (
+        operation.plan.installConfirmed ||
+        operation.plan.modpackOperationId ||
+        !['provision', 'reinstall'].includes(operation.action) ||
+        !options.installationRetry
+      )
+        return false;
+      // A lost dispatch response must never replay an installer. Its subsequent
+      // terminal failure needs a fresh, attempt-bound log before another retry.
+      if (operation.phase.startsWith('installation_retry:') && !settled()) return true;
+      const evidence = z
+        .object({ effectStartedAt: z.string(), limit: z.number().int().min(0).max(5) })
+        .safeParse(operation.plan.installationRetryEvidence);
+      const configured =
+        evidence.success &&
+        evidence.data.effectStartedAt === operation.effect_started_at?.toISOString()
+          ? evidence.data.limit
+          : await options.installationRetry(gameContext());
+      // The collector flushes asynchronously. Give a newly observed failure one
+      // bounded delivery before treating an absent transcript as ineligible.
+      if (configured === 0) {
+        const observed = operation.plan.installationFailureObservedAt;
+        if (typeof observed !== 'string') {
+          await update({
+            plan: {
+              ...operation.plan,
+              installationFailureObservedAt: nowOf(options).toISOString(),
+            },
+          });
+          return true;
+        }
+        if (nowOf(options).getTime() - Date.parse(observed) < 2000) return true;
+      }
+      const limit =
+        Number.isInteger(configured) && configured >= 0 && configured <= 5 ? configured : 0;
+      const retries = Math.max(
+        0,
+        ...Object.keys(operation.plan.effectAttempts ?? {})
+          .filter((key) => /^installation_retry:[1-5]$/.test(key))
+          .map((key) => Number(key.split(':')[1])),
+      );
+      if (retries >= limit) return false;
+      if (!options.confirmInitialInstallationStopped) return false;
+      if (!(await options.confirmInitialInstallationStopped(server.id, db))) return true;
+      if (!options.reserveInstallation) throw new DomainError('configuration_invalid');
+      await options.reserveInstallation(server.id, jobId, db);
+      await progress('installing');
+      options.onInstallationAvailable?.(jobId, server.id);
+      await effect(`installation_retry:${retries + 1}`, async () => {
+        const logs: { at: string; text: string }[] = [];
+        await options.adapter.reinstallWithConfirmation(
+          server.pterodactyl_id ?? 0,
+          server.pterodactyl_identifier ?? '',
+          {
+            ...installationCallbacks(true),
+            onOutput: (text) => {
+              logs.push({ at: nowOf(options).toISOString(), text: text.slice(0, 8192) });
+              if (logs.length > 1000) logs.shift();
+            },
+          },
+        );
+        if (operation.plan.installConfirmed !== true) {
+          const nextLimit = (await options.installationRetry?.(gameContext(), logs)) ?? 0;
+          if (nextLimit > 0)
+            await update({
+              plan: {
+                ...operation.plan,
+                installationRetryEvidence: {
+                  effectStartedAt: operation.effect_started_at?.toISOString(),
+                  limit: nextLimit,
+                },
+              },
+            });
+        }
+      });
+      return true;
+    };
     const resources = async () => {
       const value = await timed('provider_resources', () =>
         options.adapter.getResources(server.pterodactyl_identifier ?? ''),
@@ -1546,13 +1870,14 @@ export async function processServerOperation(
         backup,
         authorize: async () => {
           await trace('auth.read', () =>
-            (worldFileContent
+            (worldFileContent || (satisfactoryPreview && previewSourceVerified)
               ? (options.authorizeIntent ?? options.authorizeEffect)
               : options.authorizeEffect)(jobId, server.id, db, { timing: timing?.child('auth') }),
           );
           if (offlineWorldSelection) worldSelectionReadAuthorized = true;
         },
         ...(offlineMetadataContent ? { effectVerifiesStopped: true as const } : {}),
+        ...(previewSourceVerified ? { previewSourceVerified: true as const } : {}),
         assertStopped: async () => {
           await requireQuiescentReservation();
           if (
@@ -1629,6 +1954,7 @@ export async function processServerOperation(
         }
         if (operation.plan.backupWasRunning === true && operation.phase !== 'backup_stop') {
           await effect('backup_stop', async (verifiedServer) => {
+            await options.prepareGameStop?.(gameContext());
             await options.adapter.stopWithConfirmation(
               server.pterodactyl_id ?? 0,
               server.pterodactyl_identifier ?? '',
@@ -2236,6 +2562,20 @@ export async function processServerOperation(
           await event('servers.operation.stop_confirmed', { source: 'terminal_process' }, tx);
         });
       }
+      try {
+        const stoppedContext = gameContext();
+        // Capacity remains reserved until finish(). Maintenance may inspect
+        // files now, but must freshly prove physical shutdown before mutation.
+        stoppedContext.assertStopped = async () => {
+          if (!(await options.confirmAlreadyStopped?.(server.id, db)))
+            throw new DomainError('operation_uncertain');
+        };
+        await options.finalizeGameStop?.(stoppedContext);
+      } catch {
+        // Maintenance must not invalidate a physically confirmed stop. It is
+        // idempotent and will be retried during the next confirmed stop.
+        await event('servers.operation.stop_maintenance_skipped');
+      }
       return finish(true, true, null, false, true);
     };
     try {
@@ -2339,6 +2679,7 @@ export async function processServerOperation(
         }
         remote = await timed('provider_identity', () => ownedRemote(db, server, options));
         if (['install_failed', 'reinstall_failed'].includes(remote.status ?? '')) {
+          if (await retryFailedInstallation()) return wait('installation');
           await db
             .updateTable('managed_servers')
             .set({ installation_state: 'failed' })
@@ -2606,10 +2947,19 @@ export async function processServerOperation(
                 : {}),
             },
           });
+          // An explicit console sleep/restart promises a saved world. Complete
+          // that prerequisite before recording any possible power handoff, so a
+          // failed save can never be mistaken for an uncertain shutdown.
+          const consolePower = operation.plan.gatewayConsole !== undefined;
+          if (consolePower) {
+            if (!options.prepareGameStop) throw new DomainError('configuration_invalid');
+            await options.prepareGameStop(gameContext());
+          }
           if (action === 'stop') {
             await effect(
               'power',
               async (verifiedServer) => {
+                if (!consolePower) await options.prepareGameStop?.(gameContext());
                 const result = await options.adapter.stopWithConfirmation(
                   server.pterodactyl_id ?? 0,
                   server.pterodactyl_identifier ?? '',
@@ -2719,9 +3069,11 @@ export async function processServerOperation(
               remote,
             );
           } else
-            await effect('power', () =>
-              options.adapter.power(server.pterodactyl_identifier ?? '', action),
-            );
+            await effect('power', async () => {
+              if (action === 'restart' && !consolePower)
+                await options.prepareGameStop?.(gameContext());
+              return options.adapter.power(server.pterodactyl_identifier ?? '', action);
+            });
           const stopped = await completeObservedStop();
           if (stopped) return stopped;
           return wait('power_confirmation');
@@ -2759,7 +3111,11 @@ export async function processServerOperation(
           // with trusted, host-bound Docker non-running evidence before persisting proof.
           if (operation.plan.stopConfirmed !== true)
             return wait('stop_terminal_unproven', 'operation_uncertain');
-          if (!isGatewaySleep(operation) && !isScheduledStop(operation))
+          if (
+            !isGatewaySleep(operation) &&
+            !isScheduledStop(operation) &&
+            !isGatewayConsoleSleep(operation.plan)
+          )
             await db
               .updateTable('managed_servers')
               .set({ intent: 'manually_stopped' })
@@ -2800,11 +3156,26 @@ export async function processServerOperation(
       }
       // The integration checks the selected world at dispatch. An unused folder
       // needs neither process telemetry nor an artificial offline settling period.
-      if (!onlineWorldContent && !metadataContent) {
+      if (satisfactoryPreview) {
+        // Preview writes only its private staging tree. A fresh physical stopped
+        // proof is sufficient; do not start another resource-cache settling timer.
+        // Apply/rollback retain the normal mutation lifecycle and revalidate files.
+        await requireQuiescentReservation();
+        if (
+          !options.confirmAlreadyStopped ||
+          !(await options.confirmAlreadyStopped(server.id, db, {
+            providerServer: Promise.resolve(remote),
+          }))
+        )
+          throw new DomainError('operation_uncertain');
+        previewSourceVerified = true;
+      } else if (!onlineWorldContent && !metadataContent) {
+        if (pendingSatisfactoryMods(operation) && !(await recoverModReservation()))
+          return wait('offline_confirmation', 'operation_uncertain');
         await requireQuiescentReservation();
         if (!(await offline())) return wait('offline_confirmation');
       }
-      if (operation.action === 'minecraft-content') {
+      if (operation.action === 'minecraft-content' || operation.action === 'satisfactory-content') {
         if (!options.processGameContent) throw new DomainError('configuration_invalid');
         if (!(await options.processGameContent(gameContext())))
           return wait('game_content_confirmation');
@@ -2970,6 +3341,7 @@ export async function processServerOperation(
           return wait('installation');
         }
         if (['install_failed', 'reinstall_failed'].includes(remote.status ?? '')) {
+          if (await retryFailedInstallation()) return wait('installation');
           await db
             .updateTable('managed_servers')
             .set({ installation_state: 'failed' })
@@ -3148,6 +3520,22 @@ export async function processServerOperation(
         }
       }
       const code = safeError(error).code;
+      if (modUploadRetryDelay !== null)
+        return wait('provider_rate_limited', code, modUploadRetryDelay);
+      if (
+        error instanceof DomainError &&
+        error.code === 'configuration_invalid' &&
+        error.details?.reason === 'installation_outputs_missing' &&
+        operation.plan.installConfirmed === true &&
+        ['provision', 'reinstall'].includes(operation.action)
+      ) {
+        await db
+          .updateTable('managed_servers')
+          .set({ installation_state: 'failed' })
+          .where('id', '=', server.id)
+          .execute();
+        return finish(false, false, code);
+      }
       if (
         operation.action === 'backup' &&
         (operation.plan.backupFailed === true || operation.plan.rejected === true)
@@ -3320,6 +3708,9 @@ function reconciliationSnapshot(db: Kysely<Database>, serverId: string) {
     (select node.xmin::text from managed_nodes node where node.id = server.node_id),
     (select host.xmin::text from physical_hosts host join managed_nodes node on node.physical_host_id = host.id where node.id = server.node_id),
     (select jsonb_agg(jsonb_build_array(allocation.id, allocation.xmin::text) order by allocation.id) from server_allocations allocation where allocation.server_id = server.id),
+    (select jsonb_build_array(operation.xmin::text, job.xmin::text)
+      from server_operations operation join operation_jobs job on job.id = operation.job_id
+      where operation.job_id = server.active_operation_id and operation.server_id = server.id),
     (select reservation.xmin::text from resource_reservations reservation where reservation.server_id = server.id),
     (select reservation.xmin::text from installation_reservations reservation where reservation.server_id = server.id),
     (select jsonb_build_array(operation.job_id, operation.xmin::text, job.xmin::text)
@@ -3484,10 +3875,31 @@ export async function reconcileManagedServer(
       }
     }
   }
+  const activeModOperation =
+    server.active_operation_id &&
+    current.current_state !== 'offline' &&
+    server.runtime_state === 'offline'
+      ? await db
+          .selectFrom('server_operations')
+          .select(['action', 'phase', 'effect_state', 'plan'])
+          .where('job_id', '=', server.active_operation_id)
+          .where('server_id', '=', server.id)
+          .executeTakeFirst()
+      : undefined;
+  const activeStoppedMods =
+    activeModOperation &&
+    pendingSatisfactoryMods(activeModOperation) &&
+    server.installation_state === 'installed' &&
+    installed(remote) &&
+    !(await db
+      .selectFrom('installation_reservations')
+      .select('server_id')
+      .where('server_id', '=', server.id)
+      .executeTakeFirst());
   if (
     current.current_state !== 'offline' &&
     server.runtime_state === 'offline' &&
-    !server.active_operation_id &&
+    (!server.active_operation_id || activeStoppedMods) &&
     options.confirmAlreadyStopped
   ) {
     const latestPower = await db
@@ -3539,7 +3951,7 @@ export async function reconcileManagedServer(
       .select(['operation.job_id', 'operation.plan'])
       .where('reservation.server_id', '=', server.id)
       .where('operation.action', 'in', ['provision', 'reinstall'])
-      .where('operation.phase', '=', 'failed')
+      .where('operation.phase', 'in', ['failed', 'owner_resolved_failed'])
       .where('job.state', '=', 'failed')
       .where('job.completed_at', 'is not', null)
       .executeTakeFirst();

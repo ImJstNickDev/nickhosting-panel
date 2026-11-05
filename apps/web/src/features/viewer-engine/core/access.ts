@@ -26,13 +26,32 @@ export async function readViewerBytes(
   url: string,
   maxBytes: number,
   signal: AbortSignal,
+  prefixSize?: number,
+  headers?: Record<string, string>,
 ): Promise<Uint8Array<ArrayBuffer>> {
   const response = await fetch(safeApiPath(url), {
     credentials: 'same-origin',
     redirect: 'error',
     signal,
+    ...(prefixSize || headers
+      ? { headers: { ...headers, ...(prefixSize ? { Range: `bytes=0-${prefixSize - 1}` } : {}) } }
+      : {}),
   });
   if (!response.ok) throw apiError(await response.json().catch(() => ({})), response.status);
+  let expectedPrefixBytes: number | undefined;
+  if (prefixSize) {
+    const range = /^bytes 0-(\d+)\/(\d+)$/.exec(response.headers.get('content-range') ?? '');
+    if (
+      response.status !== 206 ||
+      !range ||
+      !Number.isSafeInteger(Number(range[2])) ||
+      Number(range[1]) + 1 !== Math.min(prefixSize, Number(range[2]))
+    ) {
+      await response.body?.cancel();
+      throw { messageKey: 'viewer.unavailable' };
+    }
+    expectedPrefixBytes = Number(range[1]) + 1;
+  }
   const length = Number(response.headers.get('content-length'));
   if (Number.isFinite(length) && length > maxBytes) {
     await response.body?.cancel();
@@ -54,6 +73,8 @@ export async function readViewerBytes(
     await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
+  if (expectedPrefixBytes !== undefined && size !== expectedPrefixBytes)
+    throw { messageKey: 'viewer.unavailable' };
   const result = new Uint8Array(size);
   let offset = 0;
   for (const part of parts) {

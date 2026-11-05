@@ -25,7 +25,8 @@ function fixture() {
     firstChunk?: () => void;
     uploadStatus?: number;
     lostUploadResponse?: boolean;
-    publish?: 'lost-response' | 'reject' | 'uncertain' | 'wrong-receipt';
+    publish?: 'lost-response' | 'reject' | 'uncertain' | 'wrong-receipt' | 'rate-limited';
+    nativeRename?: 'rate-limited' | 'lost-response';
     cleanupFailure?: boolean;
     mode?: string;
   } = {};
@@ -104,6 +105,8 @@ function fixture() {
       expect(input.source).toBe(`config/.nh-upload-${input.operationId}.pending`);
       publications.push({ from: input.source, to: input.destination });
       if (hooks.publish === 'reject') return new Response(null, { status: 403 });
+      if (hooks.publish === 'rate-limited')
+        return new Response(null, { status: 429, headers: { 'Retry-After': '0' } });
       const source = `/${input.source}`;
       const destination = `/${input.destination}`;
       const backup = source.replace(/\.pending$/, '.previous');
@@ -125,6 +128,8 @@ function fixture() {
     if (target.pathname.endsWith('/files/rename')) {
       const move = input.files[0] as { from: string; to: string };
       publications.push(move);
+      if (hooks.nativeRename === 'rate-limited')
+        return new Response(null, { status: 429, headers: { 'Retry-After': '0' } });
       const from = `/${move.from}`;
       const to = `/${move.to}`;
       // Faithful upstream behavior: Rename refuses overwrites. It also silently
@@ -135,6 +140,7 @@ function fixture() {
         files.set(to, content);
         files.delete(from);
       }
+      if (hooks.nativeRename === 'lost-response') throw new Error('Lost rename reply');
       return new Response(null, { status: 204 });
     }
     if (target.pathname.endsWith('/files/delete')) {
@@ -236,6 +242,91 @@ describe('streamed upload publication', () => {
     expect(f.fetcher.mock.calls.some(([url]) => String(url).endsWith('/upload-publication'))).toBe(
       false,
     );
+  });
+
+  it('cleans a completed stage after a rejected native rename 429 before proving safe retry', async () => {
+    const f = fixture();
+    f.hooks.nativeRename = 'rate-limited';
+    const authorize = vi.fn(async () => {});
+    const error = await f.adapter
+      .uploadFile('server', 'config/new.txt', {
+        body: body('new contents'),
+        contentLength: 12,
+        maxBytes: 12,
+        authorize,
+      })
+      .catch((error: unknown) => error);
+    expect(error).toMatchObject({
+      reason: 'rate_limited',
+      outcome: 'rejected',
+      upstreamStatus: 429,
+      retryAfterMs: 0,
+    });
+    expect(isUploadNotPublished(error)).toBe(true);
+    expect(f.publications).toHaveLength(1);
+    expect(f.uploads).toHaveLength(1);
+    expect(f.removed).toEqual(f.uploads);
+    expect(f.files).toEqual(new Map([['/config/server.properties', original]]));
+    expect(authorize).toHaveBeenCalled();
+  });
+
+  it.each(['cleanup', 'authority'] as const)(
+    'does not prove native rename retry when %s fails',
+    async (failure) => {
+      const f = fixture();
+      f.hooks.nativeRename = 'rate-limited';
+      f.hooks.cleanupFailure = failure === 'cleanup';
+      const error = await f.adapter
+        .uploadFile('server', 'config/new.txt', {
+          body: body('new contents'),
+          contentLength: 12,
+          maxBytes: 12,
+          authorize: async () => {
+            if (failure === 'authority' && f.publications.length) throw new Error('revoked');
+          },
+        })
+        .catch((error: unknown) => error);
+      expect(error).toMatchObject({ outcome: 'unknown' });
+      expect(isUploadNotPublished(error)).toBe(false);
+      expect(f.files.has('/config/new.txt')).toBe(false);
+      expect([...f.files.keys()].filter((path) => path.endsWith('.pending'))).toHaveLength(1);
+      expect(f.removed).toEqual([]);
+      expect(f.publications).toHaveLength(1);
+    },
+  );
+
+  it('never cleans or replays a native rename whose reply was lost', async () => {
+    const f = fixture();
+    f.hooks.nativeRename = 'lost-response';
+    const error = await f.adapter
+      .uploadFile('server', 'config/new.txt', {
+        body: body('new contents'),
+        contentLength: 12,
+        maxBytes: 12,
+      })
+      .catch((error: unknown) => error);
+    expect(error).toMatchObject({ outcome: 'unknown' });
+    expect(isUploadNotPublished(error)).toBe(false);
+    expect(f.files.get('/config/new.txt')).toBe('new contents');
+    expect(f.removed).toEqual([]);
+    expect(f.publications).toHaveLength(1);
+  });
+
+  it('does not infer a publication proof from a throttled replacement ledger request', async () => {
+    const f = fixture();
+    f.hooks.publish = 'rate-limited';
+    const error = await f.adapter
+      .uploadFile('server', 'config/server.properties', {
+        body: body('new contents'),
+        contentLength: 12,
+        maxBytes: 12,
+      })
+      .catch((error: unknown) => error);
+    expect(error).toMatchObject({ reason: 'rate_limited', outcome: 'rejected' });
+    expect(isUploadNotPublished(error)).toBe(false);
+    expect(f.files.get('/config/server.properties')).toBe(original);
+    expect(f.removed).toEqual([]);
+    expect(f.publications).toHaveLength(1);
   });
 
   it('preserves backup and stage after an uncertain replacement without replay', async () => {
@@ -345,6 +436,20 @@ describe('streamed upload publication', () => {
     expect(f.files.get('/config/server.properties')).toBe(original);
     expect(f.publications).toEqual([]);
     expect(f.fetcher).toHaveBeenCalledTimes(4);
+  });
+  it('restricts private uploads before any secret bytes are sent', async () => {
+    const f = fixture();
+    await f.adapter.uploadFile('server', 'config/private.key', {
+      privateFile: true,
+      body: body('secret'),
+      contentLength: 6,
+      maxBytes: 6,
+    });
+    expect(f.chmods).toEqual([{ file: f.publications[0]?.from, mode: '600' }]);
+    const calls = f.fetcher.mock.calls.map(([url]) => new URL(String(url)).pathname);
+    expect(calls.indexOf('/api/client/servers/server/files/chmod')).toBeLessThan(
+      calls.indexOf('/upload/file'),
+    );
   });
   it.each(['600', '755'])(
     'preserves an existing destination mode %s before publishing',

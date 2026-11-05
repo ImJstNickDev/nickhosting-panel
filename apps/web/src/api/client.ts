@@ -112,6 +112,22 @@ export async function api<T = unknown>(
     }
   }
 }
+/** Same-origin authenticated reads whose consumers validate and render records incrementally. */
+export async function apiStream(
+  path: string,
+  options: { signal?: AbortSignal; headers?: Record<string, string> } = {},
+): Promise<ReadableStream<Uint8Array>> {
+  const response = await fetch(safeApiPath(path), {
+    method: 'GET',
+    credentials: 'same-origin',
+    signal: options.signal,
+    headers: { 'Accept-Language': locale, ...options.headers },
+    redirect: 'error',
+  });
+  if (!response.ok) throw apiError(await response.json().catch(() => ({})), response.status);
+  if (!response.body) throw apiError(null, response.status);
+  return response.body;
+}
 export function idempotencyKey() {
   return crypto.randomUUID();
 }

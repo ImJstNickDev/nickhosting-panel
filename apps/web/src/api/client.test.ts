@@ -1,7 +1,60 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { api, apiError, consumeEvents, download, readText, safeApiPath, upload } from './client.js';
+import {
+  api,
+  apiError,
+  apiStream,
+  consumeEvents,
+  download,
+  readText,
+  safeApiPath,
+  upload,
+} from './client.js';
 
 afterEach(() => vi.unstubAllGlobals());
+it('exposes streamed records before completion and forwards reader cancellation', async () => {
+  const cancel = vi.fn();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('first\n'));
+    },
+    cancel,
+  });
+  const fetcher = vi.fn(async () => new Response(stream));
+  vi.stubGlobal('fetch', fetcher);
+  const signal = new AbortController().signal;
+  const reader = (await apiStream('/v1/servers/test/worlds', { signal })).getReader();
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe('first\n');
+  expect(fetcher).toHaveBeenCalledWith(
+    '/v1/servers/test/worlds',
+    expect.objectContaining({
+      credentials: 'same-origin',
+      redirect: 'error',
+      signal,
+    }),
+  );
+  await reader.cancel();
+  expect(cancel).toHaveBeenCalledOnce();
+});
+it('preserves authentication errors and rejects foreign stream URLs before fetching', async () => {
+  const fetcher = vi.fn(
+    async () =>
+      new Response(
+        JSON.stringify({
+          error: { code: 'unauthorized', messageKey: 'auth.errors.unauthorized' },
+          requestId: 'request-1',
+        }),
+        { status: 401 },
+      ),
+  );
+  vi.stubGlobal('fetch', fetcher);
+  await expect(apiStream('/v1/servers/test/worlds')).rejects.toMatchObject({
+    code: 'unauthorized',
+    status: 401,
+    requestId: 'request-1',
+  });
+  await expect(apiStream('https://provider.invalid/worlds')).rejects.toThrow('invalid_api_path');
+  expect(fetcher).toHaveBeenCalledOnce();
+});
 it.each([
   {
     status: 200,

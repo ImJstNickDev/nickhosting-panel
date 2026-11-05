@@ -46,6 +46,7 @@ import {
   type RuntimeImageContext,
   trustedGameModules,
 } from './game-modules.js';
+import { gatewayConsoleOperationSchema } from './gateway-console-contract.js';
 import { refreshHostObservations } from './host-observations.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import {
@@ -68,7 +69,10 @@ import {
 } from './provider-backup-events.js';
 import { cachedProviderStartLimits } from './provider-change-feed.js';
 import { supportsProviderFileOperations } from './provider-file-operations.js';
+import { type InstallationTranscript, installationLogKey } from './provisioning.js';
 import { assertGatewaySleepFence, authorizeServer } from './registry.js';
+import { cleanupSatisfactoryModPlans } from './satisfactory-mod-manager.js';
+import { createSatisfactoryModuleRuntime } from './satisfactory-module.js';
 import { authorizeScheduledEffect } from './schedules.js';
 import { createScopedProviderAdapter } from './scoped-provider-adapter.js';
 import { assertIdleSleepAllowed } from './sleep-policy.js';
@@ -205,6 +209,40 @@ export async function authorizeQueuedEffect(
   )
     throw new DomainError('forbidden');
   const game = await traceOperation(timing, 'game', () => trustedGameModules.resolve(db, serverId));
+
+  if (operation.plan.gatewayConsole !== undefined) {
+    const parsed = gatewayConsoleOperationSchema.safeParse(operation.plan.gatewayConsole);
+    if (!parsed.success || server.connection_mode !== 'gateway') throw new DomainError('forbidden');
+    const marker = parsed.data;
+    const policy = await db
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    if (
+      !policy?.enabled ||
+      policy.generation !== marker.generation ||
+      policy.protocol_id !== marker.protocolId ||
+      server.active_operation_id !== jobId ||
+      job.actor_id !== server.owner_id ||
+      job.subject_id !== server.owner_id ||
+      job.support_session_id ||
+      server.automatic_starts_paused ||
+      ['manually_stopped', 'maintenance'].includes(server.intent) ||
+      (marker.action === 'sleep' &&
+        (operation.action !== 'stop' ||
+          policy.sleep_job_id !== jobId ||
+          server.intent !== 'sleeping')) ||
+      (marker.action === 'restart' &&
+        (operation.action !== 'restart' ||
+          policy.wake_job_id !== jobId ||
+          policy.state !== 'waking'))
+    )
+      throw new DomainError('forbidden');
+    // Explicit sleep must remain wakeable; an Owner policy/consent change can
+    // revoke either queued action before its external effect.
+    await assertAutoWakeAllowed(db, serverId, policy, env);
+  }
 
   if (operation.plan.gatewayAutomation !== undefined) {
     if (server.connection_mode === 'direct') throw new DomainError('forbidden');
@@ -672,7 +710,10 @@ export async function createManagementRuntime(options: ManagementOptions) {
   });
   const gameRuntime = createGameRuntimeDispatcher(
     trustedGameModules,
-    new Map([[minecraft.id, minecraft]]),
+    new Map<string, import('./game-modules.js').GameRuntimeHooks>([
+      [minecraft.id, minecraft],
+      ['satisfactory', createSatisfactoryModuleRuntime(options.codec, env)],
+    ]),
   );
   // Kept for existing M4 callers; common hooks below dispatch through game identity.
   const minecraftOptions = minecraft.minecraftOptions;
@@ -742,6 +783,12 @@ export async function createManagementRuntime(options: ManagementOptions) {
     backupPolicy: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await trustedGameModules.resolve(context.db, context.server.id)).module?.manifest
         .backupPolicy ?? { offline: 'required' as const },
+    prepareGameStop: async (context: import('./lifecycle.js').GameLifecycleContext) => {
+      await (await gameRuntime(context.db, context.server.id))?.prepareStop?.(context);
+    },
+    finalizeGameStop: async (context: import('./lifecycle.js').GameLifecycleContext) => {
+      await (await gameRuntime(context.db, context.server.id))?.finalizeStop?.(context);
+    },
     prepareBackup: async (
       context: import('./lifecycle.js').GameLifecycleContext,
       mode: 'offline' | 'live',
@@ -758,6 +805,25 @@ export async function createManagementRuntime(options: ManagementOptions) {
       cachedProviderStartLimits(connection, serverId, values.pterodactylBaseUrl ?? ''),
     env,
     logger: options.logger,
+    installationRetry: async (
+      context: import('./lifecycle.js').GameLifecycleContext,
+      logs?: readonly { at: string; text: string }[],
+    ) => {
+      const module = await gameRuntime(context.db, context.server.id);
+      if (!module?.installationRetry) return 0;
+      if (logs) return module.installationRetry(context, logs);
+      if (!options.transferCache) return 0;
+      const raw = await options.transferCache.get(installationLogKey(context.operation().job_id));
+      if (!raw) return 0;
+      let transcript: InstallationTranscript;
+      try {
+        transcript = JSON.parse(raw) as InstallationTranscript;
+      } catch {
+        return 0;
+      }
+      if (!Array.isArray(transcript.logs)) return 0;
+      return module.installationRetry(context, transcript.logs);
+    },
     verifyInitialInstallation: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.verifyInitialInstallation?.(context) ??
       null,
@@ -781,6 +847,10 @@ export async function createManagementRuntime(options: ManagementOptions) {
         (await containerObserver.stopped(server.pterodactyl_uuid, 'server'))
       );
     },
+    cleanupGameSecrets: async (serverId: string, connection: Kysely<Database>) =>
+      (await gameRuntime(connection, serverId))?.cleanupSecrets?.(serverId, connection),
+    finalizeGameStart: async (context: import('./lifecycle.js').GameLifecycleContext) =>
+      (await gameRuntime(context.db, context.server.id))?.finalizeStart?.(context) ?? true,
     configureGameProvision: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.configureProvision(context) ?? true,
     processGameContent: async (context: import('./lifecycle.js').GameLifecycleContext) => {
@@ -1146,6 +1216,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     const external = options.reconcileExternal
       ? await options.reconcileExternal(db)
       : await reconcileExternalServices(db, externalOptions);
+    await cleanupSatisfactoryModPlans(db, env);
     await db
       .deleteFrom('server_metrics')
       .where('observed_at', '<', new Date(Date.now() - 30 * 86400000))

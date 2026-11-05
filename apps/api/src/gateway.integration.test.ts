@@ -6,15 +6,28 @@ import type { GatewayRoute } from '@nickhosting/game-sdk';
 import { safetyProviderServerSchema } from '@nickhosting/gateway-safety';
 import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import {
+  ensureSatisfactoryTlsIdentity,
   getGatewaySnapshot,
   getGatewayState,
   type ManagementRuntime,
   setGatewayPolicy,
   setGatewayRoute,
 } from '@nickhosting/server-management';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SatisfactoryApi } from '../../../games/satisfactory/src/api.js';
+import {
+  createNativeAuthenticationToken,
+  decodeNativePlayerIdentity,
+} from '../../../games/satisfactory/src/native-auth.js';
+import * as consoleLifecycle from '../../../packages/server-management/src/gateway-orchestration.js';
+import * as satisfactoryApi from '../../../packages/server-management/src/satisfactory-api.js';
+import * as nativeCredentials from '../../../packages/server-management/src/satisfactory-native-credentials.js';
 import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
 import { createApp } from './app.js';
+import {
+  observeSatisfactorySessions,
+  persistSatisfactoryOfflineSnapshots,
+} from './gateway-satisfactory-offline.js';
 
 const policy = {
   enabled: true,
@@ -187,11 +200,1015 @@ beforeEach(async () => {
       ({
         adapter: f.adapter,
         refreshObservations: refreshHost,
-        lifecycle: { observeProcessStart: processStart },
+        lifecycle: {
+          observeProcessStart: processStart,
+          confirmInitialInstallationStopped: async () => true,
+        },
       }) as unknown as ManagementRuntime,
   });
 });
 describe('M3 Core service authentication and managed control plane', () => {
+  async function satisfactoryRoute(transport: 'tcp' | 'udp' = 'tcp') {
+    await f.db
+      .insertInto('game_integrations')
+      .values({ id: 'satisfactory', version: '1.0.0', manifest: {} })
+      .onConflict((conflict) => conflict.column('id').doNothing())
+      .execute();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'satisfactory', runtime_id: 'dedicated' })
+      .where('id', '=', f.mappingId)
+      .execute();
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ protocol_id: 'satisfactory' })
+      .where('server_id', '=', serverId)
+      .execute();
+    await f.db
+      .updateTable('server_allocations')
+      .set({ protocols: ['tcp', 'udp'] })
+      .where('id', '=', route.allocationId)
+      .execute();
+    await f.db
+      .updateTable('gateway_routes')
+      .set({ transport })
+      .where('id', '=', route.id)
+      .execute();
+    const selected = (await getGatewaySnapshot(f.db, env)).routes.find(
+      (entry) => entry.id === route.id,
+    );
+    if (!selected) throw new Error('Missing Satisfactory fixture route');
+    route = selected;
+    return { routeId: route.id, routeRevision: route.revision };
+  }
+  const satisfactoryState = () => ({
+    state: 3,
+    netCL: 123456,
+    flags: '0',
+    substates: [{ id: 0, version: 1 }],
+    name: 'Factory',
+    observedAt: new Date().toISOString(),
+  });
+  describe('authenticated Satisfactory console commands', () => {
+    afterEach(() => vi.restoreAllMocks());
+    const credentials = {
+      build: 513885,
+      serverName: 'Private factory',
+      serverSecret: 'A1'.repeat(256),
+      adminPassword: { hash: 'B2'.repeat(64), salt: 'C3'.repeat(32) },
+    };
+    const playerId = '060102030405060708';
+    const player = decodeNativePlayerIdentity(playerId);
+    if (!player) throw new Error('fixture');
+    const admin = createNativeAuthenticationToken(credentials, 'Administrator', player);
+    async function setup(mode: 'sleeping' | 'online' = 'sleeping') {
+      await satisfactoryRoute();
+      await f.db
+        .updateTable('gateway_server_states')
+        .set({
+          state: mode,
+          auto_wake_override: true,
+          process_started_at: mode === 'online' ? new Date().toISOString() : null,
+          readiness_observed_at: mode === 'online' ? new Date() : null,
+        })
+        .where('server_id', '=', serverId)
+        .execute();
+      await f.db
+        .updateTable('managed_servers')
+        .set({
+          intent: mode === 'online' ? 'auto_wake_enabled' : 'sleeping',
+          runtime_state: mode === 'online' ? 'running' : 'offline',
+          automatic_starts_paused: false,
+        })
+        .where('id', '=', serverId)
+        .execute();
+      const selected = (await getGatewaySnapshot(f.db, env)).routes.find(
+        (entry) => entry.id === route.id,
+      );
+      if (!selected) throw new Error('fixture');
+      route = selected;
+      const stopped = vi
+        .spyOn(nativeCredentials, 'readStoppedSatisfactoryCredentials')
+        .mockResolvedValue({
+          credentials,
+          generation: route.generation,
+          digest: 'D4'.repeat(32),
+          providerUuid: remote.uuid,
+          port: route.backend.port,
+        });
+      const verify = vi.fn(async () => undefined);
+      const live = vi
+        .spyOn(satisfactoryApi, 'resolveSatisfactoryApi')
+        .mockResolvedValue(new SatisfactoryApi({ request: verify }));
+      const input = (command: string, authorization = `Bearer ${admin}`) => ({
+        routeId: route.id,
+        routeRevision: route.revision,
+        request: { operation: 'RunCommand', data: { Command: command }, authorization, playerId },
+      });
+      const call = async (command: string) => {
+        const response = await request(`${prefix()}/console-command`, input(command));
+        expect(response.status).toBe(200);
+        return response.json();
+      };
+      return { input, call, stopped, live, verify };
+    }
+    it('serves the complete read-only command tree while sleeping, including exact mods text, without waking or exposing credentials', async () => {
+      const { call, live } = await setup();
+      const wake = vi.spyOn(consoleLifecycle, 'requestGatewayWake');
+      for (const command of [
+        'nickhosting',
+        'nickhosting help stop',
+        'nickhosting status',
+        'nickhosting info',
+        'nickhosting version',
+        'nickhosting idle',
+        'nickhosting mods',
+      ]) {
+        const body = await call(command);
+        expect(body).toMatchObject({
+          status: 200,
+          body: { data: { commandResult: expect.any(String), returnValue: true } },
+        });
+        expect(JSON.stringify(body)).not.toContain(credentials.serverSecret);
+        expect(JSON.stringify(body)).not.toContain(admin);
+        if (command === 'nickhosting mods')
+          expect(body.body.data.commandResult).toBe('Coming Soon :)');
+      }
+      expect((await call('quit')).body.data.returnValue).toBe(false);
+      expect((await call('nickhosting stop')).body.data.returnValue).toBe(true);
+      expect((await call('nickhosting restart')).body.data.returnValue).toBe(false);
+      expect(wake).not.toHaveBeenCalled();
+      expect(live).not.toHaveBeenCalled();
+    });
+    it('rejects forged, client, application and other-player credentials before returning even help or mods', async () => {
+      const { input, live } = await setup();
+      for (const authorization of [
+        '',
+        `Bearer ${createNativeAuthenticationToken(credentials, 'Client', player)}`,
+        `Bearer ${admin.slice(0, -2)}00`,
+        `Bearer ${Buffer.from(JSON.stringify({ pl: 'APIToken' })).toString('base64')}.${'AA'.repeat(64)}`,
+      ]) {
+        const response = await request(
+          `${prefix()}/console-command`,
+          input('nickhosting mods', authorization),
+        );
+        expect(await response.json()).toMatchObject({ status: 401 });
+      }
+      const other = input('nickhosting help');
+      other.request.playerId = '060102030405060709';
+      expect(await (await request(`${prefix()}/console-command`, other)).json()).toMatchObject({
+        status: 401,
+      });
+      expect(live).not.toHaveBeenCalled();
+    });
+    it('authenticates online with original Administrator token/player and rejects success-shaped non-204 verification', async () => {
+      const { call, live, stopped, verify } = await setup('online');
+      expect((await call('nickhosting mods')).body.data.commandResult).toBe('Coming Soon :)');
+      expect(live).toHaveBeenCalledWith(expect.anything(), codec, serverId, admin, playerId);
+      expect(verify).toHaveBeenCalledWith(
+        {
+          function: 'VerifyAuthenticationToken',
+          data: { AuthenticationToken: admin.split('.')[1], PrivilegeLevel: 'Administrator' },
+        },
+        expect.any(AbortSignal),
+      );
+      expect(stopped).not.toHaveBeenCalled();
+      verify.mockResolvedValueOnce({ data: {} } as never);
+      expect(await call('nickhosting mods')).toMatchObject({ status: 401 });
+      verify.mockRejectedValueOnce(new DomainError('unauthenticated'));
+      expect(await call('nickhosting mods')).toMatchObject({ status: 401 });
+    });
+    it.each(['sleeping', 'online'] as const)(
+      'accepts genuine native anonymous Administrator in %s without inventing a player',
+      async (mode) => {
+        const { input, live } = await setup(mode);
+        const anonymous = decodeNativePlayerIdentity();
+        if (!anonymous) throw new Error('fixture');
+        const nativeToken = createNativeAuthenticationToken(
+          credentials,
+          'Administrator',
+          anonymous,
+        );
+        const value = input('nickhosting mods', `Bearer ${nativeToken}`);
+        const response = await request(`${prefix()}/console-command`, {
+          ...value,
+          request: { ...value.request, playerId: undefined },
+        });
+        expect(await response.json()).toMatchObject({
+          status: 200,
+          body: { data: { commandResult: 'Coming Soon :)', returnValue: true } },
+        });
+        if (mode === 'online')
+          expect(live).toHaveBeenCalledWith(
+            expect.anything(),
+            codec,
+            serverId,
+            nativeToken,
+            'INVALID',
+          );
+      },
+    );
+    it('checks service identity, transport and revision before native credential access', async () => {
+      const { input, stopped } = await setup();
+      const value = input('nickhosting status');
+      expect(
+        (await request(`${prefix()}/console-command`, value, { authorization: '' })).status,
+      ).toBe(401);
+      expect(
+        (
+          await request(`${prefix()}/console-command`, {
+            ...value,
+            routeRevision: route.revision + 1,
+          })
+        ).status,
+      ).toBe(412);
+      await f.db
+        .updateTable('gateway_routes')
+        .set({ transport: 'udp' })
+        .where('id', '=', route.id)
+        .execute();
+      const changed = (await getGatewaySnapshot(f.db, env)).routes.find(
+        (entry) => entry.id === route.id,
+      );
+      if (!changed) throw new Error('fixture');
+      expect(
+        (
+          await request(`${prefix()}/console-command`, {
+            ...value,
+            routeRevision: changed.revision,
+          })
+        ).status,
+      ).toBe(403);
+      expect(stopped).not.toHaveBeenCalled();
+    });
+    it('revalidates generation after native authentication before allowing an action', async () => {
+      const { input, verify } = await setup('online');
+      const action = vi.spyOn(consoleLifecycle, 'requestGatewayConsoleAction');
+      verify.mockImplementationOnce(async () => {
+        await f.db
+          .updateTable('gateway_server_states')
+          .set({ generation: randomUUID() })
+          .where('server_id', '=', serverId)
+          .execute();
+        return undefined;
+      });
+      const response = await request(`${prefix()}/console-command`, input('nickhosting stop'));
+      expect([409, 412]).toContain(response.status);
+      expect(action).not.toHaveBeenCalled();
+    });
+    it('never requests forced sleep without a configured save credential', async () => {
+      const { call } = await setup('online');
+      const action = vi.spyOn(consoleLifecycle, 'requestGatewayConsoleAction');
+      vi.spyOn(satisfactoryApi, 'satisfactoryApiConfigured').mockResolvedValue(false);
+      expect((await call('nickhosting stop')).body.data.returnValue).toBe(false);
+      expect(action).not.toHaveBeenCalled();
+    });
+    it.each(['stop', 'restart'] as const)(
+      'sends %s through Core and returns only its accepted transition proof',
+      async (command) => {
+        const { call } = await setup('online');
+        vi.spyOn(satisfactoryApi, 'satisfactoryApiConfigured').mockResolvedValue(true);
+        const before = await getGatewayState(f.db, serverId, { env });
+        const generation = command === 'restart' ? randomUUID() : before.generation;
+        const action = vi.spyOn(consoleLifecycle, 'requestGatewayConsoleAction').mockResolvedValue({
+          ...before,
+          generation,
+          state: command === 'stop' ? 'blocked' : 'waking',
+          sleepJobId: command === 'stop' ? randomUUID() : null,
+          wakeJobId: command === 'restart' ? randomUUID() : null,
+        });
+        const result = await call(`nickhosting ${command}`);
+        expect(result).toMatchObject({
+          status: 200,
+          body: { data: { returnValue: true } },
+          transition: {
+            action: command === 'stop' ? 'sleep' : 'restart',
+            previousGeneration: before.generation,
+            generation,
+          },
+        });
+        expect(action).toHaveBeenCalledWith(
+          expect.anything(),
+          serverId,
+          {
+            generation: before.generation,
+            action: command === 'stop' ? 'sleep' : 'restart',
+            playerId,
+          },
+          expect.objectContaining({ env, validateObservation: expect.any(Function) }),
+        );
+      },
+    );
+    it('uses existing wake admission for start and returns no accepted proof when blocked', async () => {
+      const { call } = await setup();
+      const before = await getGatewayState(f.db, serverId, { env });
+      const wake = vi
+        .spyOn(consoleLifecycle, 'requestGatewayWake')
+        .mockResolvedValue({ ...before, state: 'waking', wakeJobId: randomUUID() });
+      expect(await call('nickhosting start')).toMatchObject({
+        transition: {
+          action: 'start',
+          previousGeneration: before.generation,
+          generation: before.generation,
+        },
+      });
+      expect(wake).toHaveBeenCalledWith(
+        expect.anything(),
+        serverId,
+        { generation: before.generation, intent: 'join' },
+        expect.objectContaining({ validateObservation: expect.any(Function) }),
+      );
+      wake.mockResolvedValueOnce({ ...before, state: 'blocked', wakeJobId: null });
+      expect(await call('nickhosting start')).toMatchObject({
+        body: { data: { returnValue: false } },
+      });
+    });
+  });
+  describe('native stopped Satisfactory API', () => {
+    afterEach(() => vi.restoreAllMocks());
+    const credentials = {
+      build: 513885,
+      serverName: 'Synthetic protected server',
+      serverSecret: 'A1'.repeat(256),
+      adminPassword: { hash: 'B2'.repeat(64), salt: 'C3'.repeat(32) },
+    };
+    const playerId = '060102030405060708';
+    const login = {
+      operation: 'PasswordlessLogin',
+      playerId,
+      data: { MinimumPrivilegeLevel: 'Client' },
+    };
+    async function setup(transport: 'tcp' | 'udp' = 'tcp') {
+      await satisfactoryRoute(transport);
+      await f.db
+        .updateTable('gateway_server_states')
+        .set({ state: 'sleeping', auto_wake_override: true })
+        .where('server_id', '=', serverId)
+        .execute();
+      await f.db
+        .updateTable('managed_servers')
+        .set({ intent: 'sleeping', runtime_state: 'offline', automatic_starts_paused: false })
+        .where('id', '=', serverId)
+        .execute();
+      const selected = (await getGatewaySnapshot(f.db, env)).routes.find(
+        (entry) => entry.id === route.id,
+      );
+      if (!selected) throw new Error('Missing offline route');
+      route = selected;
+      const authority = {
+        credentials,
+        digest: 'D4'.repeat(32),
+        generation: route.generation,
+        providerUuid: remote.uuid,
+        port: route.backend.port,
+      };
+      const spy = vi
+        .spyOn(nativeCredentials, 'readStoppedSatisfactoryCredentials')
+        .mockResolvedValue(authority);
+      return {
+        spy,
+        authority,
+        input: { routeId: route.id, routeRevision: route.revision, request: login },
+      };
+    }
+    it('rejects another game integration before invoking the native credential service', async () => {
+      const spy = vi.spyOn(nativeCredentials, 'readStoppedSatisfactoryCredentials');
+      expect(
+        (
+          await request(`${prefix()}/offline-api`, {
+            routeId: route.id,
+            routeRevision: route.revision,
+            request: login,
+          })
+        ).status,
+      ).toBe(403);
+      expect(spy).not.toHaveBeenCalled();
+    });
+    it('requires authenticated Gateway access and returns only a native token envelope, never credentials', async () => {
+      const { input, spy } = await setup();
+      const rejectedHeaders: Record<string, string>[] = [
+        { authorization: '' },
+        { authorization: 'Bearer wrong' },
+        { 'x-nh-support-token': 'support' },
+      ];
+      for (const headers of rejectedHeaders) {
+        expect((await request(`${prefix()}/offline-api`, input, headers)).status).toBe(401);
+      }
+      expect((await request(`/internal/gateway/${randomUUID()}/offline-api`, input)).status).toBe(
+        401,
+      );
+      expect(spy).not.toHaveBeenCalled();
+      const response = await request(`${prefix()}/offline-api`, input);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      const serialized = await response.text();
+      const player = decodeNativePlayerIdentity(playerId);
+      if (!player) throw new Error('fixture');
+      expect(JSON.parse(serialized)).toEqual({
+        status: 200,
+        body: {
+          data: {
+            authenticationToken: createNativeAuthenticationToken(credentials, 'Client', player),
+          },
+        },
+      });
+      for (const value of [
+        credentials.serverSecret,
+        credentials.adminPassword.hash,
+        credentials.adminPassword.salt,
+        'Synthetic protected server',
+        'providerUuid',
+        'digest',
+      ])
+        expect(serialized).not.toContain(value);
+      expect(spy).toHaveBeenCalledExactlyOnceWith(
+        expect.anything(),
+        serverId,
+        expect.objectContaining({ adapter: f.adapter, confirmStopped: expect.any(Function) }),
+      );
+    });
+    it('rejects stale revision and wrong transport/role before reading native credentials', async () => {
+      const { input, spy } = await setup('udp');
+      expect((await request(`${prefix()}/offline-api`, input)).status).toBe(403);
+      expect(
+        (await request(`${prefix()}/offline-api`, { ...input, routeRevision: route.revision + 1 }))
+          .status,
+      ).toBe(412);
+      expect(spy).not.toHaveBeenCalled();
+      await f.db
+        .updateTable('gateway_routes')
+        .set({ transport: 'tcp' })
+        .where('id', '=', route.id)
+        .execute();
+      await f.db
+        .updateTable('server_allocations')
+        .set({ role: 'reliable' })
+        .where('id', '=', route.allocationId)
+        .execute();
+      const selected = (await getGatewaySnapshot(f.db, env)).routes.find(
+        (entry) => entry.id === route.id,
+      );
+      if (!selected) throw new Error('fixture');
+      expect(
+        (await request(`${prefix()}/offline-api`, { ...input, routeRevision: selected.revision }))
+          .status,
+      ).toBe(403);
+      expect(spy).not.toHaveBeenCalled();
+    });
+    it.each(['manually_stopped', 'maintenance', 'online', 'waking'] as const)(
+      'rejects native auth in %s mode',
+      async (mode) => {
+        const { input, spy } = await setup();
+        await f.db
+          .updateTable('gateway_server_states')
+          .set({ state: mode })
+          .where('server_id', '=', serverId)
+          .execute();
+        const selected = (await getGatewaySnapshot(f.db, env)).routes.find(
+          (entry) => entry.id === route.id,
+        );
+        if (!selected) throw new Error('fixture');
+        expect(
+          (await request(`${prefix()}/offline-api`, { ...input, routeRevision: selected.revision }))
+            .status,
+        ).toBe(503);
+        expect(spy).not.toHaveBeenCalled();
+      },
+    );
+    it('rejects disabled wake, unavailable authority and mismatched generation', async () => {
+      const { input, spy, authority } = await setup();
+      spy.mockResolvedValueOnce(undefined);
+      expect((await request(`${prefix()}/offline-api`, input)).status).toBe(503);
+      spy.mockResolvedValueOnce({ ...authority, generation: `${authority.generation}0` });
+      expect((await request(`${prefix()}/offline-api`, input)).status).toBe(503);
+      await f.db
+        .updateTable('gateway_server_states')
+        .set({ auto_wake_override: false })
+        .where('server_id', '=', serverId)
+        .execute();
+      const selected = (await getGatewaySnapshot(f.db, env)).routes.find(
+        (entry) => entry.id === route.id,
+      );
+      if (!selected) throw new Error('fixture');
+      spy.mockClear();
+      expect(
+        (await request(`${prefix()}/offline-api`, { ...input, routeRevision: selected.revision }))
+          .status,
+      ).toBe(503);
+      expect(spy).not.toHaveBeenCalled();
+    });
+    it('reads encrypted native observations only after cryptographic auth, without borrowing old cache authorization', async () => {
+      const { input } = await setup();
+      const state = {
+        activeSessionName: 'Observed factory',
+        numConnectedPlayers: 4,
+        playerLimit: 4,
+        techTier: 3,
+        activeSchematic: '',
+        gamePhase: 'Phase 2',
+        isGameRunning: true,
+        totalGameDuration: 99,
+        isGamePaused: false,
+        averageTickRate: 60,
+        autoLoadSessionName: 'Observed factory',
+      };
+      await persistSatisfactoryOfflineSnapshots(f.db, codec, serverId, [
+        {
+          key: '1'.repeat(64),
+          tokenKey: '2'.repeat(64),
+          expiresAt: Date.now() - 3600000,
+          responses: {
+            QueryServerState: JSON.stringify({
+              data: { serverGameState: state },
+              authenticationToken: 'must-not-persist',
+            }),
+          },
+        },
+      ]);
+      const secret = await f.db
+        .selectFrom('encrypted_secrets')
+        .select('envelope')
+        .where('name', '=', `gateway.satisfactory.observations.${serverId}`)
+        .executeTakeFirstOrThrow();
+      expect(JSON.stringify(secret.envelope)).not.toContain('Observed factory');
+      expect(
+        codec.decrypt(secret.envelope, `gateway.satisfactory.observations.${serverId}`),
+      ).not.toContain('must-not-persist');
+      const player = decodeNativePlayerIdentity(playerId);
+      if (!player) throw new Error('fixture');
+      const authorization = `Bearer ${createNativeAuthenticationToken(credentials, 'Client', player)}`;
+      const query = {
+        ...input,
+        request: { operation: 'QueryServerState', playerId, authorization },
+      };
+      const response = await request(`${prefix()}/offline-api`, query);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        status: 200,
+        body: {
+          data: {
+            serverGameState: {
+              ...state,
+              numConnectedPlayers: 0,
+              averageTickRate: 0,
+              isGamePaused: true,
+              activeSessionName: expect.stringContaining('Observed factory'),
+            },
+          },
+        },
+      });
+      expect(
+        await (
+          await request(`${prefix()}/offline-api`, {
+            ...query,
+            request: { ...query.request, authorization: 'Bearer invalid' },
+          })
+        ).json(),
+      ).toEqual({ status: 401, body: { errorCode: 'invalid_token' } });
+      expect(
+        await (
+          await request(`${prefix()}/offline-api`, {
+            ...query,
+            request: { ...query.request, playerId: '060102030405060709' },
+          })
+        ).json(),
+      ).toEqual({ status: 401, body: { errorCode: 'invalid_token' } });
+    });
+    it('captures native save metadata online and serves it offline only to a verified administrator', async () => {
+      const { input } = await setup();
+      const native = { sessions: [], currentSessionIndex: -1 };
+      const sessions = vi.fn(async () => native);
+      const advancedSettings = vi.fn(async () => ({
+        creativeModeEnabled: false,
+        advancedGameSettings: {},
+      }));
+      const options = vi.fn(async () => ({ serverOptions: {}, pendingServerOptions: {} }));
+      const api = { sessions, advancedSettings, options } as unknown as SatisfactoryApi;
+      const revalidate = vi.fn(async () => undefined);
+      await observeSatisfactorySessions(f.db, codec, route, api, revalidate);
+      expect(sessions).not.toHaveBeenCalled();
+      await observeSatisfactorySessions(f.db, codec, { ...route, mode: 'online' }, api, revalidate);
+      await observeSatisfactorySessions(f.db, codec, { ...route, mode: 'online' }, api, revalidate);
+      expect(sessions).toHaveBeenCalledTimes(1);
+      expect(advancedSettings).toHaveBeenCalledTimes(1);
+      expect(options).toHaveBeenCalledTimes(1);
+      expect(revalidate).toHaveBeenCalledTimes(1);
+      const player = decodeNativePlayerIdentity(playerId);
+      if (!player) throw new Error('fixture');
+      const client = `Bearer ${createNativeAuthenticationToken(credentials, 'Client', player)}`;
+      expect(
+        await (
+          await request(`${prefix()}/offline-api`, {
+            ...input,
+            request: {
+              operation: 'GetAdvancedGameSettings',
+              playerId,
+              authorization: client,
+            },
+          })
+        ).json(),
+      ).toEqual({
+        status: 200,
+        body: { data: { creativeModeEnabled: false, advancedGameSettings: {} } },
+      });
+      for (const privilege of ['Client', 'Administrator'] as const) {
+        const response = await request(`${prefix()}/offline-api`, {
+          ...input,
+          request: {
+            operation: 'EnumerateSessions',
+            playerId,
+            authorization: `Bearer ${createNativeAuthenticationToken(credentials, privilege, player)}`,
+          },
+        });
+        expect(await response.json()).toEqual(
+          privilege === 'Administrator'
+            ? { status: 200, body: { data: native } }
+            : { status: 403, body: { errorCode: 'insufficient_scope' } },
+        );
+      }
+    });
+    it('keeps genuine metadata when one native read fails while persisting successful observations', async () => {
+      await setup();
+      const options = { serverOptions: { Existing: 'yes' }, pendingServerOptions: {} };
+      const advanced = { creativeModeEnabled: false, advancedGameSettings: {} };
+      await persistSatisfactoryOfflineSnapshots(
+        f.db,
+        codec,
+        serverId,
+        [],
+        [
+          { operation: 'GetServerOptions', body: { data: options } },
+          { operation: 'GetAdvancedGameSettings', body: { data: advanced } },
+        ],
+      );
+      const api = {
+        sessions: async () => ({ sessions: [], currentSessionIndex: -1 }),
+        options: async () => {
+          throw new Error('private-error');
+        },
+        advancedSettings: async () => ({ malformed: 'must-not-persist' }),
+      } as unknown as SatisfactoryApi;
+      await observeSatisfactorySessions(
+        f.db,
+        codec,
+        { ...route, mode: 'online' },
+        api,
+        async () => undefined,
+      );
+      const name = `gateway.satisfactory.observations.${serverId}`;
+      const row = await f.db
+        .selectFrom('encrypted_secrets')
+        .select('envelope')
+        .where('name', '=', name)
+        .executeTakeFirstOrThrow();
+      const value = JSON.parse(codec.decrypt(row.envelope, name));
+      expect(value.GetServerOptions.body).toEqual({ data: options });
+      expect(value.GetAdvancedGameSettings.body).toEqual({ data: advanced });
+      expect(value.EnumerateSessions.body).toEqual({
+        data: { sessions: [], currentSessionIndex: -1 },
+      });
+      expect(JSON.stringify(value)).not.toMatch(/private-error|must-not-persist/);
+    });
+    it('never persists enumeration after route revalidation fails', async () => {
+      await setup();
+      const api = {
+        sessions: vi.fn(async () => ({ sessions: [], currentSessionIndex: -1 })),
+      } as unknown as SatisfactoryApi;
+      await observeSatisfactorySessions(
+        f.db,
+        codec,
+        { ...route, mode: 'online' },
+        api,
+        async () => {
+          throw new Error('revoked');
+        },
+      );
+      expect(
+        await f.db
+          .selectFrom('encrypted_secrets')
+          .select('name')
+          .where('name', '=', `gateway.satisfactory.observations.${serverId}`)
+          .executeTakeFirst(),
+      ).toBeUndefined();
+    });
+    it('rechecks route authority after native reads instead of returning a token for a changed route', async () => {
+      const { input, spy, authority } = await setup();
+      spy.mockImplementationOnce(async () => {
+        await f.db
+          .updateTable('gateway_server_states')
+          .set({ auto_wake_override: false })
+          .where('server_id', '=', serverId)
+          .execute();
+        return authority;
+      });
+      const response = await request(`${prefix()}/offline-api`, input);
+      expect(response.status).toBe(412);
+      expect(await response.text()).not.toContain('authenticationToken');
+    });
+  });
+  it.each([
+    'tls-identity',
+    'protocol-state',
+    'private-state-read',
+    'private-state-write',
+    'application-observation',
+    'protocol-state-read',
+  ])('rejects browser and wrong-Gateway access to %s', async (endpoint) => {
+    const input = {
+      routeId: route.id,
+      routeRevision: route.revision,
+      ...(endpoint === 'protocol-state' ? { state: satisfactoryState() } : {}),
+    };
+    expect((await request(`${prefix()}/${endpoint}`, input, { authorization: '' })).status).toBe(
+      401,
+    );
+    expect(
+      (await request(`${prefix()}/${endpoint}`, input, { 'x-nh-support-token': 'support' })).status,
+    ).toBe(401);
+    expect((await request(`/internal/gateway/${randomUUID()}/${endpoint}`, input)).status).toBe(
+      401,
+    );
+  });
+  it('returns only the route-bound TLS identity, rejects stale revisions and hides keys from snapshots', async () => {
+    const input = await satisfactoryRoute();
+    const identity = await ensureSatisfactoryTlsIdentity(f.db, codec, serverId);
+    const response = await request(`${prefix()}/tls-identity`, input);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual(identity);
+    expect(
+      (await request(`${prefix()}/tls-identity`, { ...input, routeRevision: route.revision + 1 }))
+        .status,
+    ).toBe(412);
+    expect(
+      (await request(`${prefix()}/tls-identity`, { ...input, serverId: randomUUID() })).status,
+    ).toBe(400);
+    const snapshot = await request(`${prefix()}/snapshot`);
+    expect(await snapshot.text()).not.toContain('PRIVATE KEY');
+  });
+  it.each([
+    'tls-identity',
+    'protocol-state',
+    'private-state-read',
+    'private-state-write',
+    'application-observation',
+    'protocol-state-read',
+  ])('rejects wrong protocol handlers for %s', async (endpoint) => {
+    const response = await request(`${prefix()}/${endpoint}`, {
+      routeId: route.id,
+      routeRevision: route.revision,
+      ...(endpoint === 'protocol-state' ? { state: satisfactoryState() } : {}),
+    });
+    expect(response.status).toBe(403);
+  });
+  it('rejects TLS identity retrieval for UDP routes and other Gateway namespaces', async () => {
+    const input = await satisfactoryRoute('udp');
+    expect((await request(`${prefix()}/tls-identity`, input)).status).toBe(403);
+    await f.db
+      .updateTable('gateway_routes')
+      .set({ gateway_id: randomUUID() })
+      .where('id', '=', route.id)
+      .execute();
+    expect((await request(`${prefix()}/tls-identity`, input)).status).toBe(404);
+  });
+  it('rejects Reliable Messaging routes and missing persisted TLS identities', async () => {
+    const input = await satisfactoryRoute();
+    expect((await request(`${prefix()}/tls-identity`, input)).status).toBe(503);
+    await f.db
+      .updateTable('server_allocations')
+      .set({ role: 'reliable' })
+      .where('id', '=', route.allocationId)
+      .execute();
+    const selected = (await getGatewaySnapshot(f.db, env)).routes.find(
+      (entry) => entry.id === route.id,
+    );
+    if (!selected) throw new Error('Missing reliable fixture route');
+    expect(
+      (
+        await request(`${prefix()}/tls-identity`, {
+          routeId: selected.id,
+          routeRevision: selected.revision,
+        })
+      ).status,
+    ).toBe(403);
+  });
+  it('persists private protocol state encrypted, never in routing snapshots', async () => {
+    const input = await satisfactoryRoute();
+    const state = [
+      {
+        key: 'f'.repeat(64),
+        expiresAt: Date.now() + 60000,
+        responses: { QueryServerState: '{"data":{"privateSession":"factory-secret"}}' },
+      },
+    ];
+    expect((await request(`${prefix()}/private-state-write`, { ...input, state })).status).toBe(
+      204,
+    );
+    const response = await request(`${prefix()}/private-state-read`, input);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual(state);
+    const stored = await f.db
+      .selectFrom('encrypted_secrets')
+      .select('envelope')
+      .where('name', '=', `gateway.satisfactory.cache.${serverId}`)
+      .executeTakeFirstOrThrow();
+    expect(JSON.stringify(stored.envelope)).not.toContain('factory-secret');
+    expect(await (await request(`${prefix()}/snapshot`)).text()).not.toContain('factory-secret');
+    expect(
+      (
+        await request(`${prefix()}/private-state-read`, {
+          ...input,
+          routeRevision: input.routeRevision + 1,
+        })
+      ).status,
+    ).toBe(412);
+    expect(
+      (
+        await request(`${prefix()}/private-state-write`, {
+          ...input,
+          state,
+          serverId: randomUUID(),
+        })
+      ).status,
+    ).toBe(400);
+  });
+  it('accepts a large private snapshot only after Gateway authentication', async () => {
+    const input = await satisfactoryRoute();
+    const state = [
+      {
+        key: 'f'.repeat(64),
+        tokenKey: 'a'.repeat(64),
+        expiresAt: Date.now() + 60000,
+        responses: {
+          EnumerateSessions: JSON.stringify({
+            data: { sessions: [], currentSessionIndex: -1, padding: 'x'.repeat(128 * 1024) },
+          }),
+        },
+      },
+    ];
+    expect(
+      (
+        await request(
+          `${prefix()}/private-state-write`,
+          { ...input, state },
+          { authorization: 'Bearer invalid' },
+        )
+      ).status,
+    ).toBe(401);
+    expect((await request(`${prefix()}/private-state-write`, { ...input, state })).status).toBe(
+      204,
+    );
+    expect(await (await request(`${prefix()}/private-state-read`, input)).json()).toEqual(state);
+  });
+  it('observes only authenticated live player state without exposing private session data', async () => {
+    const input = await satisfactoryRoute('udp');
+    expect((await request(`${prefix()}/application-observation`, input)).status).toBe(503);
+    let players = 3;
+    let gameRunning = true;
+    let enumerationAvailable = true;
+    const resolver = vi.spyOn(satisfactoryApi, 'resolveSatisfactoryApi').mockResolvedValue(
+      new SatisfactoryApi({
+        async request(body, signal) {
+          if (body.function === 'EnumerateSessions') {
+            if (!enumerationAvailable) throw new Error('Enumeration unavailable');
+            return { data: { sessions: [], currentSessionIndex: -1 } };
+          }
+          expect(body.function).toBe('QueryServerState');
+          expect(signal).toBeInstanceOf(AbortSignal);
+          return {
+            data: {
+              serverGameState: {
+                activeSessionName: 'Private session',
+                numConnectedPlayers: players,
+                playerLimit: 4,
+                techTier: 1,
+                activeSchematic: '',
+                gamePhase: '',
+                isGameRunning: gameRunning,
+                totalGameDuration: 100,
+                isGamePaused: false,
+                averageTickRate: 30,
+                autoLoadSessionName: '',
+              },
+            },
+          };
+        },
+      }),
+    );
+    try {
+      const response = await request(`${prefix()}/application-observation`, input);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.json()).toEqual({ ready: true, idle: false, playerCount: 3 });
+      expect(resolver).toHaveBeenCalledWith(expect.anything(), codec, serverId);
+      players = 0;
+      expect(await (await request(`${prefix()}/application-observation`, input)).json()).toEqual({
+        ready: true,
+        idle: true,
+        playerCount: 0,
+      });
+      gameRunning = false;
+      for (const available of [true, false]) {
+        enumerationAvailable = available;
+        const setup = await request(`${prefix()}/application-observation`, input);
+        expect(setup.status).toBe(200);
+        expect(await setup.json()).toEqual({ ready: true, idle: false, playerCount: 0 });
+      }
+      gameRunning = true;
+      expect(await (await request(`${prefix()}/application-observation`, input)).json()).toEqual({
+        ready: true,
+        idle: true,
+        playerCount: 0,
+      });
+      expect(
+        (
+          await request(`${prefix()}/application-observation`, {
+            ...input,
+            routeRevision: input.routeRevision + 1,
+          })
+        ).status,
+      ).toBe(412);
+      expect(
+        (await request(`${prefix()}/application-observation`, { ...input, serverId: randomUUID() }))
+          .status,
+      ).toBe(400);
+    } finally {
+      resolver.mockRestore();
+    }
+    const tcp = await satisfactoryRoute('tcp');
+    expect((await request(`${prefix()}/application-observation`, tcp)).status).toBe(403);
+  });
+  it('does not fabricate missing protocol state and rejects reads through TCP', async () => {
+    const input = await satisfactoryRoute('udp');
+    expect(await (await request(`${prefix()}/protocol-state-read`, input)).json()).toEqual({
+      state: null,
+    });
+    const tcp = await satisfactoryRoute('tcp');
+    expect((await request(`${prefix()}/protocol-state-read`, tcp)).status).toBe(403);
+  });
+  it('persists UDP state outside route authority and hydrates only the matching game route', async () => {
+    const input = await satisfactoryRoute('udp');
+    const state = satisfactoryState();
+    expect((await request(`${prefix()}/protocol-state`, { ...input, state })).status).toBe(204);
+    const selected = (await getGatewaySnapshot(f.db, env)).routes.find(
+      (entry) => entry.id === route.id,
+    );
+    if (!selected) throw new Error('Missing Satisfactory fixture route');
+    route = selected;
+    const revision = route.revision;
+    expect(route.protocol?.satisfactory).toBeUndefined();
+    expect(revision).toBe(input.routeRevision);
+    const cached = await request(`${prefix()}/protocol-state-read`, input);
+    expect(cached.status).toBe(200);
+    expect(cached.headers.get('cache-control')).toBe('no-store');
+    expect(await cached.json()).toEqual({ state });
+    expect(
+      (await request(`${prefix()}/protocol-state-read`, { ...input, routeRevision: revision + 1 }))
+        .status,
+    ).toBe(412);
+    expect(
+      (await request(`${prefix()}/protocol-state-read`, { ...input, serverId: randomUUID() }))
+        .status,
+    ).toBe(400);
+    expect(
+      (
+        await request(`${prefix()}/protocol-state`, {
+          routeId: route.id,
+          routeRevision: revision,
+          state: {
+            ...state,
+            name: 'Changed factory',
+            netCL: 513885,
+            substates: [{ id: 0, version: 7 }],
+            observedAt: new Date(Date.now() + 1000).toISOString(),
+          },
+        })
+      ).status,
+    ).toBe(204);
+    expect(
+      (await getGatewaySnapshot(f.db, env)).routes.find((entry) => entry.id === route.id)?.revision,
+    ).toBe(revision);
+    expect(
+      (
+        await request(`${prefix()}/protocol-state`, {
+          routeId: route.id,
+          routeRevision: revision,
+          state: { ...state, observedAt: new Date(Date.now() - 60000).toISOString() },
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await request(`${prefix()}/protocol-state`, {
+          routeId: route.id,
+          routeRevision: revision + 1,
+          state,
+        })
+      ).status,
+    ).toBe(412);
+  });
+
   it.each<Record<string, string>>([
     { authorization: '' },
     { authorization: 'Bearer wrong' },

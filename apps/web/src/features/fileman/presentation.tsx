@@ -332,7 +332,9 @@ export function FilemanSelectionBar({
     <FilemanSlot name="selection">
       <section className="fm-selection" aria-label={t('file.selection')}>
         <span className="fm-selection-count">{t('file.selected', { count })}</span>
-        <div className="fm-selection-actions">{children}</div>
+        <div className="fm-selection-actions">
+          <FilemanSlot name="selection.actions">{children}</FilemanSlot>
+        </div>
         <Tooltip placement="cursor" content={t('file.clearSelection')}>
           <button
             type="button"

@@ -1,16 +1,30 @@
 # syntax=docker/dockerfile:1
+FROM scratch AS ficsit-cli
+ADD --checksum=sha256:2af0f8815af93b097c7a97968569575b21cf451b7c345fbb62fae29096ee4a31 https://github.com/satisfactorymodding/ficsit-cli/releases/download/v0.7.1/ficsit_linux_amd64 /ficsit_linux_amd64
+ADD --checksum=sha256:a591eb87be517d9d03798184c210d7166141be19e37b9d4e5fe68c84f264c6bf https://github.com/satisfactorymodding/ficsit-cli/releases/download/v0.7.1/ficsit_linux_arm64 /ficsit_linux_arm64
 FROM docker:29.6.2-cli@sha256:be132a9f282288de4afaf63379dff75711fda0147c6b72a9df44e51841402144 AS docker-cli
 FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS tooling
+ARG TARGETARCH
+COPY --from=ficsit-cli /ficsit_linux_${TARGETARCH} /usr/local/bin/ficsit
+RUN chmod 755 /usr/local/bin/ficsit
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN npm install --global pnpm@10.33.0
 
+FROM tooling AS content-sandbox-build
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev linux-libc-dev && rm -rf /var/lib/apt/lists/*
+COPY deploy/native/content-sandbox.c /tmp/content-sandbox.c
+RUN gcc -O2 -Wall -Wextra -Werror -o /usr/local/bin/nh-content-sandbox /tmp/content-sandbox.c
+
 FROM tooling AS dependencies
-COPY . .
+COPY --from=content-sandbox-build /usr/local/bin/nh-content-sandbox /usr/local/bin/nh-content-sandbox
+COPY --chown=node:node . .
 RUN pnpm install --frozen-lockfile
 
 FROM dependencies AS development
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
-RUN mkdir -p /app/mountdata && chown -R node:node /app
+RUN mkdir -p /app/mountdata && chown node:node /app/mountdata
 USER node
 ENTRYPOINT ["node", "deploy/container-entry.mjs"]
 
@@ -23,6 +37,9 @@ RUN pnpm install --prod --frozen-lockfile --ignore-scripts
 
 FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS runtime
 ENV NODE_ENV=production
+COPY --from=tooling /usr/local/bin/ficsit /usr/local/bin/ficsit
+COPY --from=content-sandbox-build /usr/local/bin/nh-content-sandbox /usr/local/bin/nh-content-sandbox
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 WORKDIR /app
 COPY --from=production-dependencies --chown=node:node /app/ ./

@@ -17,6 +17,7 @@ import {
 import type { Kysely } from 'kysely';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { uploadNotPublished } from '../../pterodactyl-adapter/src/upload-dispatch.js';
 import type { BackendAllocationPool } from './allocation-pool.js';
 import { removeFilemanDirectory } from './fileman-directory.js';
 import { createInstallationCollector } from './installation-collector.js';
@@ -27,7 +28,10 @@ import {
   resolveUncertainOperation,
 } from './lifecycle.js';
 import { applyMinecraftWorldRemoval } from './minecraft-content.js';
-import { wakeInstallationOperation } from './provider-installation-events.js';
+import {
+  recordNativeInstallationCompletion,
+  wakeInstallationOperation,
+} from './provider-installation-events.js';
 import { enqueueServerOperation } from './registry.js';
 import { pendingUploadFixture } from './test-fixtures.js';
 
@@ -52,7 +56,8 @@ async function fixture(
     | 'backup'
     | 'restore'
     | 'configure'
-    | 'minecraft-content',
+    | 'minecraft-content'
+    | 'satisfactory-content',
   plan: Record<string, unknown> = {},
   binding?: {
     address: string;
@@ -475,6 +480,123 @@ async function fixture(
 }
 
 describe('durable provider lifecycle with real PostgreSQL', () => {
+  it.each(['valid', 'wrong_uuid', 'old_effect', 'status_only', 'host_running', 'old_job'] as const)(
+    'recovers only an exact native installation receipt with fresh host proof: %s',
+    async (kind) => {
+      const f = await fixture('reinstall', {
+        installationEffectPrepared: true,
+        stopConfirmed: true,
+      });
+      const effectStartedAt = new Date(f.now().getTime() - 60_000);
+      await f.db
+        .updateTable('server_operations')
+        .set({
+          phase: 'reinstall',
+          effect_state: 'uncertain',
+          effect_started_at: effectStartedAt,
+        })
+        .where('job_id', '=', f.jobId)
+        .execute();
+      f.adapter.confirmInstallation.mockResolvedValue({ confirmed: false });
+      f.options.confirmInitialInstallationStopped = vi.fn(async () => kind !== 'host_running');
+      if (kind === 'status_only') {
+        await f.db
+          .insertInto('server_events')
+          .values({
+            server_id: f.serverId,
+            job_id: f.jobId,
+            actor_id: null,
+            subject_id: null,
+            support_session_id: null,
+            message_key: 'servers.operation.installation_updated',
+            data: JSON.stringify({ state: 'completed', occurredAt: f.now().toISOString() }),
+          })
+          .execute();
+      } else {
+        expect(
+          await recordNativeInstallationCompletion(f.db, {
+            serverId: f.serverId,
+            jobId: f.jobId,
+            providerUuid: f.remote.uuid,
+            observedAt: f.now(),
+          }),
+        ).toBe(true);
+        // Duplicate native delivery remains one immutable receipt.
+        await recordNativeInstallationCompletion(f.db, {
+          serverId: f.serverId,
+          jobId: f.jobId,
+          providerUuid: f.remote.uuid,
+          observedAt: f.now(),
+        });
+        const receipts = await f.db
+          .selectFrom('server_events')
+          .selectAll()
+          .where('job_id', '=', f.jobId)
+          .execute();
+        expect(receipts).toHaveLength(1);
+        if (kind === 'wrong_uuid')
+          await f.db
+            .updateTable('server_events')
+            .set({
+              data: JSON.stringify({ ...receipts[0]?.data, providerUuid: randomUUID() }),
+            })
+            .where('job_id', '=', f.jobId)
+            .execute();
+        if (kind === 'old_effect')
+          await f.db
+            .updateTable('server_operations')
+            .set({
+              effect_started_at: new Date(effectStartedAt.getTime() + 1),
+            })
+            .where('job_id', '=', f.jobId)
+            .execute();
+        if (kind === 'old_job')
+          await f.db
+            .updateTable('server_events')
+            .set({ job_id: null })
+            .where('job_id', '=', f.jobId)
+            .execute();
+      }
+      await f.run();
+      f.tick();
+      await f.run();
+      expect((await f.operation()).plan.installConfirmed === true).toBe(kind === 'valid');
+      expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+      if (kind === 'valid') expect(f.adapter.confirmInstallation).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['before_effect', 'wrong_provider', 'inactive', 'modpacks'] as const)(
+    'does not persist an uncorrelated native installation event: %s',
+    async (kind) => {
+      const f = await fixture(
+        'reinstall',
+        kind === 'modpacks' ? { modpackOperationId: randomUUID() } : {},
+      );
+      await f.db
+        .updateTable('server_operations')
+        .set({
+          phase: 'reinstall',
+          effect_started_at: new Date(f.now().getTime() + (kind === 'before_effect' ? 1 : -1)),
+        })
+        .where('job_id', '=', f.jobId)
+        .execute();
+      if (kind === 'inactive')
+        await f.db
+          .updateTable('managed_servers')
+          .set({ active_operation_id: null })
+          .where('id', '=', f.serverId)
+          .execute();
+      expect(
+        await recordNativeInstallationCompletion(f.db, {
+          serverId: f.serverId,
+          jobId: f.jobId,
+          providerUuid: kind === 'wrong_provider' ? randomUUID() : f.remote.uuid,
+          observedAt: f.now(),
+        }),
+      ).toBe(false);
+    },
+  );
+
   it('does not dispatch a Modpacks synthetic reinstall through generic lifecycle', async () => {
     const f = await fixture('reinstall', { modpackOperationId: randomUUID() });
     const before = await f.operation();
@@ -2954,6 +3076,28 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
     expect(f.adapter.power).not.toHaveBeenCalled();
   });
+  it('runs stopped maintenance under the lifecycle lock before releasing capacity and tolerates cleanup failure', async () => {
+    const f = await fixture('stop');
+    await f.prepareReservation();
+    f.setState('running');
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.adapter.stopWithConfirmation.mockImplementation(async (_id, _identifier, input) => {
+      await input.onConfirmed();
+      return { confirmed: true };
+    });
+    f.options.finalizeGameStop = vi.fn(async (context) => {
+      expect((await f.operation()).plan.stopConfirmed).toBe(true);
+      expect(await f.reservation()).toBeDefined();
+      // The physical proof remains available while stop capacity is reserved.
+      await context.assertStopped();
+      throw new Error('maintenance failed');
+    });
+    expect(await f.run()).toBe('succeeded');
+    expect(f.options.finalizeGameStop).toHaveBeenCalledOnce();
+    expect(await f.reservation()).toBeUndefined();
+    expect(await f.run()).toBe('duplicate');
+    expect(f.options.finalizeGameStop).toHaveBeenCalledOnce();
+  });
   it('does not recreate stopped capacity from a stale running reconciliation sample', async () => {
     const f = await fixture('stop');
     await f.prepareReservation();
@@ -2981,6 +3125,261 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     await reconcileManagedServer(f.db, f.serverId, f.options);
     expect(await f.server()).toMatchObject({ runtime_state: 'running' });
     expect(await f.reservation()).toBeDefined();
+  });
+  it('suppresses cached running during a planned mod apply but retains actual new process capacity', async () => {
+    const f = await fixture('satisfactory-content', {
+      satisfactoryContent: { kind: 'mods', mode: 'apply' },
+    });
+    await f.db
+      .updateTable('managed_servers')
+      .set({ installation_state: 'installed', runtime_state: 'offline' })
+      .where('id', '=', f.serverId)
+      .execute();
+    const stopId = randomUUID();
+    const job = await f.db
+      .selectFrom('operation_jobs')
+      .selectAll()
+      .where('id', '=', f.jobId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .insertInto('operation_jobs')
+      .values({
+        ...job,
+        id: stopId,
+        idempotency_key: stopId,
+        command: JSON.stringify(job.command),
+        policy_snapshot: JSON.stringify(job.policy_snapshot),
+        state: 'succeeded',
+        completed_at: f.now(),
+      })
+      .execute();
+    await f.db
+      .insertInto('server_operations')
+      .values({
+        job_id: stopId,
+        server_id: f.serverId,
+        action: 'stop',
+        phase: 'complete',
+        effect_state: 'confirmed',
+        effect_started_at: f.now(),
+        lease_until: null,
+        lease_token: null,
+        plan: JSON.stringify({ stopConfirmed: true, stopConfirmedAt: f.now().toISOString() }),
+      })
+      .execute();
+    f.setState('running');
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.options.verifyObservationHost = vi.fn(async () => {});
+    expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('observed');
+    expect(await f.reservation()).toBeUndefined();
+    expect((await f.server()).runtime_state).toBe('offline');
+    // A delivery changing its operation while proof is in flight invalidates the snapshot.
+    f.options.confirmAlreadyStopped = vi.fn(async () => {
+      await f.db
+        .updateTable('server_operations')
+        .set({
+          plan: JSON.stringify({
+            satisfactoryContent: { kind: 'mods', mode: 'apply' },
+            pollCount: 1,
+          }),
+        })
+        .where('job_id', '=', f.jobId)
+        .execute();
+      return true;
+    });
+    expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('deferred');
+    expect(await f.reservation()).toBeUndefined();
+    // A new process defeats even a recent receipt while Apply is queued.
+    f.options.confirmAlreadyStopped = vi.fn(async () => false);
+    expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('observed');
+    expect(await f.reservation()).toMatchObject({ operation_id: f.jobId, state: 'running' });
+  });
+  it.each(['apply', 'rollback'])(
+    'recovers a same-job mod reservation for %s only after physical proof and preserves offline settlement',
+    async (mode) => {
+      const f = await fixture('satisfactory-content', {
+        satisfactoryContent: { kind: 'mods', mode },
+      });
+      await f.db
+        .updateTable('managed_servers')
+        .set({ installation_state: 'installed' })
+        .where('id', '=', f.serverId)
+        .execute();
+      await f.prepareReservation();
+      f.setState('offline');
+      f.options.verifyObservationHost = vi.fn(async () => {});
+      f.options.confirmAlreadyStopped = vi.fn(async (_id, connection, proof) => {
+        expect(connection.isTransaction).toBe(true);
+        expect((await proof?.providerServer)?.uuid).toBe(f.remote.uuid);
+        expect(await f.reservation()).toBeDefined();
+        return true;
+      });
+      f.options.processGameContent = vi.fn(async () => true);
+      expect(await f.run()).toBe('waiting');
+      expect(await f.reservation()).toBeUndefined();
+      expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
+      expect(f.options.processGameContent).not.toHaveBeenCalled();
+      expect((await f.operation()).plan.waitReason).toBe('offline_confirmation');
+      f.tick();
+      expect(await f.run()).toBe('succeeded');
+      expect(f.options.processGameContent).toHaveBeenCalledOnce();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    'running',
+    'unavailable',
+    'missing-observer',
+    'foreign',
+    'installer',
+    'host',
+    'effect',
+    'phase',
+  ] as const)('retains mod capacity and performs no content mutation for %s', async (failure) => {
+    const f = await fixture('satisfactory-content', {
+      satisfactoryContent: { kind: 'mods', mode: 'apply' },
+    });
+    await f.db
+      .updateTable('managed_servers')
+      .set({ installation_state: 'installed' })
+      .where('id', '=', f.serverId)
+      .execute();
+    await f.prepareReservation();
+    f.setState('offline');
+    f.options.confirmAlreadyStopped = vi.fn(async () => {
+      if (failure === 'unavailable') throw new Error('observer unavailable');
+      return failure !== 'running';
+    });
+    f.options.verifyObservationHost = vi.fn(async () => {
+      if (failure === 'host') throw new DomainError('configuration_invalid');
+    });
+    if (failure === 'missing-observer') f.options.confirmAlreadyStopped = undefined;
+    if (failure === 'foreign')
+      await f.db
+        .updateTable('resource_reservations')
+        .set({ operation_id: randomUUID() })
+        .where('server_id', '=', f.serverId)
+        .execute();
+    if (failure === 'installer') await f.options.reserveInstallation?.(f.serverId, f.jobId, f.db);
+    if (failure === 'effect')
+      await f.db
+        .updateTable('server_operations')
+        .set({ effect_state: 'prepared', effect_started_at: f.now() })
+        .where('job_id', '=', f.jobId)
+        .execute();
+    if (failure === 'phase')
+      await f.db
+        .updateTable('server_operations')
+        .set({ phase: 'content' })
+        .where('job_id', '=', f.jobId)
+        .execute();
+    f.options.processGameContent = vi.fn(async () => true);
+    expect(await f.run()).toBe(failure === 'host' ? 'failed' : 'waiting');
+    expect(await f.reservation()).toBeDefined();
+    expect(f.options.processGameContent).not.toHaveBeenCalled();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it('defers a proven rejected mod upload throttle and resumes only after its durable deadline', async () => {
+    const f = await fixture('satisfactory-content', {
+      satisfactoryContent: { kind: 'mods', mode: 'apply' },
+      recoveryReceipt: 'preserved',
+    });
+    f.setState('offline');
+    let sends = 0;
+    f.options.processGameContent = async (context) => {
+      await context.effect('satisfactory.mods.upload.6', async () => {
+        if (++sends === 1)
+          throw uploadNotPublished(
+            new PterodactylError('rate_limited', 'client', 'rejected', 429, 60_000),
+          );
+      });
+      return true;
+    };
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    expect(sends).toBe(1);
+    const waiting = await f.operation();
+    expect(waiting.effect_state).toBe('none');
+    expect(waiting.plan).toMatchObject({
+      rejected: false,
+      waitReason: 'provider_rate_limited',
+      recoveryReceipt: 'preserved',
+      effectAttempts: { 'satisfactory.mods.upload.6': 1 },
+    });
+    expect(Date.parse(String(waiting.plan.providerPreflightRetryAt))).toBe(
+      f.now().getTime() + 60_000,
+    );
+    f.tick(30_000);
+    expect(await f.run()).toBe('deferred');
+    expect(sends).toBe(1);
+    f.tick(31_000);
+    expect(await f.run()).toBe('succeeded');
+    expect(sends).toBe(2);
+  });
+  it('bounds proven rejected mod upload throttles by the durable per-file effect budget', async () => {
+    const f = await fixture('satisfactory-content', {
+      satisfactoryContent: { kind: 'mods', mode: 'apply' },
+    });
+    f.setState('offline');
+    let sends = 0;
+    f.options.processGameContent = async (context) => {
+      await context.effect('satisfactory.mods.upload.2', async () => {
+        sends++;
+        throw uploadNotPublished(
+          new PterodactylError('rate_limited', 'client', 'rejected', 429, 1),
+        );
+      });
+      return true;
+    };
+    expect(await f.run()).toBe('waiting');
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      f.tick();
+      expect(await f.run()).toBe(attempt < 3 ? 'waiting' : 'failed');
+    }
+    expect(sends).toBe(3);
+    expect((await f.operation()).plan.effectAttempts).toEqual({ 'satisfactory.mods.upload.2': 3 });
+    expect(await f.run()).toBe('duplicate');
+  });
+  it.each(['unmarked', 'unknown'] as const)(
+    'does not retry %s mod upload throttling as proven non-publication',
+    async (kind) => {
+      const f = await fixture('satisfactory-content', {
+        satisfactoryContent: { kind: 'mods', mode: 'apply' },
+      });
+      f.setState('offline');
+      const send = vi.fn(async () => {
+        throw new PterodactylError(
+          'rate_limited',
+          'client',
+          kind === 'unknown' ? 'unknown' : 'rejected',
+          429,
+          60_000,
+        );
+      });
+      f.options.processGameContent = async (context) => {
+        await context.effect('satisfactory.mods.upload.2', send);
+        return true;
+      };
+      expect(await f.run()).toBe('waiting');
+      f.tick();
+      expect(await f.run()).toBe(kind === 'unknown' ? 'waiting' : 'failed');
+      expect(send).toHaveBeenCalledOnce();
+      expect((await f.operation()).plan.providerPreflightRetryAt).toBeUndefined();
+      if (kind === 'unknown')
+        expect((await f.operation()).plan.waitReason).toBe('remote_outcome_unknown');
+    },
+  );
+  it('never uses mod upload throttling proof to replay a rejected power command', async () => {
+    const f = await fixture('start');
+    f.setState('offline');
+    f.adapter.power.mockRejectedValue(
+      uploadNotPublished(new PterodactylError('rate_limited', 'client', 'rejected', 429, 60_000)),
+    );
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.power).toHaveBeenCalledOnce();
+    expect((await f.operation()).plan.providerPreflightRetryAt).toBeUndefined();
+    expect(await f.run()).toBe('duplicate');
   });
   it('does not suppress a current observation using an expired stop receipt', async () => {
     const f = await fixture('stop');
@@ -3636,6 +4035,23 @@ describe('unlocked reconciliation collection and atomic stale-result fencing', (
 });
 
 describe('terminal failed installation reservation recovery', () => {
+  it('recovers an Owner-resolved unknown installation only after fresh physical stop proof', async () => {
+    const f = await failedInstallation('reinstall');
+    await f.db
+      .updateTable('server_operations')
+      .set({ phase: 'owner_resolved_failed' })
+      .where('job_id', '=', f.jobId)
+      .execute();
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => false);
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(await f.installationReservation()).toBeDefined();
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(await f.installationReservation()).toBeUndefined();
+    expect((await f.server()).installation_state).toBe('failed');
+    expect((await f.operation()).plan.installConfirmed).not.toBe(true);
+  });
+
   it('retains Modpacks installer reservations for its own recovery authority', async () => {
     const f = await failedInstallation('reinstall');
     await f.db
@@ -5501,5 +5917,151 @@ describe('inactive Minecraft world removal', () => {
     expect(await f.run()).toBe('failed');
     expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
     expect((await f.operation()).effect_state).toBe('none');
+  });
+});
+
+describe('Satisfactory background preview lifecycle', () => {
+  it('prepares in one delivery using fresh physical stop proof without a settling timer', async () => {
+    const f = await fixture('satisfactory-content', {
+      satisfactoryContent: { kind: 'mods', mode: 'preview' },
+    });
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.options.processGameContent = vi.fn(async () => true);
+    expect(await f.run()).toBe('succeeded');
+    expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
+    expect(f.options.processGameContent).toHaveBeenCalledOnce();
+    expect(f.adapter.getResources).not.toHaveBeenCalled();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it('reuses this delivery identity and keeps read authorization revocable after physical proof', async () => {
+    const f = await fixture('satisfactory-content', {
+      satisfactoryContent: { kind: 'mods', mode: 'preview' },
+    });
+    let proof = false;
+    f.options.authorizeEffect = vi.fn(async () => {});
+    f.options.confirmAlreadyStopped = vi.fn(async (_id, _db, options) => {
+      expect(await options?.providerServer).toBeDefined();
+      proof = true;
+      return true;
+    });
+    const intent = vi.fn(async () => {
+      expect(proof).toBe(true);
+    });
+    f.options.authorizeIntent = intent;
+    f.options.processGameContent = vi.fn(async (context) => {
+      expect(context.previewSourceVerified).toBe(true);
+      const effects = vi.mocked(f.options.authorizeEffect).mock.calls.length;
+      await context.authorize();
+      await context.authorize();
+      expect(f.options.authorizeEffect).toHaveBeenCalledTimes(effects);
+      intent.mockRejectedValueOnce(new Error('revoked'));
+      await expect(context.authorize()).rejects.toThrow('revoked');
+      return true;
+    });
+    expect(await f.run()).toBe('succeeded');
+    expect(intent).toHaveBeenCalledTimes(3);
+    expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
+  });
+  it('rejects preview when the physical stopped proof is unavailable', async () => {
+    const f = await fixture('satisfactory-content', {
+      satisfactoryContent: { kind: 'mods', mode: 'preview' },
+    });
+    f.options.confirmAlreadyStopped = vi.fn(async () => false);
+    f.options.processGameContent = vi.fn(async () => true);
+    expect(await f.run()).not.toBe('succeeded');
+    expect(f.options.processGameContent).not.toHaveBeenCalled();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it.each(['apply', 'rollback'])('retains the mutation settling guard for %s', async (mode) => {
+    const f = await fixture('satisfactory-content', {
+      satisfactoryContent: { kind: 'mods', mode },
+    });
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.options.processGameContent = vi.fn(async () => true);
+    expect(await f.run()).toBe('waiting');
+    expect(f.options.processGameContent).not.toHaveBeenCalled();
+  });
+});
+
+describe('integration-declared installer retries', () => {
+  it('keeps provision pending for two retries and succeeds on the third attempt', async () => {
+    const f = await fixture('provision', { autoStart: false });
+    f.remote.status = 'install_failed';
+    f.options.installationRetry = vi.fn(async () => 2);
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    f.adapter.reinstallWithConfirmation.mockImplementation(async (_id, _identifier, callbacks) => {
+      if (f.adapter.reinstallWithConfirmation.mock.calls.length === 2) {
+        f.remote.status = null;
+        f.remote.container.installed = true;
+        await callbacks.onConfirmed();
+      }
+      return { confirmed: f.adapter.reinstallWithConfirmation.mock.calls.length === 2 };
+    });
+    expect(await f.run()).toBe('waiting');
+    expect((await f.server()).installation_state).toBe('installing');
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    expect(f.adapter.createServer).toHaveBeenCalledTimes(1);
+    expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(2);
+  });
+  it('fails after the configured retry budget without further installer effects', async () => {
+    const f = await fixture('provision', { autoStart: false });
+    f.remote.status = 'install_failed';
+    f.options.installationRetry = vi.fn(async () => 2);
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    f.adapter.reinstallWithConfirmation.mockResolvedValue({ confirmed: false });
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(2);
+    expect((await f.server()).installation_state).toBe('failed');
+  });
+  it('does not let an early unconfirmed return hide a later fresh failure', async () => {
+    const f = await fixture('provision', { autoStart: false });
+    f.remote.status = 'install_failed';
+    f.options.installationRetry = vi.fn(async (_context, logs) => (logs ? 0 : 2));
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    f.adapter.reinstallWithConfirmation.mockResolvedValue({ confirmed: false });
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect((await f.operation()).plan.installationRetryEvidence).toBeUndefined();
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(2);
+  });
+  it('rejects a delayed completion captured by the previous installer channel', async () => {
+    const f = await fixture('provision', { autoStart: false });
+    f.remote.status = 'install_failed';
+    f.options.installationRetry = vi.fn(async () => 2);
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    f.adapter.reinstallWithConfirmation.mockResolvedValue({ confirmed: false });
+    await f.run();
+    const prior = (await f.operation()).effect_started_at;
+    f.tick();
+    await f.run();
+    expect(
+      await recordNativeInstallationCompletion(f.db, {
+        serverId: f.serverId,
+        jobId: f.jobId,
+        providerUuid: f.remote.uuid,
+        observedAt: f.now(),
+        effectStartedAt: prior ?? undefined,
+      }),
+    ).toBe(false);
+  });
+  it.each([0, undefined])('does not retry an ineligible failure (%s)', async (budget) => {
+    const f = await fixture('provision', { autoStart: false });
+    f.remote.status = 'install_failed';
+    if (budget !== undefined) f.options.installationRetry = vi.fn(async () => budget);
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    if (budget !== undefined) {
+      expect(await f.run()).toBe('waiting');
+      f.tick();
+    }
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
   });
 });
