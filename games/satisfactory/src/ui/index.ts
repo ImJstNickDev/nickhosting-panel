@@ -11,6 +11,8 @@ import { satisfactoryFilemanCatalogs } from './fileman-catalog.js';
 export { satisfactoryViewers } from '../viewers/index.js';
 
 import { satisfactoryViewerCatalogs } from '../viewers/catalog.js';
+import { satisfactoryIniCatalogs } from '../viewers/ini-catalog.js';
+import { manifestCatalogs as satisfactoryManifestCatalogs } from '../viewers/manifest-catalog.js';
 
 export { satisfactoryPhaseLabel, satisfactorySchematicLabel } from './progression.js';
 
@@ -86,6 +88,8 @@ export const satisfactoryUiCatalogs = {
   en: {
     ...baseCatalogs.en,
     ...satisfactoryViewerCatalogs.en,
+    ...satisfactoryIniCatalogs.en,
+    ...satisfactoryManifestCatalogs.en,
     ...satisfactoryOverviewCatalogs.en,
     ...satisfactoryProgressionCatalogs.en,
     ...satisfactorySettingsCatalogs.en,
@@ -94,6 +98,8 @@ export const satisfactoryUiCatalogs = {
   it: {
     ...baseCatalogs.it,
     ...satisfactoryViewerCatalogs.it,
+    ...satisfactoryIniCatalogs.it,
+    ...satisfactoryManifestCatalogs.it,
     ...satisfactoryOverviewCatalogs.it,
     ...satisfactoryProgressionCatalogs.it,
     ...satisfactorySettingsCatalogs.it,

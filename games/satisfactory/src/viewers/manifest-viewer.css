@@ -1,0 +1,73 @@
+.satisfactory-manifest-viewer {
+  padding: 1.5rem;
+  overflow: auto;
+}
+.satisfactory-manifest-viewer dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  gap: 1.5rem;
+  margin: 0;
+}
+.satisfactory-manifest-viewer dt {
+  font-size: 0.85rem;
+  opacity: 0.75;
+  margin-bottom: 0.35rem;
+}
+.satisfactory-manifest-viewer dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.satisfactory-manifest-viewer h3 {
+  font-size: 1rem;
+  margin: 1.5rem 0 0.75rem;
+}
+.satisfactory-manifest-profile {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+.satisfactory-manifest-profile select {
+  max-width: 75%;
+}
+.satisfactory-manifest-table {
+  overflow-x: auto;
+}
+.satisfactory-manifest-table table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+.satisfactory-manifest-table th,
+.satisfactory-manifest-table td {
+  text-align: left;
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+  vertical-align: top;
+  white-space: pre-wrap;
+}
+.satisfactory-manifest-table thead th {
+  font-size: 0.85rem;
+}
+.satisfactory-manifest-table tbody th {
+  font-weight: 500;
+}
+.satisfactory-manifest-viewer nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+@media (max-width: 600px) {
+  .satisfactory-manifest-viewer {
+    padding: 1rem;
+  }
+  .satisfactory-manifest-table th,
+  .satisfactory-manifest-table td {
+    padding: 0.5rem 0.25rem;
+    font-size: 0.85rem;
+  }
+}

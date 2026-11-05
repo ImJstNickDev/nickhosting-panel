@@ -13,6 +13,8 @@ describe('Satisfactory Fileman presentation', () => {
     expect(satisfactoryFileKind('FactoryGame.log')).toBe('log');
     expect(satisfactoryFileKind('SML.uplugin')).toBe('modManifest');
     expect(satisfactoryFileKind('nick_hosting-lock.json')).toBe('modManifest');
+    expect(satisfactoryFileKind('Factory.smmprofile')).toBe('modManifest');
+    expect(satisfactoryFileKind('profiles.json')).toBe('modManifest');
     expect(satisfactoryFileKind('private_key.pem')).toBeUndefined();
     expect(satisfactoryFileKind('notes.json')).toBeUndefined();
     expect(satisfactoryFileKind('world.sav.bak')).toBeUndefined();

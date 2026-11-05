@@ -12,7 +12,13 @@ export function satisfactoryFileKind(name: string) {
   if (value.endsWith('.sbp') || value.endsWith('.sbpcfg')) return 'blueprint';
   if (value.endsWith('.ini')) return 'configuration';
   if (value.endsWith('.log')) return 'log';
-  if (value.endsWith('.uplugin') || value === 'nick_hosting-lock.json') return 'modManifest';
+  if (
+    value.endsWith('.uplugin') ||
+    value.endsWith('.smmprofile') ||
+    value === 'nick_hosting-lock.json' ||
+    value === 'profiles.json'
+  )
+    return 'modManifest';
   return undefined;
 }
 

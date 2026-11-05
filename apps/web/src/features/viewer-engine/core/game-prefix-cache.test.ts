@@ -22,6 +22,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+it('reads an empty physical file through fresh metadata without an unsatisfiable range', async () => {
+  const fetcher = vi.fn(
+    async () => new Response(JSON.stringify({ revision: 'a'.repeat(64), size: 0, mtimeMs: 1 })),
+  );
+  vi.stubGlobal('fetch', fetcher);
+  expect(await readGameViewerPrefix(options())).toHaveLength(0);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
 it('revalidates authority each time but shares metadata bytes for unchanged revision', async () => {
   const fetcher = vi.fn(async (url: string) => (url.includes('/content?') ? body() : meta()));
   vi.stubGlobal('fetch', fetcher);

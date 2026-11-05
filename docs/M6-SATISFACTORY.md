@@ -1467,3 +1467,50 @@ All four development services are healthy. No migration, restart, game-data/powe
 operation, Pterodactyl/Blueprint change or real test asset was needed. Rollback is
 the preceding application revision; there is no persistent cache or schema change.
 Phase 2 stays open for the remaining separately bounded viewers.
+
+
+### Phase 2 — Unreal INI and mod/profile manifest viewers
+
+Satisfactory registers two more compiled read-only viewers in the existing Fileman
+registry. `.ini` opens an ordered source inspection: sections, repeated keys,
+comments, blank/unrecognized lines, quoted/structured values and Unreal array
+operators remain distinct. UTF-8 and BOM-marked UTF-16LE/BE are decoded strictly.
+This does not compute effective settings across Unreal's configuration hierarchy.
+Editing uses the existing Scribe text editor, through the direct action or Open with.
+
+The manifest viewer recognizes `.uplugin` (FileVersion 1–3), SMM3 JSON `.smmprofile`,
+ficsit-cli `profiles.json` version 0 and `nick_hosting-lock.json` version 1.
+It projects declared metadata, dependency flags/ranges, selected profile, enabled
+mod intent and resolved lock versions/target names. It neither resolves dependencies
+nor trusts/fetches download URLs. Unknown properties remain in the original file;
+Open with retains the existing JSON/text viewers. Other JSON files keep their
+normal viewer, and explicit viewer preferences still take priority.
+
+Both viewers reuse the authorized, revision-bound prefix cache introduced in the
+previous slice. The structured view accepts at most 65,535 bytes, requesting one
+additional sentinel byte so changed/larger files cannot be silently truncated.
+INI renders 200 physical lines per page; manifests render 50 mod rows per page
+with bounded collections and conditional columns. Larger or unsupported files offer
+an explicit original-file fallback. Fresh authorized metadata handles empty physical
+files without an unsatisfiable HTTP Range request. No new endpoint, transport,
+editor, dependency or persistent setting is introduced.
+
+Validation: 27 focused parser/registry/classification/cache tests; actual Fileman
+browser journey with default selection, Scribe/JSON fallback, direct editor action,
+empty/malformed/oversized files, EN/IT desktop/mobile Axe, unchanged file bytes and
+server operation count. Full typecheck, lint, frontend/runtime builds and i18n check
+pass (existing lint warnings). Independent code and visual review completed.
+Screenshots: `satisfactory-ini-{desktop-en,mobile-it}.png`,
+`satisfactory-manifest-{desktop-en,mobile-it,invalid-en}.png`.
+
+Development source watchers reloaded the changes; all four services are healthy
+at completion. No manual restart, migration, game file/power operation,
+Pterodactyl/Blueprint modification or real game test asset. Rollback is the preceding
+application revision; no persistent migration or cache recovery is required.
+The remaining log/crash/public-certificate viewers stay in phase-2 issue #31.
+
+Format references: [Epic configuration files](https://dev.epicgames.com/documentation/en-us/unreal-engine/configuration-files-in-unreal-engine),
+[Epic plugin descriptors](https://dev.epicgames.com/documentation/en-us/unreal-engine/plugins-in-unreal-engine),
+[SML descriptor fields](https://docs.ficsit.app/satisfactory-modding/latest/Development/BeginnersGuide/ReleaseMod.html).
+Profile and lock projections follow the existing `mods-profile.ts` / `mods.ts`
+contracts; native SMM import/install behavior is unchanged.

@@ -99,6 +99,9 @@ export async function readGameViewerPrefix(options: {
     metadata.size < 0
   )
     throw unavailable();
+  // HTTP ranges have no satisfiable byte in an empty file. Only the freshly
+  // authorized physical source stat can establish emptiness (not a listing).
+  if (metadata.size === 0 && !source.entry && !source.archives?.length) return new Uint8Array(0);
   const key = [
     ...namespace,
     ...rootKey,
