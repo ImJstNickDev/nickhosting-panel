@@ -17,6 +17,7 @@ import {
 } from 'react';
 
 const Navigation = createContext<{
+  viewerIdentity?: string;
   navigateDirectory?: (path: string) => void;
   sections: readonly string[];
 }>({ sections: [] });
@@ -38,11 +39,13 @@ export function FilemanHost({
   extensions,
   children,
   navigateDirectory,
+  viewerIdentity,
   sections = [],
 }: {
   context: Readonly<FilemanContext>;
   extensions?: readonly TrustedFilemanExtension<ReactNode>[];
   children?: ReactNode;
+  viewerIdentity?: string;
   navigateDirectory?: (path: string) => void;
   sections?: readonly string[];
 }) {
@@ -60,7 +63,7 @@ export function FilemanHost({
     return () => setProviders((current) => current.filter((entry) => entry.token !== token));
   }, []);
   return (
-    <Navigation.Provider value={{ navigateDirectory, sections }}>
+    <Navigation.Provider value={{ navigateDirectory, sections, viewerIdentity }}>
       <Host.Provider value={value}>
         <RegisterPathProvider.Provider value={register}>
           <PathProvider.Provider value={providers.at(-1)?.provider}>

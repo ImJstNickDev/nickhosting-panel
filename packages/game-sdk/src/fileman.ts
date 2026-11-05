@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { GameViewerSource } from './viewers.js';
 
 /** Stable presentation surfaces; changing a surface never grants a filesystem capability. */
 export const filemanSlotSchema = z.enum([
@@ -7,6 +8,7 @@ export const filemanSlotSchema = z.enum([
   'search',
   'view-toggle',
   'selection',
+  'selection.actions',
   'listing',
   'entry.name',
   'entry.icon',
@@ -41,6 +43,10 @@ export interface FilemanContext {
   readonly surface: 'directory' | 'viewer';
   readonly viewerId?: string;
   readonly readOnly: boolean;
+  readonly selection?: readonly (GameViewerSource & {
+    readonly directory: boolean;
+    readonly symlink: boolean;
+  })[];
   readonly entry?: { readonly name: string; readonly directory: boolean; readonly size: number };
 }
 /** Minimal directory metadata shared by real and extension-provided virtual paths. */

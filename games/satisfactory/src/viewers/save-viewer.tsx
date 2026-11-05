@@ -1,7 +1,13 @@
 import type { GameViewerProps } from '@nickhosting/game-sdk/ui';
 import { useEffect, useState } from 'react';
 import { isSatisfactoryServerSettings } from '../fileman.js';
-import { parseSaveHeader, type SaveHeader, saveHeaderReadLimit } from './save-header.js';
+import {
+  formatSaveMetadataValue,
+  saveMetadataFields,
+  saveMetadataLabels,
+  saveMetadataValue,
+} from './save-fields.js';
+import { cachedParseSaveHeader, type SaveHeader, saveHeaderReadLimit } from './save-header.js';
 import './save-viewer.css';
 
 const key = (name: string) => `games.satisfactory.viewers.save.${name}`;
@@ -15,7 +21,7 @@ export default function SaveViewer({ source, host }: GameViewerProps) {
     void host
       .readPrefix?.(saveHeaderReadLimit, controller.signal)
       .then((bytes) => {
-        if (!controller.signal.aborted) setState({ value: parseSaveHeader(bytes) });
+        if (!controller.signal.aborted) setState({ value: cachedParseSaveHeader(bytes) });
       })
       .catch((error: unknown) => {
         if (!controller.signal.aborted) {
@@ -38,23 +44,19 @@ export default function SaveViewer({ source, host }: GameViewerProps) {
   if (state.error) return <p role="alert">{host.t(state.error)}</p>;
   if (!state.value) return <p role="status">{host.t(key('loading'))}</p>;
   const header = state.value;
-  const duration = `${Math.floor(header.playDurationSeconds / 3600)}:${String(Math.floor(header.playDurationSeconds / 60) % 60).padStart(2, '0')}:${String(header.playDurationSeconds % 60).padStart(2, '0')}`;
-  const fields = {
-    session: header.sessionName,
-    save: header.saveName ?? source.name,
-    map: header.mapName,
-    savedAt: new Date(header.savedAt).toLocaleString(host.locale === 'it' ? 'it-IT' : 'en-GB'),
-    duration,
-    build: header.buildVersion,
-    format: header.saveVersion,
-  };
   return (
     <div className="satisfactory-save-viewer">
       <dl>
-        {Object.entries(fields).map(([name, value]) => (
+        {saveMetadataFields.map((name) => (
           <div key={name}>
-            <dt>{host.t(key(name))}</dt>
-            <dd>{value}</dd>
+            <dt>{host.t(key(saveMetadataLabels[name]))}</dt>
+            <dd>
+              {formatSaveMetadataValue(
+                saveMetadataValue(header, name, source.name),
+                name,
+                host.locale,
+              )}
+            </dd>
           </div>
         ))}
       </dl>

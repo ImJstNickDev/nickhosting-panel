@@ -1,4 +1,7 @@
 const messages: Record<string, [string, string]> = {
+  compare: ['Compare save details', 'Confronta dettagli salvataggi'],
+  metadata: ['Metadata', 'Metadati'],
+  different: ['Different', 'Diverso'],
   serverSettings: [
     'This file contains server settings, not a world save.',
     'Questo file contiene le impostazioni del server, non un salvataggio del mondo.',

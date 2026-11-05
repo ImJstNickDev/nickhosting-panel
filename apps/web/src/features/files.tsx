@@ -1968,10 +1968,16 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         surface: displaying ? 'viewer' : 'directory',
         viewerId: displaying ? (viewing ? viewed?.viewerId : editorView) : undefined,
         readOnly: viewing || !canMutate,
+        selection: selectedEntries.map((entry) => ({
+          ...viewerSource(entry),
+          directory: !entry.is_file,
+          symlink: entry.is_symlink,
+        })),
         ...(viewing ? viewerContext : {}),
       }}
       extensions={gameFilemanExtensions}
       navigateDirectory={navigate}
+      viewerIdentity={viewerIdentity}
       sections={server.data ? availableGameSections(server.data).map((section) => section.id) : []}
     >
       <section

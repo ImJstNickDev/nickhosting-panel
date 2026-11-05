@@ -5,6 +5,7 @@ import { useLocale, useT } from '../../app/i18n.js';
 import { readViewerBytes, viewerPath } from './core/access.js';
 import { trimArchivePages } from './core/archive-memory.js';
 import { archiveQuery } from './core/archive-query.js';
+import { readGameViewerPrefix } from './core/game-prefix-cache.js';
 import { selectableViewers, type ViewerId, type ViewerSource } from './core/registry.js';
 import { ViewerLoading } from './loading.js';
 
@@ -63,12 +64,13 @@ export function createGameViewerHost(options: {
         const combined = signalFor(signal);
         if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 65536)
           throw new TypeError('invalid_viewer_read_limit');
-        return readViewerBytes(
-          viewerPath(options.serverId, options.source),
+        return readGameViewerPrefix({
+          serverId: options.serverId,
+          identity: options.identity,
+          source: options.source,
           maxBytes,
-          combined,
-          maxBytes,
-        );
+          signal: combined,
+        });
       },
       archive: {
         async list(directory, signal, query = '') {

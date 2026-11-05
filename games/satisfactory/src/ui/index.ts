@@ -1,4 +1,10 @@
 export { satisfactoryFileKind, satisfactoryFileLocations } from '../fileman.js';
+export {
+  formatSaveMetadataValue,
+  saveMetadataFields,
+  saveMetadataLabels,
+  saveMetadataValue,
+} from '../viewers/save-fields.js';
 
 import { satisfactoryFilemanCatalogs } from './fileman-catalog.js';
 
@@ -326,3 +332,9 @@ export const satisfactoryUiModule = defineTrustedGameUiModule({
     },
   },
 });
+
+export {
+  cachedParseSaveHeader,
+  type SaveHeader,
+  saveHeaderReadLimit,
+} from '../viewers/save-header.js';

@@ -10,6 +10,7 @@ import { useFilemanNavigation } from '../../features/fileman/host.js';
 import { fileDirectoryQuery } from '../../features/service-contracts.js';
 import { availableGameDirectories, gameDirectoryExists } from './fileman-location.js';
 import './fileman.css';
+import { comparableSatisfactorySaves, SatisfactorySaveCompare } from './save-compare.js';
 
 const key = (name: string) => `games.satisfactory.fileman.${name}`;
 function WorldsLink({ serverId }: { serverId: string }) {
@@ -203,6 +204,20 @@ export const satisfactoryFilemanExtension = defineTrustedFilemanExtension<ReactN
       render: (context) => (
         <Locations key={`${context.serverId}:${context.path}`} serverId={context.serverId} />
       ),
+    },
+    {
+      slot: 'selection.actions',
+      mode: 'append',
+      when: (context) =>
+        context.surface === 'directory' && comparableSatisfactorySaves(context.selection),
+      render: (context) =>
+        context.selection && (
+          <SatisfactorySaveCompare
+            key={JSON.stringify([context.serverId, context.path, context.selection])}
+            serverId={context.serverId}
+            selection={context.selection}
+          />
+        ),
     },
     {
       slot: 'entry.icon',

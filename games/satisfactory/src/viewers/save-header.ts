@@ -70,3 +70,14 @@ export function parseSaveHeader(bytes: Uint8Array): SaveHeader {
     savedAt: new Date(milliseconds).toISOString(),
   };
 }
+
+const parsedHeaders = new WeakMap<Uint8Array, Readonly<SaveHeader>>();
+/** Prefix cache owns the bounded lifetime; no second persistent metadata store. */
+export function cachedParseSaveHeader(bytes: Uint8Array): Readonly<SaveHeader> {
+  let header = parsedHeaders.get(bytes);
+  if (!header) {
+    header = Object.freeze(parseSaveHeader(bytes));
+    parsedHeaders.set(bytes, header);
+  }
+  return header;
+}

@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
 import { AxeBuilder } from '@axe-core/playwright';
 import { expect as browserExpect } from '@playwright/test';
 import { expect, it } from 'vitest';
@@ -6,7 +7,7 @@ import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
 
-function save(version = 14) {
+function save(version = 14, name = 'Factory_A', duration = 3661) {
   const parts: Buffer[] = [];
   const int = (value: number) => {
     const b = Buffer.alloc(4);
@@ -21,11 +22,11 @@ function save(version = 14) {
   int(version);
   int(51);
   int(500000);
-  string('Factory_A');
+  string(name);
   string('Persistent_Level');
   string('');
   string('Northern factory');
-  int(3661);
+  int(duration);
   const date = Buffer.alloc(9);
   date.writeBigInt64LE(621355968000000000n + 1700000000000n * 10000n);
   parts.push(date);
@@ -65,6 +66,7 @@ it('uses actual Fileman navigation and compiled Satisfactory viewer with bounded
     const files = await provider.files();
     files.clear();
     files.set('Factory_A.sav', save());
+    files.set('Factory_B.sav', save(14, 'Factory_B', 7261));
     files.set('Future.sav', save(15));
     files.set('ServerSettings.28014.sav', Buffer.from('GVAS server settings fixture'));
     const directoryRequests: string[] = [];
@@ -87,6 +89,17 @@ it('uses actual Fileman navigation and compiled Satisfactory viewer with bounded
         },
       });
     });
+    const revision = (body: Buffer) => createHash('sha256').update(body).digest('hex');
+    await page.route(
+      (url) => url.pathname === `/v1/servers/${id}/files/viewer`,
+      async (route) => {
+        const body = files.get(new URL(route.request().url()).searchParams.get('path') ?? '');
+        if (!body) return route.fulfill({ status: 404, json: { code: 'not_found' } });
+        return route.fulfill({
+          json: { revision: revision(body), size: body.length, mtimeMs: 1700000000000 },
+        });
+      },
+    );
     await page.route(`**/v1/servers/${id}/files/viewer/**`, async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname.endsWith('/capabilities'))
@@ -96,6 +109,7 @@ it('uses actual Fileman navigation and compiled Satisfactory viewer with bounded
       if (url.pathname.endsWith('/content')) {
         const body = files.get(url.searchParams.get('path') ?? '');
         if (!body) return route.fulfill({ status: 404, json: { code: 'not_found' } });
+        expect(route.request().headers()['if-match']).toBe(`"${revision(body)}"`);
         const range = route.request().headers().range ?? '';
         ranges.push(range);
         const match = /^bytes=(\d+)-(\d+)$/.exec(range);
@@ -140,6 +154,56 @@ it('uses actual Fileman navigation and compiled Satisfactory viewer with bounded
       fullPage: true,
     });
     await page.getByRole('button', { name: 'Back to files', exact: true }).click();
+    await page.getByRole('checkbox', { name: 'Select Factory_A.sav', exact: true }).check();
+    await page.getByRole('checkbox', { name: 'Select Factory_B.sav', exact: true }).check();
+    const beforeComparison = ranges.length;
+    await page.getByRole('button', { name: 'Compare save details', exact: true }).click();
+    const comparison = page.getByRole('dialog', { name: 'Compare save details' });
+    await browserExpect(comparison).toContainText('2:01:01');
+    await browserExpect(comparison).toContainText('1:01:01');
+    await browserExpect(comparison.getByText('Different', { exact: true }).first()).toBeVisible();
+    expect(ranges.length - beforeComparison).toBe(1);
+    expect(
+      (await new AxeBuilder({ page }).include('.satisfactory-save-comparison').analyze())
+        .violations,
+    ).toEqual([]);
+    await page.screenshot({
+      path: 'test-results/satisfactory-compare-desktop-en.png',
+      fullPage: true,
+    });
+    await comparison.getByRole('button', { name: 'Close', exact: true }).click();
+    await browserExpect(
+      page.getByRole('checkbox', { name: 'Select Factory_A.sav', exact: true }),
+    ).toBeChecked();
+    const afterComparison = ranges.length;
+    await page.getByRole('button', { name: 'Compare save details', exact: true }).click();
+    await browserExpect(comparison).toContainText('2:01:01');
+    expect(ranges.length).toBe(afterComparison);
+    await comparison.getByRole('button', { name: 'Close', exact: true }).click();
+    files.set('Factory_B.sav', save(14, 'Factory_B', 10861));
+    await page.getByRole('button', { name: 'Compare save details', exact: true }).click();
+    await browserExpect(comparison).toContainText('3:01:01');
+    expect(ranges.length).toBe(afterComparison + 1);
+    await comparison.getByRole('button', { name: 'Close', exact: true }).click();
+    await page
+      .getByRole('checkbox', { name: 'Select ServerSettings.28014.sav', exact: true })
+      .check();
+    await browserExpect(
+      page.getByRole('button', { name: 'Compare save details', exact: true }),
+    ).toHaveCount(0);
+    await page.getByRole('checkbox', { name: 'Select Factory_B.sav', exact: true }).uncheck();
+    await browserExpect(
+      page.getByRole('button', { name: 'Compare save details', exact: true }),
+    ).toHaveCount(0);
+    await page.getByRole('button', { name: 'Clear selection', exact: true }).click();
+    await page.getByRole('checkbox', { name: 'Select Factory_A.sav', exact: true }).check();
+    await page.getByRole('checkbox', { name: 'Select Future.sav', exact: true }).check();
+    await page.getByRole('button', { name: 'Compare save details', exact: true }).click();
+    await browserExpect(comparison).toContainText('not supported');
+    await browserExpect(comparison).toContainText('Northern factory');
+    await browserExpect(comparison.getByText('Different', { exact: true })).toHaveCount(0);
+    await comparison.getByRole('button', { name: 'Close', exact: true }).click();
+    await page.getByRole('button', { name: 'Clear selection', exact: true }).click();
     await page.getByRole('link', { name: 'Open Worlds', exact: true }).click();
     await browserExpect(page).toHaveURL(new RegExp(`/servers/${id}/game/worlds$`));
     await page.goto(base);
@@ -226,6 +290,19 @@ it('uses actual Fileman navigation and compiled Satisfactory viewer with bounded
       [],
     );
     await page.screenshot({ path: 'test-results/satisfactory-save-mobile-it.png', fullPage: true });
+    await page.getByRole('button', { name: 'Torna ai file', exact: true }).click();
+    await page.getByRole('checkbox', { name: 'Seleziona Factory_A.sav', exact: true }).check();
+    await page.getByRole('checkbox', { name: 'Seleziona Factory_B.sav', exact: true }).check();
+    await page.getByRole('button', { name: 'Confronta dettagli salvataggi', exact: true }).click();
+    await browserExpect(page.getByRole('dialog')).toContainText('3:01:01');
+    expect(
+      (await new AxeBuilder({ page }).include('.satisfactory-save-comparison').analyze())
+        .violations,
+    ).toEqual([]);
+    await page.screenshot({
+      path: 'test-results/satisfactory-compare-mobile-it.png',
+      fullPage: true,
+    });
     expect(
       await harness.database.db
         .selectFrom('server_operations')

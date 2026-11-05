@@ -1436,3 +1436,34 @@ creation/removal discovered on focus without a reload and no request to absent
 Mods. Desktop/mobile Axe checks and filtered-menu screenshots were reviewed.
 Types, frontend build and lint pass with the existing warnings. No migration,
 service restart or game-data operation was needed for this presentation change.
+
+### Phase 2 — Save metadata cache and comparison
+
+The next approved slice reuses the existing authenticated viewer metadata endpoint
+and its revision-bound content reads. No parallel file transport, persistent game
+index, new endpoint or world-body parsing is introduced. The user compares exactly
+two selected regular world-save files through a Fileman selection action; native
+server settings files remain excluded. Other phase-2 viewers remain separate work.
+
+The shared prefix cache retains at most 64 entries / 4 MiB for 60 seconds,
+including reservations for concurrent reads. Each use freshly authorizes/stats the
+source; content misses use the existing bounded Range request with If-Match.
+Identity, server, source/archive path, revision and read limit scope reuse. Readers
+share requests without one consumer cancelling the others. Immutable parsed save
+headers are reused by both inspection and comparison. Revisions are stat-based:
+external replacements preserving both size and mtime cannot be detected immediately.
+
+The existing Fileman selection toolbar opens a shared read-only comparison dialog
+for two world saves, with textual difference markers and independent file errors.
+Closing preserves selection; navigation/identity changes cancel outstanding work.
+EN/IT desktop/mobile screenshots and accessibility checks were reviewed:
+`satisfactory-compare-desktop-en.png`, `satisfactory-compare-mobile-it.png`.
+
+Validation: 25 focused cache/parser/host tests and the actual Fileman browser journey
+pass (warm-cache reuse, changed revision, settings exclusion, partial failure,
+selection preservation, desktop/mobile Axe). Full typecheck, lint, frontend and
+runtime builds pass; existing lint warnings remain. Independent review passed.
+All four development services are healthy. No migration, restart, game-data/power
+operation, Pterodactyl/Blueprint change or real test asset was needed. Rollback is
+the preceding application revision; there is no persistent cache or schema change.
+Phase 2 stays open for the remaining separately bounded viewers.

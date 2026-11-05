@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseSaveHeader } from './save-header.js';
+import { cachedParseSaveHeader, parseSaveHeader } from './save-header.js';
 
 function fixture(version = 14, wide = false) {
   const parts: Buffer[] = [];
@@ -54,4 +54,13 @@ describe('Satisfactory bounded save header', () => {
     corrupt[20] = 65;
     expect(() => parseSaveHeader(corrupt)).toThrow();
   });
+});
+
+it('memoizes parsed metadata without mutating shared prefix bytes', () => {
+  const bytes = fixture();
+  const original = Buffer.from(bytes);
+  const first = cachedParseSaveHeader(bytes);
+  expect(cachedParseSaveHeader(bytes)).toBe(first);
+  expect(Object.isFrozen(first)).toBe(true);
+  expect(bytes).toEqual(original);
 });

@@ -27,12 +27,15 @@ export async function readViewerBytes(
   maxBytes: number,
   signal: AbortSignal,
   prefixSize?: number,
+  headers?: Record<string, string>,
 ): Promise<Uint8Array<ArrayBuffer>> {
   const response = await fetch(safeApiPath(url), {
     credentials: 'same-origin',
     redirect: 'error',
     signal,
-    ...(prefixSize ? { headers: { Range: `bytes=0-${prefixSize - 1}` } } : {}),
+    ...(prefixSize || headers
+      ? { headers: { ...headers, ...(prefixSize ? { Range: `bytes=0-${prefixSize - 1}` } : {}) } }
+      : {}),
   });
   if (!response.ok) throw apiError(await response.json().catch(() => ({})), response.status);
   let expectedPrefixBytes: number | undefined;
