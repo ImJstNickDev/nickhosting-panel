@@ -1,8 +1,13 @@
 import { satisfactorySaveDirectory } from './world-paths.js';
 
+/** Native server settings use Unreal GVAS, not the world-save header format. */
+export const isSatisfactoryServerSettings = (name: string) =>
+  /^ServerSettings(?:\.\d+)?\.sav$/i.test(name);
+
 /** Filename classification is presentation only, never proof of file contents. */
 export function satisfactoryFileKind(name: string) {
   const value = name.toLowerCase();
+  if (isSatisfactoryServerSettings(name)) return 'serverSettings';
   if (value.endsWith('.sav')) return 'save';
   if (value.endsWith('.sbp') || value.endsWith('.sbpcfg')) return 'blueprint';
   if (value.endsWith('.ini')) return 'configuration';

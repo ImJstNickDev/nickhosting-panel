@@ -1405,3 +1405,20 @@ bindings. No game file or power operation, Pterodactyl/Blueprint update, DNS cha
 or real test-server creation was performed. Rollback restores the prior code and
 `nickhosting-dev-app:before-satisfactory-fileman-20261105` image through the same
 Compose pipeline; persistent game data and settings remain intact.
+
+First-slice acceptance fixes: folder shortcuts now check the selected path through
+existing identity-scoped Fileman listings before navigating. A directory that has
+not been created (for example Mods on a vanilla instance) leaves the current folder
+open with a localized status. No directory is created and genuine listing failures
+remain errors. Reads happen only on selection, with stale navigation cancelled.
+
+Native `ServerSettings.<port>.sav` (and `ServerSettings.sav`) files are classified
+separately from world saves and excluded from automatic world-header inspection.
+Explicit Open with preferences remain honored, but the save viewer explains that
+this is server configuration without reading its bytes or offering Worlds actions.
+Ordinary world names such as `ServerSettings_factory.sav` remain inspectable.
+
+Regression checks: eight save/classification tests, six folder helper/host tests,
+and the actual Fileman browser journey pass. Browser checks prove no absent-target
+request, no read for ServerSettings even with explicit viewer selection, and no
+server operation; desktop/mobile missing-folder screenshots accompany the change.

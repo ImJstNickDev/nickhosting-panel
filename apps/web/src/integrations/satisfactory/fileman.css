@@ -14,3 +14,11 @@
   align-items: center;
   justify-content: center;
 }
+
+.satisfactory-file-locations {
+  flex-wrap: wrap;
+}
+.satisfactory-file-location-status {
+  max-inline-size: 26ch;
+  font-size: 12px;
+}

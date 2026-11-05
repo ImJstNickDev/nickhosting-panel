@@ -1,4 +1,5 @@
 import { defineTrustedGameViewer } from '@nickhosting/game-sdk/ui';
+import { isSatisfactoryServerSettings } from '../fileman.js';
 export const satisfactoryViewers = [
   defineTrustedGameViewer(
     {
@@ -9,6 +10,9 @@ export const satisfactoryViewers = [
       readOnly: true,
     },
     () => import('./save-viewer.js'),
-    (source) => source.gameId === 'satisfactory' && /\.sav$/i.test(source.name),
+    (source) =>
+      source.gameId === 'satisfactory' &&
+      /\.sav$/i.test(source.name) &&
+      !isSatisfactoryServerSettings(source.name),
   ),
 ] as const;

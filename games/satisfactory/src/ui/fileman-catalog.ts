@@ -1,10 +1,15 @@
 const messages: Record<string, [string, string]> = {
+  folderMissing: [
+    'This folder has not been created yet.',
+    'Questa cartella non è ancora stata creata.',
+  ],
   locations: ['Game folders', 'Cartelle del gioco'],
   saves: ['Saves', 'Salvataggi'],
   mods: ['Mods', 'Mod'],
   configuration: ['Configuration', 'Configurazione'],
   logs: ['Logs', 'Log'],
   worlds: ['Open Worlds', 'Apri Worlds'],
+  'kind.serverSettings': ['Satisfactory server settings', 'Impostazioni server Satisfactory'],
   'kind.save': ['Satisfactory save', 'Salvataggio Satisfactory'],
   'kind.blueprint': ['Satisfactory blueprint', 'Blueprint Satisfactory'],
   'kind.configuration': ['Unreal configuration', 'Configurazione Unreal'],

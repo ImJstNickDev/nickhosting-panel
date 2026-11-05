@@ -52,10 +52,25 @@ it('uses actual Fileman navigation and compiled Satisfactory viewer with bounded
       .select('job_id')
       .where('server_id', '=', id)
       .execute();
+    const server = await harness.database.db
+      .selectFrom('managed_servers')
+      .select('pterodactyl_identifier')
+      .where('id', '=', id)
+      .executeTakeFirstOrThrow();
+    const identifier = server.pterodactyl_identifier;
+    if (!identifier) throw new Error('Missing fixture provider identity');
+    await provider.adapter.createDirectory(identifier, '', 'FactoryGame');
     const files = await provider.files();
     files.clear();
     files.set('Factory_A.sav', save());
     files.set('Future.sav', save(15));
+    files.set('ServerSettings.28014.sav', Buffer.from('GVAS server settings fixture'));
+    const directoryRequests: string[] = [];
+    page.on('request', (request) => {
+      const url = new URL(request.url());
+      if (url.pathname === `/v1/servers/${id}/files`)
+        directoryRequests.push(url.searchParams.get('path') ?? '');
+    });
     const ranges: string[] = [];
     let worlds = true;
     await page.route(`**/v1/platform/servers/${id}`, async (route) => {
@@ -125,6 +140,34 @@ it('uses actual Fileman navigation and compiled Satisfactory viewer with bounded
     await page.getByRole('link', { name: 'Open Worlds', exact: true }).click();
     await browserExpect(page).toHaveURL(new RegExp(`/servers/${id}/game/worlds$`));
     await page.goto(base);
+    await browserExpect(page.locator('.satisfactory-save-viewer')).toBeVisible();
+    await page.getByRole('button', { name: 'Back to files', exact: true }).click();
+    await page.getByRole('combobox', { name: 'Game folders' }).selectOption('mods');
+    await browserExpect(page.getByRole('status').filter({ hasText: /folder.*not.*created/i }))
+      .toBeVisible()
+      .catch(async (error) => {
+        await page.screenshot({
+          path: 'test-results/satisfactory-folder-failure.png',
+          fullPage: true,
+        });
+        throw error;
+      });
+    expect(directoryRequests).not.toContain('FactoryGame/Mods');
+    await page.screenshot({
+      path: 'test-results/satisfactory-folder-missing-en.png',
+      fullPage: true,
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect((await new AxeBuilder({ page }).include('.file-manager').analyze()).violations).toEqual(
+      [],
+    );
+    await page.screenshot({
+      path: 'test-results/satisfactory-folder-missing-mobile-en.png',
+      fullPage: true,
+    });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await provider.adapter.createDirectory(identifier, 'FactoryGame', 'Mods');
+    await page.reload();
     const request = page.waitForRequest(
       (r) =>
         new URL(r.url()).pathname === `/v1/servers/${id}/files` &&
@@ -133,6 +176,28 @@ it('uses actual Fileman navigation and compiled Satisfactory viewer with bounded
     await page.getByRole('combobox', { name: 'Game folders' }).selectOption('mods');
     await request;
     await page.goto(`${base}?directory=`);
+    const readsBeforeSettings = ranges.length;
+    await page
+      .locator('.fm-filename')
+      .getByText('ServerSettings.28014.sav', { exact: true })
+      .click();
+    await browserExpect(page.getByRole('button', { name: 'Open with', exact: true })).toBeVisible();
+    await browserExpect(page.locator('.satisfactory-save-viewer')).toHaveCount(0);
+    expect(ranges).toHaveLength(readsBeforeSettings);
+    await page.getByRole('button', { name: 'Open with', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Show all', exact: true }).click();
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Save details', exact: true })
+      .click();
+    await browserExpect(
+      page.getByText('This file contains server settings, not a world save.', { exact: true }),
+    ).toBeVisible();
+    await browserExpect(page.getByRole('link', { name: 'Open Worlds', exact: true })).toHaveCount(
+      0,
+    );
+    expect(ranges).toHaveLength(readsBeforeSettings);
+    await page.getByRole('button', { name: 'Back to files', exact: true }).click();
     await page.locator('.fm-filename').getByText('Future.sav', { exact: true }).click();
     await browserExpect(page.getByRole('alert')).toContainText('not supported');
     await page.getByRole('button', { name: 'Back to files', exact: true }).click();

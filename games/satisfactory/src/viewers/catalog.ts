@@ -1,4 +1,8 @@
 const messages: Record<string, [string, string]> = {
+  serverSettings: [
+    'This file contains server settings, not a world save.',
+    'Questo file contiene le impostazioni del server, non un salvataggio del mondo.',
+  ],
   unsupported: [
     'This save header version is not supported.',
     'Questa versione del formato di salvataggio non è supportata.',

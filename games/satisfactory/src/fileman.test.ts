@@ -3,6 +3,9 @@ import { satisfactoryFileKind, satisfactoryFileLocations } from './fileman.js';
 
 describe('Satisfactory Fileman presentation', () => {
   it('recognizes native files without parsing or classifying private keys', () => {
+    expect(satisfactoryFileKind('ServerSettings.28014.sav')).toBe('serverSettings');
+    expect(satisfactoryFileKind('ServerSettings.sav')).toBe('serverSettings');
+    expect(satisfactoryFileKind('ServerSettings_factory.sav')).toBe('save');
     expect(satisfactoryFileKind('Factory_A.SAV')).toBe('save');
     expect(satisfactoryFileKind('Constructor.sbp')).toBe('blueprint');
     expect(satisfactoryFileKind('Constructor.sbpcfg')).toBe('blueprint');

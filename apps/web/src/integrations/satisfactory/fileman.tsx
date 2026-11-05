@@ -1,10 +1,14 @@
 import { defineTrustedFilemanExtension } from '@nickhosting/game-sdk/ui';
 import { satisfactoryFileKind, satisfactoryFileLocations } from '@nickhosting/satisfactory/ui';
-import type { ReactNode } from 'react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
+import { queryClient } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
+import { ErrorNotice } from '../../components/ui.js';
 import { useFilemanNavigation } from '../../features/fileman/host.js';
+import { fileDirectoryQuery } from '../../features/service-contracts.js';
+import { gameDirectoryExists } from './fileman-location.js';
 import './fileman.css';
 
 const key = (name: string) => `games.satisfactory.fileman.${name}`;
@@ -36,6 +40,48 @@ function WorldsLink({ serverId }: { serverId: string }) {
 function Locations({ serverId }: { serverId: string }) {
   const t = useT();
   const { navigateDirectory } = useFilemanNavigation();
+  const pending = useRef<AbortController | undefined>(undefined);
+  const [checking, setChecking] = useState(false);
+  const [missing, setMissing] = useState(false);
+  const [error, setError] = useState<unknown>();
+  useEffect(() => () => pending.current?.abort(), []);
+  async function openDirectory(target: string) {
+    pending.current?.abort();
+    const controller = new AbortController();
+    pending.current = controller;
+    setChecking(true);
+    setMissing(false);
+    setError(undefined);
+    const identity = JSON.stringify(fileDirectoryQuery(serverId, '').queryKey[3]);
+    const checkIdentity = () => {
+      if (identity !== JSON.stringify(fileDirectoryQuery(serverId, '').queryKey[3]))
+        controller.abort();
+      controller.signal.throwIfAborted();
+    };
+    try {
+      const exists = await gameDirectoryExists(
+        target,
+        async (parent) => {
+          checkIdentity();
+          const entries = await queryClient.fetchQuery({
+            ...fileDirectoryQuery(serverId, parent, { prepareDownloads: false }),
+            staleTime: 0,
+          });
+          checkIdentity();
+          return entries;
+        },
+        controller.signal,
+      );
+      if (!controller.signal.aborted) {
+        if (exists) navigateDirectory?.(target);
+        else setMissing(true);
+      }
+    } catch (failure) {
+      if (!controller.signal.aborted) setError(failure);
+    } finally {
+      if (pending.current === controller) setChecking(false);
+    }
+  }
   if (!navigateDirectory) return null;
   return (
     <div className="fm-tools satisfactory-file-locations">
@@ -44,11 +90,12 @@ function Locations({ serverId }: { serverId: string }) {
         <select
           aria-label={t(key('locations'))}
           value=""
+          disabled={checking}
           onChange={(event) => {
             const location = satisfactoryFileLocations.find(
               (item) => item.id === event.target.value,
             );
-            if (location) navigateDirectory(location.path);
+            if (location) void openDirectory(location.path);
           }}
         >
           <option value="" disabled>
@@ -62,6 +109,12 @@ function Locations({ serverId }: { serverId: string }) {
         </select>
       </label>
       <WorldsLink serverId={serverId} />
+      {missing && (
+        <span className="satisfactory-file-location-status" role="status">
+          {t(key('folderMissing'))}
+        </span>
+      )}
+      {Boolean(error) && <ErrorNotice error={error} />}
     </div>
   );
 }
@@ -105,7 +158,9 @@ export const satisfactoryFilemanExtension = defineTrustedFilemanExtension<ReactN
       slot: 'breadcrumb',
       mode: 'append',
       when: (context) => context.surface === 'directory',
-      render: (context) => <Locations serverId={context.serverId} />,
+      render: (context) => (
+        <Locations key={`${context.serverId}:${context.path}`} serverId={context.serverId} />
+      ),
     },
     {
       slot: 'entry.icon',
@@ -118,7 +173,10 @@ export const satisfactoryFilemanExtension = defineTrustedFilemanExtension<ReactN
     {
       slot: 'viewer.actions',
       mode: 'append',
-      when: (context) => context.viewerId === 'satisfactory:save',
+      when: (context) =>
+        context.viewerId === 'satisfactory:save' &&
+        satisfactoryFileKind(context.entry?.name ?? context.path.split('/').at(-1) ?? '') ===
+          'save',
       render: (context) => <WorldsLink serverId={context.serverId} />,
     },
   ],

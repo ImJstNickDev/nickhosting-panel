@@ -1,12 +1,15 @@
 import type { GameViewerProps } from '@nickhosting/game-sdk/ui';
 import { useEffect, useState } from 'react';
+import { isSatisfactoryServerSettings } from '../fileman.js';
 import { parseSaveHeader, type SaveHeader, saveHeaderReadLimit } from './save-header.js';
 import './save-viewer.css';
 
 const key = (name: string) => `games.satisfactory.viewers.save.${name}`;
 export default function SaveViewer({ source, host }: GameViewerProps) {
   const [state, setState] = useState<{ value?: SaveHeader; error?: string }>({});
+  const serverSettings = isSatisfactoryServerSettings(source.name);
   useEffect(() => {
+    if (serverSettings) return;
     const controller = new AbortController();
     setState({});
     void host
@@ -30,7 +33,8 @@ export default function SaveViewer({ source, host }: GameViewerProps) {
       });
     if (!host.readPrefix) setState({ error: key('unavailable') });
     return () => controller.abort();
-  }, [host]);
+  }, [host, serverSettings]);
+  if (serverSettings) return <p>{host.t(key('serverSettings'))}</p>;
   if (state.error) return <p role="alert">{host.t(state.error)}</p>;
   if (!state.value) return <p role="status">{host.t(key('loading'))}</p>;
   const header = state.value;
