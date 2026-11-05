@@ -203,6 +203,17 @@ export function CreateServerPage() {
         return;
       }
     }
+    if (page?.kind === 'form') {
+      const invalid = validateUiValues(
+        module.descriptor.creation.fields.filter((field) => page.fields?.includes(field.id)),
+        values,
+        choices,
+      );
+      if (invalid.length) {
+        setErrors(Object.fromEntries(invalid.map((error) => [error.field, error.code])));
+        return;
+      }
+    }
     if (
       page?.kind === 'address' &&
       connectionChoice.subdomain &&
@@ -448,6 +459,20 @@ export function CreateServerPage() {
                   onChange={(v) => update(page.field, v)}
                   onChoices={receiveChoices}
                 />
+              )}
+              {page.kind === 'form' && (
+                <div className="stack">
+                  <GameFields
+                    module={module}
+                    fields={module.descriptor.creation.fields.filter((field) =>
+                      page.fields?.includes(field.id),
+                    )}
+                    values={values}
+                    onChange={update}
+                    errors={errors}
+                    onChoices={(field, options) => setChoices((v) => ({ ...v, [field]: options }))}
+                  />
+                </div>
               )}
               {page.kind === 'address' && (
                 <CreationConnection

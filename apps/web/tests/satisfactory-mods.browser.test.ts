@@ -1378,3 +1378,77 @@ it('keeps advanced edits bound to their original world and avoids native reads w
   ).toBe(true);
   await context.close();
 });
+
+it('replaces a rejected saved token and reports connected only after fresh native settings succeed', async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  let replacementAccepted = false;
+  let releaseNative: (() => void) | undefined;
+  const nativeReady = new Promise<void>((resolve) => {
+    releaseNative = resolve;
+  });
+  const reads = { options: 0, advanced: 0 };
+  const writes: unknown[] = [];
+  const rejected = {
+    error: { code: 'game_authentication_failed', messageKey: 'errors.game_authentication_failed' },
+  };
+  await page.route('**/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/token')) {
+      const body = route.request().postDataJSON();
+      writes.push(body);
+      if (body.token !== 'replacement-fixture-token')
+        return route.fulfill({ status: 409, json: rejected });
+      replacementAccepted = true;
+      return route.fulfill({ status: 204 });
+    }
+    if (path.endsWith('/options') || path.endsWith('/advanced-settings')) {
+      const advanced = path.endsWith('/advanced-settings');
+      reads[advanced ? 'advanced' : 'options']++;
+      if (!replacementAccepted) return route.fulfill({ status: 409, json: rejected });
+      await nativeReady;
+      return route.fulfill({
+        json: advanced
+          ? {
+              sessionName: 'Factory',
+              creativeModeEnabled: false,
+              advancedGameSettings: { 'FG.GameRules.NoBuildCost': 'False' },
+            }
+          : { serverOptions: { 'FG.AutosaveInterval': '600' }, pendingServerOptions: {} },
+      });
+    }
+    return route.fulfill({ json: { configured: true } });
+  });
+  try {
+    await page.goto(`${origin}satisfactory-fixture?settings`);
+    await check(page.getByRole('alert')).toContainText(
+      'The game rejected these credentials. Check the password or reconnect its API in Settings.',
+    );
+    await check(page.getByText('Server API connected.', { exact: true })).toHaveCount(0);
+    await check(page.getByText('API credentials saved.', { exact: true })).toBeVisible();
+    const token = page.getByLabel('Application token', { exact: true });
+    const save = token
+      .locator('xpath=ancestor::form')
+      .getByRole('button', { name: 'Save changes', exact: true });
+    await token.fill('rejected-fixture-token');
+    await save.click();
+    await check(token).toHaveValue('rejected-fixture-token');
+    await check(page.getByRole('alert')).toContainText('The game rejected these credentials.');
+    await token.fill('replacement-fixture-token');
+    await save.click();
+    await check.poll(() => reads).toEqual({ options: 2, advanced: 2 });
+    await check(page.getByText('Server API connected.', { exact: true })).toHaveCount(0);
+    releaseNative?.();
+    await check(page.getByText('Server API connected.', { exact: true })).toBeVisible();
+    await check(page.getByLabel('Autosave interval (seconds)', { exact: true })).toHaveValue('600');
+    await check(token).toHaveValue('');
+    await check(page.getByRole('alert')).toHaveCount(0);
+    expect(writes).toEqual([
+      { token: 'rejected-fixture-token' },
+      { token: 'replacement-fixture-token' },
+    ]);
+  } finally {
+    releaseNative?.();
+    await context.close();
+  }
+});

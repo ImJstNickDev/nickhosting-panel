@@ -17,7 +17,8 @@ const translations: Record<string, [string, string]> = {
     'In the game Server Manager console, run server.GenerateAPIToken and enter the result here. The token is verified against the running server and stored encrypted.',
     'Nella console del Server Manager del gioco esegui server.GenerateAPIToken e inserisci qui il risultato. Il token viene verificato sul server acceso e conservato cifrato.',
   ],
-  'api.configured': ['Server API connected.', 'API del server collegata.'],
+  'api.configured': ['API credentials saved.', 'Credenziali API salvate.'],
+  'api.connected': ['Server API connected.', 'API del server collegata.'],
   'api.unconfigured': [
     'Connect the server API to manage settings and read player counts.',
     'Collega l’API del server per gestire le impostazioni e leggere il numero di giocatori.',
@@ -43,6 +44,16 @@ const translations: Record<string, [string, string]> = {
   'fields.mapping': ['Server runtime', 'Runtime del server'],
   'fields.branch': ['Release channel', 'Canale di rilascio'],
   'fields.autoUpdate': ['Update on startup', 'Aggiorna all’avvio'],
+  'setup.title': ['Set up your server', 'Configura il server'],
+  'setup.client': ['Set up in Satisfactory', 'Configura da Satisfactory'],
+  'setup.panel': ['Set up here', 'Configura qui'],
+  'setup.credentials': ['Server access', 'Accesso al server'],
+  'setup.adminPassword': ['Administrator password', 'Password amministratore'],
+  'setup.clientPassword': ['Player password (optional)', 'Password giocatori (facoltativa)'],
+  'setup.clientPasswordHelp': [
+    'Leave empty to let players join without a password.',
+    'Lascia vuoto per consentire ai giocatori di entrare senza password.',
+  ],
   'branches.public': ['Stable', 'Stabile'],
   'branches.experimental': ['Experimental channel', 'Canale sperimentale'],
   'ports.game': ['Game and HTTPS', 'Gioco e HTTPS'],
@@ -94,6 +105,36 @@ export const satisfactoryUiDescriptor = gameUiDescriptorSchema.parse({
         ],
       },
       { id: 'autoUpdate', labelKey: `${prefix}fields.autoUpdate`, type: 'boolean' },
+      {
+        id: 'setupMode',
+        labelKey: `${prefix}setup.title`,
+        type: 'choice',
+        required: true,
+        options: [
+          { value: 'client', labelKey: `${prefix}setup.client` },
+          { value: 'panel', labelKey: `${prefix}setup.panel` },
+        ],
+      },
+      {
+        id: 'adminPassword',
+        labelKey: `${prefix}setup.adminPassword`,
+        type: 'text',
+        secret: true,
+        minLength: 1,
+        maxLength: 128,
+        required: true,
+        when: [{ field: 'setupMode', operator: 'equals', values: ['panel'] }],
+      },
+      {
+        id: 'clientPassword',
+        labelKey: `${prefix}setup.clientPassword`,
+        type: 'text',
+        helpKey: `${prefix}setup.clientPasswordHelp`,
+        secret: true,
+        maxLength: 128,
+        differentFrom: 'adminPassword',
+        when: [{ field: 'setupMode', operator: 'equals', values: ['panel'] }],
+      },
     ],
     pages: [
       {
@@ -103,10 +144,24 @@ export const satisfactoryUiDescriptor = gameUiDescriptorSchema.parse({
         kind: 'choice-list',
       },
       { id: 'branch', titleKey: `${prefix}fields.branch`, field: 'branch', kind: 'choice-list' },
+      {
+        id: 'setup',
+        titleKey: `${prefix}setup.title`,
+        field: 'setupMode',
+        kind: 'choice-list',
+        resetFields: ['adminPassword', 'clientPassword'],
+      },
+      {
+        id: 'credentials',
+        titleKey: `${prefix}setup.credentials`,
+        field: 'adminPassword',
+        kind: 'form',
+        fields: ['adminPassword', 'clientPassword'],
+      },
     ],
     choicesHandler: 'choices',
     createHandler: 'create',
-    defaults: { branch: 'public', autoUpdate: true },
+    defaults: { branch: 'public', autoUpdate: true, setupMode: 'client' },
   },
   sections: [
     {
@@ -185,7 +240,24 @@ const creationSchema = z.object({
   autoStart: z.boolean().default(true),
   branch: z.enum(['public', 'experimental']).default('public'),
   autoUpdate: z.boolean().default(true),
+  setupMode: z.enum(['client', 'panel']).default('client'),
+  adminPassword: z.unknown().optional(),
+  clientPassword: z.unknown().optional(),
 });
+const setupSchema = z
+  .object({
+    adminPassword: z
+      .string()
+      .min(1)
+      .max(128)
+      .refine((value) => !value.includes('\0')),
+    clientPassword: z
+      .string()
+      .max(128)
+      .refine((value) => !value.includes('\0'))
+      .optional(),
+  })
+  .refine((value) => !value.clientPassword || value.clientPassword !== value.adminPassword);
 export const satisfactoryUiModule = defineTrustedGameUiModule({
   descriptor: satisfactoryUiDescriptor,
   catalogs: satisfactoryUiCatalogs,
@@ -216,14 +288,19 @@ export const satisfactoryUiModule = defineTrustedGameUiModule({
       }));
     },
     async create(client, context) {
-      const { branch, autoUpdate, ...values } = creationSchema.parse(context.values);
+      const { branch, autoUpdate, setupMode, adminPassword, clientPassword, ...values } =
+        creationSchema.parse(context.values);
+      const setup =
+        setupMode === 'panel'
+          ? setupSchema.parse({ adminPassword, ...(clientPassword ? { clientPassword } : {}) })
+          : undefined;
       return client.request('/v1/servers', {
         method: 'POST',
         signal: context.signal,
         body: {
           ...values,
           idempotencyKey: z.string().min(1).parse(context.idempotencyKey),
-          satisfactory: { branch, autoUpdate },
+          satisfactory: { branch, autoUpdate, ...(setup ? { setup } : {}) },
         },
       });
     },

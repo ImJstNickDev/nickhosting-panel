@@ -9,6 +9,7 @@ import {
   verifyNativeAuthenticationToken,
 } from './native-auth.js';
 import type { NativeSatisfactoryCredentials } from './native-credentials.js';
+import { supportsSatisfactoryOfflineAuthentication } from './offline-auth-profile.js';
 
 const operations = new Set([
   'PasswordlessLogin',
@@ -47,7 +48,7 @@ export function handleNativeOfflineApi(
 ): GatewayOfflineApiResponse {
   if (!supportsNativeOfflineOperation(request.operation)) return failure('not_found', 404);
   if (
-    credentials.build !== 513885 ||
+    !supportsSatisfactoryOfflineAuthentication(credentials.build) ||
     !/^[a-f\d]{512}$/i.test(credentials.serverSecret) ||
     [credentials.adminPassword, credentials.clientPassword].some(
       (password) =>

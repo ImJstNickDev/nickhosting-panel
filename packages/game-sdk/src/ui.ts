@@ -63,6 +63,8 @@ export const uiFieldSchema = z.discriminatedUnion('type', [
       maxLength: z.number().int().min(1).max(65536),
       format: z.enum(['plain', 'player-name', 'world-name', 'uuid']).default('plain'),
       lookupHandler: id.optional(),
+      secret: z.boolean().default(false),
+      differentFrom: fieldId.optional(),
     })
     .strict(),
   z
@@ -222,9 +224,11 @@ export const gameUiDescriptorSchema = z
                   'players',
                   'toggle-players',
                   'address',
+                  'form',
                 ]),
                 position: z.enum(['before-name', 'configuration']).default('configuration'),
                 resetFields: z.array(fieldId).max(64).default([]),
+                fields: z.array(fieldId).min(1).max(16).optional(),
                 lookupHandler: id.optional(),
                 toggleField: fieldId.optional(),
                 seedField: fieldId.optional(),
@@ -427,11 +431,26 @@ export const gameUiDescriptorSchema = z
           page.lookupHandler ||
           page.toggleField ||
           page.seedField ||
-          page.resetFields.length
+          page.resetFields.length ||
+          page.fields
         )
           context.addIssue({ code: 'custom', message: 'invalid_address_page' });
         continue;
       }
+      if (page.kind === 'form') {
+        if (
+          !page.fields?.includes(page.field) ||
+          !page.fields.every((field) => creationFields.has(field)) ||
+          new Set(page.fields).size !== page.fields.length ||
+          page.lookupHandler ||
+          page.toggleField ||
+          page.seedField ||
+          page.resetFields.length
+        )
+          context.addIssue({ code: 'custom', message: 'invalid_form_page' });
+        continue;
+      }
+      if (page.fields) context.addIssue({ code: 'custom', message: 'invalid_page_fields' });
       const field = d.creation.fields.find((f) => f.id === page.field);
       const toggle = d.creation.fields.find((f) => f.id === page.toggleField);
       const seed = d.creation.fields.find((f) => f.id === page.seedField);
@@ -469,6 +488,9 @@ export const gameUiDescriptorSchema = z
       for (const field of form.fields) {
         const dependencies = [
           ...field.when.map((c) => c.field),
+          ...((field.type === 'text' || field.type === 'textarea') && field.differentFrom
+            ? [field.differentFrom]
+            : []),
           ...(field.type === 'choice' ? (field.source?.dependsOn ?? []) : []),
         ];
         if (dependencies.some((ref) => ref === field.id || !fields.has(ref)))
@@ -479,6 +501,12 @@ export const gameUiDescriptorSchema = z
             field.minLength > field.maxLength)
         )
           context.addIssue({ code: 'custom', message: 'invalid_field_bounds' });
+        if (
+          (field.type === 'text' || field.type === 'textarea') &&
+          field.secret &&
+          (field.type !== 'text' || field.lookupHandler)
+        )
+          context.addIssue({ code: 'custom', message: 'invalid_secret_field' });
         if (field.type === 'choice')
           unique(
             field.options.map((o) => o.value),
@@ -553,7 +581,8 @@ export function validateUiValues(
       case 'textarea':
         valid =
           textValid(value, field.maxLength, field.format) &&
-          (value as string).length >= field.minLength;
+          (value as string).length >= field.minLength &&
+          (!field.differentFrom || value !== values[field.differentFrom]);
         break;
       case 'multi-text':
         valid =

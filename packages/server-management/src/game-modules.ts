@@ -89,6 +89,10 @@ export interface FileMutationContext {
 }
 export interface GameRuntimeHooks extends GameBackupHooks<GameLifecycleContext> {
   configureProvision(context: GameLifecycleContext): Promise<boolean>;
+  /** Complete explicit first-run configuration after confirmed process start. */
+  finalizeStart?(context: GameLifecycleContext): Promise<boolean>;
+  /** Local protected-store cleanup after proven provider deletion, in its transaction. */
+  cleanupSecrets?(serverId: string, db: Kysely<Database>): Promise<void>;
   /** Flush game state inside the existing durable stop/restart effect. */
   prepareStop?(context: GameLifecycleContext): Promise<void>;
   /** Best-effort maintenance after confirmed stop, under the existing lifecycle lock. */

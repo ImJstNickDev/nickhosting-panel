@@ -67,6 +67,7 @@ export function SatisfactorySettingsSection(props: GameSectionViewProps) {
       setToken('');
       setSaved(true);
       await config.refetch();
+      await Promise.all([options.refetch(), advanced.refetch()]);
     } catch (cause) {
       setError(cause);
     } finally {
@@ -139,7 +140,17 @@ export function SatisfactorySettingsSection(props: GameSectionViewProps) {
       {config.isPending ? (
         <p role="status">{t('web.loading')}</p>
       ) : (
-        <p>{t(key(config.data?.configured ? 'configured' : 'unconfigured'))}</p>
+        <p>
+          {t(
+            key(
+              config.data?.configured
+                ? online && options.isSuccess && !options.isError
+                  ? 'connected'
+                  : 'configured'
+                : 'unconfigured',
+            ),
+          )}
+        </p>
       )}
       {props.canManage && (
         <form

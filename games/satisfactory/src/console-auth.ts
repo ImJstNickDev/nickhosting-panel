@@ -1,6 +1,7 @@
 import type { GatewayOfflineApiRequest } from '@nickhosting/game-sdk';
 import { decodeNativePlayerIdentity, verifyNativeAuthenticationToken } from './native-auth.js';
 import type { NativeSatisfactoryCredentials } from './native-credentials.js';
+import { supportsSatisfactoryOfflineAuthentication } from './offline-auth-profile.js';
 
 /** Syntax only: online callers MUST verify the fingerprint with the backend. */
 export function consoleAdministratorIdentity(request: GatewayOfflineApiRequest) {
@@ -44,7 +45,7 @@ export function authorizeStoppedConsoleAdministrator(
   if (
     !identity ||
     !player ||
-    credentials.build !== 513885 ||
+    !supportsSatisfactoryOfflineAuthentication(credentials.build) ||
     !/^[a-f\d]{512}$/i.test(credentials.serverSecret) ||
     !/^[a-f\d]{128}$/i.test(credentials.adminPassword?.hash ?? '') ||
     !/^[a-f\d]{64}$/i.test(credentials.adminPassword?.salt ?? '')

@@ -133,6 +133,15 @@ export const en = {
   'errors.configuration_invalid': 'Check the instance settings.',
   'errors.secret_invalid': 'A protected credential could not be read.',
   'errors.integration_unavailable': 'This integration is unavailable.',
+  'errors.game_authentication_failed':
+    'The game rejected these credentials. Check the password or reconnect its API in Settings.',
+  'errors.game_not_ready':
+    'The game is not ready yet. Wait for startup or world loading to finish, then retry.',
+  'errors.game_setup_conflict':
+    'This server is already configured. Connect it using its existing administrator credentials.',
+  'errors.game_request_unsupported': 'The game does not support this action.',
+  'errors.game_save_failed':
+    'The game could not save the world. Check the server log and available storage before retrying.',
   'errors.resources_unavailable': 'There is not enough available capacity to start this server.',
   'errors.storage_exhausted': 'There is not enough available storage.',
   'errors.content_storage_unavailable':
@@ -328,6 +337,15 @@ export const it: Record<MessageKey, string> = {
   'errors.configuration_invalid': "Controlla le impostazioni dell'istanza.",
   'errors.secret_invalid': 'Impossibile leggere una credenziale protetta.',
   'errors.integration_unavailable': 'Questa integrazione non è disponibile.',
+  'errors.game_authentication_failed':
+    'Il gioco ha rifiutato le credenziali. Controlla la password o ricollega la sua API nelle Impostazioni.',
+  'errors.game_not_ready':
+    'Il gioco non è ancora pronto. Attendi la fine dell’avvio o del caricamento del mondo, poi riprova.',
+  'errors.game_setup_conflict':
+    'Questo server è già configurato. Collegalo usando le credenziali amministratore esistenti.',
+  'errors.game_request_unsupported': 'Il gioco non supporta questa azione.',
+  'errors.game_save_failed':
+    'Il gioco non è riuscito a salvare il mondo. Controlla il log del server e lo spazio disponibile prima di riprovare.',
   'errors.resources_unavailable':
     'La capacità disponibile non è sufficiente per avviare questo server.',
   'errors.storage_exhausted': 'Lo spazio di archiviazione disponibile non è sufficiente.',

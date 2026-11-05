@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { SecretCodec } from '@nickhosting/core';
+import { DomainError, SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type {
   ApplicationServer,
@@ -17,7 +17,7 @@ import {
   processServerOperation,
   reconcileManagedServer,
 } from './lifecycle.js';
-import { createManagedServer, setRuntimeMapping } from './registry.js';
+import { createManagedServer, enqueueServerOperation, setRuntimeMapping } from './registry.js';
 import { authorizeQueuedEffect, createManagementRuntime } from './runtime.js';
 import { readSatisfactoryTlsIdentity } from './satisfactory-tls.js';
 import { managementFixture } from './test-fixtures.js';
@@ -33,12 +33,13 @@ afterAll(async () => {
 
 describe('Satisfactory application provision lifecycle', () => {
   it.each([
-    [false, false],
-    [true, false],
-    [false, true],
+    [false, false, true, 'ready'],
+    [true, false, false, 'pending'],
+    [false, true, false, 'ready'],
+    [true, false, false, 'failed'],
   ])(
     'creates three permanent routes and uploads persistent TLS before optional initial start (autoStart=%s, missingOutputs=%s)',
-    async (autoStart, missingOutputs) => {
+    async (autoStart, missingOutputs, setupRequested, setupResult) => {
       const f = await managementFixture(database.db, { interactive: true });
       await f.db
         .insertInto('game_integrations')
@@ -92,7 +93,18 @@ describe('Satisfactory application provision lifecycle', () => {
       const request = f.input({
         mappingId: mapping.id,
         autoStart,
-        satisfactory: { branch: 'experimental', autoUpdate: false },
+        satisfactory: {
+          branch: 'experimental',
+          autoUpdate: false,
+          ...(setupRequested
+            ? {
+                setup: {
+                  adminPassword: 'private-admin-password',
+                  clientPassword: 'private-client-password',
+                },
+              }
+            : {}),
+        },
       });
       const created = await createManagedServer(f.db, f.adapter, f.context, request, env, {
         codec,
@@ -100,6 +112,32 @@ describe('Satisfactory application provision lifecycle', () => {
       expect(
         await createManagedServer(f.db, f.adapter, f.context, request, env, { codec }),
       ).toEqual(created);
+      const setupRow = await f.db
+        .selectFrom('encrypted_secrets')
+        .select('envelope')
+        .where('name', '=', `satisfactory.initial-setup.${created.serverId}`)
+        .executeTakeFirst();
+      expect(Boolean(setupRow)).toBe(setupRequested);
+      if (setupRequested) {
+        expect(JSON.stringify(setupRow)).not.toContain('private-admin-password');
+        await expect(
+          createManagedServer(
+            f.db,
+            f.adapter,
+            f.context,
+            {
+              ...request,
+              satisfactory: {
+                branch: 'experimental',
+                autoUpdate: false,
+                setup: { adminPassword: 'different-password' },
+              },
+            },
+            env,
+            { codec },
+          ),
+        ).rejects.toMatchObject({ code: 'conflict' });
+      }
       const stored = await f.db
         .selectFrom('server_operations')
         .selectAll()
@@ -129,6 +167,8 @@ describe('Satisfactory application provision lifecycle', () => {
       expect(await routes()).toHaveLength(3);
       expect((await routes()).every((r) => !r.enabled)).toBe(true);
       expect(JSON.stringify(stored.plan)).not.toContain('PRIVATE KEY');
+      expect(JSON.stringify(stored)).not.toContain('private-admin-password');
+      expect(JSON.stringify(stored)).not.toContain('private-client-password');
       const identity = await readSatisfactoryTlsIdentity(f.db, codec, created.serverId);
       expect(identity).toBeDefined();
       let remote: ApplicationServer | undefined;
@@ -148,7 +188,11 @@ describe('Satisfactory application provision lifecycle', () => {
         createServer: vi.fn(async (input: ProvisionPlan) => {
           effects.push('create');
           remote = {
-            id: 90000 + Number(autoStart) + Number(missingOutputs) * 2,
+            id:
+              90000 +
+              Number(autoStart) +
+              Number(missingOutputs) * 2 +
+              (setupResult === 'failed' ? 10 : 0),
             uuid: randomUUID(),
             identifier: randomUUID().slice(0, 8),
             external_id: input.externalId,
@@ -252,12 +296,17 @@ describe('Satisfactory application provision lifecycle', () => {
         }),
       } as unknown as PterodactylAdapter;
       const runtime = await createManagementRuntime({ db: f.db, codec, adapter, env });
+      const finalize = vi.fn(runtime.lifecycle.finalizeGameStart);
+      if (setupResult === 'pending') finalize.mockResolvedValueOnce(false);
+      if (setupResult === 'failed')
+        finalize.mockRejectedValueOnce(new DomainError('game_setup_conflict'));
       const options: LifecycleOptions = {
         adapter,
         env,
         now: () => clock,
         settleMs: 1,
         configureGameProvision: runtime.lifecycle.configureGameProvision,
+        finalizeGameStart: finalize,
         authorizeEffect: async (jobId, serverId, db) => {
           await authorizeQueuedEffect(db, jobId, serverId, env, adapter);
         },
@@ -294,8 +343,36 @@ describe('Satisfactory application provision lifecycle', () => {
       if (autoStart) {
         expect(first).toBe('waiting');
         clock = new Date(clock.getTime() + 30000);
-        expect(await processServerOperation(f.db, created.jobId, options)).toBe('succeeded');
-      } else expect(first).toBe('succeeded');
+        if (setupResult === 'pending') {
+          expect(await processServerOperation(f.db, created.jobId, options)).toBe('waiting');
+          clock = new Date(clock.getTime() + 30000);
+        }
+        const outcome = await processServerOperation(f.db, created.jobId, options);
+        expect(outcome).toBe(setupResult === 'failed' ? 'failed' : 'succeeded');
+        if (setupResult === 'failed') {
+          expect(
+            await f.db
+              .selectFrom('managed_servers')
+              .select(['installation_state', 'runtime_state', 'active_operation_id'])
+              .where('id', '=', created.serverId)
+              .executeTakeFirstOrThrow(),
+          ).toMatchObject({
+            installation_state: 'installed',
+            runtime_state: 'running',
+            active_operation_id: null,
+          });
+          expect(
+            await f.db
+              .selectFrom('resource_reservations')
+              .select('state')
+              .where('server_id', '=', created.serverId)
+              .executeTakeFirstOrThrow(),
+          ).toMatchObject({ state: 'running' });
+        }
+      } else {
+        expect(first).toBe('succeeded');
+        expect(finalize).not.toHaveBeenCalled();
+      }
       expect(adapter.createServer).toHaveBeenCalledTimes(1);
       expect(effects.slice(0, 3)).toEqual([
         'create',
@@ -328,6 +405,25 @@ describe('Satisfactory application provision lifecycle', () => {
           .sort(),
       ).toEqual(['game:tcp', 'game:udp', 'reliable:tcp']);
       expect(await readSatisfactoryTlsIdentity(f.db, codec, created.serverId)).toEqual(identity);
+      if (!autoStart && setupRequested) {
+        // Native setup effects have separate DB tests; this checks the deferred lifecycle dispatch.
+        finalize.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+        const start = await enqueueServerOperation(
+          f.db,
+          f.context,
+          created.serverId,
+          { action: 'start', idempotencyKey: randomUUID() },
+          env,
+        );
+        clock = new Date(clock.getTime() + 30000);
+        expect(await processServerOperation(f.db, start.jobId, options)).toBe('waiting');
+        clock = new Date(clock.getTime() + 30000);
+        expect(await processServerOperation(f.db, start.jobId, options)).toBe('waiting');
+        clock = new Date(clock.getTime() + 30000);
+        expect(await processServerOperation(f.db, start.jobId, options)).toBe('succeeded');
+        expect(finalize).toHaveBeenCalledTimes(2);
+        expect(adapter.power).toHaveBeenCalledTimes(1);
+      }
     },
   );
 });

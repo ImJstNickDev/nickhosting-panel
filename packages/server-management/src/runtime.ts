@@ -827,6 +827,10 @@ export async function createManagementRuntime(options: ManagementOptions) {
         (await containerObserver.stopped(server.pterodactyl_uuid, 'server'))
       );
     },
+    cleanupGameSecrets: async (serverId: string, connection: Kysely<Database>) =>
+      (await gameRuntime(connection, serverId))?.cleanupSecrets?.(serverId, connection),
+    finalizeGameStart: async (context: import('./lifecycle.js').GameLifecycleContext) =>
+      (await gameRuntime(context.db, context.server.id))?.finalizeStart?.(context) ?? true,
     configureGameProvision: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.configureProvision(context) ?? true,
     processGameContent: async (context: import('./lifecycle.js').GameLifecycleContext) => {

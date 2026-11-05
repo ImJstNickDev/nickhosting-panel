@@ -73,6 +73,12 @@ import { minecraftProvisionStartup } from './minecraft-startup.js';
 import { backupSchemaAvailable } from './provider-backup-events.js';
 import { retryableProvision } from './provision-retry.js';
 import { integrationImageCandidates, mappingProvisionImage } from './runtime-images.js';
+import {
+  assertSatisfactorySetupRetry,
+  persistSatisfactorySetup,
+  satisfactoryCreationHashInput,
+  satisfactorySetupSchema,
+} from './satisfactory-setup.js';
 import { ensureSatisfactoryTlsIdentity } from './satisfactory-tls.js';
 import { killRequestSchema, requestStopEscalation } from './stop-escalation.js';
 import { storageCommitments } from './storage-accounting.js';
@@ -107,7 +113,9 @@ export const createServerSchema = z
       })
       .strict()
       .optional(),
-    satisfactory: satisfactoryConfigurationSchema.optional(),
+    satisfactory: satisfactoryConfigurationSchema
+      .extend({ setup: satisfactorySetupSchema.optional() })
+      .optional(),
     minecraft: z
       .object({ choiceId: z.uuid(), configuration: minecraftConfigurationSchema })
       .strict()
@@ -531,12 +539,20 @@ export async function createManagedServer(
   const hash = digest({
     kind: 'create',
     subject: context.subjectUserId,
-    value: options.creationRequest ?? request,
+    value: satisfactoryCreationHashInput(options.creationRequest ?? request),
   });
   return db.transaction().execute(async (tx) => {
     await requestLock(tx, context, request.idempotencyKey);
     const previous = await previousRequest(tx, context, request.idempotencyKey, hash);
-    if (previous) return previous;
+    if (previous) {
+      await assertSatisfactorySetupRetry(
+        tx,
+        options.codec,
+        previous.serverId,
+        request.satisfactory?.setup,
+      );
+      return previous;
+    }
     await lockResources(tx);
     await assertStoragePolicyIdle(tx);
     const { values: config } = await getSettings(tx, env);
@@ -873,7 +889,9 @@ export async function createManagedServer(
         reliable: reliable.port,
         externalReliable: publicReliable?.publicPort ?? reliable.port,
       };
-      Object.assign(environment, satisfactoryEggEnvironment(value.satisfactory ?? {}, ports));
+      const { setup, ...runtimeConfiguration } = value.satisfactory ?? {};
+      Object.assign(environment, satisfactoryEggEnvironment(runtimeConfiguration, ports));
+      if (setup) await persistSatisfactorySetup(tx, options.codec, serverId, value.name, setup);
       satisfactoryStartup = `${mapping.startup.replace(/\s+-(?:ExternalReliablePort|ReliablePort|Port)=(?:\{\{[^}]+\}\}|[^\s]+)/g, '')} ${satisfactoryPortArguments(ports).join(' ')}`;
       await ensureSatisfactoryTlsIdentity(tx, options.codec, serverId);
     } else if (value.satisfactory) throw new DomainError('validation_failed');

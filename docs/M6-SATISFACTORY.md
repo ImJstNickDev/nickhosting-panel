@@ -1229,3 +1229,65 @@ Typechecks, frontend/runtime builds, translation compilation and lint pass. API 
 worker were restarted under the standing development authorization; the public dev
 frontend serves the shared frame and detail navigation. All four dev services remain
 healthy. No migration, new game asset or Pterodactyl/Blueprint change was required.
+
+### Phase 1: optional first-run setup and native API reliability — 2026-11-05
+
+Owner decisions for issue #30: untested builds do not block creation, startup,
+updates or normal gameplay; technical Gateway compatibility information is not
+added to user screens. The native offline-authentication profile remains guarded.
+Automatic sleep now also requires a fresh, generation-bound UDP observation of a
+build supported by that profile. An unknown build stays online instead of sleeping
+into an unavailable authentication flow. Manual power/forced-sleep controls and
+online forwarding retain their existing semantics.
+
+The creation wizard offers setup in the Satisfactory client (the default) or setup
+in NickPanel. Client setup omits the setup object entirely, including after switching
+away from populated password fields. It performs no claim, password assignment or
+application-token generation. Panel setup accepts an administrator password and an
+optional distinct player password; inputs are masked and omitted from review and
+browser storage. The common wizard gained a declarative form page and secret-text
+field support, preserving the existing installer components and styling.
+
+Panel setup is persisted in the existing encrypted secret store, never provider
+environment variables, operation plans or audit payloads. Public request hashes
+contain only setup presence; an encrypted receipt preserves changed-credential
+idempotency checks after setup consumption. A trusted post-start hook runs under
+the current lifecycle lock and uses the existing retry/wait mechanism. Setup also
+runs after a deferred first manual start when auto-start was disabled. Native
+PasswordlessLogin, ClaimServer, SetClientPassword and RunCommand generate real
+credentials over the existing pinned TLS transport. The resulting application
+token is checked against native state and stored in the existing token namespace.
+No world is created implicitly; existing Worlds/client flows remain authoritative.
+
+Durable encrypted stages recover interrupted claims using the originally supplied
+password only after a recorded claim attempt. An already-claimed server is never
+reset or silently adopted. Transient API startup failures retry within ten minutes;
+definitive refusal or expiry clears pending credentials, reports the setup failure
+and preserves the running game. Confirmed deletion clears setup-owned secrets.
+Successful setup consumes temporary credentials and is not replayed on reinstall.
+
+Native errors now map to finite localized authentication/setup/readiness/save/action
+errors; raw native messages and data are never propagated. Rejected game credentials
+do not return a panel-session 401. Settings distinguish saved API credentials from
+a live successful connection and refresh native options after token replacement.
+No new schema migration, dependency or Blueprint/Pterodactyl change is required.
+
+Rollback is application-code rollback, retaining existing server identities, tokens,
+worlds and secret-store data. Before reverting with pending setup requests, complete
+or explicitly cancel those requests; older code cannot consume their encrypted state.
+Do not restore an old database over later user data. Game-client playable-session and
+SMM desktop acceptance remain separate from the automated evidence recorded below.
+
+Phase-1 validation: 37 native API/transport/route tests, 45 focused Gateway/auth
+regressions and 25 wizard/SDK tests passed. Ten isolated setup DB tests and four
+provisioning DB tests cover encrypted persistence, idempotency, claim-response loss,
+pre-dispatch recovery, deferred first start, cleanup and installed/running-state
+preservation after setup refusal. Test-fixture provider identity/clock collisions
+were corrected before the final targeted passes. Three wizard browser journeys
+(desktop EN/mobile IT, skip after editing credentials, masked opt-in setup) and one
+Settings token-replacement regression passed. Wizard Axe checks found no violations;
+reviewed screenshots are `docs/screenshots/m6/satisfactory-wizard-*`.
+Full typechecks, frontend/runtime builds and lint passed (existing 104 warnings and
+one informational lint item). These are automated/isolated-provider checks, not a
+new real Steam/Epic playable-client or SMM desktop acceptance claim. No game instance
+was created, started, claimed, reset or deleted for this phase's verification.

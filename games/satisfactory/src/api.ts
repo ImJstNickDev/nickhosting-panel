@@ -1,5 +1,6 @@
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import { satisfactoryApiError } from './api-errors.js';
 import { type SatisfactorySessionEvent, streamSatisfactorySessions } from './sessions-stream.js';
 
 export {
@@ -40,9 +41,58 @@ export class SatisfactoryApi {
     const envelope = z
       .object({ data: z.unknown().optional(), errorCode: z.string().optional() })
       .safeParse(response);
-    if (!envelope.success || envelope.data.errorCode)
+    if (!envelope.success)
       throw new DomainError('integration_unavailable', 503, { reason: 'satisfactory_api_failed' });
+    if (envelope.data.errorCode) throw satisfactoryApiError(envelope.data.errorCode);
     return envelope.data.data;
+  }
+  private authenticationToken(value: unknown): string {
+    const parsed = z
+      .object({
+        authenticationToken: z
+          .string()
+          .min(1)
+          .max(8192)
+          .regex(/^[\x21-\x7e]+$/),
+      })
+      .safeParse(value);
+    if (!parsed.success) throw new DomainError('integration_unavailable');
+    return parsed.data.authenticationToken;
+  }
+  async passwordlessLogin(privilege: 'InitialAdmin', signal?: AbortSignal): Promise<string> {
+    return this.authenticationToken(
+      await this.call('PasswordlessLogin', { MinimumPrivilegeLevel: privilege }, signal),
+    );
+  }
+  async passwordLogin(password: string, signal?: AbortSignal): Promise<string> {
+    return this.authenticationToken(
+      await this.call(
+        'PasswordLogin',
+        { MinimumPrivilegeLevel: 'Administrator', Password: password },
+        signal,
+      ),
+    );
+  }
+  async claim(name: string, password: string, signal?: AbortSignal): Promise<string> {
+    return this.authenticationToken(
+      await this.call('ClaimServer', { ServerName: name, AdminPassword: password }, signal),
+    );
+  }
+  async setClientPassword(password: string, signal?: AbortSignal): Promise<void> {
+    await this.call('SetClientPassword', { Password: password }, signal);
+  }
+  async generateApplicationToken(signal?: AbortSignal): Promise<string> {
+    const response = z
+      .object({ commandResult: z.string().max(65536) })
+      .safeParse(await this.call('RunCommand', { Command: 'server.GenerateAPIToken' }, signal));
+    if (!response.success) throw new DomainError('integration_unavailable');
+    // Read the native command's token, never construct one. Ignore human text,
+    // and reject ambiguous output rather than storing the wrong credential.
+    const candidates = response.data.commandResult.match(/[A-Za-z0-9+/]+=*\.[a-fA-F0-9]+/g) ?? [];
+    const tokens = [...new Set(candidates.filter(isSatisfactoryApplicationToken))];
+    const token = tokens[0];
+    if (tokens.length !== 1 || !token) throw new DomainError('integration_unavailable');
+    return token;
   }
   /** Native verification binds the raw fingerprint to Administrator and the
    * player ID supplied by the certificate-pinned transport. Only HTTP 204 maps
@@ -166,5 +216,17 @@ export class SatisfactoryApi {
     const parsed = z.record(z.string().min(1).max(256), z.string().max(4096)).parse(options);
     if (Object.keys(parsed).length > 128) throw new DomainError('validation_failed');
     await this.call('ApplyServerOptions', { UpdatedServerOptions: parsed }, signal);
+  }
+}
+
+export function isSatisfactoryApplicationToken(token: string): boolean {
+  if (token.length > 8192 || !/^[A-Za-z0-9+/]+=*\.[a-fA-F0-9]+$/.test(token)) return false;
+  try {
+    return (
+      JSON.parse(Buffer.from(token.split('.')[0] ?? '', 'base64').toString('utf8')).pl ===
+      'APIToken'
+    );
+  } catch {
+    return false;
   }
 }

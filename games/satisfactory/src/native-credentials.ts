@@ -1,3 +1,5 @@
+import { satisfactoryOfflineAuthenticationBuild } from './offline-auth-profile.js';
+
 /** Native USaveGame credential layout verified against dedicated server build 513885.
  * Missing properties remain absent: Unreal may omit defaults, but this decoder does
  * not infer authentication policy from that omission. Never log its return value.
@@ -14,7 +16,7 @@ export interface NativeSatisfactoryCredentials {
 }
 
 const MAX_BYTES = 256 * 1024;
-const PROFILE_BUILD = 513885;
+const PROFILE_BUILD = satisfactoryOfflineAuthenticationBuild;
 const SERVER_PACKAGE = '/Script/FactoryDedicatedServer';
 
 class Reader {

@@ -2,7 +2,7 @@ import { createSocket } from 'node:dgram';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
 import type { GatewayProtocolContext } from '@nickhosting/game-sdk';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createSatisfactoryGatewayAdapter } from './gateway-module.js';
 import {
   decodeSatisfactoryPoll,
@@ -245,14 +245,50 @@ describe('Satisfactory gateway', () => {
 });
 
 describe('authenticated Satisfactory player observations', () => {
+  let backend: ReturnType<typeof createSocket>;
+  let build: number;
+  beforeEach(async () => {
+    build = 513885;
+    backend = createSocket('udp4');
+    await new Promise<void>((resolve) => backend.bind(0, '127.0.0.1', resolve));
+    backend.on('message', (bytes, remote) => {
+      const poll = decodeSatisfactoryPoll(bytes);
+      if (poll)
+        backend.send(
+          encodeSatisfactoryState(poll.cookie, { ...persisted, flags: 1n, netCL: build }),
+          remote.port,
+          remote.address,
+        );
+    });
+  });
+  afterEach(() => backend.close());
   function observedAdapter() {
     const adapter = createSatisfactoryGatewayAdapter({ read: () => undefined, write: () => {} });
-    adapter.probeReadiness = async () => ({ ready: true });
+    const probe = adapter.probeReadiness;
+    adapter.probeReadiness = (c) =>
+      probe({
+        ...c,
+        route: {
+          ...c.route,
+          protocol: {
+            ...c.route.protocol,
+            handlerId: 'satisfactory',
+            role: 'game',
+            gameVersion: 'public',
+          },
+          backend: {
+            address: '127.0.0.1',
+            allocationAddress: '127.0.0.1',
+            port: backend.address().port,
+          },
+        },
+      });
     return adapter;
   }
   it('prioritizes startup hints while keeping native readiness and skipping irrelevant waking idle reads', async () => {
     const adapter = observedAdapter(),
       c = context(encodeSatisfactoryPoll(1n));
+    const nativeProbe = adapter.probeReadiness;
     const probe = vi.fn(async () => ({ ready: false }));
     adapter.probeReadiness = probe;
     c.route = { ...c.route, mode: 'waking' };
@@ -265,6 +301,7 @@ describe('authenticated Satisfactory player observations', () => {
     expect(await adapter.probeIdle?.(c)).toEqual({ idle: false });
     expect(c.observeApplication).not.toHaveBeenCalled();
     c.route = { ...c.route, mode: 'online' };
+    adapter.probeReadiness = nativeProbe;
     expect(await adapter.observe?.(c)).toEqual({ ready: true, idle: true, playerCount: 0 });
     expect(c.observeApplication).toHaveBeenCalledTimes(1);
   });
@@ -301,6 +338,36 @@ describe('authenticated Satisfactory player observations', () => {
       }),
     ).toEqual({ ready: true });
   });
+  it('keeps unknown builds ready and forwards player observations without allowing automatic sleep', async () => {
+    const adapter = observedAdapter();
+    const c = context(encodeSatisfactoryPoll(1n));
+    c.observeApplication = async () => ({ ready: true, idle: true, playerCount: 0 });
+    expect(await adapter.observe?.(c)).toEqual({ ready: true, idle: true, playerCount: 0 });
+    build = 999999;
+    expect(await adapter.observe?.(c)).toEqual({ ready: true, idle: false, playerCount: 0 });
+    expect(await adapter.probeIdle?.(c)).toEqual({ idle: false, playerCount: 0 });
+    build = 513885;
+    expect(await adapter.observe?.(c)).toEqual({ ready: true, idle: true, playerCount: 0 });
+  });
+  it('never authorizes sleep from persisted build metadata or a stale native probe', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    try {
+      const adapter = observedAdapter();
+      const c = context(encodeSatisfactoryPoll(1n));
+      if (!c.route.protocol?.satisfactory) throw new Error('Missing persisted state');
+      c.route.protocol.satisfactory = { ...c.route.protocol.satisfactory, netCL: 513885 };
+      c.observeApplication = async () => ({ ready: true, idle: true, playerCount: 0 });
+      expect(await adapter.probeIdle?.(c)).toEqual({ idle: false, playerCount: 0 });
+      expect(await adapter.observe?.(c)).toMatchObject({ ready: true, idle: true });
+      now.mockReturnValue(11001);
+      expect(await adapter.probeIdle?.(c)).toEqual({ idle: false, playerCount: 0 });
+      expect(await adapter.observe?.(c)).toMatchObject({ ready: true, idle: true });
+      c.route = { ...c.route, generation: '99999999-9999-4999-8999-999999999999' };
+      expect(await adapter.probeIdle?.(c)).toEqual({ idle: false, playerCount: 0 });
+    } finally {
+      now.mockRestore();
+    }
+  });
   it('never turns invalid, unavailable, or active-player samples into an idle claim', async () => {
     const adapter = observedAdapter(),
       c = context(encodeSatisfactoryPoll(1n));
@@ -311,29 +378,28 @@ describe('authenticated Satisfactory player observations', () => {
     c.observeApplication = async () => ({ ready: true, idle: true, playerCount: Number.NaN });
     expect(await adapter.observe?.(c)).toEqual({ ready: true });
   });
-});
 
-it('expires cached application observations without inventing zero players', async () => {
-  const now = vi.spyOn(Date, 'now').mockReturnValue(1000);
-  try {
-    const adapter = createSatisfactoryGatewayAdapter({ read: () => undefined, write: () => {} });
-    adapter.probeReadiness = async () => ({ ready: true });
-    const c = context(encodeSatisfactoryPoll(1n));
-    c.observeApplication = async () => ({ ready: true, idle: true, playerCount: 0 });
-    expect(await adapter.observe?.(c)).toMatchObject({ idle: true, playerCount: 0 });
-    now.mockReturnValue(6001);
-    const reliable = {
-      ...c,
-      route: {
-        ...c.route,
-        public: { ...c.route.public, transport: 'tcp' as const },
-        protocol: { handlerId: 'satisfactory', gameVersion: 'public', role: 'reliable' },
-      },
-    };
-    expect(await adapter.observe?.(reliable)).toEqual({ ready: true });
-  } finally {
-    now.mockRestore();
-  }
+  it('expires cached application observations without inventing zero players', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    try {
+      const adapter = observedAdapter();
+      const c = context(encodeSatisfactoryPoll(1n));
+      c.observeApplication = async () => ({ ready: true, idle: true, playerCount: 0 });
+      expect(await adapter.observe?.(c)).toMatchObject({ idle: true, playerCount: 0 });
+      now.mockReturnValue(6001);
+      const reliable = {
+        ...c,
+        route: {
+          ...c.route,
+          public: { ...c.route.public, transport: 'tcp' as const },
+          protocol: { handlerId: 'satisfactory', gameVersion: 'public', role: 'reliable' },
+        },
+      };
+      expect(await adapter.observe?.(reliable)).toEqual({ ready: true });
+    } finally {
+      now.mockRestore();
+    }
+  });
 });
 
 it('never reuses readiness from another process generation for Reliable Messaging', async () => {

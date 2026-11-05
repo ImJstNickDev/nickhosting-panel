@@ -277,6 +277,9 @@ function GameField({
             {...shared}
             label={t(field.labelKey)}
             hint={hint}
+            type={field.secret ? 'password' : 'text'}
+            autoComplete={field.secret ? 'new-password' : undefined}
+            spellCheck={field.secret ? false : undefined}
             value={typeof value === 'string' ? value : ''}
             required={field.required}
             minLength={field.minLength}

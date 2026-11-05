@@ -3,6 +3,7 @@ import { createSocket } from 'node:dgram';
 import { connect, isIP } from 'node:net';
 import type { GatewayProtocolAdapter, GatewayProtocolContext } from '@nickhosting/game-sdk';
 import { acceptSatisfactoryHttps } from './https-gateway.js';
+import { supportsSatisfactoryOfflineAuthentication } from './offline-auth-profile.js';
 import {
   decodeSatisfactoryPoll,
   decodeSatisfactoryState,
@@ -69,7 +70,7 @@ export function createSatisfactoryGatewayAdapter(
   store: SatisfactoryGatewayStateStore,
 ): GatewayProtocolAdapter {
   const loads = new Map<string, { attemptedAt: number; work: Promise<void> }>();
-  const observations = new Map<string, { generation: string; at: number }>();
+  const observations = new Map<string, { generation: string; at: number; netCL: number }>();
   const applicationSamples = new Map<
     string,
     { generation: string; at: number; playerCount: number; idle: boolean }
@@ -130,9 +131,17 @@ export function createSatisfactoryGatewayAdapter(
       Date.now() - application.at > 5_000
     )
       return { ready: true };
+    // Keep an unverified build online instead of suspending it into an offline
+    // authentication flow it cannot serve. Normal readiness, updates, forwarding
+    // and explicit power controls remain independent of this optimization.
+    const native = observations.get(context.route.serverId);
+    const canAuthenticateOffline =
+      native?.generation === context.route.generation &&
+      Date.now() - native.at <= 10_000 &&
+      supportsSatisfactoryOfflineAuthentication(native.netCL);
     return {
       ready: true,
-      idle: application.idle,
+      idle: application.idle && canAuthenticateOffline,
       playerCount: application.playerCount,
     };
   }
@@ -278,10 +287,12 @@ export function createSatisfactoryGatewayAdapter(
           boundInsert(observations, context.route.serverId, {
             generation: context.route.generation,
             at: Date.now(),
+            netCL: state.netCL,
           });
         else observations.delete(context.route.serverId);
         return { ready };
       } catch {
+        observations.delete(context.route.serverId);
         return { ready: false };
       }
     },

@@ -123,6 +123,10 @@ export function createSatisfactoryModuleRuntime(
   return {
     id: satisfactoryModule.id,
     configureProvision: configure,
+    cleanupSecrets: async (serverId, db) =>
+      (await import('./satisfactory-setup.js')).deleteSatisfactorySetup(db, serverId),
+    finalizeStart: async (context) =>
+      (await import('./satisfactory-setup.js')).finalizeSatisfactorySetup(context, codec),
     async prepareStop(context) {
       const { satisfactoryApiConfigured, resolveSatisfactoryApi } = await import(
         './satisfactory-api.js'

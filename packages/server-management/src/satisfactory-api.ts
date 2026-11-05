@@ -7,6 +7,7 @@ import { type Database, recordAudit } from '@nickhosting/database';
 import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
 import {
+  isSatisfactoryApplicationToken,
   SatisfactoryApi,
   type SatisfactoryApiTransport,
 } from '../../../games/satisfactory/src/api.js';
@@ -34,12 +35,12 @@ function tokenName(id: string): string {
 export function satisfactoryPinnedTransport(
   endpoint: { address: string; port: number },
   certificatePem: string,
-  token: string,
+  token?: string,
   playerId?: string,
 ): SatisfactoryApiTransport {
   if (playerId !== undefined && !decodeNativePlayerIdentity(playerId))
     throw new DomainError('validation_failed');
-  const secret = tokenSchema.parse(token),
+  const secret = token === undefined ? undefined : tokenSchema.parse(token),
     expected = new X509Certificate(certificatePem).raw;
   if (
     !isIP(endpoint.address) ||
@@ -69,7 +70,7 @@ export function satisfactoryPinnedTransport(
               ? new Error('certificate_mismatch')
               : undefined,
           headers: {
-            Authorization: `Bearer ${secret}`,
+            ...(secret ? { Authorization: `Bearer ${secret}` } : {}),
             ...(playerId ? { 'X-FactoryGame-PlayerId': playerId } : {}),
             'Content-Type': 'application/json; charset=utf-8',
             'Accept-Encoding': 'identity',
@@ -92,7 +93,11 @@ export function satisfactoryPinnedTransport(
                   ? 'unauthenticated'
                   : playerId && res.statusCode === 403
                     ? 'forbidden'
-                    : 'integration_unavailable',
+                    : res.statusCode === 401 || res.statusCode === 403
+                      ? 'game_authentication_failed'
+                      : res.statusCode === 503
+                        ? 'game_not_ready'
+                        : 'integration_unavailable',
               ),
             );
           } else resolve(res);
@@ -179,6 +184,36 @@ export async function satisfactoryApiConfigured(
     .where('name', '=', tokenName(serverId))
     .executeTakeFirst());
 }
+/** Used only by authorized first-run setup over the same pinned backend transport. */
+export async function resolveSatisfactoryBootstrapApi(
+  db: Kysely<Database>,
+  codec: SecretCodec,
+  serverId: string,
+  token?: string,
+): Promise<SatisfactoryApi> {
+  const { endpoint } = await target(db, serverId);
+  const identity = await readSatisfactoryTlsIdentity(db, codec, serverId);
+  if (!identity) throw new DomainError('integration_unavailable');
+  return new SatisfactoryApi(satisfactoryPinnedTransport(endpoint, identity.certificatePem, token));
+}
+
+/** Caller owns the server lifecycle lock and has verified this token natively. */
+export async function storeSatisfactoryApiToken(
+  db: Kysely<Database>,
+  codec: SecretCodec,
+  serverId: string,
+  token: string,
+): Promise<void> {
+  if (!isSatisfactoryApplicationToken(token)) throw new DomainError('validation_failed');
+  const name = tokenName(serverId);
+  const envelope = codec.encrypt(token, name);
+  await db
+    .insertInto('encrypted_secrets')
+    .values({ name, envelope })
+    .onConflict((c) => c.column('name').doUpdateSet({ envelope }))
+    .execute();
+}
+
 export async function resolveSatisfactoryApi(
   db: Kysely<Database>,
   codec: SecretCodec,
@@ -237,21 +272,11 @@ export async function setSatisfactoryApiToken(
   input: unknown,
 ): Promise<void> {
   const token = tokenSchema.parse(input);
-  try {
-    const payload = JSON.parse(Buffer.from(token.split('.')[0] ?? '', 'base64').toString('utf8'));
-    if (payload.pl !== 'APIToken') throw new Error();
-  } catch {
-    throw new DomainError('validation_failed');
-  }
+  if (!isSatisfactoryApplicationToken(token)) throw new DomainError('validation_failed');
   await locked(db, context, id, async (connection) => {
     await (await resolveSatisfactoryApi(connection, codec, id, token)).state();
     await authorizeServer(connection, context, id, 'server:manage');
-    const name = tokenName(id);
-    await connection
-      .insertInto('encrypted_secrets')
-      .values({ name, envelope: codec.encrypt(token, name) })
-      .onConflict((c) => c.column('name').doUpdateSet({ envelope: codec.encrypt(token, name) }))
-      .execute();
+    await storeSatisfactoryApiToken(connection, codec, id, token);
     await recordAudit(connection, context, 'satisfactory.api-token.updated', { serverId: id });
   });
 }

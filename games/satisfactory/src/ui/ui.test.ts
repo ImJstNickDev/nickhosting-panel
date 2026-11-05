@@ -58,3 +58,97 @@ it('declares shared hostname and explicit port in the common UI contract', () =>
     ).toBe(false);
   }
 });
+
+it('keeps setup optional and strips stale credentials when choosing the game client', async () => {
+  const request = vi.fn().mockResolvedValue({});
+  await satisfactoryUiModule.handlers.create?.(
+    { request },
+    {
+      idempotencyKey: 'skip',
+      values: {
+        mappingId: '11111111-1111-4111-8111-111111111111',
+        name: 'Factory',
+        limits: { memory: 8192, cpu: 200 },
+        setupMode: 'client',
+        adminPassword: 'stale admin',
+        clientPassword: 'stale player',
+      },
+    },
+  );
+  const body = request.mock.calls[0]?.[1].body;
+  expect(body.satisfactory).toEqual({ branch: 'public', autoUpdate: true });
+  expect(JSON.stringify(body)).not.toMatch(/stale|Password|setupMode/);
+  expect(satisfactoryUiModule.descriptor.creation.defaults.setupMode).toBe('client');
+});
+it('sends opt-in credentials only inside setup without changing their bytes', async () => {
+  const request = vi.fn().mockResolvedValue({});
+  const values = {
+    mappingId: '11111111-1111-4111-8111-111111111111',
+    name: 'Factory',
+    limits: { memory: 8192, cpu: 200 },
+    setupMode: 'panel',
+    adminPassword: ' admin café ',
+    clientPassword: ' player ',
+  };
+  await satisfactoryUiModule.handlers.create?.({ request }, { idempotencyKey: 'panel', values });
+  expect(request.mock.calls[0]?.[1].body).toMatchObject({
+    satisfactory: { setup: { adminPassword: ' admin café ', clientPassword: ' player ' } },
+  });
+  expect(request.mock.calls[0]?.[1].body).not.toHaveProperty('adminPassword');
+  for (const invalid of [
+    { adminPassword: '' },
+    { adminPassword: 'a'.repeat(129) },
+    { adminPassword: 'same', clientPassword: 'same' },
+  ]) {
+    await expect(
+      satisfactoryUiModule.handlers.create?.(
+        { request },
+        {
+          idempotencyKey: 'invalid',
+          values: { ...values, ...invalid },
+        },
+      ),
+    ).rejects.toThrow();
+  }
+  expect(request).toHaveBeenCalledTimes(1);
+});
+it('declares conditional masked credentials and validates them before leaving the form', async () => {
+  const { validateUiValues, visibleFields } = await import('@nickhosting/game-sdk/ui');
+  const fields = satisfactoryUiModule.descriptor.creation.fields;
+  expect(visibleFields(fields, { setupMode: 'client' }).some((f) => f.id === 'adminPassword')).toBe(
+    false,
+  );
+  expect(fields.find((f) => f.id === 'adminPassword')).toMatchObject({
+    type: 'text',
+    secret: true,
+  });
+  const credentials = fields.filter((f) => ['adminPassword', 'clientPassword'].includes(f.id));
+  expect(
+    validateUiValues(credentials, {
+      setupMode: 'panel',
+      adminPassword: 'same',
+      clientPassword: 'same',
+    }),
+  ).toEqual([{ field: 'clientPassword', code: 'invalid' }]);
+  expect(validateUiValues(credentials, { setupMode: 'panel', adminPassword: ' admin ' })).toEqual(
+    [],
+  );
+  const descriptor = satisfactoryUiModule.descriptor;
+  expect(
+    gameUiDescriptorSchema.safeParse({
+      ...descriptor,
+      creation: {
+        ...descriptor.creation,
+        pages: [
+          {
+            id: 'bad',
+            titleKey: 'games.satisfactory.setup.title',
+            field: 'adminPassword',
+            kind: 'form',
+            fields: ['unknown'],
+          },
+        ],
+      },
+    }).success,
+  ).toBe(false);
+});

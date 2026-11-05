@@ -230,3 +230,46 @@ async function collect<T>(source: AsyncIterable<T>): Promise<T[]> {
   for await (const item of source) result.push(item);
   return result;
 }
+
+it('uses pinned anonymous bootstrap and treats rejected game tokens independently of panel login', async () => {
+  const authorizations: (string | undefined)[] = [];
+  let status = 200;
+  const server = createServer(
+    { key: identity.privateKeyPem, cert: identity.certificatePem },
+    (req, res) => {
+      authorizations.push(req.headers.authorization);
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(status);
+        res.end('{"data":{"authenticationToken":"native.token"}}');
+      });
+    },
+  );
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('bind');
+  try {
+    const endpoint = { address: '127.0.0.1', port: address.port };
+    expect(
+      await satisfactoryPinnedTransport(endpoint, identity.certificatePem).request({
+        function: 'PasswordlessLogin',
+      }),
+    ).toEqual({ data: { authenticationToken: 'native.token' } });
+    status = 401;
+    await expect(
+      satisfactoryPinnedTransport(endpoint, identity.certificatePem, 'revoked').request({
+        function: 'QueryServerState',
+      }),
+    ).rejects.toMatchObject({ code: 'game_authentication_failed', status: 409 });
+    status = 503;
+    await expect(
+      satisfactoryPinnedTransport(endpoint, identity.certificatePem, 'token').request({
+        function: 'QueryServerState',
+      }),
+    ).rejects.toMatchObject({ code: 'game_not_ready' });
+    expect(authorizations).toEqual([undefined, 'Bearer revoked', 'Bearer token']);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

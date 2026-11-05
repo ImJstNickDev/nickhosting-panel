@@ -143,6 +143,8 @@ export interface LifecycleOptions {
   } | null>;
   /** Game hooks run under the same pinned server lock and durable effect journal. */
   configureGameProvision?: (context: GameLifecycleContext) => Promise<boolean>;
+  finalizeGameStart?: (context: GameLifecycleContext) => Promise<boolean>;
+  cleanupGameSecrets?: (serverId: string, db: Kysely<Database>) => Promise<void>;
   prepareGameStop?: (context: GameLifecycleContext) => Promise<void>;
   finalizeGameStop?: (context: GameLifecycleContext) => Promise<void>;
   /** Read-only, trusted integration attestation; never used for reinstall/wipe. */
@@ -751,6 +753,22 @@ export async function processServerOperation(
       alreadyStopped = false,
       confirmedStopped = false,
     ): Promise<Result> => {
+      if (
+        success &&
+        !release &&
+        !alreadyStopped &&
+        !confirmedStopped &&
+        ((operation.action === 'provision' && operation.phase === 'initial_start') ||
+          (['start', 'restart'].includes(operation.action) && operation.phase === 'power')) &&
+        options.finalizeGameStart
+      ) {
+        try {
+          if (!(await options.finalizeGameStart(gameContext()))) return wait('game_setup');
+        } catch (error) {
+          // Power is proven; a native setup failure must not repeat the start effect.
+          return finish(false, false, safeError(error).code);
+        }
+      }
       // Settings, player lists and selected-world metadata change no capacity.
       // Keep their atomic completion under the server lock without unrelated admission waits.
       const metadataOnly = metadataContent && !release && !alreadyStopped && !confirmedStopped;
@@ -862,6 +880,7 @@ export async function processServerOperation(
               .where('installation_state', 'in', ['pending', 'installing'])
               .execute();
           if (success && operation.action === 'delete') {
+            await options.cleanupGameSecrets?.(server.id, tx);
             await tx
               .updateTable('managed_servers')
               .set({ deleted_at: nowOf(options), runtime_state: 'offline', readiness: 'unknown' })

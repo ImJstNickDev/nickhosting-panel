@@ -142,3 +142,70 @@ it('uses native world and advanced settings payloads without console interpolati
     },
   ]);
 });
+
+it('bootstraps using native tokens and extracts only an unambiguous application token', async () => {
+  const applicationToken = `${Buffer.from(JSON.stringify({ pl: 'APIToken' })).toString('base64')}.${'ab'.repeat(64)}`;
+  const request = vi
+    .fn()
+    .mockResolvedValueOnce({ data: { authenticationToken: 'initial.token' } })
+    .mockResolvedValueOnce({ data: { authenticationToken: 'admin.token' } })
+    .mockResolvedValueOnce({ data: { authenticationToken: 'resumed.token' } })
+    .mockResolvedValueOnce({ data: {} })
+    .mockResolvedValueOnce({
+      data: { commandResult: `Generated application token:\n${applicationToken}\n` },
+    });
+  const api = new SatisfactoryApi({ request });
+  expect(await api.passwordlessLogin('InitialAdmin')).toBe('initial.token');
+  expect(await api.claim('Factory', ' private password ')).toBe('admin.token');
+  expect(await api.passwordLogin(' private password ')).toBe('resumed.token');
+  await api.setClientPassword('players');
+  expect(await api.generateApplicationToken()).toBe(applicationToken);
+  expect(request.mock.calls.map(([body]) => body)).toEqual([
+    { function: 'PasswordlessLogin', data: { MinimumPrivilegeLevel: 'InitialAdmin' } },
+    {
+      function: 'ClaimServer',
+      data: { ServerName: 'Factory', AdminPassword: ' private password ' },
+    },
+    {
+      function: 'PasswordLogin',
+      data: { MinimumPrivilegeLevel: 'Administrator', Password: ' private password ' },
+    },
+    { function: 'SetClientPassword', data: { Password: 'players' } },
+    { function: 'RunCommand', data: { Command: 'server.GenerateAPIToken' } },
+  ]);
+  const prefix = Buffer.from(JSON.stringify({ pl: 'APIToken' })).toString('base64');
+  request.mockResolvedValue({ data: { commandResult: `${prefix}.aa ${prefix}.bb` } });
+  await expect(api.generateApplicationToken()).rejects.toMatchObject({
+    code: 'integration_unavailable',
+  });
+  request.mockResolvedValue({
+    data: { commandResult: `${Buffer.from('{"pl":"Administrator"}').toString('base64')}.aa` },
+  });
+  await expect(api.generateApplicationToken()).rejects.toMatchObject({
+    code: 'integration_unavailable',
+  });
+});
+
+it.each([
+  ['invalid_token', 'game_authentication_failed'],
+  ['server_claimed', 'game_setup_conflict'],
+  ['server_unavailable', 'game_not_ready'],
+  ['save_game_failed', 'game_save_failed'],
+  ['function_not_found', 'game_request_unsupported'],
+  ['unknown_private_native_error', 'integration_unavailable'],
+])('classifies %s without exposing native response data', async (errorCode, code) => {
+  const api = new SatisfactoryApi({
+    request: async () => ({
+      errorCode,
+      errorMessage: 'password=secret',
+      errorData: { token: 'secret' },
+    }),
+  });
+  await expect(api.state()).rejects.toMatchObject({ code });
+  try {
+    await api.state();
+  } catch (error) {
+    expect(JSON.stringify(error)).not.toContain('secret');
+    expect(JSON.stringify(error)).not.toContain('unknown_private_native_error');
+  }
+});

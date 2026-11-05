@@ -6,6 +6,7 @@ import {
   decodeSatisfactoryNativeCredentials,
   type NativeSatisfactoryCredentials,
 } from '../../../games/satisfactory/src/native-credentials.js';
+import { supportsSatisfactoryOfflineAuthentication } from '../../../games/satisfactory/src/offline-auth-profile.js';
 import { verifyManagedIdentity } from './lifecycle.js';
 
 type Adapter = Pick<PterodactylAdapter, 'getApplicationServer' | 'listFiles' | 'readFile'> &
@@ -274,7 +275,8 @@ async function readCredentials(
           !version ||
           typeof version !== 'object' ||
           !('Changelist' in version) ||
-          version.Changelist !== 513885
+          typeof version.Changelist !== 'number' ||
+          !supportsSatisfactoryOfflineAuthentication(version.Changelist)
         )
           return undefined;
         const path = `.config/Epic/FactoryGame/Saved/SaveGames/ServerSettings.${initial.allocation.port}.sav`;
