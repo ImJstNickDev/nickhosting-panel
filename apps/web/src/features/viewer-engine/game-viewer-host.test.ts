@@ -164,3 +164,43 @@ describe('shared integration viewer host', () => {
     expect(onViewerChange).toHaveBeenCalledOnce();
   });
 });
+
+it('reads only the selected save prefix through the existing ranged content endpoint', async () => {
+  const fetcher = vi.fn(
+    async (_url: string, _options?: RequestInit) =>
+      new Response(new Uint8Array(32), {
+        status: 206,
+        headers: { 'content-range': 'bytes 0-31/1000000', 'content-length': '32' },
+      }),
+  );
+  vi.stubGlobal('fetch', fetcher);
+  const host = scope({ source: { path: 'world.sav', name: 'world.sav', size: 1000000 } }).host;
+  expect((await host.readPrefix?.(32, signal()))?.length).toBe(32);
+  expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ headers: { Range: 'bytes=0-31' } });
+  for (const size of [0, 65537, NaN])
+    await expect(host.readPrefix?.(size, signal())).rejects.toThrow();
+});
+it('rejects ignored range and mismatched range before consuming a full save', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => new Response(new Uint8Array(100))),
+  );
+  await expect(scope().host.readPrefix?.(32, signal())).rejects.toMatchObject({
+    messageKey: 'viewer.unavailable',
+  });
+});
+it('rejects truncated prefix bodies even with a valid range header', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(
+      async () =>
+        new Response(new Uint8Array(20), {
+          status: 206,
+          headers: { 'content-range': 'bytes 0-31/1000000' },
+        }),
+    ),
+  );
+  await expect(scope().host.readPrefix?.(32, signal())).rejects.toMatchObject({
+    messageKey: 'viewer.unavailable',
+  });
+});

@@ -16,6 +16,12 @@ import {
   useState,
 } from 'react';
 
+const Navigation = createContext<{
+  navigateDirectory?: (path: string) => void;
+  sections: readonly string[];
+}>({ sections: [] });
+export const useFilemanNavigation = () => useContext(Navigation);
+
 const emptyHost = createFilemanExtensionHost<ReactNode>([]);
 const PathProvider = createContext<FilemanPathProvider | undefined>(undefined);
 const RegisterPathProvider = createContext<
@@ -31,10 +37,14 @@ export function FilemanHost({
   context,
   extensions,
   children,
+  navigateDirectory,
+  sections = [],
 }: {
   context: Readonly<FilemanContext>;
   extensions?: readonly TrustedFilemanExtension<ReactNode>[];
   children?: ReactNode;
+  navigateDirectory?: (path: string) => void;
+  sections?: readonly string[];
 }) {
   const host = useMemo(
     () => (extensions ? createFilemanExtensionHost(extensions) : emptyHost),
@@ -50,11 +60,15 @@ export function FilemanHost({
     return () => setProviders((current) => current.filter((entry) => entry.token !== token));
   }, []);
   return (
-    <Host.Provider value={value}>
-      <RegisterPathProvider.Provider value={register}>
-        <PathProvider.Provider value={providers.at(-1)?.provider}>{children}</PathProvider.Provider>
-      </RegisterPathProvider.Provider>
-    </Host.Provider>
+    <Navigation.Provider value={{ navigateDirectory, sections }}>
+      <Host.Provider value={value}>
+        <RegisterPathProvider.Provider value={register}>
+          <PathProvider.Provider value={providers.at(-1)?.provider}>
+            {children}
+          </PathProvider.Provider>
+        </RegisterPathProvider.Provider>
+      </Host.Provider>
+    </Navigation.Provider>
   );
 }
 

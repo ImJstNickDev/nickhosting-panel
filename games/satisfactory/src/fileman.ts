@@ -1,0 +1,20 @@
+import { satisfactorySaveDirectory } from './world-paths.js';
+
+/** Filename classification is presentation only, never proof of file contents. */
+export function satisfactoryFileKind(name: string) {
+  const value = name.toLowerCase();
+  if (value.endsWith('.sav')) return 'save';
+  if (value.endsWith('.sbp') || value.endsWith('.sbpcfg')) return 'blueprint';
+  if (value.endsWith('.ini')) return 'configuration';
+  if (value.endsWith('.log')) return 'log';
+  if (value.endsWith('.uplugin') || value === 'nick_hosting-lock.json') return 'modManifest';
+  return undefined;
+}
+
+/** Known installation locations. Opening one uses normal Fileman missing-path handling. */
+export const satisfactoryFileLocations = [
+  { id: 'saves', path: satisfactorySaveDirectory },
+  { id: 'mods', path: 'FactoryGame/Mods' },
+  { id: 'configuration', path: 'FactoryGame/Saved/Config' },
+  { id: 'logs', path: 'FactoryGame/Saved/Logs' },
+] as const;

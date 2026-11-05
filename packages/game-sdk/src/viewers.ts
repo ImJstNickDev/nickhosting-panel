@@ -19,6 +19,9 @@ export interface GameViewerArchiveEntry {
   size: number;
 }
 export interface GameViewerHost {
+  locale?: string;
+  /** Bounded prefix of the selected source; no arbitrary filesystem authority. */
+  readPrefix?(maxBytes: number, signal: AbortSignal): Promise<Uint8Array<ArrayBuffer>>;
   t(key: string, values?: Record<string, string | number>): string;
   /** Bounded reads of the currently selected container; authority stays with Fileman. */
   archive: {

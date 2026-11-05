@@ -1357,3 +1357,51 @@ rendering assumption; the common contribution renderer now guards its absence.
 Development activation restarts only the existing API and worker after confirming
 zero running operation jobs; no game server was started, stopped or reinstalled.
 Phase 1 is accepted by the Owner; phase 2 remains unstarted.
+
+### Phase 2 — Fileman first slice
+
+Owner approved direct read-only `.sav` metadata opening and structured read-only
+Unreal INI viewing, retaining the existing text editor for INI changes. The first
+slice covers save-header inspection, file classification, directory shortcuts and
+contextual navigation to the existing Worlds screen. INI, log/certificate viewers,
+metadata comparison and deeper save-tree inspection are separate subsequent slices;
+this slice does not close phase 2 or begin the Blueprint phase.
+
+Fileman remains the common shell. Compiled game contributions use its viewer and
+extension SDK, existing authorized file transport and Open with preferences. Save
+inspection reads a bounded prefix and does not decompress the save body, invoke the
+native game API or wake a stopped server. Version, malformed-input and unavailable
+file states must remain explicit instead of presenting guessed metadata.
+
+The independent header reader follows the common prefix documented by the
+[Satisfactory parser header layout](https://github.com/etothepii4/satisfactory-file-parser/blob/master/src/parser/satisfactory/save/satisfactory-save-header.ts).
+It supports header versions 6–14, including narrow/wide strings and the version-14
+save name. It inspects metadata only, not save integrity or world compatibility.
+Map options are skipped rather than disclosed. Unknown versions fail explicitly.
+The shared viewer host exposes a selected-source-only prefix read (maximum64KiB),
+validates the206 Content-Range and actual body length, and retains existing API
+errors, cancellation and panel locale. Existing viewer preferences take precedence
+and Open with remains available.
+
+Filename classification adds no file reads. The game contributes ordinary Fileman
+icons, four directory shortcuts (saves, mods, configuration and logs), and Worlds
+navigation only when that existing section is available to the user. Navigation
+uses Fileman's existing guard; it does not create missing directories, load worlds
+or change game power. All labels ship in English and Italian.
+
+Validation for this slice:15 parser/host tests and four classification/Fileman host
+checks passed. One combined actual-Fileman browser journey verifies default save
+opening, bounded Range reads, unsupported-header errors, same-route shortcuts,
+Worlds navigation/availability, unchanged operation count, and ENdesktop/ITmobile
+Axe checks. Three screenshots under `docs/screenshots/m6/satisfactory-*` were reviewed.
+A duplicate named landmark found by Axe was fixed by keeping only Fileman's shell
+region. Independent code and visual review passed. Full types, frontend/runtime
+builds and lint passed (existing104 warnings and one informational diagnostic).
+
+Activation uses the existing development image/Compose pipeline, adding only
+workspace/React peer linkage; no new external package version or database migration.
+The four existing API/worker/Gateway/Vite services retain their mount and port
+bindings. No game file or power operation, Pterodactyl/Blueprint update, DNS change
+or real test-server creation was performed. Rollback restores the prior code and
+`nickhosting-dev-app:before-satisfactory-fileman-20261105` image through the same
+Compose pipeline; persistent game data and settings remain intact.

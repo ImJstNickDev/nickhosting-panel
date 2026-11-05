@@ -99,7 +99,7 @@ import {
 import { FolderUploadError, planFolderUpload, prepareFolderUpload } from './folder-upload.js';
 import { InlineFileRename } from './inline-file-rename.js';
 import { validFilename } from './inline-file-rename-model.js';
-import { gameUiRegistry, getFileEntryGroup } from './integrations.js';
+import { availableGameSections, gameUiRegistry, getFileEntryGroup } from './integrations.js';
 import { useDirectoryPrefetch } from './use-directory-prefetch.js';
 import { useViewerEscape } from './use-viewer-escape.js';
 import { isSingleCompressed } from './viewer-engine/core/compressed.js';
@@ -1971,6 +1971,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         ...(viewing ? viewerContext : {}),
       }}
       extensions={gameFilemanExtensions}
+      navigateDirectory={navigate}
+      sections={server.data ? availableGameSections(server.data).map((section) => section.id) : []}
     >
       <section
         className="file-manager"

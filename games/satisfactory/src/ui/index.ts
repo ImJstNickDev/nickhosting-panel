@@ -1,3 +1,11 @@
+export { satisfactoryFileKind, satisfactoryFileLocations } from '../fileman.js';
+
+import { satisfactoryFilemanCatalogs } from './fileman-catalog.js';
+
+export { satisfactoryViewers } from '../viewers/index.js';
+
+import { satisfactoryViewerCatalogs } from '../viewers/catalog.js';
+
 export { satisfactoryPhaseLabel, satisfactorySchematicLabel } from './progression.js';
 
 import { satisfactoryProgressionCatalogs } from './progression-catalog.js';
@@ -71,15 +79,19 @@ const baseCatalogs = {
 export const satisfactoryUiCatalogs = {
   en: {
     ...baseCatalogs.en,
+    ...satisfactoryViewerCatalogs.en,
     ...satisfactoryOverviewCatalogs.en,
     ...satisfactoryProgressionCatalogs.en,
     ...satisfactorySettingsCatalogs.en,
+    ...satisfactoryFilemanCatalogs.en,
   },
   it: {
     ...baseCatalogs.it,
+    ...satisfactoryViewerCatalogs.it,
     ...satisfactoryOverviewCatalogs.it,
     ...satisfactoryProgressionCatalogs.it,
     ...satisfactorySettingsCatalogs.it,
+    ...satisfactoryFilemanCatalogs.it,
   },
 };
 export const satisfactoryUiDescriptor = gameUiDescriptorSchema.parse({
