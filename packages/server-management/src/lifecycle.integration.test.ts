@@ -5726,3 +5726,86 @@ describe('Satisfactory background preview lifecycle', () => {
     expect(f.options.processGameContent).not.toHaveBeenCalled();
   });
 });
+
+describe('integration-declared installer retries', () => {
+  it('keeps provision pending for two retries and succeeds on the third attempt', async () => {
+    const f = await fixture('provision', { autoStart: false });
+    f.remote.status = 'install_failed';
+    f.options.installationRetry = vi.fn(async () => 2);
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    f.adapter.reinstallWithConfirmation.mockImplementation(async (_id, _identifier, callbacks) => {
+      if (f.adapter.reinstallWithConfirmation.mock.calls.length === 2) {
+        f.remote.status = null;
+        f.remote.container.installed = true;
+        await callbacks.onConfirmed();
+      }
+      return { confirmed: f.adapter.reinstallWithConfirmation.mock.calls.length === 2 };
+    });
+    expect(await f.run()).toBe('waiting');
+    expect((await f.server()).installation_state).toBe('installing');
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    expect(f.adapter.createServer).toHaveBeenCalledTimes(1);
+    expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(2);
+  });
+  it('fails after the configured retry budget without further installer effects', async () => {
+    const f = await fixture('provision', { autoStart: false });
+    f.remote.status = 'install_failed';
+    f.options.installationRetry = vi.fn(async () => 2);
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    f.adapter.reinstallWithConfirmation.mockResolvedValue({ confirmed: false });
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(2);
+    expect((await f.server()).installation_state).toBe('failed');
+  });
+  it('does not let an early unconfirmed return hide a later fresh failure', async () => {
+    const f = await fixture('provision', { autoStart: false });
+    f.remote.status = 'install_failed';
+    f.options.installationRetry = vi.fn(async (_context, logs) => (logs ? 0 : 2));
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    f.adapter.reinstallWithConfirmation.mockResolvedValue({ confirmed: false });
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect((await f.operation()).plan.installationRetryEvidence).toBeUndefined();
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(2);
+  });
+  it('rejects a delayed completion captured by the previous installer channel', async () => {
+    const f = await fixture('provision', { autoStart: false });
+    f.remote.status = 'install_failed';
+    f.options.installationRetry = vi.fn(async () => 2);
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    f.adapter.reinstallWithConfirmation.mockResolvedValue({ confirmed: false });
+    await f.run();
+    const prior = (await f.operation()).effect_started_at;
+    f.tick();
+    await f.run();
+    expect(
+      await recordNativeInstallationCompletion(f.db, {
+        serverId: f.serverId,
+        jobId: f.jobId,
+        providerUuid: f.remote.uuid,
+        observedAt: f.now(),
+        effectStartedAt: prior ?? undefined,
+      }),
+    ).toBe(false);
+  });
+  it.each([0, undefined])('does not retry an ineligible failure (%s)', async (budget) => {
+    const f = await fixture('provision', { autoStart: false });
+    f.remote.status = 'install_failed';
+    if (budget !== undefined) f.options.installationRetry = vi.fn(async () => budget);
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    if (budget !== undefined) {
+      expect(await f.run()).toBe('waiting');
+      f.tick();
+    }
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+  });
+});

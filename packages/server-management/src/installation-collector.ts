@@ -62,6 +62,7 @@ export function createInstallationCollector(options: {
           's.external_id',
           's.node_id',
           'o.plan',
+          'o.effect_started_at',
           'j.state',
         ])
         .where('s.id', '=', serverId)
@@ -78,6 +79,7 @@ export function createInstallationCollector(options: {
             row.provider_user_id,
             row.external_id,
             row.node_id,
+            row.effect_started_at?.toISOString(),
           ])
         : undefined;
       if (binding && binding !== identity) return false;
@@ -171,6 +173,9 @@ export function createInstallationCollector(options: {
                     jobId,
                     providerUuid: current.pterodactyl_uuid as string,
                     observedAt,
+                    ...(current.effect_started_at
+                      ? { effectStartedAt: current.effect_started_at }
+                      : {}),
                   });
                   // The lifecycle still verifies current provider identity and stopped containers.
                   await options.wake(jobId);

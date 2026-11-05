@@ -5,6 +5,7 @@ import { createBrowserRouter, RouterProvider } from 'react-router';
 import { queryClient } from '../../src/api/client.js';
 import { LocaleProvider } from '../../src/app/i18n.js';
 import { NavigationGuardProvider } from '../../src/components/navigation-guard.js';
+import { SatisfactoryInstallationPolicy } from '../../src/integrations/satisfactory/installation-policy.js';
 import { SatisfactoryModsSection } from '../../src/integrations/satisfactory/mods.js';
 import { SatisfactorySettingsSection } from '../../src/integrations/satisfactory/settings.js';
 import '../../src/app/style.css';
@@ -53,7 +54,11 @@ createRoot(root).render(
               <NavigationGuardProvider>
                 <main style={{ padding: 24, maxWidth: 1000, margin: 'auto' }}>
                   <h1>Satisfactory</h1>
-                  <FixtureSection />
+                  {location.search.includes('installation-policy') ? (
+                    <SatisfactoryInstallationPolicy />
+                  ) : (
+                    <FixtureSection />
+                  )}
                 </main>
               </NavigationGuardProvider>
             ),

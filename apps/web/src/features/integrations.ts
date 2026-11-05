@@ -138,7 +138,16 @@ const MinecraftVersions = lazy(() =>
 const MinecraftScan = lazy(() =>
   import('./minecraft-admin.js').then((module) => ({ default: module.MinecraftCatalogScan })),
 );
+const SatisfactoryInstallationPolicy = lazy(() =>
+  import('../integrations/satisfactory/installation-policy.js').then((module) => ({
+    default: module.SatisfactoryInstallationPolicy,
+  })),
+);
 const ownerComponents = new Map([
+  [
+    'satisfactory-installation',
+    { Component: SatisfactoryInstallationPolicy, Background: undefined },
+  ],
   [
     'minecraft-versions',
     {

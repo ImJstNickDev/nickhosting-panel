@@ -1,9 +1,18 @@
-.satisfactory-settings {
+.satisfactory-settings-body {
   display: grid;
   gap: 20px;
   padding: 24px;
-  max-width: 1080px;
-  margin-inline: auto;
+}
+.satisfactory-token-toggle {
+  justify-self: start;
+}
+.satisfactory-setting-choice {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+.satisfactory-setting-choice > small {
+  color: var(--muted);
 }
 .satisfactory-settings h2,
 .satisfactory-settings h3,
@@ -50,7 +59,7 @@
   opacity: 1;
 }
 @media (max-width: 600px) {
-  .satisfactory-settings {
+  .satisfactory-settings-body {
     padding: 16px;
   }
   .satisfactory-option-fields {

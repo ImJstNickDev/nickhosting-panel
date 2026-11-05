@@ -1,4 +1,5 @@
 import { DomainError, type SecretCodec } from '@nickhosting/core';
+import { getSettings } from '@nickhosting/database';
 import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import {
   satisfactoryCertificatePaths,
@@ -6,6 +7,7 @@ import {
 } from '../../../games/satisfactory/src/index.js';
 import type { GameRuntimeHooks, TrustedGameModule } from './game-modules.js';
 import type { GameLifecycleContext } from './lifecycle.js';
+import { satisfactoryInstallerRetryable } from './satisfactory-installation-retry.js';
 import { ensureSatisfactoryTlsIdentity } from './satisfactory-tls.js';
 
 export const satisfactoryModule: TrustedGameModule = {
@@ -123,6 +125,10 @@ export function createSatisfactoryModuleRuntime(
   return {
     id: satisfactoryModule.id,
     configureProvision: configure,
+    async installationRetry(context, logs) {
+      if (!satisfactoryInstallerRetryable(logs, context.operation().effect_started_at)) return 0;
+      return (await getSettings(context.db, env)).values.satisfactoryInstallationRetries;
+    },
     cleanupSecrets: async (serverId, db) =>
       (await import('./satisfactory-setup.js')).deleteSatisfactorySetup(db, serverId),
     finalizeStart: async (context) =>

@@ -156,6 +156,10 @@ export interface LifecycleOptions {
     serverId: string,
     connection: Kysely<Database>,
   ) => Promise<boolean>;
+  installationRetry?: (
+    context: GameLifecycleContext,
+    logs?: readonly { at: string; text: string }[],
+  ) => Promise<number>;
   processGameContent?: (context: GameLifecycleContext) => Promise<boolean>;
   verifyGameRestore?: (context: GameLifecycleContext) => Promise<boolean>;
   env?: Environment;
@@ -1185,6 +1189,9 @@ export async function processServerOperation(
                   ? { rejected: false, rejectionCode: undefined }
                   : {}),
                 waitReason: null,
+                ...(phase.startsWith('installation_retry:')
+                  ? { installationFailureObservedAt: null }
+                  : {}),
                 effectAttempts: { ...attempts, [phase]: attempt },
                 ...(['power', 'initial_start'].includes(phase)
                   ? { powerEffectPrepared: true }
@@ -1481,6 +1488,84 @@ export async function processServerOperation(
     const settled = () =>
       operation.effect_started_at !== null &&
       nowOf(options).getTime() - operation.effect_started_at.getTime() >= settleOf(options);
+    const retryFailedInstallation = async (): Promise<boolean> => {
+      if (
+        operation.plan.installConfirmed ||
+        operation.plan.modpackOperationId ||
+        !['provision', 'reinstall'].includes(operation.action) ||
+        !options.installationRetry
+      )
+        return false;
+      // A lost dispatch response must never replay an installer. Its subsequent
+      // terminal failure needs a fresh, attempt-bound log before another retry.
+      if (operation.phase.startsWith('installation_retry:') && !settled()) return true;
+      const evidence = z
+        .object({ effectStartedAt: z.string(), limit: z.number().int().min(0).max(5) })
+        .safeParse(operation.plan.installationRetryEvidence);
+      const configured =
+        evidence.success &&
+        evidence.data.effectStartedAt === operation.effect_started_at?.toISOString()
+          ? evidence.data.limit
+          : await options.installationRetry(gameContext());
+      // The collector flushes asynchronously. Give a newly observed failure one
+      // bounded delivery before treating an absent transcript as ineligible.
+      if (configured === 0) {
+        const observed = operation.plan.installationFailureObservedAt;
+        if (typeof observed !== 'string') {
+          await update({
+            plan: {
+              ...operation.plan,
+              installationFailureObservedAt: nowOf(options).toISOString(),
+            },
+          });
+          return true;
+        }
+        if (nowOf(options).getTime() - Date.parse(observed) < 2000) return true;
+      }
+      const limit =
+        Number.isInteger(configured) && configured >= 0 && configured <= 5 ? configured : 0;
+      const retries = Math.max(
+        0,
+        ...Object.keys(operation.plan.effectAttempts ?? {})
+          .filter((key) => /^installation_retry:[1-5]$/.test(key))
+          .map((key) => Number(key.split(':')[1])),
+      );
+      if (retries >= limit) return false;
+      if (!options.confirmInitialInstallationStopped) return false;
+      if (!(await options.confirmInitialInstallationStopped(server.id, db))) return true;
+      if (!options.reserveInstallation) throw new DomainError('configuration_invalid');
+      await options.reserveInstallation(server.id, jobId, db);
+      await progress('installing');
+      options.onInstallationAvailable?.(jobId, server.id);
+      await effect(`installation_retry:${retries + 1}`, async () => {
+        const logs: { at: string; text: string }[] = [];
+        await options.adapter.reinstallWithConfirmation(
+          server.pterodactyl_id ?? 0,
+          server.pterodactyl_identifier ?? '',
+          {
+            ...installationCallbacks(true),
+            onOutput: (text) => {
+              logs.push({ at: nowOf(options).toISOString(), text: text.slice(0, 8192) });
+              if (logs.length > 1000) logs.shift();
+            },
+          },
+        );
+        if (operation.plan.installConfirmed !== true) {
+          const nextLimit = (await options.installationRetry?.(gameContext(), logs)) ?? 0;
+          if (nextLimit > 0)
+            await update({
+              plan: {
+                ...operation.plan,
+                installationRetryEvidence: {
+                  effectStartedAt: operation.effect_started_at?.toISOString(),
+                  limit: nextLimit,
+                },
+              },
+            });
+        }
+      });
+      return true;
+    };
     const resources = async () => {
       const value = await timed('provider_resources', () =>
         options.adapter.getResources(server.pterodactyl_identifier ?? ''),
@@ -2432,6 +2517,7 @@ export async function processServerOperation(
         }
         remote = await timed('provider_identity', () => ownedRemote(db, server, options));
         if (['install_failed', 'reinstall_failed'].includes(remote.status ?? '')) {
+          if (await retryFailedInstallation()) return wait('installation');
           await db
             .updateTable('managed_servers')
             .set({ installation_state: 'failed' })
@@ -3091,6 +3177,7 @@ export async function processServerOperation(
           return wait('installation');
         }
         if (['install_failed', 'reinstall_failed'].includes(remote.status ?? '')) {
+          if (await retryFailedInstallation()) return wait('installation');
           await db
             .updateTable('managed_servers')
             .set({ installation_state: 'failed' })

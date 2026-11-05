@@ -69,6 +69,7 @@ import {
 } from './provider-backup-events.js';
 import { cachedProviderStartLimits } from './provider-change-feed.js';
 import { supportsProviderFileOperations } from './provider-file-operations.js';
+import { type InstallationTranscript, installationLogKey } from './provisioning.js';
 import { assertGatewaySleepFence, authorizeServer } from './registry.js';
 import { cleanupSatisfactoryModPlans } from './satisfactory-mod-manager.js';
 import { createSatisfactoryModuleRuntime } from './satisfactory-module.js';
@@ -804,6 +805,25 @@ export async function createManagementRuntime(options: ManagementOptions) {
       cachedProviderStartLimits(connection, serverId, values.pterodactylBaseUrl ?? ''),
     env,
     logger: options.logger,
+    installationRetry: async (
+      context: import('./lifecycle.js').GameLifecycleContext,
+      logs?: readonly { at: string; text: string }[],
+    ) => {
+      const module = await gameRuntime(context.db, context.server.id);
+      if (!module?.installationRetry) return 0;
+      if (logs) return module.installationRetry(context, logs);
+      if (!options.transferCache) return 0;
+      const raw = await options.transferCache.get(installationLogKey(context.operation().job_id));
+      if (!raw) return 0;
+      let transcript: InstallationTranscript;
+      try {
+        transcript = JSON.parse(raw) as InstallationTranscript;
+      } catch {
+        return 0;
+      }
+      if (!Array.isArray(transcript.logs)) return 0;
+      return module.installationRetry(context, transcript.logs);
+    },
     verifyInitialInstallation: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.verifyInitialInstallation?.(context) ??
       null,

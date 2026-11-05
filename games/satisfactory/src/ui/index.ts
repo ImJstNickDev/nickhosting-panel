@@ -11,6 +11,7 @@ import { satisfactorySettingsCatalogs } from './settings-catalog.js';
 
 const prefix = 'games.satisfactory.';
 const translations: Record<string, [string, string]> = {
+  'installation.title': ['Installation', 'Installazione'],
   'api.title': ['FICSIT Settings', 'Impostazioni FICSIT'],
   'api.token': ['Application token', 'Token applicazione'],
   'api.tokenHelp': [
@@ -82,6 +83,13 @@ export const satisfactoryUiCatalogs = {
   },
 };
 export const satisfactoryUiDescriptor = gameUiDescriptorSchema.parse({
+  administration: [
+    {
+      id: 'installation',
+      titleKey: 'games.satisfactory.installation.title',
+      component: 'satisfactory-installation',
+    },
+  ],
   gameId: 'satisfactory',
   schemaVersion: 1,
   nameKey: `${prefix}name`,

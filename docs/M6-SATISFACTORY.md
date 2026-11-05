@@ -1298,3 +1298,62 @@ and Vite health checks pass; Gateway's authenticated Unix readiness check passes
 following its first snapshot. The public development frontend serves the form-page
 wizard. No database, DNS, Blueprint/Pterodactyl or existing game-data mutation was
 performed. Existing withheld unrelated routes retain their safety checks.
+
+
+### Phase 1 — Owner native-client acceptance (2026-11-05)
+
+The Owner completed all three agreed first-run journeys using their Arch Linux
+laptop and the latest Satisfactory client available on the test date (exact build
+not recorded): client-side setup, automatic panel setup, and panel setup deferred
+until the first manual start. All three succeeded. The Owner explicitly removed
+the fourth Gateway sleep/wake acceptance check from this phase; broader Gateway
+stabilization remains a separate future scope. These observations do not assert
+additional Steam/Epic, modded-client or SMM coverage.
+
+Client-side setup intentionally does not provision an application API token. Its
+`nickhosting stop` attempt correctly refused before requesting a stop because the
+panel could not verify the save. To enable that operation, generate a native token
+with `server.GenerateAPIToken` and verify/store it through FICSIT Settings. Both
+panel-configured journeys supplied the token automatically; the Owner also
+confirmed the console stop command succeeded in the automatic-setup journey.
+
+Two fresh SteamCMD installations initially failed with `Missing configuration`
+after SteamCMD bootstrap; a subsequent installation succeeded. This is installer
+acceptance evidence, not a native setup failure. The requested follow-up uses
+bounded automatic installation retries and keeps unrelated failure handling intact.
+
+FICSIT Settings now shares the Overview/Worlds header and surface. Connected API
+credentials hide setup instructions behind an explicit replacement action. Known
+server options have English/Italian names and supported boolean encodings use
+localized dropdowns without changing their native serialization. Pending boolean
+values are localized too. Unknown/mod settings retain their native values. Numeric
+weather/network preset mappings are not guessed; verified enum presentation is
+tracked in phase 5 (#34). Three focused browser cases passed, including Italian
+accessibility, world-change guards and token rejection/recovery; desktop/mobile
+and unconfigured screenshots were refreshed and reviewed.
+
+Installation retries are contributed through the existing Owner integration UI and
+platform settings pipeline. `satisfactoryInstallationRetries` defaults to 2, accepts
+0–5, and has environment override `NH_SATISFACTORY_INSTALLATION_RETRIES`. Only fresh
+installer output matching app 1690800 `Missing configuration` qualifies. The same
+operation keeps its reservations and installer state; attempt budgets are journaled
+with dispatch, previous completion events are fenced out, and both game/installer
+processes must be confirmed stopped before retry. Successful installation cannot
+be retried. Exhaustion or unrelated errors retain normal failure/reinstall behavior.
+Live adapter output covers rapid failures; a bounded log-flush grace avoids racing
+collector writes. The shared failure path can wait roughly two additional seconds
+for diagnostics on other games, but does not retry their installers.
+
+Follow-up validation: 16 focused unit/adapter checks, six isolated lifecycle DB
+cases, and four focused browser cases passed (three Settings and one Owner retry
+control, including environment lock and zero retries). Independent review found no
+remaining blockers. No database migration, Blueprint update or game operation was
+required. Rollback uses the previous application code, preserving settings, TLS/API
+credentials and game data; settle in-flight installation operations before rollback.
+
+Full typechecks, frontend/runtime builds and lint passed (existing 104 warnings and
+one informational item). The new optional Owner section background exposed a
+rendering assumption; the common contribution renderer now guards its absence.
+Development activation restarts only the existing API and worker after confirming
+zero running operation jobs; no game server was started, stopped or reinstalled.
+Phase 1 is accepted by the Owner; phase 2 remains unstarted.

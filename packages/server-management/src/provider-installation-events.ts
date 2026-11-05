@@ -129,7 +129,13 @@ export async function applyProviderInstallationEvent(
  * status receipt is deliberately not convertible into this terminal evidence. */
 export async function recordNativeInstallationCompletion(
   db: Kysely<Database>,
-  input: { serverId: string; jobId: string; providerUuid: string; observedAt: Date },
+  input: {
+    serverId: string;
+    jobId: string;
+    providerUuid: string;
+    observedAt: Date;
+    effectStartedAt?: Date;
+  },
 ) {
   return db.transaction().execute(async (tx) => {
     const operation = await tx
@@ -148,10 +154,13 @@ export async function recordNativeInstallationCompletion(
       !operation ||
       !['queued', 'running'].includes(operation.state) ||
       !['provision', 'reinstall'].includes(operation.action) ||
-      !['provision', 'installation', 'reinstall'].includes(operation.phase) ||
+      (!['provision', 'installation', 'reinstall'].includes(operation.phase) &&
+        !/^installation_retry:[1-5]$/.test(operation.phase)) ||
       operation.plan.modpackOperationId ||
       operation.plan.installConfirmed ||
       !operation.effect_started_at ||
+      (input.effectStartedAt !== undefined &&
+        operation.effect_started_at.getTime() !== input.effectStartedAt.getTime()) ||
       operation.effect_started_at > input.observedAt
     )
       return false;

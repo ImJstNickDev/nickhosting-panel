@@ -212,7 +212,7 @@ it('connects a write-only token, updates server and advanced options with acknow
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
   let configured = false;
-  let option = '4';
+  let option = 'false';
   let creativeModeEnabled = false;
   let advancedValue = 'False';
   const mutations: unknown[] = [];
@@ -269,12 +269,12 @@ it('connects a write-only token, updates server and advanced options with acknow
   await token.fill(secret);
   await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await check(page.getByText('Server API connected.', { exact: true })).toBeVisible();
-  await check(token).toHaveValue('');
+  await check(token).toHaveCount(0);
   await check(page.getByText('Advanced world settings', { exact: true })).toBeVisible();
   const field = page.getByLabel('Pause when no players are connected', { exact: true });
   await check(page.getByLabel('Autosave interval (seconds)', { exact: true })).toHaveValue('300.0');
   await check(page.getByLabel('Future.Option', { exact: true })).toHaveValue('unchanged');
-  await field.fill('true');
+  await field.selectOption('true');
   await field
     .locator('xpath=ancestor::form')
     .getByRole('button', { name: 'Save changes', exact: true })
@@ -282,7 +282,7 @@ it('connects a write-only token, updates server and advanced options with acknow
   await check(page.getByText('Changes saved.', { exact: true })).toBeVisible();
   await check(field).toHaveValue('true');
   const advancedField = page.getByLabel('Build without material costs', { exact: true });
-  await advancedField.fill('True');
+  await advancedField.selectOption('True');
   const advancedSave = advancedField
     .locator('xpath=ancestor::form')
     .getByRole('button', { name: 'Save changes', exact: true });
@@ -1348,7 +1348,7 @@ it('keeps advanced edits bound to their original world and avoids native reads w
   });
   await page.goto(`${origin}satisfactory-fixture?settings`);
   const field = page.getByLabel('Build without material costs', { exact: true });
-  await field.fill('True');
+  await field.selectOption('True');
   sessionName = 'Another world';
   await page.evaluate(
     "import('/src/api/client.ts').then(({queryClient}) => queryClient.invalidateQueries({queryKey: ['satisfactory-advanced-settings']}))",
@@ -1426,6 +1426,7 @@ it('replaces a rejected saved token and reports connected only after fresh nativ
     );
     await check(page.getByText('Server API connected.', { exact: true })).toHaveCount(0);
     await check(page.getByText('API credentials saved.', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Replace API token', exact: true }).click();
     const token = page.getByLabel('Application token', { exact: true });
     const save = token
       .locator('xpath=ancestor::form')
@@ -1441,7 +1442,7 @@ it('replaces a rejected saved token and reports connected only after fresh nativ
     releaseNative?.();
     await check(page.getByText('Server API connected.', { exact: true })).toBeVisible();
     await check(page.getByLabel('Autosave interval (seconds)', { exact: true })).toHaveValue('600');
-    await check(token).toHaveValue('');
+    await check(token).toHaveCount(0);
     await check(page.getByRole('alert')).toHaveCount(0);
     expect(writes).toEqual([
       { token: 'rejected-fixture-token' },
@@ -1449,6 +1450,71 @@ it('replaces a rejected saved token and reports connected only after fresh nativ
     ]);
   } finally {
     releaseNative?.();
+    await context.close();
+  }
+});
+
+it('saves Satisfactory installation retry limits and respects the environment lock', async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  let retries = 2;
+  let locked = false;
+  const writes: unknown[] = [];
+  await page.route('**/v1/owner/settings', async (route) => {
+    if (route.request().method() === 'PATCH') {
+      const body = route.request().postDataJSON();
+      writes.push(body);
+      retries = body.satisfactoryInstallationRetries;
+      return route.fulfill({ json: {} });
+    }
+    return route.fulfill({
+      json: {
+        config: {
+          values: { satisfactoryInstallationRetries: retries },
+          lockedKeys: locked ? ['satisfactoryInstallationRetries'] : [],
+        },
+      },
+    });
+  });
+  try {
+    await page.goto(`${origin}satisfactory-fixture?installation-policy`);
+    const field = page.getByRole('spinbutton', { name: 'Automatic retries', exact: true });
+    const save = page.getByRole('button', { name: 'Save changes', exact: true });
+    await check(field).toHaveValue('2');
+    await save.click();
+    await check.poll(() => writes.length).toBe(1);
+    await field.fill('0');
+    await save.click();
+    await check.poll(() => writes.length).toBe(2);
+    await check(field).toHaveValue('0');
+    expect(writes).toEqual([
+      { satisfactoryInstallationRetries: 2 },
+      { satisfactoryInstallationRetries: 0 },
+    ]);
+    expect(
+      (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())
+        .violations,
+    ).toEqual([]);
+    await page.screenshot({
+      path: `${shots}/satisfactory-installation-policy-en.png`,
+      fullPage: true,
+    });
+    locked = true;
+    retries = 2;
+    await page.reload();
+    await check(field).toHaveValue('2');
+    await check(field).toBeDisabled();
+    await check(save).toBeDisabled();
+    await check(
+      page.getByText('These defaults are set by the environment configuration.', { exact: true }),
+    ).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({
+      path: `${shots}/satisfactory-installation-policy-locked-mobile-en.png`,
+      fullPage: true,
+    });
+    expect(writes).toHaveLength(2);
+  } finally {
     await context.close();
   }
 });

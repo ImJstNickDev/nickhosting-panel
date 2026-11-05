@@ -1,4 +1,21 @@
 const messages: Record<string, [string, string]> = {
+  enabled: ['Enabled', 'Attivo'],
+  disabled: ['Disabled', 'Disattivo'],
+  replaceToken: ['Replace API token', 'Sostituisci token API'],
+  'option.saveOnDisconnect': [
+    'Save when a player disconnects',
+    'Salva quando un giocatore si disconnette',
+  ],
+  'option.restartTime': [
+    'Daily restart (minutes after midnight UTC)',
+    'Riavvio giornaliero (minuti dopo mezzanotte UTC)',
+  ],
+  'option.seasonalEvents': ['Seasonal events', 'Eventi stagionali'],
+  'option.networkQuality': ['Network quality', 'Qualità della rete'],
+  'option.weatherPreset': ['Weather preset', 'Condizioni meteo'],
+  'option.noPower': ['Build without power requirements', 'Costruisci senza requisiti energetici'],
+  'option.noFuel': ['Vehicles without fuel costs', 'Veicoli senza consumo di carburante'],
+  'option.disableArachnids': ['Disable arachnid creatures', 'Disattiva creature aracnidi'],
   'advanced.noBuildCost': ['Build without material costs', 'Costruisci senza costi di materiali'],
   advancedNoWorld: [
     'Load or create a world in Worlds to edit its advanced settings.',
