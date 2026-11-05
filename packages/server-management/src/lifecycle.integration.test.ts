@@ -17,6 +17,7 @@ import {
 import type { Kysely } from 'kysely';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { uploadNotPublished } from '../../pterodactyl-adapter/src/upload-dispatch.js';
 import type { BackendAllocationPool } from './allocation-pool.js';
 import { removeFilemanDirectory } from './fileman-directory.js';
 import { createInstallationCollector } from './installation-collector.js';
@@ -3124,6 +3125,261 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     await reconcileManagedServer(f.db, f.serverId, f.options);
     expect(await f.server()).toMatchObject({ runtime_state: 'running' });
     expect(await f.reservation()).toBeDefined();
+  });
+  it('suppresses cached running during a planned mod apply but retains actual new process capacity', async () => {
+    const f = await fixture('satisfactory-content', {
+      satisfactoryContent: { kind: 'mods', mode: 'apply' },
+    });
+    await f.db
+      .updateTable('managed_servers')
+      .set({ installation_state: 'installed', runtime_state: 'offline' })
+      .where('id', '=', f.serverId)
+      .execute();
+    const stopId = randomUUID();
+    const job = await f.db
+      .selectFrom('operation_jobs')
+      .selectAll()
+      .where('id', '=', f.jobId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .insertInto('operation_jobs')
+      .values({
+        ...job,
+        id: stopId,
+        idempotency_key: stopId,
+        command: JSON.stringify(job.command),
+        policy_snapshot: JSON.stringify(job.policy_snapshot),
+        state: 'succeeded',
+        completed_at: f.now(),
+      })
+      .execute();
+    await f.db
+      .insertInto('server_operations')
+      .values({
+        job_id: stopId,
+        server_id: f.serverId,
+        action: 'stop',
+        phase: 'complete',
+        effect_state: 'confirmed',
+        effect_started_at: f.now(),
+        lease_until: null,
+        lease_token: null,
+        plan: JSON.stringify({ stopConfirmed: true, stopConfirmedAt: f.now().toISOString() }),
+      })
+      .execute();
+    f.setState('running');
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.options.verifyObservationHost = vi.fn(async () => {});
+    expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('observed');
+    expect(await f.reservation()).toBeUndefined();
+    expect((await f.server()).runtime_state).toBe('offline');
+    // A delivery changing its operation while proof is in flight invalidates the snapshot.
+    f.options.confirmAlreadyStopped = vi.fn(async () => {
+      await f.db
+        .updateTable('server_operations')
+        .set({
+          plan: JSON.stringify({
+            satisfactoryContent: { kind: 'mods', mode: 'apply' },
+            pollCount: 1,
+          }),
+        })
+        .where('job_id', '=', f.jobId)
+        .execute();
+      return true;
+    });
+    expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('deferred');
+    expect(await f.reservation()).toBeUndefined();
+    // A new process defeats even a recent receipt while Apply is queued.
+    f.options.confirmAlreadyStopped = vi.fn(async () => false);
+    expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('observed');
+    expect(await f.reservation()).toMatchObject({ operation_id: f.jobId, state: 'running' });
+  });
+  it.each(['apply', 'rollback'])(
+    'recovers a same-job mod reservation for %s only after physical proof and preserves offline settlement',
+    async (mode) => {
+      const f = await fixture('satisfactory-content', {
+        satisfactoryContent: { kind: 'mods', mode },
+      });
+      await f.db
+        .updateTable('managed_servers')
+        .set({ installation_state: 'installed' })
+        .where('id', '=', f.serverId)
+        .execute();
+      await f.prepareReservation();
+      f.setState('offline');
+      f.options.verifyObservationHost = vi.fn(async () => {});
+      f.options.confirmAlreadyStopped = vi.fn(async (_id, connection, proof) => {
+        expect(connection.isTransaction).toBe(true);
+        expect((await proof?.providerServer)?.uuid).toBe(f.remote.uuid);
+        expect(await f.reservation()).toBeDefined();
+        return true;
+      });
+      f.options.processGameContent = vi.fn(async () => true);
+      expect(await f.run()).toBe('waiting');
+      expect(await f.reservation()).toBeUndefined();
+      expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
+      expect(f.options.processGameContent).not.toHaveBeenCalled();
+      expect((await f.operation()).plan.waitReason).toBe('offline_confirmation');
+      f.tick();
+      expect(await f.run()).toBe('succeeded');
+      expect(f.options.processGameContent).toHaveBeenCalledOnce();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    'running',
+    'unavailable',
+    'missing-observer',
+    'foreign',
+    'installer',
+    'host',
+    'effect',
+    'phase',
+  ] as const)('retains mod capacity and performs no content mutation for %s', async (failure) => {
+    const f = await fixture('satisfactory-content', {
+      satisfactoryContent: { kind: 'mods', mode: 'apply' },
+    });
+    await f.db
+      .updateTable('managed_servers')
+      .set({ installation_state: 'installed' })
+      .where('id', '=', f.serverId)
+      .execute();
+    await f.prepareReservation();
+    f.setState('offline');
+    f.options.confirmAlreadyStopped = vi.fn(async () => {
+      if (failure === 'unavailable') throw new Error('observer unavailable');
+      return failure !== 'running';
+    });
+    f.options.verifyObservationHost = vi.fn(async () => {
+      if (failure === 'host') throw new DomainError('configuration_invalid');
+    });
+    if (failure === 'missing-observer') f.options.confirmAlreadyStopped = undefined;
+    if (failure === 'foreign')
+      await f.db
+        .updateTable('resource_reservations')
+        .set({ operation_id: randomUUID() })
+        .where('server_id', '=', f.serverId)
+        .execute();
+    if (failure === 'installer') await f.options.reserveInstallation?.(f.serverId, f.jobId, f.db);
+    if (failure === 'effect')
+      await f.db
+        .updateTable('server_operations')
+        .set({ effect_state: 'prepared', effect_started_at: f.now() })
+        .where('job_id', '=', f.jobId)
+        .execute();
+    if (failure === 'phase')
+      await f.db
+        .updateTable('server_operations')
+        .set({ phase: 'content' })
+        .where('job_id', '=', f.jobId)
+        .execute();
+    f.options.processGameContent = vi.fn(async () => true);
+    expect(await f.run()).toBe(failure === 'host' ? 'failed' : 'waiting');
+    expect(await f.reservation()).toBeDefined();
+    expect(f.options.processGameContent).not.toHaveBeenCalled();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it('defers a proven rejected mod upload throttle and resumes only after its durable deadline', async () => {
+    const f = await fixture('satisfactory-content', {
+      satisfactoryContent: { kind: 'mods', mode: 'apply' },
+      recoveryReceipt: 'preserved',
+    });
+    f.setState('offline');
+    let sends = 0;
+    f.options.processGameContent = async (context) => {
+      await context.effect('satisfactory.mods.upload.6', async () => {
+        if (++sends === 1)
+          throw uploadNotPublished(
+            new PterodactylError('rate_limited', 'client', 'rejected', 429, 60_000),
+          );
+      });
+      return true;
+    };
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    expect(sends).toBe(1);
+    const waiting = await f.operation();
+    expect(waiting.effect_state).toBe('none');
+    expect(waiting.plan).toMatchObject({
+      rejected: false,
+      waitReason: 'provider_rate_limited',
+      recoveryReceipt: 'preserved',
+      effectAttempts: { 'satisfactory.mods.upload.6': 1 },
+    });
+    expect(Date.parse(String(waiting.plan.providerPreflightRetryAt))).toBe(
+      f.now().getTime() + 60_000,
+    );
+    f.tick(30_000);
+    expect(await f.run()).toBe('deferred');
+    expect(sends).toBe(1);
+    f.tick(31_000);
+    expect(await f.run()).toBe('succeeded');
+    expect(sends).toBe(2);
+  });
+  it('bounds proven rejected mod upload throttles by the durable per-file effect budget', async () => {
+    const f = await fixture('satisfactory-content', {
+      satisfactoryContent: { kind: 'mods', mode: 'apply' },
+    });
+    f.setState('offline');
+    let sends = 0;
+    f.options.processGameContent = async (context) => {
+      await context.effect('satisfactory.mods.upload.2', async () => {
+        sends++;
+        throw uploadNotPublished(
+          new PterodactylError('rate_limited', 'client', 'rejected', 429, 1),
+        );
+      });
+      return true;
+    };
+    expect(await f.run()).toBe('waiting');
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      f.tick();
+      expect(await f.run()).toBe(attempt < 3 ? 'waiting' : 'failed');
+    }
+    expect(sends).toBe(3);
+    expect((await f.operation()).plan.effectAttempts).toEqual({ 'satisfactory.mods.upload.2': 3 });
+    expect(await f.run()).toBe('duplicate');
+  });
+  it.each(['unmarked', 'unknown'] as const)(
+    'does not retry %s mod upload throttling as proven non-publication',
+    async (kind) => {
+      const f = await fixture('satisfactory-content', {
+        satisfactoryContent: { kind: 'mods', mode: 'apply' },
+      });
+      f.setState('offline');
+      const send = vi.fn(async () => {
+        throw new PterodactylError(
+          'rate_limited',
+          'client',
+          kind === 'unknown' ? 'unknown' : 'rejected',
+          429,
+          60_000,
+        );
+      });
+      f.options.processGameContent = async (context) => {
+        await context.effect('satisfactory.mods.upload.2', send);
+        return true;
+      };
+      expect(await f.run()).toBe('waiting');
+      f.tick();
+      expect(await f.run()).toBe(kind === 'unknown' ? 'waiting' : 'failed');
+      expect(send).toHaveBeenCalledOnce();
+      expect((await f.operation()).plan.providerPreflightRetryAt).toBeUndefined();
+      if (kind === 'unknown')
+        expect((await f.operation()).plan.waitReason).toBe('remote_outcome_unknown');
+    },
+  );
+  it('never uses mod upload throttling proof to replay a rejected power command', async () => {
+    const f = await fixture('start');
+    f.setState('offline');
+    f.adapter.power.mockRejectedValue(
+      uploadNotPublished(new PterodactylError('rate_limited', 'client', 'rejected', 429, 60_000)),
+    );
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.power).toHaveBeenCalledOnce();
+    expect((await f.operation()).plan.providerPreflightRetryAt).toBeUndefined();
+    expect(await f.run()).toBe('duplicate');
   });
   it('does not suppress a current observation using an expired stop receipt', async () => {
     const f = await fixture('stop');

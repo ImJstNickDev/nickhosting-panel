@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createTestDatabase } from '@nickhosting/database/testing';
-import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
+import { type PterodactylAdapter, PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { satisfactoryManifest } from '../../../games/satisfactory/src/manifest.js';
 import { prepareSatisfactoryMods } from '../../../games/satisfactory/src/mods.js';
@@ -149,6 +149,12 @@ beforeEach(async () => {
       async (_id: string, path: string, input: { body: ReadableStream<Uint8Array> }) => {
         files.set(path, Buffer.from(await new Response(input.body).arrayBuffer()));
       },
+    ),
+    prepareUploadBatch: vi.fn(async () => null),
+    prepareUpload: vi.fn(
+      async (identifier: string, path: string) =>
+        (input: Parameters<PterodactylAdapter['uploadFile']>[2]) =>
+          adapter.uploadFile(identifier, path, input),
     ),
     createDirectory: vi.fn(async (_id: string, parent: string, name: string) => {
       directories.add(parent ? `${parent}/${name}` : name);
@@ -470,6 +476,32 @@ it.each(['server', 'build', 'plan', 'job'])(
     ).toEqual([]);
   },
 );
+it('defers throttled grants without uploads then resumes the same prepared apply', async () => {
+  const planId = await preview();
+  const apply = await context({ mode: 'apply', revision: 0, planId });
+  vi.mocked(adapter.prepareUploadBatch).mockRejectedValueOnce(
+    new PterodactylError('rate_limited', 'client', 'rejected', 429, 60_000),
+  );
+  expect(await processSatisfactoryMods(apply, env)).toBe(false);
+  expect(adapter.uploadFile).not.toHaveBeenCalled();
+  expect(apply.operation().plan.providerPreflightRetryAt).toEqual(expect.any(String));
+  expect(apply.operation().plan.satisfactoryModsApplying).toBe(true);
+  expect(
+    await f.db
+      .selectFrom('satisfactory_mod_states')
+      .select(['revision', 'recovery'])
+      .where('server_id', '=', id)
+      .executeTakeFirstOrThrow(),
+  ).toMatchObject({
+    revision: 0,
+    recovery: expect.objectContaining({ jobId: apply.operation().job_id }),
+  });
+  expect(await processSatisfactoryMods(apply, env)).toBe(true);
+  expect(files.get('FactoryGame/Mods/Example/binary.so')?.toString()).toBe('binary-2.0.0');
+  expect(prepareSatisfactoryMods).toHaveBeenCalledOnce();
+  await complete(apply);
+});
+
 it('previews without remote writes then applies frozen artifacts and restores original bytes on rollback', async () => {
   const planId = await preview();
   expect(adapter.uploadFile).not.toHaveBeenCalled();

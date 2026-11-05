@@ -13,6 +13,8 @@ import { parseCommand, processJob } from '@nickhosting/jobs';
 import {
   type ApplicationServer,
   type BuildUpdate,
+  isUploadNotDispatched,
+  isUploadNotPublished,
   type PterodactylAdapter,
   PterodactylError,
   limitsSchema as providerLimitsSchema,
@@ -291,6 +293,21 @@ const installed = (remote: ApplicationServer) =>
   !remote.status && (remote.container.installed === true || remote.container.installed === 1);
 const installationPending = (remote: ApplicationServer) =>
   remote.status === 'installing' || !remote.container.installed;
+/** Only pre-effect mod mutations can own a reservation recreated by reconciliation. */
+const pendingSatisfactoryMods = (
+  operation: Pick<Operation, 'action' | 'phase' | 'effect_state' | 'plan'>,
+) => {
+  const content = operation.plan.satisfactoryContent as
+    | { kind?: string; mode?: string }
+    | undefined;
+  return (
+    operation.action === 'satisfactory-content' &&
+    operation.phase === 'planned' &&
+    operation.effect_state === 'none' &&
+    content?.kind === 'mods' &&
+    ['apply', 'rollback'].includes(content.mode ?? '')
+  );
+};
 const nowOf = (options: LifecycleOptions) => options.now?.() ?? new Date();
 const settleOf = (options: LifecycleOptions) => options.settleMs ?? 21_000;
 
@@ -1049,6 +1066,7 @@ export async function processServerOperation(
       (operation.plan.satisfactoryContent as { mode?: string }).mode === 'preview';
     let previewSourceVerified = false;
     let providerFileEffects = false;
+    let modUploadRetryDelay: number | null = null;
     let worldSelectionReadAuthorized = false;
     // Reuse this delivery's identity for game file operations. Metadata edits
     // share the browsing proof; long staging refreshes it.
@@ -1084,6 +1102,116 @@ export async function processServerOperation(
           await measure('reservation', () => assertQuiescentReservation(tx));
         }),
       );
+    };
+    const recoverModReservation = async (): Promise<boolean> => {
+      const reserved = await db
+        .selectFrom('resource_reservations')
+        .select('operation_id')
+        .where('server_id', '=', server.id)
+        .executeTakeFirst();
+      if (!reserved) return true;
+      if (reserved.operation_id !== jobId || !options.confirmAlreadyStopped) return false;
+      // Lifecycle already holds the server advisory lock. Match admission's row
+      // lock order and pin host/provider configuration while proving quiescence.
+      return db.transaction().execute(async (tx) => {
+        await lockResources(tx);
+        const node = await tx
+          .selectFrom('managed_nodes')
+          .selectAll()
+          .where('id', '=', server.node_id)
+          .forShare()
+          .executeTakeFirstOrThrow();
+        await tx
+          .selectFrom('physical_hosts')
+          .select('id')
+          .where('id', '=', node.physical_host_id)
+          .forUpdate()
+          .executeTakeFirstOrThrow();
+        await tx
+          .selectFrom('user')
+          .select('id')
+          .where('id', '=', server.owner_id)
+          .forUpdate()
+          .executeTakeFirstOrThrow();
+        const fresh = await tx
+          .selectFrom('managed_servers')
+          .selectAll()
+          .where('id', '=', server.id)
+          .forUpdate()
+          .executeTakeFirstOrThrow();
+        const current = await tx
+          .selectFrom('server_operations')
+          .selectAll()
+          .where('job_id', '=', jobId)
+          .forUpdate()
+          .executeTakeFirstOrThrow();
+        const reservation = await tx
+          .selectFrom('resource_reservations')
+          .selectAll()
+          .where('server_id', '=', server.id)
+          .forUpdate()
+          .executeTakeFirst();
+        if (!reservation) return true;
+        if (
+          fresh.deleted_at ||
+          fresh.active_operation_id !== jobId ||
+          fresh.node_id !== server.node_id ||
+          fresh.owner_id !== server.owner_id ||
+          fresh.installation_state !== 'installed' ||
+          current.lease_token !== token ||
+          !pendingSatisfactoryMods(current) ||
+          reservation.operation_id !== jobId ||
+          reservation.physical_host_id !== node.physical_host_id ||
+          (await tx
+            .selectFrom('installation_reservations')
+            .select('server_id')
+            .where('server_id', '=', server.id)
+            .executeTakeFirst())
+        )
+          return false;
+        await tx
+          .selectFrom('server_allocations')
+          .select('id')
+          .where('server_id', '=', server.id)
+          .forShare()
+          .execute();
+        await tx
+          .selectFrom('platform_settings')
+          .select('key')
+          .where('key', '=', 'platform')
+          .forShare()
+          .execute();
+        await tx
+          .selectFrom('encrypted_secrets')
+          .select('name')
+          .where('name', '=', 'pterodactylApplicationKey')
+          .forShare()
+          .execute();
+        await tx
+          .selectFrom('provider_accounts')
+          .select('user_id')
+          .where('user_id', '=', fresh.owner_id)
+          .forShare()
+          .execute();
+        const remote = await ownedRemote(tx, fresh, options);
+        if (!installed(remote)) return false;
+        const observerPreflight = options.verifyObservationHost?.(server.id, tx);
+        await observerPreflight;
+        if (
+          !(await options.confirmAlreadyStopped?.(server.id, tx, {
+            providerServer: Promise.resolve(remote),
+            observerPreflight,
+          }))
+        )
+          return false;
+        await tx
+          .deleteFrom('resource_reservations')
+          .where('server_id', '=', server.id)
+          .where('operation_id', '=', jobId)
+          .execute();
+        await event('servers.operation.stop_confirmed', { source: 'content_quiescence' }, tx);
+        return true;
+      });
     };
     const confirmWorldSelectionStopped = () =>
       trace('stop.final', async () => {
@@ -1373,7 +1501,41 @@ export async function processServerOperation(
       try {
         result = await timed('provider_effect', () => perform(verifiedServer));
       } catch (error) {
-        if (error instanceof PterodactylError && error.outcome === 'rejected') {
+        const modContent = operation.plan.satisfactoryContent as
+          | { kind?: string; mode?: string }
+          | undefined;
+        if (
+          operation.action === 'satisfactory-content' &&
+          modContent?.kind === 'mods' &&
+          ['apply', 'rollback'].includes(modContent.mode ?? '') &&
+          /^satisfactory\.mods\.upload\.\d+$/.test(phase) &&
+          error instanceof PterodactylError &&
+          error.reason === 'rate_limited' &&
+          error.outcome === 'rejected' &&
+          (isUploadNotPublished(error) || isUploadNotDispatched(error)) &&
+          attempt < job.max_attempts
+        ) {
+          // Only adapter-proven non-publication may retry. The next delivery
+          // rechecks destination hashes and resumes the existing receipt; it
+          // never replays an uncertain upload body or a power effect.
+          modUploadRetryDelay =
+            error.retryAfterMs !== undefined &&
+            Number.isFinite(error.retryAfterMs) &&
+            error.retryAfterMs >= 0
+              ? error.retryAfterMs
+              : 60_000;
+          await update({
+            effect_state: 'none',
+            plan: {
+              ...operation.plan,
+              rejected: false,
+              rejectionCode: undefined,
+              providerPreflightRetryAt: new Date(
+                nowOf(options).getTime() + modUploadRetryDelay,
+              ).toISOString(),
+            },
+          });
+        } else if (error instanceof PterodactylError && error.outcome === 'rejected') {
           await update({
             effect_state: 'none',
             plan: { ...operation.plan, rejected: true, rejectionCode: safeError(error).code },
@@ -3008,6 +3170,8 @@ export async function processServerOperation(
           throw new DomainError('operation_uncertain');
         previewSourceVerified = true;
       } else if (!onlineWorldContent && !metadataContent) {
+        if (pendingSatisfactoryMods(operation) && !(await recoverModReservation()))
+          return wait('offline_confirmation', 'operation_uncertain');
         await requireQuiescentReservation();
         if (!(await offline())) return wait('offline_confirmation');
       }
@@ -3356,6 +3520,8 @@ export async function processServerOperation(
         }
       }
       const code = safeError(error).code;
+      if (modUploadRetryDelay !== null)
+        return wait('provider_rate_limited', code, modUploadRetryDelay);
       if (
         error instanceof DomainError &&
         error.code === 'configuration_invalid' &&
@@ -3542,6 +3708,9 @@ function reconciliationSnapshot(db: Kysely<Database>, serverId: string) {
     (select node.xmin::text from managed_nodes node where node.id = server.node_id),
     (select host.xmin::text from physical_hosts host join managed_nodes node on node.physical_host_id = host.id where node.id = server.node_id),
     (select jsonb_agg(jsonb_build_array(allocation.id, allocation.xmin::text) order by allocation.id) from server_allocations allocation where allocation.server_id = server.id),
+    (select jsonb_build_array(operation.xmin::text, job.xmin::text)
+      from server_operations operation join operation_jobs job on job.id = operation.job_id
+      where operation.job_id = server.active_operation_id and operation.server_id = server.id),
     (select reservation.xmin::text from resource_reservations reservation where reservation.server_id = server.id),
     (select reservation.xmin::text from installation_reservations reservation where reservation.server_id = server.id),
     (select jsonb_build_array(operation.job_id, operation.xmin::text, job.xmin::text)
@@ -3706,10 +3875,31 @@ export async function reconcileManagedServer(
       }
     }
   }
+  const activeModOperation =
+    server.active_operation_id &&
+    current.current_state !== 'offline' &&
+    server.runtime_state === 'offline'
+      ? await db
+          .selectFrom('server_operations')
+          .select(['action', 'phase', 'effect_state', 'plan'])
+          .where('job_id', '=', server.active_operation_id)
+          .where('server_id', '=', server.id)
+          .executeTakeFirst()
+      : undefined;
+  const activeStoppedMods =
+    activeModOperation &&
+    pendingSatisfactoryMods(activeModOperation) &&
+    server.installation_state === 'installed' &&
+    installed(remote) &&
+    !(await db
+      .selectFrom('installation_reservations')
+      .select('server_id')
+      .where('server_id', '=', server.id)
+      .executeTakeFirst());
   if (
     current.current_state !== 'offline' &&
     server.runtime_state === 'offline' &&
-    !server.active_operation_id &&
+    (!server.active_operation_id || activeStoppedMods) &&
     options.confirmAlreadyStopped
   ) {
     const latestPower = await db

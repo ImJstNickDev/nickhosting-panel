@@ -1514,3 +1514,99 @@ Format references: [Epic configuration files](https://dev.epicgames.com/document
 [SML descriptor fields](https://docs.ficsit.app/satisfactory-modding/latest/Development/BeginnersGuide/ReleaseMod.html).
 Profile and lock projections follow the existing `mods-profile.ts` / `mods.ts`
 contracts; native SMM import/install behavior is unchanged.
+
+
+### Mod apply after a confirmed stop — stale resource reservation
+
+An Owner-reported mod apply could remain in `planned` indefinitely: after a
+confirmed stop, reconciliation re-imported a cached running resource sample while
+the content job was active. The resulting same-job resource reservation prevented
+the apply from reaching its offline check, while normal reconciliation retained
+capacity during active operations. The generic wait reason obscured this as
+provider unavailability; repeated deliveries could also encounter provider limits.
+
+The fix is restricted to pre-effect Satisfactory mod apply/rollback. Recovery must
+retain the existing physical-stop and ownership proofs, installation exclusion and
+resource/server locking. It must never release another operation's reservation or
+interpret cached offline resources alone as permission to write game files.
+
+
+Recovery now pins admission, host/provider identity, installation state and the
+same-job reservation under the established locks, proves physical quiescence,
+and releases only that reservation. Existing offline settlement and per-file
+stopped checks remain mandatory. Recent confirmed-stop suppression also covers
+planned mod operations; active operation/job MVCC revisions prevent applying a
+proof after a concurrent transition. A real new process defeats suppression.
+Proof refusal uses the existing offline-confirmation wait rather than treating a
+retained reservation as provider unavailability.
+
+Validation: 13 focused isolated lifecycle tests (11 new, 2 existing) cover apply
+and rollback, stale-running prevention, concurrent operation changes, actual
+running processes, unavailable/missing observers, foreign/installer reservations,
+invalid host proof and post-effect/non-planned exclusion. Full typecheck, lint and
+runtime build pass (existing lint warnings). Independent safety review passed.
+No frontend behavior or schema change; no new infrastructure or test game assets.
+
+The development worker was stopped during implementation and restarted after
+checks under standing Owner authorization. The existing Owner-requested apply job
+resumes through the ordinary lifecycle; no manual reservation deletion or job
+rewrite. No Pterodactyl/Wings/Blueprint configuration change. Rollback reverts the
+application code after settling active jobs; installed mod files are not undone
+by a code rollback and retain the existing mod recovery pipeline.
+
+
+The resumed live job exposed a second failure during per-file upload. Satisfactory
+now reuses Fileman's existing batch upload grant/cache path (windows of at most
+500, one disposable group per delivery), including expiry renewal and native
+fallback. Grant acquisition precedes the file effect: a provider rate limit there
+persists its retry deadline without replaying any file body. Publication uncertainty
+still uses existing recovery. Hash verification, private staging, permissions and
+physical-stop checks remain unchanged. Sanitized failure diagnostics record stage,
+index and provider status/reason, never signed URLs, tokens or file content.
+The original upload failure had only a generic error code, so its exact upstream
+status is not claimed retrospectively.
+
+
+Upload validation: 11 focused unit tests and 32 isolated mod-worker integration
+tests pass, including grant expiry/window limits, native fallback, rejected
+admission, unknown-publication non-replay and resuming a prepared apply after grant
+throttling. Typecheck, lint and runtime build pass; independent upload review passed.
+The failed live attempt is restored via the existing rollback endpoint, followed
+by a new preview/apply for the original selection. All commands retain current
+actor/session validation and normal lifecycle authorization; no terminal-job reset
+or host-filesystem edit is used.
+
+
+The live batch check also reproduced Wings returning HTTP 500 for missing future
+parent directories. Batch windows now establish every required parent through the
+existing authorized/stopped mkdir effects before permission/grant lookup. No 500
+is treated as absence. Destination hashes are rechecked after window preparation
+to reject intervening external edits. Regression tests explicitly reproduce this
+missing-directory response and verify no directory writes when the process starts.
+
+The next live attempt identified a native rename HTTP 429 during publication of a
+new file. The adapter now waits for the provider cooldown, reauthorizes and removes
+only its own completed temporary upload before issuing trusted non-publication
+proof. Failed cleanup, lost responses, replacement publication and authorization
+failure remain uncertain and cannot trigger an automatic body replay. The existing
+Satisfactory file-effect retry budget accepts only this proof or proven
+non-dispatch; generic 429 and power effects are excluded. Five lifecycle and 22
+adapter publication tests pass, including positive cooldown and failed cleanup.
+The combined focused validation covers 83 tests; final typecheck, lint and runtime
+build pass. Independent review passed for all three layers.
+
+A temporary upload left by the old failed publication was removed through the
+existing authorized Fileman cleanup adapter only after exact server, stopped
+process, failed job, file metadata and SHA-256 receipt checks. Its absence was
+confirmed before ordinary rollback/preview/apply. No wildcard cleanup, database
+job reset, game power request or Pterodactyl/Wings patch was performed.
+
+Live acceptance completed on the Owner-requested server: ordinary rollback,
+preview and apply all succeeded. The original selection resolved to PEP_Mod 1.1.4
+and SML 3.12.0; all 76 planned files passed the final inventory/hash check and the
+managed mod revision advanced with no recovery pending. A real publication 429
+was recovered automatically without a terminal failure. The server remained
+offline with no active operation; API, worker, Gateway and Vite are healthy.
+No in-game startup or multiplayer compatibility test is claimed. The apply still
+incurs repeated directory/identity checks and provider cooldowns; reducing that
+request amplification is a separate performance follow-up, not a failed install.

@@ -6,6 +6,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { DomainError } from '@nickhosting/core';
 import { getSettings } from '@nickhosting/database';
+import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import { sql } from 'kysely';
 import { z } from 'zod';
 import {
@@ -22,6 +23,7 @@ import {
 } from '../../../games/satisfactory/src/mods-limits.js';
 import { diffSatisfactoryMods } from '../../../games/satisfactory/src/mods-plan.js';
 import { contentStorageRoot, reserveContentStaging } from './content-admission.js';
+import { createUploadUrlCache } from './file-upload-urls.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import {
   ensureSatisfactoryModState,
@@ -720,11 +722,32 @@ export async function processSatisfactoryMods(
       .execute();
     await context.update({ plan: { ...context.operation().plan, satisfactoryModsApplying: true } });
   }
-  for (let index = 0; index < receipt.files.length; index++) {
-    const file = receipt.files[index]!;
-    // Unchanged files need no mutation. The final fresh full fingerprint still
-    // detects any external change after the initial scan.
-    if (initialByPath.get(file.path)?.sha256 === file.sha256) continue;
+  // Reuse Fileman's disposable bulk credentials, never persist signed URLs.
+  // The window bounds provider work even for very large mod trees. Each body
+  // still has its own stopped/authorization/effect and publication guards.
+  const uploadUrls = createUploadUrlCache(Date.now, 1);
+  const uploadKey = context.operation().job_id;
+  const authorizeUpload = async () => {
+    await context.authorize();
+    await context.assertStopped();
+  };
+  const uploadFailure = (stage: 'grant' | 'publication', index: number, error: unknown) => {
+    context.logger?.log('warn', 'satisfactory.mods_upload_failed', {
+      jobId: context.operation().job_id,
+      serverId: context.server.id,
+      stage,
+      index,
+      ...(error instanceof PterodactylError
+        ? {
+            reason: error.reason,
+            scope: error.scope,
+            outcome: error.outcome,
+            upstreamStatus: error.upstreamStatus,
+          }
+        : { reason: error instanceof DomainError ? error.code : 'unknown' }),
+    });
+  };
+  const ensureUploadDirectories = async (file: z.infer<typeof fileSchema>, index: number) => {
     const parts = file.path.split('/');
     for (let depth = 0; depth < parts.length - 1; depth++) {
       const parent = parts.slice(0, depth).join('/'),
@@ -741,6 +764,13 @@ export async function processSatisfactoryMods(
           await context.adapter.createDirectory(identifier, parent, name);
         });
     }
+  };
+  for (let index = 0; index < receipt.files.length; index++) {
+    const file = receipt.files[index]!;
+    // Unchanged files need no mutation. The final fresh full fingerprint still
+    // detects any external change after the initial scan.
+    if (initialByPath.get(file.path)?.sha256 === file.sha256) continue;
+    await ensureUploadDirectories(file, index);
     const old = oldByPath.get(file.path);
     const actual = await readHash(file.path, Math.max(file.size, old?.size ?? 0));
     if (actual === file.sha256) continue;
@@ -752,20 +782,75 @@ export async function processSatisfactoryMods(
     const stagedHash = createHash('sha256');
     for await (const chunk of createReadStream(staged)) stagedHash.update(chunk);
     if (stagedHash.digest('hex') !== file.sha256) throw new DomainError('operation_uncertain');
-    await context.effect(`satisfactory.mods.upload.${index}`, async () => {
-      await context.authorize();
-      await context.assertStopped();
-      await context.adapter.uploadFile(identifier, file.path, {
-        body: Readable.toWeb(createReadStream(staged, { highWaterMark: 65536 }), {
-          strategy: { highWaterMark: 65536, size: (chunk: Buffer) => chunk.byteLength },
-        }) as ReadableStream<Uint8Array>,
-        contentLength: file.size,
-        maxBytes: file.size,
-        authorize: async () => {
-          await context.authorize();
-          await context.assertStopped();
-        },
+    const ticket = { id: file.path, path: `/${file.path}` };
+    let send = await uploadUrls.take(uploadKey, ticket);
+    const pending =
+      send === undefined
+        ? receipt.files
+            .slice(index, index + 500)
+            .map((item, offset) => ({ file: item, index: index + offset }))
+            .filter((item) => initialByPath.get(item.file.path)?.sha256 !== item.file.sha256)
+        : [];
+    // Bulk preparation inspects every destination's permissions. Establish all
+    // parent directories first: native Wings can report missing directories as
+    // 500, which must never be reinterpreted as absence. Keep mkdir effects
+    // outside grant retry handling and preserve their original file indices.
+    for (const item of pending) await ensureUploadDirectories(item.file, item.index);
+    try {
+      if (send === undefined) {
+        await uploadUrls.warm(
+          uploadKey,
+          pending.map(({ file }) => ({ id: file.path, path: `/${file.path}` })),
+          (paths) =>
+            context.adapter.prepareUploadBatch(identifier, paths, { authorize: authorizeUpload }),
+          file.path,
+        );
+        send = await uploadUrls.take(uploadKey, ticket);
+      }
+      if (send === undefined) throw new DomainError('integration_unavailable');
+      send ??= await context.adapter.prepareUpload(identifier, file.path, {
+        authorize: authorizeUpload,
       });
+    } catch (error) {
+      uploadFailure('grant', index, error);
+      // Grant preparation cannot have published game bytes. Honor provider
+      // throttling before entering an effect; never replay an uncertain body.
+      if (error instanceof PterodactylError && error.reason === 'rate_limited') {
+        const delay =
+          error.retryAfterMs !== undefined &&
+          Number.isFinite(error.retryAfterMs) &&
+          error.retryAfterMs >= 0
+            ? error.retryAfterMs
+            : 60_000;
+        await context.update({
+          plan: {
+            ...context.operation().plan,
+            providerPreflightRetryAt: new Date(Date.now() + delay).toISOString(),
+          },
+        });
+        return false;
+      }
+      throw error;
+    }
+    // Window preparation may have performed several directory operations.
+    // Recheck ownership after that work before publishing the current file.
+    if ((await readHash(file.path, Math.max(file.size, old?.size ?? 0))) !== actual)
+      throw new DomainError('conflict');
+    await context.effect(`satisfactory.mods.upload.${index}`, async () => {
+      await authorizeUpload();
+      try {
+        await send({
+          body: Readable.toWeb(createReadStream(staged, { highWaterMark: 65536 }), {
+            strategy: { highWaterMark: 65536, size: (chunk: Buffer) => chunk.byteLength },
+          }) as ReadableStream<Uint8Array>,
+          contentLength: file.size,
+          maxBytes: file.size,
+          authorize: authorizeUpload,
+        });
+      } catch (error) {
+        uploadFailure('publication', index, error);
+        throw error;
+      }
     });
     // Managed Apply/rollback verify the entire resulting tree once before commit.
     // Legacy dispatch has no final inventory and retains per-file verification.

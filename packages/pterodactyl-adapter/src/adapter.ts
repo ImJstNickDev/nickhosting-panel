@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 import { allocationInventory } from './allocations.js';
@@ -272,6 +273,51 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         await adapter.renameFiles(identifier, '', [{ from: temporary, to: normalized }]);
       }
     } catch (error) {
+      if (
+        publishing &&
+        !exists &&
+        transferCompleted &&
+        error instanceof PterodactylError &&
+        error.reason === 'rate_limited' &&
+        error.outcome === 'rejected' &&
+        error.upstreamStatus === 429
+      ) {
+        // Native rename was conclusively rejected before publication. The body
+        // writer has finished, but its unique sibling must be removed before a
+        // caller may retry the file. Honor the shared client cooldown first;
+        // an immediate delete would hit that same limiter and leak the stage.
+        const waitMs = Math.min(
+          300_000,
+          Math.max(
+            0,
+            Number.isFinite(error.retryAfterMs) ? (error.retryAfterMs as number) : 60_000,
+          ),
+        );
+        const retryAt = Date.now() + waitMs;
+        try {
+          await delay(waitMs, undefined, { signal: body.signal });
+          body.signal?.throwIfAborted();
+          await body.authorize?.();
+          body.signal?.throwIfAborted();
+          await transport.empty('client', `${clientServer(identifier)}/files/delete`, 'POST', {
+            root: '/',
+            files: [temporary],
+          });
+        } catch {
+          // No cleanup receipt or no current authority: preserve the stage and
+          // uncertainty, never claim that a new upload is safe to dispatch.
+          throw new PterodactylError('unavailable', 'client', 'unknown');
+        }
+        throw uploadNotPublished(
+          new PterodactylError(
+            error.reason,
+            error.scope,
+            'rejected',
+            error.upstreamStatus,
+            Math.max(0, retryAt - Date.now()),
+          ),
+        );
+      }
       if (publishing || (!prepared && isUploadNotDispatched(error))) throw error;
       // A lost response can leave a writer still running upstream. Deleting an
       // apparently absent stage cannot prove that it will not be created later.
