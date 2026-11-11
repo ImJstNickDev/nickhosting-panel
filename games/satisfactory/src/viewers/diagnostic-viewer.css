@@ -1,0 +1,34 @@
+.satisfactory-diagnostic-viewer {
+  padding: 1.5rem;
+  overflow: auto;
+}
+.satisfactory-diagnostic-viewer dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+  gap: 1.5rem;
+  margin: 0;
+}
+.satisfactory-diagnostic-viewer dt {
+  font-size: 0.85rem;
+  opacity: 0.75;
+  margin-bottom: 0.35rem;
+}
+.satisfactory-diagnostic-viewer dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.satisfactory-diagnostic-viewer h3 {
+  font-size: 1rem;
+  margin: 0 0 1rem;
+}
+.satisfactory-diagnostic-viewer section + section {
+  border-top: 1px solid var(--line);
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+}
+@media (max-width: 600px) {
+  .satisfactory-diagnostic-viewer {
+    padding: 1rem;
+  }
+}

@@ -16,6 +16,8 @@ describe('Satisfactory Fileman presentation', () => {
     expect(satisfactoryFileKind('Factory.smmprofile')).toBe('modManifest');
     expect(satisfactoryFileKind('profiles.json')).toBe('modManifest');
     expect(satisfactoryFileKind('private_key.pem')).toBeUndefined();
+    expect(satisfactoryFileKind('CrashContext.runtime-xml')).toBe('crash');
+    expect(satisfactoryFileKind('cert_chain.pem')).toBe('certificate');
     expect(satisfactoryFileKind('notes.json')).toBeUndefined();
     expect(satisfactoryFileKind('world.sav.bak')).toBeUndefined();
   });
@@ -25,6 +27,7 @@ describe('Satisfactory Fileman presentation', () => {
       'mods',
       'configuration',
       'logs',
+      'crashes',
     ]);
     expect(
       satisfactoryFileLocations.every(

@@ -1,3 +1,4 @@
+import { isCertificateName, isCrashContextName } from './viewers/diagnostic-names.js';
 import { satisfactorySaveDirectory } from './world-paths.js';
 
 /** Native server settings use Unreal GVAS, not the world-save header format. */
@@ -12,6 +13,8 @@ export function satisfactoryFileKind(name: string) {
   if (value.endsWith('.sbp') || value.endsWith('.sbpcfg')) return 'blueprint';
   if (value.endsWith('.ini')) return 'configuration';
   if (value.endsWith('.log')) return 'log';
+  if (isCrashContextName(name)) return 'crash';
+  if (isCertificateName(name)) return 'certificate';
   if (
     value.endsWith('.uplugin') ||
     value.endsWith('.smmprofile') ||
@@ -28,4 +31,5 @@ export const satisfactoryFileLocations = [
   { id: 'mods', path: 'FactoryGame/Mods' },
   { id: 'configuration', path: 'FactoryGame/Saved/Config' },
   { id: 'logs', path: 'FactoryGame/Saved/Logs' },
+  { id: 'crashes', path: 'FactoryGame/Saved/Crashes' },
 ] as const;

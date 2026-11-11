@@ -416,6 +416,9 @@ importers:
       '@nickhosting/game-sdk':
         specifier: workspace:*
         version: link:../../packages/game-sdk
+      '@peculiar/x509':
+        specifier: 1.14.3
+        version: 1.14.3
       semver:
         specifier: 7.8.5
         version: 7.8.5

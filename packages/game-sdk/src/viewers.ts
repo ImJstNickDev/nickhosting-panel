@@ -23,6 +23,11 @@ export interface GameViewerHost {
   /** Bounded prefix of the selected source; no arbitrary filesystem authority.
    * Shared metadata bytes are read-only: compiled viewers must not mutate them. */
   readPrefix?(maxBytes: number, signal: AbortSignal): Promise<Uint8Array<ArrayBuffer>>;
+  /** Fresh revision-bound tail of the selected physical file. */
+  readTail?(
+    maxBytes: number,
+    signal: AbortSignal,
+  ): Promise<{ bytes: Uint8Array<ArrayBuffer>; truncated: boolean }>;
   t(key: string, values?: Record<string, string | number>): string;
   /** Bounded reads of the currently selected container; authority stays with Fileman. */
   archive: {
@@ -51,7 +56,7 @@ export const gameViewerDescriptorSchema = z
       .array(
         z
           .string()
-          .regex(/^[a-z0-9]+(?:\.[a-z0-9]+)*$/)
+          .regex(/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/)
           .max(32),
       )
       .min(1)

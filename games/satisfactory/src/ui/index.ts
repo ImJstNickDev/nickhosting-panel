@@ -1,3 +1,6 @@
+import { diagnosticViewerCatalog } from '../viewers/diagnostic-catalog.js';
+import { satisfactoryLogCatalogs } from '../viewers/log-catalog.js';
+
 export { satisfactoryFileKind, satisfactoryFileLocations } from '../fileman.js';
 export {
   formatSaveMetadataValue,
@@ -88,6 +91,8 @@ export const satisfactoryUiCatalogs = {
   en: {
     ...baseCatalogs.en,
     ...satisfactoryViewerCatalogs.en,
+    ...diagnosticViewerCatalog.en,
+    ...satisfactoryLogCatalogs.en,
     ...satisfactoryIniCatalogs.en,
     ...satisfactoryManifestCatalogs.en,
     ...satisfactoryOverviewCatalogs.en,
@@ -98,6 +103,8 @@ export const satisfactoryUiCatalogs = {
   it: {
     ...baseCatalogs.it,
     ...satisfactoryViewerCatalogs.it,
+    ...diagnosticViewerCatalog.it,
+    ...satisfactoryLogCatalogs.it,
     ...satisfactoryIniCatalogs.it,
     ...satisfactoryManifestCatalogs.it,
     ...satisfactoryOverviewCatalogs.it,

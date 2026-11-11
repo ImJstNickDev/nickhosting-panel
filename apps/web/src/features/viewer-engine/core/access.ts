@@ -28,18 +28,38 @@ export async function readViewerBytes(
   signal: AbortSignal,
   prefixSize?: number,
   headers?: Record<string, string>,
+  byteRange?: { start: number; end: number; total: number },
 ): Promise<Uint8Array<ArrayBuffer>> {
   const response = await fetch(safeApiPath(url), {
     credentials: 'same-origin',
     redirect: 'error',
     signal,
-    ...(prefixSize || headers
-      ? { headers: { ...headers, ...(prefixSize ? { Range: `bytes=0-${prefixSize - 1}` } : {}) } }
+    ...(prefixSize || headers || byteRange
+      ? {
+          headers: {
+            ...headers,
+            ...(byteRange
+              ? { Range: `bytes=${byteRange.start}-${byteRange.end}` }
+              : prefixSize
+                ? { Range: `bytes=0-${prefixSize - 1}` }
+                : {}),
+          },
+        }
       : {}),
   });
   if (!response.ok) throw apiError(await response.json().catch(() => ({})), response.status);
   let expectedPrefixBytes: number | undefined;
-  if (prefixSize) {
+  if (byteRange) {
+    if (
+      response.status !== 206 ||
+      response.headers.get('content-range') !==
+        `bytes ${byteRange.start}-${byteRange.end}/${byteRange.total}`
+    ) {
+      await response.body?.cancel();
+      throw { messageKey: 'viewer.unavailable' };
+    }
+    expectedPrefixBytes = byteRange.end - byteRange.start + 1;
+  } else if (prefixSize) {
     const range = /^bytes 0-(\d+)\/(\d+)$/.exec(response.headers.get('content-range') ?? '');
     if (
       response.status !== 206 ||

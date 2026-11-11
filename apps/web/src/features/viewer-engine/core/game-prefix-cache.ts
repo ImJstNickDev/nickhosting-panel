@@ -55,7 +55,7 @@ function trim(currentKey: readonly unknown[]) {
   }
 }
 
-/** Cache only a bounded metadata prefix, never full files. A fresh authorized stat
+/** Cache only a bounded metadata prefix or physical-file tail. A fresh authorized stat
  * precedes every hit; If-Match binds new bytes to that existing source revision.
  * Returned bytes are shared between compiled trusted viewers and must not be mutated.
  * The backend revision is stat-based, not a full-content hash. */
@@ -65,11 +65,14 @@ export async function readGameViewerPrefix(options: {
   source: ViewerSource;
   maxBytes: number;
   signal: AbortSignal;
+  tail?: boolean;
+  onSize?: (size: number) => void;
 }): Promise<Uint8Array<ArrayBuffer>> {
   const { source, maxBytes, signal, serverId } = options;
   signal.throwIfAborted();
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 65536)
     throw new TypeError('invalid_viewer_read_limit');
+  if (options.tail && (source.entry || source.archives?.length)) throw unavailable();
   const currentIdentity = identity(serverId);
   const check = () => {
     signal.throwIfAborted();
@@ -99,6 +102,7 @@ export async function readGameViewerPrefix(options: {
     metadata.size < 0
   )
     throw unavailable();
+  options.onSize?.(metadata.size);
   // HTTP ranges have no satisfiable byte in an empty file. Only the freshly
   // authorized physical source stat can establish emptiness (not a listing).
   if (metadata.size === 0 && !source.entry && !source.archives?.length) return new Uint8Array(0);
@@ -108,6 +112,7 @@ export async function readGameViewerPrefix(options: {
     source.archives ?? [],
     source.entry ?? '',
     metadata.revision,
+    options.tail ? 'tail' : 'prefix',
     maxBytes,
   ];
   trim(key);
@@ -119,8 +124,15 @@ export async function readGameViewerPrefix(options: {
           viewerPath(serverId, source),
           maxBytes,
           AbortSignal.any([sharedSignal, AbortSignal.timeout(15000)]),
-          maxBytes,
+          options.tail ? undefined : maxBytes,
           { 'If-Match': `"${metadata.revision}"` },
+          options.tail
+            ? {
+                start: Math.max(0, metadata.size - maxBytes),
+                end: metadata.size - 1,
+                total: metadata.size,
+              }
+            : undefined,
         ),
       staleTime: gamePrefixCacheLimits.ttlMs,
       gcTime: gamePrefixCacheLimits.ttlMs,

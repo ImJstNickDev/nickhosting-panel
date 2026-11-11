@@ -1,5 +1,7 @@
 import { defineTrustedGameViewer } from '@nickhosting/game-sdk/ui';
 import { isSatisfactoryServerSettings } from '../fileman.js';
+import { diagnosticViewers } from './diagnostic-registry.js';
+import { satisfactoryLogViewers } from './log-registry.js';
 import { matchesManifestName } from './manifest-parser.js';
 export const satisfactoryViewers = [
   defineTrustedGameViewer(
@@ -38,4 +40,6 @@ export const satisfactoryViewers = [
     () => import('./manifest-viewer.js'),
     (source) => source.gameId === 'satisfactory' && matchesManifestName(source.name),
   ),
+  ...diagnosticViewers,
+  ...satisfactoryLogViewers,
 ] as const;

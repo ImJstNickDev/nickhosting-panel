@@ -1610,3 +1610,57 @@ offline with no active operation; API, worker, Gateway and Vite are healthy.
 No in-game startup or multiplayer compatibility test is claimed. The apply still
 incurs repeated directory/identity checks and provider cooldowns; reducing that
 request amplification is a separate performance follow-up, not a failed install.
+
+### Phase 2 — Log, crash and public certificate viewers
+
+The remaining Fileman viewers use the compiled game registry, existing viewer
+shell, authorization, revision-bound read transport and shared bounded cache.
+No new game page or parallel file service is introduced. The existing optional
+folder menu also includes native crash reports, hidden when the folder is absent.
+
+- Logs read at most the final 64 KiB of a physical file. Refresh re-stats the
+  source; filters operate locally on the loaded tail, with severity/literal text
+  filtering and 200-line pages. Partial initial lines are omitted. Small archived
+  logs use existing bounded member reads; larger members require extraction.
+- `CrashContext.runtime-xml` exposes native error, build/platform and call-stack
+  fields. Parsing rejects DTD/entity declarations, malformed XML and oversized
+  input; binary minidumps are not decoded.
+- PEM public certificates show chain entries, subject, issuer, serial, validity
+  dates and SHA-256 fingerprints using the pinned browser-capable `@peculiar/x509`
+  parser. This is metadata inspection, not signature-chain or hostname validation.
+  Known private-key filenames do not trigger a read; mixed/private PEM is rejected
+  without rendering its contents. Structured crash/certificate input is limited
+  to 65,535 bytes; existing Open with/editor choices remain available.
+
+EN/IT, existing Fileman spacing/toolbars and responsive layouts are retained.
+The shared SDK gains an optional bounded tail read and permits native hyphenated
+extensions; all selected-source authority remains in Fileman. Tail and prefix
+cache entries are separated, reads require exact Content-Range/length, and identity
+changes/cancellation retain the existing guards. Stat-preserving external file
+replacement has the existing stat-based revision limitation.
+
+References: [Epic crash reports](https://dev.epicgames.com/documentation/en-us/unreal-engine/crash-reporting-in-unreal-engine),
+[public X.509 parser](https://github.com/PeculiarVentures/x509).
+
+Validation includes focused parser/registry/cache/host tests and an actual Fileman
+browser journey: English desktop and Italian mobile, Axe accessibility, filtering,
+refresh, bounded large-file ranges, empty/read-error/malformed states, certificate
+chains and private filename exclusion. Screenshots are under `docs/screenshots/m6/`
+(`satisfactory-log-*`, `satisfactory-crash-*`, `satisfactory-certificate-*`).
+Independent cross-review of diagnostics and shared tail transport found no blocker.
+Typecheck, lint, frontend/runtime builds and i18n checks passed; existing lint and
+bundle-size warnings remain. No test-game assets or real game-file/power changes.
+
+Activation rebuilt the ordinary development image for the direct parser dependency
+and recreated only Vite with the full existing Compose chain. Mounts, ports and
+networks match the previous container; API/worker/Vite healthy. The Gateway was
+already stopped before this task and remains unchanged. Existing isolated M2 test
+services were started for browser validation. No migration, Blueprint, Panel/Wings
+or host/network change. Rollback is the previous app revision and retained previous
+Vite image; no persisted viewer data or schema needs reverting.
+
+Final acceptance: 39 focused unit/host/registry tests and the complete diagnostics
+browser journey passed, including newest-log-page behavior. Seven reviewed
+screenshots are committed. Phase 2 (#31) is complete; deep save-body inspection
+remains explicitly outside this phase. The next planned phase is Blueprint library
+work (#32), not started here.

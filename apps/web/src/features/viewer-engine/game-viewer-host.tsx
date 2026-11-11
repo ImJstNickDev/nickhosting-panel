@@ -72,6 +72,21 @@ export function createGameViewerHost(options: {
           signal: combined,
         });
       },
+      async readTail(maxBytes, signal) {
+        let size = 0;
+        const bytes = await readGameViewerPrefix({
+          serverId: options.serverId,
+          identity: options.identity,
+          source: options.source,
+          maxBytes,
+          signal: signalFor(signal),
+          tail: true,
+          onSize: (value) => {
+            size = value;
+          },
+        });
+        return { bytes, truncated: size > bytes.length };
+      },
       archive: {
         async list(directory, signal, query = '') {
           const combined = signalFor(signal);
