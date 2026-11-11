@@ -1,3 +1,4 @@
+import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 import { fail } from './contracts.js';
 import type { CurseForgeProvider } from './curseforge.js';
@@ -38,6 +39,7 @@ const projectSchema = z.object({
   allowModDistribution: z.boolean().nullable().optional(),
   isAvailable: z.boolean().default(true),
   links: z.object({ websiteUrl: str }).optional(),
+  categories: z.array(z.object({ id: numericId })).optional(),
 });
 const fileSchema = z.object({
   id: numericId,
@@ -217,16 +219,50 @@ export class CurseForgeModpackCatalog implements ModpackCatalog {
   }
   async search(input: ModpackCatalogSearchInput = {}, signal?: AbortSignal) {
     const { offset, limit } = pageInput(input);
+    const query = queryInput(input.query);
+    const categories = modpackSearchCategories(input).map(cfId);
+    const classId = await this.classId(signal);
+    if (/^[1-9][0-9]*$/.test(query)) {
+      const empty = { offset, limit, total: 0, items: [] };
+      if (!Number.isSafeInteger(Number(query))) return empty;
+      let raw: unknown;
+      try {
+        raw = await this.data(`/mods/${query}`, signal);
+      } catch (error) {
+        if (
+          error instanceof DomainError &&
+          error.code === 'integration_unavailable' &&
+          error.details?.reason === 'content_http_refused' &&
+          error.details.providerStatus === 404
+        )
+          return empty;
+        throw error;
+      }
+      if (raw === null) return empty;
+      const identity = z
+        .object({ id: numericId, gameId: numericId, classId: numericId.nullable() })
+        .parse(raw);
+      if (identity.id !== Number(query)) fail('modpack_identity');
+      if (identity.gameId !== 432 || identity.classId !== classId) return empty;
+      const project = projectSchema.parse(raw);
+      if (!categories.every((id) => project.categories?.some((category) => category.id === id)))
+        return empty;
+      return modpackCatalogProjectsSchema.parse({
+        offset,
+        limit,
+        total: 1,
+        items: offset === 0 ? [this.publicProject(project)] : [],
+      });
+    }
     const params = new URLSearchParams({
       gameId: '432',
-      classId: String(await this.classId(signal)),
-      searchFilter: queryInput(input.query),
+      classId: String(classId),
+      searchFilter: query,
       index: String(offset),
       pageSize: String(limit),
       sortField: '2',
       sortOrder: 'desc',
     });
-    const categories = modpackSearchCategories(input).map(cfId);
     if (categories.length === 1) params.set('categoryId', String(categories[0]));
     else if (categories.length > 1) params.set('categoryIds', JSON.stringify(categories));
     const raw = z
