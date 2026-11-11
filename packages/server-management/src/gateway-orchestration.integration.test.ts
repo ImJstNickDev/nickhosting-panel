@@ -2483,6 +2483,46 @@ describe('authenticated game console lifecycle', () => {
     );
     expect(observed.state).toBe('online');
   });
+  it.each(['user', 'owner'] as const)(
+    'refuses native console restart capacity for a %s without changing the running reservation',
+    async (role) => {
+      if (role === 'owner')
+        await f.db
+          .updateTable('user')
+          .set({ role: 'user' })
+          .where('id', '=', f.owner.actorUserId)
+          .execute();
+      await f.db
+        .updateTable('user')
+        .set({ role })
+        .where('id', '=', f.context.actorUserId)
+        .execute();
+      f.context.role = role;
+      const fixture = await started();
+      await report(fixture);
+      fixture.power.mockClear();
+      const reservation = await f.db
+        .selectFrom('resource_reservations')
+        .selectAll()
+        .where('server_id', '=', serverId)
+        .executeTakeFirstOrThrow();
+      const jobsBefore = await f.db.selectFrom('operation_jobs').select('id').execute();
+      const outboxBefore = await f.db.selectFrom('job_outbox').select('job_id').execute();
+      await f.observe({ availableMemoryMiB: 1 });
+      await expect(command('restart')).rejects.toThrow('resources_unavailable');
+      expect((await row()).active_operation_id).toBeNull();
+      expect(fixture.power).not.toHaveBeenCalled();
+      expect(
+        await f.db
+          .selectFrom('resource_reservations')
+          .selectAll()
+          .where('server_id', '=', serverId)
+          .executeTakeFirstOrThrow(),
+      ).toEqual(reservation);
+      expect(await f.db.selectFrom('operation_jobs').select('id').execute()).toEqual(jobsBefore);
+      expect(await f.db.selectFrom('job_outbox').select('job_id').execute()).toEqual(outboxBefore);
+    },
+  );
   it('restarts through existing admission with save-before-power and native readiness', async () => {
     const fixture = await started();
     await report(fixture, { idle: false, playerCount: 2, activeSessions: 2 });

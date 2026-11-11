@@ -443,6 +443,7 @@ async function insertOperation(
   hash: string,
   action: Database['server_operations']['action'],
   plan: Record<string, unknown>,
+  beforeActivation?: () => Promise<void>,
 ) {
   await tx
     .insertInto('operation_jobs')
@@ -481,6 +482,10 @@ async function insertOperation(
       lease_token: null,
     })
     .execute();
+  // Admission needs the durable actor/operation, but must still see the previous
+  // active operation when checking reservation ownership. Failure rolls back all
+  // job rows before any notification or delivery can escape this transaction.
+  await beforeActivation?.();
   await tx.insertInto('job_outbox').values({ job_id: jobId, last_dispatched_at: null }).execute();
   await notifyJobOutbox(tx);
   await tx
@@ -1026,6 +1031,8 @@ export async function enqueueLockedServerOperation(
   env: Environment = {},
   automation?: GatewayAutomationOperation,
   options: {
+    /** Internal provenance, supplied before initial admission by automation callers. */
+    requestSource?: 'automation';
     minecraftPlan?: MinecraftPreparedContent;
     minecraftInitialContent?: MinecraftPreparedContent;
     satisfactoryContent?: true;
@@ -1163,6 +1170,7 @@ export async function enqueueLockedServerOperation(
     throw new DomainError('operation_uncertain');
   const jobId = randomUUID();
   const plan: Record<string, unknown> = automation ? { gatewayAutomation: automation } : {};
+  if (options.requestSource) plan.requestSource = options.requestSource;
   if (value.action === 'minecraft-content') {
     if (
       !options.minecraftPlan ||
@@ -1249,8 +1257,6 @@ export async function enqueueLockedServerOperation(
     throw new DomainError('operation_uncertain');
   if (value.action === 'start' || value.action === 'restart')
     plan.reservationCreated = !reservation;
-  if (value.action === 'start' || value.action === 'restart')
-    await reserveStartInTransaction(tx, serverId, jobId, value.action, env);
   if (value.action === 'stop') {
     await tx
       .updateTable('resource_reservations')
@@ -1362,6 +1368,8 @@ export async function enqueueLockedServerOperation(
       .execute();
   }
   if (value.action === 'delete') await revokeGatewayRoutesForDeletion(tx, serverId, new Date());
+  const computeAction =
+    value.action === 'start' || value.action === 'restart' ? value.action : null;
   return insertOperation(
     tx,
     context,
@@ -1371,6 +1379,9 @@ export async function enqueueLockedServerOperation(
     hash,
     value.action,
     plan,
+    computeAction
+      ? () => reserveStartInTransaction(tx, serverId, jobId, computeAction, env)
+      : undefined,
   );
 }
 

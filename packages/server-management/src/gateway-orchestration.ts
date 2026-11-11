@@ -723,6 +723,8 @@ export async function requestGatewayConsoleAction(
         idempotencyKey: `gateway_console_${randomUUID()}`,
       },
       options.env,
+      undefined,
+      { requestSource: 'automation' },
     );
     const generation = value.action === 'restart' ? randomUUID() : state.generation;
     const stored = await tx
