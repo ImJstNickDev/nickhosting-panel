@@ -1,61 +1,130 @@
-import type { GameViewerProps } from '@nickhosting/game-sdk/ui';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { filterLog, type LogLine, logReadLimit, parseLog } from './log-parser.js';
+import type { GameViewerLogPage, GameViewerProps } from '@nickhosting/game-sdk/ui';
+import { useEffect, useRef, useState } from 'react';
+import { filterLog, logReadLimit, parseLog } from './log-parser.js';
 import './log-viewer.css';
 
 const key = (value: string) => `games.satisfactory.viewers.log.${value}`;
 const pageSize = 200;
+const errorKey = (error: unknown) =>
+  error &&
+  typeof error === 'object' &&
+  'messageKey' in error &&
+  typeof error.messageKey === 'string'
+    ? error.messageKey
+    : key('unavailable');
 export default function LogViewer({ source, host }: GameViewerProps) {
-  const [state, setState] = useState<{ lines?: LogLine[]; truncated?: boolean; error?: string }>(
-    {},
-  );
-  const [refresh, setRefresh] = useState(0);
+  const [state, setState] = useState<{ value?: GameViewerLogPage; error?: string }>({});
   const [query, setQuery] = useState('');
-  const [level, setLevel] = useState('all');
-  const [page, setPage] = useState(0);
-  const currentFilter = useRef({ query, level });
-  currentFilter.current = { query, level };
+  const [search, setSearch] = useState('');
   useEffect(() => {
-    void refresh;
+    const timer = setTimeout(() => setSearch(query), 200);
+    return () => clearTimeout(timer);
+  }, [query]);
+  const [level, setLevel] = useState<'all' | 'error' | 'warning' | 'info'>('all');
+  const [offset, setOffset] = useState(-1);
+  const [refresh, setRefresh] = useState(0);
+  const quietRefresh = useRef(false);
+  const resolvedOffset = useRef(0);
+  const previousRefresh = useRef(0);
+  const archiveBytes = useRef<Promise<Uint8Array<ArrayBuffer>> | undefined>(undefined);
+  const archiveLifetime = useRef<AbortController | undefined>(undefined);
+  const archived = Boolean(source.entry || source.archives?.length);
+  useEffect(() => {
+    // A different host owns different selected-source authority and archive bytes.
+    void host;
     const controller = new AbortController();
-    setState({});
-    setPage(0);
-    const archived = Boolean(source.entry || source.archives?.length);
-    const read = async () => {
-      if (archived && source.size >= logReadLimit) throw { messageKey: key('archiveLarge') };
-      const result = archived
-        ? { bytes: await host.readPrefix?.(logReadLimit, controller.signal), truncated: false }
-        : await host.readTail?.(logReadLimit, controller.signal);
-      if (!result?.bytes) throw new Error('unavailable');
-      if (archived && result.bytes.length >= logReadLimit)
-        throw { messageKey: key('archiveLarge') };
-      const lines = parseLog(result.bytes, result.truncated);
-      if (!controller.signal.aborted) {
-        const filter = currentFilter.current;
-        const count = filterLog(lines, filter.query, filter.level).length;
-        setPage(archived ? 0 : Math.max(0, Math.ceil(count / pageSize) - 1));
-        setState({ lines, truncated: result.truncated });
+    archiveLifetime.current = controller;
+    archiveBytes.current = undefined;
+    return () => controller.abort();
+  }, [host]);
+  useEffect(
+    () =>
+      host.log?.onChange(() => {
+        quietRefresh.current = true;
+        setRefresh((value) => value + 1);
+      }),
+    [host],
+  );
+  useEffect(() => {
+    if (query !== search) return;
+    const controller = new AbortController();
+    const update = refresh !== previousRefresh.current;
+    const quiet = update && quietRefresh.current;
+    const target = offset === -1 && update ? resolvedOffset.current : offset;
+    const load = async () => {
+      let value: GameViewerLogPage;
+      if (archived) {
+        if (source.size >= logReadLimit) throw { messageKey: key('archiveLarge') };
+        const lifetime = archiveLifetime.current;
+        if (!lifetime || !host.readPrefix) throw new Error('unavailable');
+        if (update) archiveBytes.current = undefined;
+        archiveBytes.current ??= host.readPrefix(logReadLimit, lifetime.signal);
+        const bytes = await archiveBytes.current;
+        if (bytes.length >= logReadLimit) throw { messageKey: key('archiveLarge') };
+        const lines = parseLog(bytes);
+        const filtered = filterLog(lines, search, level);
+        const start = Math.min(
+          Math.max(0, target),
+          Math.max(0, Math.ceil(filtered.length / pageSize) - 1) * pageSize,
+        );
+        value = {
+          revision: 'archive',
+          offset: start,
+          total: filtered.length,
+          totalLines: lines.length,
+          rows: filtered
+            .slice(start, start + pageSize)
+            .map((line) => ({ line: line.index + 1, text: line.text, level: line.level })),
+        };
+      } else {
+        if (!host.log) throw new Error('unavailable');
+        if (update) {
+          await host.log.refresh(controller.signal);
+          previousRefresh.current = refresh;
+        }
+        value = await host.log.page(
+          { offset: target, limit: pageSize, query: search, level },
+          controller.signal,
+        );
       }
+      if (controller.signal.aborted) return;
+      resolvedOffset.current = value.offset;
+      setState((previous) => ({
+        value:
+          previous.value && JSON.stringify(previous.value) === JSON.stringify(value)
+            ? previous.value
+            : value,
+      }));
     };
-    void read().catch((error: unknown) => {
-      if (!controller.signal.aborted)
-        setState({
-          error:
+    // Search is server-side over the complete snapshot; debounce typing, never the page buttons.
+    const timer = setTimeout(() => {
+      void load().catch((error) => {
+        if (controller.signal.aborted) return;
+        const denied =
+          error &&
+          typeof error === 'object' &&
+          'status' in error &&
+          [401, 403, 404, 410].includes(Number(error.status));
+        setState((previous) => {
+          if (
+            quiet &&
+            previous.value &&
             error &&
             typeof error === 'object' &&
-            'messageKey' in error &&
-            typeof error.messageKey === 'string'
-              ? error.messageKey
-              : key('unavailable'),
+            'code' in error &&
+            error.code === 'viewer_revision_changed'
+          )
+            return previous;
+          return { ...(denied ? {} : { value: previous.value }), error: errorKey(error) };
         });
-    });
-    return () => controller.abort();
-  }, [host, source.entry, source.archives, source.size, refresh]);
-  const filtered = useMemo(
-    () => filterLog(state.lines ?? [], query, level),
-    [state.lines, query, level],
-  );
-  const rows = filtered.slice(page * pageSize, (page + 1) * pageSize);
+      });
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [host, archived, source.size, query, search, level, offset, refresh]);
+  const page = state.value;
   return (
     <div className="satisfactory-log-viewer">
       <div className="satisfactory-log-toolbar">
@@ -67,7 +136,7 @@ export default function LogViewer({ source, host }: GameViewerProps) {
             maxLength={256}
             onChange={(event) => {
               setQuery(event.target.value);
-              setPage(0);
+              setOffset(0);
             }}
           />
         </label>
@@ -77,11 +146,11 @@ export default function LogViewer({ source, host }: GameViewerProps) {
             aria-label={host.t(key('level'))}
             value={level}
             onChange={(event) => {
-              setLevel(event.target.value);
-              setPage(0);
+              setLevel(event.target.value as typeof level);
+              setOffset(0);
             }}
           >
-            {['all', 'error', 'warning', 'info'].map((value) => (
+            {(['all', 'error', 'warning', 'info'] as const).map((value) => (
               <option key={value} value={value}>
                 {host.t(key(value))}
               </option>
@@ -90,44 +159,49 @@ export default function LogViewer({ source, host }: GameViewerProps) {
         </label>
         <button
           type="button"
-          onClick={() => setRefresh((value) => value + 1)}
-          disabled={!state.lines && !state.error}
+          onClick={() => {
+            quietRefresh.current = false;
+            setRefresh((value) => value + 1);
+          }}
+          disabled={!page && !state.error}
         >
           {host.t(key('refresh'))}
         </button>
       </div>
-      {state.truncated && <p className="satisfactory-log-note">{host.t(key('tail'))}</p>}
-      {state.error ? (
-        <p role="alert">{host.t(state.error)}</p>
-      ) : !state.lines ? (
-        <p role="status">{host.t(key('loading'))}</p>
-      ) : !rows.length ? (
-        <p>{host.t(key(state.lines.length ? 'noMatches' : 'empty'))}</p>
+      {state.error && <p role="alert">{host.t(state.error)}</p>}
+      {!page ? (
+        !state.error && <p role="status">{host.t(key('loading'))}</p>
+      ) : !page.rows.length ? (
+        <p>{host.t(key(page.totalLines ? 'noMatches' : 'empty'))}</p>
       ) : (
         <div className="satisfactory-log-lines">
-          {rows.map((line) => (
-            <div key={line.index} className={`satisfactory-log-${line.level}`}>
+          {page.rows.map((line) => (
+            <div key={line.line} className={`satisfactory-log-${line.level}`}>
               <code>{line.text || '\u00a0'}</code>
             </div>
           ))}
         </div>
       )}
-      {filtered.length > pageSize && (
+      {page && page.total > pageSize && (
         <nav className="satisfactory-log-pagination" aria-label={host.t(key('name'))}>
-          <button type="button" disabled={page === 0} onClick={() => setPage(page - 1)}>
+          <button
+            type="button"
+            disabled={page.offset === 0}
+            onClick={() => setOffset(Math.max(0, page.offset - pageSize))}
+          >
             {host.t(key('previous'))}
           </button>
           <span>
             {host.t(key('range'), {
-              start: page * pageSize + 1,
-              end: Math.min((page + 1) * pageSize, filtered.length),
-              total: filtered.length,
+              start: page.offset + 1,
+              end: page.offset + page.rows.length,
+              total: page.total,
             })}
           </span>
           <button
             type="button"
-            disabled={(page + 1) * pageSize >= filtered.length}
-            onClick={() => setPage(page + 1)}
+            disabled={page.offset + page.rows.length >= page.total}
+            onClick={() => setOffset(page.offset + pageSize)}
           >
             {host.t(key('next'))}
           </button>

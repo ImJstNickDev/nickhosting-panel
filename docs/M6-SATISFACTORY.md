@@ -1664,3 +1664,56 @@ browser journey passed, including newest-log-page behavior. Seven reviewed
 screenshots are committed. Phase 2 (#31) is complete; deep save-body inspection
 remains explicitly outside this phase. The next planned phase is Blueprint library
 work (#32), not started here.
+
+### Log viewer — whole-file snapshots and server-side navigation
+
+Physical logs now use a browser-owned lease over the existing FileViewerService,
+ViewerCache and ViewerSessionCache. The authorized source streams once into the
+existing private temporary disk cache; the browser receives only bounded pages.
+Next/Previous navigate the complete file and literal/severity search scans the
+entire local snapshot, not a 64 KiB tail. A sparse line-offset index permits direct
+page reads without loading the complete text into memory. Existing configured
+snapshot/cache byte limits apply; there is no separate log storage service.
+
+The selected-source SDK host owns open/page/refresh/renew/close requests. Handles
+are bound to authenticated session, actor/subject/support context, server and
+provider identity; every data request rechecks current access. A lightweight lease
+heartbeat retains the snapshot while the viewer is open without checking content.
+Closing/unmounting releases that tab; other tabs retain their own lease. Idle
+expiry cleans up lost closes, and a returning tab can reopen through fresh
+authorization. Last-reference disposal releases the disk snapshot. Revocation
+cancels reads and clears displayed content.
+
+Refresh prepares a replacement snapshot before swapping it. The UI retains old
+rows while loading, preserves the absolute page anchor and stable line keys, and
+does not remount for appended content. Fileman already exposes query-cache
+invalidation/listing-success notifications for saves, uploads, transfers and
+listing refresh. The log host subscribes only to the selected parent/identity.
+There is no existing general remote filesystem watcher: game-process appends
+alone do not emit these events, and this change introduces no content polling or
+new watcher. Manual Refresh remains available. Expected revision races on a
+background update preserve the prior page silently; authorization failures do not.
+
+Archived log members retain the established bounded member-view fallback; whole-file
+leases target physical files. UTF-8/CRLF parsing, cancellation, response and line
+budgets remain explicit. Oversized individual lines or unsupported encoding are
+reported instead of silently truncating search results. Snapshot identity retains
+the existing size/mtime limitation for external stat-preserving replacement.
+
+Validation: 48 focused parser/cache/session/client and isolated-DB route tests,
+plus the full EN-desktop/IT-mobile Fileman browser journey with Axe passed. The
+parser fixture covers a 23 MiB/40,000-line log, distant pages, full-file search,
+UTF-8 splits, cancellation and one upstream acquisition. Browser evidence verifies
+search beyond the former tail, Next/Previous requests and unchanged selection/page
+after a 50-line append notified through the existing directory invalidation hook.
+Route tests cover ownership, revocation/provider binding, expiry/close cleanup,
+failed refresh preserving the prior snapshot and no content rereads for paging.
+Independent frontend/backend reviews passed after cancellation-cleanup fixes.
+Types, lint, frontend/runtime builds and i18n checks passed (existing warnings).
+
+No migration, dependency, container recreation, service restart or real game
+file/power operation was required. Existing dev source watchers activated the
+change; API/worker/Vite healthy. The previously stopped Gateway remains unchanged.
+Only existing isolated test services were used, with no new game test assets.
+Rollback reverts application code after active viewer leases settle; API shutdown
+also closes its existing process-owned viewer caches. No persistent data migration.

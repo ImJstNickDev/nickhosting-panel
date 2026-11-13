@@ -18,7 +18,30 @@ export interface GameViewerArchiveEntry {
   directory: boolean;
   size: number;
 }
+export interface GameViewerLogPage {
+  revision: string;
+  rows: { line: number; text: string; level: 'error' | 'warning' | 'info' }[];
+  offset: number;
+  total: number;
+  totalLines: number;
+}
+export interface GameViewerLogSession {
+  page(
+    options: {
+      offset: number;
+      limit: number;
+      query?: string;
+      level?: 'all' | 'error' | 'warning' | 'info';
+    },
+    signal: AbortSignal,
+  ): Promise<GameViewerLogPage>;
+  refresh(signal: AbortSignal): Promise<{ revision: string; changed: boolean }>;
+  /** Existing Fileman listing invalidations only; no remote content polling. */
+  onChange(listener: () => void): () => void;
+}
 export interface GameViewerHost {
+  /** Selected physical file only. Host owns lease and releases it when disposed. */
+  log?: GameViewerLogSession;
   locale?: string;
   /** Bounded prefix of the selected source; no arbitrary filesystem authority.
    * Shared metadata bytes are read-only: compiled viewers must not mutate them. */

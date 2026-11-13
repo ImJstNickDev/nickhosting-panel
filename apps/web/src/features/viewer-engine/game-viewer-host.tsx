@@ -6,6 +6,7 @@ import { readViewerBytes, viewerPath } from './core/access.js';
 import { trimArchivePages } from './core/archive-memory.js';
 import { archiveQuery } from './core/archive-query.js';
 import { readGameViewerPrefix } from './core/game-prefix-cache.js';
+import { createLogSession } from './core/log-session.js';
 import { selectableViewers, type ViewerId, type ViewerSource } from './core/registry.js';
 import { ViewerLoading } from './loading.js';
 
@@ -58,6 +59,9 @@ export function createGameViewerHost(options: {
   };
   return {
     host: {
+      ...(!options.source.entry && !options.source.archives?.length
+        ? { log: createLogSession(options.serverId, options.source, lifetime.signal) }
+        : {}),
       t: options.t,
       locale: options.locale,
       async readPrefix(maxBytes, signal) {

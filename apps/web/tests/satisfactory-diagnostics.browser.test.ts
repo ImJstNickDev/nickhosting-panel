@@ -1,14 +1,26 @@
 import { Buffer } from 'node:buffer';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { AxeBuilder } from '@axe-core/playwright';
 import { expect as browserExpect } from '@playwright/test';
 import { expect, it } from 'vitest';
+import { ViewerCache } from '../../api/src/viewer-cache.js';
+import { openLogViewer } from '../../api/src/viewer-log.js';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
 
 it('opens bounded Satisfactory diagnostics through the existing Fileman shell', async () => {
   const harness = await browserHarness();
+  const cacheRoot = await mkdtemp(join(tmpdir(), 'nh-log-browser-'));
+  const logCache = new ViewerCache({ root: cacheRoot });
+  const logSessions = new Map<
+    string,
+    { path: string; revision: string; value: Awaited<ReturnType<typeof openLogViewer>> }
+  >();
+  const downloads = new Map<string, number>();
   let provider: Awaited<ReturnType<typeof installBrowserFixtures>> | undefined;
   try {
     const identities = await prepareJourneyIdentities(harness);
@@ -38,7 +50,9 @@ it('opens bounded Satisfactory diagnostics through the existing Fileman shell', 
     files.set('Empty.log', Buffer.alloc(0));
     files.set(
       'Large.log',
-      Buffer.from(`${'LogInit: Display: old line\n'.repeat(5000)}LogGame: Error: Tail marker\n`),
+      Buffer.from(
+        `LogGame: Display: Start marker\n${'LogInit: Display: old line\n'.repeat(5000)}LogGame: Error: Tail marker\n`,
+      ),
     );
     files.set('Unavailable.log', Buffer.from('cannot read'));
 
@@ -112,6 +126,7 @@ w0RLozHnei051W51+srovbeS+CruyOGw
       if (
         path.startsWith(`/v1/servers/${id}/files`) &&
         path !== `/v1/servers/${id}/files/directories` &&
+        !path.startsWith(`/v1/servers/${id}/files/viewer/log/session`) &&
         !['GET', 'HEAD'].includes(request.method())
       )
         writes.push(`${request.method()} ${path}`);
@@ -140,6 +155,81 @@ w0RLozHnei051W51+srovbeS+CruyOGw
         return route.fulfill({ json: { available: true } });
       if (url.pathname.endsWith('/preferences'))
         return route.fulfill({ json: { preferences: [] } });
+      const logRoute = url.pathname.split('/files/viewer/log/session')[1];
+      if (logRoute !== undefined) {
+        const request = route.request();
+        const input = request.method() === 'POST' ? (request.postDataJSON() ?? {}) : {};
+        const prepare = async (path: string) => {
+          const bytes = files.get(path);
+          if (!bytes || path === 'Unavailable.log') throw new Error('unavailable');
+          const snapshot = Buffer.from(bytes);
+          const rev = revision(snapshot);
+          const value = await openLogViewer(
+            {
+              size: snapshot.length,
+              mtimeMs: 1700000000000,
+              read: async (offset, length) => snapshot.subarray(offset, offset + length),
+              stream: () => {
+                downloads.set(path, (downloads.get(path) ?? 0) + 1);
+                return new ReadableStream({
+                  start(controller) {
+                    controller.enqueue(snapshot);
+                    controller.close();
+                  },
+                });
+              },
+            },
+            { cache: logCache, key: `${path}:${rev}`, signal: new AbortController().signal },
+          );
+          return { path, revision: rev, value };
+        };
+        try {
+          if (!logRoute) {
+            const sessionId = randomUUID();
+            const value = await prepare(input.path);
+            logSessions.set(sessionId, value);
+            return route.fulfill({ json: { sessionId, revision: value.revision } });
+          }
+          const [sessionId, action] = logRoute.slice(1).split('/');
+          const current = logSessions.get(sessionId ?? '');
+          if (!current) return route.fulfill({ status: 404 });
+          if (request.method() === 'DELETE') {
+            await current.value.close();
+            logSessions.delete(sessionId ?? '');
+            return route.fulfill({ status: 204 });
+          }
+          if (action === 'renew') return route.fulfill({ status: 204 });
+          if (action === 'refresh') {
+            const bytes = files.get(current.path);
+            const changed = bytes && revision(bytes) !== current.revision;
+            if (changed) {
+              const next = await prepare(current.path);
+              logSessions.set(sessionId ?? '', next);
+              await current.value.close();
+              return route.fulfill({ json: { changed: true, revision: next.revision } });
+            }
+            return route.fulfill({ json: { changed: false, revision: current.revision } });
+          }
+          if (action === 'page')
+            return route.fulfill({
+              json: {
+                ...(await current.value.query(input, new AbortController().signal)),
+                revision: current.revision,
+              },
+            });
+          return route.fulfill({ status: 404 });
+        } catch {
+          return route.fulfill({
+            status: 503,
+            json: {
+              error: {
+                code: 'integration_unavailable',
+                messageKey: 'errors.integration_unavailable',
+              },
+            },
+          });
+        }
+      }
       if (!url.pathname.endsWith('/content')) return route.fulfill({ status: 404 });
       const path = url.searchParams.get('path') ?? '';
       if (path === 'Unavailable.log')
@@ -174,10 +264,10 @@ w0RLozHnei051W51+srovbeS+CruyOGw
     await open('FactoryGame.log');
     const log = page.locator('.satisfactory-log-viewer');
     await browserExpect(log).toContainText('Example diagnostic');
-    await log.getByLabel('Filter lines', { exact: true }).fill('Missing');
+    await log.getByLabel('Search log', { exact: true }).fill('Missing');
     await browserExpect(log).toContainText('Missing optional configuration');
     await browserExpect(log).not.toContainText('Example diagnostic');
-    await log.getByLabel('Filter lines', { exact: true }).fill('');
+    await log.getByLabel('Search log', { exact: true }).fill('');
     await log.getByRole('combobox').selectOption({ label: 'Errors' });
     await browserExpect(log).toContainText('Example diagnostic');
     await browserExpect(log).not.toContainText('Missing optional configuration');
@@ -193,12 +283,42 @@ w0RLozHnei051W51+srovbeS+CruyOGw
     files.set('FactoryGame.log', fixtureBytes('FactoryGame.log'));
     await open('Large.log');
     await browserExpect(log).toContainText('Tail marker');
-    await log.getByLabel('Filter lines', { exact: true }).fill('Tail marker');
+    await log.getByLabel('Search log', { exact: true }).fill('Tail marker');
     await browserExpect(log).toContainText('Tail marker');
-    const largeRead = contentReads.find((read) => read.path === 'Large.log');
-    expect(largeRead?.range).toBe(
-      `bytes=${fixtureBytes('Large.log').length - 65536}-${fixtureBytes('Large.log').length - 1}`,
+    await log.getByLabel('Search log', { exact: true }).fill('Start marker');
+    await browserExpect(log).toContainText('Start marker');
+    await log.getByLabel('Search log', { exact: true }).fill('');
+    await browserExpect(log.getByRole('button', { name: 'Next', exact: true })).toBeEnabled();
+    await log.getByRole('button', { name: 'Next', exact: true }).click();
+    await browserExpect(log).not.toContainText('Start marker');
+    expect(downloads.get('Large.log')).toBe(1);
+    const visibleBeforeAppend = await log.locator('.satisfactory-log-lines').innerText();
+    await log
+      .locator('.satisfactory-log-lines code')
+      .first()
+      .evaluate((node) => {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+      });
+    const selectionBefore = await page.evaluate(() => window.getSelection()?.toString());
+    files.set(
+      'Large.log',
+      Buffer.concat([
+        fixtureBytes('Large.log'),
+        Buffer.from('LogGame: Display: Added line\n'.repeat(50)),
+      ]),
     );
+    await page.evaluate(
+      `import('/src/api/client.ts').then(({queryClient}) => queryClient.invalidateQueries({queryKey:['files','${id}']}))`,
+    );
+    await browserExpect.poll(() => downloads.get('Large.log')).toBe(2);
+    expect(await log.locator('.satisfactory-log-lines').innerText()).toBe(visibleBeforeAppend);
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(selectionBefore);
+    files.set('Large.log', fixtureBytes('Large.log'));
+
     await back();
     await open('Unavailable.log');
     await browserExpect(log.getByRole('alert')).toBeVisible();
@@ -251,7 +371,15 @@ w0RLozHnei051W51+srovbeS+CruyOGw
     await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'it' });
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(`${base}?directory=`);
-    await open('cert_chain.pem');
+    try {
+      await open('cert_chain.pem');
+    } catch (error) {
+      await page.screenshot({
+        path: 'test-results/log-session-navigation-error.png',
+        fullPage: true,
+      });
+      throw error;
+    }
     await browserExpect(diagnostic).toContainText('factory.example.test');
     expect((await new AxeBuilder({ page }).include('.file-manager').analyze()).violations).toEqual(
       [],
@@ -296,6 +424,9 @@ w0RLozHnei051W51+srovbeS+CruyOGw
         .execute(),
     ).toEqual(beforeOperations);
   } finally {
+    for (const value of logSessions.values()) await value.value.close();
+    await logCache.close();
+    await rm(cacheRoot, { recursive: true, force: true });
     provider?.dispose();
     await harness.close();
   }
