@@ -1717,3 +1717,31 @@ change; API/worker/Vite healthy. The previously stopped Gateway remains unchange
 Only existing isolated test services were used, with no new game test assets.
 Rollback reverts application code after active viewer leases settle; API shutdown
 also closes its existing process-owned viewer caches. No persistent data migration.
+
+### Log viewport and incremental scrolling
+
+The physical-log viewer keeps the existing server-side snapshot/search API while
+replacing Previous/Next controls with adjacent-page loading during internal scroll.
+The log surface fits the remaining viewport; the search/filter toolbar stays outside
+the text scroller. This avoids growing the document for a long log. Bidirectional
+loading keeps a bounded row window and preserves the visible row's pixel anchor
+when older rows are prepended or distant rows are evicted. Full-file search and
+existing Fileman-triggered background refresh retain their prior authorization and
+snapshot lifetime behavior. No new transport, file watcher or content polling.
+
+The window contains at most 600 rows, fetched in adjacent 200-row portions. The
+scroller is a uniquely named keyboard-focusable region; available height accounts
+for the surrounding Fileman/main spacing and visual viewport. Wrapped row heights
+are measured for anchoring. A response that would evict the user's new visible
+anchor after a direction change is discarded and the current edge reconsidered.
+New rows appended while already at the bottom remain reachable without requiring
+a fictitious page-button action. Search still covers the complete backend snapshot.
+
+Four focused window tests and the complete desktop/mobile Fileman browser journey
+validate scrolling through multiple windows, reverse/prepend anchoring, bounded
+DOM, document height, full-file search, silent append selection and read-error retry.
+Axe, independent review, root/web typechecks, lint, build and i18n checks passed
+(existing warnings). Updated log screenshots show long files in both layouts.
+No backend API, migration, dependency, infrastructure or real game-data operation;
+existing source watchers serve the frontend changes. Rollback is the preceding
+application revision; snapshot/session lifecycle is unchanged.

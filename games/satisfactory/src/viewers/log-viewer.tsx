@@ -1,10 +1,10 @@
 import type { GameViewerLogPage, GameViewerProps } from '@nickhosting/game-sdk/ui';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { filterLog, logReadLimit, parseLog } from './log-parser.js';
+import { extendLogWindow, logPageSize } from './log-window.js';
 import './log-viewer.css';
 
 const key = (value: string) => `games.satisfactory.viewers.log.${value}`;
-const pageSize = 200;
 const errorKey = (error: unknown) =>
   error &&
   typeof error === 'object' &&
@@ -12,121 +12,275 @@ const errorKey = (error: unknown) =>
   typeof error.messageKey === 'string'
     ? error.messageKey
     : key('unavailable');
+type Anchor = { line: string; top: number };
 export default function LogViewer({ source, host }: GameViewerProps) {
   const [state, setState] = useState<{ value?: GameViewerLogPage; error?: string }>({});
+  const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState('');
   const [search, setSearch] = useState('');
+  const [level, setLevel] = useState<'all' | 'error' | 'warning' | 'info'>('all');
+  const root = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLElement>(null);
+  const value = useRef<GameViewerLogPage | undefined>(undefined);
+  const positioning = useRef<{ anchor?: Anchor; edge?: 'top' | 'bottom' } | undefined>(undefined);
+  const runtime = useRef<
+    { scroll(): void; refresh(quiet: boolean): void; fill(): void } | undefined
+  >(undefined);
   useEffect(() => {
     const timer = setTimeout(() => setSearch(query), 200);
     return () => clearTimeout(timer);
   }, [query]);
-  const [level, setLevel] = useState<'all' | 'error' | 'warning' | 'info'>('all');
-  const [offset, setOffset] = useState(-1);
-  const [refresh, setRefresh] = useState(0);
-  const quietRefresh = useRef(false);
-  const resolvedOffset = useRef(0);
-  const previousRefresh = useRef(0);
-  const archiveBytes = useRef<Promise<Uint8Array<ArrayBuffer>> | undefined>(undefined);
-  const archiveLifetime = useRef<AbortController | undefined>(undefined);
-  const archived = Boolean(source.entry || source.archives?.length);
-  useEffect(() => {
-    // A different host owns different selected-source authority and archive bytes.
-    void host;
-    const controller = new AbortController();
-    archiveLifetime.current = controller;
-    archiveBytes.current = undefined;
-    return () => controller.abort();
-  }, [host]);
-  useEffect(
-    () =>
-      host.log?.onChange(() => {
-        quietRefresh.current = true;
-        setRefresh((value) => value + 1);
-      }),
-    [host],
-  );
+  useLayoutEffect(() => {
+    const element = root.current;
+    if (!element) return;
+    const measure = () => {
+      const viewport = window.visualViewport;
+      const bottom = viewport ? viewport.offsetTop + viewport.height : window.innerHeight;
+      let remainingSpacing = 0;
+      for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+        const style = getComputedStyle(parent);
+        remainingSpacing +=
+          (Number.parseFloat(style.paddingBottom) || 0) +
+          (Number.parseFloat(style.borderBottomWidth) || 0) +
+          (Number.parseFloat(style.marginBottom) || 0);
+        if (parent.tagName === 'MAIN') break;
+      }
+      const height = Math.max(
+        0,
+        Math.floor(bottom - element.getBoundingClientRect().top - Math.max(16, remainingSpacing)),
+      );
+      if (element.style.height !== `${height}px`) element.style.height = `${height}px`;
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    if (element.parentElement) observer.observe(element.parentElement);
+    const header = element.parentElement?.previousElementSibling;
+    if (header) observer.observe(header);
+    window.addEventListener('resize', measure);
+    window.visualViewport?.addEventListener('resize', measure);
+    window.visualViewport?.addEventListener('scroll', measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', measure);
+      window.visualViewport?.removeEventListener('resize', measure);
+      window.visualViewport?.removeEventListener('scroll', measure);
+    };
+  }, []);
+  useLayoutEffect(() => {
+    void state; // Restore the measured anchor after the new row window commits.
+    const element = scroller.current,
+      position = positioning.current;
+    if (!element || !position) return;
+    positioning.current = undefined;
+    if (position.edge) element.scrollTop = position.edge === 'bottom' ? element.scrollHeight : 0;
+    else if (position.anchor) {
+      const row = element.querySelector<HTMLElement>(`[data-line="${position.anchor.line}"]`);
+      if (row)
+        element.scrollTop +=
+          row.getBoundingClientRect().top -
+          element.getBoundingClientRect().top -
+          position.anchor.top;
+    }
+    runtime.current?.fill();
+  }, [state]);
   useEffect(() => {
     if (query !== search) return;
     const controller = new AbortController();
-    const update = refresh !== previousRefresh.current;
-    const quiet = update && quietRefresh.current;
-    const target = offset === -1 && update ? resolvedOffset.current : offset;
-    const load = async () => {
-      let value: GameViewerLogPage;
-      if (archived) {
-        if (source.size >= logReadLimit) throw { messageKey: key('archiveLarge') };
-        const lifetime = archiveLifetime.current;
-        if (!lifetime || !host.readPrefix) throw new Error('unavailable');
-        if (update) archiveBytes.current = undefined;
-        archiveBytes.current ??= host.readPrefix(logReadLimit, lifetime.signal);
-        const bytes = await archiveBytes.current;
-        if (bytes.length >= logReadLimit) throw { messageKey: key('archiveLarge') };
-        const lines = parseLog(bytes);
-        const filtered = filterLog(lines, search, level);
-        const start = Math.min(
-          Math.max(0, target),
-          Math.max(0, Math.ceil(filtered.length / pageSize) - 1) * pageSize,
-        );
-        value = {
-          revision: 'archive',
-          offset: start,
-          total: filtered.length,
-          totalLines: lines.length,
-          rows: filtered
-            .slice(start, start + pageSize)
-            .map((line) => ({ line: line.index + 1, text: line.text, level: line.level })),
-        };
-      } else {
+    const archived = Boolean(source.entry || source.archives?.length);
+    let reading = false,
+      ready = false,
+      queuedRefresh = false,
+      queuedQuiet = true,
+      fillAllowed = true;
+    let archiveBytes: Promise<Uint8Array<ArrayBuffer>> | undefined;
+    const anchor = (): Anchor | undefined => {
+      const element = scroller.current;
+      if (!element) return;
+      const top = element.getBoundingClientRect().top;
+      const row = Array.from(element.querySelectorAll<HTMLElement>('[data-line]')).find(
+        (item) => item.getBoundingClientRect().bottom > top,
+      );
+      return row
+        ? { line: row.dataset.line ?? '', top: row.getBoundingClientRect().top - top }
+        : undefined;
+    };
+    const page = async (offset: number): Promise<GameViewerLogPage> => {
+      if (!archived) {
         if (!host.log) throw new Error('unavailable');
-        if (update) {
-          await host.log.refresh(controller.signal);
-          previousRefresh.current = refresh;
-        }
-        value = await host.log.page(
-          { offset: target, limit: pageSize, query: search, level },
+        return host.log.page(
+          { offset, limit: logPageSize, query: search, level },
           controller.signal,
         );
       }
-      if (controller.signal.aborted) return;
-      resolvedOffset.current = value.offset;
-      setState((previous) => ({
-        value:
-          previous.value && JSON.stringify(previous.value) === JSON.stringify(value)
-            ? previous.value
-            : value,
-      }));
+      if (source.size >= logReadLimit || !host.readPrefix)
+        throw { messageKey: key('archiveLarge') };
+      archiveBytes ??= host.readPrefix(logReadLimit, controller.signal);
+      const bytes = await archiveBytes;
+      if (bytes.length >= logReadLimit) throw { messageKey: key('archiveLarge') };
+      const lines = parseLog(bytes),
+        filtered = filterLog(lines, search, level);
+      const last = Math.max(0, Math.ceil(filtered.length / logPageSize) - 1) * logPageSize;
+      const start = offset === -1 ? last : Math.min(Math.max(0, offset), last);
+      return {
+        revision: 'archive',
+        offset: start,
+        total: filtered.length,
+        totalLines: lines.length,
+        rows: filtered
+          .slice(start, start + logPageSize)
+          .map((row) => ({ line: row.index + 1, text: row.text, level: row.level })),
+      };
     };
-    // Search is server-side over the complete snapshot; debounce typing, never the page buttons.
-    const timer = setTimeout(() => {
-      void load().catch((error) => {
+    const publish = (
+      next: GameViewerLogPage,
+      position: { anchor?: Anchor; edge?: 'top' | 'bottom' },
+    ) => {
+      if (controller.signal.aborted) return;
+      value.current = next;
+      positioning.current = position;
+      setState({ value: next });
+    };
+    const perform = async (
+      operation: 'initial' | 'before' | 'after' | 'refresh',
+      quiet = false,
+    ) => {
+      if (reading) {
+        if (operation === 'refresh') {
+          queuedRefresh = true;
+          queuedQuiet = queuedQuiet && quiet;
+        }
+        return;
+      }
+      const current = value.current;
+      if (operation !== 'initial' && !current) return;
+      let followEdge = false;
+      reading = true;
+      fillAllowed = true;
+      setBusy(true);
+      try {
+        let next: GameViewerLogPage;
+        if (operation === 'initial') next = await page(search || level !== 'all' ? 0 : -1);
+        else if (operation === 'refresh') {
+          if (archived) archiveBytes = undefined;
+          else await host.log?.refresh(controller.signal);
+          next = await page(current?.offset ?? 0);
+          const wanted = current?.rows.length ?? logPageSize;
+          while (next.rows.length < wanted && next.offset + next.rows.length < next.total) {
+            const extra = await page(next.offset + next.rows.length);
+            if (extra.revision !== next.revision || !extra.rows.length)
+              throw { code: 'viewer_revision_changed', messageKey: key('changed') };
+            next = { ...next, rows: [...next.rows, ...extra.rows].slice(0, wanted) };
+          }
+        } else {
+          const offset =
+            operation === 'before'
+              ? Math.max(0, (current?.offset ?? 0) - logPageSize)
+              : (current?.offset ?? 0) + (current?.rows.length ?? 0);
+          const extra = await page(offset);
+          next = current
+            ? extendLogWindow(current, extra, operation === 'before' ? 'before' : 'after')
+            : extra;
+        }
         if (controller.signal.aborted) return;
+        const position =
+          operation === 'initial'
+            ? { edge: (search || level !== 'all' ? 'top' : 'bottom') as 'top' | 'bottom' }
+            : { anchor: anchor() };
+        if (
+          (operation === 'before' || operation === 'after') &&
+          position.anchor &&
+          !next.rows.some((row) => String(row.line) === position.anchor?.line)
+        ) {
+          followEdge = true;
+          return;
+        }
+        ready = true;
+        publish(next, position);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        fillAllowed = false;
+        if (
+          quiet &&
+          value.current &&
+          error &&
+          typeof error === 'object' &&
+          'code' in error &&
+          error.code === 'viewer_revision_changed'
+        )
+          return;
         const denied =
           error &&
           typeof error === 'object' &&
           'status' in error &&
           [401, 403, 404, 410].includes(Number(error.status));
-        setState((previous) => {
-          if (
-            quiet &&
-            previous.value &&
-            error &&
-            typeof error === 'object' &&
-            'code' in error &&
-            error.code === 'viewer_revision_changed'
-          )
-            return previous;
-          return { ...(denied ? {} : { value: previous.value }), error: errorKey(error) };
-        });
-      });
-    }, 0);
-    return () => {
-      clearTimeout(timer);
-      controller.abort();
+        if (denied) {
+          value.current = undefined;
+          ready = false;
+        }
+        setState((previous) => ({
+          ...(!denied ? { value: previous.value } : {}),
+          error: errorKey(error),
+        }));
+      } finally {
+        reading = false;
+        if (!controller.signal.aborted) {
+          setBusy(false);
+          if (queuedRefresh) {
+            const quiet = queuedQuiet;
+            queuedRefresh = false;
+            queuedQuiet = true;
+            void perform('refresh', quiet);
+          } else
+            requestAnimationFrame(() => {
+              if (!controller.signal.aborted) {
+                runtime.current?.fill();
+                if (operation === 'refresh' || followEdge) runtime.current?.scroll();
+              }
+            });
+        }
+      }
     };
-  }, [host, archived, source.size, query, search, level, offset, refresh]);
+    const loadEdge = (fill = false) => {
+      const element = scroller.current,
+        current = value.current;
+      if (
+        !ready ||
+        reading ||
+        !element ||
+        !current ||
+        controller.signal.aborted ||
+        (fill && !fillAllowed)
+      )
+        return;
+      if (fill && element.scrollHeight > element.clientHeight + 1) return;
+      if (current.offset > 0 && (fill || element.scrollTop < 160)) void perform('before');
+      else if (
+        current.offset + current.rows.length < current.total &&
+        (fill || element.scrollHeight - element.scrollTop - element.clientHeight < 160)
+      )
+        void perform('after');
+    };
+    runtime.current = {
+      scroll: () => loadEdge(),
+      fill: () => loadEdge(true),
+      refresh: (quiet) => {
+        void perform(value.current ? 'refresh' : 'initial', quiet);
+      },
+    };
+    const unsubscribe = host.log?.onChange(() => {
+      void perform('refresh', true);
+    });
+    void perform('initial');
+    return () => {
+      controller.abort();
+      unsubscribe?.();
+      runtime.current = undefined;
+    };
+  }, [host, source.entry, source.archives, source.size, query, search, level]);
   const page = state.value;
   return (
-    <div className="satisfactory-log-viewer">
+    <div className="satisfactory-log-viewer" ref={root} data-offset={page?.offset}>
       <div className="satisfactory-log-toolbar">
         <label>
           {host.t(key('search'))}
@@ -136,7 +290,6 @@ export default function LogViewer({ source, host }: GameViewerProps) {
             maxLength={256}
             onChange={(event) => {
               setQuery(event.target.value);
-              setOffset(0);
             }}
           />
         </label>
@@ -147,7 +300,6 @@ export default function LogViewer({ source, host }: GameViewerProps) {
             value={level}
             onChange={(event) => {
               setLevel(event.target.value as typeof level);
-              setOffset(0);
             }}
           >
             {(['all', 'error', 'warning', 'info'] as const).map((value) => (
@@ -160,53 +312,34 @@ export default function LogViewer({ source, host }: GameViewerProps) {
         <button
           type="button"
           onClick={() => {
-            quietRefresh.current = false;
-            setRefresh((value) => value + 1);
+            runtime.current?.refresh(false);
           }}
-          disabled={!page && !state.error}
+          disabled={busy}
         >
           {host.t(key('refresh'))}
         </button>
       </div>
       {state.error && <p role="alert">{host.t(state.error)}</p>}
-      {!page ? (
-        !state.error && <p role="status">{host.t(key('loading'))}</p>
-      ) : !page.rows.length ? (
-        <p>{host.t(key(page.totalLines ? 'noMatches' : 'empty'))}</p>
-      ) : (
-        <div className="satisfactory-log-lines">
-          {page.rows.map((line) => (
-            <div key={line.line} className={`satisfactory-log-${line.level}`}>
+      <section
+        className="satisfactory-log-lines"
+        ref={scroller}
+        onScroll={() => runtime.current?.scroll()}
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: A named scroll region must be keyboard scrollable.
+        tabIndex={0}
+        aria-label={host.t(key('contents'))}
+      >
+        {!page ? (
+          !state.error && <p role="status">{host.t(key('loading'))}</p>
+        ) : !page.rows.length ? (
+          <p>{host.t(key(page.totalLines ? 'noMatches' : 'empty'))}</p>
+        ) : (
+          page.rows.map((line) => (
+            <div key={line.line} data-line={line.line} className={`satisfactory-log-${line.level}`}>
               <code>{line.text || '\u00a0'}</code>
             </div>
-          ))}
-        </div>
-      )}
-      {page && page.total > pageSize && (
-        <nav className="satisfactory-log-pagination" aria-label={host.t(key('name'))}>
-          <button
-            type="button"
-            disabled={page.offset === 0}
-            onClick={() => setOffset(Math.max(0, page.offset - pageSize))}
-          >
-            {host.t(key('previous'))}
-          </button>
-          <span>
-            {host.t(key('range'), {
-              start: page.offset + 1,
-              end: page.offset + page.rows.length,
-              total: page.total,
-            })}
-          </span>
-          <button
-            type="button"
-            disabled={page.offset + page.rows.length >= page.total}
-            onClick={() => setOffset(page.offset + pageSize)}
-          >
-            {host.t(key('next'))}
-          </button>
-        </nav>
-      )}
+          ))
+        )}
+      </section>
     </div>
   );
 }

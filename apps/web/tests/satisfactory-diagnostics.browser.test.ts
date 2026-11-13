@@ -22,9 +22,18 @@ it('opens bounded Satisfactory diagnostics through the existing Fileman shell', 
   >();
   const downloads = new Map<string, number>();
   let provider: Awaited<ReturnType<typeof installBrowserFixtures>> | undefined;
+  let captureFailure: (() => Promise<Buffer>) | undefined;
+  let drainRoutes: (() => Promise<void>) | undefined;
   try {
     const identities = await prepareJourneyIdentities(harness);
     const page = identities.user;
+    // Intentionally abandoned requests must not report errors after harness disposal.
+    drainRoutes = async () => {
+      await page.goto('about:blank');
+      await page.unrouteAll({ behavior: 'ignoreErrors' });
+    };
+    captureFailure = () =>
+      page.screenshot({ path: 'test-results/log-infinite-failure.png', fullPage: true });
     provider = await installBrowserFixtures(
       harness.database,
       identities.ownerId,
@@ -51,10 +60,11 @@ it('opens bounded Satisfactory diagnostics through the existing Fileman shell', 
     files.set(
       'Large.log',
       Buffer.from(
-        `LogGame: Display: Start marker\n${'LogInit: Display: old line\n'.repeat(5000)}LogGame: Error: Tail marker\n`,
+        `LogGame: Display: Start marker\n${Array.from({ length: 5000 }, (_, index) => `LogInit: Display: old line ${index}${index % 7 === 0 ? ' wrapped detail'.repeat(32) : ''}\n`).join('')}LogGame: Error: Tail marker\n`,
       ),
     );
-    files.set('Unavailable.log', Buffer.from('cannot read'));
+    files.set('Unavailable.log', Buffer.from('Recovered log content'));
+    let unavailable = true;
 
     files.set(
       'CrashContext.runtime-xml',
@@ -161,7 +171,7 @@ w0RLozHnei051W51+srovbeS+CruyOGw
         const input = request.method() === 'POST' ? (request.postDataJSON() ?? {}) : {};
         const prepare = async (path: string) => {
           const bytes = files.get(path);
-          if (!bytes || path === 'Unavailable.log') throw new Error('unavailable');
+          if (!bytes || (path === 'Unavailable.log' && unavailable)) throw new Error('unavailable');
           const snapshot = Buffer.from(bytes);
           const rev = revision(snapshot);
           const value = await openLogViewer(
@@ -287,10 +297,55 @@ w0RLozHnei051W51+srovbeS+CruyOGw
     await browserExpect(log).toContainText('Tail marker');
     await log.getByLabel('Search log', { exact: true }).fill('Start marker');
     await browserExpect(log).toContainText('Start marker');
-    await log.getByLabel('Search log', { exact: true }).fill('');
-    await browserExpect(log.getByRole('button', { name: 'Next', exact: true })).toBeEnabled();
-    await log.getByRole('button', { name: 'Next', exact: true }).click();
-    await browserExpect(log).not.toContainText('Start marker');
+    await log.getByLabel('Search log', { exact: true }).fill('old line');
+    await browserExpect(log.locator('[data-line]').first()).toHaveAttribute('data-line', '2');
+    await browserExpect
+      .poll(async () => Number(await log.locator('[data-line]').last().getAttribute('data-line')))
+      .toBeLessThan(1000);
+    const scroller = log.locator('.satisfactory-log-lines');
+    await browserExpect(log.getByRole('button', { name: /^(Next|Previous)$/ })).toHaveCount(0);
+    const checkViewport = async () => {
+      expect(
+        await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight + 2),
+      ).toBe(true);
+      expect(
+        await scroller.evaluate(
+          (node) => node.getBoundingClientRect().bottom <= window.innerHeight + 1,
+        ),
+      ).toBe(true);
+    };
+    await checkViewport();
+    for (let index = 0; index < 4; index++) {
+      const last = Number(await scroller.locator('[data-line]').last().getAttribute('data-line'));
+      await scroller.evaluate((node) => {
+        node.scrollTop = node.scrollHeight;
+        node.dispatchEvent(new Event('scroll'));
+      });
+      await browserExpect
+        .poll(async () =>
+          Number(await scroller.locator('[data-line]').last().getAttribute('data-line')),
+        )
+        .toBeGreaterThan(last);
+      expect(await scroller.locator('[data-line]').count()).toBeLessThanOrEqual(600);
+    }
+    const firstLine = await scroller.locator('[data-line]').first().getAttribute('data-line');
+    const anchorBefore = await scroller.evaluate((node) => {
+      node.scrollTop = 0;
+      const row = node.querySelector('[data-line]');
+      const top = row?.getBoundingClientRect().top;
+      node.dispatchEvent(new Event('scroll'));
+      return top;
+    });
+    await browserExpect
+      .poll(async () =>
+        Number(await scroller.locator('[data-line]').first().getAttribute('data-line')),
+      )
+      .toBeLessThan(Number(firstLine));
+    const anchorAfter = await scroller.locator(`[data-line="${firstLine}"]`).boundingBox();
+    if (!anchorAfter || anchorBefore === undefined) throw new Error('Missing retained row');
+    expect(Math.abs(anchorAfter.y - anchorBefore)).toBeLessThan(2);
+    await checkViewport();
+    await page.screenshot({ path: 'test-results/satisfactory-log-desktop-en.png', fullPage: true });
     expect(downloads.get('Large.log')).toBe(1);
     const visibleBeforeAppend = await log.locator('.satisfactory-log-lines').innerText();
     await log
@@ -322,6 +377,9 @@ w0RLozHnei051W51+srovbeS+CruyOGw
     await back();
     await open('Unavailable.log');
     await browserExpect(log.getByRole('alert')).toBeVisible();
+    unavailable = false;
+    await log.getByRole('button', { name: 'Refresh', exact: true }).click();
+    await browserExpect(log).toContainText('Recovered log content');
     await back();
     await open('Empty.log');
     await browserExpect(log).toContainText('No log lines.');
@@ -402,8 +460,16 @@ w0RLozHnei051W51+srovbeS+CruyOGw
       fullPage: true,
     });
     await back();
-    await open('FactoryGame.log');
-    await browserExpect(log).toContainText('Example diagnostic');
+    await open('Large.log');
+    await browserExpect(log).toContainText('Tail marker');
+    expect(
+      await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight + 2),
+    ).toBe(true);
+    expect(
+      await log
+        .locator('.satisfactory-log-lines')
+        .evaluate((node) => node.scrollHeight > node.clientHeight),
+    ).toBe(true);
     expect((await new AxeBuilder({ page }).include('.file-manager').analyze()).violations).toEqual(
       [],
     );
@@ -415,7 +481,11 @@ w0RLozHnei051W51+srovbeS+CruyOGw
     ).toBe(true);
     expect(writes).toEqual([]);
     expect(pageErrors).toEqual([]);
-    expect([...files]).toEqual([...fileBytes]);
+    const fingerprints = (entries: Map<string, Buffer>) =>
+      [...entries].map(([name, bytes]) => [name, bytes.length, revision(bytes)]);
+    expect(fingerprints(files)).toEqual(fingerprints(fileBytes));
+    await drainRoutes?.();
+    drainRoutes = undefined;
     expect(
       await harness.database.db
         .selectFrom('server_operations')
@@ -423,7 +493,11 @@ w0RLozHnei051W51+srovbeS+CruyOGw
         .where('server_id', '=', id)
         .execute(),
     ).toEqual(beforeOperations);
+  } catch (error) {
+    await captureFailure?.();
+    throw error;
   } finally {
+    await drainRoutes?.();
     for (const value of logSessions.values()) await value.value.close();
     await logCache.close();
     await rm(cacheRoot, { recursive: true, force: true });

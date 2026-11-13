@@ -1,5 +1,6 @@
 const messages: Record<string, [string, string]> = {
   name: ['Log', 'Log'],
+  contents: ['Log contents', 'Contenuto log'],
   refresh: ['Refresh', 'Aggiorna'],
   search: ['Search log', 'Cerca nel log'],
   level: ['Level', 'Livello'],
@@ -32,9 +33,6 @@ const messages: Record<string, [string, string]> = {
   ],
   empty: ['No log lines.', 'Nessuna riga nel log.'],
   noMatches: ['No matching lines.', 'Nessuna riga corrispondente.'],
-  previous: ['Previous', 'Precedente'],
-  next: ['Next', 'Successiva'],
-  range: ['Lines {start}–{end} of {total}', 'Righe {start}–{end} di {total}'],
 };
 export const satisfactoryLogCatalogs = {
   en: Object.fromEntries(
