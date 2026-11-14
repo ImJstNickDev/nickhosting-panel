@@ -254,12 +254,24 @@ export default function LogViewer({ source, host }: GameViewerProps) {
       )
         return;
       if (fill && element.scrollHeight > element.clientHeight + 1) return;
-      if (current.offset > 0 && (fill || element.scrollTop < 160)) void perform('before');
-      else if (
-        current.offset + current.rows.length < current.total &&
-        (fill || element.scrollHeight - element.scrollTop - element.clientHeight < 160)
+      // Measure real rows so wrapped lines get the same advance notice as short ones.
+      // Limit prefetch margins for short final pages.
+      const rows = element.querySelectorAll<HTMLElement>('[data-line]');
+      const margin = Math.min(40, Math.floor(rows.length / 4));
+      const bounds = element.getBoundingClientRect();
+      const before = rows[margin]?.getBoundingClientRect().top;
+      const after = rows[rows.length - 1 - margin]?.getBoundingClientRect().bottom;
+      const nearBefore = fill || (before !== undefined && before >= bounds.top);
+      const nearAfter = fill || (after !== undefined && after <= bounds.bottom);
+      const canBefore = current.offset > 0 && nearBefore;
+      const canAfter = current.offset + current.rows.length < current.total && nearAfter;
+      if (
+        canBefore &&
+        (!canAfter ||
+          element.scrollTop <= element.scrollHeight - element.scrollTop - element.clientHeight)
       )
-        void perform('after');
+        void perform('before');
+      else if (canAfter) void perform('after');
     };
     runtime.current = {
       scroll: () => loadEdge(),

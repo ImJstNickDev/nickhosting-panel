@@ -318,7 +318,13 @@ w0RLozHnei051W51+srovbeS+CruyOGw
     for (let index = 0; index < 4; index++) {
       const last = Number(await scroller.locator('[data-line]').last().getAttribute('data-line'));
       await scroller.evaluate((node) => {
-        node.scrollTop = node.scrollHeight;
+        const rows = node.querySelectorAll<HTMLElement>('[data-line]');
+        const boundary = rows[rows.length - 31];
+        if (!boundary) throw new Error('Missing prefetch boundary');
+        node.scrollTop +=
+          boundary.getBoundingClientRect().bottom - node.getBoundingClientRect().bottom;
+        if (node.scrollHeight - node.scrollTop - node.clientHeight < 300)
+          throw new Error('Prefetch must start well before the bottom');
         node.dispatchEvent(new Event('scroll'));
       });
       await browserExpect
@@ -330,20 +336,22 @@ w0RLozHnei051W51+srovbeS+CruyOGw
     }
     const firstLine = await scroller.locator('[data-line]').first().getAttribute('data-line');
     const anchorBefore = await scroller.evaluate((node) => {
-      node.scrollTop = 0;
-      const row = node.querySelector('[data-line]');
+      const row = node.querySelectorAll<HTMLElement>('[data-line]')[30];
+      if (!row) throw new Error('Missing prefetch anchor');
+      node.scrollTop += row.getBoundingClientRect().top - node.getBoundingClientRect().top;
+      if (node.scrollTop < 300) throw new Error('Prefetch must start well before the top');
       const top = row?.getBoundingClientRect().top;
       node.dispatchEvent(new Event('scroll'));
-      return top;
+      return { top, line: row.dataset.line };
     });
     await browserExpect
       .poll(async () =>
         Number(await scroller.locator('[data-line]').first().getAttribute('data-line')),
       )
       .toBeLessThan(Number(firstLine));
-    const anchorAfter = await scroller.locator(`[data-line="${firstLine}"]`).boundingBox();
-    if (!anchorAfter || anchorBefore === undefined) throw new Error('Missing retained row');
-    expect(Math.abs(anchorAfter.y - anchorBefore)).toBeLessThan(2);
+    const anchorAfter = await scroller.locator(`[data-line="${anchorBefore.line}"]`).boundingBox();
+    if (!anchorAfter || anchorBefore.top === undefined) throw new Error('Missing retained row');
+    expect(Math.abs(anchorAfter.y - anchorBefore.top)).toBeLessThan(2);
     await checkViewport();
     await page.screenshot({ path: 'test-results/satisfactory-log-desktop-en.png', fullPage: true });
     expect(downloads.get('Large.log')).toBe(1);

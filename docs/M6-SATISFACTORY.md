@@ -1745,3 +1745,5 @@ Axe, independent review, root/web typechecks, lint, build and i18n checks passed
 No backend API, migration, dependency, infrastructure or real game-data operation;
 existing source watchers serve the frontend changes. Rollback is the preceding
 application revision; snapshot/session lifecycle is unchanged.
+
+Log scrolling prefetches adjacent pages with 40 rendered rows remaining (capped at a quarter of the current window for short pages), using actual wrapped-row geometry. The nearest edge wins if both margins overlap. Browser coverage loads in both directions while more than 300 pixels remain and verifies the reading anchor and bounded window.
