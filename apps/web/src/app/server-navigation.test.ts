@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { satisfactoryManifest } from '../../../../games/satisfactory/src/manifest.js';
 import type { ServerInfo } from '../features/service-contracts.js';
 import { serverNavigation } from './server-navigation.js';
 
@@ -81,4 +82,32 @@ describe('contextual server navigation', () => {
       ),
     ).toBe(false);
   });
+});
+
+it('shows all Satisfactory management destinations from its compiled integration', () => {
+  const value = {
+    ...server(['files.read', 'settings.read'], 'dedicated'),
+    gameId: 'satisfactory',
+    capabilities: { ...satisfactoryManifest.capabilities, gatewayMessages: false },
+  };
+  const items = serverNavigation(value, '/servers/server-fixture/game/worlds', translate);
+  expect(items.filter((item) => item.to.includes('/game/')).map((item) => item.to)).toEqual([
+    '/servers/server-fixture/game/overview',
+    '/servers/server-fixture/game/worlds',
+    '/servers/server-fixture/game/mods',
+    '/servers/server-fixture/game/server-settings',
+  ]);
+  expect(items.filter((item) => item.active).map((item) => item.to)).toEqual([
+    '/servers/server-fixture/game/worlds',
+  ]);
+  expect(items.find((item) => item.to.endsWith('/overview'))?.group).toBe('serverNav.tools');
+  expect(items.find((item) => item.to.endsWith('/worlds'))?.group).toBe('serverNav.tools');
+  const staleCapabilities = serverNavigation(
+    { ...value, capabilities: { ...value.capabilities, worlds: false } },
+    '',
+    translate,
+  );
+  expect(staleCapabilities.some((item) => item.to.endsWith('/overview'))).toBe(true);
+  expect(staleCapabilities.some((item) => item.to.endsWith('/server-settings'))).toBe(true);
+  expect(staleCapabilities.some((item) => item.to.endsWith('/worlds'))).toBe(false);
 });

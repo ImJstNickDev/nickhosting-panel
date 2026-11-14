@@ -82,6 +82,7 @@ services:
       - { type: bind, source: ./packages/pterodactyl-adapter/src, target: /app/packages/pterodactyl-adapter/src, read_only: true, bind: { create_host_path: false } }
       - { type: bind, source: ./packages/server-management/src, target: /app/packages/server-management/src, read_only: true, bind: { create_host_path: false } }
       - { type: bind, source: ./games/minecraft/src, target: /app/games/minecraft/src, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: ./games/satisfactory/src, target: /app/games/satisfactory/src, read_only: true, bind: { create_host_path: false } }
     healthcheck:
       test: [CMD, node, deploy/container-health.mjs, web]
       interval: 15s
@@ -110,6 +111,7 @@ services:
       - { type: bind, source: ./packages/pterodactyl-adapter/src, target: /app/packages/pterodactyl-adapter/src, read_only: true, bind: { create_host_path: false } }
       - { type: bind, source: ./packages/server-management/src, target: /app/packages/server-management/src, read_only: true, bind: { create_host_path: false } }
       - { type: bind, source: ./games/minecraft/src, target: /app/games/minecraft/src, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: ./games/satisfactory/src, target: /app/games/satisfactory/src, read_only: true, bind: { create_host_path: false } }
       - { type: bind, source: ./apps/api/src, target: /app/apps/api/src, read_only: true, bind: { create_host_path: false } }
       - { type: bind, source: ./apps/worker/src, target: /app/apps/worker/src, read_only: true, bind: { create_host_path: false } }
       - { type: bind, source: ./tsconfig.json, target: /app/tsconfig.json, read_only: true, bind: { create_host_path: false } }

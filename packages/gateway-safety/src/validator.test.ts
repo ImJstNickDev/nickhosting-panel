@@ -355,7 +355,7 @@ describe('Gateway snapshot provider batches', () => {
     expect(f.options.provider.getApplicationServer).toHaveBeenCalledWith(42);
     expect(f.options.provider.getApplicationServer).toHaveBeenCalledWith(43);
     expect(f.options.resolveContext).toHaveBeenCalledTimes(6);
-    expect(f.options.observer.observe).toHaveBeenCalledTimes(6);
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(4);
     expect(f.options.loadProof).toHaveBeenCalledTimes(6);
     const next = safety.createValidationBatch?.();
     if (!next) throw new Error('Missing next validation batch');
@@ -384,6 +384,30 @@ describe('Gateway snapshot provider batches', () => {
       expect(f.options.provider[source]).toHaveBeenCalledTimes(2);
     },
   );
+
+  it('shares initial host evidence across waves without renewing its age or exposing mutations', async () => {
+    const f = fixture();
+    let clock = f.observation.observedAt;
+    f.options.now = () => clock;
+    const safety = f.validator();
+    const batch = safety.createValidationBatch?.();
+    if (!batch) throw new Error('Missing batch');
+    await batch.validate(f.route, []);
+    // A later distinct route still uses the original immutable snapshot.
+    f.observation.sockets.push({ ...f.route.public, inode: 'foreign', processOwned: false });
+    await batch.validate({ ...f.route, id: ids.node }, []);
+    expect(f.options.observer.observe).toHaveBeenCalledOnce();
+    // The repeated route is the final bind gate and must detect the new socket.
+    await expect(batch.validate(f.route, [])).rejects.toMatchObject({ reason: 'public_collision' });
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
+    f.observation.sockets = [];
+    clock += 5001;
+    f.observation.observedAt = clock;
+    await expect(batch.validate({ ...f.route, id: ids.allocation }, [])).rejects.toThrow();
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
+    await safety.createValidationBatch?.().validate(f.route, []);
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(3);
+  });
 
   it('isolates concurrently active batches, including source failures', async () => {
     const f = fixture();

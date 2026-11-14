@@ -1,4 +1,4 @@
-import { isIP } from 'node:net';
+import { isIP, type Socket } from 'node:net';
 import { gatewayPresentationSchema, minecraftGatewayResponsesSchema } from '@nickhosting/core';
 import { z } from 'zod';
 
@@ -19,6 +19,41 @@ export const gatewayModeSchema = z.enum([
 export type GatewayMode = z.infer<typeof gatewayModeSchema>;
 /** Ephemeral listener response; stopping is not persisted routing authority. */
 export type GatewayResponseMode = GatewayMode | 'stopping';
+/** Bounded private protocol metadata, including JSON-escaped native response strings.
+ * Routing snapshots and inbound player requests retain their smaller independent limits. */
+export const gatewayPrivateStateMaxBytes = 32 * 1024 * 1024 + 512 * 1024;
+export const gatewayOfflineApiRequestSchema = z
+  .strictObject({
+    operation: z.string().regex(/^[A-Za-z][A-Za-z0-9]{0,63}$/),
+    data: z.record(z.string(), z.unknown()).optional(),
+    authorization: z.string().max(8199).optional(),
+    playerId: z.string().max(2048).optional(),
+  })
+  .refine((value) => {
+    try {
+      return Buffer.byteLength(JSON.stringify(value)) <= 65536;
+    } catch {
+      return false;
+    }
+  });
+export type GatewayOfflineApiRequest = z.infer<typeof gatewayOfflineApiRequestSchema>;
+export const gatewayOfflineApiResponseSchema = z.strictObject({
+  status: z.number().int().min(200).max(599),
+  body: z.record(z.string(), z.unknown()).optional(),
+});
+export type GatewayOfflineApiResponse = z.infer<typeof gatewayOfflineApiResponseSchema>;
+/** Core-authenticated lifecycle receipt, never exposed in the game's JSON body. */
+export const gatewayConsoleCommandResponseSchema = gatewayOfflineApiResponseSchema.extend({
+  transition: z
+    .strictObject({
+      action: z.enum(['start', 'sleep', 'restart']),
+      previousGeneration: z.uuid(),
+      generation: z.uuid(),
+    })
+    .optional(),
+});
+export type GatewayConsoleCommandResponse = z.infer<typeof gatewayConsoleCommandResponseSchema>;
+
 export interface GatewayProtocolObservation {
   ready: boolean;
   idle?: boolean;
@@ -66,6 +101,30 @@ export const gatewayMinecraftProtocolSchema = z
   .refine((value) => !value.transfer || (value.family === 'netty' && value.protocolId >= 766));
 export type GatewayMinecraftProtocol = z.infer<typeof gatewayMinecraftProtocolSchema>;
 
+export const gatewaySatisfactoryStateSchema = z
+  .object({
+    state: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]),
+    netCL: z.number().int().min(0).max(4294967295),
+    flags: z
+      .string()
+      .regex(/^[0-9]{1,20}$/)
+      .refine((value) => BigInt(value) <= 18446744073709551615n),
+    substates: z
+      .array(
+        z
+          .object({
+            id: z.number().int().min(0).max(255),
+            version: z.number().int().min(0).max(65535),
+          })
+          .strict(),
+      )
+      .max(255),
+    name: z.string().max(1024),
+    observedAt: timestamp,
+  })
+  .strict();
+export type GatewaySatisfactoryState = z.infer<typeof gatewaySatisfactoryStateSchema>;
+
 export const gatewayRouteSchema = z
   .object({
     id: z.uuid(),
@@ -100,6 +159,7 @@ export const gatewayRouteSchema = z
         gameVersion: z.string().min(1).max(128),
         role: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
         minecraft: gatewayMinecraftProtocolSchema.optional(),
+        satisfactory: gatewaySatisfactoryStateSchema.optional(),
       })
       .strict()
       .optional(),
@@ -195,7 +255,47 @@ export const gatewayObservationSchema = z
   );
 export type GatewayObservation = z.infer<typeof gatewayObservationSchema>;
 
+export interface GatewayTlsIdentity {
+  privateKeyPem: string;
+  certificatePem: string;
+}
+
 export interface GatewayControl {
+  loadProtocolState?(request: {
+    routeId: string;
+    routeRevision: number;
+  }): Promise<GatewaySatisfactoryState | undefined>;
+  /** Authenticated, per-route application observation. No credentials cross this boundary. */
+  observeApplication?(request: {
+    routeId: string;
+    routeRevision: number;
+  }): Promise<GatewayProtocolObservation>;
+  loadPrivateState?(request: { routeId: string; routeRevision: number }): Promise<unknown>;
+  requestOfflineApi?(request: {
+    routeId: string;
+    routeRevision: number;
+    request: GatewayOfflineApiRequest;
+  }): Promise<GatewayOfflineApiResponse>;
+  /** Native-authenticated command execution through Core's existing lifecycle. */
+  requestConsoleCommand?(request: {
+    routeId: string;
+    routeRevision: number;
+    request: GatewayOfflineApiRequest;
+  }): Promise<GatewayConsoleCommandResponse>;
+  savePrivateState?(request: {
+    routeId: string;
+    routeRevision: number;
+    state: unknown;
+  }): Promise<void>;
+  reportProtocolState?(request: {
+    routeId: string;
+    routeRevision: number;
+    state: GatewaySatisfactoryState;
+  }): Promise<void>;
+  fetchTlsIdentity?(request: {
+    routeId: string;
+    routeRevision: number;
+  }): Promise<GatewayTlsIdentity>;
   /** Commit notification only; receipt must match the current fenced operation.
    * No timer here grants authority or extends a listener lease. */
   waitForSleep?(
@@ -237,6 +337,10 @@ export interface GatewaySessionDiagnostic {
   action: 'status' | 'login' | 'incompatible' | 'transfer';
 }
 export interface GatewayProtocolContext {
+  loadState?(): Promise<GatewaySatisfactoryState | undefined>;
+  observeApplication?(): Promise<GatewayProtocolObservation>;
+  persistState?(state: GatewaySatisfactoryState): Promise<void>;
+  input?: Uint8Array;
   route: Readonly<GatewayRoute>;
   signal: AbortSignal;
   /** Optional trusted diagnostics; implementations must isolate sink failures. */
@@ -260,13 +364,65 @@ export interface GatewayProtocolSession {
 
 /** Trusted game code. Implementations must distinguish real protocol readiness
  * and player idleness; an open socket or no Gateway traffic proves neither. */
+export interface GatewayTcpContext extends GatewayProtocolContext {
+  /** Existing Core TCP idle policy bounds managed requests waiting for readiness. */
+  backendWaitTimeoutMs?: number;
+  /** Native game authentication and authorized reads against protected stopped
+   * instance state. This hook must never initiate a backend start. */
+  requestOfflineApi?(request: GatewayOfflineApiRequest): Promise<GatewayOfflineApiResponse>;
+  /** Bounded native console request; Core verifies the original player token. */
+  requestConsoleCommand?(request: GatewayOfflineApiRequest): Promise<GatewayConsoleCommandResponse>;
+  /** Protect one bounded command response, never gameplay, across its own accepted
+   * lifecycle transition. Release only after HTTP response finish/close. */
+  beginConsoleReply?(): (() => void) | undefined;
+  /** A detached connection may finish its accepted reply but handle no new work. */
+  consoleReplyOnly?(): boolean;
+  /** Credential-free API diagnostics. Only fixed operation names and outcomes;
+   * never include headers, request/response bodies or player identifiers. */
+  onApiDiagnostic?(event: {
+    operation: string;
+    outcome: 'health' | 'cached' | 'native' | 'unavailable' | 'wake_result' | 'forwarding_attempt';
+  }): void;
+  /** Reserve a validated backend stream before opening it. Undefined refuses
+   * forwarding; the idempotent release must run when that upstream closes. */
+  beginForwarding?(): (() => void) | undefined;
+  /** Reserve active request work before a join or mutation. Undefined means
+   * authority/quiescence forbids the effect. Release is idempotent. */
+  beginActivity?(): (() => void) | undefined;
+  loadPrivateState?(): Promise<unknown>;
+  savePrivateState?(state: unknown): Promise<void>;
+  mode(): GatewayResponseMode;
+  canForward(): boolean;
+  requestWake(): Promise<GatewayMode>;
+  tlsIdentity(): Promise<GatewayTlsIdentity>;
+}
+
 export interface GatewayProtocolAdapter {
+  /** Online client requests, including polling, reset the idle interval. Managed
+   * TCP adapters must reserve each forwarded request with beginActivity.
+   * Backend probes and offline responses never count as client activity. */
+  readonly clientRequestsPreventIdle?: boolean;
+  /** Opt in only when every non-polling managed request uses beginActivity. */
+  readonly managesTcpActivity?: boolean;
+  /** Opt in only when every upstream stream is registered through beginForwarding.
+   * Unforwarded frontends remain lease-owned during temporary backend churn. */
+  readonly managesTcpForwarding?: boolean;
+  /** Pure, bounded packet classification for online activity accounting. */
+  isStatusDatagram?(input: Uint8Array, direction: 'client' | 'backend'): boolean;
+  /** Trusted ordering of roles within one server. Lower numbers run first;
+   * finite integers in [-1000, 1000], default 0. This never grants readiness. */
+  validationPriority?(route: Readonly<GatewayRoute>): number;
+  /** Owns a bounded application connection; the core retains lease/socket ownership. */
+  handlesTcp?(route: Readonly<GatewayRoute>): boolean;
+  acceptTcp?(socket: Socket, context: GatewayTcpContext): Promise<void>;
   readonly id: string;
   /** Authenticated provider events may deliver durable readiness receipts for opted-in integrations. */
   readonly startupHint?: 'provider_running';
   readonly readinessSource?: 'provider_running';
   supports(route: Readonly<GatewayRoute>): boolean;
   classify(input: Uint8Array, context: GatewayProtocolContext): GatewayIntent;
+  /** Hydrate presentation data without changing route authority, before a bounded status reply. */
+  prepareResponse?(context: GatewayProtocolContext): Promise<void>;
   response(context: GatewayProtocolContext, state: GatewayResponseMode): Uint8Array | undefined;
   /** Optional stateful TCP status/ping dialogue; old datagram/fixture adapters
    * retain the stateless classify/response contract. Used only while forwarding is fenced. */

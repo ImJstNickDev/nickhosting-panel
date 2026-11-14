@@ -15,7 +15,7 @@ Failed or interrupted effects never trigger a blind second installer invocation.
 | Provider | Catalog | Server installation source |
 | --- | --- | --- |
 | Modrinth | Projects and exact versions | `.mrpack`, pinned manifest files and server overrides; explicitly client-only entries excluded |
-| CurseForge | Modpacks and exact file versions | Official server pack where available, otherwise the pinned manifest with one bulk file-resolution request; distribution restrictions remain enforced |
+| CurseForge | Modpacks and exact file versions; numeric project-ID search | Official server pack where available, otherwise the pinned manifest with one bulk file-resolution request; distribution restrictions remain enforced |
 | Feed The Beast | Public pack/version metadata | Exact version file manifest; client-only files excluded |
 | Technic | Official platform metadata | Official matching server ZIP; client-only Solder bundles are not presented as server packages |
 | VoidsWrath | Official published catalog/pages | Explicit server download link; an unresolved Minecraft/loader requirement blocks installation |
@@ -500,3 +500,10 @@ uses its native [categoryIds array](https://docs.curseforge.com/rest-api/#search
 whose documentation does not specify AND/OR semantics. The UI does not promise
 a universal boolean matching rule or filter just the loaded result page. Providers
 without a category taxonomy retain their existing category-free view.
+
+For CurseForge, a trimmed positive numeric query (for example `575941`) resolves
+the exact project directly instead of relying on the text-search index. Only
+Minecraft modpacks are returned. Missing projects or projects outside that class
+produce an empty result; authentication and transport failures remain errors.
+An exact-ID result must match every selected category and appears only on the
+first page. Version selection and distribution restrictions remain unchanged.

@@ -1,0 +1,375 @@
+import { randomUUID, timingSafeEqual, X509Certificate } from 'node:crypto';
+import type { IncomingMessage } from 'node:http';
+import { request } from 'node:https';
+import { isIP } from 'node:net';
+import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
+import { type Database, recordAudit } from '@nickhosting/database';
+import { type Kysely, sql } from 'kysely';
+import { z } from 'zod';
+import {
+  isSatisfactoryApplicationToken,
+  SatisfactoryApi,
+  type SatisfactoryApiTransport,
+} from '../../../games/satisfactory/src/api.js';
+import { decodeNativePlayerIdentity } from '../../../games/satisfactory/src/native-auth.js';
+import { satisfactoryEnumerationMaxBytes } from '../../../games/satisfactory/src/response-limits.js';
+import {
+  satisfactoryAdvancedSettingsSchema,
+  satisfactoryAdvancedSettingsUpdateSchema,
+} from '../../../games/satisfactory/src/settings.js';
+import {
+  changeSatisfactoryWorld,
+  type SatisfactoryWorldAction,
+} from '../../../games/satisfactory/src/worlds.js';
+import { authorizeServer } from './registry.js';
+import { readSatisfactoryTlsIdentity } from './satisfactory-tls.js';
+
+const tokenSchema = z
+  .string()
+  .min(1)
+  .max(8192)
+  .regex(/^[\x21-\x7e]+$/);
+function tokenName(id: string): string {
+  return `satisfactory.api-token.${z.uuid().parse(id)}`;
+}
+export function satisfactoryPinnedTransport(
+  endpoint: { address: string; port: number },
+  certificatePem: string,
+  token?: string,
+  playerId?: string,
+): SatisfactoryApiTransport {
+  if (playerId !== undefined && !decodeNativePlayerIdentity(playerId))
+    throw new DomainError('validation_failed');
+  const secret = token === undefined ? undefined : tokenSchema.parse(token),
+    expected = new X509Certificate(certificatePem).raw;
+  if (
+    !isIP(endpoint.address) ||
+    !Number.isInteger(endpoint.port) ||
+    endpoint.port < 1 ||
+    endpoint.port > 65535
+  )
+    throw new DomainError('configuration_invalid');
+  async function response(
+    body: { function: string; data?: Record<string, unknown> },
+    signal?: AbortSignal,
+  ): Promise<IncomingMessage> {
+    return new Promise((resolve, reject) => {
+      const payload = Buffer.from(JSON.stringify(body));
+      const req = request(
+        {
+          hostname: endpoint.address,
+          port: endpoint.port,
+          path: '/api/v1',
+          method: 'POST',
+          agent: false,
+          ca: certificatePem,
+          rejectUnauthorized: true,
+          minVersion: 'TLSv1.2',
+          checkServerIdentity: (_host, cert) =>
+            !cert.raw || cert.raw.length !== expected.length || !timingSafeEqual(cert.raw, expected)
+              ? new Error('certificate_mismatch')
+              : undefined,
+          headers: {
+            ...(secret ? { Authorization: `Bearer ${secret}` } : {}),
+            ...(playerId ? { 'X-FactoryGame-PlayerId': playerId } : {}),
+            'Content-Type': 'application/json; charset=utf-8',
+            'Accept-Encoding': 'identity',
+            'Content-Length': String(payload.length),
+          },
+          signal: signal
+            ? AbortSignal.any([signal, AbortSignal.timeout(10000)])
+            : AbortSignal.timeout(10000),
+        },
+        (res) => {
+          if (
+            (res.statusCode ?? 500) < 200 ||
+            (res.statusCode ?? 500) >= 300 ||
+            (res.headers['content-encoding'] && res.headers['content-encoding'] !== 'identity')
+          ) {
+            res.resume();
+            reject(
+              new DomainError(
+                playerId && res.statusCode === 401
+                  ? 'unauthenticated'
+                  : playerId && res.statusCode === 403
+                    ? 'forbidden'
+                    : res.statusCode === 401 || res.statusCode === 403
+                      ? 'game_authentication_failed'
+                      : res.statusCode === 503
+                        ? 'game_not_ready'
+                        : 'integration_unavailable',
+              ),
+            );
+          } else resolve(res);
+        },
+      );
+      req.on('error', () => reject(new DomainError('integration_unavailable')));
+      req.end(payload);
+    });
+  }
+  async function* chunks(res: IncomingMessage, maxBytes: number): AsyncGenerator<Uint8Array> {
+    let length = 0;
+    try {
+      for await (const chunk of res) {
+        const bytes = chunk as Buffer;
+        length += bytes.length;
+        if (length > maxBytes) throw new DomainError('integration_unavailable');
+        yield bytes;
+      }
+    } finally {
+      res.destroy();
+    }
+  }
+  return {
+    async *streamRequest(body, signal) {
+      const res = await response(body, signal);
+      yield* chunks(
+        res,
+        body.function === 'EnumerateSessions' ? satisfactoryEnumerationMaxBytes : 1048576,
+      );
+    },
+    async request(body, signal) {
+      const res = await response(body, signal);
+      if (res.statusCode === 204) {
+        res.resume();
+        return undefined;
+      }
+      try {
+        const buffers: Uint8Array[] = [];
+        for await (const chunk of chunks(
+          res,
+          body.function === 'EnumerateSessions' ? satisfactoryEnumerationMaxBytes : 1048576,
+        ))
+          buffers.push(chunk);
+        const text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(buffers));
+        // Only HTTP 204 verifies authentication; empty 202 acknowledges map changes.
+        return res.statusCode === 202 && !text.length ? {} : (JSON.parse(text) as unknown);
+      } catch {
+        throw new DomainError('integration_unavailable');
+      }
+    },
+  };
+}
+async function target(db: Kysely<Database>, id: string) {
+  const server = await db
+    .selectFrom('managed_servers as s')
+    .innerJoin('runtime_egg_mappings as m', 'm.id', 's.mapping_id')
+    .select([
+      's.id',
+      's.active_operation_id',
+      's.installation_state',
+      's.runtime_state',
+      'm.game_id',
+    ])
+    .where('s.id', '=', id)
+    .where('s.deleted_at', 'is', null)
+    .executeTakeFirst();
+  if (server?.game_id !== 'satisfactory') throw new DomainError('not_found');
+  const allocation = await db
+    .selectFrom('server_allocations')
+    .select(['backend_address', 'port'])
+    .where('server_id', '=', id)
+    .where('role', '=', 'game')
+    .executeTakeFirst();
+  if (!allocation?.backend_address) throw new DomainError('integration_unavailable');
+  return { server, endpoint: { address: allocation.backend_address, port: allocation.port } };
+}
+export async function satisfactoryApiConfigured(
+  db: Kysely<Database>,
+  serverId: string,
+): Promise<boolean> {
+  return !!(await db
+    .selectFrom('encrypted_secrets')
+    .select('name')
+    .where('name', '=', tokenName(serverId))
+    .executeTakeFirst());
+}
+/** Used only by authorized first-run setup over the same pinned backend transport. */
+export async function resolveSatisfactoryBootstrapApi(
+  db: Kysely<Database>,
+  codec: SecretCodec,
+  serverId: string,
+  token?: string,
+): Promise<SatisfactoryApi> {
+  const { endpoint } = await target(db, serverId);
+  const identity = await readSatisfactoryTlsIdentity(db, codec, serverId);
+  if (!identity) throw new DomainError('integration_unavailable');
+  return new SatisfactoryApi(satisfactoryPinnedTransport(endpoint, identity.certificatePem, token));
+}
+
+/** Caller owns the server lifecycle lock and has verified this token natively. */
+export async function storeSatisfactoryApiToken(
+  db: Kysely<Database>,
+  codec: SecretCodec,
+  serverId: string,
+  token: string,
+): Promise<void> {
+  if (!isSatisfactoryApplicationToken(token)) throw new DomainError('validation_failed');
+  const name = tokenName(serverId);
+  const envelope = codec.encrypt(token, name);
+  await db
+    .insertInto('encrypted_secrets')
+    .values({ name, envelope })
+    .onConflict((c) => c.column('name').doUpdateSet({ envelope }))
+    .execute();
+}
+
+export async function resolveSatisfactoryApi(
+  db: Kysely<Database>,
+  codec: SecretCodec,
+  serverId: string,
+  overrideToken?: string,
+  playerId?: string,
+): Promise<SatisfactoryApi> {
+  const { endpoint } = await target(db, serverId);
+  const identity = await readSatisfactoryTlsIdentity(db, codec, serverId);
+  if (!identity) throw new DomainError('integration_unavailable');
+  const name = tokenName(serverId);
+  const stored =
+    overrideToken === undefined
+      ? await db
+          .selectFrom('encrypted_secrets')
+          .select('envelope')
+          .where('name', '=', name)
+          .executeTakeFirst()
+      : undefined;
+  const token = overrideToken ?? (stored ? codec.decrypt(stored.envelope, name) : undefined);
+  if (!token) throw new DomainError('configuration_invalid');
+  return new SatisfactoryApi(
+    satisfactoryPinnedTransport(endpoint, identity.certificatePem, token, playerId),
+  );
+}
+async function locked<T>(
+  db: Kysely<Database>,
+  context: AuthContext,
+  id: string,
+  work: (db: Kysely<Database>) => Promise<T>,
+): Promise<T> {
+  return db.connection().execute(async (connection) => {
+    const result = await sql<{
+      acquired: boolean;
+    }>`select pg_try_advisory_lock(hashtextextended(current_schema() || ${`:nickhosting:server:${id}`},0)) as acquired`.execute(
+      connection,
+    );
+    if (!result.rows[0]?.acquired) throw new DomainError('conflict');
+    try {
+      const server = await authorizeServer(connection, context, id, 'server:manage');
+      if (server.active_operation_id) throw new DomainError('conflict');
+      await target(connection, id);
+      return await work(connection);
+    } finally {
+      await sql`select pg_advisory_unlock(hashtextextended(current_schema() || ${`:nickhosting:server:${id}`},0))`.execute(
+        connection,
+      );
+    }
+  });
+}
+export async function setSatisfactoryApiToken(
+  db: Kysely<Database>,
+  codec: SecretCodec,
+  context: AuthContext,
+  id: string,
+  input: unknown,
+): Promise<void> {
+  const token = tokenSchema.parse(input);
+  if (!isSatisfactoryApplicationToken(token)) throw new DomainError('validation_failed');
+  await locked(db, context, id, async (connection) => {
+    await (await resolveSatisfactoryApi(connection, codec, id, token)).state();
+    await authorizeServer(connection, context, id, 'server:manage');
+    await storeSatisfactoryApiToken(connection, codec, id, token);
+    await recordAudit(connection, context, 'satisfactory.api-token.updated', { serverId: id });
+  });
+}
+export async function applySatisfactoryOptions(
+  db: Kysely<Database>,
+  codec: SecretCodec,
+  context: AuthContext,
+  id: string,
+  input: unknown,
+): Promise<void> {
+  const options = z.record(z.string().min(1).max(256), z.string().max(4096)).parse(input);
+  if (Object.keys(options).length > 128) throw new DomainError('validation_failed');
+  await locked(db, context, id, async (connection) => {
+    const api = await resolveSatisfactoryApi(connection, codec, id);
+    await recordAudit(connection, context, 'satisfactory.options.requested', {
+      serverId: id,
+      keys: Object.keys(options),
+    });
+    await authorizeServer(connection, context, id, 'server:manage');
+    await api.applyOptions(options);
+    await recordAudit(connection, context, 'satisfactory.options.updated', {
+      serverId: id,
+      keys: Object.keys(options),
+    });
+  });
+}
+
+export async function mutateSatisfactoryWorld(
+  db: Kysely<Database>,
+  codec: SecretCodec,
+  context: AuthContext,
+  id: string,
+  request: SatisfactoryWorldAction,
+): Promise<void> {
+  await locked(db, context, id, async (connection) => {
+    const { server } = await target(connection, id);
+    if (server.installation_state !== 'installed' || server.runtime_state !== 'running')
+      throw new DomainError('conflict');
+    const api = await resolveSatisfactoryApi(connection, codec, id);
+    const safetySave = `nickhosting_before_${request.action}_${randomUUID().replaceAll('-', '')}`;
+    await recordAudit(connection, context, `satisfactory.world.${request.action}.requested`, {
+      serverId: id,
+      safetySave,
+    });
+    await changeSatisfactoryWorld(api, request, safetySave, () =>
+      authorizeServer(connection, context, id, 'server:manage').then(() => undefined),
+    );
+    await recordAudit(
+      connection,
+      context,
+      `satisfactory.world.${request.action}.${request.action === 'save' ? 'completed' : 'accepted'}`,
+      {
+        serverId: id,
+      },
+    );
+  });
+}
+export async function applySatisfactoryAdvancedSettings(
+  db: Kysely<Database>,
+  codec: SecretCodec,
+  context: AuthContext,
+  id: string,
+  input: unknown,
+): Promise<void> {
+  const parsed = satisfactoryAdvancedSettingsUpdateSchema.parse(input);
+  await locked(db, context, id, async (connection) => {
+    const { server } = await target(connection, id);
+    if (server.installation_state !== 'installed' || server.runtime_state !== 'running')
+      throw new DomainError('conflict');
+    const api = await resolveSatisfactoryApi(connection, codec, id);
+    const [state, current] = await Promise.all([
+      api.state(),
+      api.advancedSettings().then((value) => satisfactoryAdvancedSettingsSchema.parse(value)),
+    ]);
+    if (
+      !state.isGameRunning ||
+      state.activeSessionName !== parsed.expectedSessionName ||
+      (!current.creativeModeEnabled && !parsed.confirmEnable)
+    )
+      throw new DomainError('conflict');
+    if (
+      Object.keys(parsed.settings).some((key) => !Object.hasOwn(current.advancedGameSettings, key))
+    )
+      throw new DomainError('validation_failed');
+    await recordAudit(connection, context, 'satisfactory.advanced-settings.requested', {
+      serverId: id,
+      keys: Object.keys(parsed.settings),
+    });
+    await authorizeServer(connection, context, id, 'server:manage');
+    await api.applyAdvancedSettings(parsed.settings);
+    await recordAudit(connection, context, 'satisfactory.advanced-settings.updated', {
+      serverId: id,
+      keys: Object.keys(parsed.settings),
+    });
+  });
+}

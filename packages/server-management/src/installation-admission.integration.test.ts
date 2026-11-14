@@ -23,6 +23,7 @@ describe('physical installation resource admission', () => {
       f.adapter,
       f.context,
       f.input(limits ? { limits: { ...f.limits, ...limits } } : {}),
+      { NH_STORAGE_POLICY: 'PER_USER_BUDGET' },
     );
   const nodeInput = (patch: Record<string, unknown> = {}) => ({
     id: f.nodeId,

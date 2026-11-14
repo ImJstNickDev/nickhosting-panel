@@ -234,7 +234,8 @@ describe('opt-in development Gateway Compose', () => {
       NH_GATEWAY_CONTROL_TOKEN: token,
       NH_GATEWAY_CORE_URL: 'https://dev.hub.example.test',
       NH_GATEWAY_DIAGNOSTICS_SOCKET: '/run/nickhosting-gateway/diagnostics.sock',
-      NH_GATEWAY_PROTOCOL_MODULES: '["/app/games/minecraft/src/gateway-module.ts"]',
+      NH_GATEWAY_PROTOCOL_MODULES:
+        '["/app/games/minecraft/src/gateway-module.ts","/app/games/satisfactory/src/gateway-module.ts"]',
     });
     expect(gateway?.env_file).toBeUndefined();
     expect(gateway?.entrypoint).toEqual([

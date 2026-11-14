@@ -776,22 +776,41 @@ describe('durable generic schedules', () => {
     ).toBeUndefined();
   });
 
-  it('refuses capacity immediately and never retries that occurrence after capacity returns', async () => {
-    await allowStarts();
-    const schedule = await create({ action: 'start' });
-    await f.observe({ availableMemoryMiB: 128 });
-    expect(await due()).toEqual({ dispatched: 0, skipped: 1 });
-    expect((await outcomes(schedule.id)).items[0]?.reason).toBe('resources_unavailable');
-    await f.observe();
-    expect(await due()).toEqual({ dispatched: 0, skipped: 0 });
-    expect(
+  it.each(['user', 'owner'] as const)(
+    'refuses %s schedule capacity immediately and never retries that occurrence after capacity returns',
+    async (role) => {
+      if (role === 'owner')
+        await f.db
+          .updateTable('user')
+          .set({ role: 'user' })
+          .where('id', '=', f.owner.actorUserId)
+          .execute();
       await f.db
-        .selectFrom('resource_reservations')
-        .select('server_id')
-        .where('server_id', '=', serverId)
-        .executeTakeFirst(),
-    ).toBeUndefined();
-  });
+        .updateTable('user')
+        .set({ role })
+        .where('id', '=', f.context.actorUserId)
+        .execute();
+      f.context.role = role;
+      await allowStarts();
+      const schedule = await create({ action: 'start' });
+      const jobsBefore = await f.db.selectFrom('operation_jobs').select('id').execute();
+      const outboxBefore = await f.db.selectFrom('job_outbox').select('job_id').execute();
+      await f.observe({ availableMemoryMiB: 128 });
+      expect(await due()).toEqual({ dispatched: 0, skipped: 1 });
+      expect((await outcomes(schedule.id)).items[0]?.reason).toBe('resources_unavailable');
+      expect(await f.db.selectFrom('operation_jobs').select('id').execute()).toEqual(jobsBefore);
+      expect(await f.db.selectFrom('job_outbox').select('job_id').execute()).toEqual(outboxBefore);
+      await f.observe();
+      expect(await due()).toEqual({ dispatched: 0, skipped: 0 });
+      expect(
+        await f.db
+          .selectFrom('resource_reservations')
+          .select('server_id')
+          .where('server_id', '=', serverId)
+          .executeTakeFirst(),
+      ).toBeUndefined();
+    },
+  );
 
   it('retains only the newest interval due and reports missed/late occurrences', async () => {
     const schedule = await create({

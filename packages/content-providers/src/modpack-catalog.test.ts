@@ -1,3 +1,4 @@
+import { DomainError } from '@nickhosting/core';
 import { describe, expect, it, vi } from 'vitest';
 import type { ContentHttp } from './contracts.js';
 import { CurseForgeProvider } from './curseforge.js';
@@ -181,6 +182,88 @@ function curseforge(file = cfFile, project = cfProject) {
   };
 }
 describe('CurseForge modpack catalog', () => {
+  function numericSearch(
+    project: unknown = { ...cfProject, id: 575941, categories: [{ id: 4472 }, { id: 4481 }] },
+    error?: Error,
+  ) {
+    const json = vi.fn(async (url: string) => {
+      if (url.includes('/categories?')) return { data: [{ id: 4471, slug: 'modpacks' }] };
+      if (url.endsWith('/mods/575941')) {
+        if (error) throw error;
+        return { data: project };
+      }
+      throw new Error('Unexpected metadata request');
+    });
+    const http: ContentHttp = { json, text: vi.fn(), download: vi.fn() };
+    return {
+      json,
+      catalog: createModpackCatalog('curseforge', {
+        http,
+        curseforge: new CurseForgeProvider(http, { apiKey: 'fixture' }),
+      }),
+    };
+  }
+  it('looks up numeric project IDs directly, preserves categories and paginates a singleton', async () => {
+    const { catalog, json } = numericSearch();
+    expect(await catalog.search({ query: ' 575941 ', categories: ['4472', '4481'] })).toMatchObject(
+      { total: 1, offset: 0, limit: 20, items: [{ id: '575941' }] },
+    );
+    expect(await catalog.search({ query: '575941', offset: 20 })).toMatchObject({
+      total: 1,
+      items: [],
+    });
+    expect(await catalog.search({ query: '575941', categories: ['4472', '99'] })).toMatchObject({
+      total: 0,
+      items: [],
+    });
+    expect(json.mock.calls.some(([url]) => url.includes('/mods/search'))).toBe(false);
+  });
+  it.each([
+    null,
+    { ...cfProject, id: 575941, classId: 6 },
+    { ...cfProject, id: 575941, gameId: 999 },
+  ])('returns no numeric result for missing or non-modpack project %j', async (project) => {
+    expect(await numericSearch(project).catalog.search({ query: '575941' })).toMatchObject({
+      total: 0,
+      items: [],
+    });
+  });
+  it('returns no numeric result only for a confirmed project 404', async () => {
+    const error = new DomainError('integration_unavailable', 503, {
+      reason: 'content_http_refused',
+      providerStatus: 404,
+    });
+    expect(await numericSearch(undefined, error).catalog.search({ query: '575941' })).toMatchObject(
+      { total: 0, items: [] },
+    );
+  });
+  it.each([401, 403, 429, 500])(
+    'preserves provider failure %i during ID lookup',
+    async (status) => {
+      const error = new DomainError('integration_unavailable', 503, {
+        reason: 'content_http_refused',
+        providerStatus: status,
+      });
+      await expect(
+        numericSearch(undefined, error).catalog.search({ query: '575941' }),
+      ).rejects.toBe(error);
+    },
+  );
+  it('rejects mismatched IDs and malformed matching project metadata', async () => {
+    await expect(numericSearch(cfProject).catalog.search({ query: '575941' })).rejects.toThrow(
+      'validation_failed',
+    );
+    await expect(
+      numericSearch({ id: 575941, gameId: 432, classId: 4471 }).catalog.search({ query: '575941' }),
+    ).rejects.toThrow();
+  });
+  it('does not turn arbitrary URLs or noncanonical numeric text into project lookups', async () => {
+    const { catalog, json } = curseforge();
+    for (const query of ['Cuboid Outpost', '0575941', 'https://example.test/575941'])
+      await catalog.search({ query });
+    expect(json.mock.calls.filter(([url]) => url.includes('/mods/search'))).toHaveLength(3);
+    expect(json.mock.calls.some(([url]) => url.endsWith('/mods/575941'))).toBe(false);
+  });
   it.each(['project', 'version'])(
     'refuses unavailable %s even when a server-pack link exists',
     async (blocked) => {

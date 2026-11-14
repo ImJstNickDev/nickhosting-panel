@@ -17,6 +17,8 @@ interface Boundary {
 export type InstallationConfirmationOptions = StopConfirmationOptions & {
   serverUUID?: string;
   timing?: FileReadTiming;
+  /** Live installer output only; never replayed console history. */
+  onOutput?: (text: string) => void;
 };
 /** Panel clears installing on daemon reset too; status alone cannot prove completion. */
 export async function confirmInstallation(
@@ -25,7 +27,7 @@ export async function confirmInstallation(
   identifier: string,
   options: InstallationConfirmationOptions,
   reinstall = false,
-  timeoutMs = 300000,
+  timeoutMs = 3600_000,
   observer?: ContainerObserver,
 ): Promise<{ confirmed: boolean }> {
   const measure = <T>(name: string, work: () => Promise<T>): Promise<T> =>
@@ -44,6 +46,8 @@ export async function confirmInstallation(
     authorize: options.authorize,
     maxDurationMs: Math.max(1000, timeoutMs),
     onEvent: (event) => {
+      if (connected && armed && event.type === 'console' && event.source === 'installation')
+        options.onOutput?.(event.data);
       if (event.type === 'closed' || event.type === 'error') {
         connected = false;
         finish();

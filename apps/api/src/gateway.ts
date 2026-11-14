@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import {
   type AuthContext,
   type createLogger,
@@ -6,7 +7,12 @@ import {
   type SecretCodec,
 } from '@nickhosting/core';
 import { type createDatabase, getSecret, getSettings } from '@nickhosting/database';
-import { gatewayObservationSchema, gatewayWakeRequestSchema } from '@nickhosting/game-sdk';
+import {
+  gatewayObservationSchema,
+  gatewayPrivateStateMaxBytes,
+  gatewaySatisfactoryStateSchema,
+  gatewayWakeRequestSchema,
+} from '@nickhosting/game-sdk';
 import { gatewayReachabilityProofSchema } from '@nickhosting/gateway-safety';
 import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
 import {
@@ -17,6 +23,7 @@ import {
   getGatewayState,
   listGatewayRoutes,
   type ManagementRuntime,
+  readSatisfactoryTlsIdentity,
   recordGatewayContact,
   reportGatewayObservation,
   requestGatewayWake,
@@ -27,9 +34,17 @@ import {
   verifyManagedIdentity,
 } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
+import { resolveSatisfactoryApi } from '../../../packages/server-management/src/satisfactory-api.js';
 import type { Variables } from './app.js';
 import { gatewayClientFeatures, gatewayPresentationForClient } from './gateway-presentation.js';
+import { registerSatisfactoryConsoleApi } from './gateway-satisfactory-console.js';
+import {
+  observeSatisfactorySessions,
+  persistSatisfactoryOfflineSnapshots,
+  registerSatisfactoryOfflineApi,
+} from './gateway-satisfactory-offline.js';
 import { registerGatewaySleepRoutes } from './gateway-sleep.js';
 import { registerGatewayStartupRoutes } from './gateway-startup.js';
 
@@ -118,7 +133,18 @@ export function registerGatewayRoutes(
   });
   registerGatewayStartupRoutes(app, options);
   registerGatewaySleepRoutes(app, { ...options, authenticate: authenticateGateway });
+  registerSatisfactoryOfflineApi(app, { ...options, route });
+  registerSatisfactoryConsoleApi(app, { ...options, route });
   const prefix = '/internal/gateway/:gatewayId';
+  app.use(
+    `${prefix}/private-state-write`,
+    bodyLimit({
+      maxSize: gatewayPrivateStateMaxBytes + 4096,
+      onError: () => {
+        throw new DomainError('validation_failed', 413);
+      },
+    }),
+  );
   app.get(`${prefix}/configuration`, async (c) => {
     const values = await gatewayConfiguration(db, env);
     return c.json(
@@ -438,6 +464,172 @@ export function registerGatewayRoutes(
     const remote = await management.adapter.getApplicationServer(context.providerServerId);
     await verifyManagedIdentity(db, server, remote);
     return c.json(safetyServer(remote));
+  });
+  app.post(`${prefix}/application-observation`, async (c) => {
+    const parsed = z
+      .strictObject({
+        routeId: z.uuid(),
+        routeRevision: z.number().int().positive(),
+      })
+      .safeParse(await options.body(c));
+    if (!parsed.success) throw new DomainError('validation_failed');
+    const selected = await route(parsed.data);
+    await gatewaySafetyContext(db, selected);
+    if (
+      selected.protocol?.handlerId !== 'satisfactory' ||
+      selected.protocol.role !== 'game' ||
+      selected.public.transport !== 'udp'
+    )
+      throw new DomainError('forbidden');
+    c.header('Cache-Control', 'no-store');
+    // Only live, authenticated backend state can establish player idleness.
+    // The Gateway receives no application credential or private session data.
+    const api = await resolveSatisfactoryApi(db, codec, selected.serverId);
+    const state = await api.state(AbortSignal.timeout(3000));
+    await route(parsed.data);
+    await persistSatisfactoryOfflineSnapshots(db, codec, selected.serverId, [], {
+      operation: 'QueryServerState',
+      body: { data: { serverGameState: state } },
+    });
+    const [idle] = await Promise.all([
+      api.canAutoSleep(state, AbortSignal.timeout(1500)),
+      observeSatisfactorySessions(db, codec, selected, api, () => route(parsed.data)),
+    ]);
+    await route(parsed.data);
+    return c.json({
+      ready: true,
+      idle,
+      playerCount: state.numConnectedPlayers,
+    });
+  });
+  app.post(`${prefix}/protocol-state-read`, async (c) => {
+    const parsed = z
+      .strictObject({ routeId: z.uuid(), routeRevision: z.number().int().positive() })
+      .safeParse(await options.body(c));
+    if (!parsed.success) throw new DomainError('validation_failed');
+    const selected = await route(parsed.data);
+    await gatewaySafetyContext(db, selected);
+    if (
+      selected.protocol?.handlerId !== 'satisfactory' ||
+      selected.protocol.role !== 'game' ||
+      selected.public.transport !== 'udp'
+    )
+      throw new DomainError('forbidden');
+    const row = await db
+      .selectFrom('satisfactory_server_state')
+      .select('snapshot')
+      .where('server_id', '=', selected.serverId)
+      .executeTakeFirst();
+    c.header('Cache-Control', 'no-store');
+    return c.json({ state: row ? gatewaySatisfactoryStateSchema.parse(row.snapshot) : null });
+  });
+  app.post(`${prefix}/protocol-state`, async (c) => {
+    const parsed = z
+      .object({
+        routeId: z.uuid(),
+        routeRevision: z.number().int().positive(),
+        state: gatewaySatisfactoryStateSchema,
+      })
+      .strict()
+      .safeParse(await options.body(c));
+    if (!parsed.success) throw new DomainError('validation_failed');
+    const input = parsed.data;
+    const selected = await route({ routeId: input.routeId, routeRevision: input.routeRevision });
+    await gatewaySafetyContext(db, selected);
+    if (
+      selected.protocol?.handlerId !== 'satisfactory' ||
+      selected.protocol.role !== 'game' ||
+      selected.public.transport !== 'udp'
+    )
+      throw new DomainError('forbidden');
+    const age = Date.now() - Date.parse(input.state.observedAt);
+    if (age < -5000 || age > 30000) throw new DomainError('validation_failed');
+    const previous = await db
+      .selectFrom('satisfactory_server_state')
+      .select('snapshot')
+      .where('server_id', '=', selected.serverId)
+      .executeTakeFirst();
+    const parsedPrevious = gatewaySatisfactoryStateSchema.safeParse(previous?.snapshot);
+    if (parsedPrevious.success) {
+      const { observedAt: _previousTime, ...previousState } = parsedPrevious.data;
+      const { observedAt: _currentTime, ...currentState } = input.state;
+      // Identical observations must not change route authority or invalidate
+      // the readiness receipt currently being collected against this revision.
+      if (isDeepStrictEqual(previousState, currentState)) return c.body(null, 204);
+    }
+    await db
+      .insertInto('satisfactory_server_state')
+      .values({ server_id: selected.serverId, snapshot: input.state, updated_at: new Date() })
+      .onConflict((conflict) =>
+        conflict.column('server_id').doUpdateSet({ snapshot: input.state, updated_at: new Date() }),
+      )
+      .execute();
+    return c.body(null, 204);
+  });
+  for (const action of ['private-state-read', 'private-state-write'] as const) {
+    app.post(`${prefix}/${action}`, async (c) => {
+      const parsed = z
+        .object({
+          routeId: z.uuid(),
+          routeRevision: z.number().int().positive(),
+          state: z.unknown().optional(),
+        })
+        .strict()
+        .safeParse(await options.body(c));
+      if (!parsed.success) throw new DomainError('validation_failed');
+      const selected = await route({
+        routeId: parsed.data.routeId,
+        routeRevision: parsed.data.routeRevision,
+      });
+      await gatewaySafetyContext(db, selected);
+      if (
+        selected.protocol?.handlerId !== 'satisfactory' ||
+        selected.protocol.role !== 'game' ||
+        selected.public.transport !== 'tcp'
+      )
+        throw new DomainError('forbidden');
+      const name = `gateway.satisfactory.cache.${selected.serverId}`;
+      c.header('Cache-Control', 'no-store');
+      if (action === 'private-state-read') {
+        const existing = await db
+          .selectFrom('encrypted_secrets')
+          .select('envelope')
+          .where('name', '=', name)
+          .executeTakeFirst();
+        return c.json(existing ? JSON.parse(codec.decrypt(existing.envelope, name)) : null);
+      }
+      const serialized = JSON.stringify(parsed.data.state);
+      if (!serialized || Buffer.byteLength(serialized) > gatewayPrivateStateMaxBytes)
+        throw new DomainError('validation_failed');
+      await persistSatisfactoryOfflineSnapshots(db, codec, selected.serverId, parsed.data.state);
+      const envelope = codec.encrypt(serialized, name);
+      await db
+        .insertInto('encrypted_secrets')
+        .values({ name, envelope })
+        .onConflict((conflict) => conflict.column('name').doUpdateSet({ envelope }))
+        .execute();
+      return c.body(null, 204);
+    });
+  }
+  app.post(`${prefix}/tls-identity`, async (c) => {
+    const parsed = z
+      .object({ routeId: z.uuid(), routeRevision: z.number().int().positive() })
+      .strict()
+      .safeParse(await options.body(c));
+    if (!parsed.success) throw new DomainError('validation_failed');
+    const input = parsed.data;
+    const selected = await route(input);
+    await gatewaySafetyContext(db, selected);
+    if (
+      selected.protocol?.handlerId !== 'satisfactory' ||
+      selected.public.transport !== 'tcp' ||
+      selected.protocol.role !== 'game'
+    )
+      throw new DomainError('forbidden');
+    const identity = await readSatisfactoryTlsIdentity(db, codec, selected.serverId);
+    if (!identity) throw new DomainError('integration_unavailable');
+    c.header('Cache-Control', 'no-store');
+    return c.json(identity);
   });
   app.post(`${prefix}/proof-read`, async (c) => {
     const selected = await route(await options.body(c));

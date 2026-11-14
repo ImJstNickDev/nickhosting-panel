@@ -14,6 +14,7 @@ import {
 import { type Kysely, type Selectable, sql, type Transaction } from 'kysely';
 import { z } from 'zod';
 import { type DB, type Environment, lockResources } from './admission.js';
+import { gatewayConsoleOperationSchema } from './gateway-console-contract.js';
 import { type GatewayPolicyContext, loadGatewayPolicyContext } from './gateway-policy-context.js';
 import { requireMinecraftGatewayProtocol } from './gateway-registry.js';
 import { currentInteractiveContext } from './interactive-context.js';
@@ -47,6 +48,22 @@ function matchingSleepOperation(
     marker.generation === state.generation
   );
 }
+function matchingConsoleSleepOperation(
+  operation: Selectable<Database['server_operations']> | undefined,
+  serverId: string,
+  state: State,
+): operation is Selectable<Database['server_operations']> {
+  const marker = gatewayConsoleOperationSchema.safeParse(operation?.plan.gatewayConsole);
+  return (
+    operation?.job_id === state.sleep_job_id &&
+    operation?.server_id === serverId &&
+    operation?.action === 'stop' &&
+    marker.success &&
+    marker.data.action === 'sleep' &&
+    marker.data.generation === state.generation &&
+    marker.data.protocolId === state.protocol_id
+  );
+}
 // Scheduled stops share terminal recovery, but never the idle/quiescence proof:
 // they are explicitly authorized operations, not player-idleness observations.
 function matchingScheduledStopOperation(
@@ -74,6 +91,8 @@ function matchingScheduledStopOperation(
 
 export interface GatewayOrchestrationOptions {
   env?: Environment;
+  /** Trusted native Administrator identity, supplied only by the console API. */
+  consolePlayerId?: string;
   /** Trusted Core route/revision revalidation, inside the observation's global
    * resource transaction lock. Required by the HTTP ingress integration. */
   validateObservation?: (tx: Transaction<Database>) => Promise<void>;
@@ -534,8 +553,13 @@ export async function requestGatewayWake(
     z.strictObject({ generation: z.uuid(), intent: z.enum(['status', 'join']) }),
     input,
   );
+  const consolePlayerId =
+    options.consolePlayerId === undefined
+      ? undefined
+      : parse(gatewayConsoleOperationSchema.shape.playerId, options.consolePlayerId);
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
+    await options.validateObservation?.(tx);
     const { server, state } = await rows(tx, serverId);
     const now = nowOf(options);
     if (value.generation !== state.generation) throw new DomainError('conflict');
@@ -579,6 +603,7 @@ export async function requestGatewayWake(
     // denied request while the durable blocked state and diagnostics still commit.
     await sql`savepoint gateway_admission`.execute(tx);
     try {
+      await options.validateObservation?.(tx);
       const result = await enqueueLockedServerOperation(
         tx,
         actor,
@@ -616,12 +641,149 @@ export async function requestGatewayWake(
         jobId: result.jobId,
         generation: state.generation,
       });
+      if (consolePlayerId !== undefined)
+        await recordAudit(tx, actor, 'gateway.console.requested', {
+          serverId,
+          jobId: result.jobId,
+          generation: state.generation,
+          action: 'start',
+          playerId: consolePlayerId,
+          protocolId: state.protocol_id,
+        });
       await sql`release savepoint gateway_admission`.execute(tx);
     } catch (error) {
       await sql`rollback to savepoint gateway_admission`.execute(tx);
       if (!(error instanceof DomainError)) throw error;
       await block(tx, state, error.code, now);
     }
+    return getGatewayState(tx, serverId, options);
+  });
+}
+
+/** Authenticated native Administrator command, scoped by the calling game API.
+ * Reuses the normal admission, durable jobs and stop confirmation pipeline.
+ * Force sleep is explicit work, like a scheduled stop: it never fabricates idle
+ * observations or borrows an automatic idle fence to disconnect active players. */
+export async function requestGatewayConsoleAction(
+  db: Kysely<Database>,
+  serverId: string,
+  input: unknown,
+  options: GatewayOrchestrationOptions = {},
+): Promise<GatewayState> {
+  const value = parse(gatewayConsoleOperationSchema.omit({ protocolId: true }), input);
+  return db.transaction().execute(async (tx) => {
+    await lockResources(tx);
+    await options.validateObservation?.(tx);
+    const { server, state } = await rows(tx, serverId);
+    const now = nowOf(options);
+    if (value.generation !== state.generation) throw new DomainError('conflict');
+    if (!state.enabled || ['manually_stopped', 'maintenance'].includes(server.intent))
+      throw new DomainError('forbidden');
+    const inputs = await loadGatewayPolicyContext(tx, serverId, options.env);
+    if (
+      server.automatic_starts_paused ||
+      !resolveAutoWakeValues(
+        inputs.values,
+        inputs.mapping.game_id,
+        inputs.mapping.runtime_id,
+        state,
+      ).effectiveEnabled
+    )
+      throw new DomainError('forbidden');
+    if (server.active_operation_id) {
+      const active = await tx
+        .selectFrom('server_operations')
+        .selectAll()
+        .where('job_id', '=', server.active_operation_id)
+        .where('server_id', '=', serverId)
+        .executeTakeFirst();
+      const previous = gatewayConsoleOperationSchema.safeParse(active?.plan.gatewayConsole);
+      if (
+        previous.success &&
+        previous.data.action === value.action &&
+        previous.data.generation === state.generation &&
+        previous.data.protocolId === state.protocol_id &&
+        active?.job_id === (value.action === 'sleep' ? state.sleep_job_id : state.wake_job_id)
+      )
+        return publicState(tx, server, state, now, options.env, inputs);
+      throw new DomainError('conflict');
+    }
+    if (value.action === 'sleep' && effectiveState(server, state, now) === 'sleeping')
+      return publicState(tx, server, state, now, options.env, inputs);
+    if (effectiveState(server, state, now) !== 'online' || server.runtime_state !== 'running')
+      throw new DomainError('conflict');
+    const actor = await ownerContext(tx, server);
+    await options.validateObservation?.(tx);
+    const operation = await enqueueLockedServerOperation(
+      tx,
+      actor,
+      serverId,
+      {
+        action: value.action === 'sleep' ? 'stop' : 'restart',
+        idempotencyKey: `gateway_console_${randomUUID()}`,
+      },
+      options.env,
+      undefined,
+      { requestSource: 'automation' },
+    );
+    const generation = value.action === 'restart' ? randomUUID() : state.generation;
+    const stored = await tx
+      .selectFrom('server_operations')
+      .select('plan')
+      .where('job_id', '=', operation.jobId)
+      .executeTakeFirstOrThrow();
+    await tx
+      .updateTable('server_operations')
+      .set({
+        plan: JSON.stringify({
+          ...stored.plan,
+          gatewayConsole: { ...value, generation, protocolId: state.protocol_id },
+          ...(value.action === 'restart'
+            ? { consolePriorProcessStartedAt: state.process_started_at }
+            : {}),
+        }),
+      })
+      .where('job_id', '=', operation.jobId)
+      .execute();
+    await tx
+      .updateTable('managed_servers')
+      .set({
+        intent: value.action === 'sleep' ? 'sleeping' : 'auto_wake_enabled',
+        readiness: value.action === 'sleep' ? 'unknown' : 'loading',
+        updated_at: now,
+      })
+      .where('id', '=', serverId)
+      .execute();
+    await tx
+      .updateTable('gateway_server_states')
+      .set({
+        generation,
+        state: value.action === 'sleep' ? 'blocked' : 'waking',
+        ...(value.action === 'sleep'
+          ? { sleep_job_id: operation.jobId }
+          : {
+              wake_job_id: operation.jobId,
+              sleep_job_id: null,
+              process_started_at: null,
+              startup_deadline_at: new Date(now.getTime() + state.readiness_timeout_seconds * 1000),
+            }),
+        readiness_observed_at: null,
+        idle_since: null,
+        error_code: null,
+        blocked_until: null,
+        updated_at: now,
+      })
+      .where('server_id', '=', serverId)
+      .execute();
+    await recordAudit(tx, actor, 'gateway.console.requested', {
+      serverId,
+      jobId: operation.jobId,
+      generation,
+      action: value.action,
+      playerId: value.playerId,
+      protocolId: state.protocol_id,
+    });
+    await notifyGatewayChange(tx);
     return getGatewayState(tx, serverId, options);
   });
 }
@@ -1109,7 +1271,8 @@ async function reconcileLocked(
         reservation &&
         job.completed_at &&
         (matchingSleepOperation(operation, serverId, state) ||
-          matchingScheduledStopOperation(operation, serverId, state)) &&
+          matchingScheduledStopOperation(operation, serverId, state) ||
+          matchingConsoleSleepOperation(operation, serverId, state)) &&
         operation.phase === 'failed' &&
         operation.effect_state === 'none' &&
         ((operation.plan.rejected === true && operation.plan.powerEffectPrepared === false) ||
@@ -1121,6 +1284,13 @@ async function reconcileLocked(
         operation.plan.stopConfirmed !== true &&
         operation.plan.stopConfirmedAt === undefined
       ) {
+        if (matchingConsoleSleepOperation(operation, serverId, state))
+          await tx
+            .updateTable('resource_reservations')
+            .set({ state: 'running', updated_at: now })
+            .where('server_id', '=', serverId)
+            .where('operation_id', '=', job.id)
+            .execute();
         // Retire only a never-prepared or conclusively rejected pre-handoff attempt. Keep its
         // journal and compute reservation; new observations must establish a
         // new idle interval before a distinct stop can be authorized.
@@ -1155,6 +1325,66 @@ async function reconcileLocked(
       .selectAll()
       .where('id', '=', state.wake_job_id)
       .executeTakeFirstOrThrow();
+    if (
+      job.state === 'failed' &&
+      job.completed_at &&
+      !server.active_operation_id &&
+      server.runtime_state === 'running' &&
+      server.intent === 'auto_wake_enabled'
+    ) {
+      const operation = await tx
+        .selectFrom('server_operations')
+        .selectAll()
+        .where('job_id', '=', job.id)
+        .where('server_id', '=', serverId)
+        .executeTakeFirst();
+      const marker = gatewayConsoleOperationSchema.safeParse(operation?.plan.gatewayConsole);
+      const priorEpoch = z.iso
+        .datetime({ offset: true })
+        .safeParse(operation?.plan.consolePriorProcessStartedAt);
+      if (
+        marker.success &&
+        marker.data.action === 'restart' &&
+        marker.data.generation === state.generation &&
+        marker.data.protocolId === state.protocol_id &&
+        operation?.action === 'restart' &&
+        operation.phase === 'failed' &&
+        operation.effect_state === 'none' &&
+        operation.effect_started_at === null &&
+        operation.plan.powerEffectPrepared === undefined &&
+        operation.plan.effectAttempts === undefined &&
+        operation.plan.acknowledged !== true &&
+        operation.plan.restartConfirmed !== true &&
+        priorEpoch.success
+      ) {
+        // A failed save/preflight never reached power. Retire only that proven
+        // non-effect and require fresh readiness for the original process.
+        await tx
+          .updateTable('resource_reservations')
+          .set({ state: 'running', updated_at: now })
+          .where('server_id', '=', serverId)
+          .where('operation_id', '=', job.id)
+          .execute();
+        await tx
+          .updateTable('gateway_server_states')
+          .set({
+            wake_job_id: null,
+            state: 'blocked',
+            process_started_at: priorEpoch.data,
+            readiness_observed_at: null,
+            startup_deadline_at: null,
+            last_observed_at: null,
+            idle_since: null,
+            error_code: 'operation_uncertain',
+            blocked_until: null,
+            updated_at: now,
+          })
+          .where('server_id', '=', serverId)
+          .execute();
+        await notifyGatewayChange(tx);
+        return getGatewayState(tx, serverId, options);
+      }
+    }
     const resumedBackup =
       job.state === 'failed'
         ? await tx

@@ -1,0 +1,193 @@
+.satisfactory-worlds-body {
+  display: grid;
+  gap: 20px;
+  padding: 24px;
+}
+.satisfactory-worlds h3,
+.satisfactory-worlds h4,
+.satisfactory-worlds-body p {
+  margin: 0;
+}
+.satisfactory-worlds-toolbar,
+.satisfactory-world-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.satisfactory-worlds-toolbar:empty {
+  display: none;
+}
+.satisfactory-worlds-toolbar > .actions {
+  margin-left: auto;
+}
+.satisfactory-worlds h4 {
+  font-size: 0.95rem;
+}
+.satisfactory-worlds h3 {
+  font-size: 1.1rem;
+  overflow-wrap: anywhere;
+}
+.satisfactory-worlds .actions {
+  flex-wrap: wrap;
+}
+.satisfactory-worlds-list {
+  display: grid;
+  gap: 16px;
+}
+.satisfactory-world-card {
+  border: 1px solid var(--line);
+  border-left: 3px solid #ef8c24;
+  border-radius: 4px;
+  padding: 20px;
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+.satisfactory-worlds-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: 6px;
+}
+.satisfactory-worlds-active {
+  color: var(--text);
+  font-weight: 600;
+}
+.satisfactory-worlds-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px 36px;
+  margin: 0;
+  font-size: 0.85rem;
+}
+.satisfactory-worlds-details dt,
+.satisfactory-save-technical dt {
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.satisfactory-worlds-details dd,
+.satisfactory-save-technical dd {
+  margin: 0;
+}
+.satisfactory-worlds details > summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 5px 0;
+}
+.satisfactory-world-history,
+.satisfactory-world-retention {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+.satisfactory-history-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+  margin: 16px 0;
+}
+.satisfactory-history-filters .workspace-search {
+  flex: 1;
+  min-width: 180px;
+}
+.satisfactory-history-filters > label:not(.workspace-search) {
+  display: grid;
+  gap: 6px;
+  font-size: 0.8rem;
+}
+.satisfactory-history-filters select {
+  min-height: 40px;
+}
+.satisfactory-save-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.satisfactory-save-list > li {
+  display: flex;
+  align-items: start;
+  gap: 16px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+.satisfactory-save-list > li:last-child {
+  border-bottom: 0;
+}
+.satisfactory-worlds-identity {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.satisfactory-save-date {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: 5px;
+}
+.satisfactory-save-technical {
+  margin-top: 8px;
+  font-size: 0.8rem;
+}
+.satisfactory-save-technical dl {
+  display: grid;
+  gap: 12px;
+}
+.satisfactory-save-technical code {
+  overflow-wrap: anywhere;
+}
+.satisfactory-world-retention p {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: 10px;
+  max-width: 75ch;
+}
+.satisfactory-world-retention form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+  margin-top: 12px;
+}
+.satisfactory-world-retention input {
+  max-width: 110px;
+}
+.satisfactory-worlds-transfers {
+  font-size: 0.85rem;
+}
+.satisfactory-worlds-transfers a {
+  display: inline-block;
+  margin: 12px 0;
+}
+.satisfactory-worlds-transfers p {
+  color: var(--muted);
+  max-width: 80ch;
+}
+@media (max-width: 750px) {
+  .satisfactory-worlds-body {
+    padding: 16px;
+  }
+  .satisfactory-world-card {
+    padding: 14px;
+  }
+  .satisfactory-save-list > li {
+    flex-wrap: wrap;
+  }
+  .satisfactory-worlds-identity {
+    flex-basis: 100%;
+  }
+  .satisfactory-history-filters > label {
+    width: 100%;
+  }
+  .satisfactory-worlds-details {
+    gap: 12px 20px;
+  }
+}
+
+.satisfactory-world-detail {
+  border: 0;
+  padding: 0;
+}

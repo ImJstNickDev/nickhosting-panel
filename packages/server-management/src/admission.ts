@@ -193,6 +193,34 @@ function assertPhysicalCommitmentLimit(
     throw new DomainError('resources_unavailable');
 }
 
+/** Only the actual administrator who submitted this operation can waive physical
+ * compute admission. Automated work may run under an Owner identity, so it must
+ * remain subject to capacity checks. Provider-effect authorization is separate. */
+async function ownerRequestedCapacityOverride(
+  tx: DB,
+  server: { id: string; owner_id: string },
+  jobId: string,
+) {
+  const request = await tx
+    .selectFrom('operation_jobs as job')
+    .innerJoin('server_operations as operation', 'operation.job_id', 'job.id')
+    .innerJoin('user as actor', 'actor.id', 'job.actor_id')
+    .select(['job.policy_snapshot', 'operation.plan'])
+    .where('job.id', '=', jobId)
+    .where('operation.server_id', '=', server.id)
+    .where('job.resource_owner_id', '=', server.owner_id)
+    .where('job.state', 'in', ['queued', 'running'])
+    .where('actor.role', '=', 'owner')
+    .executeTakeFirst();
+  return (
+    request?.policy_snapshot.role === 'owner' &&
+    request.plan.requestSource !== 'automation' &&
+    request.plan.gatewayAutomation === undefined &&
+    request.plan.gatewayConsole === undefined &&
+    request.plan.scheduleAutomation === undefined
+  );
+}
+
 /** Installation is physical host work, independent of the user's active game quota. */
 export async function reserveInstallationInTransaction(
   tx: Transaction<Database>,
@@ -243,7 +271,12 @@ export async function reserveInstallationInTransaction(
   const reserved = await reservedPhysicalCompute(tx, node.physical_host_id, env, {
     installationServerId: serverId,
   });
-  assertPhysicalCompute(observed, reserved.memoryMiB + memoryMiB, reserved.cpuPercent + cpuPercent);
+  if (!(await ownerRequestedCapacityOverride(tx, server, jobId)))
+    assertPhysicalCompute(
+      observed,
+      reserved.memoryMiB + memoryMiB,
+      reserved.cpuPercent + cpuPercent,
+    );
   await tx
     .insertInto('installation_reservations')
     .values({
@@ -335,12 +368,14 @@ export async function reserveStartInTransaction(
     current?.physical_memory_mib ?? 0,
     physicalMemoryMiB(memoryMiB, effectiveNodeOverhead(node, env)),
   );
-  assertPhysicalCommitmentLimit(
-    observed,
-    reserved.memoryMiB + physicalMemory,
-    reserved.cpuPercent + cpuPercent,
-  );
-  if (current) {
+  const ownerOverride = await ownerRequestedCapacityOverride(tx, server, jobId);
+  if (!ownerOverride)
+    assertPhysicalCommitmentLimit(
+      observed,
+      reserved.memoryMiB + physicalMemory,
+      reserved.cpuPercent + cpuPercent,
+    );
+  if (!ownerOverride && current) {
     const memoryGrowth = physicalMemory - current.physical_memory_mib;
     const cpuGrowth = cpuPercent - current.cpu_percent;
     // Retaining a commitment is not a new allocation. In particular, neither
@@ -359,7 +394,7 @@ export async function reserveStartInTransaction(
         : reserved.memoryMiB + (sampledAfterCommitment ? memoryGrowth : physicalMemory),
       cpuGrowth === 0 ? 0 : reserved.cpuPercent + (sampledAfterCommitment ? cpuGrowth : cpuPercent),
     );
-  } else {
+  } else if (!ownerOverride) {
     // A new start still reserves its full maximum in addition to all existing
     // commitments and measured host usage, without crediting cached telemetry.
     assertPhysicalCompute(
