@@ -175,6 +175,59 @@ describe('read-only host network observer', () => {
       ).toBe(false);
     }
   });
+  it('inspects complete large inventories with at most four concurrent chunks across both kinds', async () => {
+    const f = fixture();
+    const containers = Array.from({ length: 310 }, (_, index) => ({
+      ...f.container,
+      id: (index + 1).toString(16).padStart(64, '0'),
+      name: `/container-${index}`,
+      running: index % 2 === 0,
+      status: index % 2 === 0 ? 'running' : 'exited',
+    }));
+    const networks = Array.from({ length: 65 }, (_, index) => ({
+      ...f.network,
+      id: (index + 1000).toString(16).padStart(64, '0'),
+      name: `network-${index}`,
+    }));
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const original = f.io.docker;
+    let active = 0;
+    let maximum = 0;
+    let inspected = 0;
+    f.io.docker = vi.fn(async (args, socket) => {
+      if (args[0] === 'info') return original(args, socket);
+      const inventory = args[0] === 'container' ? containers : networks;
+      if (args[1] === 'ls')
+        return inventory
+          .map((row) => row.id)
+          .reverse()
+          .join('\n');
+      maximum = Math.max(maximum, ++active);
+      if (active === 4) entered.resolve();
+      await release.promise;
+      const requested = args.slice(4);
+      expect(requested.length).toBeLessThanOrEqual(64);
+      inspected += requested.length;
+      active--;
+      return inventory
+        .filter((row) => requested.includes(row.id))
+        .reverse()
+        .map((row) => JSON.stringify(row))
+        .join('\n');
+    });
+    const observing = f.observer().observe();
+    await entered.promise;
+    expect(active).toBe(4);
+    release.resolve();
+    const observation = await observing;
+    expect(maximum).toBe(4);
+    expect(inspected).toBe(375);
+    expect(observation.containers.map((row) => row.id)).toEqual(containers.map((row) => row.id));
+    expect(observation.networks.map((row) => row.id)).toEqual(networks.map((row) => row.id));
+    expect(vi.mocked(f.io.docker).mock.calls.filter(([args]) => args[1] === 'ls')).toHaveLength(4);
+  });
+
   it('normalizes empty Docker HostIp to wildcard, never exact ownership', async () => {
     const f = fixture();
     Object.assign(f.container.configuredBindings['25565/tcp'][0] ?? {}, { HostIp: '' });
@@ -597,6 +650,52 @@ describe('container retry safety and bounded diagnostics', () => {
 });
 
 describe('complete fresh replacement evidence', () => {
+  it('corroborates all missing IDs across parallel chunks before allowing a retry', async () => {
+    const f = fixture();
+    const containers = Array.from({ length: 65 }, (_, index) => ({
+      ...f.container,
+      id: (index + 1).toString(16).padStart(64, '0'),
+    }));
+    const missing = [containers[0]?.id, containers[64]?.id];
+    let lists = 0;
+    vi.mocked(execFile).mockImplementation(((
+      _file: string,
+      args: string[],
+      _options: unknown,
+      callback: (error: Error | null, stdout: string, stderr: string) => void,
+    ) => {
+      const command = args.slice(2);
+      if (command[0] === 'container' && command[1] === 'ls') {
+        lists++;
+        // Only the first reported disappearance is genuine. The second claimed
+        // missing ID still exists, so the whole observation must fail closed.
+        const rows = lists === 1 ? containers : containers.filter((row) => row.id !== missing[0]);
+        queueMicrotask(() => callback(null, rows.map((row) => row.id).join('\n'), ''));
+      } else if (command[0] === 'container' && command[1] === 'inspect') {
+        const requested = command.slice(4);
+        const absent = missing.find((value) => value !== undefined && requested.includes(value));
+        const rows = containers.filter((row) => requested.includes(row.id) && row.id !== absent);
+        queueMicrotask(() =>
+          callback(
+            Object.assign(new Error('private'), { code: 1, killed: false, signal: null }),
+            rows.map((row) => JSON.stringify(row)).join('\n'),
+            `Error: No such object: ${absent}`,
+          ),
+        );
+      } else
+        void f.io
+          .docker(command, f.config.dockerSocket)
+          .then((stdout) => callback(null, stdout, ''));
+      return {};
+    }) as typeof execFile);
+    const { docker: _docker, ...dependencies } = f.io;
+    await expect(createNetworkObserver(f.config, dependencies).observe()).rejects.toMatchObject({
+      reason: 'container_inspect',
+    });
+    expect(
+      vi.mocked(execFile).mock.calls.filter((call) => (call[1] as string[])[2] === 'info'),
+    ).toHaveLength(1);
+  });
   it('accepts a corroborated missing batch only with complete valid surviving rows, then rereads changed bindings', async () => {
     const f = fixture();
     const old = f.container.id;

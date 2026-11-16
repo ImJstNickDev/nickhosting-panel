@@ -440,64 +440,72 @@ export function createNetworkObserver(
         ]);
         const rawContainers: z.infer<typeof containerSchema>[] = [];
         const networks: ObservedNetwork[] = [];
-        // Settle both inventories before considering a retry: an independent
-        // malformed network response must never be hidden by container churn.
-        const inspections = await Promise.allSettled([
-          (async () => {
-            for (let start = 0; start < beforeContainers.length; start += 64) {
-              const result = await command(
-                [
-                  'container',
-                  'inspect',
-                  '--format',
-                  containerFormat,
-                  ...beforeContainers.slice(start, start + 64),
-                ],
-                'container_inspect',
-              );
-              await stage('container_parse', () => {
-                const rows = result
-                  .split('\n')
-                  .map((line) => containerSchema.parse(JSON.parse(line)));
-                if (
-                  rows
-                    .map((row) => row.id)
-                    .sort()
-                    .join() !== beforeContainers.slice(start, start + 64).join()
-                )
-                  throw new NetworkObservationError('container_inventory');
-                rawContainers.push(...rows);
-              });
+        // Bound total CLI inspection concurrency across BOTH inventories. Every
+        // chunk is still complete and individually checked; settle all issued
+        // chunks so malformed evidence cannot be hidden by container churn.
+        const tasks: (() => Promise<void>)[] = [];
+        for (let start = 0; start < beforeContainers.length; start += 64) {
+          const expected = beforeContainers.slice(start, start + 64);
+          tasks.push(async () => {
+            const result = await command(
+              ['container', 'inspect', '--format', containerFormat, ...expected],
+              'container_inspect',
+            );
+            await stage('container_parse', () => {
+              const rows = result
+                .split('\n')
+                .map((line) => containerSchema.parse(JSON.parse(line)));
+              if (
+                rows
+                  .map((row) => row.id)
+                  .sort()
+                  .join() !== expected.join()
+              )
+                throw new NetworkObservationError('container_inventory');
+              rawContainers.push(...rows);
+            });
+          });
+        }
+        for (let start = 0; start < beforeNetworks.length; start += 64) {
+          const expected = beforeNetworks.slice(start, start + 64);
+          tasks.push(async () => {
+            const result = await command(
+              ['network', 'inspect', '--format', networkFormat, ...expected],
+              'network_inspect',
+            );
+            await stage('network_parse', () => {
+              const rows = result.split('\n').map((line) => networkSchema.parse(JSON.parse(line)));
+              if (
+                rows
+                  .map((row) => row.id)
+                  .sort()
+                  .join() !== expected.join()
+              )
+                throw new NetworkObservationError('network_inventory');
+              networks.push(...rows.map((row) => ({ ...row, options: row.options ?? {} })));
+            });
+          });
+        }
+        const inspections: PromiseSettledResult<void>[] = new Array(tasks.length);
+        let nextTask = 0;
+        await Promise.all(
+          Array.from({ length: Math.min(4, tasks.length) }, async () => {
+            while (nextTask < tasks.length) {
+              const index = nextTask++;
+              const task = tasks[index];
+              if (!task) return;
+              try {
+                await task();
+                inspections[index] = { status: 'fulfilled', value: undefined };
+              } catch (reason) {
+                inspections[index] = { status: 'rejected', reason };
+              }
             }
-          })(),
-          (async () => {
-            for (let start = 0; start < beforeNetworks.length; start += 64) {
-              const result = await command(
-                [
-                  'network',
-                  'inspect',
-                  '--format',
-                  networkFormat,
-                  ...beforeNetworks.slice(start, start + 64),
-                ],
-                'network_inspect',
-              );
-              await stage('network_parse', () => {
-                const rows = result
-                  .split('\n')
-                  .map((line) => networkSchema.parse(JSON.parse(line)));
-                if (
-                  rows
-                    .map((row) => row.id)
-                    .sort()
-                    .join() !== beforeNetworks.slice(start, start + 64).join()
-                )
-                  throw new NetworkObservationError('network_inventory');
-                networks.push(...rows.map((row) => ({ ...row, options: row.options ?? {} })));
-              });
-            }
-          })(),
-        ]);
+          }),
+        );
+        // Stable observation order does not depend on which CLI call finished first.
+        rawContainers.sort((a, b) => a.id.localeCompare(b.id));
+        networks.sort((a, b) => a.id.localeCompare(b.id));
         for (const result of inspections) {
           if (result.status === 'rejected' && !(result.reason instanceof MissingContainers))
             throw result.reason;
@@ -509,23 +517,21 @@ export function createNetworkObserver(
             .join() !== beforeNetworks.join()
         )
           throw new NetworkObservationError('network_inventory');
-        for (const result of inspections) {
-          if (result.status === 'rejected') {
-            const missing = result.reason as MissingContainers;
-            const [current, currentNetworks] = await Promise.all([
-              ids('container'),
-              ids('network'),
-            ]);
-            if (currentNetworks.join() !== beforeNetworks.join())
-              throw new NetworkObservationError('network_inventory');
-            if (
-              missing.ids.every(
-                (value) => beforeContainers.includes(value) && !current.includes(value),
-              )
-            )
-              throw new ContainerChurn();
-            throw new NetworkObservationError('container_inspect');
-          }
+        const missing = inspections.flatMap((result) =>
+          result.status === 'rejected' ? (result.reason as MissingContainers).ids : [],
+        );
+        if (missing.length) {
+          const [current, currentNetworks] = await Promise.all([ids('container'), ids('network')]);
+          if (currentNetworks.join() !== beforeNetworks.join())
+            throw new NetworkObservationError('network_inventory');
+          // Parallel chunks can report separate disappearances. Corroborate
+          // every claimed ID, never let the first valid disappearance hide an
+          // invalid missing-object response from a different chunk.
+          if (
+            missing.every((value) => beforeContainers.includes(value) && !current.includes(value))
+          )
+            throw new ContainerChurn();
+          throw new NetworkObservationError('container_inspect');
         }
         if (
           rawContainers
