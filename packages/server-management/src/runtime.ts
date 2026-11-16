@@ -186,6 +186,25 @@ export async function authorizeQueuedEffect(
   )
     await authorizeServer(db, context, serverId, 'backups.create');
   if (server.owner_id !== job.resource_owner_id) throw new DomainError('forbidden');
+  const capacityOverride = job.policy_snapshot.capacityOverride;
+  if (
+    capacityOverride !== undefined &&
+    (capacityOverride === null ||
+      typeof capacityOverride !== 'object' ||
+      !('actorId' in capacityOverride) ||
+      capacityOverride.actorId !== job.actor_id ||
+      !('resourceOwnerId' in capacityOverride) ||
+      capacityOverride.resourceOwnerId !== server.owner_id ||
+      context.role !== 'owner' ||
+      job.policy_snapshot.role !== 'owner' ||
+      operation.plan.requestSource === 'automation' ||
+      operation.plan.gatewayAutomation !== undefined ||
+      operation.plan.gatewayConsole !== undefined ||
+      operation.plan.scheduleAutomation !== undefined)
+  )
+    // Ordinary server access cannot inherit an earlier administrator's waived
+    // capacity after demotion, ownership transfer or conversion to automated work.
+    throw new DomainError('forbidden');
   if (operation.plan.scheduleAutomation !== undefined)
     await authorizeScheduledEffect(db, jobId, serverId);
   if (operation.action === 'backup' && operation.phase === 'backup_resume') {

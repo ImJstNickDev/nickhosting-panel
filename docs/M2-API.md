@@ -702,14 +702,19 @@ or manual reset of queued jobs is needed.
 
 ## Installer admission and completion
 
-Owner-initiated requests skip the physical RAM/CPU capacity checks described below
-and the corresponding start/restart headroom and hard-ceiling checks. The actor
+Owner-initiated requests may exceed per-user active RAM/CPU quotas, the physical
+RAM/CPU capacity checks described below, and corresponding start/restart headroom
+and hard-ceiling checks. The actor
 must have the platform `owner` role both when the request was recorded and when
 admission runs. Automated requests (including schedules and native Gateway console
-commands) do not inherit this exception from the server owner. User budgets,
-observation validity, enabled nodes/hosts, storage, allocation and authorization
-checks remain enforced. All reservations are still recorded; no public bypass
-parameter or provider configuration change is introduced.
+commands) do not inherit this exception from the server owner. Observation validity,
+enabled nodes/hosts, storage budgets, allocation and authorization checks remain
+enforced. All reservations are still recorded; no public bypass parameter or
+provider configuration change is introduced. When a capacity check is actually
+waived, `server.capacity.overridden` records the actor, subject, job, resource owner
+and check categories in the Owner audit. A durable job marker requires the worker
+to revalidate that same Owner authority before the provider effect; demotion or
+ownership transfer cannot inherit an earlier exception.
 
 Managed node configuration accepts `installerMemoryMiB` and `installerCpuPercent`
 (defaults 1024 MiB / 100%). The Owner must match the real Wings installer floors;

@@ -50,6 +50,20 @@ proves the desired configuration. An unavailable or mismatching readback retains
 recovery, with phase-local retry backoff; normal successful changes need no delayed
 job delivery. Settling rules for destructive operations are unchanged.
 
+## Administrator capacity override
+
+Manual operations submitted by a platform Owner can exceed the resource owner's
+active CPU/RAM quota as well as the existing physical compute limits. This covers,
+for example, an Owner starting a server configured at 600% CPU while the user's
+default quota remains 400%. The quotas themselves are not rewritten.
+
+The request and current actor must both have Owner authority. Automatic wake,
+schedules and Gateway-console operations do not inherit this exception. Required
+host observations, enabled nodes, ownership, storage checks and serialized
+reservations remain enforced. A waived capacity check creates a durable audit event
+and job attribution; the worker rechecks that attribution and current role before
+dispatch. No client-supplied bypass flag is accepted.
+
 ## Validation and activation
 
 Focused tests cover mounted namespace identity and replacement, missing evidence,

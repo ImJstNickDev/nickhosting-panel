@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AuthContext } from '@nickhosting/core';
+import { type AuthContext, authSessionId } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { lockResources, reserveInstallation, reserveStart } from './admission.js';
@@ -8,9 +8,10 @@ import {
   enqueueLockedServerOperation,
   enqueueServerOperation,
 } from './registry.js';
+import { authorizeQueuedEffect } from './runtime.js';
 import { managementFixture } from './test-fixtures.js';
 
-describe('administrator-requested physical compute admission', () => {
+describe('administrator-requested compute admission', () => {
   let database: Awaited<ReturnType<typeof createTestDatabase>>;
   let f: Awaited<ReturnType<typeof managementFixture>>;
   beforeEach(async () => {
@@ -153,19 +154,32 @@ describe('administrator-requested physical compute admission', () => {
     );
   });
 
-  it('does not grant automatic work Owner capacity at initial enqueue', async () => {
-    const serverId = await f.server();
-    await pressure();
-    await expect(
-      f.db.transaction().execute(async (tx) => {
-        await lockResources(tx);
-        return enqueueLockedServerOperation(tx, f.owner, serverId, request(), {}, undefined, {
-          requestSource: 'automation',
-        });
-      }),
-    ).rejects.toThrow('resources_unavailable');
-    expect(await f.db.selectFrom('resource_reservations').selectAll().execute()).toEqual([]);
-  });
+  it.each(['physical', 'user-quota'] as const)(
+    'does not grant automatic work Owner %s capacity at initial enqueue',
+    async (capacity) => {
+      const serverId = await f.server();
+      if (capacity === 'physical') await pressure();
+      const env = capacity === 'user-quota' ? { NH_DEFAULT_USER_MEMORY_MIB: '64' } : {};
+      const before = await queuedCounts();
+      await expect(
+        f.db.transaction().execute(async (tx) => {
+          await lockResources(tx);
+          return enqueueLockedServerOperation(tx, f.owner, serverId, request(), env, undefined, {
+            requestSource: 'automation',
+          });
+        }),
+      ).rejects.toThrow('resources_unavailable');
+      expect(await queuedCounts()).toEqual(before);
+      expect(await f.db.selectFrom('resource_reservations').selectAll().execute()).toEqual([]);
+      expect(
+        await f.db
+          .selectFrom('audit_events')
+          .select('id')
+          .where('action', '=', 'server.capacity.overridden')
+          .execute(),
+      ).toEqual([]);
+    },
+  );
 
   it.each(['gatewayAutomation', 'gatewayConsole', 'scheduleAutomation', 'requestSource'])(
     'keeps %s work constrained during worker admission',
@@ -217,14 +231,201 @@ describe('administrator-requested physical compute admission', () => {
     },
   );
 
-  it('retains the resource owner active-compute quota for manual Owner requests', async () => {
+  it.each(['memory', 'cpu'] as const)(
+    'waives the resource owner %s quota only for manual Owner requests and audits once',
+    async (resource) => {
+      const serverId = await f.server({ limits: { ...f.limits, cpu: 600 } });
+      const env =
+        resource === 'memory'
+          ? { NH_DEFAULT_USER_MEMORY_MIB: '64', NH_DEFAULT_USER_CPU_PERCENT: '1000' }
+          : { NH_DEFAULT_USER_CPU_PERCENT: '400' };
+      await expect(
+        enqueueServerOperation(f.db, f.context, serverId, request(), env),
+      ).rejects.toThrow('resources_unavailable');
+      const operation = await enqueueServerOperation(f.db, f.owner, serverId, request(), env);
+      await reserveStart(f.db, serverId, operation.jobId, 'start', env);
+      await expect(
+        authorizeQueuedEffect(f.db, operation.jobId, serverId, env),
+      ).resolves.toMatchObject({
+        actorUserId: f.owner.actorUserId,
+        role: 'owner',
+      });
+      expect(
+        await f.db.selectFrom('resource_reservations').selectAll().executeTakeFirst(),
+      ).toMatchObject({ server_id: serverId, cpu_percent: 600, owner_id: f.context.subjectUserId });
+      expect(
+        await f.db
+          .selectFrom('audit_events')
+          .select(['actor_user_id', 'subject_user_id', 'metadata'])
+          .where('action', '=', 'server.capacity.overridden')
+          .execute(),
+      ).toEqual([
+        {
+          actor_user_id: f.owner.actorUserId,
+          subject_user_id: f.owner.subjectUserId,
+          metadata: {
+            serverId,
+            jobId: operation.jobId,
+            resourceOwnerId: f.context.subjectUserId,
+            checks: ['user_compute'],
+          },
+        },
+      ]);
+    },
+  );
+
+  it('revokes a consumed capacity override at dispatch even if the demoted actor owns the server', async () => {
+    const serverId = await f.server({ limits: { ...f.limits, cpu: 600 } });
+    await setActorRole('owner');
+    const context = { ...f.context, role: 'owner' } as const;
+    const operation = await enqueueServerOperation(f.db, context, serverId, request(), {
+      NH_DEFAULT_USER_CPU_PERCENT: '400',
+    });
+    await setActorRole('user');
+    await expect(authorizeQueuedEffect(f.db, operation.jobId, serverId)).rejects.toThrow(
+      'forbidden',
+    );
+    await expect(
+      reserveStart(f.db, serverId, operation.jobId, 'start', {
+        NH_DEFAULT_USER_CPU_PERCENT: '400',
+      }),
+    ).rejects.toThrow('resources_unavailable');
+  });
+
+  it('does not trust a caller-supplied Owner role when the actual actor is ordinary', async () => {
     const serverId = await f.server();
     await expect(
-      enqueueServerOperation(f.db, f.owner, serverId, request(), {
+      enqueueServerOperation(f.db, { ...f.context, role: 'owner' }, serverId, request(), {
         NH_DEFAULT_USER_MEMORY_MIB: '64',
       }),
     ).rejects.toThrow('resources_unavailable');
     expect(await f.db.selectFrom('resource_reservations').selectAll().execute()).toEqual([]);
+  });
+
+  it('audits additional capacity exceptions discovered at worker admission without duplicating them', async () => {
+    const serverId = await f.server();
+    const env = { NH_DEFAULT_USER_MEMORY_MIB: '64' };
+    const operation = await enqueueServerOperation(f.db, f.owner, serverId, request(), env);
+    await pressure();
+    await reserveStart(f.db, serverId, operation.jobId, 'start', env);
+    await reserveStart(f.db, serverId, operation.jobId, 'start', env);
+    const audits = await f.db
+      .selectFrom('audit_events')
+      .select('metadata')
+      .where('action', '=', 'server.capacity.overridden')
+      .orderBy('created_at')
+      .execute();
+    expect(audits).toHaveLength(2);
+    expect(audits[0]?.metadata.checks).toEqual(['user_compute']);
+    expect(audits[1]?.metadata.checks).toEqual(['user_compute', 'physical_compute']);
+  });
+
+  it.each(['actor', 'resource-owner', 'automation'] as const)(
+    'does not reuse a consumed override with changed %s attribution',
+    async (change) => {
+      const serverId = await f.server();
+      const operation = await enqueueServerOperation(f.db, f.owner, serverId, request(), {
+        NH_DEFAULT_USER_MEMORY_MIB: '64',
+      });
+      if (change === 'automation') {
+        const row = await f.db
+          .selectFrom('server_operations')
+          .select('plan')
+          .where('job_id', '=', operation.jobId)
+          .executeTakeFirstOrThrow();
+        await f.db
+          .updateTable('server_operations')
+          .set({ plan: JSON.stringify({ ...row.plan, requestSource: 'automation' }) })
+          .where('job_id', '=', operation.jobId)
+          .execute();
+      } else {
+        const job = await f.db
+          .selectFrom('operation_jobs')
+          .select('policy_snapshot')
+          .where('id', '=', operation.jobId)
+          .executeTakeFirstOrThrow();
+        await f.db
+          .updateTable('operation_jobs')
+          .set({
+            policy_snapshot: JSON.stringify({
+              ...job.policy_snapshot,
+              capacityOverride: {
+                actorId: change === 'actor' ? f.context.actorUserId : f.owner.actorUserId,
+                resourceOwnerId:
+                  change === 'resource-owner' ? f.owner.actorUserId : f.context.subjectUserId,
+              },
+            }),
+          })
+          .where('id', '=', operation.jobId)
+          .execute();
+      }
+      await expect(authorizeQueuedEffect(f.db, operation.jobId, serverId)).rejects.toThrow(
+        'forbidden',
+      );
+    },
+  );
+
+  it('attributes a support override to its actual Owner actor and rechecks support revocation', async () => {
+    const serverId = await f.server({ limits: { ...f.limits, cpu: 600 } });
+    const id = randomUUID(),
+      parentId = randomUUID(),
+      startedAt = new Date();
+    const expiresAt = new Date(Date.now() + 600_000);
+    await database.pool.query(
+      'INSERT INTO session(id,token,"userId","expiresAt") VALUES($1,$2,$3,$4)',
+      [parentId, randomUUID(), f.owner.actorUserId, expiresAt],
+    );
+    await database.pool.query(
+      'INSERT INTO support_sessions(id,token_hash,actor_user_id,subject_user_id,parent_session_id,reason,origin,audit_correlation_id,started_at,expires_at,last_activity_at) VALUES($1,$2,$3,$4,$5,$6,$7,$1,$8,$9,$8)',
+      [
+        id,
+        randomUUID(),
+        f.owner.actorUserId,
+        f.context.subjectUserId,
+        parentId,
+        'Isolated capacity test',
+        'http://localhost:3999',
+        startedAt,
+        expiresAt,
+      ],
+    );
+    const context: AuthContext = {
+      ...f.owner,
+      [authSessionId]: parentId,
+      subjectUserId: f.context.subjectUserId,
+      sessionType: 'support',
+      ownerElevation: true,
+      support: {
+        id,
+        startedAt,
+        expiresAt,
+        lastActivityAt: startedAt,
+        revokedAt: null,
+        reason: 'Isolated capacity test',
+      },
+    };
+    const operation = await enqueueServerOperation(f.db, context, serverId, request(), {
+      NH_DEFAULT_USER_CPU_PERCENT: '400',
+    });
+    await expect(authorizeQueuedEffect(f.db, operation.jobId, serverId)).resolves.toMatchObject({
+      role: 'owner',
+      actorUserId: f.owner.actorUserId,
+      subjectUserId: f.context.subjectUserId,
+    });
+    const audit = await f.db
+      .selectFrom('audit_events')
+      .selectAll()
+      .where('action', '=', 'server.capacity.overridden')
+      .executeTakeFirstOrThrow();
+    expect(audit).toMatchObject({
+      actor_user_id: f.owner.actorUserId,
+      subject_user_id: f.context.subjectUserId,
+      correlation_id: id,
+    });
+    await database.pool.query('UPDATE support_sessions SET revoked_at=now() WHERE id=$1', [id]);
+    await expect(authorizeQueuedEffect(f.db, operation.jobId, serverId)).rejects.toThrow(
+      'support_invalid',
+    );
   });
 
   it('rejects an uncertain reservation owned by another operation before activating an Owner job', async () => {
