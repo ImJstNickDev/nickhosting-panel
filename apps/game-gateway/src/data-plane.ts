@@ -198,6 +198,21 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     routeRevision: route.revision,
     wakeJobId: route.wakeJobId,
   });
+  const rejectionReason = (error: unknown) =>
+    error instanceof GatewayProviderRateLimitedError
+      ? 'provider_rate_limited'
+      : error instanceof GatewayRouteRevisionStaleError
+        ? 'route_revision_stale'
+        : error instanceof GatewaySafetyError
+          ? error.reason
+          : error instanceof NetworkObservationError
+            ? `observer_${error.reason}`
+            : error instanceof DomainError &&
+                ['validation_timeout', 'lease_expired'].includes(
+                  String(error.details?.gatewaySafetyReason),
+                )
+              ? String(error.details?.gatewaySafetyReason)
+              : 'control_unavailable';
   const bounded = async <T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> => {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1165,7 +1180,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     // Independent servers share a bounded read-only validation pool. Roles of
     // one server remain ordered: a failed role withholds its siblings, and a
     // protocol probe may depend on the preceding game-port observation.
-    // Native binds and final pre-bind checks remain sequential below.
+    // The final binding pass uses a separate fresh evidence batch below.
     type ValidationResult = { ok: true } | { ok: false; error: unknown };
     const results = new Map<string, ValidationResult>();
     const groups = new Map<string, GatewayRoute[]>();
@@ -1318,7 +1333,12 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         throw error;
       }
     }
-    if (stopping || expires <= now()) throw new DomainError('conflict');
+    const requireLease = () => {
+      if (stopping) throw new DomainError('integration_unavailable');
+      if (expires <= now())
+        throw new DomainError('conflict', 409, { gatewaySafetyReason: 'lease_expired' });
+    };
+    requireLease();
     const staged: Listener[] = [];
     try {
       for (const listener of [...listeners.values()]) {
@@ -1333,36 +1353,70 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           await closeListener(listener);
         }
       }
-      for (const route of next.routes) {
-        if (withheldServers.has(route.serverId)) continue;
-        if (listeners.has(route.id)) continue;
-        // Earlier routes may have spent the entire topology TTL waiting for
-        // another role. Refresh evidence directly before each native bind;
-        // staged listeners are already ours even before the snapshot commits.
-        try {
-          await bounded(async () => {
-            const verdict = await validation.validate(route, [
-              ...[...listeners.values()].map((listener) => listener.route.public),
-              ...staged.map((listener) => listener.route.public),
-            ]);
-            readiness.set(route.id, verdict?.backendReady ?? true);
-          });
-        } catch (error) {
-          if (!(error instanceof GatewaySafetyError) || error.reason !== 'backend_active_binding')
-            throw error;
-          logTiming('gateway.safety_failure', {
-            ...routeIdentity(route),
-            reason: error.reason,
-            routeMode: route.mode,
-          });
-          await withholdServer(route.serverId, staged);
-          continue;
-        }
-        if (stopping || expires <= now()) throw new DomainError('conflict');
-        const listener = await bind(route, readiness.get(route.id) ?? false);
-        staged.push(listener);
-      }
-      if (stopping || expires <= now()) throw new DomainError('conflict');
+      const bindingGroups = pending
+        .map((group) =>
+          group.filter((route) => !withheldServers.has(route.serverId) && !listeners.has(route.id)),
+        )
+        .filter((group) => group.length > 0);
+      // Start new provider and host reads AFTER the first pass and withdrawals.
+      // Concurrent admissions share only an in-flight host read; later routes
+      // reread topology and stopped-container reservations before native bind.
+      // Every route still validates original provider/host source timestamps.
+      // Bounded overlapping reads avoid serial scans exhausting the lease, and
+      // exclusive binds close the final socket race. Server roles remain ordered.
+      const prebind = bindingGroups.length
+        ? (options.safety.createValidationBatch?.(bindingGroups.flat(), 'prebind') ??
+          options.safety)
+        : undefined;
+      let nextBindingGroup = 0;
+      let bindingFailed = false;
+      let bindingError: unknown;
+      await Promise.all(
+        Array.from({ length: Math.min(4, bindingGroups.length) }, async () => {
+          while (!bindingFailed && !stopping) {
+            const group = bindingGroups[nextBindingGroup++];
+            if (!group) return;
+            for (const route of group) {
+              if (bindingFailed || stopping || withheldServers.has(route.serverId)) return;
+              try {
+                requireLease();
+                const verdict = await bounded(() =>
+                  (prebind ?? options.safety).validate(route, [
+                    ...[...listeners.values()].map((listener) => listener.route.public),
+                    ...staged.map((listener) => listener.route.public),
+                  ]),
+                );
+                if (bindingFailed) return;
+                requireLease();
+                readiness.set(route.id, verdict?.backendReady ?? true);
+                // Always record issued binds, even if a sibling worker fails
+                // while this native call completes, so rollback closes them.
+                staged.push(await bind(route, readiness.get(route.id) ?? false));
+              } catch (error) {
+                logTiming('gateway.safety_failure', {
+                  ...routeIdentity(route),
+                  reason: rejectionReason(error),
+                  routeMode: route.mode,
+                  stage: 'prebind',
+                });
+                if (
+                  error instanceof GatewaySafetyError &&
+                  error.reason === 'backend_active_binding'
+                ) {
+                  await withholdServer(route.serverId, staged);
+                  break;
+                }
+                if (!bindingFailed) bindingError = error;
+                bindingFailed = true;
+                controlAvailable = false;
+                return;
+              }
+            }
+          }
+        }),
+      );
+      if (bindingFailed) throw bindingError;
+      requireLease();
       for (const listener of staged) listeners.set(listener.route.id, listener);
       for (const route of next.routes) {
         if (withheldServers.has(route.serverId)) continue;
@@ -1527,10 +1581,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         if (error instanceof GatewayProviderRateLimitedError) deferProvider(error);
         counters.snapshotErrors++;
         options.logger?.log('warn', 'gateway.snapshot_unavailable', {
-          reason:
-            error instanceof GatewayProviderRateLimitedError
-              ? 'provider_rate_limited'
-              : 'control_unavailable',
+          reason: rejectionReason(error),
         });
         throw error;
       })

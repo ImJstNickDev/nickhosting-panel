@@ -141,7 +141,6 @@ function compose(gateway: boolean, live = false) {
         NH_DEV_PUBLIC_URL: 'https://dev.hub.example.test',
         NH_DEV_GATEWAY_ID: '60c8c57e-ae42-4ad6-906d-04c22f70ff2c',
         NH_DEV_GATEWAY_CONTROL_TOKEN: token,
-        NH_DEV_GATEWAY_HOST_PROC: '/proc/12345',
         NH_DEV_DOCKER_GID: '987',
         NH_DEV_PHYSICAL_HOST_ID: 'test-host',
         NH_DEV_NODE_PROBE_ADDRESS: '10.42.0.1',
@@ -247,18 +246,19 @@ describe('opt-in development Gateway Compose', () => {
     expect(gateway?.tmpfs).toContain(
       '/run/nickhosting-gateway:rw,noexec,nosuid,size=1m,mode=0700,uid=1000,gid=1000',
     );
-    expect(gateway?.volumes).toContainEqual({
-      type: 'bind',
-      source: '/proc/12345',
-      target: '/run/nickhosting-host-proc',
-      read_only: true,
-      bind: { create_host_path: false },
-    });
+    for (const suffix of ['net', 'ns/net'])
+      expect(gateway?.volumes).toContainEqual({
+        type: 'bind',
+        source: `/proc/1/${suffix}`,
+        target: `/run/nickhosting-host-proc/${suffix}`,
+        read_only: true,
+        bind: { create_host_path: false },
+      });
     for (const volume of gateway?.volumes ?? []) {
       expect(volume.read_only).toBe(true);
       expect(volume.bind?.create_host_path).toBe(false);
       expect(volume.source).not.toMatch(/mountdata|\.env|\.codex|wings|\/var\/lib\/docker/);
-      if (!['/var/run/docker.sock', '/proc/12345'].includes(volume.source))
+      if (!['/var/run/docker.sock', '/proc/1/net', '/proc/1/ns/net'].includes(volume.source))
         expect(volume.source.startsWith(`${resolve('.')}/`)).toBe(true);
     }
   });

@@ -1595,16 +1595,17 @@ describe('persistent Gateway fixture forwarding', () => {
     });
     const f = plane([a, b], { safety: { validate } });
     await f.gateway.start();
-    expect(calls).toEqual([a.id, b.id, a.id]);
+    expect(calls).toEqual([a.id, b.id, a.id, b.id]);
     expect(f.gateway.health().routes).toBe(0);
     await refuses(first.port);
     await refuses(second.port);
   });
-  it('includes newly staged endpoints in each subsequent pre-bind topology verification', async () => {
+  it('includes staged sibling endpoints in the next ordered role validation', async () => {
     const first = await tcpFixture();
     const second = await tcpFixture();
     const a = route(first.port);
     const b = route(second.port);
+    b.serverId = a.serverId;
     // Reserving ephemeral backend ports on 127.0.0.2 does not reserve those
     // numbers on 127.0.0.1. Other unit files bind independent ephemeral HTTP
     // listeners there, so give this successful-bind fixture its own address.
@@ -1629,8 +1630,8 @@ describe('persistent Gateway fixture forwarding', () => {
     await expect(f.gateway.applySnapshot(f.snapshot())).rejects.toMatchObject({
       code: 'EADDRINUSE',
     });
-    // Both route preflights and only the first immediate pre-bind check run.
-    expect(f.safety.validate).toHaveBeenCalledTimes(3);
+    // Issued pre-bind checks settle before every newly bound listener rolls back.
+    expect(f.safety.validate).toHaveBeenCalledTimes(4);
     expect(f.gateway.health().routes).toBe(0);
     expect((await exchange(direct.port, 'unrelated fixture')).toString()).toBe('unrelated fixture');
   });
@@ -2127,7 +2128,7 @@ describe('sleep protocol handling and observations', () => {
     expect(f.safety.validate).toHaveBeenCalledTimes(3);
     expect(f.safety.validateBackend).not.toHaveBeenCalled();
   });
-  it('uses one isolated validation batch per snapshot, including final pre-bind checks', async () => {
+  it('starts a fresh isolated evidence batch for binding, and only one batch for renewals', async () => {
     const first = await tcpFixture();
     const second = await tcpFixture();
     const batches: ReturnType<typeof vi.fn<GatewaySafety['validate']>>[] = [];
@@ -2140,17 +2141,134 @@ describe('sleep protocol handling and observations', () => {
       safety: { createValidationBatch },
     });
     await f.gateway.start();
-    expect(createValidationBatch).toHaveBeenCalledOnce();
+    expect(createValidationBatch).toHaveBeenCalledTimes(2);
     expect(createValidationBatch).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ id: expect.any(String) })]),
     );
-    expect(batches[0]).toHaveBeenCalledTimes(4);
+    expect(createValidationBatch).toHaveBeenLastCalledWith(
+      expect.arrayContaining([expect.objectContaining({ id: expect.any(String) })]),
+      'prebind',
+    );
+    expect(batches[0]).toHaveBeenCalledTimes(2);
+    expect(batches[1]).toHaveBeenCalledTimes(2);
     expect(f.safety.validate).not.toHaveBeenCalled();
     expect(f.gateway.health().routes).toBe(2);
     await f.gateway.refresh();
-    expect(createValidationBatch).toHaveBeenCalledTimes(2);
-    expect(batches[0]).toHaveBeenCalledTimes(4);
+    expect(createValidationBatch).toHaveBeenCalledTimes(3);
+    expect(batches[0]).toHaveBeenCalledTimes(2);
     expect(batches[1]).toHaveBeenCalledTimes(2);
+    expect(batches[2]).toHaveBeenCalledTimes(2);
+  });
+  it('validates and binds 26 routes within a 15 second lease using bounded independent groups', async () => {
+    const backends = await Promise.all(Array.from({ length: 26 }, () => tcpFixture()));
+    const routes = backends.map(({ port }) => ({
+      ...route(port, 'tcp', 'sleeping'),
+      public: { address: '127.0.0.71', port, transport: 'tcp' as const },
+    }));
+    let clock = Date.now();
+    const start = clock;
+    const batches: { active: number; maximum: number; count: number }[] = [];
+    const createValidationBatch = vi.fn(() => {
+      const batch = { active: 0, maximum: 0, count: 0 };
+      batches.push(batch);
+      return {
+        async validate() {
+          const started = clock;
+          batch.maximum = Math.max(batch.maximum, ++batch.active);
+          batch.count++;
+          // Each real read costs one simulated second. Serial pre-bind checks
+          // alone would exceed the lease; independent checks overlap their cost.
+          await delay(5);
+          clock = Math.max(clock, started + 1000);
+          batch.active--;
+          return { backendReady: false };
+        },
+      };
+    });
+    const f = plane(routes, { now: () => clock, lease: 15000, safety: { createValidationBatch } });
+    await f.gateway.applySnapshot(f.snapshot());
+    expect(batches).toEqual([
+      { active: 0, maximum: 4, count: 26 },
+      { active: 0, maximum: 4, count: 26 },
+    ]);
+    expect(clock - start).toBeLessThan(15000);
+    expect(f.gateway.health()).toMatchObject({ ready: true, routes: 26, configuredRoutes: 26 });
+    const first = backends[0];
+    if (!first) throw new Error('Missing backend fixture');
+    expect((await exchange(first.port, 'STATUS\n', false, '127.0.0.71')).toString()).toBe(
+      'sleeping\n',
+    );
+  });
+  it('does not commit a pre-bind batch that finishes after its lease and reports the real reason', async () => {
+    const backend = await tcpFixture();
+    let clock = Date.now();
+    let batches = 0;
+    const log = vi.fn();
+    const f = plane([route(backend.port)], {
+      now: () => clock,
+      lease: 15000,
+      logger: { log },
+      safety: {
+        createValidationBatch() {
+          const prebind = ++batches === 2;
+          return {
+            async validate() {
+              if (prebind) clock += 15000;
+            },
+          };
+        },
+      },
+    });
+    await f.gateway.start();
+    expect(f.gateway.health()).toMatchObject({ ready: false, routes: 0, revision: null });
+    expect(log).toHaveBeenCalledWith('warn', 'gateway.snapshot_unavailable', {
+      reason: 'lease_expired',
+    });
+    await refuses(backend.port);
+  });
+  it('waits for pending pre-bind checks before rollback and preserves their safety reason', async () => {
+    const first = await tcpFixture();
+    const second = await tcpFixture();
+    const a = route(first.port);
+    const b = route(second.port);
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const log = vi.fn();
+    let batches = 0;
+    const f = plane([a, b], {
+      logger: { log },
+      safety: {
+        createValidationBatch() {
+          const prebind = ++batches === 2;
+          return {
+            async validate(current) {
+              if (!prebind) return;
+              if (current.id === a.id) {
+                await entered.promise;
+                throw new GatewaySafetyError('public_collision');
+              }
+              entered.resolve();
+              await release.promise;
+            },
+          };
+        },
+      },
+    });
+    let completed = false;
+    const starting = f.gateway.start().then(() => {
+      completed = true;
+    });
+    await entered.promise;
+    await delay(10);
+    expect(completed).toBe(false);
+    release.resolve();
+    await starting;
+    expect(f.gateway.health()).toMatchObject({ ready: false, routes: 0 });
+    expect(log).toHaveBeenCalledWith('warn', 'gateway.snapshot_unavailable', {
+      reason: 'public_collision',
+    });
+    await refuses(first.port);
+    await refuses(second.port);
   });
   it.each(['sleeping', 'manually_stopped', 'maintenance'] as const)(
     'renews %s listener safety without periodic gameplay observations',

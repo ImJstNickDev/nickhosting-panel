@@ -941,12 +941,26 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
   }
   return {
     validate,
-    createValidationBatch(routes = []) {
+    createValidationBatch(routes = [], phase = 'initial') {
       const batch = createProviderBatch(routes);
       let host: Promise<NetworkObservation> | undefined;
       const checked = new Set<string>();
       return {
         validate(route, ownedBindings) {
+          if (phase === 'prebind')
+            return validate(route, ownedBindings, batch, async () => {
+              // Concurrent admissions can share one observation already being
+              // collected. Never retain its settled value for a later route:
+              // stopped-container reservations and topology can change without
+              // opening a socket that an exclusive native bind would detect.
+              host ??= options.observer
+                .observe()
+                .then((value) => structuredClone(value))
+                .finally(() => {
+                  host = undefined;
+                });
+              return structuredClone(await host);
+            });
           // A route is inspected once in the initial snapshot pass. Rechecking
           // it before native bind must see newly opened sockets and topology.
           const first = !checked.has(route.id);

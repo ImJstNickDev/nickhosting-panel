@@ -1360,6 +1360,7 @@ export async function processServerOperation(
           .executeTakeFirst()) !== undefined;
       if (
         finalPowerIdentity ||
+        phase === 'configure' ||
         worldFileContent ||
         ((operation.plan.gatewayAutomation !== undefined ||
           operation.plan.gatewayConsole !== undefined ||
@@ -1480,6 +1481,18 @@ export async function processServerOperation(
             );
           } else {
             await timed('authorization', () => options.authorizeEffect(jobId, server.id, db));
+          }
+          if (phase === 'configure') {
+            // Durable preparation and authorization can wait. Recheck the actual
+            // process immediately before changing limits, never a cached resource state.
+            if (
+              !verifiedServer ||
+              !options.confirmAlreadyStopped ||
+              !(await options.confirmAlreadyStopped(server.id, db, {
+                providerServer: Promise.resolve(verifiedServer),
+              }))
+            )
+              throw new DomainError('operation_uncertain');
           }
           if (phase === 'initial_start') await assertProvisionGatewayStart(db, server.id, jobId);
           if (phase === 'backup_resume' && !(await backupResumeAllowed()))
@@ -3169,6 +3182,17 @@ export async function processServerOperation(
         )
           throw new DomainError('operation_uncertain');
         previewSourceVerified = true;
+      } else if (operation.action === 'configure') {
+        // A fresh physical stopped proof supersedes Panel's resource-cache
+        // settling window. Keep reservation exclusion and recheck at dispatch.
+        await requireQuiescentReservation();
+        if (
+          !options.confirmAlreadyStopped ||
+          !(await options.confirmAlreadyStopped(server.id, db, {
+            providerServer: Promise.resolve(remote),
+          }))
+        )
+          throw new DomainError('operation_uncertain');
       } else if (!onlineWorldContent && !metadataContent) {
         if (pendingSatisfactoryMods(operation) && !(await recoverModReservation()))
           return wait('offline_confirmation', 'operation_uncertain');
@@ -3216,18 +3240,20 @@ export async function processServerOperation(
           build.remove_allocations?.length
         )
           throw new DomainError('validation_failed');
-        const matches = () =>
+        const matches = (current: ApplicationServer) =>
           ['memory', 'cpu', 'disk', 'swap', 'io'].every(
             (key) =>
-              remote.limits[key as keyof typeof remote.limits] === build[key as keyof BuildUpdate],
+              current.limits[key as keyof typeof current.limits] ===
+              build[key as keyof BuildUpdate],
           ) &&
-          (remote.limits.threads ?? '') === (build.threads ?? '') &&
+          (current.limits.threads ?? '') === (build.threads ?? '') &&
+          current.allocation === build.allocation &&
           ['databases', 'allocations', 'backups'].every(
             (key) =>
-              remote.feature_limits[key as keyof typeof remote.feature_limits] ===
+              current.feature_limits[key as keyof typeof current.feature_limits] ===
               build.feature_limits[key as keyof typeof build.feature_limits],
           );
-        if (operation.phase === 'configure' && matches()) {
+        const completeConfiguration = async () => {
           await db
             .updateTable('managed_servers')
             .set({
@@ -3243,11 +3269,27 @@ export async function processServerOperation(
             .where('id', '=', server.id)
             .execute();
           return finish(true);
-        }
+        };
+        if (operation.phase === 'configure' && matches(remote)) return completeConfiguration();
+        if (operation.phase !== 'configure')
+          // An actual uncertain readback may retry, but it must not inherit a
+          // previous phase's maximum observation backoff.
+          await update({ plan: { ...operation.plan, pollCount: 0, waitReason: null } });
         // A repeated absolute build PATCH converges on the same recorded desired state.
-        await effect('configure', () =>
-          options.adapter.updateBuild(server.pterodactyl_id ?? 0, build),
-        );
+        try {
+          await effect('configure', () =>
+            options.adapter.updateBuild(server.pterodactyl_id ?? 0, build),
+          );
+        } catch (error) {
+          if (!(error instanceof PterodactylError) || error.outcome !== 'unknown') throw error;
+          // A lost response may still have applied the absolute build. Inspect it
+          // now; an unavailable or mismatching read retains uncertain recovery.
+          const current = await timed('provider_identity', () => ownedRemote(db, server, options));
+          if (matches(current)) return completeConfiguration();
+          throw error;
+        }
+        const current = await timed('provider_identity', () => ownedRemote(db, server, options));
+        if (matches(current)) return completeConfiguration();
         return wait('configuration_confirmation');
       }
       if (

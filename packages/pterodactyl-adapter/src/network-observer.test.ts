@@ -45,6 +45,7 @@ function fixture() {
     now: () => 1_800_000_000_000,
     read: vi.fn(async (path) => `${header}\n${path.endsWith('/tcp') ? row('0100007F') : ''}\n`),
     link: vi.fn(async (path) => (path.includes('/fd/') ? 'socket:[42]' : 'net:[100]')),
+    namespaceFile: vi.fn(async () => ({ inode: 100n, filesystemType: 0x6e736673n })),
     directory: vi.fn(async () => ['4']),
     interfaces: vi.fn(() => ['127.0.0.1', '10.0.0.1']),
     docker: vi.fn(async (args) => {
@@ -96,6 +97,62 @@ describe('Linux proc network parsers', () => {
 });
 
 describe('read-only host network observer', () => {
+  it('accepts an independently mounted nsfs proof without a per-boot process PID', async () => {
+    const f = fixture();
+    const link = f.io.link;
+    f.io.link = vi.fn(async (path) => {
+      if (path === `${f.config.hostProcDirectory}/ns/net`)
+        throw Object.assign(new Error('not a symlink'), { code: 'EINVAL' });
+      return link(path);
+    });
+    expect((await f.observer().observe()).hostNamespaceId).toBe('net:[100]');
+    expect(f.io.namespaceFile).toHaveBeenCalledTimes(2);
+    expect(f.io.namespaceFile).toHaveBeenCalledWith(`${f.config.hostProcDirectory}/ns/net`);
+  });
+  it.each([
+    { inode: 100n, filesystemType: 0x01021994n },
+    { inode: 101n, filesystemType: 0x6e736673n },
+    { inode: 0n, filesystemType: 0x6e736673n },
+  ])('rejects ordinary files and foreign mounted namespaces: %s', async (identity) => {
+    const f = fixture();
+    const link = f.io.link;
+    f.io.link = vi.fn(async (path) => {
+      if (path === `${f.config.hostProcDirectory}/ns/net`)
+        throw Object.assign(new Error('not a symlink'), { code: 'EINVAL' });
+      return link(path);
+    });
+    f.io.namespaceFile = vi.fn(async () => identity);
+    await expect(f.observer().observe()).rejects.toMatchObject({ reason: 'namespace' });
+    expect(f.io.docker).not.toHaveBeenCalled();
+  });
+  it('rejects replacement of the mounted namespace during observation', async () => {
+    const f = fixture();
+    const link = f.io.link;
+    f.io.link = vi.fn(async (path) => {
+      if (path === `${f.config.hostProcDirectory}/ns/net`)
+        throw Object.assign(new Error('not a symlink'), { code: 'EINVAL' });
+      return link(path);
+    });
+    f.io.namespaceFile = vi
+      .fn()
+      .mockResolvedValueOnce({ inode: 100n, filesystemType: 0x6e736673n })
+      .mockResolvedValueOnce({ inode: 101n, filesystemType: 0x6e736673n });
+    await expect(f.observer().observe()).rejects.toMatchObject({ reason: 'namespace' });
+  });
+  it.each(['EACCES', 'ENOENT'])(
+    'does not bypass an unreadable/missing proc proof: %s',
+    async (code) => {
+      const f = fixture();
+      const link = f.io.link;
+      f.io.link = vi.fn(async (path) => {
+        if (path === `${f.config.hostProcDirectory}/ns/net`)
+          throw Object.assign(new Error('unavailable'), { code });
+        return link(path);
+      });
+      await expect(f.observer().observe()).rejects.toMatchObject({ reason: 'namespace' });
+      expect(f.io.namespaceFile).not.toHaveBeenCalled();
+    },
+  );
   it('verifies namespace/daemon, all container bindings and actual network metadata', async () => {
     const f = fixture();
     const result = await f.observer().observe();

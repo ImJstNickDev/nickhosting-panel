@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { readdir, readFile, readlink } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { open, readdir, readFile, readlink, statfs } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { posix } from 'node:path';
@@ -89,6 +90,7 @@ export interface NetworkObserver {
 export interface NetworkObserverDependencies {
   read(path: string): Promise<string>;
   link(path: string): Promise<string>;
+  namespaceFile(path: string): Promise<{ inode: bigint; filesystemType: bigint }>;
   directory(path: string): Promise<string[]>;
   interfaces(): string[];
   docker(args: readonly string[], socket: string, timeoutMs?: number): Promise<string>;
@@ -97,6 +99,21 @@ export interface NetworkObserverDependencies {
 const production: NetworkObserverDependencies = {
   read: (path) => readFile(path, 'utf8'),
   link: readlink,
+  async namespaceFile(path) {
+    // A read-only bind of the host's init network namespace survives reboot
+    // without exposing a host process tree or requiring ptrace privileges.
+    // Inspect the opened descriptor so replacement cannot mix two identities.
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const [metadata, filesystem] = await Promise.all([
+        file.stat({ bigint: true }),
+        statfs(`/proc/self/fd/${file.fd}`, { bigint: true }),
+      ]);
+      return { inode: metadata.ino, filesystemType: filesystem.type };
+    } finally {
+      await file.close();
+    }
+  },
   directory: (path) => readdir(path),
   interfaces: () =>
     Object.values(networkInterfaces())
@@ -338,6 +355,20 @@ export function createNetworkObserver(
   )
     throw new DomainError('configuration_invalid');
   const io = { ...production, ...dependencies };
+  async function hostNamespace() {
+    const path = `${config.hostProcDirectory}/ns/net`;
+    try {
+      return await io.link(path);
+    } catch (error) {
+      // Preserve legacy proc-directory proofs. Only a non-symlink may be a
+      // namespace bind; missing/unreadable proofs must never take this fallback.
+      if ((error as NodeJS.ErrnoException).code !== 'EINVAL') throw error;
+      const file = await io.namespaceFile(path);
+      // Linux NSFS_MAGIC: an ordinary file with a matching inode is not proof.
+      if (file.filesystemType !== 0x6e736673n || file.inode <= 0n) throw new Error();
+      return `net:[${file.inode}]`;
+    }
+  }
   return {
     async observe() {
       const started = io.now();
@@ -390,10 +421,7 @@ export function createNetworkObserver(
       }
       async function attempt(): Promise<NetworkObservation> {
         const [namespaceId, hostNamespaceId] = await stage('namespace', async () => {
-          const values = await Promise.all([
-            io.link('/proc/self/ns/net'),
-            io.link(`${config.hostProcDirectory}/ns/net`),
-          ]);
+          const values = await Promise.all([io.link('/proc/self/ns/net'), hostNamespace()]);
           if (
             !namespace(values[0]) ||
             values[0] !== values[1] ||
@@ -587,8 +615,7 @@ export function createNetworkObserver(
           await stage('namespace', async () => {
             if ((await io.link('/proc/self/ns/net')) !== namespaceId) throw new Error();
             remaining();
-            if ((await io.link(`${config.hostProcDirectory}/ns/net`)) !== hostNamespaceId)
-              throw new Error();
+            if ((await hostNamespace()) !== hostNamespaceId) throw new Error();
           });
           return {
             observedAt: started,

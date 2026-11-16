@@ -399,6 +399,9 @@ async function fixture(
     authorizeEffect: async () => {},
     now: () => clock,
     reserveStart,
+    ...(action === 'configure'
+      ? { confirmAlreadyStopped: vi.fn(async () => state === 'offline') }
+      : {}),
     backupPolicy: async () => ({ offline: 'none' }),
     reserveInstallation: async (_serverId, _jobId, connection) => {
       await connection
@@ -2337,7 +2340,7 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     ).toHaveLength(0);
     expect(f.adapter.deleteServer).toHaveBeenCalledTimes(1);
   });
-  it('reconciles applied build changes after a timeout without duplicate effects', async () => {
+  it('confirms applied build changes immediately after a lost PATCH response', async () => {
     const f = await fixture('configure', {
       build: {
         memory: 256,
@@ -2353,14 +2356,121 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
       f.remote.limits.memory = build.memory;
       throw new PterodactylError('unavailable', 'application', 'unknown');
     });
-    expect(await f.run()).toBe('waiting');
-    f.tick();
-    expect(await f.run()).toBe('waiting');
-    f.tick();
     expect(await f.run()).toBe('succeeded');
     expect((await f.server()).limits.memory).toBe(256);
     expect(f.adapter.updateBuild).toHaveBeenCalledTimes(1);
   });
+  it('changes limits in one delivery without cached-offline or confirmation polling', async () => {
+    const f = await fixture('configure', {
+      pollCount: 20,
+      build: {
+        memory: 256,
+        cpu: 60,
+        disk: 64,
+        swap: 0,
+        io: 500,
+        allocation: providerSequence + 1,
+        feature_limits: { databases: 0, allocations: 1, backups: 1 },
+      },
+    });
+    // Even stale telemetry cannot impose a settling delay over physical proof.
+    f.adapter.getResources.mockRejectedValue(new Error('Cached telemetry must not be consulted'));
+    expect(await f.run()).toBe('succeeded');
+    expect(f.adapter.updateBuild).toHaveBeenCalledTimes(1);
+    expect(f.options.confirmAlreadyStopped).toHaveBeenCalledTimes(2);
+    expect(f.adapter.getResources).not.toHaveBeenCalled();
+    expect((await f.server()).limits).toMatchObject({ memory: 256, cpu: 60 });
+    expect((await f.server()).active_operation_id).toBeNull();
+    const job = await f.db
+      .selectFrom('operation_jobs')
+      .select(['state', 'completed_at'])
+      .where('id', '=', f.jobId)
+      .executeTakeFirstOrThrow();
+    expect(job).toEqual({ state: 'succeeded', completed_at: f.now() });
+    expect(
+      await f.db
+        .selectFrom('server_events')
+        .select('id')
+        .where('job_id', '=', f.jobId)
+        .where('message_key', '=', 'servers.operation.waiting')
+        .execute(),
+    ).toHaveLength(0);
+  });
+  it.each(['running', 'missing-observer', 'unavailable-observer'] as const)(
+    'does not configure without a physical stopped proof: %s',
+    async (reason) => {
+      const f = await fixture('configure');
+      if (reason === 'running') f.setState('running');
+      else if (reason === 'missing-observer') f.options.confirmAlreadyStopped = undefined;
+      else
+        f.options.confirmAlreadyStopped = vi.fn(async () => {
+          throw new DomainError('integration_unavailable');
+        });
+      expect(await f.run()).toBe('waiting');
+      expect(f.adapter.updateBuild).not.toHaveBeenCalled();
+      expect((await f.operation()).effect_state).toBe('none');
+      expect((await f.server()).active_operation_id).toBe(f.jobId);
+    },
+  );
+  it('rechecks stopped state after durable configure preparation before dispatch', async () => {
+    const f = await fixture('configure', {
+      build: {
+        memory: 256,
+        cpu: 10,
+        disk: 64,
+        swap: 0,
+        io: 500,
+        allocation: providerSequence + 1,
+        feature_limits: { databases: 0, allocations: 1, backups: 1 },
+      },
+    });
+    f.options.checkpoint = async (point) => {
+      if (point === 'prepared') f.setState('running');
+    };
+    expect(await f.run()).toBe('failed');
+    expect(f.options.confirmAlreadyStopped).toHaveBeenCalledTimes(2);
+    expect(f.adapter.updateBuild).not.toHaveBeenCalled();
+    expect((await f.operation()).effect_state).toBe('none');
+  });
+  it.each(['stale-build', 'unavailable', 'foreign-identity'] as const)(
+    'never confirms a configure PATCH from an unverified readback: %s',
+    async (reason) => {
+      const f = await fixture('configure', {
+        pollCount: 20,
+        build: {
+          memory: 256,
+          cpu: 10,
+          disk: 64,
+          swap: 0,
+          io: 500,
+          allocation: providerSequence + 1,
+          feature_limits: { databases: 0, allocations: 1, backups: 1 },
+        },
+      });
+      f.adapter.updateBuild.mockImplementation(async () => {
+        if (reason === 'unavailable')
+          f.adapter.getApplicationServer.mockRejectedValue(
+            new PterodactylError('unavailable', 'application', 'unknown'),
+          );
+        if (reason === 'foreign-identity') f.remote.uuid = randomUUID();
+        return f.remote;
+      });
+      expect(await f.run()).toBe(reason === 'foreign-identity' ? 'failed' : 'waiting');
+      expect(f.adapter.updateBuild).toHaveBeenCalledTimes(1);
+      expect((await f.server()).limits.memory).toBe(128);
+      const job = await f.db
+        .selectFrom('operation_jobs')
+        .select(['state', 'next_attempt_at'])
+        .where('id', '=', f.jobId)
+        .executeTakeFirstOrThrow();
+      expect(job.state).not.toBe('succeeded');
+      if (reason === 'stale-build') {
+        const delay = job.next_attempt_at.getTime() - f.now().getTime();
+        expect(delay).toBeGreaterThanOrEqual(2000);
+        expect(delay).toBeLessThan(2500);
+      }
+    },
+  );
   it.each(['replaced', 'deleted'] as const)(
     'does not request prompt delivery retries for an inactive %s operation',
     async (reason) => {
@@ -2660,8 +2770,6 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
       throw new PterodactylError('unavailable', 'application', 'unknown');
     });
     expect(await f.run()).toBe('waiting');
-    f.tick();
-    expect(await f.run()).toBe('waiting');
     await f.prepareReservation();
     const context = {
       actorUserId: f.ownerId,
@@ -2721,8 +2829,6 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
       f.adapter.updateBuild.mockImplementation(async () => {
         throw new PterodactylError('unavailable', 'application', 'unknown');
       });
-      expect(await f.run()).toBe('waiting');
-      f.tick();
       expect(await f.run()).toBe('waiting');
       await f.prepareReservation();
       await f.db
@@ -2882,8 +2988,6 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     f.adapter.updateBuild.mockImplementation(async () => {
       throw new PterodactylError('invalid_request', 'application', 'rejected', 422);
     });
-    expect(await f.run()).toBe('waiting');
-    f.tick();
     expect(await f.run()).toBe('failed');
     expect((await f.server()).limits).toMatchObject({ memory: 128, disk: 64 });
     expect(f.adapter.updateBuild).toHaveBeenCalledTimes(1);

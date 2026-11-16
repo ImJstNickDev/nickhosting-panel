@@ -43,9 +43,11 @@ services:
     volumes:
       # Read-only mount does not restrict Docker API authority (issue #22).
       - { type: bind, source: /var/run/docker.sock, target: /var/run/docker.sock, read_only: true, bind: { create_host_path: false } }
-      # Must identify an independent host process and be readable by the service.
+      # Stable host-init namespace proof and socket tables: no ephemeral user PID.
+      # The observer verifies nsfs identity against its own namespace and Owner pin.
       # Never use /proc/self or relax host permissions to make this check pass.
-      - { type: bind, source: "${NH_DEV_GATEWAY_HOST_PROC:?Verified readable host process proc directory required}", target: /run/nickhosting-host-proc, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: /proc/1/ns/net, target: /run/nickhosting-host-proc/ns/net, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: /proc/1/net, target: /run/nickhosting-host-proc/net, read_only: true, bind: { create_host_path: false } }
       - { type: bind, source: ./apps/game-gateway/src, target: /app/apps/game-gateway/src, read_only: true, bind: { create_host_path: false } }
       - { type: bind, source: ./packages/core/src, target: /app/packages/core/src, read_only: true, bind: { create_host_path: false } }
       - { type: bind, source: ./packages/game-sdk/src, target: /app/packages/game-sdk/src, read_only: true, bind: { create_host_path: false } }

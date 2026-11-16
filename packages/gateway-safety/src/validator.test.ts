@@ -409,6 +409,68 @@ describe('Gateway snapshot provider batches', () => {
     expect(f.options.observer.observe).toHaveBeenCalledTimes(3);
   });
 
+  it('rereads stopped-container reservations for later pre-bind admissions with no active socket', async () => {
+    const f = fixture();
+    const safety = f.validator();
+    const batch = safety.createValidationBatch?.([f.route], 'prebind');
+    if (!batch) throw new Error('Missing batch');
+    await expect(batch.validate(f.route, [])).resolves.toEqual({ backendReady: true });
+    const container = f.observation.containers[0];
+    if (!container) throw new Error('Missing fixture container');
+    f.observation.containers.push({
+      ...container,
+      id: 'c'.repeat(64),
+      name: '/unrelated-stopped-server',
+      running: false,
+      configuredBindings: [f.route.public],
+      activeBindings: [],
+    });
+    // A new route in a later worker wave must not use the first route's settled
+    // host observation, even though the same native endpoint remains unbound.
+    expect(f.observation.sockets).toEqual([]);
+    await expect(batch.validate({ ...f.route, id: ids.node }, [])).rejects.toMatchObject({
+      reason: 'public_collision',
+    });
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares only an in-flight pre-bind host read and retries observation after it settles', async () => {
+    const f = fixture();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    f.options.observer.observe = vi.fn(async () => {
+      entered.resolve();
+      await release.promise;
+      return f.observation;
+    });
+    const batch = f.validator().createValidationBatch?.([f.route], 'prebind');
+    if (!batch) throw new Error('Missing batch');
+    const first = batch.validate(f.route, []);
+    const sibling = batch.validate({ ...f.route, id: ids.node }, []);
+    await entered.promise;
+    await Promise.resolve();
+    expect(f.options.observer.observe).toHaveBeenCalledOnce();
+    release.resolve();
+    await Promise.all([first, sibling]);
+    await batch.validate({ ...f.route, id: ids.allocation }, []);
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not cache a rejected pre-bind host observation for subsequent admissions', async () => {
+    const f = fixture();
+    f.options.observer.observe = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Observer failed'))
+      .mockResolvedValue(f.observation);
+    const batch = f.validator().createValidationBatch?.([f.route], 'prebind');
+    if (!batch) throw new Error('Missing batch');
+    await expect(batch.validate(f.route, [])).rejects.toThrow('Observer failed');
+    await expect(batch.validate({ ...f.route, id: ids.node }, [])).resolves.toEqual({
+      backendReady: true,
+    });
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
+  });
+
   it('isolates concurrently active batches, including source failures', async () => {
     const f = fixture();
     let rejectFirst!: (error: Error) => void;
