@@ -23,7 +23,7 @@ import {
   canonicalAllocationAddress,
   effectiveBackendAllocationPool,
 } from './allocation-pool.js';
-import { getGatewayState } from './gateway-orchestration.js';
+import { getGatewaySnapshotState, getGatewayState } from './gateway-orchestration.js';
 import { getGatewayPresentationVariables } from './gateway-presentation.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
@@ -441,21 +441,26 @@ async function buildGatewayRoutes(tx: Kysely<Database>, env: Environment, routeI
     completedOperations.map((operation) => [operation.server_id, operation]),
   );
   const routes: GatewayRoute[] = [];
+  const states = new Map<string, Promise<Awaited<ReturnType<typeof getGatewaySnapshotState>>>>();
   for (const row of rows) {
-    let state: Awaited<ReturnType<typeof getGatewayState>>;
+    let state: Awaited<ReturnType<typeof getGatewaySnapshotState>>['state'];
     let minecraft: GatewayMinecraftProtocol | undefined;
     try {
-      state = await getGatewayState(tx, row.server_id, { env });
-      if (row.game_id === 'minecraft') {
-        minecraft = await requireMinecraftGatewayProtocol(
+      let evidence = states.get(row.server_id);
+      if (!evidence) {
+        evidence = getGatewaySnapshotState(
           tx,
           row.server_id,
-          { handlerId: state.protocolId, gameVersion: state.gameVersion },
-          env,
-          new Date(now),
+          { env, now: () => new Date(now) },
+          {
+            mapping: { game_id: row.game_id, runtime_id: row.runtime_id },
+            values: config,
+          },
         );
-        if (row.transport !== 'tcp' || row.role !== 'game') continue;
+        states.set(row.server_id, evidence);
       }
+      ({ state, minecraft } = await evidence);
+      if (row.game_id === 'minecraft' && (row.transport !== 'tcp' || row.role !== 'game')) continue;
     } catch (error) {
       if (
         (row.game_id === 'minecraft' || row.stored_handler_id === 'minecraft-java') &&

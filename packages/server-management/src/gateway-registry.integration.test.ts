@@ -60,6 +60,36 @@ const input = () => ({
   transport: 'tcp' as const,
 });
 describe('durable explicit Gateway route registry', () => {
+  it('resolves one server state for sibling routes and refreshes it on the next snapshot', async () => {
+    await setGatewayRoute(f.db, f.owner, input(), env);
+    await setGatewayRoute(f.db, f.owner, { ...input(), transport: 'udp' }, env);
+    let sampleReads = 0;
+    const measured = f.db.withPlugin({
+      transformQuery({ node }) {
+        if (
+          node.kind === 'SelectQueryNode' &&
+          JSON.stringify(node).includes('gateway_startup_samples')
+        )
+          sampleReads++;
+        return node;
+      },
+      async transformResult({ result }) {
+        return result;
+      },
+    });
+    const first = await getGatewaySnapshot(measured, env);
+    expect(first.routes).toHaveLength(2);
+    expect(sampleReads).toBe(1);
+    await f.db
+      .updateTable('managed_servers')
+      .set({ automatic_starts_paused: true })
+      .where('id', '=', serverId)
+      .execute();
+    const second = await getGatewaySnapshot(measured, env);
+    expect(sampleReads).toBe(2);
+    expect(second.routes.every((route) => route.wakeEnabled === false)).toBe(true);
+  });
+
   it('keeps mutable Satisfactory protocol observations outside route authority', async () => {
     await setGatewayRoute(f.db, f.owner, input(), env);
     await f.db

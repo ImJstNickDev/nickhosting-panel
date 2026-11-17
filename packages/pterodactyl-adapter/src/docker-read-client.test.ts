@@ -123,3 +123,27 @@ it('reads complete network metadata once for a chunk and rejects missing identit
     dockerReadCommand(['network', 'inspect', '--format', '', 'c'.repeat(64)], socket),
   ).rejects.toThrow('docker_read_identity');
 });
+
+it('rejects a successful inspect for another container and duplicate network identities', async () => {
+  const id = 'a'.repeat(64);
+  const socket = await fixture((req, res) => {
+    if (req.url === '/networks') {
+      const entry = {
+        Id: id,
+        Name: 'bridge',
+        Driver: 'bridge',
+        Scope: 'local',
+        Internal: false,
+        EnableIPv6: false,
+        Options: {},
+      };
+      res.end(JSON.stringify([entry, entry]));
+    } else res.end(JSON.stringify(native('b'.repeat(64))));
+  });
+  await expect(
+    dockerReadCommand(['container', 'inspect', '--format', '', id], socket),
+  ).rejects.toThrow('docker_read_invalid');
+  await expect(
+    dockerReadCommand(['network', 'inspect', '--format', '', id], socket),
+  ).rejects.toThrow('docker_read_identity');
+});

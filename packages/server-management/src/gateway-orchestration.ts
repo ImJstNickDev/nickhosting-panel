@@ -286,6 +286,28 @@ export async function getGatewayState(
   return publicState(db, server, state, nowOf(options), options.env);
 }
 
+/** Snapshot-local evidence: resolve protocol and policy once per server, not per role. */
+export async function getGatewaySnapshotState(
+  db: DB,
+  serverId: string,
+  options: GatewayOrchestrationOptions,
+  policyInputs: GatewayPolicyContext,
+) {
+  const { server, state } = await rows(db, serverId);
+  const now = nowOf(options);
+  const minecraft =
+    server.game_id === 'minecraft' || state.protocol_id === 'minecraft-java'
+      ? await requireMinecraftGatewayProtocol(
+          db,
+          serverId,
+          { handlerId: state.protocol_id, gameVersion: state.game_version },
+          options.env,
+          now,
+        )
+      : undefined;
+  return { state: await publicState(db, server, state, now, options.env, policyInputs), minecraft };
+}
+
 export async function setGatewayPolicy(
   db: Kysely<Database>,
   context: AuthContext,
