@@ -149,6 +149,8 @@ export const safetyProviderServerSchema = z
   })
   .strict();
 export interface GatewayProviderSource {
+  /** Earliest source-read time of a supplied immutable control evidence batch. */
+  observedAt?(): number | undefined;
   listNodes(): Promise<z.infer<typeof safetyProviderNodeSchema>[]>;
   listAllocations(nodeId: number): Promise<z.infer<typeof safetyProviderAllocationSchema>[]>;
   getApplicationServer(serverId: number): Promise<z.infer<typeof safetyProviderServerSchema>>;
@@ -345,6 +347,37 @@ function identityDigest(
 export function createGatewaySafetyValidator(options: GatewaySafetyOptions): GatewaySafety {
   const policy = gatewayNetworkPolicySchema.parse(options.policy);
   const now = options.now ?? Date.now;
+  const backendProbes = new Map<string, ReturnType<GatewaySafetyOptions['probeBackend']>>();
+  const nodeProbes = new Map<string, Promise<boolean>>();
+  const providerObservedAt = (fallback: number) => {
+    const observedAt = options.provider.observedAt?.() ?? fallback;
+    if (!Number.isSafeInteger(observedAt) || observedAt <= 0) unavailable('observation_stale');
+    return observedAt;
+  };
+  function probeBackend(route: GatewayRoute, identity: string, validationId?: string) {
+    const key = JSON.stringify([route, identity]);
+    let pending = backendProbes.get(key);
+    if (!pending) {
+      pending = Promise.resolve()
+        .then(() => options.probeBackend(route, validationId))
+        .finally(() => backendProbes.delete(key));
+      backendProbes.set(key, pending);
+    }
+    return pending;
+  }
+  function probeNode(route: GatewayRoute, context: GatewaySafetyContext) {
+    // This challenge proves the configured persistent node endpoint, not an
+    // individual game port. Share only the currently running nonce exchange.
+    const key = JSON.stringify([context.providerNodeId, route.backend.address]);
+    let pending = nodeProbes.get(key);
+    if (!pending) {
+      pending = Promise.resolve()
+        .then(() => options.probeNode(route, context))
+        .finally(() => nodeProbes.delete(key));
+      nodeProbes.set(key, pending);
+    }
+    return pending;
+  }
   async function timed<T>(
     route: GatewayRoute,
     validationId: string,
@@ -397,6 +430,37 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     );
     return result;
   }
+  type InventoryEntry = {
+    allocation: Awaited<ReturnType<GatewayProviderSource['listAllocations']>>[number];
+    effective: string;
+  };
+  const inventoryIndexes = new WeakMap<
+    Awaited<ReturnType<typeof inventories>>,
+    { ports: Map<number, InventoryEntry[]>; identities: Map<string, InventoryEntry> }
+  >();
+  function indexedInventories(source: Awaited<ReturnType<typeof inventories>>) {
+    const previous = inventoryIndexes.get(source);
+    if (previous) return previous;
+    const ports = new Map<number, InventoryEntry[]>();
+    const identities = new Map<string, InventoryEntry>();
+    for (const node of policy.nodes) {
+      const values = source.get(node.nodeId) ?? unavailable();
+      for (const allocation of values) {
+        const key = `${node.nodeId}:${allocation.id}`;
+        if (identities.has(key)) unavailable();
+        // Validate every configured allocation, including free reservations and
+        // unrelated ports, once for this immutable source batch.
+        const entry = { allocation, effective: effectiveAddress(allocation.ip, node) };
+        identities.set(key, entry);
+        const samePort = ports.get(allocation.port) ?? [];
+        samePort.push(entry);
+        ports.set(allocation.port, samePort);
+      }
+    }
+    const index = { ports, identities };
+    inventoryIndexes.set(source, index);
+    return index;
+  }
   type ProviderEvidence = {
     started: number;
     nodes: Awaited<ReturnType<GatewayProviderSource['listNodes']>>;
@@ -413,7 +477,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       // Scope these promises to one explicit snapshot apply, never to the validator
       // lifetime. Keep failures and the earliest source-read timestamp in the batch.
       inventory ??= (() => {
-        const started = now();
+        const started = providerObservedAt(now());
         return Promise.all([options.provider.listNodes(), inventories()]).then(
           ([nodes, nodeInventories]) => structuredClone({ started, nodes, nodeInventories }),
         );
@@ -493,6 +557,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       await timed(route, validationId, 'context', () => options.resolveContext(route)),
     );
     const started = now();
+    const providerStarted = providerObservedAt(started);
     const previous = listener ? undefined : validatedProvider.get(route.id);
     const share =
       previous?.key === evidenceKey(route, context) &&
@@ -512,7 +577,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
                 options.provider.getApplicationServer(context.providerServerId),
                 inventories(),
               ]).then(([nodes, server, nodeInventories]) => ({
-                started,
+                started: providerStarted,
                 nodes,
                 server,
                 nodeInventories,
@@ -586,38 +651,26 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       unavailable();
     if (effectiveAddress(route.backend.allocationAddress, selectedNode) !== route.backend.address)
       unavailable();
-    let ownInventory = false;
-    for (const node of policy.nodes) {
-      const inventory = nodeInventories.get(node.nodeId) ?? unavailable();
-      if (new Set(inventory.map((allocation) => allocation.id)).size !== inventory.length)
-        unavailable();
-      for (const allocation of inventory) {
-        const effective = effectiveAddress(allocation.ip, node);
-        // Include free allocations too: Gateway cannot take a configured provider endpoint.
-        if (
-          allocation.port === route.public.port &&
-          addressesOverlap(effective, route.public.address)
-        )
-          unavailable('public_collision');
-        const selected =
-          node.nodeId === context.providerNodeId && allocation.id === context.providerAllocationId;
-        if (selected) {
-          if (
-            !allocation.assigned ||
-            !allocationIdentityEqual(allocation.ip, route.backend.allocationAddress) ||
-            allocation.port !== route.backend.port
-          )
-            unavailable();
-          ownInventory = true;
-        } else if (
-          allocation.assigned &&
-          allocation.port === route.backend.port &&
-          addressesOverlap(effective, route.backend.address)
-        )
-          unavailable();
-      }
-    }
+    const inventory = indexedInventories(nodeInventories);
+    for (const entry of inventory.ports.get(route.public.port) ?? [])
+      if (addressesOverlap(entry.effective, route.public.address)) unavailable('public_collision');
+    const ownInventory = inventory.identities.get(
+      `${context.providerNodeId}:${context.providerAllocationId}`,
+    );
     if (!ownInventory) unavailable('provider_allocation');
+    if (
+      !ownInventory.allocation.assigned ||
+      !allocationIdentityEqual(ownInventory.allocation.ip, route.backend.allocationAddress) ||
+      ownInventory.allocation.port !== route.backend.port
+    )
+      unavailable();
+    for (const entry of inventory.ports.get(route.backend.port) ?? [])
+      if (
+        entry !== ownInventory &&
+        entry.allocation.assigned &&
+        addressesOverlap(entry.effective, route.backend.address)
+      )
+        unavailable();
     const retained = retainedBindings.get(route.id);
     // A wake operation rotates generation while retaining the same public listener.
     // Generation scopes control-plane authority, not backend identity: the caller
@@ -725,7 +778,11 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     if (!state.container?.running || !state.backendBindingsComplete)
       unavailable('backend_active_binding');
     const result = await timed(state.route, state.validationId, 'backend_protocol', () =>
-      options.probeBackend(state.route, state.validationId),
+      probeBackend(
+        state.route,
+        JSON.stringify([state.digest, state.container?.id]),
+        state.validationId,
+      ),
     );
     if (!(typeof result === 'boolean' ? result : result.ready === true))
       unavailable('backend_protocol');
@@ -772,9 +829,13 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     ownedBindings: readonly GatewayEndpoint[],
     batch?: ProviderBatch,
     observe?: NetworkObserver['observe'],
+    token = failureToken(route.id),
   ) {
     const state = await inspect(route, ownedBindings, true, batch, observe);
     const accepted = (backendReady: boolean) => {
+      // A newer attempt that could not acquire this route's active inspection
+      // revoked it. Its older completion must not restore backend authority.
+      if (failureToken(route.id) !== token) unavailable('observation_stale');
       // Proof reads, node challenges and protocol responses may outlive the
       // provider inventory, especially when it was shared earlier in this batch.
       if (
@@ -818,7 +879,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     if (!state.container || (state.container.running && !state.backendBindingsComplete)) {
       if (!state.mayRetainStatus || !matches || !proof.success || proof.data.version !== 2)
         unavailable('retained_proof_mismatch');
-      if (!(await options.probeNode(route, state.context))) unavailable('node_challenge');
+      if (!(await probeNode(route, state.context))) unavailable('node_challenge');
       if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
         unavailable('observation_stale');
       return accepted(false);
@@ -857,7 +918,10 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       }
       // A failed game probe revokes forwarding, not an independently proven
       // public binding. Ownership/collision/topology failures above still throw.
-      const result = await options.probeBackend(route).catch(() => false);
+      const result = await probeBackend(
+        route,
+        JSON.stringify([state.digest, state.container.id]),
+      ).catch(() => false);
       const backendReady = typeof result === 'boolean' ? result : result.ready === true;
       if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
         unavailable('observation_stale');
@@ -866,7 +930,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         return accepted(true);
       }
     }
-    if (!(await options.probeNode(route, state.context))) unavailable('node_challenge');
+    if (!(await probeNode(route, state.context))) unavailable('node_challenge');
     if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
       unavailable('observation_stale');
     retainBinding();
@@ -878,17 +942,21 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     batch?: ProviderBatch,
     observe?: NetworkObserver['observe'],
   ) {
-    // Serialize renewals: an older successful inspection must never restore
-    // authority after a newer failed inspection. Revoke while checks run.
+    // Keep one active inspection per route, without queuing abandoned timeout
+    // work. A concurrent attempt revokes the older result and retries only after
+    // it settles; it cannot restore stale authority or add more provider work.
     const preceding = renewals.get(route.id);
     const previous = validatedProvider.get(route.id) ?? preceding?.previous;
     validatedProvider.delete(route.id);
+    if (preceding) {
+      failureToken(route.id, true);
+      return Promise.reject(new GatewaySafetyError('observation_stale'));
+    }
+    const token = failureToken(route.id);
     let work!: Promise<{ backendReady: boolean }>;
     work = (async () => {
-      await preceding?.work.catch(() => undefined);
-      validatedProvider.delete(route.id);
       try {
-        return await validateListener(route, ownedBindings, batch, observe);
+        return await validateListener(route, ownedBindings, batch, observe, token);
       } catch (error) {
         validatedProvider.delete(route.id);
         failureToken(route.id, true);
@@ -1015,8 +1083,9 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       )
         return validateBackend(route);
       const validationId = randomUUID();
+      const identity = previous.leasedProbe?.identity ?? unavailable('observation_stale');
       const result = await timed(route, validationId, 'leased_backend_protocol', () =>
-        options.probeBackend(route, validationId),
+        probeBackend(route, identity, validationId),
       );
       if (!(typeof result === 'boolean' ? result : result.ready === true))
         unavailable('backend_protocol');

@@ -724,9 +724,8 @@ describe('persistent Gateway fixture forwarding', () => {
     expect(results.slice(1).map((bytes) => bytes.toString())).toEqual(
       Array.from({ length: 24 }, (_, i) => `client-${i}`),
     );
-    // Full validation includes backend proof, once initially and once directly
-    // before binding; an extra standalone proof would duplicate both inspections.
-    expect(f.safety.validate).toHaveBeenCalledTimes(2);
+    // One fresh admission includes backend proof immediately before binding.
+    expect(f.safety.validate).toHaveBeenCalledTimes(1);
     expect(f.safety.validateBackend).not.toHaveBeenCalled();
     expect(f.control.requestWake).not.toHaveBeenCalled();
     expect(f.gateway.metrics().tcpBytesToClient).toBeGreaterThanOrEqual(payload.length);
@@ -1391,12 +1390,12 @@ describe('persistent Gateway fixture forwarding', () => {
     const valid = route(independent.port, 'tcp', 'sleeping');
     let queryChecks = 0;
     const validate = vi.fn<GatewaySafety['validate']>(async (current) => {
-      if (current.id === query.id && ++queryChecks === 2)
+      if (current.id === query.id && ++queryChecks === 1)
         throw new GatewaySafetyError('backend_active_binding');
     });
     const f = plane([game, valid, query], { safety: { validate } });
     await f.gateway.applySnapshot(f.snapshot());
-    expect(validate).toHaveBeenCalledTimes(6);
+    expect(validate).toHaveBeenCalledTimes(3);
     expect(f.gateway.ownedBindings()).toEqual([valid.public]);
     expect(f.gateway.health()).toMatchObject({
       ready: true,
@@ -1578,24 +1577,28 @@ describe('persistent Gateway fixture forwarding', () => {
       await refuses(second.port);
     },
   );
-  it('refreshes topology immediately before binding after another route exhausts the earlier evidence TTL', async () => {
+  it('checks changed topology before admitting the next ordered role and rolls back staged binds', async () => {
     const first = await tcpFixture();
     const second = await tcpFixture();
     const a = route(first.port);
-    const b = route(second.port);
+    const b = {
+      ...route(second.port),
+      serverId: a.serverId,
+      protocol: { handlerId: 'fixture', gameVersion: '1', role: 'query' },
+    };
     const calls: string[] = [];
     let changed = false;
     const validate = vi.fn<GatewaySafety['validate']>(async (current) => {
       calls.push(current.id);
-      if (current.id === b.id) {
+      if (current.id === a.id) {
         await delay(30);
         changed = true;
       }
-      if (current.id === a.id && changed) throw new DomainError('allocation_unavailable');
+      if (current.id === b.id && changed) throw new DomainError('allocation_unavailable');
     });
     const f = plane([a, b], { safety: { validate } });
     await f.gateway.start();
-    expect(calls).toEqual([a.id, b.id, a.id, b.id]);
+    expect(calls).toEqual([a.id, b.id]);
     expect(f.gateway.health().routes).toBe(0);
     await refuses(first.port);
     await refuses(second.port);
@@ -1616,8 +1619,8 @@ describe('persistent Gateway fixture forwarding', () => {
     // Preserve native bind errors in a setup failure instead of start()'s
     // deliberate unavailable-control handling hiding their diagnostic cause.
     await f.gateway.applySnapshot(f.snapshot());
-    expect(f.safety.validate).toHaveBeenCalledTimes(4);
-    expect(vi.mocked(f.safety.validate).mock.calls[3]).toEqual([b, [a.public]]);
+    expect(f.safety.validate).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(f.safety.validate).mock.calls[1]).toEqual([b, [a.public]]);
     expect((await exchange(first.port, 'first', false, publicAddress)).toString()).toBe('first');
     expect((await exchange(second.port, 'second', false, publicAddress)).toString()).toBe('second');
   });
@@ -1631,7 +1634,7 @@ describe('persistent Gateway fixture forwarding', () => {
       code: 'EADDRINUSE',
     });
     // Issued pre-bind checks settle before every newly bound listener rolls back.
-    expect(f.safety.validate).toHaveBeenCalledTimes(4);
+    expect(f.safety.validate).toHaveBeenCalledTimes(2);
     expect(f.gateway.health().routes).toBe(0);
     expect((await exchange(direct.port, 'unrelated fixture')).toString()).toBe('unrelated fixture');
   });
@@ -1954,22 +1957,54 @@ describe('sleep protocol handling and observations', () => {
   });
   it('bounds failed/hung protocol observations and permits subsequent recovery', async () => {
     const backend = await tcpFixture();
+    const log = vi.fn();
     const handler = fixtureProtocol({
       probeReadiness: vi.fn(async () => new Promise<{ ready: boolean }>(() => {})),
     });
     const f = plane([route(backend.port, 'tcp', 'waking')], {
+      logger: { log },
       protocols: [handler],
       policy: { probeTimeoutMs: 30 },
     });
     await f.gateway.start();
     await f.gateway.observe();
-    expect(f.control.reportObservation).toHaveBeenCalledWith(
-      expect.objectContaining({ ready: false, idle: false }),
-    );
+    expect(f.control.reportObservation).not.toHaveBeenCalled();
     expect(f.gateway.metrics().observationErrors).toBe(1);
+    expect(log).toHaveBeenCalledWith(
+      'info',
+      'gateway.observation_failure',
+      expect.objectContaining({ reason: 'validation_timeout' }),
+    );
     vi.mocked(handler.probeReadiness).mockResolvedValue({ ready: true });
     await f.gateway.observe();
-    expect(f.control.reportObservation).toHaveBeenCalledTimes(2);
+    expect(f.control.reportObservation).toHaveBeenCalledTimes(1);
+  });
+  it('samples committed authority while a newer candidate waits for validation', async () => {
+    const backend = await tcpFixture();
+    const r = route(backend.port);
+    const leasedProbe = vi.fn(async () => ({ ready: true, idle: false, playerCount: 1 }));
+    const f = plane([r], { safety: { probeLeasedBackend: leasedProbe } });
+    await f.gateway.start();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    vi.mocked(f.control.fetchSnapshot).mockResolvedValue(f.snapshot([{ ...r, revision: 2 }], 2));
+    vi.mocked(f.safety.validate).mockImplementation(async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    const renewal = f.gateway.refresh();
+    try {
+      await entered.promise;
+      await f.gateway.observe();
+      expect(leasedProbe).toHaveBeenCalledWith(r);
+      expect(f.safety.validateBackend).not.toHaveBeenCalled();
+      expect(f.control.reportObservation).toHaveBeenCalledWith(
+        expect.objectContaining({ routeRevision: 1, ready: true }),
+      );
+    } finally {
+      release.resolve();
+      await renewal;
+    }
   });
   it.each(['waking', 'online'] as const)(
     'completes a slow %s observation across repeated equivalent lease renewals with its original deadline',
@@ -2122,10 +2157,10 @@ describe('sleep protocol handling and observations', () => {
     const f = plane([route(backend.port, 'tcp', 'sleeping')]);
     await f.gateway.start();
     expect(f.gateway.health().routes).toBe(1);
-    expect(f.safety.validate).toHaveBeenCalledTimes(2);
+    expect(f.safety.validate).toHaveBeenCalledTimes(1);
     expect(f.safety.validateBackend).not.toHaveBeenCalled();
     await f.gateway.refresh();
-    expect(f.safety.validate).toHaveBeenCalledTimes(3);
+    expect(f.safety.validate).toHaveBeenCalledTimes(2);
     expect(f.safety.validateBackend).not.toHaveBeenCalled();
   });
   it('starts a fresh isolated evidence batch for binding, and only one batch for renewals', async () => {
@@ -2149,13 +2184,13 @@ describe('sleep protocol handling and observations', () => {
       expect.arrayContaining([expect.objectContaining({ id: expect.any(String) })]),
       'prebind',
     );
-    expect(batches[0]).toHaveBeenCalledTimes(2);
+    expect(batches[0]).not.toHaveBeenCalled();
     expect(batches[1]).toHaveBeenCalledTimes(2);
     expect(f.safety.validate).not.toHaveBeenCalled();
     expect(f.gateway.health().routes).toBe(2);
     await f.gateway.refresh();
     expect(createValidationBatch).toHaveBeenCalledTimes(3);
-    expect(batches[0]).toHaveBeenCalledTimes(2);
+    expect(batches[0]).not.toHaveBeenCalled();
     expect(batches[1]).toHaveBeenCalledTimes(2);
     expect(batches[2]).toHaveBeenCalledTimes(2);
   });
@@ -2188,7 +2223,7 @@ describe('sleep protocol handling and observations', () => {
     const f = plane(routes, { now: () => clock, lease: 15000, safety: { createValidationBatch } });
     await f.gateway.applySnapshot(f.snapshot());
     expect(batches).toEqual([
-      { active: 0, maximum: 4, count: 26 },
+      { active: 0, maximum: 0, count: 0 },
       { active: 0, maximum: 4, count: 26 },
     ]);
     expect(clock - start).toBeLessThan(15000);
@@ -2282,7 +2317,7 @@ describe('sleep protocol handling and observations', () => {
       await f.gateway.observe();
       await f.gateway.refresh();
       await f.gateway.observe();
-      expect(f.safety.validate).toHaveBeenCalledTimes(3);
+      expect(f.safety.validate).toHaveBeenCalledTimes(2);
       expect(f.safety.validateBackend).not.toHaveBeenCalled();
       expect(observe).not.toHaveBeenCalled();
       expect(f.control.reportObservation).not.toHaveBeenCalled();
@@ -2391,6 +2426,10 @@ describe('sleep protocol handling and observations', () => {
       });
       await f.gateway.start();
       await f.gateway.observe();
+      if (condition === 'failed-readiness') {
+        expect(f.control.reportObservation).not.toHaveBeenCalled();
+        return;
+      }
       expect(f.control.reportObservation).toHaveBeenCalledOnce();
       const observation = vi.mocked(f.control.reportObservation).mock.calls[0]?.[0];
       expect(observation?.idle).toBe(false);
@@ -3685,8 +3724,6 @@ describe('lease, reconciliation and shutdown safety', () => {
     const f = plane([route(first.port), route(second.port)]);
     vi.mocked(f.safety.validate)
       .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new GatewayProviderRateLimitedError(100));
     await expect(f.gateway.applySnapshot(f.snapshot())).rejects.toBeInstanceOf(
       GatewayProviderRateLimitedError,
@@ -3811,8 +3848,6 @@ describe('lease, reconciliation and shutdown safety', () => {
     const f = plane([route(first.port), route(second.port)]);
     vi.mocked(f.safety.validate)
       .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new GatewayRouteRevisionStaleError());
     await expect(f.gateway.applySnapshot(f.snapshot())).rejects.toBeInstanceOf(
       GatewayRouteRevisionStaleError,
@@ -3854,7 +3889,7 @@ describe('lease, reconciliation and shutdown safety', () => {
     const fresh = plane([r]);
     await fresh.gateway.start();
     expect((await exchange(backend.port, 'restart')).toString()).toBe('restart');
-    expect(fresh.safety.validate).toHaveBeenCalledTimes(2);
+    expect(fresh.safety.validate).toHaveBeenCalledTimes(1);
   });
   it('keeps authorized forwarding briefly during API loss, then closes on lease expiry and recovers', async () => {
     const backend = await tcpFixture();
@@ -4185,9 +4220,11 @@ describe('event-driven within-lease readiness', () => {
         expect.objectContaining({ reason, probeStage: 'leased_backend', trigger: 'periodic' }),
       );
       expect(JSON.stringify(log.mock.calls)).not.toContain('private provider response');
-      expect(p.control.reportObservation).toHaveBeenCalledWith(
-        expect.objectContaining({ ready: false }),
-      );
+      if (reason === 'backend_protocol')
+        expect(p.control.reportObservation).toHaveBeenCalledWith(
+          expect.objectContaining({ ready: false }),
+        );
+      else expect(p.control.reportObservation).not.toHaveBeenCalled();
     },
   );
 
@@ -4206,7 +4243,7 @@ describe('event-driven within-lease readiness', () => {
       p.snapshot([{ ...r, mode: 'online', revision: 2 }], 2, 60000),
     );
     await p.gateway.observe();
-    expect(p.safety.validate).toHaveBeenCalledTimes(2);
+    expect(p.safety.validate).toHaveBeenCalledTimes(1);
     expect(p.safety.probeLeasedBackend).toHaveBeenCalledTimes(1);
     expect(p.control.fetchSnapshot).toHaveBeenCalledTimes(1);
     expect(p.gateway.health().revision).toBe(2);

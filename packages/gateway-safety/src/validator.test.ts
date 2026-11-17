@@ -1365,6 +1365,78 @@ describe('Gateway pre-bind and forwarding safety', () => {
     await expect(safety.validate(f.route, [])).rejects.toThrow('allocation_unavailable');
     expect(f.options.provider.listNodes).toHaveBeenCalledTimes(2);
   });
+  it('rejects overlapping renewals without queuing work or restoring an invalidated grant', async () => {
+    const f = fixture();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    f.options.observer.observe = vi.fn(async () => {
+      entered.resolve();
+      await release.promise;
+      return f.observation;
+    });
+    const safety = f.validator();
+    const first = safety.validate(f.route, []);
+    const firstFailure = expect(first).rejects.toMatchObject({ reason: 'observation_stale' });
+    await entered.promise;
+    for (let attempt = 0; attempt < 10; attempt++)
+      await expect(safety.validate(f.route, [])).rejects.toMatchObject({
+        reason: 'observation_stale',
+      });
+    expect(f.options.resolveContext).toHaveBeenCalledTimes(1);
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(1);
+    release.resolve();
+    await firstFailure;
+    await safety.validate(f.route, []);
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
+  });
+  it.each(['standalone', 'batch'] as const)(
+    'does not reset the source timestamp of supplied %s control evidence',
+    async (mode) => {
+      const f = fixture();
+      f.options.provider.observedAt = () => f.observation.observedAt - 5001;
+      const safety = f.validator();
+      const validation = mode === 'batch' ? safety.createValidationBatch?.([f.route]) : safety;
+      await expect(validation?.validate(f.route, [])).rejects.toMatchObject({
+        reason: 'observation_stale',
+      });
+      expect(f.options.probeBackend).not.toHaveBeenCalled();
+    },
+  );
+  it('shares only an in-flight node challenge across routes on the same node address', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    const second = { ...f.route, id: '77777777-7777-4777-8777-777777777777' };
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<boolean>();
+    f.options.probeNode = vi.fn(async () => {
+      entered.resolve();
+      return release.promise;
+    });
+    const safety = f.validator();
+    const pending = Promise.all([safety.validate(f.route, []), safety.validate(second, [])]);
+    await entered.promise;
+    // Let both independently validated routes reach the same outstanding nonce.
+    await vi.waitFor(() => expect(f.options.saveProof).toHaveBeenCalledTimes(2));
+    expect(f.options.probeNode).toHaveBeenCalledTimes(1);
+    release.resolve(true);
+    await pending;
+    await safety.validate(f.route, []);
+    expect(f.options.probeNode).toHaveBeenCalledTimes(2);
+  });
+  it('shares overlapping game dialogues without retaining a settled gameplay sample', async () => {
+    const f = fixture();
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    const release = Promise.withResolvers<{ ready: boolean; idle: boolean; playerCount: number }>();
+    f.options.probeBackend = vi.fn(async () => release.promise);
+    const first = safety.probeLeasedBackend?.(f.route);
+    const second = safety.probeLeasedBackend?.(f.route);
+    await vi.waitFor(() => expect(f.options.probeBackend).toHaveBeenCalledTimes(1));
+    release.resolve({ ready: true, idle: true, playerCount: 0 });
+    await Promise.all([first, second]);
+    await safety.probeLeasedBackend?.(f.route);
+    expect(f.options.probeBackend).toHaveBeenCalledTimes(2);
+  });
   it('collects independent read-only sources concurrently before authorizing a bind', async () => {
     const f = fixture();
     const entered = new Set<string>();

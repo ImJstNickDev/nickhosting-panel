@@ -1201,6 +1201,10 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           if (!group) return;
           for (const route of group) {
             if (fatalValidation || stopping) return;
+            // New/rebound listeners receive their one full admission check just
+            // before native bind. Only retained listeners need renewal here.
+            const retained = listeners.get(route.id);
+            if (!retained || !isDeepStrictEqual(retained.route.public, route.public)) continue;
             try {
               const verdict = await bounded(() => validation.validate(route, owned));
               readiness.set(route.id, verdict?.backendReady ?? true);
@@ -1899,7 +1903,11 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     let probeDuration = 0;
     let reportDuration = 0;
     const work = (async () => {
-      const candidates = candidateSnapshot;
+      // A periodic sample follows committed listener authority while a newer
+      // snapshot is being admitted. Startup hints may target that new intent.
+      const observationAuthority = () =>
+        priorityServerId ? candidateSnapshot : (snapshot ?? candidateSnapshot);
+      const candidates = observationAuthority();
       if (!candidates || Date.parse(candidates.expiresAt) <= now() || stopping) return;
       const servers = new Map<string, GatewayRoute[]>();
       const epochs = new Map(observationEpochs);
@@ -1956,6 +1964,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           continue;
         let ready = true;
         let idle = true;
+        let readinessUnknown = false;
         const observedAt = new Date(now()).toISOString();
         if (anchor.sleepEligibleAt && Date.parse(anchor.sleepEligibleAt) <= Date.parse(observedAt))
           sampledIdleDeadlines.set(
@@ -2060,6 +2069,9 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             // An idle-only failure suppresses sleep without discarding the
             // independent readiness proof; unknown readiness cannot advance.
             ready = ready && readinessConfirmed;
+            readinessUnknown ||=
+              !readinessConfirmed &&
+              !(error instanceof GatewaySafetyError && error.reason === 'backend_protocol');
             idle = false;
             players.push(undefined);
             counters.observationErrors++;
@@ -2069,29 +2081,26 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
               detail: error instanceof GatewaySafetyError ? error.observationFailure : undefined,
               trigger: priorityServerId ? 'startup_hint' : 'periodic',
               durationMs: Math.round(performance.now() - probeStarted),
-              reason:
-                error instanceof GatewaySafetyError
-                  ? error.reason
-                  : error instanceof NetworkObservationError
-                    ? `observer_${error.reason}`
-                    : error instanceof GatewayRouteRevisionStaleError
-                      ? 'route_revision_stale'
-                      : 'unclassified',
+              reason: rejectionReason(error),
             });
             options.logger?.log('warn', 'gateway.observation_unavailable', { routeId: route.id });
           } finally {
             probeDuration += performance.now() - probeStarted;
           }
         }
+        // Failed infrastructure evidence is unknown, not a negative game
+        // response. Do not advance Core's lifecycle/revision with that guess.
+        if (readinessUnknown) continue;
         try {
           if (providerRetryAt > now()) return;
+          const currentAuthority = observationAuthority();
           if (
             observationEpochs.get(anchor.serverId) !== epochs.get(anchor.serverId) ||
-            !candidateSnapshot ||
-            candidateSnapshot.gatewayId !== candidates.gatewayId ||
-            candidateSnapshot.revision !== candidates.revision ||
-            !isDeepStrictEqual(candidateSnapshot.routes, candidates.routes) ||
-            Date.parse(candidateSnapshot.expiresAt) <= now() ||
+            !currentAuthority ||
+            currentAuthority.gatewayId !== candidates.gatewayId ||
+            currentAuthority.revision !== candidates.revision ||
+            !isDeepStrictEqual(currentAuthority.routes, candidates.routes) ||
+            Date.parse(currentAuthority.expiresAt) <= now() ||
             Date.parse(candidates.expiresAt) <= now() ||
             stopping
           ) {
