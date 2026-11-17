@@ -174,7 +174,11 @@ export async function createGatewayRuntime(
     const serverRoutes = new Map<number, string>();
     const evidence = createEvidenceCache(networkPolicy.maximumObservationAgeMs);
     const routeValues = new Map<string, import('@nickhosting/game-sdk').GatewayRoute>();
-    const context = async (route: import('@nickhosting/game-sdk').GatewayRoute) => {
+    const context = async (
+      route: import('@nickhosting/game-sdk').GatewayRoute,
+      signal?: AbortSignal,
+    ) => {
+      signal?.throwIfAborted();
       routeValues.set(route.id, route);
       const cached = evidence.route(route);
       if (cached) {
@@ -182,7 +186,11 @@ export async function createGatewayRuntime(
         return cached.context;
       }
       const result = gatewaySafetyContextSchema.parse(
-        await client.requestJson('context', { routeId: route.id, routeRevision: route.revision }),
+        await client.requestJson(
+          'context',
+          { routeId: route.id, routeRevision: route.revision },
+          signal,
+        ),
       );
       serverRoutes.set(result.providerServerId, route.id);
       return result;
@@ -198,12 +206,16 @@ export async function createGatewayRuntime(
         ? T
         : never,
       validationId?: string,
+      signal?: AbortSignal,
     ) => {
+      signal?.throwIfAborted();
       const handler = protocols.find(
         (p) => p.id === route.protocol?.handlerId && p.supports(route),
       );
       if (!handler) return false;
       const controller = new AbortController();
+      const abort = () => controller.abort(signal?.reason);
+      signal?.addEventListener('abort', abort, { once: true });
       const timeout = setTimeout(() => controller.abort(), policy.probeTimeoutMs);
       const probeId = randomUUID();
       const probeContext = {
@@ -234,7 +246,7 @@ export async function createGatewayRuntime(
           : {}),
       };
       try {
-        return await Promise.race([
+        const result = await Promise.race([
           handler.observe
             ? handler.observe(probeContext)
             : handler.probeReadiness(probeContext).then((r) => r.ready === true),
@@ -242,9 +254,13 @@ export async function createGatewayRuntime(
             controller.signal.addEventListener('abort', () => resolve(false), { once: true }),
           ),
         ]);
+        signal?.throwIfAborted();
+        return result;
       } catch {
+        if (signal?.aborted) throw signal.reason;
         return false;
       } finally {
+        signal?.removeEventListener('abort', abort);
         clearTimeout(timeout);
         controller.abort();
       }
@@ -262,19 +278,21 @@ export async function createGatewayRuntime(
         ),
       provider: {
         observedAt: () => evidence.current()?.observedAt,
-        listNodes: async () =>
+        listNodes: async (signal) =>
           evidence.current()?.nodes ??
           z
             .array(safetyProviderNodeSchema)
             .max(1000)
-            .parse(await client.requestJson('inventory', { operation: 'nodes' })),
-        listAllocations: async (nodeId) =>
+            .parse(await client.requestJson('inventory', { operation: 'nodes' }, signal)),
+        listAllocations: async (nodeId, signal) =>
           evidence.current()?.allocations.find((entry) => entry.nodeId === nodeId)?.allocations ??
           z
             .array(safetyProviderAllocationSchema)
             .max(100000)
-            .parse(await client.requestJson('inventory', { operation: 'allocations', nodeId })),
-        getApplicationServer: async (id) => {
+            .parse(
+              await client.requestJson('inventory', { operation: 'allocations', nodeId }, signal),
+            ),
+        getApplicationServer: async (id, signal) => {
           const routeId = serverRoutes.get(id);
           if (!routeId) throw new DomainError('provenance_mismatch');
           const value = routeValues.get(routeId);
@@ -283,10 +301,10 @@ export async function createGatewayRuntime(
             if (cached) return cached;
           }
           return safetyProviderServerSchema.parse(
-            await client.requestJson('inventory', { operation: 'server', routeId }),
+            await client.requestJson('inventory', { operation: 'server', routeId }, signal),
           );
         },
-        getApplicationServers: async (routeIds) => {
+        getApplicationServers: async (routeIds, signal) => {
           const cached = evidence.current();
           if (
             cached &&
@@ -307,10 +325,14 @@ export async function createGatewayRuntime(
               .array(safetyProviderServerSchema)
               .max(1000)
               .parse(
-                await client.requestJson('inventory', {
-                  operation: 'servers',
-                  routeIds: routeIds.slice(offset, offset + 1000),
-                }),
+                await client.requestJson(
+                  'inventory',
+                  {
+                    operation: 'servers',
+                    routeIds: routeIds.slice(offset, offset + 1000),
+                  },
+                  signal,
+                ),
               );
             for (const server of values) {
               const previous = servers.get(server.id);
@@ -323,28 +345,36 @@ export async function createGatewayRuntime(
         },
       },
       resolveContext: context,
-      loadProof: async (route) => {
+      loadProof: async (route, signal) => {
         const cached = evidence.route(route);
         if (cached) return cached.proof;
         return gatewayReachabilityProofSchema.nullable().parse(
-          await client.requestJson('proof-read', {
-            routeId: route.id,
-            routeRevision: route.revision,
-          }),
+          await client.requestJson(
+            'proof-read',
+            {
+              routeId: route.id,
+              routeRevision: route.revision,
+            },
+            signal,
+          ),
         );
       },
-      saveProof: async (route, proof) => {
-        await client.requestJson('proof-write', {
-          routeId: route.id,
-          routeRevision: route.revision,
-          proof,
-        });
+      saveProof: async (route, proof, signal) => {
+        await client.requestJson(
+          'proof-write',
+          {
+            routeId: route.id,
+            routeRevision: route.revision,
+            proof,
+          },
+          signal,
+        );
       },
       probeBackend: probe,
-      probeNode: async (route, validatedContext) => {
+      probeNode: async (route, validatedContext, signal) => {
         // The validator already resolved this exact route immediately before
         // its fresh inspection; avoid a duplicate Core request in the same pass.
-        const identity = validatedContext ?? (await context(route)),
+        const identity = validatedContext ?? (await context(route, signal)),
           target = settings.gatewayNodeProbes[String(identity.providerNodeId)];
         return target
           ? probeNodeEndpoint(
@@ -352,6 +382,7 @@ export async function createGatewayRuntime(
               target.port,
               target.transport,
               policy.probeTimeoutMs,
+              signal,
             )
           : false;
       },

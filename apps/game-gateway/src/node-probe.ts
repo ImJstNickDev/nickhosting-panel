@@ -15,6 +15,7 @@ export async function probeNodeEndpoint(
   port: number,
   transport: 'tcp' | 'udp',
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   if (
     !isIP(address) ||
@@ -32,11 +33,18 @@ export async function probeNodeEndpoint(
       if (done) return;
       done = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
       close();
       resolve(ok);
     };
     let close = () => {};
+    const abort = () => finish(false);
     const timer = setTimeout(() => finish(false), timeoutMs);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) {
+      finish(false);
+      return;
+    }
     if (transport === 'tcp') {
       const socket = connect({ host: address, port });
       close = () => socket.destroy();

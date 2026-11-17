@@ -26,6 +26,30 @@ const snapshot = {
 };
 
 describe('authenticated bounded Gateway control client', () => {
+  it('cancels an individual evidence read without closing the control client', async () => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const client = createGatewayControlClient({
+      ...settings,
+      fetcher: (_url, options) =>
+        new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(new Error('cancelled')), {
+            once: true,
+          });
+          started.resolve();
+        }),
+    });
+    try {
+      const read = client.requestJson('evidence', undefined, controller.signal);
+      const rejected = expect(read).rejects.toThrow();
+      await started.promise;
+      controller.abort();
+      await rejected;
+    } finally {
+      client.close();
+    }
+  });
+
   it('allows large private metadata while preserving the configured bound on other responses', async () => {
     const body = { metadata: 'x'.repeat(128 * 1024) };
     const client = createGatewayControlClient({

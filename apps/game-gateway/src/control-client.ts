@@ -27,7 +27,7 @@ export interface GatewayControlClientOptions {
  * or crosses cleartext networks. Loopback HTTP supports same-host IPC/tests. */
 export interface GatewayControlClient extends GatewayControl {
   /** Additional authenticated Core contracts must validate their own JSON response. */
-  requestJson(action: string, body?: unknown): Promise<unknown>;
+  requestJson(action: string, body?: unknown, signal?: AbortSignal): Promise<unknown>;
   close(): void;
 }
 /** Only minted from Core's authenticated, bounded explicit revision precondition.

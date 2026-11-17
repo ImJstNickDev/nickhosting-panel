@@ -4,6 +4,27 @@ import { describe, expect, it } from 'vitest';
 import { probeNodeEndpoint, startNodeProbe } from './node-probe.js';
 
 describe('private node path challenge', () => {
+  it('closes an outstanding TCP challenge immediately on caller cancellation', async () => {
+    const controller = new AbortController();
+    const closed = Promise.withResolvers<void>();
+    const server = createServer((socket) => {
+      socket.on('error', () => {});
+      socket.on('close', () => closed.resolve());
+      socket.on('data', () => controller.abort());
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('fixture');
+    try {
+      expect(
+        await probeNodeEndpoint('127.0.0.1', address.port, 'tcp', 10000, controller.signal),
+      ).toBe(false);
+      await closed.promise;
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it.each(['tcp', 'udp'] as const)(
     'requires an exact fresh nonce roundtrip over %s',
     async (transport) => {
