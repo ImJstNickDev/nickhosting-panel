@@ -64,23 +64,70 @@ async function loadProtocols(env: Environment): Promise<GatewayProtocolAdapter[]
  * later validation (including the final bind check) takes a new host snapshot.
  * Each caller still checks the original observation timestamp and route proof. */
 export function coalesceNetworkObservations(source: NetworkObserver): NetworkObserver {
-  let pending: ReturnType<NetworkObserver['observe']> | undefined;
+  type Shared = {
+    work: ReturnType<NetworkObserver['observe']>;
+    controller: AbortController;
+    consumers: number;
+    settled: boolean;
+  };
+  let pending: Shared | undefined;
   return {
-    async observe() {
+    async observe(signal) {
+      signal?.throwIfAborted();
       if (!pending) {
-        const work = Promise.resolve().then(() => source.observe());
-        pending = work;
-        void work.then(
-          () => {
-            if (pending === work) pending = undefined;
+        const controller = new AbortController();
+        const shared: Shared = {
+          controller,
+          consumers: 0,
+          settled: false,
+          work: Promise.resolve().then(() => {
+            controller.signal.throwIfAborted();
+            return source.observe(controller.signal);
+          }),
+        };
+        pending = shared;
+        const settled = () => {
+          shared.settled = true;
+          if (pending === shared) pending = undefined;
+        };
+        void shared.work.then(settled, settled);
+      }
+      const shared = pending;
+      shared.consumers++;
+      return new Promise((resolve, reject) => {
+        let done = false;
+        const release = () => {
+          if (done) return false;
+          done = true;
+          signal?.removeEventListener('abort', abort);
+          shared.consumers--;
+          if (!shared.settled && shared.consumers === 0) {
+            // An individual timeout cannot cancel another route's evidence.
+            // Once everyone leaves, stop the native work and evict it immediately.
+            if (pending === shared) pending = undefined;
+            shared.controller.abort();
+          }
+          return true;
+        };
+        const abort = () => {
+          if (release()) reject(signal?.reason);
+        };
+        signal?.addEventListener('abort', abort, { once: true });
+        if (signal?.aborted) abort();
+        void shared.work.then(
+          (value) => {
+            if (!release()) return;
+            try {
+              resolve(structuredClone(value));
+            } catch (error) {
+              reject(error);
+            }
           },
-          () => {
-            if (pending === work) pending = undefined;
+          (error: unknown) => {
+            if (release()) reject(error);
           },
         );
-      }
-      // Independent consumers cannot mutate another route's evidence.
-      return structuredClone(await pending);
+      });
     },
   };
 }

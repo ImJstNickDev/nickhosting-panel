@@ -1,3 +1,4 @@
+import { setMaxListeners } from 'node:events';
 import { constants } from 'node:fs';
 import { open, readdir, readFile, readlink, statfs } from 'node:fs/promises';
 import { isIP } from 'node:net';
@@ -23,7 +24,8 @@ export type NetworkObservationFailure =
   | 'container_churn'
   | 'socket_observation'
   | 'interfaces'
-  | 'observation_timeout';
+  | 'observation_timeout'
+  | 'observation_cancelled';
 
 /** Only a fixed category crosses the observer boundary, never Docker output. */
 export class NetworkObservationError extends DomainError {
@@ -79,20 +81,25 @@ export interface NetworkObservation {
   networks: ObservedNetwork[];
 }
 export interface NetworkObserver {
-  observe(): Promise<NetworkObservation>;
+  observe(signal?: AbortSignal): Promise<NetworkObservation>;
 }
 
 export interface NetworkObserverDependencies {
-  read(path: string): Promise<string>;
+  read(path: string, signal?: AbortSignal): Promise<string>;
   link(path: string): Promise<string>;
   namespaceFile(path: string): Promise<{ inode: bigint; filesystemType: bigint }>;
   directory(path: string): Promise<string[]>;
   interfaces(): string[];
-  docker(args: readonly string[], socket: string, timeoutMs?: number): Promise<string>;
+  docker(
+    args: readonly string[],
+    socket: string,
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ): Promise<string>;
   now(): number;
 }
 const production: NetworkObserverDependencies = {
-  read: (path) => readFile(path, 'utf8'),
+  read: (path, signal) => readFile(path, { encoding: 'utf8', signal }),
   link: readlink,
   async namespaceFile(path) {
     // A read-only bind of the host's init network namespace survives reboot
@@ -302,11 +309,18 @@ export function createNetworkObserver(
     }
   }
   return {
-    async observe() {
+    async observe(signal) {
+      const controller = new AbortController();
+      // Four inventory chunks can own eight bounded native requests each.
+      setMaxListeners(40, controller.signal);
+      const abort = () => controller.abort();
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
       const started = io.now();
       const deadline = started + 15000;
       let expired = false;
       function remaining() {
+        if (signal?.aborted) throw new NetworkObservationError('observation_cancelled');
         const value = deadline - io.now();
         if (expired || value <= 0) throw new NetworkObservationError('observation_timeout');
         return value;
@@ -328,7 +342,7 @@ export function createNetworkObserver(
       }
       async function command(args: readonly string[], reason: NetworkObservationFailure) {
         return stage(reason, async () => {
-          const value = await io.docker(args, config.dockerSocket, remaining());
+          const value = await io.docker(args, config.dockerSocket, remaining(), controller.signal);
           if (typeof value !== 'string' || value.length > 4 * 1024 * 1024) throw new Error();
           return value.trim();
         });
@@ -537,7 +551,10 @@ export function createNetworkObserver(
               remaining();
               sockets.push(
                 ...parseProcSockets(
-                  await io.read(`${config.hostProcDirectory}/net/${transport}${ipv6 ? '6' : ''}`),
+                  await io.read(
+                    `${config.hostProcDirectory}/net/${transport}${ipv6 ? '6' : ''}`,
+                    controller.signal,
+                  ),
                   transport,
                   ipv6,
                   ownedInodes,
@@ -568,6 +585,15 @@ export function createNetworkObserver(
         });
       }
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let abortWork: (() => void) | undefined;
+      const cancelled = new Promise<never>((_resolve, reject) => {
+        abortWork = () =>
+          reject(
+            new NetworkObservationError(expired ? 'observation_timeout' : 'observation_cancelled'),
+          );
+        controller.signal.addEventListener('abort', abortWork, { once: true });
+        if (controller.signal.aborted) abortWork();
+      });
       const complete = async () => {
         for (let number = 0; number < 2; number++) {
           try {
@@ -583,15 +609,20 @@ export function createNetworkObserver(
       try {
         return await Promise.race([
           complete(),
+          cancelled,
           new Promise<never>((_resolve, reject) => {
             timer = setTimeout(() => {
               expired = true;
+              controller.abort();
               reject(new NetworkObservationError('observation_timeout'));
             }, remaining());
           }),
         ]);
       } finally {
         if (timer !== undefined) clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        if (abortWork) controller.signal.removeEventListener('abort', abortWork);
+        controller.abort();
       }
     },
   };

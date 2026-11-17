@@ -162,6 +162,7 @@ describe('read-only host network observer', () => {
       ['container', 'ls', '--all', '--no-trunc', '--format', '{{.ID}}'],
       f.config.dockerSocket,
       15000,
+      expect.any(AbortSignal),
     );
     for (const [args] of vi.mocked(f.io.docker).mock.calls) {
       expect(args.join(' ')).not.toContain('.Config.Env');
@@ -539,4 +540,26 @@ describe('complete fresh replacement evidence', () => {
       vi.useRealTimers();
     }
   });
+});
+
+it('cancels an owned observation promptly and cannot start later stages from a late read', async () => {
+  const f = fixture();
+  const controller = new AbortController();
+  let resolve!: (value: string) => void;
+  f.io.docker = vi.fn(
+    () =>
+      new Promise<string>((done) => {
+        resolve = done;
+      }),
+  );
+  const work = f.observer().observe(controller.signal);
+  const rejected = expect(work).rejects.toMatchObject({ reason: 'observation_cancelled' });
+  await vi.waitFor(() => expect(f.io.docker).toHaveBeenCalledTimes(1));
+  const nativeSignal = vi.mocked(f.io.docker).mock.calls[0]?.[3];
+  controller.abort();
+  await rejected;
+  expect(nativeSignal?.aborted).toBe(true);
+  resolve('"test-daemon"');
+  await Promise.resolve();
+  expect(f.io.docker).toHaveBeenCalledTimes(1);
 });

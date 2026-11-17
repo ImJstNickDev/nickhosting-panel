@@ -43,9 +43,15 @@ const network = z.object({
 // TCP destination, redirects or mutation endpoint is exposed by this transport.
 const agent = new Agent({ keepAlive: true, maxSockets: 8, maxTotalSockets: 8, maxFreeSockets: 8 });
 class MissingObject extends Error {}
-async function readJson(socketPath: string, path: string, deadline: number): Promise<unknown> {
+async function readJson(
+  socketPath: string,
+  path: string,
+  deadline: number,
+  signal?: AbortSignal,
+): Promise<unknown> {
   const remaining = deadline - Date.now();
   if (remaining <= 0) throw new Error('docker_read_timeout');
+  if (signal?.aborted) throw new Error('docker_read_cancelled');
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (error?: Error, value?: unknown) => {
@@ -58,7 +64,7 @@ async function readJson(socketPath: string, path: string, deadline: number): Pro
       } else resolve(value);
     };
     const req = request(
-      { socketPath, path, method: 'GET', agent, headers: { Accept: 'application/json' } },
+      { socketPath, path, method: 'GET', agent, signal, headers: { Accept: 'application/json' } },
       (response) => {
         if (response.statusCode !== 200) {
           response.destroy();
@@ -98,11 +104,13 @@ export async function dockerReadCommand(
   args: readonly string[],
   socket: string,
   timeoutMs = 10000,
+  signal?: AbortSignal,
 ): Promise<string> {
   const deadline = Date.now() + Math.min(15000, timeoutMs);
   if (args[0] === 'info') {
     return JSON.stringify(
-      z.object({ ID: z.string().min(1) }).parse(await readJson(socket, '/info', deadline)).ID,
+      z.object({ ID: z.string().min(1) }).parse(await readJson(socket, '/info', deadline, signal))
+        .ID,
     );
   }
   const kind = args[0];
@@ -116,6 +124,7 @@ export async function dockerReadCommand(
           socket,
           kind === 'container' ? '/containers/json?all=true' : '/networks',
           deadline,
+          signal,
         ),
       );
     return rows.map((row) => row.Id).join('\n');
@@ -129,7 +138,7 @@ export async function dockerReadCommand(
     const values = z
       .array(network)
       .max(10000)
-      .parse(await readJson(socket, '/networks', deadline));
+      .parse(await readJson(socket, '/networks', deadline, signal));
     const indexed = new Map(values.map((value) => [value.Id, value]));
     if (indexed.size !== values.length) throw new Error('docker_read_identity');
     return ids
@@ -155,6 +164,10 @@ export async function dockerReadCommand(
   await Promise.all(
     Array.from({ length: Math.min(8, ids.length) }, async () => {
       while (next < ids.length) {
+        if (signal?.aborted) {
+          failure ??= new Error('docker_read_cancelled');
+          return;
+        }
         const target = ids[next++];
         if (!target) return;
         try {
@@ -162,6 +175,7 @@ export async function dockerReadCommand(
             socket,
             kind === 'container' ? `/containers/${target}/json` : `/networks/${target}`,
             deadline,
+            signal,
           );
           const value = container.parse(raw);
           if (value.Id !== target) throw new Error('docker_read_identity');

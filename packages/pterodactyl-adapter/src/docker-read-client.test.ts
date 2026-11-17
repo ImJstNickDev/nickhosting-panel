@@ -147,3 +147,24 @@ it('rejects a successful inspect for another container and duplicate network ide
     dockerReadCommand(['network', 'inspect', '--format', '', id], socket),
   ).rejects.toThrow('docker_read_identity');
 });
+
+it('cancels active and queued native requests without dispatching later inspections', async () => {
+  let requests = 0;
+  const socket = await fixture((_req, _res) => {
+    requests++;
+  });
+  const controller = new AbortController();
+  const ids = Array.from({ length: 32 }, (_, i) => (i + 1).toString(16).padStart(64, '0'));
+  const work = dockerReadCommand(
+    ['container', 'inspect', '--format', '', ...ids],
+    socket,
+    10000,
+    controller.signal,
+  );
+  const rejected = expect(work).rejects.toThrow('docker_read');
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  controller.abort();
+  await rejected;
+  expect(requests).toBeLessThanOrEqual(8);
+  expect(requests).toBeGreaterThan(0);
+});
