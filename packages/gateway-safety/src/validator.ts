@@ -9,10 +9,12 @@ import {
   gatewayRouteSchema,
 } from '@nickhosting/game-sdk';
 import type {
+  NetworkEndpoint,
   NetworkObservation,
   NetworkObserver,
   ObservedContainer,
   ObservedNetwork,
+  ObservedSocket,
 } from '@nickhosting/pterodactyl-adapter';
 import { z } from 'zod';
 import {
@@ -245,8 +247,11 @@ function effectiveAddress(raw: string, node: GatewayNetworkPolicy['nodes'][numbe
   if (!address || /^127\./.test(address) || address === '::1') unavailable();
   return address;
 }
-function nodeNetwork(observation: NetworkObservation, node: GatewayNetworkPolicy['nodes'][number]) {
-  const matches = observation.networks.filter((network) => network.name === node.networkMode);
+function nodeNetwork(
+  observation: NetworkObservation,
+  node: GatewayNetworkPolicy['nodes'][number],
+  matches: readonly ObservedNetwork[],
+) {
   const network = matches[0];
   if (
     matches.length !== 1 ||
@@ -268,14 +273,10 @@ function nodeNetwork(observation: NetworkObservation, node: GatewayNetworkPolicy
 }
 function safeContainer(
   route: GatewayRoute,
-  context: GatewaySafetyContext,
-  observation: NetworkObservation,
+  matches: readonly ObservedContainer[],
   network: ObservedNetwork,
   allowTransient = false,
 ) {
-  const matches = observation.containers.filter(
-    (container) => container.name === `/${context.providerServerUuid}`,
-  );
   const container = matches[0];
   if (matches.length === 0 && allowTransient) return undefined;
   if (matches.length > 1) unavailable('backend_container_ambiguous');
@@ -434,6 +435,17 @@ async function sharedRead<T>(
   }
 }
 
+function immutableObservation(value: NetworkObservation): NetworkObservation {
+  const copy = structuredClone(value);
+  const freeze = (entry: unknown): void => {
+    if (!entry || typeof entry !== 'object' || Object.isFrozen(entry)) return;
+    for (const child of Object.values(entry)) freeze(child);
+    Object.freeze(entry);
+  };
+  freeze(copy);
+  return copy;
+}
+
 /** A denial never changes an allocation, container, socket, listener or provider configuration. */
 export function createGatewaySafetyValidator(options: GatewaySafetyOptions): GatewaySafety {
   const policy = gatewayNetworkPolicySchema.parse(options.policy);
@@ -468,6 +480,69 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       (sharedSignal) => options.probeNode(route, context, sharedSignal),
       signal,
     );
+  }
+  type HostIndex = {
+    containers: Map<string, ObservedContainer[]>;
+    networks: Map<number, ObservedNetwork>;
+    endpoints: Map<number, { containerId: string; endpoint: NetworkEndpoint }[]>;
+    sockets: Map<number, ObservedSocket[]>;
+    publicAddresses: Set<string | null>;
+    unsafeProviderNetworking: boolean;
+  };
+  const hostIndexes = new WeakMap<NetworkObservation, HostIndex>();
+  const immutableHosts = new WeakSet<NetworkObservation>();
+  function indexedHost(observation: NetworkObservation): HostIndex {
+    // Only our private deeply frozen batch copies are reusable. Standalone
+    // observations may come from a mutable provider and are indexed afresh.
+    const reusable = immutableHosts.has(observation);
+    const cached = reusable ? hostIndexes.get(observation) : undefined;
+    if (cached) return cached;
+    const namedNetworks = new Map<string, ObservedNetwork[]>();
+    for (const network of observation.networks) {
+      const named = namedNetworks.get(network.name) ?? [];
+      named.push(network);
+      namedNetworks.set(network.name, named);
+    }
+    const networks = new Map<number, ObservedNetwork>();
+    const networkModes = new Set<string>();
+    for (const node of policy.nodes) {
+      const network = nodeNetwork(observation, node, namedNetworks.get(node.networkMode) ?? []);
+      networks.set(node.nodeId, network);
+      networkModes.add(network.name);
+      networkModes.add(network.id);
+    }
+    const containers = new Map<string, ObservedContainer[]>();
+    const endpoints: HostIndex['endpoints'] = new Map();
+    let unsafeProviderNetworking = false;
+    for (const container of observation.containers) {
+      const named = containers.get(container.name) ?? [];
+      named.push(container);
+      containers.set(container.name, named);
+      if (container.service === 'Pterodactyl' && container.containerType === 'server_process')
+        unsafeProviderNetworking ||=
+          !!container.unassignedPublications?.length || !networkModes.has(container.networkMode);
+      for (const endpoint of [...container.configuredBindings, ...container.activeBindings]) {
+        const samePort = endpoints.get(endpoint.port) ?? [];
+        samePort.push({ containerId: container.id, endpoint });
+        endpoints.set(endpoint.port, samePort);
+      }
+    }
+    const sockets: HostIndex['sockets'] = new Map();
+    for (const socket of observation.sockets) {
+      const samePort = sockets.get(socket.port) ?? [];
+      samePort.push(socket);
+      sockets.set(socket.port, samePort);
+    }
+    const index: HostIndex = {
+      containers,
+      networks,
+      endpoints,
+      sockets,
+      unsafeProviderNetworking,
+      publicAddresses: new Set(observation.interfaceAddresses.map(canonicalAddress)),
+    };
+    if (reusable) hostIndexes.set(observation, index);
+    return index;
   }
   async function timed<T>(
     route: GatewayRoute,
@@ -739,12 +814,8 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       now() - observation.observedAt > policy.maximumObservationAgeMs
     )
       unavailable();
-    if (
-      !observation.interfaceAddresses.some(
-        (address) => canonicalAddress(address) === route.public.address,
-      )
-    )
-      unavailable();
+    const host = indexedHost(observation);
+    if (!host.publicAddresses.has(route.public.address)) unavailable();
     if (
       nodes.length !== policy.nodes.length ||
       new Set(nodes.map((node) => node.id)).size !== nodes.length
@@ -753,11 +824,11 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     for (const node of nodes) {
       const declared = policy.nodes.find((entry) => entry.nodeId === node.id);
       if (!declared || declared.nodeUuid !== node.uuid) unavailable();
-      nodeNetwork(observation, declared);
+      if (!host.networks.has(declared.nodeId)) unavailable();
     }
     const selectedNode =
       policy.nodes.find((node) => node.nodeId === context.providerNodeId) ?? unavailable();
-    const selectedNetwork = nodeNetwork(observation, selectedNode);
+    const selectedNetwork = host.networks.get(selectedNode.nodeId) ?? unavailable();
     if (
       server.id !== context.providerServerId ||
       server.uuid !== context.providerServerUuid ||
@@ -820,33 +891,28 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       retained !== undefined &&
       exactEndpoint(retained.public, route.public) &&
       ownedBindings.some((binding) => exactEndpoint(binding, route.public));
-    const container = safeContainer(route, context, observation, selectedNetwork, mayRetainStatus);
+    const container = safeContainer(
+      route,
+      host.containers.get(`/${context.providerServerUuid}`) ?? [],
+      selectedNetwork,
+      mayRetainStatus,
+    );
     const proofContainer = container ?? (mayRetainStatus ? retained?.container : undefined);
     if (!proofContainer) unavailable('backend_container_missing');
-    for (const existing of observation.containers) {
-      // A direct server in host/shared/routed/unknown networking can disregard its
-      // allocation binding address. Stopped containers must not become a hidden
-      // future wildcard listener after this public endpoint is admitted.
-      if (existing.service === 'Pterodactyl' && existing.containerType === 'server_process') {
-        if (existing.unassignedPublications?.length) unavailable();
-        const configured = policy.nodes.some((node) => {
-          const network = nodeNetwork(observation, node);
-          return [network.name, network.id].includes(existing.networkMode);
-        });
-        if (!configured) unavailable();
-      }
-      for (const endpoint of [...existing.configuredBindings, ...existing.activeBindings]) {
-        if (listener && endpointsOverlap(endpoint, route.public)) unavailable('public_collision');
-        if (
-          existing.id !== container?.id &&
-          endpoint.port === route.backend.port &&
-          addressesOverlap(endpoint.address, route.backend.address)
-        )
-          unavailable('backend_collision');
-      }
-    }
+    // Global provider networking shape was checked once while indexing. Keep
+    // endpoint decisions route-specific and preserve the wildcard predicates.
+    if (host.unsafeProviderNetworking) unavailable();
+    if (listener)
+      for (const { endpoint } of host.endpoints.get(route.public.port) ?? [])
+        if (endpointsOverlap(endpoint, route.public)) unavailable('public_collision');
+    for (const { containerId, endpoint } of host.endpoints.get(route.backend.port) ?? [])
+      if (
+        containerId !== container?.id &&
+        addressesOverlap(endpoint.address, route.backend.address)
+      )
+        unavailable('backend_collision');
     if (listener) {
-      for (const socket of observation.sockets) {
+      for (const socket of host.sockets.get(route.public.port) ?? []) {
         if (
           endpointsOverlap(socket, route.public) &&
           !(
@@ -1181,18 +1247,19 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
           checked.add(route.id);
           const observe =
             phase === 'prebind' || first
-              ? async (consumerSignal?: AbortSignal) =>
-                  structuredClone(
-                    await sharedRead(
-                      host,
-                      'host',
-                      (sharedSignal) =>
-                        options.observer
-                          .observe(sharedSignal)
-                          .then((value) => structuredClone(value)),
-                      consumerSignal,
-                      phase === 'initial',
-                    ),
+              ? (consumerSignal?: AbortSignal) =>
+                  sharedRead(
+                    host,
+                    'host',
+                    async (sharedSignal) => {
+                      const value = immutableObservation(
+                        await options.observer.observe(sharedSignal),
+                      );
+                      immutableHosts.add(value);
+                      return value;
+                    },
+                    consumerSignal,
+                    phase === 'initial',
                   )
               : undefined;
           return validate(route, ownedBindings, batch, observe, signal);

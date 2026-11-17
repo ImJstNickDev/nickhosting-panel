@@ -415,6 +415,68 @@ describe('Gateway snapshot provider batches', () => {
     await safety.createValidationBatch?.().validate(f.route, []);
     expect(f.options.observer.observe).toHaveBeenCalledTimes(3);
   });
+  it('reindexes reused standalone observations even when only their outer object is frozen', async () => {
+    const f = fixture();
+    Object.freeze(f.observation);
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    f.observation.sockets.push({
+      ...f.route.public,
+      inode: 'new-foreign-socket',
+      processOwned: false,
+    });
+    await expect(safety.validate(f.route, [f.route.public])).rejects.toMatchObject({
+      reason: 'public_collision',
+    });
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
+  });
+  it.each([
+    ['duplicate-container', 'backend_container_ambiguous'],
+    ['duplicate-network', 'unsafe_topology'],
+    ['configured-wildcard', 'public_collision'],
+    ['owned-socket-wildcard', 'public_collision'],
+    ['unrelated-unsafe-network', 'unsafe_topology'],
+  ] as const)(
+    'preserves %s rejection across shared immutable host indexes',
+    async (kind, reason) => {
+      const f = fixture();
+      const original = f.observation.containers[0];
+      const network = f.observation.networks[0];
+      if (!original || !network) throw new Error('Missing fixture topology');
+      if (kind === 'duplicate-container')
+        f.observation.containers.push({ ...original, id: 'b'.repeat(64) });
+      else if (kind === 'duplicate-network')
+        f.observation.networks.push({ ...network, id: 'b'.repeat(64) });
+      else if (kind === 'owned-socket-wildcard')
+        f.observation.sockets.push({
+          ...f.route.public,
+          address: '0.0.0.0',
+          inode: 'foreign-wildcard',
+          processOwned: true,
+        });
+      else
+        f.observation.containers.push({
+          ...original,
+          id: 'b'.repeat(64),
+          name: '/unrelated-provider-container',
+          networkMode: kind === 'unrelated-unsafe-network' ? 'host' : original.networkMode,
+          activeBindings: [],
+          configuredBindings:
+            kind === 'configured-wildcard' ? [{ ...f.route.public, address: '::' }] : [],
+        });
+      const batch = f.validator().createValidationBatch?.();
+      if (!batch) throw new Error('Missing validation batch');
+      await expect(batch.validate(f.route, [f.route.public])).rejects.toMatchObject({ reason });
+      await expect(
+        batch.validate({ ...f.route, id: ids.node }, [f.route.public]),
+      ).rejects.toMatchObject({
+        reason,
+      });
+      expect(f.options.observer.observe).toHaveBeenCalledOnce();
+      expect(f.options.probeBackend).not.toHaveBeenCalled();
+      expect(f.options.saveProof).not.toHaveBeenCalled();
+    },
+  );
 
   it('rereads stopped-container reservations for later pre-bind admissions with no active socket', async () => {
     const f = fixture();
