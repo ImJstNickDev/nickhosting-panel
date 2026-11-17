@@ -141,6 +141,9 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     lastObservationProbeDurationMs: 0,
     lastObservationReportDurationMs: 0,
     lastSnapshotDurationMs: 0,
+    lastSnapshotFetchDurationMs: 0,
+    lastSnapshotApplyDurationMs: 0,
+    snapshotCycles: 0,
     snapshotErrors: 0,
     leaseExpirations: 0,
   };
@@ -221,18 +224,18 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         operation(controller.signal),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
-            controller.abort();
-            reject(
-              new DomainError('integration_unavailable', 503, {
-                gatewaySafetyReason: 'validation_timeout',
-              }),
-            );
+            const error = new DomainError('integration_unavailable', 503, {
+              gatewaySafetyReason: 'validation_timeout',
+            });
+            controller.abort(error);
+            reject(error);
           }, policy.probeTimeoutMs);
           timer.unref();
         }),
       ]);
     } finally {
       if (timer) clearTimeout(timer);
+      controller.abort();
     }
   };
   const clientsCount = () =>
@@ -1206,7 +1209,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             const retained = listeners.get(route.id);
             if (!retained || !isDeepStrictEqual(retained.route.public, route.public)) continue;
             try {
-              const verdict = await bounded(() => validation.validate(route, owned));
+              const verdict = await bounded((signal) => validation.validate(route, owned, signal));
               readiness.set(route.id, verdict?.backendReady ?? true);
               const current = listeners.get(route.id);
               if (verdict?.backendReady === false && current?.backendReady) {
@@ -1384,11 +1387,15 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
               if (bindingFailed || stopping || withheldServers.has(route.serverId)) return;
               try {
                 requireLease();
-                const verdict = await bounded(() =>
-                  (prebind ?? options.safety).validate(route, [
-                    ...[...listeners.values()].map((listener) => listener.route.public),
-                    ...staged.map((listener) => listener.route.public),
-                  ]),
+                const verdict = await bounded((signal) =>
+                  (prebind ?? options.safety).validate(
+                    route,
+                    [
+                      ...[...listeners.values()].map((listener) => listener.route.public),
+                      ...staged.map((listener) => listener.route.public),
+                    ],
+                    signal,
+                  ),
                 );
                 if (bindingFailed) return;
                 requireLease();
@@ -1565,12 +1572,20 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       return Promise.reject(new GatewayProviderRateLimitedError(providerRetryAt - now()));
     if (refreshing) return refreshing;
     const refreshStarted = performance.now();
+    let fetchDuration = 0;
+    let applyDuration = 0;
     refreshing = (async () => {
       for (let attempt = 0; attempt < 2; attempt++) {
         const fetchStartedAt = now();
         try {
-          const input = await options.control.fetchSnapshot();
-          await applySnapshot(input, fetchStartedAt);
+          const fetchingStarted = performance.now();
+          const input = await options.control.fetchSnapshot().finally(() => {
+            fetchDuration += performance.now() - fetchingStarted;
+          });
+          const applyingStarted = performance.now();
+          await applySnapshot(input, fetchStartedAt).finally(() => {
+            applyDuration += performance.now() - applyingStarted;
+          });
           return;
         } catch (error) {
           const transient =
@@ -1590,6 +1605,9 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         throw error;
       })
       .finally(() => {
+        counters.snapshotCycles++;
+        counters.lastSnapshotFetchDurationMs = Math.round(fetchDuration);
+        counters.lastSnapshotApplyDurationMs = Math.round(applyDuration);
         counters.lastSnapshotDurationMs = Math.round(performance.now() - refreshStarted);
         refreshing = undefined;
       });
@@ -2017,8 +2035,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
                   options.safety.probeLeasedBackend;
                 probeStage = leasedProbe ? 'leased_backend' : 'full_backend';
                 const sample = leasedProbe
-                  ? await leasedProbe.call(options.safety, route)
-                  : await options.safety.validateBackend(route);
+                  ? await leasedProbe.call(options.safety, route, signal)
+                  : await options.safety.validateBackend(route, signal);
                 if (sample)
                   return {
                     ...sample,

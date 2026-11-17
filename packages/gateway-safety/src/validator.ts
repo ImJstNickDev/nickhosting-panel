@@ -151,28 +151,44 @@ export const safetyProviderServerSchema = z
 export interface GatewayProviderSource {
   /** Earliest source-read time of a supplied immutable control evidence batch. */
   observedAt?(): number | undefined;
-  listNodes(): Promise<z.infer<typeof safetyProviderNodeSchema>[]>;
-  listAllocations(nodeId: number): Promise<z.infer<typeof safetyProviderAllocationSchema>[]>;
-  getApplicationServer(serverId: number): Promise<z.infer<typeof safetyProviderServerSchema>>;
+  listNodes(signal?: AbortSignal): Promise<z.infer<typeof safetyProviderNodeSchema>[]>;
+  listAllocations(
+    nodeId: number,
+    signal?: AbortSignal,
+  ): Promise<z.infer<typeof safetyProviderAllocationSchema>[]>;
+  getApplicationServer(
+    serverId: number,
+    signal?: AbortSignal,
+  ): Promise<z.infer<typeof safetyProviderServerSchema>>;
   /** Core scopes a bulk read to these authenticated managed routes. */
   getApplicationServers?(
     routeIds: readonly string[],
+    signal?: AbortSignal,
   ): Promise<z.infer<typeof safetyProviderServerSchema>[]>;
 }
 export interface GatewaySafetyOptions {
   provider: GatewayProviderSource;
   observer: NetworkObserver;
   policy: GatewayNetworkPolicy;
-  resolveContext(route: GatewayRoute): Promise<GatewaySafetyContext>;
-  loadProof(route: GatewayRoute): Promise<GatewayReachabilityProof | null>;
-  saveProof(route: GatewayRoute, proof: GatewayReachabilityProof): Promise<void>;
+  resolveContext(route: GatewayRoute, signal?: AbortSignal): Promise<GatewaySafetyContext>;
+  loadProof(route: GatewayRoute, signal?: AbortSignal): Promise<GatewayReachabilityProof | null>;
+  saveProof(
+    route: GatewayRoute,
+    proof: GatewayReachabilityProof,
+    signal?: AbortSignal,
+  ): Promise<void>;
   /** Actual game-protocol challenge/readiness response from the Gateway process namespace. */
   probeBackend(
     route: GatewayRoute,
     validationId?: string,
+    signal?: AbortSignal,
   ): Promise<boolean | GatewayProtocolObservation>;
   /** Fresh nonce challenge response from a configured persistent probe at EXACT backend.address. */
-  probeNode(route: GatewayRoute, context?: GatewaySafetyContext): Promise<boolean>;
+  probeNode(
+    route: GatewayRoute,
+    context?: GatewaySafetyContext,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
   /** Trusted compiled integration declares Core provider-running readiness authority. */
   providerReady?: (route: GatewayRoute) => boolean;
   now?: () => number;
@@ -343,51 +359,127 @@ function identityDigest(
     .digest('hex');
 }
 
+/** Race a consumer deadline without allowing a late source to continue its pipeline. */
+async function cancellable<T>(action: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  signal?.throwIfAborted();
+  let abort: (() => void) | undefined;
+  try {
+    const work = action();
+    const value = signal
+      ? await Promise.race([
+          work,
+          new Promise<never>((_, reject) => {
+            abort = () => reject(signal.reason);
+            signal.addEventListener('abort', abort, { once: true });
+            if (signal.aborted) abort();
+          }),
+        ])
+      : await work;
+    signal?.throwIfAborted();
+    return value;
+  } finally {
+    if (abort) signal?.removeEventListener('abort', abort);
+  }
+}
+type SharedRead<T> = {
+  work: Promise<T>;
+  controller: AbortController;
+  consumers: number;
+  settled: boolean;
+};
+async function sharedRead<T>(
+  entries: Map<string, SharedRead<T>>,
+  key: string,
+  action: (signal: AbortSignal) => Promise<T>,
+  signal?: AbortSignal,
+  retain = false,
+): Promise<T> {
+  signal?.throwIfAborted();
+  let entry = entries.get(key);
+  if (!entry) {
+    const controller = new AbortController();
+    entry = {
+      controller,
+      consumers: 0,
+      settled: false,
+      work: Promise.resolve().then(() => {
+        controller.signal.throwIfAborted();
+        return action(controller.signal);
+      }),
+    };
+    entries.set(key, entry);
+    const current = entry;
+    const settle = () => {
+      current.settled = true;
+      if (!retain && entries.get(key) === current) entries.delete(key);
+    };
+    void current.work.then(
+      () => settle(),
+      (error) => {
+        current.controller.abort(error);
+        settle();
+      },
+    );
+  }
+  const current = entry;
+  current.consumers++;
+  try {
+    return await cancellable(() => current.work, signal);
+  } finally {
+    current.consumers--;
+    if (!current.consumers && !current.settled) {
+      if (entries.get(key) === current) entries.delete(key);
+      current.controller.abort(signal?.reason);
+    }
+  }
+}
+
 /** A denial never changes an allocation, container, socket, listener or provider configuration. */
 export function createGatewaySafetyValidator(options: GatewaySafetyOptions): GatewaySafety {
   const policy = gatewayNetworkPolicySchema.parse(options.policy);
   const now = options.now ?? Date.now;
-  const backendProbes = new Map<string, ReturnType<GatewaySafetyOptions['probeBackend']>>();
-  const nodeProbes = new Map<string, Promise<boolean>>();
+  const backendProbes = new Map<
+    string,
+    SharedRead<Awaited<ReturnType<GatewaySafetyOptions['probeBackend']>>>
+  >();
+  const nodeProbes = new Map<string, SharedRead<boolean>>();
   const providerObservedAt = (fallback: number) => {
     const observedAt = options.provider.observedAt?.() ?? fallback;
     if (!Number.isSafeInteger(observedAt) || observedAt <= 0) unavailable('observation_stale');
     return observedAt;
   };
-  function probeBackend(route: GatewayRoute, identity: string, validationId?: string) {
-    const key = JSON.stringify([route, identity]);
-    let pending = backendProbes.get(key);
-    if (!pending) {
-      pending = Promise.resolve()
-        .then(() => options.probeBackend(route, validationId))
-        .finally(() => backendProbes.delete(key));
-      backendProbes.set(key, pending);
-    }
-    return pending;
+  function probeBackend(
+    route: GatewayRoute,
+    identity: string,
+    validationId?: string,
+    signal?: AbortSignal,
+  ) {
+    return sharedRead(
+      backendProbes,
+      JSON.stringify([route, identity]),
+      (sharedSignal) => options.probeBackend(route, validationId, sharedSignal),
+      signal,
+    );
   }
-  function probeNode(route: GatewayRoute, context: GatewaySafetyContext) {
-    // This challenge proves the configured persistent node endpoint, not an
-    // individual game port. Share only the currently running nonce exchange.
-    const key = JSON.stringify([context.providerNodeId, route.backend.address]);
-    let pending = nodeProbes.get(key);
-    if (!pending) {
-      pending = Promise.resolve()
-        .then(() => options.probeNode(route, context))
-        .finally(() => nodeProbes.delete(key));
-      nodeProbes.set(key, pending);
-    }
-    return pending;
+  function probeNode(route: GatewayRoute, context: GatewaySafetyContext, signal?: AbortSignal) {
+    return sharedRead(
+      nodeProbes,
+      JSON.stringify([context.providerNodeId, route.backend.address]),
+      (sharedSignal) => options.probeNode(route, context, sharedSignal),
+      signal,
+    );
   }
   async function timed<T>(
     route: GatewayRoute,
     validationId: string,
     stage: string,
     action: () => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<T> {
     const started = performance.now();
     let outcome: 'completed' | 'rejected' = 'rejected';
     try {
-      const value = await action();
+      const value = await cancellable(action, signal);
       outcome = 'completed';
       return value;
     } finally {
@@ -415,16 +507,20 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     string,
     { public: GatewayEndpoint; container: ObservedContainer }
   >();
-  async function inventories() {
+  async function inventories(signal?: AbortSignal) {
     const result = new Map<number, Awaited<ReturnType<GatewayProviderSource['listAllocations']>>>();
     let next = 0;
     // Bound discovery fan-out even if an Owner policy enumerates many nodes.
     await Promise.all(
       Array.from({ length: Math.min(4, policy.nodes.length) }, async () => {
         while (next < policy.nodes.length) {
+          signal?.throwIfAborted();
           const node = policy.nodes[next++];
           if (!node) return;
-          result.set(node.nodeId, await options.provider.listAllocations(node.nodeId));
+          result.set(
+            node.nodeId,
+            await cancellable(() => options.provider.listAllocations(node.nodeId, signal), signal),
+          );
         }
       }),
     );
@@ -467,40 +563,61 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     server: Awaited<ReturnType<GatewayProviderSource['getApplicationServer']>>;
     nodeInventories: Awaited<ReturnType<typeof inventories>>;
   };
-  type ProviderBatch = (serverId: number) => Promise<ProviderEvidence>;
+  type ProviderBatch = (serverId: number, signal?: AbortSignal) => Promise<ProviderEvidence>;
   function createProviderBatch(routes: readonly GatewayRoute[]): ProviderBatch {
-    let inventory: Promise<Pick<ProviderEvidence, 'started' | 'nodes' | 'nodeInventories'>>;
-    let bulkServers: Promise<Map<number, ProviderEvidence['server']>> | undefined;
-    const servers = new Map<number, Promise<ProviderEvidence['server']>>();
+    const inventory = new Map<
+      string,
+      SharedRead<Pick<ProviderEvidence, 'started' | 'nodes' | 'nodeInventories'>>
+    >();
+    const bulk = new Map<string, SharedRead<Map<number, ProviderEvidence['server']>>>();
+    const servers = new Map<string, SharedRead<ProviderEvidence['server']>>();
     const routeIds = [...new Set(routes.map((route) => route.id))];
-    return (serverId) => {
-      // Scope these promises to one explicit snapshot apply, never to the validator
-      // lifetime. Keep failures and the earliest source-read timestamp in the batch.
-      inventory ??= (() => {
-        const started = providerObservedAt(now());
-        return Promise.all([options.provider.listNodes(), inventories()]).then(
-          ([nodes, nodeInventories]) => structuredClone({ started, nodes, nodeInventories }),
-        );
-      })();
-      let server = servers.get(serverId);
-      if (!server) {
-        if (options.provider.getApplicationServers && routeIds.length) {
-          bulkServers ??= options.provider.getApplicationServers(routeIds).then((values) => {
-            const indexed = new Map(values.map((value) => [value.id, structuredClone(value)]));
-            if (indexed.size !== values.length) unavailable('provider_identity');
-            return indexed;
-          });
-          server = bulkServers.then(
-            (values) => values.get(serverId) ?? unavailable('provider_identity'),
-          );
-        } else {
-          server = options.provider
-            .getApplicationServer(serverId)
-            .then((value) => structuredClone(value));
-        }
-        servers.set(serverId, server);
-      }
-      return Promise.all([inventory, server]).then(([shared, server]) => ({ ...shared, server }));
+    const getServers = options.provider.getApplicationServers?.bind(options.provider);
+    return async (serverId, signal) => {
+      const inventoryWork = sharedRead(
+        inventory,
+        'inventory',
+        async (sharedSignal) => {
+          const started = providerObservedAt(now());
+          const [nodes, nodeInventories] = await Promise.all([
+            options.provider.listNodes(sharedSignal),
+            inventories(sharedSignal),
+          ]);
+          sharedSignal.throwIfAborted();
+          return structuredClone({ started, nodes, nodeInventories });
+        },
+        signal,
+        true,
+      );
+      const serverWork =
+        getServers && routeIds.length
+          ? sharedRead(
+              bulk,
+              'servers',
+              async (sharedSignal) => {
+                const values = await getServers(routeIds, sharedSignal);
+                sharedSignal.throwIfAborted();
+                const indexed = new Map(values.map((value) => [value.id, structuredClone(value)]));
+                if (indexed.size !== values.length) unavailable('provider_identity');
+                return indexed;
+              },
+              signal,
+              true,
+            ).then((values) => values.get(serverId) ?? unavailable('provider_identity'))
+          : sharedRead(
+              servers,
+              String(serverId),
+              async (sharedSignal) => {
+                const value = await options.provider.getApplicationServer(serverId, sharedSignal);
+                sharedSignal.throwIfAborted();
+                return structuredClone(value);
+              },
+              signal,
+              true,
+            );
+      const [shared, server] = await Promise.all([inventoryWork, serverWork]);
+      signal?.throwIfAborted();
+      return { ...shared, server };
     };
   }
   // Successful listener checks may supply backend observations, without extending
@@ -536,10 +653,15 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     listener: boolean,
     batch?: ProviderBatch,
     observe?: NetworkObserver['observe'],
+    signal?: AbortSignal,
   ) {
     const validationId = randomUUID();
-    return timed(route, validationId, 'inspect_total', () =>
-      inspectDetails(route, ownedBindings, listener, validationId, batch, observe),
+    return timed(
+      route,
+      validationId,
+      'inspect_total',
+      () => inspectDetails(route, ownedBindings, listener, validationId, batch, observe, signal),
+      signal,
     );
   }
   async function inspectDetails(
@@ -549,12 +671,19 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     validationId: string,
     batch?: ProviderBatch,
     observe?: NetworkObserver['observe'],
+    signal?: AbortSignal,
   ) {
     const route = gatewayRouteSchema.parse(routeValue);
     if (!exactBindableAddress(route.public.address) || !privateBackend(route.backend.address))
       unavailable();
     const context = gatewaySafetyContextSchema.parse(
-      await timed(route, validationId, 'context', () => options.resolveContext(route)),
+      await timed(
+        route,
+        validationId,
+        'context',
+        () => options.resolveContext(route, signal),
+        signal,
+      ),
     );
     const started = now();
     const providerStarted = providerObservedAt(started);
@@ -571,25 +700,33 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         share
           ? Promise.resolve(previous.evidence)
           : batch
-            ? batch(context.providerServerId)
+            ? batch(context.providerServerId, signal)
             : Promise.all([
-                options.provider.listNodes(),
-                options.provider.getApplicationServer(context.providerServerId),
-                inventories(),
+                options.provider.listNodes(signal),
+                options.provider.getApplicationServer(context.providerServerId, signal),
+                inventories(signal),
               ]).then(([nodes, server, nodeInventories]) => ({
                 started: providerStarted,
                 nodes,
                 server,
                 nodeInventories,
               })),
+      signal,
     );
     // Initial snapshot checks may share timestamped host evidence. Final bind
     // checks and standalone probes read it again; every route enforces its age.
     // Settle both branches before abandoning a failed inspection.
     const results = await Promise.allSettled([
-      timed(route, validationId, 'host_observation', observe ?? (() => options.observer.observe())),
+      timed(
+        route,
+        validationId,
+        'host_observation',
+        () => (observe ?? options.observer.observe.bind(options.observer))(signal),
+        signal,
+      ),
       providerRead,
     ]);
+    signal?.throwIfAborted();
     for (const result of results) if (result.status === 'rejected') throw result.reason;
     const [observed, provider] = results;
     if (observed.status !== 'fulfilled' || provider.status !== 'fulfilled') unavailable();
@@ -736,6 +873,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       unavailable('observation_stale');
     return {
       validationId,
+      signal,
       route,
       context,
       observation,
@@ -775,14 +913,21 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     };
   }
   async function proveBackend(state: Awaited<ReturnType<typeof inspect>>) {
+    state.signal?.throwIfAborted();
     if (!state.container?.running || !state.backendBindingsComplete)
       unavailable('backend_active_binding');
-    const result = await timed(state.route, state.validationId, 'backend_protocol', () =>
-      probeBackend(
-        state.route,
-        JSON.stringify([state.digest, state.container?.id]),
-        state.validationId,
-      ),
+    const result = await timed(
+      state.route,
+      state.validationId,
+      'backend_protocol',
+      () =>
+        probeBackend(
+          state.route,
+          JSON.stringify([state.digest, state.container?.id]),
+          state.validationId,
+          state.signal,
+        ),
+      state.signal,
     );
     if (!(typeof result === 'boolean' ? result : result.ready === true))
       unavailable('backend_protocol');
@@ -801,8 +946,12 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       digest: state.digest,
       verifiedAt: now(),
     };
-    await timed(state.route, state.validationId, 'proof_write', () =>
-      options.saveProof(state.route, proof),
+    await timed(
+      state.route,
+      state.validationId,
+      'proof_write',
+      () => options.saveProof(state.route, proof, state.signal),
+      state.signal,
     );
     if (
       now() - state.observation.observedAt > policy.maximumObservationAgeMs ||
@@ -813,9 +962,9 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     // Boolean-only adapters retain the legacy data-plane fallback.
     return typeof result === 'boolean' ? undefined : result;
   }
-  async function validateBackend(route: GatewayRoute) {
+  async function validateBackend(route: GatewayRoute, signal?: AbortSignal) {
     try {
-      const state = await inspect(route, [], false);
+      const state = await inspect(route, [], false, undefined, undefined, signal);
       return await proveBackend(state);
     } catch (error) {
       // A later failed full inspection must not leave a fast-path grant behind.
@@ -830,9 +979,11 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     batch?: ProviderBatch,
     observe?: NetworkObserver['observe'],
     token = failureToken(route.id),
+    signal?: AbortSignal,
   ) {
-    const state = await inspect(route, ownedBindings, true, batch, observe);
+    const state = await inspect(route, ownedBindings, true, batch, observe, signal);
     const accepted = (backendReady: boolean) => {
+      signal?.throwIfAborted();
       // A newer attempt that could not acquire this route's active inspection
       // revoked it. Its older completion must not restore backend authority.
       if (failureToken(route.id) !== token) unavailable('observation_stale');
@@ -865,7 +1016,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       }
       return { backendReady };
     };
-    const raw = await options.loadProof(route);
+    const raw = await cancellable(() => options.loadProof(route, signal), signal);
     const proof = gatewayReachabilityProofSchema.safeParse(raw);
     const matches =
       proof.success &&
@@ -879,7 +1030,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     if (!state.container || (state.container.running && !state.backendBindingsComplete)) {
       if (!state.mayRetainStatus || !matches || !proof.success || proof.data.version !== 2)
         unavailable('retained_proof_mismatch');
-      if (!(await probeNode(route, state.context))) unavailable('node_challenge');
+      if (!(await probeNode(route, state.context, signal))) unavailable('node_challenge');
       if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
         unavailable('observation_stale');
       return accepted(false);
@@ -921,7 +1072,10 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       const result = await probeBackend(
         route,
         JSON.stringify([state.digest, state.container.id]),
+        undefined,
+        signal,
       ).catch(() => false);
+      signal?.throwIfAborted();
       const backendReady = typeof result === 'boolean' ? result : result.ready === true;
       if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
         unavailable('observation_stale');
@@ -930,7 +1084,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         return accepted(true);
       }
     }
-    if (!(await probeNode(route, state.context))) unavailable('node_challenge');
+    if (!(await probeNode(route, state.context, signal))) unavailable('node_challenge');
     if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
       unavailable('observation_stale');
     retainBinding();
@@ -941,7 +1095,9 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     ownedBindings: readonly GatewayEndpoint[],
     batch?: ProviderBatch,
     observe?: NetworkObserver['observe'],
+    signal?: AbortSignal,
   ) {
+    signal?.throwIfAborted();
     // Keep one active inspection per route, without queuing abandoned timeout
     // work. A concurrent attempt revokes the older result and retries only after
     // it settles; it cannot restore stale authority or add more provider work.
@@ -956,7 +1112,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     let work!: Promise<{ backendReady: boolean }>;
     work = (async () => {
       try {
-        return await validateListener(route, ownedBindings, batch, observe, token);
+        return await validateListener(route, ownedBindings, batch, observe, token, signal);
       } catch (error) {
         validatedProvider.delete(route.id);
         failureToken(route.id, true);
@@ -987,68 +1143,65 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       failures.get(routeId) === previous.leasedProbe?.failures
     );
   }
-  async function waitForRenewals(routeId: string, previous: ProviderGrant) {
+  async function waitForRenewals(routeId: string, previous: ProviderGrant, signal?: AbortSignal) {
     while (renewals.has(routeId) && freshGrant(previous)) {
+      signal?.throwIfAborted();
       const renewal = renewals.get(routeId);
       const remaining =
         Math.min(previous.leasedProbe?.observedAt ?? 0, previous.evidence.started) +
         policy.maximumObservationAgeMs -
         now();
       let timeout: ReturnType<typeof setTimeout> | undefined;
-      const completed = await Promise.race([
-        renewal?.work.then(
-          () => true,
-          () => false,
-        ),
-        new Promise<false>((resolve) => {
-          timeout = setTimeout(() => resolve(false), Math.max(0, remaining));
-        }),
-      ]).finally(() => clearTimeout(timeout));
+      const completed = await cancellable(
+        () =>
+          Promise.race([
+            renewal?.work.then(
+              () => true,
+              () => false,
+            ),
+            new Promise<false>((resolve) => {
+              timeout = setTimeout(() => resolve(false), Math.max(0, remaining));
+            }),
+          ]),
+        signal,
+      ).finally(() => clearTimeout(timeout));
       if (!completed) break;
     }
   }
   return {
-    validate,
+    validate: (route, ownedBindings, signal) =>
+      validate(route, ownedBindings, undefined, undefined, signal),
     createValidationBatch(routes = [], phase = 'initial') {
       const batch = createProviderBatch(routes);
-      let host: Promise<NetworkObservation> | undefined;
+      const host = new Map<string, SharedRead<NetworkObservation>>();
       const checked = new Set<string>();
       return {
-        validate(route, ownedBindings) {
-          if (phase === 'prebind')
-            return validate(route, ownedBindings, batch, async () => {
-              // Concurrent admissions can share one observation already being
-              // collected. Never retain its settled value for a later route:
-              // stopped-container reservations and topology can change without
-              // opening a socket that an exclusive native bind would detect.
-              host ??= options.observer
-                .observe()
-                .then((value) => structuredClone(value))
-                .finally(() => {
-                  host = undefined;
-                });
-              return structuredClone(await host);
-            });
-          // A route is inspected once in the initial snapshot pass. Rechecking
-          // it before native bind must see newly opened sockets and topology.
+        validate(route, ownedBindings, signal) {
           const first = !checked.has(route.id);
           checked.add(route.id);
-          return validate(
-            route,
-            ownedBindings,
-            batch,
-            first
-              ? async () => {
-                  host ??= options.observer.observe().then((value) => structuredClone(value));
-                  return structuredClone(await host);
-                }
-              : undefined,
-          );
+          const observe =
+            phase === 'prebind' || first
+              ? async (consumerSignal?: AbortSignal) =>
+                  structuredClone(
+                    await sharedRead(
+                      host,
+                      'host',
+                      (sharedSignal) =>
+                        options.observer
+                          .observe(sharedSignal)
+                          .then((value) => structuredClone(value)),
+                      consumerSignal,
+                      phase === 'initial',
+                    ),
+                  )
+              : undefined;
+          return validate(route, ownedBindings, batch, observe, signal);
         },
       };
     },
     validateBackend,
-    async probeLeasedBackend(routeValue) {
+    async probeLeasedBackend(routeValue, signal) {
+      signal?.throwIfAborted();
       const route = gatewayRouteSchema.parse(routeValue);
       let previous = validatedProvider.get(route.id);
       const active = renewals.get(route.id);
@@ -1063,7 +1216,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         // A renewal revokes permission while it inspects. Join that full check
         // instead of starting a duplicate, but retain the original grant's deadline.
         previous = active.previous;
-        await waitForRenewals(route.id, previous);
+        await waitForRenewals(route.id, previous, signal);
         if (
           !freshGrant(previous) ||
           renewals.has(route.id) ||
@@ -1081,17 +1234,27 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         !equivalentGrant(route.id, previous, validatedProvider.get(route.id)) ||
         !fresh()
       )
-        return validateBackend(route);
+        return validateBackend(route, signal);
       const validationId = randomUUID();
       const identity = previous.leasedProbe?.identity ?? unavailable('observation_stale');
-      const result = await timed(route, validationId, 'leased_backend_protocol', () =>
-        probeBackend(route, identity, validationId),
+      const result = await timed(
+        route,
+        validationId,
+        'leased_backend_protocol',
+        () => probeBackend(route, identity, validationId, signal),
+        signal,
       );
       if (!(typeof result === 'boolean' ? result : result.ready === true))
         unavailable('backend_protocol');
       // A fresh identical renewal may finish during the game response. Await it
       // rather than throwing away that response, within the ORIGINAL age budget.
-      await timed(route, validationId, 'renewal_wait', () => waitForRenewals(route.id, previous));
+      await timed(
+        route,
+        validationId,
+        'renewal_wait',
+        () => waitForRenewals(route.id, previous, signal),
+        signal,
+      );
       const current = validatedProvider.get(route.id);
       const equivalent = equivalentGrant(route.id, previous, current);
       if (!fresh() || renewals.has(route.id) || !equivalent)

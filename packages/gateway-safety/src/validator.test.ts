@@ -227,6 +227,7 @@ describe('Gateway snapshot provider batches', () => {
       expect(f.options.provider.getApplicationServers).toHaveBeenCalledOnce();
       expect(f.options.provider.getApplicationServers).toHaveBeenCalledWith(
         entries.map((entry) => entry.route.id),
+        expect.any(AbortSignal),
       );
     }
   });
@@ -352,8 +353,14 @@ describe('Gateway snapshot provider batches', () => {
     expect(f.options.provider.listNodes).toHaveBeenCalledOnce();
     expect(f.options.provider.listAllocations).toHaveBeenCalledTimes(2);
     expect(f.options.provider.getApplicationServer).toHaveBeenCalledTimes(2);
-    expect(f.options.provider.getApplicationServer).toHaveBeenCalledWith(42);
-    expect(f.options.provider.getApplicationServer).toHaveBeenCalledWith(43);
+    expect(f.options.provider.getApplicationServer).toHaveBeenCalledWith(
+      42,
+      expect.any(AbortSignal),
+    );
+    expect(f.options.provider.getApplicationServer).toHaveBeenCalledWith(
+      43,
+      expect.any(AbortSignal),
+    );
     expect(f.options.resolveContext).toHaveBeenCalledTimes(6);
     expect(f.options.observer.observe).toHaveBeenCalledTimes(4);
     expect(f.options.loadProof).toHaveBeenCalledTimes(6);
@@ -789,7 +796,11 @@ describe('Gateway pre-bind and forwarding safety', () => {
     const probeBackend = vi.fn(async () => sample);
     const validator = createGatewaySafetyValidator({ ...f.options, probeBackend });
     expect(await validator.validateBackend(f.route)).toBe(sample);
-    expect(probeBackend).toHaveBeenCalledExactlyOnceWith(f.route, expect.any(String));
+    expect(probeBackend).toHaveBeenCalledExactlyOnceWith(
+      f.route,
+      expect.any(String),
+      expect.any(AbortSignal),
+    );
     expect(f.options.observer.observe).toHaveBeenCalledOnce();
     expect(f.options.provider.listNodes).toHaveBeenCalledOnce();
     expect(f.proof()).toMatchObject({ version: 2, routeId: f.route.id });
@@ -807,14 +818,18 @@ describe('Gateway pre-bind and forwarding safety', () => {
   it('proves loopback provider remap, both real Docker bindings and readiness from current namespace', async () => {
     const f = fixture();
     await f.validator().validate(f.route, []);
-    expect(f.options.probeBackend).toHaveBeenCalledWith(f.route, expect.any(String));
+    expect(f.options.probeBackend).toHaveBeenCalledWith(
+      f.route,
+      expect.any(String),
+      expect.any(AbortSignal),
+    );
     expect(f.proof()).toMatchObject({
       version: 2,
       serverId: f.route.serverId,
       allocationId: f.route.allocationId,
       namespaceId: 'net:[100]',
     });
-    expect(f.options.provider.listAllocations).toHaveBeenCalledWith(1);
+    expect(f.options.provider.listAllocations).toHaveBeenCalledWith(1, undefined);
   });
   it.each(['10.5.0.1', 'fd42::1'])('preserves direct private backend %s', async (address) => {
     const f = fixture();
@@ -910,7 +925,11 @@ describe('Gateway pre-bind and forwarding safety', () => {
       const sample = { ready: true, idle: false, playerCount: 2 };
       f.options.probeBackend = vi.fn(async () => sample);
       expect(await safety.probeLeasedBackend?.(f.route)).toBe(sample);
-      expect(f.options.probeBackend).toHaveBeenCalledExactlyOnceWith(f.route, expect.any(String));
+      expect(f.options.probeBackend).toHaveBeenCalledExactlyOnceWith(
+        f.route,
+        expect.any(String),
+        expect.any(AbortSignal),
+      );
       expect(f.options.observer.observe).toHaveBeenCalledOnce();
       expect(f.options.resolveContext).toHaveBeenCalledOnce();
       expect(f.options.provider.listNodes).toHaveBeenCalledOnce();
@@ -1389,6 +1408,125 @@ describe('Gateway pre-bind and forwarding safety', () => {
     await safety.validate(f.route, []);
     expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
   });
+  it.each(['context', 'host', 'proof'] as const)(
+    'cancels during %s and never continues late evidence into a game probe or proof write',
+    async (stage) => {
+      const f = fixture();
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      let sourceSignal: AbortSignal | undefined;
+      const pause = async (signal?: AbortSignal) => {
+        sourceSignal = signal;
+        entered.resolve();
+        await release.promise;
+      };
+      if (stage === 'context') {
+        const context = await f.options.resolveContext(f.route);
+        f.options.resolveContext = vi.fn(async (_route, signal) => {
+          await pause(signal);
+          return context;
+        });
+      } else if (stage === 'host') {
+        f.options.observer.observe = vi.fn(async (signal) => {
+          await pause(signal);
+          return f.observation;
+        });
+      } else {
+        f.options.loadProof = vi.fn(async (_route, signal) => {
+          await pause(signal);
+          return null;
+        });
+      }
+      const controller = new AbortController();
+      const safety = f.validator();
+      const work = safety.validate(f.route, [], controller.signal);
+      await entered.promise;
+      const reason = new Error('consumer deadline');
+      const failure = expect(work).rejects.toBe(reason);
+      controller.abort(reason);
+      await failure;
+      expect(sourceSignal?.aborted).toBe(true);
+      release.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(f.options.probeBackend).not.toHaveBeenCalled();
+      expect(f.options.saveProof).not.toHaveBeenCalled();
+      if (stage === 'context') expect(f.options.observer.observe).not.toHaveBeenCalled();
+    },
+  );
+  it('cancels an owned game challenge and prevents a late successful response from writing proof', async () => {
+    const f = fixture();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<boolean>();
+    let sourceSignal: AbortSignal | undefined;
+    f.options.probeBackend = vi.fn(async (_route, _validationId, signal) => {
+      sourceSignal = signal;
+      entered.resolve();
+      return release.promise;
+    });
+    const controller = new AbortController();
+    const work = f.validator().validateBackend(f.route, controller.signal);
+    await entered.promise;
+    const failure = expect(work).rejects.toMatchObject({ name: 'AbortError' });
+    controller.abort();
+    await failure;
+    expect(sourceSignal?.aborted).toBe(true);
+    release.resolve(true);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(f.options.saveProof).not.toHaveBeenCalled();
+  });
+  it('keeps shared provider work alive for another route after one consumer cancels', async () => {
+    const f = fixture();
+    const second = { ...f.route, id: '77777777-7777-4777-8777-777777777777' };
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let sourceSignal: AbortSignal | undefined;
+    f.options.provider.listNodes = vi.fn(async (signal) => {
+      sourceSignal = signal;
+      entered.resolve();
+      await release.promise;
+      return [f.node];
+    });
+    const batch = f.validator().createValidationBatch?.([f.route, second]);
+    if (!batch) throw new Error('Missing batch');
+    const controller = new AbortController();
+    const first = batch.validate(f.route, [], controller.signal);
+    const other = batch.validate(second, []);
+    await entered.promise;
+    const failure = expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    controller.abort();
+    await failure;
+    expect(sourceSignal?.aborted).toBe(false);
+    release.resolve();
+    await other;
+    expect(f.options.provider.listNodes).toHaveBeenCalledTimes(1);
+    expect(f.options.saveProof).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(f.options.saveProof).mock.calls[0]?.[0].id).toBe(second.id);
+  });
+  it('aborts a shared game socket only after its last consumer cancels', async () => {
+    const f = fixture();
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    const release = Promise.withResolvers<boolean>();
+    let sourceSignal: AbortSignal | undefined;
+    f.options.probeBackend = vi.fn(async (_route, _validationId, signal) => {
+      sourceSignal = signal;
+      return release.promise;
+    });
+    const firstController = new AbortController();
+    const otherController = new AbortController();
+    const first = safety.probeLeasedBackend?.(f.route, firstController.signal);
+    const other = safety.probeLeasedBackend?.(f.route, otherController.signal);
+    await vi.waitFor(() => expect(f.options.probeBackend).toHaveBeenCalledTimes(1));
+    const firstFailure = expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    firstController.abort();
+    await firstFailure;
+    expect(sourceSignal?.aborted).toBe(false);
+    const otherFailure = expect(other).rejects.toMatchObject({ name: 'AbortError' });
+    otherController.abort();
+    await otherFailure;
+    expect(sourceSignal?.aborted).toBe(true);
+    release.resolve(true);
+  });
   it.each(['standalone', 'batch'] as const)(
     'does not reset the source timestamp of supplied %s control evidence',
     async (mode) => {
@@ -1688,6 +1826,7 @@ describe('Gateway pre-bind and forwarding safety', () => {
     expect(f.options.probeNode).toHaveBeenCalledWith(
       f.route,
       await f.options.resolveContext(f.route),
+      expect.any(AbortSignal),
     );
     f.options.probeNode = vi.fn(async () => false);
     await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
@@ -1708,6 +1847,7 @@ describe('Gateway pre-bind and forwarding safety', () => {
       expect(f.options.probeNode).toHaveBeenCalledWith(
         f.route,
         await f.options.resolveContext(f.route),
+        expect.any(AbortSignal),
       );
       expect(f.options.probeBackend).not.toHaveBeenCalled();
       // A retained waiting listener is not evidence that game traffic may forward.
@@ -1740,6 +1880,7 @@ describe('Gateway pre-bind and forwarding safety', () => {
       expect(f.options.probeNode).toHaveBeenCalledWith(
         f.route,
         await f.options.resolveContext(f.route),
+        expect.any(AbortSignal),
       );
       // Losing node reachability or ownership still closes the listener.
       vi.mocked(f.options.probeNode).mockResolvedValue(false);

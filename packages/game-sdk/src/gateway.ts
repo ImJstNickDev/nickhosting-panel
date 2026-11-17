@@ -451,12 +451,19 @@ export interface GatewaySafety {
   validate(
     route: GatewayRoute,
     ownedBindings: readonly GatewayEndpoint[],
+    signal?: AbortSignal,
     // biome-ignore lint/suspicious/noConfusingVoidType: Preserve existing strict validator implementations returning Promise<void>.
   ): Promise<void | { backendReady: boolean }>;
   /** Independent exact Docker binding identity and namespace reachability proof. */
-  // biome-ignore lint/suspicious/noConfusingVoidType: Legacy validators provide no reusable protocol sample.
-  validateBackend(route: GatewayRoute): Promise<void | GatewayProtocolObservation>;
+  validateBackend(
+    route: GatewayRoute,
+    signal?: AbortSignal,
+    // biome-ignore lint/suspicious/noConfusingVoidType: Legacy validators provide no reusable protocol sample.
+  ): Promise<void | GatewayProtocolObservation>;
   /** Only for already-bound waking routes under the original live listener lease. */
-  // biome-ignore lint/suspicious/noConfusingVoidType: Legacy validators provide no reusable protocol sample.
-  probeLeasedBackend?(route: GatewayRoute): Promise<void | GatewayProtocolObservation>;
+  probeLeasedBackend?(
+    route: GatewayRoute,
+    signal?: AbortSignal,
+    // biome-ignore lint/suspicious/noConfusingVoidType: Legacy validators provide no reusable protocol sample.
+  ): Promise<void | GatewayProtocolObservation>;
 }

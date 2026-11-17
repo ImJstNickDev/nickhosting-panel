@@ -1620,7 +1620,11 @@ describe('persistent Gateway fixture forwarding', () => {
     // deliberate unavailable-control handling hiding their diagnostic cause.
     await f.gateway.applySnapshot(f.snapshot());
     expect(f.safety.validate).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(f.safety.validate).mock.calls[1]).toEqual([b, [a.public]]);
+    expect(vi.mocked(f.safety.validate).mock.calls[1]).toEqual([
+      b,
+      [a.public],
+      expect.any(AbortSignal),
+    ]);
     expect((await exchange(first.port, 'first', false, publicAddress)).toString()).toBe('first');
     expect((await exchange(second.port, 'second', false, publicAddress)).toString()).toBe('second');
   });
@@ -1659,7 +1663,7 @@ describe('sleep protocol handling and observations', () => {
       const f = plane([r], { protocols: [handler], safety: { validateBackend } });
       await f.gateway.start();
       await f.gateway.observe();
-      expect(validateBackend).toHaveBeenCalledExactlyOnceWith(r);
+      expect(validateBackend).toHaveBeenCalledExactlyOnceWith(r, expect.any(AbortSignal));
       expect(handler.observe).not.toHaveBeenCalled();
       expect(handler.probeReadiness).not.toHaveBeenCalled();
       expect(handler.probeIdle).not.toHaveBeenCalled();
@@ -1996,7 +2000,7 @@ describe('sleep protocol handling and observations', () => {
     try {
       await entered.promise;
       await f.gateway.observe();
-      expect(leasedProbe).toHaveBeenCalledWith(r);
+      expect(leasedProbe).toHaveBeenCalledWith(r, expect.any(AbortSignal));
       expect(f.safety.validateBackend).not.toHaveBeenCalled();
       expect(f.control.reportObservation).toHaveBeenCalledWith(
         expect.objectContaining({ routeRevision: 1, ready: true }),
@@ -2334,7 +2338,7 @@ describe('sleep protocol handling and observations', () => {
     const blocked = { ...r, revision: 2, mode: 'blocked' as const };
     await f.gateway.applySnapshot(f.snapshot([blocked], 2));
     await f.gateway.observe();
-    expect(f.safety.validateBackend).toHaveBeenCalledWith(blocked);
+    expect(f.safety.validateBackend).toHaveBeenCalledWith(blocked, expect.any(AbortSignal));
     expect(f.control.reportObservation).toHaveBeenCalledWith(
       expect.objectContaining({ routeId: r.id, routeRevision: 2, ready: true }),
     );
@@ -4034,7 +4038,13 @@ describe('transition-only Gateway diagnostics', () => {
     const r = route(backend.port, 'tcp', 'waking');
     const f = plane([r], { logger: { log }, policy: { probeTimeoutMs: 25 } });
     await f.gateway.start();
-    vi.mocked(f.safety.validate).mockImplementation(async () => new Promise<void>(() => {}));
+    let operationSignal: AbortSignal | undefined;
+    vi.mocked(f.safety.validate).mockImplementation(async (_route, _bindings, signal) => {
+      operationSignal = signal;
+      return new Promise<void>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    });
     await expect(f.gateway.refresh()).rejects.toThrow('integration_unavailable');
     expect(log).toHaveBeenCalledWith(
       'info',
@@ -4042,6 +4052,7 @@ describe('transition-only Gateway diagnostics', () => {
       expect.objectContaining({ routeId: r.id, reason: 'validation_timeout' }),
     );
     expect(f.gateway.health().routes).toBe(0);
+    expect(operationSignal?.aborted).toBe(true);
     await refuses(backend.port);
   });
 
@@ -4097,6 +4108,13 @@ describe('transition-only Gateway diagnostics', () => {
     await f.gateway.start();
     await f.gateway.refresh();
     await f.gateway.refresh();
+    expect(f.gateway.metrics()).toMatchObject({
+      snapshotCycles: 3,
+      lastSnapshotFetchDurationMs: expect.any(Number),
+      lastSnapshotApplyDurationMs: expect.any(Number),
+    });
+    expect(f.gateway.metrics().lastSnapshotFetchDurationMs).toBeGreaterThanOrEqual(0);
+    expect(f.gateway.metrics().lastSnapshotApplyDurationMs).toBeGreaterThanOrEqual(0);
     const online = { ...r, revision: 2, mode: 'online' as const };
     await f.gateway.applySnapshot(f.snapshot([online], 2));
     const events = () =>
