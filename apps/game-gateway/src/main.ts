@@ -72,6 +72,16 @@ export function coalesceNetworkObservations(source: NetworkObserver): NetworkObs
   };
   let pending: Shared | undefined;
   return {
+    async observeFresh(signal) {
+      signal?.throwIfAborted();
+      // New/changed admissions must not join a scan begun before Core evidence.
+      // The caller owns this read and its cancellation independently of renewals.
+      const value = await (source.observeFresh
+        ? source.observeFresh(signal)
+        : source.observe(signal));
+      signal?.throwIfAborted();
+      return structuredClone(value);
+    },
     async observe(signal) {
       signal?.throwIfAborted();
       if (!pending) {

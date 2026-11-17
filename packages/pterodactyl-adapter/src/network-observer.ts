@@ -82,6 +82,8 @@ export interface NetworkObservation {
 }
 export interface NetworkObserver {
   observe(signal?: AbortSignal): Promise<NetworkObservation>;
+  /** Begin new evidence after an admission boundary; never join an older scan. */
+  observeFresh?(signal?: AbortSignal): Promise<NetworkObservation>;
 }
 
 export interface NetworkObserverDependencies {

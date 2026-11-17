@@ -294,6 +294,36 @@ describe('overlapping network observation reads', () => {
     c.abort(new Error('third timeout'));
     await thirdRejected;
   });
+  it('starts admission evidence independently of an older shared scan and its cancellation', async () => {
+    const reads: {
+      signal?: AbortSignal;
+      resolve: (value: ReturnType<typeof observation>) => void;
+    }[] = [];
+    const observe = vi.fn(
+      (signal?: AbortSignal) =>
+        new Promise<ReturnType<typeof observation>>((resolve) => {
+          reads.push({ signal, resolve });
+        }),
+    );
+    const observer = coalesceNetworkObservations({ observe });
+    const renewal = new AbortController(),
+      admission = new AbortController();
+    const older = observer.observe(renewal.signal);
+    const rejected = expect(older).rejects.toThrow('renewal cancelled');
+    await Promise.resolve();
+    const fresh = observer.observeFresh?.(admission.signal);
+    expect(observe).toHaveBeenCalledTimes(2);
+    expect(reads[0]?.signal?.aborted).toBe(false);
+    renewal.abort(new Error('renewal cancelled'));
+    await rejected;
+    expect(reads[0]?.signal?.aborted).toBe(true);
+    expect(reads[1]?.signal).toBe(admission.signal);
+    expect(admission.signal.aborted).toBe(false);
+    const value = observation();
+    reads[1]?.resolve(value);
+    expect(await fresh).toEqual(value);
+    reads[0]?.resolve({ ...value, observedAt: value.observedAt - 1000 });
+  });
   it('shares the failure without reusing failed or successful observations afterward', async () => {
     const failure = new Error('host inspection failed');
     const observe = vi.fn().mockRejectedValueOnce(failure).mockResolvedValue(observation());
