@@ -13,6 +13,7 @@ import {
   type GatewayResponseMode,
   type GatewayRoute,
   type GatewaySafety,
+  type GatewaySafetyRenewal,
   type GatewaySnapshot,
   gatewaySnapshotSchema,
 } from '@nickhosting/game-sdk';
@@ -1122,7 +1123,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     if (expired.length) counters.leaseExpirations++;
     await Promise.all(expired.map((listener) => closeListener(listener)));
   };
-  const apply = async (input: unknown, fetchStartedAt: number) => {
+  const apply = async (input: unknown, fetchStartedAt: number, renewal?: GatewaySafetyRenewal) => {
     const applyStarted = performance.now();
     const parsed = gatewaySnapshotSchema.safeParse(input);
     if (!parsed.success || stopping) throw new DomainError('validation_failed');
@@ -1180,7 +1181,10 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     };
     // Share provider reads and timestamped initial host evidence for this snapshot.
     // Every route retains its authority/age checks; final binds reread topology.
-    const validation = options.safety.createValidationBatch?.(next.routes) ?? options.safety;
+    const validation =
+      renewal?.createValidationBatch(next.routes) ??
+      options.safety.createValidationBatch?.(next.routes) ??
+      options.safety;
     // Independent servers share a bounded read-only validation pool. Roles of
     // one server remain ordered: a failed role withholds its siblings, and a
     // protocol probe may depend on the preceding game-port observation.
@@ -1379,7 +1383,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       // Bounded overlapping reads avoid serial scans exhausting the lease, and
       // exclusive binds close the final socket race. Server roles remain ordered.
       const prebind = bindingGroups.length
-        ? (options.safety.createValidationBatch?.(bindingGroups.flat(), 'prebind') ??
+        ? (renewal?.createValidationBatch(bindingGroups.flat(), 'prebind') ??
+          options.safety.createValidationBatch?.(bindingGroups.flat(), 'prebind') ??
           options.safety)
         : undefined;
       let nextBindingGroup = 0;
@@ -1565,9 +1570,13 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       throw error;
     }
   };
-  const applySnapshot = (input: unknown, fetchStartedAt = now()) => {
+  const applySnapshot = (
+    input: unknown,
+    fetchStartedAt = now(),
+    renewal?: GatewaySafetyRenewal,
+  ) => {
     const result = serial.then(() =>
-      apply(input, fetchStartedAt).catch((error) => {
+      apply(input, fetchStartedAt, renewal).catch((error) => {
         controlAvailable = false;
         throw error;
       }),
@@ -1585,13 +1594,21 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     refreshing = (async () => {
       for (let attempt = 0; attempt < 2; attempt++) {
         const fetchStartedAt = now();
+        // This read cannot grant authority. Its result is eligible only for
+        // exact unchanged routes after Core supplies the new snapshot.
+        let renewal: GatewaySafetyRenewal | undefined;
+        try {
+          if (snapshot && leased()) renewal = options.safety.prepareRenewal?.(snapshot.routes);
+        } catch {
+          /* An optional speculative read cannot revoke the current lease. */
+        }
         try {
           const fetchingStarted = performance.now();
           const input = await options.control.fetchSnapshot().finally(() => {
             fetchDuration += performance.now() - fetchingStarted;
           });
           const applyingStarted = performance.now();
-          await applySnapshot(input, fetchStartedAt).finally(() => {
+          await applySnapshot(input, fetchStartedAt, renewal).finally(() => {
             applyDuration += performance.now() - applyingStarted;
           });
           return;
@@ -1600,6 +1617,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             error instanceof GatewayRouteRevisionStaleError ||
             (error instanceof NetworkObservationError && error.reason === 'container_churn');
           if (!transient || attempt === 1) throw error;
+        } finally {
+          renewal?.close();
         }
       }
     })()

@@ -2010,6 +2010,49 @@ describe('sleep protocol handling and observations', () => {
       await renewal;
     }
   });
+  it('overlaps speculative host collection with the Core fetch and closes the cycle after apply or fetch failure', async () => {
+    const backend = await tcpFixture();
+    const r = route(backend.port);
+    const f = plane([r]);
+    await f.gateway.start();
+    const host = Promise.withResolvers<void>();
+    const core = Promise.withResolvers<void>();
+    const enteredCore = Promise.withResolvers<void>();
+    const close = vi.fn();
+    const validate = vi.fn(async () => {
+      await host.promise;
+      return { backendReady: true };
+    });
+    const prepare = vi.fn(() => ({ createValidationBatch: () => ({ validate }), close }));
+    f.safety.prepareRenewal = prepare;
+    vi.mocked(f.control.fetchSnapshot).mockImplementation(async () => {
+      expect(prepare).toHaveBeenCalledOnce();
+      enteredCore.resolve();
+      await core.promise;
+      return f.snapshot();
+    });
+    const work = f.gateway.refresh();
+    try {
+      await enteredCore.promise;
+      expect(prepare).toHaveBeenCalledWith([r]);
+      expect(validate).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+      host.resolve();
+      core.resolve();
+      await work;
+      expect(validate).toHaveBeenCalledOnce();
+      expect(close).toHaveBeenCalledOnce();
+      expect(f.gateway.health()).toMatchObject({ ready: true, routes: 1 });
+      vi.mocked(f.control.fetchSnapshot).mockRejectedValue(new Error('Core unavailable'));
+      await expect(f.gateway.refresh()).rejects.toThrow('Core unavailable');
+      expect(close).toHaveBeenCalledTimes(2);
+      expect(f.gateway.health().routes).toBe(1);
+    } finally {
+      host.resolve();
+      core.resolve();
+      await work.catch(() => {});
+    }
+  });
   it.each(['waking', 'online'] as const)(
     'completes a slow %s observation across repeated equivalent lease renewals with its original deadline',
     async (mode) => {

@@ -6,6 +6,7 @@ import {
   type GatewayProtocolObservation,
   type GatewayRoute,
   type GatewaySafety,
+  type GatewaySafetyRenewal,
   gatewayRouteSchema,
 } from '@nickhosting/game-sdk';
 import type {
@@ -1234,38 +1235,108 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       if (!completed) break;
     }
   }
+  type PreparedHost = {
+    matches(route: GatewayRoute): boolean;
+    read(signal?: AbortSignal): Promise<NetworkObservation | undefined>;
+    barrier(signal?: AbortSignal): Promise<void>;
+  };
+  async function observeFresh(signal?: AbortSignal, prepared?: PreparedHost) {
+    const fresh = (
+      options.observer as NetworkObserver & { observeFresh?: NetworkObserver['observe'] }
+    ).observeFresh;
+    if (fresh) return fresh.call(options.observer, signal);
+    // Compatibility for non-coalescing observers: settle/discard speculative
+    // work before initiating a post-Control observation.
+    await prepared?.barrier(signal);
+    signal?.throwIfAborted();
+    return options.observer.observe(signal);
+  }
+  function createValidationBatch(
+    routes: readonly GatewayRoute[] = [],
+    phase: 'initial' | 'prebind' = 'initial',
+    prepared?: PreparedHost,
+  ): Pick<GatewaySafety, 'validate'> {
+    const batch = createProviderBatch(routes);
+    const host = new Map<string, SharedRead<NetworkObservation>>();
+    const checked = new Set<string>();
+    return {
+      validate(route, ownedBindings, signal) {
+        const first = !checked.has(route.id);
+        checked.add(route.id);
+        const eligible = phase === 'initial' && first && prepared?.matches(route);
+        const observe =
+          phase === 'prebind' || first
+            ? (consumerSignal?: AbortSignal) =>
+                sharedRead(
+                  host,
+                  eligible ? 'prepared' : 'current',
+                  async (sharedSignal) => {
+                    const prefetched = eligible ? await prepared?.read(sharedSignal) : undefined;
+                    if (prefetched) return prefetched;
+                    const observed =
+                      prepared || phase === 'prebind'
+                        ? await observeFresh(sharedSignal, prepared)
+                        : await options.observer.observe(sharedSignal);
+                    sharedSignal.throwIfAborted();
+                    const value = immutableObservation(observed);
+                    immutableHosts.add(value);
+                    return value;
+                  },
+                  consumerSignal,
+                  phase === 'initial',
+                )
+            : undefined;
+        return validate(route, ownedBindings, batch, observe, signal);
+      },
+    };
+  }
+  function prepareRenewal(routes: readonly GatewayRoute[]): GatewaySafetyRenewal {
+    const identities = new Map(routes.map((route) => [route.id, JSON.stringify(route)]));
+    const source = new AbortController();
+    const cycle = new AbortController();
+    let closed = false;
+    // Capture a fresh independent epoch before the concurrent Core fetch. An
+    // existing coalesced observation may predate this refresh and is ineligible.
+    const pending = observeFresh(source.signal)
+      .then((observed) => {
+        source.signal.throwIfAborted();
+        const value = immutableObservation(observed);
+        immutableHosts.add(value);
+        return value;
+      })
+      .catch(() => undefined);
+    const prepared: PreparedHost = {
+      matches: (route) => identities.get(route.id) === JSON.stringify(route),
+      read: (signal) => cancellable(() => pending, signal),
+      barrier: async (signal) => {
+        await cancellable(() => pending, signal);
+      },
+    };
+    return {
+      createValidationBatch(next = [], phase = 'initial') {
+        if (closed) unavailable('observation_stale');
+        if (phase === 'prebind' || !next.some(prepared.matches)) source.abort();
+        const batch = createValidationBatch(next, phase, prepared);
+        return {
+          validate(route, ownedBindings, signal) {
+            const currentSignal = signal ? AbortSignal.any([signal, cycle.signal]) : cycle.signal;
+            return batch.validate(route, ownedBindings, currentSignal);
+          },
+        };
+      },
+      close() {
+        closed = true;
+        source.abort();
+        cycle.abort();
+        identities.clear();
+      },
+    };
+  }
   return {
     validate: (route, ownedBindings, signal) =>
       validate(route, ownedBindings, undefined, undefined, signal),
-    createValidationBatch(routes = [], phase = 'initial') {
-      const batch = createProviderBatch(routes);
-      const host = new Map<string, SharedRead<NetworkObservation>>();
-      const checked = new Set<string>();
-      return {
-        validate(route, ownedBindings, signal) {
-          const first = !checked.has(route.id);
-          checked.add(route.id);
-          const observe =
-            phase === 'prebind' || first
-              ? (consumerSignal?: AbortSignal) =>
-                  sharedRead(
-                    host,
-                    'host',
-                    async (sharedSignal) => {
-                      const value = immutableObservation(
-                        await options.observer.observe(sharedSignal),
-                      );
-                      immutableHosts.add(value);
-                      return value;
-                    },
-                    consumerSignal,
-                    phase === 'initial',
-                  )
-              : undefined;
-          return validate(route, ownedBindings, batch, observe, signal);
-        },
-      };
-    },
+    createValidationBatch,
+    prepareRenewal,
     validateBackend,
     async probeLeasedBackend(routeValue, signal) {
       signal?.throwIfAborted();

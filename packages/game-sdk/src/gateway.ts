@@ -433,7 +433,16 @@ export interface GatewayProtocolAdapter {
   probeIdle?(context: GatewayProtocolContext): Promise<{ idle: boolean; playerCount?: number }>;
 }
 
+/** Fresh speculative host evidence scoped to one control fetch/application. */
+export interface GatewaySafetyRenewal {
+  createValidationBatch(
+    routes?: readonly GatewayRoute[],
+    phase?: 'initial' | 'prebind',
+  ): Pick<GatewaySafety, 'validate'>;
+  close(): void;
+}
 export interface GatewaySafety {
+  prepareRenewal?(routes: readonly GatewayRoute[]): GatewaySafetyRenewal;
   /** One snapshot application may share provider reads across its routes. Each
    * validation still checks current context, host bindings and proof. Pre-bind
    * batches share only in-flight host observations: subsequent admissions reread

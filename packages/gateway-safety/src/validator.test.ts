@@ -415,6 +415,79 @@ describe('Gateway snapshot provider batches', () => {
     await safety.createValidationBatch?.().validate(f.route, []);
     expect(f.options.observer.observe).toHaveBeenCalledTimes(3);
   });
+  it('uses a speculative host epoch only for identical renewed routes and preserves its original age', async () => {
+    const f = fixture();
+    let clock = f.observation.observedAt;
+    f.options.now = () => clock;
+    const fresh = vi.fn(async () => structuredClone(f.observation));
+    Object.assign(f.options.observer, { observeFresh: fresh });
+    const safety = f.validator();
+    const renewal = safety.prepareRenewal?.([f.route]);
+    if (!renewal) throw new Error('Missing renewal');
+    try {
+      await vi.waitFor(() => expect(fresh).toHaveBeenCalledOnce());
+      await renewal.createValidationBatch([f.route]).validate(f.route, []);
+      expect(fresh).toHaveBeenCalledOnce();
+      expect(f.options.observer.observe).not.toHaveBeenCalled();
+      clock += 5001;
+      f.observation.observedAt = clock;
+      await expect(renewal.createValidationBatch([f.route]).validate(f.route, [])).rejects.toThrow(
+        'allocation_unavailable',
+      );
+      expect(fresh).toHaveBeenCalledOnce();
+    } finally {
+      renewal.close();
+    }
+    expect(() => renewal.createValidationBatch([f.route])).toThrow('allocation_unavailable');
+  });
+  it.each(['revision', 'new-route', 'prebind'] as const)(
+    'requires a distinct post-Control host epoch for %s while the speculative source is pending',
+    async (change) => {
+      const f = fixture();
+      const next = {
+        ...f.route,
+        id: change === 'new-route' ? ids.node : f.route.id,
+        revision: change === 'revision' ? 2 : f.route.revision,
+      };
+      const release = Promise.withResolvers<NetworkObservation>();
+      let speculativeSignal: AbortSignal | undefined;
+      const changedHost = structuredClone(f.observation);
+      changedHost.sockets.push({
+        ...next.public,
+        inode: 'post-core-collision',
+        processOwned: false,
+      });
+      const fresh = vi.fn(async (signal?: AbortSignal) => {
+        if (fresh.mock.calls.length === 1) {
+          speculativeSignal = signal;
+          return release.promise;
+        }
+        return changedHost;
+      });
+      // A normal coalesced read would incorrectly return the still-running old
+      // source. The admission must bypass it even before that source settles.
+      f.options.observer.observe = vi.fn(async () => release.promise);
+      Object.assign(f.options.observer, { observeFresh: fresh });
+      const renewal = f.validator().prepareRenewal?.([f.route]);
+      if (!renewal) throw new Error('Missing renewal');
+      try {
+        const batch = renewal.createValidationBatch(
+          [next],
+          change === 'prebind' ? 'prebind' : 'initial',
+        );
+        await expect(batch.validate(next, [])).rejects.toMatchObject({
+          reason: 'public_collision',
+        });
+        expect(fresh).toHaveBeenCalledTimes(2);
+        expect(f.options.observer.observe).not.toHaveBeenCalled();
+        expect(speculativeSignal?.aborted).toBe(true);
+        expect(f.options.saveProof).not.toHaveBeenCalled();
+      } finally {
+        renewal.close();
+        release.resolve(f.observation);
+      }
+    },
+  );
   it('reindexes reused standalone observations even when only their outer object is frozen', async () => {
     const f = fixture();
     Object.freeze(f.observation);
