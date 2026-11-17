@@ -37,6 +37,7 @@ export async function requireMinecraftGatewayProtocol(
   registration: { handlerId: string; gameVersion: string },
   env: Environment = {},
   _now = new Date(),
+  resolvedValues?: Awaited<ReturnType<typeof getSettings>>['values'],
 ): Promise<GatewayMinecraftProtocol | undefined> {
   const server = await db
     .selectFrom('managed_servers as server')
@@ -76,7 +77,7 @@ export async function requireMinecraftGatewayProtocol(
     throw unavailable();
   const declaration = minecraftGatewayDeclaration(choice.combination.profile);
   if (!choice.capabilities.gateway || !declaration) throw unavailable();
-  const { values } = await getSettings(db, env);
+  const values = resolvedValues ?? (await getSettings(db, env)).values;
   return gatewayMinecraftProtocolSchema.parse({
     ...(values.minecraftGatewayResponses ? { responses: values.minecraftGatewayResponses } : {}),
     release: choice.combination.release,

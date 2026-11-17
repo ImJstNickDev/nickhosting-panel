@@ -225,19 +225,22 @@ async function publicState(
   now: Date,
   env: Environment = {},
   policyInputs?: GatewayPolicyContext,
+  includeStartupEstimate = true,
 ): Promise<GatewayState> {
   const inputs = policyInputs ?? (await loadGatewayPolicyContext(db, server.id, env));
   const idleTimeout = await resolveIdleTimeout(db, server.id, state, env, inputs);
-  const samples = await db
-    .selectFrom('gateway_startup_samples')
-    .select('duration_ms')
-    .where('server_id', '=', server.id)
-    .where('fingerprint', '=', fingerprint(server, state))
-    .where('ready_at', '>=', new Date(now.getTime() - state.estimate_max_age_seconds * 1000))
-    .where('ready_at', '<=', now)
-    .orderBy('ready_at', 'desc')
-    .limit(10)
-    .execute();
+  const samples = includeStartupEstimate
+    ? await db
+        .selectFrom('gateway_startup_samples')
+        .select('duration_ms')
+        .where('server_id', '=', server.id)
+        .where('fingerprint', '=', fingerprint(server, state))
+        .where('ready_at', '>=', new Date(now.getTime() - state.estimate_max_age_seconds * 1000))
+        .where('ready_at', '<=', now)
+        .orderBy('ready_at', 'desc')
+        .limit(10)
+        .execute()
+    : [];
   const actual = effectiveState(server, state, now);
   return {
     serverId: server.id,
@@ -303,9 +306,21 @@ export async function getGatewaySnapshotState(
           { handlerId: state.protocol_id, gameVersion: state.game_version },
           options.env,
           now,
+          policyInputs.values,
         )
       : undefined;
-  return { state: await publicState(db, server, state, now, options.env, policyInputs), minecraft };
+  return {
+    state: await publicState(
+      db,
+      server,
+      state,
+      now,
+      options.env,
+      policyInputs,
+      effectiveState(server, state, now) === 'waking',
+    ),
+    minecraft,
+  };
 }
 
 export async function setGatewayPolicy(

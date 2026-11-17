@@ -64,6 +64,7 @@ describe('durable explicit Gateway route registry', () => {
     await setGatewayRoute(f.db, f.owner, input(), env);
     await setGatewayRoute(f.db, f.owner, { ...input(), transport: 'udp' }, env);
     let sampleReads = 0;
+    let stateReads = 0;
     const measured = f.db.withPlugin({
       transformQuery({ node }) {
         if (
@@ -71,6 +72,11 @@ describe('durable explicit Gateway route registry', () => {
           JSON.stringify(node).includes('gateway_startup_samples')
         )
           sampleReads++;
+        if (
+          node.kind === 'SelectQueryNode' &&
+          JSON.stringify(node.from).includes('gateway_server_states')
+        )
+          stateReads++;
         return node;
       },
       async transformResult({ result }) {
@@ -79,15 +85,26 @@ describe('durable explicit Gateway route registry', () => {
     });
     const first = await getGatewaySnapshot(measured, env);
     expect(first.routes).toHaveLength(2);
-    expect(sampleReads).toBe(1);
+    expect(stateReads).toBe(1);
+    expect(sampleReads).toBe(0);
     await f.db
       .updateTable('managed_servers')
       .set({ automatic_starts_paused: true })
       .where('id', '=', serverId)
       .execute();
     const second = await getGatewaySnapshot(measured, env);
-    expect(sampleReads).toBe(2);
+    expect(stateReads).toBe(2);
+    expect(sampleReads).toBe(0);
     expect(second.routes.every((route) => route.wakeEnabled === false)).toBe(true);
+    await getGatewayState(measured, serverId, { env });
+    expect(sampleReads).toBe(1);
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ state: 'waking', startup_deadline_at: new Date(Date.now() + 60000) })
+      .where('server_id', '=', serverId)
+      .execute();
+    await getGatewaySnapshot(measured, env);
+    expect(sampleReads).toBe(2);
   });
 
   it('keeps mutable Satisfactory protocol observations outside route authority', async () => {
