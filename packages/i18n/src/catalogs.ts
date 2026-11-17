@@ -39,6 +39,56 @@ export const en = {
   'games.minecraft.management.properties': 'Game settings',
   'games.minecraft.management.players': 'Players',
   'gateway.states.sleeping': 'Sleeping',
+  'gateway.satisfactory.sleepingSession': '{name} — Server sleeping; press Join to start',
+  'gateway.satisfactory.console.help': 'List commands or describe one command.',
+  'gateway.satisfactory.console.status': 'Show the current server state.',
+  'gateway.satisfactory.console.info': 'Show the server name and public connection address.',
+  'gateway.satisfactory.console.version':
+    'Show integration version and the last observed game build.',
+  'gateway.satisfactory.console.idle': 'Show the automatic sleep timeout and current conditions.',
+  'gateway.satisfactory.console.start': 'Wake the server, respecting panel restrictions.',
+  'gateway.satisfactory.console.stop':
+    'Save and force sleep, disconnecting players. Join can wake it again.',
+  'gateway.satisfactory.console.restart':
+    'Save and restart the running server, disconnecting players.',
+  'gateway.satisfactory.console.mods': 'Coming Soon :)',
+  'gateway.satisfactory.console.invalid':
+    'Unknown command or invalid arguments. Use nickhosting help.',
+  'gateway.satisfactory.console.nativeUnavailable':
+    'The backend is unavailable. Use Join or nickhosting start to wake a sleeping server.',
+  'gateway.satisfactory.console.state': 'State: {state}',
+  'gateway.satisfactory.console.stopping': 'Suspending the server',
+  'gateway.satisfactory.console.name': 'Server: {name}',
+  'gateway.satisfactory.console.address': 'Address: {address}',
+  'gateway.satisfactory.console.game': 'Game: Satisfactory',
+  'gateway.satisfactory.console.integrationVersion': 'Integration: {version}',
+  'gateway.satisfactory.console.observedBuild': 'Last observed game build (NetCL): {build}',
+  'gateway.satisfactory.console.unknown': 'Unavailable',
+  'gateway.satisfactory.console.timeout': 'Automatic sleep timeout: {seconds} seconds',
+  'gateway.satisfactory.console.idleDisabled': 'Automatic sleep is disabled.',
+  'gateway.satisfactory.console.idleConditions':
+    'Automatic sleep requires a world, no players, no client requests and no active operation.',
+  'gateway.satisfactory.console.idleActivity':
+    'This request counts as activity while online. Server Manager polling keeps the server awake.',
+  'gateway.satisfactory.console.players': 'Connected players: {count}',
+  'gateway.satisfactory.console.noWorld': 'No world is verified; automatic sleep is prevented.',
+  'gateway.satisfactory.console.world': 'A world is available.',
+  'gateway.satisfactory.console.operation': 'A server operation is in progress.',
+  'gateway.satisfactory.console.startAccepted':
+    'Start requested. Use nickhosting status to check progress.',
+  'gateway.satisfactory.console.starting': 'The server is already starting.',
+  'gateway.satisfactory.console.online': 'The server is already running.',
+  'gateway.satisfactory.console.sleeping': 'The server is already sleeping.',
+  'gateway.satisfactory.console.stopAccepted':
+    'Sleep requested. The world will be saved before shutdown; players will be disconnected. Join or nickhosting start can wake the server again.',
+  'gateway.satisfactory.console.restartAccepted':
+    'Restart requested. The world will be saved; players will be disconnected. Use nickhosting status to check progress.',
+  'gateway.satisfactory.console.restartSleeping': 'The server is sleeping. Use nickhosting start.',
+  'gateway.satisfactory.console.restricted':
+    'The panel currently prevents this action. Check the server state and settings in NickPanel.',
+  'gateway.satisfactory.console.saveUnavailable':
+    'Saving cannot be verified: the server API credential is not configured in NickPanel. No stop was requested.',
+  'gateway.satisfactory.console.busy': 'The server is busy or changing state. Try again shortly.',
   'gateway.states.waking': 'Starting the game',
   'gateway.states.online': 'Ready to play',
   'gateway.states.blocked': 'Unavailable',
@@ -49,6 +99,8 @@ export const en = {
   'servers.operation.owner_resolution': 'The Owner resolved an uncertain operation.',
   'servers.operation.effect_prepared': 'Operation prepared.',
   'servers.operation.stop_confirmed': 'Server stop confirmed.',
+  'servers.operation.stop_maintenance_skipped':
+    'Server stopped. Save maintenance will be retried after a later stop.',
   'servers.operation.kill_unconfirmed':
     'Force stop could not be confirmed. Check the operation details.',
   'servers.operation.install_confirmed': 'Installation completion confirmed.',
@@ -81,6 +133,15 @@ export const en = {
   'errors.configuration_invalid': 'Check the instance settings.',
   'errors.secret_invalid': 'A protected credential could not be read.',
   'errors.integration_unavailable': 'This integration is unavailable.',
+  'errors.game_authentication_failed':
+    'The game rejected these credentials. Check the password or reconnect its API in Settings.',
+  'errors.game_not_ready':
+    'The game is not ready yet. Wait for startup or world loading to finish, then retry.',
+  'errors.game_setup_conflict':
+    'This server is already configured. Connect it using its existing administrator credentials.',
+  'errors.game_request_unsupported': 'The game does not support this action.',
+  'errors.game_save_failed':
+    'The game could not save the world. Check the server log and available storage before retrying.',
   'errors.resources_unavailable': 'There is not enough available capacity to start this server.',
   'errors.storage_exhausted': 'There is not enough available storage.',
   'errors.content_storage_unavailable':
@@ -180,6 +241,58 @@ export const it: Record<MessageKey, string> = {
   'games.minecraft.management.properties': 'Impostazioni del gioco',
   'games.minecraft.management.players': 'Giocatori',
   'gateway.states.sleeping': 'In sospensione',
+  'gateway.satisfactory.sleepingSession': '{name} — Server in sospensione; premi Join per avviarlo',
+  'gateway.satisfactory.console.help': 'Elenca i comandi o descrive un comando.',
+  'gateway.satisfactory.console.status': 'Mostra lo stato attuale del server.',
+  'gateway.satisfactory.console.info': 'Mostra nome e indirizzo pubblico del server.',
+  'gateway.satisfactory.console.version':
+    'Mostra la versione dell’integrazione e l’ultima build del gioco osservata.',
+  'gateway.satisfactory.console.idle': 'Mostra timeout e condizioni della sospensione automatica.',
+  'gateway.satisfactory.console.start': 'Risveglia il server rispettando i vincoli del pannello.',
+  'gateway.satisfactory.console.stop':
+    'Salva e forza la sospensione, disconnettendo i giocatori. Join può risvegliarlo.',
+  'gateway.satisfactory.console.restart':
+    'Salva e riavvia il server acceso, disconnettendo i giocatori.',
+  'gateway.satisfactory.console.mods': 'Coming Soon :)',
+  'gateway.satisfactory.console.invalid':
+    'Comando sconosciuto o argomenti non validi. Usa nickhosting help.',
+  'gateway.satisfactory.console.nativeUnavailable':
+    'Il backend non è disponibile. Usa Join o nickhosting start per risvegliare un server sospeso.',
+  'gateway.satisfactory.console.state': 'Stato: {state}',
+  'gateway.satisfactory.console.stopping': 'Sospensione del server in corso',
+  'gateway.satisfactory.console.name': 'Server: {name}',
+  'gateway.satisfactory.console.address': 'Indirizzo: {address}',
+  'gateway.satisfactory.console.game': 'Gioco: Satisfactory',
+  'gateway.satisfactory.console.integrationVersion': 'Integrazione: {version}',
+  'gateway.satisfactory.console.observedBuild': 'Ultima build del gioco osservata (NetCL): {build}',
+  'gateway.satisfactory.console.unknown': 'Non disponibile',
+  'gateway.satisfactory.console.timeout': 'Timeout di sospensione automatica: {seconds} secondi',
+  'gateway.satisfactory.console.idleDisabled': 'La sospensione automatica è disabilitata.',
+  'gateway.satisfactory.console.idleConditions':
+    'La sospensione automatica richiede un mondo, nessun giocatore, nessuna richiesta client e nessuna operazione attiva.',
+  'gateway.satisfactory.console.idleActivity':
+    'Questa richiesta conta come attività a server acceso. Il polling del Server Manager mantiene il server acceso.',
+  'gateway.satisfactory.console.players': 'Giocatori connessi: {count}',
+  'gateway.satisfactory.console.noWorld':
+    'Nessun mondo verificato: la sospensione automatica è impedita.',
+  'gateway.satisfactory.console.world': 'Un mondo è disponibile.',
+  'gateway.satisfactory.console.operation': 'È in corso un’operazione sul server.',
+  'gateway.satisfactory.console.startAccepted':
+    'Avvio richiesto. Usa nickhosting status per verificarne lo stato.',
+  'gateway.satisfactory.console.starting': 'Il server è già in avvio.',
+  'gateway.satisfactory.console.online': 'Il server è già acceso.',
+  'gateway.satisfactory.console.sleeping': 'Il server è già sospeso.',
+  'gateway.satisfactory.console.stopAccepted':
+    'Sospensione richiesta. Il mondo verrà salvato prima dell’arresto; i giocatori saranno disconnessi. Join o nickhosting start potranno risvegliare il server.',
+  'gateway.satisfactory.console.restartAccepted':
+    'Riavvio richiesto. Il mondo verrà salvato; i giocatori saranno disconnessi. Usa nickhosting status per verificarne lo stato.',
+  'gateway.satisfactory.console.restartSleeping': 'Il server è sospeso. Usa nickhosting start.',
+  'gateway.satisfactory.console.restricted':
+    'Il pannello impedisce questa azione. Controlla stato e impostazioni del server in NickPanel.',
+  'gateway.satisfactory.console.saveUnavailable':
+    'Impossibile verificare il salvataggio: la credenziale API del server non è configurata in NickPanel. Nessun arresto richiesto.',
+  'gateway.satisfactory.console.busy':
+    'Il server è occupato o sta cambiando stato. Riprova tra poco.',
   'gateway.states.waking': 'Avvio del gioco',
   'gateway.states.online': 'Pronto per giocare',
   'gateway.states.blocked': 'Non disponibile',
@@ -190,6 +303,8 @@ export const it: Record<MessageKey, string> = {
   'servers.operation.owner_resolution': 'Il Proprietario ha risolto un’operazione incerta.',
   'servers.operation.effect_prepared': 'Operazione preparata.',
   'servers.operation.stop_confirmed': 'Arresto del server confermato.',
+  'servers.operation.stop_maintenance_skipped':
+    'Server arrestato. La manutenzione dei salvataggi verrà riprovata dopo un arresto successivo.',
   'servers.operation.kill_unconfirmed':
     'Impossibile confermare l’arresto forzato. Controlla i dettagli dell’operazione.',
   'servers.operation.install_confirmed': 'Completamento dell’installazione confermato.',
@@ -222,6 +337,15 @@ export const it: Record<MessageKey, string> = {
   'errors.configuration_invalid': "Controlla le impostazioni dell'istanza.",
   'errors.secret_invalid': 'Impossibile leggere una credenziale protetta.',
   'errors.integration_unavailable': 'Questa integrazione non è disponibile.',
+  'errors.game_authentication_failed':
+    'Il gioco ha rifiutato le credenziali. Controlla la password o ricollega la sua API nelle Impostazioni.',
+  'errors.game_not_ready':
+    'Il gioco non è ancora pronto. Attendi la fine dell’avvio o del caricamento del mondo, poi riprova.',
+  'errors.game_setup_conflict':
+    'Questo server è già configurato. Collegalo usando le credenziali amministratore esistenti.',
+  'errors.game_request_unsupported': 'Il gioco non supporta questa azione.',
+  'errors.game_save_failed':
+    'Il gioco non è riuscito a salvare il mondo. Controlla il log del server e lo spazio disponibile prima di riprovare.',
   'errors.resources_unavailable':
     'La capacità disponibile non è sufficiente per avviare questo server.',
   'errors.storage_exhausted': 'Lo spazio di archiviazione disponibile non è sufficiente.',

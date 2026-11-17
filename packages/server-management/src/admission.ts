@@ -193,6 +193,106 @@ function assertPhysicalCommitmentLimit(
     throw new DomainError('resources_unavailable');
 }
 
+/** Only the actual administrator who submitted this operation can waive
+ * compute admission. Automated work may run under an Owner identity, so it must
+ * remain subject to capacity checks. Provider-effect authorization is separate. */
+async function ownerRequestedCapacityOverride(
+  tx: DB,
+  server: { id: string; owner_id: string },
+  jobId: string,
+) {
+  const request = await tx
+    .selectFrom('operation_jobs as job')
+    .innerJoin('server_operations as operation', 'operation.job_id', 'job.id')
+    .innerJoin('user as actor', 'actor.id', 'job.actor_id')
+    .select([
+      'job.actor_id',
+      'job.subject_id',
+      'job.support_session_id',
+      'job.policy_snapshot',
+      'operation.plan',
+    ])
+    .where('job.id', '=', jobId)
+    .where('operation.server_id', '=', server.id)
+    .where('job.resource_owner_id', '=', server.owner_id)
+    .where('job.state', 'in', ['queued', 'running'])
+    .where('actor.role', '=', 'owner')
+    .executeTakeFirst();
+  return request?.policy_snapshot.role === 'owner' &&
+    request.plan.requestSource !== 'automation' &&
+    request.plan.gatewayAutomation === undefined &&
+    request.plan.gatewayConsole === undefined &&
+    request.plan.scheduleAutomation === undefined
+    ? request
+    : undefined;
+}
+
+function checkComputeCapacity(
+  ownerOverride: Awaited<ReturnType<typeof ownerRequestedCapacityOverride>>,
+  waived: string[],
+  check: string,
+  assertion: () => void,
+) {
+  try {
+    assertion();
+  } catch (error) {
+    if (!ownerOverride || !(error instanceof DomainError) || error.code !== 'resources_unavailable')
+      throw error;
+    waived.push(check);
+  }
+}
+
+/** The worker rechecks this durable attribution at its final effect handoff.
+ * Keep it outside operation.plan, which lifecycle owns and may rewrite. */
+async function recordCapacityOverride(
+  tx: DB,
+  server: { id: string; owner_id: string },
+  jobId: string,
+  request: Awaited<ReturnType<typeof ownerRequestedCapacityOverride>>,
+  waived: string[],
+) {
+  if (!request || waived.length === 0) return;
+  const marker = {
+    actorId: request.actor_id,
+    resourceOwnerId: server.owner_id,
+    checks: [...waived],
+  };
+  const previous = request.policy_snapshot.capacityOverride;
+  if (
+    previous &&
+    typeof previous === 'object' &&
+    'actorId' in previous &&
+    previous.actorId === marker.actorId &&
+    'resourceOwnerId' in previous &&
+    previous.resourceOwnerId === marker.resourceOwnerId
+  ) {
+    const previousChecks =
+      'checks' in previous && Array.isArray(previous.checks)
+        ? previous.checks.filter((check): check is string => typeof check === 'string')
+        : [];
+    if (waived.every((check) => previousChecks.includes(check))) return;
+    marker.checks = [...new Set([...previousChecks, ...waived])];
+  }
+  await tx
+    .updateTable('operation_jobs')
+    .set({
+      policy_snapshot: sql`jsonb_set(policy_snapshot, '{capacityOverride}', ${JSON.stringify(marker)}::jsonb)`,
+    })
+    .where('id', '=', jobId)
+    .execute();
+  await tx
+    .insertInto('audit_events')
+    .values({
+      id: randomUUID(),
+      actor_user_id: request.actor_id,
+      subject_user_id: request.subject_id,
+      correlation_id: request.support_session_id ?? jobId,
+      action: 'server.capacity.overridden',
+      metadata: { serverId: server.id, jobId, resourceOwnerId: server.owner_id, checks: waived },
+    })
+    .execute();
+}
+
 /** Installation is physical host work, independent of the user's active game quota. */
 export async function reserveInstallationInTransaction(
   tx: Transaction<Database>,
@@ -243,7 +343,16 @@ export async function reserveInstallationInTransaction(
   const reserved = await reservedPhysicalCompute(tx, node.physical_host_id, env, {
     installationServerId: serverId,
   });
-  assertPhysicalCompute(observed, reserved.memoryMiB + memoryMiB, reserved.cpuPercent + cpuPercent);
+  const ownerOverride = await ownerRequestedCapacityOverride(tx, server, jobId);
+  const waived: string[] = [];
+  checkComputeCapacity(ownerOverride, waived, 'physical_compute', () =>
+    assertPhysicalCompute(
+      observed,
+      reserved.memoryMiB + memoryMiB,
+      reserved.cpuPercent + cpuPercent,
+    ),
+  );
+  await recordCapacityOverride(tx, server, jobId, ownerOverride, waived);
   await tx
     .insertInto('installation_reservations')
     .values({
@@ -325,20 +434,26 @@ export async function reserveStartInTransaction(
   const mine = reservations.filter(
     (r) => r.owner_id === server.owner_id && r.server_id !== serverId,
   );
-  if (
-    mine.reduce((sum, r) => sum + r.memory_mib, 0) + memoryMiB > userMemory ||
-    mine.reduce((sum, r) => sum + r.cpu_percent, 0) + cpuPercent > userCpu
-  )
-    throw new DomainError('resources_unavailable');
+  const ownerOverride = await ownerRequestedCapacityOverride(tx, server, jobId);
+  const waived: string[] = [];
+  checkComputeCapacity(ownerOverride, waived, 'user_compute', () => {
+    if (
+      mine.reduce((sum, r) => sum + r.memory_mib, 0) + memoryMiB > userMemory ||
+      mine.reduce((sum, r) => sum + r.cpu_percent, 0) + cpuPercent > userCpu
+    )
+      throw new DomainError('resources_unavailable');
+  });
   const reserved = await reservedPhysicalCompute(tx, host.id, env, { gameServerId: serverId });
   const physicalMemory = Math.max(
     current?.physical_memory_mib ?? 0,
     physicalMemoryMiB(memoryMiB, effectiveNodeOverhead(node, env)),
   );
-  assertPhysicalCommitmentLimit(
-    observed,
-    reserved.memoryMiB + physicalMemory,
-    reserved.cpuPercent + cpuPercent,
+  checkComputeCapacity(ownerOverride, waived, 'physical_commitment', () =>
+    assertPhysicalCommitmentLimit(
+      observed,
+      reserved.memoryMiB + physicalMemory,
+      reserved.cpuPercent + cpuPercent,
+    ),
   );
   if (current) {
     const memoryGrowth = physicalMemory - current.physical_memory_mib;
@@ -352,22 +467,29 @@ export async function reserveStartInTransaction(
     // charge the full proposed row rather than repeatedly spending one sample.
     const sampledAfterCommitment =
       current.updated_at.getTime() < new Date(observed.snapshot.observedAt).getTime();
-    assertPhysicalCompute(
-      observed,
-      memoryGrowth === 0
-        ? 0
-        : reserved.memoryMiB + (sampledAfterCommitment ? memoryGrowth : physicalMemory),
-      cpuGrowth === 0 ? 0 : reserved.cpuPercent + (sampledAfterCommitment ? cpuGrowth : cpuPercent),
+    checkComputeCapacity(ownerOverride, waived, 'physical_compute', () =>
+      assertPhysicalCompute(
+        observed,
+        memoryGrowth === 0
+          ? 0
+          : reserved.memoryMiB + (sampledAfterCommitment ? memoryGrowth : physicalMemory),
+        cpuGrowth === 0
+          ? 0
+          : reserved.cpuPercent + (sampledAfterCommitment ? cpuGrowth : cpuPercent),
+      ),
     );
   } else {
     // A new start still reserves its full maximum in addition to all existing
     // commitments and measured host usage, without crediting cached telemetry.
-    assertPhysicalCompute(
-      observed,
-      reserved.memoryMiB + physicalMemory,
-      reserved.cpuPercent + cpuPercent,
+    checkComputeCapacity(ownerOverride, waived, 'physical_compute', () =>
+      assertPhysicalCompute(
+        observed,
+        reserved.memoryMiB + physicalMemory,
+        reserved.cpuPercent + cpuPercent,
+      ),
     );
   }
+  await recordCapacityOverride(tx, server, jobId, ownerOverride, waived);
   await tx
     .insertInto('resource_reservations')
     .values({

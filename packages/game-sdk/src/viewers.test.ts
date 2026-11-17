@@ -29,7 +29,7 @@ describe('compiled first-party file viewers', () => {
         id: 'fixture-game:archive-info',
         gameId: 'fixture-game',
         labelKey: 'games.fixture-game.viewers.archive',
-        extensions: ['jar', 'jar.disabled'],
+        extensions: ['jar', 'jar.disabled', 'runtime-xml'],
         readOnly: true,
       },
       async () => ({}),
@@ -40,6 +40,11 @@ describe('compiled first-party file viewers', () => {
     expect(module.matches?.({ path: 'test.jar', name: 'test.jar', size: 10 })).toBe(false);
     // An explicit selection remains possible outside the suggestion path.
     expect(registry.forFile('fixture-game', 'jar')).toEqual([module]);
+    expect(registry.forFile('fixture-game', 'runtime-xml')).toEqual([module]);
+    for (const extension of ['../xml', '-xml', 'xml-', 'xml--xml', 'xml/xml'])
+      expect(() =>
+        defineTrustedGameViewer({ ...module.descriptor, extensions: [extension] }, module.load),
+      ).toThrow();
     expect(() =>
       defineTrustedGameViewer(module.descriptor as never, module.load, 'mods/*' as never),
     ).toThrow();

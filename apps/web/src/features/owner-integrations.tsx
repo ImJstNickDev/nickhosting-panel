@@ -222,9 +222,7 @@ function IntegrationWorkspace({ module, section }: { module: Module; section: st
           .filter((item) => visited.includes(item.id) || item.id === section)
           .map((item) => (
             <div key={item.id} hidden={item.id !== section}>
-              <Suspense fallback={<Loading />}>
-                <item.Background />
-              </Suspense>
+              <Suspense fallback={<Loading />}>{item.Background && <item.Background />}</Suspense>
             </div>
           ))}
       </div>

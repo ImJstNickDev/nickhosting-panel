@@ -12,6 +12,8 @@ import { viewerArchivePath } from './viewer-archive.js';
 import { archiveChain, selectArchiveEntries, ViewerArchiveTree } from './viewer-archive-tree.js';
 import { ViewerFormatError, ViewerSessionCache } from './viewer-cache.js';
 import { viewerBody, viewerHeaders, viewerRange } from './viewer-http.js';
+import { registerLogViewerRoutes } from './viewer-log-routes.js';
+import type { ViewerLogSessions } from './viewer-log-sessions.js';
 import type { FileViewerService } from './viewer-service.js';
 import { openSqliteViewer, type ViewerSqliteSession } from './viewer-sqlite.js';
 import type { SubtitleViewerSession } from './viewer-subtitles.js';
@@ -48,8 +50,11 @@ const formatMessages: Record<string, string> = {
   viewer_sqlite_cell: 'viewer.sqliteCellUnavailable',
   viewer_subtitles_unavailable: 'viewer.videoSubtitleFailed',
 };
+const logSessions = new WeakMap<object, ViewerLogSessions>();
 const services = new WeakMap<object, Promise<FileViewerService>>();
 export async function closeFileViewers(db: object) {
+  await logSessions.get(db)?.close();
+  logSessions.delete(db);
   const pending = services.get(db);
   services.delete(db);
   if (pending) await (await pending).close();
@@ -92,6 +97,7 @@ export function registerFileViewerRoutes(
     }
     return pending;
   };
+  logSessions.set(db, registerLogViewerRoutes(app, options, viewer));
   const archives = new ViewerSessionCache<Retained<ViewerArchiveTree>>();
   const databases = new ViewerSessionCache<Retained<ViewerSqliteSession>>({ maximum: 4 });
   const subtitles = new ViewerSessionCache<Retained<SubtitleViewerSession>>({ maximum: 8 });

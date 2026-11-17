@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   actionAvailability,
   availableGameUiSections,
+  canManageGameUiSection,
   createTrustedGameUiRegistry,
   defineTrustedGameUiModule,
   gameUiDescriptorSchema,
@@ -12,6 +13,30 @@ import {
   validateUiValues,
   visibleFields,
 } from './ui.js';
+
+it('distinguishes explicit renderer write authority from generic reads and existing granular permissions', () => {
+  expect(
+    canManageGameUiSection({ requiredPermissions: ['server:read'] }, [
+      'server:read',
+      'server:manage',
+    ]),
+  ).toBe(false);
+  const explicit = {
+    requiredPermissions: ['server:read'],
+    managePermissions: ['server:manage', 'files.write'],
+  };
+  expect(canManageGameUiSection(explicit, ['server:read', 'server:manage'])).toBe(false);
+  expect(canManageGameUiSection(explicit, ['server:read', 'server:manage', 'files.write'])).toBe(
+    true,
+  );
+  const granular = { requiredPermissions: ['game.minecraft.mods.read'] };
+  expect(
+    canManageGameUiSection(granular, ['game.minecraft.mods.read', 'game.minecraft.mods.write']),
+  ).toBe(true);
+  expect(
+    canManageGameUiSection(granular, ['game.minecraft.mods.read', 'game.minecraft.mods.download']),
+  ).toBe(false);
+});
 
 it('accepts bounded presentation keys and explicit patch forms without executable URLs', () => {
   const form = { id: 'settings', titleKey: 'games.fixture-arena.settings', fields: [] };

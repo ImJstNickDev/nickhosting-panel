@@ -4,6 +4,7 @@ import { connect, createServer, isIP, type Server, type Socket } from 'node:net'
 import { isDeepStrictEqual } from 'node:util';
 import { DomainError } from '@nickhosting/core';
 import {
+  type GatewayConsoleCommandResponse,
   type GatewayControl,
   type GatewayEndpoint,
   type GatewayMode,
@@ -12,6 +13,7 @@ import {
   type GatewayResponseMode,
   type GatewayRoute,
   type GatewaySafety,
+  type GatewaySafetyRenewal,
   type GatewaySnapshot,
   gatewaySnapshotSchema,
 } from '@nickhosting/game-sdk';
@@ -65,6 +67,7 @@ export interface GatewayDataPlaneOptions {
 }
 
 interface UdpSession {
+  lastGameplayAt?: number;
   socket: DatagramSocket;
   lastActivity: number;
   connecting: boolean;
@@ -72,6 +75,7 @@ interface UdpSession {
   queuedBytes: number;
 }
 interface Listener {
+  tlsIdentity?: Promise<import('@nickhosting/game-sdk').GatewayTlsIdentity>;
   route: GatewayRoute;
   backendReady: boolean;
   statusOnly?: boolean;
@@ -81,7 +85,10 @@ interface Listener {
   udp?: DatagramSocket;
   clients: Set<Socket>;
   forwardingClients: Set<Socket>;
+  managedClients: Set<Socket>;
+  passiveClients: Set<Socket>;
   sessions: Map<string, UdpSession>;
+  clientActivity: { version: number; reportedVersion: number };
 }
 
 /** One process owns the hot route cache. There is no Core, SQL or Redis call in
@@ -95,6 +102,16 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     throw new DomainError('configuration_invalid');
   const now = options.now ?? Date.now;
   const listeners = new Map<string, Listener>();
+  const consoleReplies = new WeakMap<
+    Socket,
+    {
+      deadline: number;
+      draining: boolean;
+      sourceGeneration: string;
+      targetGeneration?: string;
+      transition?: GatewayConsoleCommandResponse['transition'];
+    }
+  >();
   const protocols = new Map(options.protocols.map((adapter) => [adapter.id, adapter]));
   const wakeRequests = new Map<
     string,
@@ -125,6 +142,9 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     lastObservationProbeDurationMs: 0,
     lastObservationReportDurationMs: 0,
     lastSnapshotDurationMs: 0,
+    lastSnapshotFetchDurationMs: 0,
+    lastSnapshotApplyDurationMs: 0,
+    snapshotCycles: 0,
     snapshotErrors: 0,
     leaseExpirations: 0,
   };
@@ -132,6 +152,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   // Only a successfully applied snapshot can exempt an intentionally withheld
   // route from listener readiness. Failed candidates never change this count.
   let withheldRoutes = 0;
+  let committedWithheldServers = new Set<string>();
   // Authenticated candidates may be probed before they are safe to bind. This
   // breaks first-start readiness bootstrap without granting forwarding rights.
   let candidateSnapshot: GatewaySnapshot | undefined;
@@ -167,6 +188,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     { deadline: number; observedAt: number; generation: string; routes: GatewayRoute[] }
   >();
   const loggedRouteStates = new Map<string, string>();
+  const apiDiagnosticTimes = new Map<string, number>();
   const logTiming = (event: string, data: Readonly<Record<string, unknown>>) => {
     try {
       options.logger?.log('info', event, data);
@@ -181,6 +203,21 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     routeRevision: route.revision,
     wakeJobId: route.wakeJobId,
   });
+  const rejectionReason = (error: unknown) =>
+    error instanceof GatewayProviderRateLimitedError
+      ? 'provider_rate_limited'
+      : error instanceof GatewayRouteRevisionStaleError
+        ? 'route_revision_stale'
+        : error instanceof GatewaySafetyError
+          ? error.reason
+          : error instanceof NetworkObservationError
+            ? `observer_${error.reason}`
+            : error instanceof DomainError &&
+                ['validation_timeout', 'lease_expired'].includes(
+                  String(error.details?.gatewaySafetyReason),
+                )
+              ? String(error.details?.gatewaySafetyReason)
+              : 'control_unavailable';
   const bounded = async <T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> => {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -189,18 +226,18 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         operation(controller.signal),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
-            controller.abort();
-            reject(
-              new DomainError('integration_unavailable', 503, {
-                gatewaySafetyReason: 'validation_timeout',
-              }),
-            );
+            const error = new DomainError('integration_unavailable', 503, {
+              gatewaySafetyReason: 'validation_timeout',
+            });
+            controller.abort(error);
+            reject(error);
           }, policy.probeTimeoutMs);
           timer.unref();
         }),
       ]);
     } finally {
       if (timer) clearTimeout(timer);
+      controller.abort();
     }
   };
   const clientsCount = () =>
@@ -217,6 +254,58 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       return undefined;
     }
   };
+  const recordClientActivity = (listener: Listener) => {
+    if (
+      active(listener) &&
+      listener.route.mode === 'online' &&
+      listener.backendReady &&
+      !listener.statusOnly &&
+      !quiescence.has(listener.route.serverId) &&
+      protocol(listener.route)?.clientRequestsPreventIdle
+    )
+      listener.clientActivity.version++;
+  };
+  const validationPriority = (route: GatewayRoute) => {
+    const priority = protocol(route)?.validationPriority?.(route) ?? 0;
+    if (!Number.isInteger(priority) || Math.abs(priority) > 1000)
+      throw new DomainError('configuration_invalid');
+    return priority;
+  };
+  const observationContext = (route: GatewayRoute, signal: AbortSignal) => ({
+    route,
+    signal,
+    loadState: options.control.loadProtocolState
+      ? async () => {
+          if (signal.aborted) throw new DomainError('integration_unavailable');
+          const state = await options.control.loadProtocolState?.({
+            routeId: route.id,
+            routeRevision: route.revision,
+          });
+          if (signal.aborted) throw new DomainError('integration_unavailable');
+          return state;
+        }
+      : undefined,
+    observeApplication: options.control.observeApplication
+      ? async () => {
+          if (signal.aborted) throw new DomainError('integration_unavailable');
+          const observed = await options.control.observeApplication?.({
+            routeId: route.id,
+            routeRevision: route.revision,
+          });
+          if (signal.aborted || !observed) throw new DomainError('integration_unavailable');
+          return observed;
+        }
+      : undefined,
+    persistState: options.control.reportProtocolState
+      ? async (state: import('@nickhosting/game-sdk').GatewaySatisfactoryState) => {
+          await options.control.reportProtocolState?.({
+            routeId: route.id,
+            routeRevision: route.revision,
+            state,
+          });
+        }
+      : undefined,
+  });
   const dropSession = (listener: Listener, key: string) => {
     const session = listener.sessions.get(key);
     if (!session) return;
@@ -227,8 +316,26 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       /* A connecting or failed socket may already be closed. */
     }
   };
-  const clearSessions = (listener: Listener) => {
-    for (const client of listener.clients) client.destroy();
+  const clearBackendSessions = (listener: Listener) => {
+    for (const client of listener.forwardingClients) client.destroy();
+    for (const key of listener.sessions.keys()) dropSession(listener, key);
+  };
+  const clearSessions = (listener: Listener, commandTransition?: GatewayRoute) => {
+    listener.tlsIdentity = undefined;
+    listener.clientActivity = { version: 0, reportedVersion: 0 };
+    for (const client of listener.clients) {
+      const reply = consoleReplies.get(client);
+      if (
+        commandTransition &&
+        reply &&
+        reply.deadline > now() &&
+        !listener.forwardingClients.has(client) &&
+        (!reply.transition || reply.transition.generation === commandTransition.generation)
+      ) {
+        reply.draining = true;
+        reply.targetGeneration = commandTransition.generation;
+      } else client.destroy();
+    }
     for (const key of listener.sessions.keys()) dropSession(listener, key);
   };
   const closeListener = (listener: Listener, force = true): Promise<void> => {
@@ -246,10 +353,10 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       listener.tcp.close(() => resolve());
     });
   };
-  const response = (route: GatewayRoute, mode: GatewayResponseMode) => {
+  const response = (route: GatewayRoute, mode: GatewayResponseMode, input?: Uint8Array) => {
     try {
       const bytes = protocol(route)?.response(
-        { route, signal: AbortSignal.timeout(policy.classificationTimeoutMs) },
+        { route, input, signal: AbortSignal.timeout(policy.classificationTimeoutMs) },
         mode,
       );
       return bytes && bytes.byteLength <= policy.maxProtocolResponseBytes ? bytes : undefined;
@@ -373,12 +480,22 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         signal: AbortSignal.timeout(policy.classificationTimeoutMs),
       });
       if (intent.kind === 'need-more') return { pending: true };
-      if (intent.kind === 'status') return { bytes: response(route, responseMode(listener)) };
+      if (intent.kind === 'status') {
+        if (handler.prepareResponse)
+          await bounded(
+            (signal) =>
+              handler.prepareResponse?.({ ...observationContext(route, signal), input }) ??
+              Promise.resolve(),
+          );
+        return active(listener) && listener.route === route
+          ? { bytes: response(route, responseMode(listener), input) }
+          : {};
+      }
       if (intent.kind !== 'join') return {};
       const mode =
         route.mode === 'sleeping' || route.mode === 'blocked' ? await wake(route) : route.mode;
       return active(listener) && listener.route === route
-        ? { bytes: response(route, responseMode(listener, mode)) }
+        ? { bytes: response(route, responseMode(listener, mode), input) }
         : {};
     } catch {
       return {};
@@ -396,9 +513,229 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     socket.once('close', () => {
       listener.clients.delete(socket);
       listener.forwardingClients.delete(socket);
+      listener.managedClients.delete(socket);
+      listener.passiveClients.delete(socket);
     });
     socket.setNoDelay(true);
     socket.setTimeout(policy.tcpIdleTimeoutMs, () => socket.destroy());
+    const managedHandler = protocol(listener.route);
+    if (managedHandler?.acceptTcp && (managedHandler.handlesTcp?.(listener.route) ?? true)) {
+      // Every frontend remains lease-owned. Opted-in managed protocols reserve
+      // actual upstreams separately, allowing unforwarded wake requests to wait.
+      listener.managedClients.add(socket);
+      if (!managedHandler.managesTcpForwarding) listener.forwardingClients.add(socket);
+      let upstreams = 0;
+      if (managedHandler.managesTcpActivity) listener.passiveClients.add(socket);
+      let activities = 0;
+      const controller = new AbortController();
+      socket.once('close', () => controller.abort());
+      const route = listener.route;
+      const valid = () =>
+        active(listener) &&
+        listener.route.generation === route.generation &&
+        !consoleReplies.get(socket)?.draining;
+      void managedHandler
+        .acceptTcp(socket, {
+          route,
+          signal: controller.signal,
+          backendWaitTimeoutMs: policy.tcpIdleTimeoutMs,
+          onApiDiagnostic: (event) => {
+            if (!valid()) return;
+            const mode = responseMode(listener);
+            const key = `${route.id}:${mode}:${event.operation}:${event.outcome}`;
+            const now = Date.now();
+            if (now - (apiDiagnosticTimes.get(key) ?? 0) < 30_000) return;
+            if (apiDiagnosticTimes.size >= 10_000) {
+              const first = apiDiagnosticTimes.keys().next().value;
+              if (first) apiDiagnosticTimes.delete(first);
+            }
+            apiDiagnosticTimes.set(key, now);
+            logTiming('gateway.api_response', {
+              routeId: route.id,
+              serverId: route.serverId,
+              mode,
+              operation: event.operation,
+              outcome: event.outcome,
+            });
+          },
+          beginForwarding: () => {
+            if (
+              !valid() ||
+              consoleReplies.has(socket) ||
+              socket.destroyed ||
+              !listener.clients.has(socket) ||
+              listener.statusOnly ||
+              !listener.backendReady ||
+              listener.route.mode !== 'online' ||
+              quiescence.has(route.serverId)
+            )
+              return undefined;
+            upstreams++;
+            listener.forwardingClients.add(socket);
+            let released = false;
+            return () => {
+              if (released) return;
+              released = true;
+              upstreams--;
+              if (upstreams === 0 && managedHandler.managesTcpForwarding)
+                listener.forwardingClients.delete(socket);
+            };
+          },
+          beginActivity: () => {
+            if (
+              !valid() ||
+              socket.destroyed ||
+              !listener.clients.has(socket) ||
+              listener.statusOnly ||
+              quiescence.has(route.serverId)
+            )
+              return undefined;
+            activities++;
+            recordClientActivity(listener);
+            listener.passiveClients.delete(socket);
+            let released = false;
+            return () => {
+              if (released) return;
+              released = true;
+              activities--;
+              if (valid()) recordClientActivity(listener);
+              if (
+                activities === 0 &&
+                managedHandler.managesTcpActivity &&
+                listener.clients.has(socket)
+              )
+                listener.passiveClients.add(socket);
+            };
+          },
+          mode: () => (valid() ? responseMode(listener) : 'blocked'),
+          canForward: () =>
+            valid() &&
+            !listener.statusOnly &&
+            listener.backendReady &&
+            listener.route.mode === 'online' &&
+            !quiescence.has(route.serverId),
+          requestWake: () => (valid() ? wake(listener.route) : Promise.resolve('blocked')),
+          consoleReplyOnly: () => consoleReplies.get(socket)?.draining ?? false,
+          beginConsoleReply: () => {
+            if (
+              !valid() ||
+              socket.destroyed ||
+              listener.statusOnly ||
+              !listener.clients.has(socket) ||
+              listener.forwardingClients.has(socket) ||
+              consoleReplies.has(socket) ||
+              quiescence.has(route.serverId)
+            )
+              return undefined;
+            const reply = {
+              deadline: now() + 10000,
+              draining: false,
+              sourceGeneration: route.generation,
+            };
+            consoleReplies.set(socket, reply);
+            const timer = setTimeout(() => socket.destroy(), 10000);
+            timer.unref();
+            let released = false;
+            const release = () => {
+              if (released) return;
+              released = true;
+              clearTimeout(timer);
+              socket.off('close', release);
+              consoleReplies.delete(socket);
+              if (reply.draining) socket.destroySoon();
+            };
+            socket.once('close', release);
+            return release;
+          },
+          requestConsoleCommand: options.control.requestConsoleCommand
+            ? async (request) => {
+                const reply = consoleReplies.get(socket);
+                if (!valid() || listener.statusOnly || !reply || quiescence.has(route.serverId))
+                  throw new DomainError('integration_unavailable');
+                const result = await options.control.requestConsoleCommand?.({
+                  routeId: listener.route.id,
+                  routeRevision: listener.route.revision,
+                  request,
+                });
+                if (
+                  !result ||
+                  !active(listener) ||
+                  socket.destroyed ||
+                  listener.statusOnly ||
+                  reply.deadline <= now() ||
+                  consoleReplies.get(socket) !== reply
+                )
+                  throw new DomainError('integration_unavailable');
+                const transition = result.transition;
+                if (transition && transition.previousGeneration !== reply.sourceGeneration)
+                  throw new DomainError('integration_unavailable');
+                if (
+                  reply.draining &&
+                  (!transition ||
+                    transition.generation !== reply.targetGeneration ||
+                    transition.generation !== listener.route.generation)
+                )
+                  throw new DomainError('integration_unavailable');
+                if (!reply.draining && !valid()) throw new DomainError('integration_unavailable');
+                reply.transition = transition;
+                return result;
+              }
+            : undefined,
+          requestOfflineApi: options.control.requestOfflineApi
+            ? async (request) => {
+                const allowed = () =>
+                  valid() &&
+                  responseMode(listener) === 'sleeping' &&
+                  listener.route.wakeEnabled !== false;
+                if (!allowed()) throw new DomainError('integration_unavailable');
+                const result = await options.control.requestOfflineApi?.({
+                  routeId: listener.route.id,
+                  routeRevision: listener.route.revision,
+                  request,
+                });
+                if (!allowed() || !result) throw new DomainError('integration_unavailable');
+                return result;
+              }
+            : undefined,
+          loadPrivateState: options.control.loadPrivateState
+            ? async () => {
+                if (!valid()) throw new DomainError('integration_unavailable');
+                return options.control.loadPrivateState?.({
+                  routeId: listener.route.id,
+                  routeRevision: listener.route.revision,
+                });
+              }
+            : undefined,
+          savePrivateState: options.control.savePrivateState
+            ? async (state) => {
+                if (!valid()) throw new DomainError('integration_unavailable');
+                await options.control.savePrivateState?.({
+                  routeId: listener.route.id,
+                  routeRevision: listener.route.revision,
+                  state,
+                });
+              }
+            : undefined,
+          tlsIdentity: async () => {
+            if (!valid() || !options.control.fetchTlsIdentity)
+              throw new DomainError('integration_unavailable');
+            listener.tlsIdentity ??= options.control
+              .fetchTlsIdentity({
+                routeId: listener.route.id,
+                routeRevision: listener.route.revision,
+              })
+              .catch((error) => {
+                listener.tlsIdentity = undefined;
+                throw error;
+              });
+            const identity = await listener.tlsIdentity;
+            if (!valid()) throw new DomainError('integration_unavailable');
+            return identity;
+          },
+        })
+        .catch(() => socket.destroy());
+      return;
+    }
     if (
       listener.backendReady &&
       listener.route.mode === 'online' &&
@@ -624,6 +961,18 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       counters.udpDropped++;
     }
   };
+  const isStatusDatagram = (
+    listener: Listener,
+    input: Uint8Array,
+    direction: 'client' | 'backend',
+  ) => {
+    if (input.byteLength > policy.maxClassificationBytes) return false;
+    try {
+      return protocol(listener.route)?.isStatusDatagram?.(input, direction) === true;
+    } catch {
+      return false;
+    }
+  };
   const receive = (listener: Listener, message: Buffer, remote: RemoteInfo) => {
     counters.udpReceived++;
     if (!active(listener)) {
@@ -666,7 +1015,14 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       socket.on('error', () => dropSession(listener, key));
       socket.on('message', (bytes: Buffer) => {
         if (!active(listener) || listener.sessions.get(key) !== current) return;
+        const status = isStatusDatagram(listener, bytes, 'backend');
+        if (!status && quiescence.has(listener.route.serverId)) {
+          counters.udpDropped++;
+          dropSession(listener, key);
+          return;
+        }
         current.lastActivity = now();
+        if (!status) current.lastGameplayAt = now();
         sendUdpResponse(listener, bytes, remote);
       });
       socket.connect(listener.route.backend.port, listener.route.backend.address, () => {
@@ -678,6 +1034,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       });
     }
     session.lastActivity = now();
+    if (!isStatusDatagram(listener, message, 'client')) session.lastGameplayAt = now();
     if (
       session.queuedBytes + session.socket.getSendQueueSize() + message.length >
       policy.maxUdpQueuedBytes
@@ -686,6 +1043,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       return;
     }
     counters.udpBytesToBackend += message.length;
+    recordClientActivity(listener);
     if (session.connecting) {
       session.queued.push(message);
       session.queuedBytes += message.length;
@@ -697,7 +1055,10 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       backendReady,
       clients: new Set(),
       forwardingClients: new Set(),
+      managedClients: new Set(),
+      passiveClients: new Set(),
       sessions: new Map(),
+      clientActivity: { version: 0, reportedVersion: 0 },
     };
     try {
       if (route.public.transport === 'tcp') {
@@ -762,7 +1123,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     if (expired.length) counters.leaseExpirations++;
     await Promise.all(expired.map((listener) => closeListener(listener)));
   };
-  const apply = async (input: unknown, fetchStartedAt: number) => {
+  const apply = async (input: unknown, fetchStartedAt: number, renewal?: GatewaySafetyRenewal) => {
     const applyStarted = performance.now();
     const parsed = gatewaySnapshotSchema.safeParse(input);
     if (!parsed.success || stopping) throw new DomainError('validation_failed');
@@ -818,27 +1179,103 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       }
       await Promise.all(rejected.map((listener) => closeListener(listener)));
     };
-    // Share only provider source reads for this snapshot. Each route and final
-    // bind still checks its own current authority, topology and reachability.
-    const validation = options.safety.createValidationBatch?.(next.routes) ?? options.safety;
+    // Share provider reads and timestamped initial host evidence for this snapshot.
+    // Every route retains its authority/age checks; final binds reread topology.
+    const validation =
+      renewal?.createValidationBatch(next.routes) ??
+      options.safety.createValidationBatch?.(next.routes) ??
+      options.safety;
+    // Independent servers share a bounded read-only validation pool. Roles of
+    // one server remain ordered: a failed role withholds its siblings, and a
+    // protocol probe may depend on the preceding game-port observation.
+    // The final binding pass uses a separate fresh evidence batch below.
+    type ValidationResult = { ok: true } | { ok: false; error: unknown };
+    const results = new Map<string, ValidationResult>();
+    const groups = new Map<string, GatewayRoute[]>();
+    for (const route of next.routes) {
+      const group = groups.get(route.serverId) ?? [];
+      group.push(route);
+      groups.set(route.serverId, group);
+    }
+    const pending = [...groups.values()];
+    for (const group of pending)
+      group.sort((a, b) => validationPriority(a) - validationPriority(b));
+    let nextGroup = 0;
+    let fatalValidation = false;
+    await Promise.all(
+      Array.from({ length: Math.min(4, pending.length) }, async () => {
+        while (!fatalValidation && !stopping) {
+          const group = pending[nextGroup++];
+          if (!group) return;
+          for (const route of group) {
+            if (fatalValidation || stopping) return;
+            // Reclassify previously withheld servers with the shared renewal
+            // evidence. Persistent absence must not trigger fresh admission
+            // scans on every poll. A recovered route still passes the separate
+            // fresh pre-bind gate; this classification never grants a listener.
+            const retained = listeners.get(route.id);
+            if (
+              !committedWithheldServers.has(route.serverId) &&
+              (!retained || !isDeepStrictEqual(retained.route.public, route.public))
+            )
+              continue;
+            try {
+              const verdict = await bounded((signal) => validation.validate(route, owned, signal));
+              readiness.set(route.id, verdict?.backendReady ?? true);
+              const current = listeners.get(route.id);
+              if (verdict?.backendReady === false && current?.backendReady) {
+                current.backendReady = false;
+                clearBackendSessions(current);
+                logRouteTransition(current, 'backend_not_ready');
+              }
+              results.set(route.id, { ok: true });
+            } catch (error) {
+              results.set(route.id, { ok: false, error });
+              if (
+                error instanceof GatewaySafetyError &&
+                error.reason === 'backend_active_binding'
+              ) {
+                await withholdServer(route.serverId);
+              } else {
+                // Existing authority retains only its original lease while
+                // already-issued reads settle. Withdraw the unsafe traffic now,
+                // before processing rollback decisions in snapshot order below.
+                fatalValidation = true;
+                controlAvailable = false;
+                if (
+                  error instanceof NetworkObservationError &&
+                  error.reason === 'container_churn'
+                ) {
+                  for (const current of listeners.values()) {
+                    current.backendReady = false;
+                    current.statusOnly = true;
+                    for (const client of current.forwardingClients) client.destroy();
+                    for (const key of current.sessions.keys()) dropSession(current, key);
+                  }
+                } else if (
+                  !(error instanceof GatewayProviderRateLimitedError) &&
+                  !(error instanceof GatewayRouteRevisionStaleError)
+                ) {
+                  const unsafe = listeners.get(route.id);
+                  if (unsafe) {
+                    logRouteTransition(unsafe, 'safety_rejected', false);
+                    listeners.delete(route.id);
+                    await closeListener(unsafe);
+                  }
+                }
+              }
+              break;
+            }
+          }
+        }
+      }),
+    );
     for (const route of next.routes) {
       if (stopping) throw new DomainError('integration_unavailable');
-      if (withheldServers.has(route.serverId)) continue;
+      const result = results.get(route.id);
+      if (!result) continue;
       try {
-        await bounded(async () => {
-          // Listener validation can establish its initial proof from the same
-          // fresh inspection; a separate backend inspection duplicates inventory.
-          const verdict = await validation.validate(route, owned);
-          readiness.set(route.id, verdict?.backendReady ?? true);
-          // A known failed backend must stop receiving traffic immediately,
-          // even if validation of another route keeps this snapshot pending.
-          const current = listeners.get(route.id);
-          if (verdict?.backendReady === false && current?.backendReady) {
-            current.backendReady = false;
-            clearSessions(current);
-            logRouteTransition(current, 'backend_not_ready');
-          }
-        });
+        if (!result.ok) throw result.error;
       } catch (error) {
         // Core may advance a route while fresh inventory/protocol evidence is
         // collected. This candidate never becomes authoritative; the already
@@ -914,7 +1351,12 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         throw error;
       }
     }
-    if (stopping || expires <= now()) throw new DomainError('conflict');
+    const requireLease = () => {
+      if (stopping) throw new DomainError('integration_unavailable');
+      if (expires <= now())
+        throw new DomainError('conflict', 409, { gatewaySafetyReason: 'lease_expired' });
+    };
+    requireLease();
     const staged: Listener[] = [];
     try {
       for (const listener of [...listeners.values()]) {
@@ -929,48 +1371,109 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           await closeListener(listener);
         }
       }
-      for (const route of next.routes) {
-        if (withheldServers.has(route.serverId)) continue;
-        if (listeners.has(route.id)) continue;
-        // Earlier routes may have spent the entire topology TTL waiting for
-        // another role. Refresh evidence directly before each native bind;
-        // staged listeners are already ours even before the snapshot commits.
-        try {
-          await bounded(async () => {
-            const verdict = await validation.validate(route, [
-              ...[...listeners.values()].map((listener) => listener.route.public),
-              ...staged.map((listener) => listener.route.public),
-            ]);
-            readiness.set(route.id, verdict?.backendReady ?? true);
-          });
-        } catch (error) {
-          if (!(error instanceof GatewaySafetyError) || error.reason !== 'backend_active_binding')
-            throw error;
-          logTiming('gateway.safety_failure', {
-            ...routeIdentity(route),
-            reason: error.reason,
-            routeMode: route.mode,
-          });
-          await withholdServer(route.serverId, staged);
-          continue;
-        }
-        if (stopping || expires <= now()) throw new DomainError('conflict');
-        const listener = await bind(route, readiness.get(route.id) ?? false);
-        staged.push(listener);
-      }
-      if (stopping || expires <= now()) throw new DomainError('conflict');
+      const bindingGroups = pending
+        .map((group) =>
+          group.filter((route) => !withheldServers.has(route.serverId) && !listeners.has(route.id)),
+        )
+        .filter((group) => group.length > 0);
+      // Start new provider and host reads AFTER the first pass and withdrawals.
+      // Concurrent admissions share only an in-flight host read; later routes
+      // reread topology and stopped-container reservations before native bind.
+      // Every route still validates original provider/host source timestamps.
+      // Bounded overlapping reads avoid serial scans exhausting the lease, and
+      // exclusive binds close the final socket race. Server roles remain ordered.
+      const prebind = bindingGroups.length
+        ? (renewal?.createValidationBatch(bindingGroups.flat(), 'prebind') ??
+          options.safety.createValidationBatch?.(bindingGroups.flat(), 'prebind') ??
+          options.safety)
+        : undefined;
+      let nextBindingGroup = 0;
+      let bindingFailed = false;
+      let bindingError: unknown;
+      await Promise.all(
+        Array.from({ length: Math.min(4, bindingGroups.length) }, async () => {
+          while (!bindingFailed && !stopping) {
+            const group = bindingGroups[nextBindingGroup++];
+            if (!group) return;
+            for (const route of group) {
+              if (bindingFailed || stopping || withheldServers.has(route.serverId)) return;
+              try {
+                requireLease();
+                const verdict = await bounded((signal) =>
+                  (prebind ?? options.safety).validate(
+                    route,
+                    [
+                      ...[...listeners.values()].map((listener) => listener.route.public),
+                      ...staged.map((listener) => listener.route.public),
+                    ],
+                    signal,
+                  ),
+                );
+                if (bindingFailed) return;
+                requireLease();
+                readiness.set(route.id, verdict?.backendReady ?? true);
+                // Always record issued binds, even if a sibling worker fails
+                // while this native call completes, so rollback closes them.
+                staged.push(await bind(route, readiness.get(route.id) ?? false));
+              } catch (error) {
+                logTiming('gateway.safety_failure', {
+                  ...routeIdentity(route),
+                  reason: rejectionReason(error),
+                  routeMode: route.mode,
+                  stage: 'prebind',
+                });
+                if (
+                  error instanceof GatewaySafetyError &&
+                  error.reason === 'backend_active_binding'
+                ) {
+                  await withholdServer(route.serverId, staged);
+                  break;
+                }
+                if (!bindingFailed) bindingError = error;
+                bindingFailed = true;
+                controlAvailable = false;
+                return;
+              }
+            }
+          }
+        }),
+      );
+      if (bindingFailed) throw bindingError;
+      requireLease();
       for (const listener of staged) listeners.set(listener.route.id, listener);
       for (const route of next.routes) {
         if (withheldServers.has(route.serverId)) continue;
         const listener = listeners.get(route.id);
         if (!listener) throw new DomainError('internal_error');
         if (
-          !isDeepStrictEqual(listener.route.backend, route.backend) ||
-          listener.route.generation !== route.generation ||
-          (listener.route.mode === 'online' && route.mode !== 'online') ||
-          (listener.backendReady && !readiness.get(route.id))
+          listener.route.wakeEnabled !== route.wakeEnabled ||
+          ['maintenance', 'manually_stopped'].includes(route.mode)
         )
-          clearSessions(listener);
+          for (const client of listener.clients) if (consoleReplies.has(client)) client.destroy();
+        if (
+          !isDeepStrictEqual(listener.route.backend, route.backend) ||
+          !isDeepStrictEqual(listener.route.protocol, route.protocol) ||
+          listener.route.serverId !== route.serverId ||
+          listener.route.nodeId !== route.nodeId ||
+          listener.route.allocationId !== route.allocationId ||
+          listener.route.generation !== route.generation ||
+          (listener.route.mode === 'online' && route.mode !== 'online')
+        ) {
+          // A lifecycle acknowledgement may finish on its original frontend only
+          // across a pure mode/generation change. Every other authority change,
+          // lease expiry, safety failure or listener removal still closes it.
+          const sameTarget =
+            listener.route.serverId === route.serverId &&
+            listener.route.nodeId === route.nodeId &&
+            listener.route.allocationId === route.allocationId &&
+            listener.route.wakeEnabled === route.wakeEnabled &&
+            isDeepStrictEqual(listener.route.public, route.public) &&
+            isDeepStrictEqual(listener.route.backend, route.backend) &&
+            isDeepStrictEqual(listener.route.protocol, route.protocol) &&
+            ['online', 'waking', 'blocked', 'sleeping'].includes(route.mode);
+          clearSessions(listener, sameTarget ? route : undefined);
+        } else if (listener.backendReady && !readiness.get(route.id))
+          clearBackendSessions(listener);
         listener.route = route;
         listener.backendReady = readiness.get(route.id) ?? false;
         listener.statusOnly = false;
@@ -1055,6 +1558,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         )
           wakeRequests.delete(serverId);
       withheldRoutes = next.routes.filter((route) => withheldServers.has(route.serverId)).length;
+      committedWithheldServers = new Set(withheldServers);
       controlAvailable = true;
     } catch (error) {
       if (error instanceof GatewayProviderRateLimitedError) {
@@ -1066,9 +1570,13 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       throw error;
     }
   };
-  const applySnapshot = (input: unknown, fetchStartedAt = now()) => {
+  const applySnapshot = (
+    input: unknown,
+    fetchStartedAt = now(),
+    renewal?: GatewaySafetyRenewal,
+  ) => {
     const result = serial.then(() =>
-      apply(input, fetchStartedAt).catch((error) => {
+      apply(input, fetchStartedAt, renewal).catch((error) => {
         controlAvailable = false;
         throw error;
       }),
@@ -1081,18 +1589,36 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       return Promise.reject(new GatewayProviderRateLimitedError(providerRetryAt - now()));
     if (refreshing) return refreshing;
     const refreshStarted = performance.now();
+    let fetchDuration = 0;
+    let applyDuration = 0;
     refreshing = (async () => {
       for (let attempt = 0; attempt < 2; attempt++) {
         const fetchStartedAt = now();
+        // This read cannot grant authority. Its result is eligible only for
+        // exact unchanged routes after Core supplies the new snapshot.
+        let renewal: GatewaySafetyRenewal | undefined;
         try {
-          const input = await options.control.fetchSnapshot();
-          await applySnapshot(input, fetchStartedAt);
+          if (snapshot && leased()) renewal = options.safety.prepareRenewal?.(snapshot.routes);
+        } catch {
+          /* An optional speculative read cannot revoke the current lease. */
+        }
+        try {
+          const fetchingStarted = performance.now();
+          const input = await options.control.fetchSnapshot().finally(() => {
+            fetchDuration += performance.now() - fetchingStarted;
+          });
+          const applyingStarted = performance.now();
+          await applySnapshot(input, fetchStartedAt, renewal).finally(() => {
+            applyDuration += performance.now() - applyingStarted;
+          });
           return;
         } catch (error) {
           const transient =
             error instanceof GatewayRouteRevisionStaleError ||
             (error instanceof NetworkObservationError && error.reason === 'container_churn');
           if (!transient || attempt === 1) throw error;
+        } finally {
+          renewal?.close();
         }
       }
     })()
@@ -1101,14 +1627,14 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         if (error instanceof GatewayProviderRateLimitedError) deferProvider(error);
         counters.snapshotErrors++;
         options.logger?.log('warn', 'gateway.snapshot_unavailable', {
-          reason:
-            error instanceof GatewayProviderRateLimitedError
-              ? 'provider_rate_limited'
-              : 'control_unavailable',
+          reason: rejectionReason(error),
         });
         throw error;
       })
       .finally(() => {
+        counters.snapshotCycles++;
+        counters.lastSnapshotFetchDurationMs = Math.round(fetchDuration);
+        counters.lastSnapshotApplyDurationMs = Math.round(applyDuration);
         counters.lastSnapshotDurationMs = Math.round(performance.now() - refreshStarted);
         refreshing = undefined;
       });
@@ -1422,7 +1948,11 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     let probeDuration = 0;
     let reportDuration = 0;
     const work = (async () => {
-      const candidates = candidateSnapshot;
+      // A periodic sample follows committed listener authority while a newer
+      // snapshot is being admitted. Startup hints may target that new intent.
+      const observationAuthority = () =>
+        priorityServerId ? candidateSnapshot : (snapshot ?? candidateSnapshot);
+      const candidates = observationAuthority();
       if (!candidates || Date.parse(candidates.expiresAt) <= now() || stopping) return;
       const servers = new Map<string, GatewayRoute[]>();
       const epochs = new Map(observationEpochs);
@@ -1444,7 +1974,9 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       // Non-due servers keep their stable snapshot order; effects stay serialized.
       const orderedServers = [...servers.values()].sort((a, b) => dueAt(a) - dueAt(b));
       for (const routes of orderedServers) {
-        routes.sort((a, b) => a.id.localeCompare(b.id));
+        routes.sort(
+          (a, b) => validationPriority(a) - validationPriority(b) || a.id.localeCompare(b.id),
+        );
         const anchor = routes[0];
         if (!anchor || stopping || routes.some((route) => listeners.get(route.id)?.statusOnly))
           continue;
@@ -1477,6 +2009,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           continue;
         let ready = true;
         let idle = true;
+        let readinessUnknown = false;
         const observedAt = new Date(now()).toISOString();
         if (anchor.sleepEligibleAt && Date.parse(anchor.sleepEligibleAt) <= Date.parse(observedAt))
           sampledIdleDeadlines.set(
@@ -1508,8 +2041,11 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
                 if (providerOnline) {
                   probeStage = 'idle';
                   const sample = handler.observe
-                    ? await handler.observe({ route, signal })
-                    : { ...(await handler.probeReadiness({ route, signal })), idle: false };
+                    ? await handler.observe(observationContext(route, signal))
+                    : {
+                        ...(await handler.probeReadiness(observationContext(route, signal))),
+                        idle: false,
+                      };
                   return {
                     ready: true,
                     coherent: true,
@@ -1526,13 +2062,25 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
                   options.safety.probeLeasedBackend;
                 probeStage = leasedProbe ? 'leased_backend' : 'full_backend';
                 const sample = leasedProbe
-                  ? await leasedProbe.call(options.safety, route)
-                  : await options.safety.validateBackend(route);
-                if (sample) return { ...sample, coherent: true };
+                  ? await leasedProbe.call(options.safety, route, signal)
+                  : await options.safety.validateBackend(route, signal);
+                if (sample)
+                  return {
+                    ...sample,
+                    // A safety readiness sample without player evidence cannot
+                    // replace a game integration's authenticated idle probe.
+                    coherent: sample.idle !== undefined || !handler.probeIdle,
+                  };
                 probeStage = 'protocol';
                 if (handler.observe)
-                  return { ...(await handler.observe({ route, signal })), coherent: true };
-                return { ...(await handler.probeReadiness({ route, signal })), coherent: false };
+                  return {
+                    ...(await handler.observe(observationContext(route, signal))),
+                    coherent: true,
+                  };
+                return {
+                  ...(await handler.probeReadiness(observationContext(route, signal))),
+                  coherent: false,
+                };
               },
             );
             readinessConfirmed = validated.ready === true;
@@ -1547,7 +2095,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             const observation = validated.coherent
               ? validated
               : probeIdle
-                ? await bounded((signal) => probeIdle({ route, signal }))
+                ? await bounded((signal) => probeIdle(observationContext(route, signal)))
                 : { idle: false, playerCount: undefined };
             const playerCount =
               Number.isSafeInteger(observation.playerCount) &&
@@ -1566,6 +2114,9 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             // An idle-only failure suppresses sleep without discarding the
             // independent readiness proof; unknown readiness cannot advance.
             ready = ready && readinessConfirmed;
+            readinessUnknown ||=
+              !readinessConfirmed &&
+              !(error instanceof GatewaySafetyError && error.reason === 'backend_protocol');
             idle = false;
             players.push(undefined);
             counters.observationErrors++;
@@ -1575,29 +2126,26 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
               detail: error instanceof GatewaySafetyError ? error.observationFailure : undefined,
               trigger: priorityServerId ? 'startup_hint' : 'periodic',
               durationMs: Math.round(performance.now() - probeStarted),
-              reason:
-                error instanceof GatewaySafetyError
-                  ? error.reason
-                  : error instanceof NetworkObservationError
-                    ? `observer_${error.reason}`
-                    : error instanceof GatewayRouteRevisionStaleError
-                      ? 'route_revision_stale'
-                      : 'unclassified',
+              reason: rejectionReason(error),
             });
             options.logger?.log('warn', 'gateway.observation_unavailable', { routeId: route.id });
           } finally {
             probeDuration += performance.now() - probeStarted;
           }
         }
+        // Failed infrastructure evidence is unknown, not a negative game
+        // response. Do not advance Core's lifecycle/revision with that guess.
+        if (readinessUnknown) continue;
         try {
           if (providerRetryAt > now()) return;
+          const currentAuthority = observationAuthority();
           if (
             observationEpochs.get(anchor.serverId) !== epochs.get(anchor.serverId) ||
-            !candidateSnapshot ||
-            candidateSnapshot.gatewayId !== candidates.gatewayId ||
-            candidateSnapshot.revision !== candidates.revision ||
-            !isDeepStrictEqual(candidateSnapshot.routes, candidates.routes) ||
-            Date.parse(candidateSnapshot.expiresAt) <= now() ||
+            !currentAuthority ||
+            currentAuthority.gatewayId !== candidates.gatewayId ||
+            currentAuthority.revision !== candidates.revision ||
+            !isDeepStrictEqual(currentAuthority.routes, candidates.routes) ||
+            Date.parse(currentAuthority.expiresAt) <= now() ||
             Date.parse(candidates.expiresAt) <= now() ||
             stopping
           ) {
@@ -1607,16 +2155,36 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           // Equivalent lease renewals must not starve a slower protocol probe.
           // Keep the captured lease/time for this observation and its idle fence;
           // only exactly unchanged route authority may outlive object replacement.
-          const activeSessions = [...listeners.values()]
-            .filter((listener) => listener.route.serverId === anchor.serverId)
-            .reduce(
-              (count, listener) => count + listener.forwardingClients.size + listener.sessions.size,
-              0,
-            );
+          const serverListeners = [...listeners.values()].filter(
+            (listener) => listener.route.serverId === anchor.serverId,
+          );
+          // Preserve requests completed between probes, and retain any newer
+          // request arriving while Core commits this observation.
+          const clientActivity = serverListeners.map((listener) => ({
+            state: listener.clientActivity,
+            version: listener.clientActivity.version,
+          }));
+          const recentClientRequests = clientActivity.some(
+            ({ state, version }) => version !== state.reportedVersion,
+          );
+          const activeSessions = serverListeners.reduce(
+            (count, listener) =>
+              count +
+              [...new Set([...listener.forwardingClients, ...listener.managedClients])].filter(
+                (socket) => !listener.passiveClients.has(socket),
+              ).length +
+              [...listener.sessions.values()].filter(
+                (session) =>
+                  session.lastGameplayAt !== undefined &&
+                  now() - session.lastGameplayAt < policy.udpIdleTimeoutMs,
+              ).length,
+            0,
+          );
           const canQuiesce =
             anchor.mode === 'online' &&
             ready &&
             idle &&
+            !recentClientRequests &&
             activeSessions === 0 &&
             anchor.sleepEligibleAt !== undefined &&
             routes.every((route) => route.sleepEligibleAt === anchor.sleepEligibleAt) &&
@@ -1659,7 +2227,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
               wakeJobId: anchor.wakeJobId,
               observedAt,
               ready,
-              idle: ready && idle && activeSessions === 0,
+              idle: ready && idle && activeSessions === 0 && !recentClientRequests,
               quiescenceUntil:
                 quiescenceUntil === undefined ? undefined : new Date(quiescenceUntil).toISOString(),
               playerCount: players.every((count) => count !== undefined)
@@ -1679,6 +2247,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
                   durationMs: Math.round(durationMs),
                 });
             });
+          for (const { state, version } of clientActivity) state.reportedVersion = version;
           if (ready && anchor.mode === 'waking') {
             const applied =
               receipt &&

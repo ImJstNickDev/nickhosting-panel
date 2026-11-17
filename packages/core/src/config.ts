@@ -202,6 +202,7 @@ export const platformConfigSchema = z
       .optional(),
     gameIdleTimeouts: gameIdleTimeoutsSchema,
     gameAutoWakePolicies: gameAutoWakePoliciesSchema,
+    satisfactoryInstallationRetries: z.number().int().min(0).max(5),
     defaultAutoWakeEnabled: z.boolean(),
     autoWakeUserAccess: autoWakeUserAccessSchema,
     defaultIdleTimeoutSeconds: gameIdleTimeoutSchema,
@@ -252,6 +253,7 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   sftpCredentialTtlSeconds: 3600,
   gameIdleTimeouts: {},
   gameAutoWakePolicies: {},
+  satisfactoryInstallationRetries: 2,
   defaultAutoWakeEnabled: true,
   autoWakeUserAccess: 'editable',
   dnsDomains: [],
@@ -361,6 +363,7 @@ export const configEnvironmentKeys = {
   gatewayDiagnosticsSocket: 'NH_GATEWAY_DIAGNOSTICS_SOCKET',
   gameIdleTimeouts: 'NH_GAME_IDLE_TIMEOUTS',
   gameAutoWakePolicies: 'NH_GAME_AUTO_WAKE_POLICIES',
+  satisfactoryInstallationRetries: 'NH_SATISFACTORY_INSTALLATION_RETRIES',
   defaultAutoWakeEnabled: 'NH_DEFAULT_AUTO_WAKE_ENABLED',
   autoWakeUserAccess: 'NH_AUTO_WAKE_USER_ACCESS',
   defaultIdleTimeoutSeconds: 'NH_DEFAULT_IDLE_TIMEOUT_SECONDS',
@@ -377,6 +380,7 @@ export const configEnvironmentKeys = {
 } as const satisfies Record<PlatformConfigKey, string>;
 
 const numericKeys = new Set<PlatformConfigKey>([
+  'satisfactoryInstallationRetries',
   'dnsNameReuseDelaySeconds',
   'dnsAvailabilityCacheSeconds',
   'dnsAvailabilityRequestsPerMinute',

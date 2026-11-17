@@ -214,53 +214,65 @@ describe('backend console mediation over a real isolated WebSocket', () => {
       }),
     ).rejects.toMatchObject({ reason: 'invalid_response' });
   });
-  it('uses the managed stop UUID for its internal relay without refetching Application or Client identity', async () => {
-    const fixture = await setup();
-    const reads: string[] = [];
-    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url, init) => {
-      const path = new URL(String(url)).pathname;
-      reads.push(path);
-      if (path.endsWith('/websocket')) return fixture.fetcher(url, init);
-      if (path.endsWith('/power')) {
-        fixture.send('status', ['stopping']);
-        fixture.send('status', ['offline']);
-        return new Response(null, { status: 204 });
-      }
-      throw new Error('Unexpected identity refetch');
-    });
-    const observer = { preflight: vi.fn(async () => {}), stopped: vi.fn(async () => true) };
-    const adapter = createPterodactylAdapter({
-      baseURL: 'https://panel.example.com',
-      applicationKey: 'isolated-app-key',
-      clientKey: 'isolated-client-key',
-      fetcher,
-      webSocketOrigins: [fixture.origin],
-      containerObserver: observer,
-      timeoutMs: 1000,
-    });
-    const beforePower = vi.fn(async () => {}),
-      onConfirmed = vi.fn(async () => {});
-    const result = await adapter.stopWithConfirmation(1, client.identifier, {
-      verifiedServer: {
-        id: 1,
-        uuid,
-        identifier: client.identifier,
-        nest: 1,
-        egg: 1,
-      } as ApplicationServer,
-      authorize: async () => true,
-      beforePower,
-      onConfirmed,
-    });
-    expect(result).toEqual({ confirmed: true });
-    expect(reads).toEqual([
-      `/api/client/servers/${client.identifier}/websocket`,
-      `/api/client/servers/${client.identifier}/power`,
-    ]);
-    expect(beforePower).toHaveBeenCalledTimes(1);
-    expect(onConfirmed).toHaveBeenCalledTimes(1);
-    expect(observer.stopped).toHaveBeenCalledWith(uuid, 'server');
-  });
+  it.each([undefined, -9223371971137])(
+    'uses the managed stop UUID and confirms terminal status after unavailable uptime (%s)',
+    async (uptime) => {
+      const fixture = await setup();
+      const reads: string[] = [];
+      const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url, init) => {
+        const path = new URL(String(url)).pathname;
+        reads.push(path);
+        if (path.endsWith('/websocket')) return fixture.fetcher(url, init);
+        if (path.endsWith('/power')) {
+          fixture.send('status', ['stopping']);
+          fixture.send('stats', [
+            JSON.stringify({
+              cpu_absolute: 0,
+              disk_bytes: 1,
+              memory_bytes: 0,
+              network: { rx_bytes: 0, tx_bytes: 0 },
+              uptime,
+            }),
+          ]);
+          fixture.send('status', ['offline']);
+          return new Response(null, { status: 204 });
+        }
+        throw new Error('Unexpected identity refetch');
+      });
+      const observer = { preflight: vi.fn(async () => {}), stopped: vi.fn(async () => true) };
+      const adapter = createPterodactylAdapter({
+        baseURL: 'https://panel.example.com',
+        applicationKey: 'isolated-app-key',
+        clientKey: 'isolated-client-key',
+        fetcher,
+        webSocketOrigins: [fixture.origin],
+        containerObserver: observer,
+        timeoutMs: 1000,
+      });
+      const beforePower = vi.fn(async () => {}),
+        onConfirmed = vi.fn(async () => {});
+      const result = await adapter.stopWithConfirmation(1, client.identifier, {
+        verifiedServer: {
+          id: 1,
+          uuid,
+          identifier: client.identifier,
+          nest: 1,
+          egg: 1,
+        } as ApplicationServer,
+        authorize: async () => true,
+        beforePower,
+        onConfirmed,
+      });
+      expect(result).toEqual({ confirmed: true });
+      expect(reads).toEqual([
+        `/api/client/servers/${client.identifier}/websocket`,
+        `/api/client/servers/${client.identifier}/power`,
+      ]);
+      expect(beforePower).toHaveBeenCalledTimes(1);
+      expect(onConfirmed).toHaveBeenCalledTimes(1);
+      expect(observer.stopped).toHaveBeenCalledWith(uuid, 'server');
+    },
+  );
   it('rechecks command permission independently from read-only stream permission', async () => {
     const fixture = await setup();
     let writable = true;

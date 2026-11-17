@@ -18,7 +18,39 @@ export interface GameViewerArchiveEntry {
   directory: boolean;
   size: number;
 }
+export interface GameViewerLogPage {
+  revision: string;
+  rows: { line: number; text: string; level: 'error' | 'warning' | 'info' }[];
+  offset: number;
+  total: number;
+  totalLines: number;
+}
+export interface GameViewerLogSession {
+  page(
+    options: {
+      offset: number;
+      limit: number;
+      query?: string;
+      level?: 'all' | 'error' | 'warning' | 'info';
+    },
+    signal: AbortSignal,
+  ): Promise<GameViewerLogPage>;
+  refresh(signal: AbortSignal): Promise<{ revision: string; changed: boolean }>;
+  /** Existing Fileman listing invalidations only; no remote content polling. */
+  onChange(listener: () => void): () => void;
+}
 export interface GameViewerHost {
+  /** Selected physical file only. Host owns lease and releases it when disposed. */
+  log?: GameViewerLogSession;
+  locale?: string;
+  /** Bounded prefix of the selected source; no arbitrary filesystem authority.
+   * Shared metadata bytes are read-only: compiled viewers must not mutate them. */
+  readPrefix?(maxBytes: number, signal: AbortSignal): Promise<Uint8Array<ArrayBuffer>>;
+  /** Fresh revision-bound tail of the selected physical file. */
+  readTail?(
+    maxBytes: number,
+    signal: AbortSignal,
+  ): Promise<{ bytes: Uint8Array<ArrayBuffer>; truncated: boolean }>;
   t(key: string, values?: Record<string, string | number>): string;
   /** Bounded reads of the currently selected container; authority stays with Fileman. */
   archive: {
@@ -47,7 +79,7 @@ export const gameViewerDescriptorSchema = z
       .array(
         z
           .string()
-          .regex(/^[a-z0-9]+(?:\.[a-z0-9]+)*$/)
+          .regex(/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/)
           .max(32),
       )
       .min(1)

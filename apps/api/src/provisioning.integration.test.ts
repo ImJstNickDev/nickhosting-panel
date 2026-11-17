@@ -564,6 +564,26 @@ it('shares one installation collector, bounds replay and resumes history after s
     await vi.waitFor(() => expect(relayInstallation).toHaveBeenCalledTimes(2));
     input?.onEvent({ type: 'installation', phase: 'completed' });
     await vi.waitFor(() => expect(wake).toHaveBeenCalledWith(target.jobId));
+    const nativeReceipt = await database.db
+      .selectFrom('server_events')
+      .select('data')
+      .where('job_id', '=', target.jobId)
+      .where('message_key', '=', 'servers.operation.installation_updated')
+      .executeTakeFirstOrThrow();
+    expect(nativeReceipt.data).toMatchObject({
+      source: 'native_installation_completed',
+      state: 'completed',
+    });
+    expect(
+      (
+        await database.db
+          .selectFrom('server_operations')
+          .select('plan')
+          .where('job_id', '=', target.jobId)
+          .executeTakeFirstOrThrow()
+      ).plan.installConfirmed,
+    ).not.toBe(true);
+
     expect(
       (
         await database.db

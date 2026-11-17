@@ -1,4 +1,10 @@
 export const ownerIntegrationWebMessages: Record<string, readonly [string, string]> = {
+  'ownerIntegration.installation': ['Installation', 'Installazione'],
+  'ownerIntegration.installationRetries': ['Automatic retries', 'Tentativi aggiuntivi automatici'],
+  'ownerIntegration.installationRetriesHelp': [
+    'Retry the Steam metadata download failure automatically. Two retries allow three attempts in total; zero disables retries.',
+    'Ripete automaticamente l’installazione se Steam non riesce a caricare i metadati. Due tentativi aggiuntivi consentono tre tentativi totali; zero disabilita le ripetizioni.',
+  ],
   'mapping.create': ['Associate egg', 'Associa egg'],
   'mapping.edit': ['Edit mapping', 'Modifica associazione'],
   'mapping.createAction': ['Create mapping', 'Crea associazione'],

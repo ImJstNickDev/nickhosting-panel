@@ -239,7 +239,8 @@ export interface ServerTables {
       | 'backup'
       | 'restore'
       | 'configure'
-      | 'minecraft-content';
+      | 'minecraft-content'
+      | 'satisfactory-content';
     phase: Generated<string>;
     plan: Json<Record<string, unknown>>;
     effect_state: Generated<'none' | 'prepared' | 'uncertain' | 'confirmed'>;

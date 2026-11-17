@@ -18,8 +18,8 @@ export function isUploadNotDispatched(error: unknown): error is Error {
   return error instanceof Error && notDispatched.has(error);
 }
 
-/** Internal proof: the adapter never attempted publication of its isolated
- * temporary upload. The requested destination has not been modified. */
+/** Internal proof: the destination was not modified. Publication was not
+ * attempted, or was conclusively rejected and the own temporary file cleaned. */
 export function uploadNotPublished(error: Error): Error {
   const failure =
     error instanceof PterodactylError

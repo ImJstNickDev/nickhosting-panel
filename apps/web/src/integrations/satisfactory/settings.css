@@ -1,0 +1,78 @@
+.satisfactory-settings-body {
+  display: grid;
+  gap: 20px;
+  padding: 24px;
+}
+.satisfactory-token-toggle {
+  justify-self: start;
+}
+.satisfactory-setting-choice {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+.satisfactory-setting-choice > small {
+  color: var(--muted);
+}
+.satisfactory-settings h2,
+.satisfactory-settings h3,
+.satisfactory-settings p {
+  margin: 0;
+}
+.satisfactory-settings form {
+  display: grid;
+  gap: 16px;
+}
+.satisfactory-settings .field {
+  min-width: 0;
+}
+.satisfactory-settings .field > label {
+  font-size: 0.85rem;
+}
+.satisfactory-settings .field > small {
+  max-width: 70ch;
+}
+.satisfactory-settings .satisfactory-settings-connection {
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+.satisfactory-settings .details {
+  margin: 0;
+}
+.satisfactory-settings .details > div {
+  min-width: 0;
+}
+.satisfactory-settings .details dd {
+  overflow-wrap: anywhere;
+}
+.satisfactory-option-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 24px;
+}
+.satisfactory-settings .form-footer {
+  justify-content: flex-end;
+}
+.satisfactory-settings input:disabled {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface) 94%, var(--muted));
+  opacity: 1;
+}
+@media (max-width: 600px) {
+  .satisfactory-settings-body {
+    padding: 16px;
+  }
+  .satisfactory-option-fields {
+    grid-template-columns: 1fr;
+  }
+}
+.satisfactory-settings-confirm {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  line-height: 1.5;
+}
+.satisfactory-settings-confirm input {
+  flex: 0 0 auto;
+  margin-top: 5px;
+}

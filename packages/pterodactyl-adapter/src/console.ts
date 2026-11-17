@@ -23,7 +23,14 @@ const statsSchema = z.object({
   memory_bytes: z.number().nonnegative(),
   cpu_absolute: z.number().nonnegative(),
   disk_bytes: z.number().nonnegative(),
-  uptime: z.number().nonnegative().optional(),
+  // Wings can emit an overflowed negative uptime after the process exits,
+  // before its terminal status frame. Treat that unavailable metric as absent
+  // so the authenticated status stream can still prove the ordered stop.
+  uptime: z.preprocess(
+    (value) =>
+      typeof value === 'number' && Number.isFinite(value) && value < 0 ? undefined : value,
+    z.number().nonnegative().optional(),
+  ),
   network: z
     .object({ rx_bytes: z.number().nonnegative(), tx_bytes: z.number().nonnegative() })
     .optional(),

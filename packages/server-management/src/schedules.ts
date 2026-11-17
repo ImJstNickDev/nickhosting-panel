@@ -871,6 +871,8 @@ async function dispatchSchedule(
                 : {}),
             },
             env,
+            undefined,
+            { requestSource: 'automation' },
           );
           jobId = operation.jobId;
           const stopIntent = ['manually_stopped', 'maintenance'].includes(server.intent)

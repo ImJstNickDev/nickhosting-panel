@@ -602,15 +602,22 @@ approval. The Docker socket has host-equivalent authority even mounted read-only
 (issue #22). Host networking also permits reaching host-local services; it is not
 an egress security boundary.
 
-Independent namespace proof is mounted read-only at `/run/nickhosting-host-proc`.
-Choose an independently verified long-lived host process readable by the service
-UID (for example the existing host user service manager), not `/proc/self` or the
-Gateway's own process. Before activation record the host process UID, executable,
-parent, start time and namespace; recheck before mounting. `/proc/1/ns/net` is
-not readable by the current dev UID. Do not change permissions or add privileges
-as a workaround. Reboot/process replacement requires re-verification, updated
-private path/namespace pin and service recreation; a stale proof fails closed.
-Container access to the proposed proof is **not yet tested**.
+Independent host evidence uses two read-only binds under
+`/run/nickhosting-host-proc`: `/proc/1/ns/net` to `ns/net`, and `/proc/1/net`
+to `net`. PID 1 belongs to the host init process, so a reboot does not leave a
+mount referencing an expired user-session PID. No whole host process tree is
+exposed and no extra capability or host permission change is required.
+
+The observer verifies that the mounted namespace handle is a Linux `nsfs` object,
+compares its inode with both the Gateway network namespace and the Owner's pinned
+identity, and repeats the identity check after reading socket tables. Ordinary
+files, foreign namespaces and unavailable evidence fail closed. The Docker daemon
+resolves the host namespace bind; the unprivileged Gateway reads the mounted handle
+without needing permission to traverse the host's `/proc/1/ns/net` symlink.
+Existing proc-directory proofs remain supported by the observer, but development
+Compose no longer uses `NH_DEV_GATEWAY_HOST_PROC`. Recheck namespace/daemon identity
+after moving hosts or changing the deployment; never substitute `/proc/self` for
+independent host evidence. See [recovery validation](M6-GATEWAY-RECOVERY.md).
 
 Control communication uses the existing dev HTTPS origin and the narrowly routed
 `/internal/gateway/` prefix in dev ingress. Core requires the exact Gateway UUID
@@ -632,7 +639,6 @@ Private `.env.dev.local` additions (do not print values or replace existing keys
 - `NH_DEV_GATEWAY_ID`: one persistent UUID, generated once.
 - `NH_DEV_GATEWAY_CONTROL_TOKEN`: independently generated 32 random bytes encoded
   base64url; separate from all application/provider secrets.
-- `NH_DEV_GATEWAY_HOST_PROC`: independently verified host process directory.
 - Append `compose.dev.gateway.yaml` to the existing `COMPOSE_FILE` chain, preserving
   the base, real-provider and observer overlays.
 
@@ -655,7 +661,7 @@ docker compose --env-file .env.dev.local --profile gateway config --quiet
 docker compose --env-file .env.dev.local build api web
 # First verify namespace access using the same nonroot service, before runtime:
 docker compose --env-file .env.dev.local --profile gateway run --rm --no-deps \
-  --entrypoint node gateway -e 'const f=require("node:fs");const a=f.readlinkSync("/proc/self/ns/net");const b=f.readlinkSync("/run/nickhosting-host-proc/ns/net");if(a!==b)process.exit(1);for(const n of ["tcp","tcp6","udp","udp6"])f.readFileSync("/run/nickhosting-host-proc/net/"+n);'
+  --entrypoint node gateway -e 'const f=require("node:fs");const a=f.readlinkSync("/proc/self/ns/net");const p="/run/nickhosting-host-proc/ns/net";if(f.statfsSync(p).type!==0x6e736673)process.exit(1);const b="net:["+f.statSync(p,{bigint:true}).ino+"]";if(a!==b)process.exit(1);for(const n of ["tcp","tcp6","udp","udp6"])f.readFileSync("/run/nickhosting-host-proc/net/"+n);'
 # Recreate only the explicitly approved dev processes. Preserve DB/Redis/Vite/mail.
 docker compose --env-file .env.dev.local up -d --no-deps --wait api worker web
 docker compose --env-file .env.dev.local --profile gateway up -d --no-deps --wait gateway

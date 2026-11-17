@@ -305,6 +305,14 @@ export class ViewerCache {
     file.ready = true;
   }
 
+  /** Drop an unleased snapshot immediately; active consumers remain untouched. */
+  async discardIdle(key: string): Promise<void> {
+    await this.#exclusive(async () => {
+      const file = this.#files.get(key);
+      if (file && file.references === 0) await this.#remove(key, file);
+    });
+  }
+
   async close(): Promise<void> {
     await this.#exclusive(async () => {
       this.#closed = true;
@@ -479,6 +487,14 @@ export class ViewerSessionCache<T> {
     } finally {
       signal?.removeEventListener('abort', onAbort);
     }
+  }
+
+  /** Explicit viewer close releases only its lease; dispose after the last reader. */
+  async discardIdle(key: string): Promise<void> {
+    await this.#exclusive(async () => {
+      const entry = this.#entries.get(key);
+      if (entry && entry.references === 0) await this.#dispose(key, entry);
+    });
   }
 
   async invalidate(key: string): Promise<void> {

@@ -61,7 +61,8 @@
     "smol-toml": "1.9.1",
     "unified": "11.0.5",
     "yaml": "2.9.1",
-    "zod": "4.6.5"
+    "zod": "4.6.5",
+    "@nickhosting/satisfactory": "workspace:*"
   },
   "devDependencies": {
     "@hono/node-server": "2.1.4",

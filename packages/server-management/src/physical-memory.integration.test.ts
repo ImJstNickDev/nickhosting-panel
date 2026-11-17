@@ -41,7 +41,10 @@ describe('Wings physical memory overhead accounting', () => {
     provisionUserId: 1,
     memoryOverheadPercent,
   });
-  const installer = () => createManagedServer(f.db, f.adapter, f.context, f.input());
+  const installer = () =>
+    createManagedServer(f.db, f.adapter, f.context, f.input(), {
+      NH_STORAGE_POLICY: 'PER_USER_BUDGET',
+    });
 
   it('atomically refuses two starts whose raw RAM fits but physical maxima do not', async () => {
     const servers = await Promise.all([

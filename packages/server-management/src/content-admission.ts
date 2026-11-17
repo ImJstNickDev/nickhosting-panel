@@ -197,7 +197,9 @@ export async function reserveContentStaging(
       job.subject_id !== context.subjectUserId ||
       job.state !== 'running' ||
       job.active_operation_id !== jobId ||
-      !['provision', 'minecraft-content', 'reinstall', 'wipe'].includes(job.action)
+      !['provision', 'minecraft-content', 'satisfactory-content', 'reinstall', 'wipe'].includes(
+        job.action,
+      )
     )
       throw new DomainError('forbidden');
     if (job.action === 'minecraft-content') {

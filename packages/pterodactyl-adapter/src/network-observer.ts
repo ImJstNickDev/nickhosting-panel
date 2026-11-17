@@ -1,10 +1,12 @@
-import { execFile } from 'node:child_process';
-import { readdir, readFile, readlink } from 'node:fs/promises';
+import { setMaxListeners } from 'node:events';
+import { constants } from 'node:fs';
+import { open, readdir, readFile, readlink, statfs } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { posix } from 'node:path';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import { dockerReadCommand, MissingContainers } from './docker-read-client.js';
 
 export type NetworkObservationFailure =
   | 'namespace'
@@ -22,17 +24,13 @@ export type NetworkObservationFailure =
   | 'container_churn'
   | 'socket_observation'
   | 'interfaces'
-  | 'observation_timeout';
+  | 'observation_timeout'
+  | 'observation_cancelled';
 
 /** Only a fixed category crosses the observer boundary, never Docker output. */
 export class NetworkObservationError extends DomainError {
   constructor(readonly reason: NetworkObservationFailure) {
     super('integration_unavailable');
-  }
-}
-class MissingContainers extends Error {
-  constructor(readonly ids: string[]) {
-    super('missing containers');
   }
 }
 class ContainerChurn extends Error {}
@@ -83,90 +81,50 @@ export interface NetworkObservation {
   networks: ObservedNetwork[];
 }
 export interface NetworkObserver {
-  observe(): Promise<NetworkObservation>;
+  observe(signal?: AbortSignal): Promise<NetworkObservation>;
+  /** Begin new evidence after an admission boundary; never join an older scan. */
+  observeFresh?(signal?: AbortSignal): Promise<NetworkObservation>;
 }
 
 export interface NetworkObserverDependencies {
-  read(path: string): Promise<string>;
+  read(path: string, signal?: AbortSignal): Promise<string>;
   link(path: string): Promise<string>;
+  namespaceFile(path: string): Promise<{ inode: bigint; filesystemType: bigint }>;
   directory(path: string): Promise<string[]>;
   interfaces(): string[];
-  docker(args: readonly string[], socket: string, timeoutMs?: number): Promise<string>;
+  docker(
+    args: readonly string[],
+    socket: string,
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ): Promise<string>;
   now(): number;
 }
 const production: NetworkObserverDependencies = {
-  read: (path) => readFile(path, 'utf8'),
+  read: (path, signal) => readFile(path, { encoding: 'utf8', signal }),
   link: readlink,
+  async namespaceFile(path) {
+    // A read-only bind of the host's init network namespace survives reboot
+    // without exposing a host process tree or requiring ptrace privileges.
+    // Inspect the opened descriptor so replacement cannot mix two identities.
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const [metadata, filesystem] = await Promise.all([
+        file.stat({ bigint: true }),
+        statfs(`/proc/self/fd/${file.fd}`, { bigint: true }),
+      ]);
+      return { inode: metadata.ino, filesystemType: filesystem.type };
+    } finally {
+      await file.close();
+    }
+  },
   directory: (path) => readdir(path),
   interfaces: () =>
     Object.values(networkInterfaces())
       .flatMap((addresses) => addresses ?? [])
       .map((address) => address.address),
   now: Date.now,
-  docker: (args, socket, timeoutMs = 10000) =>
-    new Promise((resolve, reject) => {
-      execFile(
-        'docker',
-        ['--host', `unix://${socket}`, ...args],
-        {
-          encoding: 'utf8',
-          timeout: Math.min(10000, timeoutMs),
-          maxBuffer: 4 * 1024 * 1024,
-          killSignal: 'SIGKILL',
-          shell: false,
-          env: Object.fromEntries(
-            Object.entries(process.env).filter(([key]) => !key.startsWith('DOCKER_')),
-          ),
-        },
-        (error, stdout, stderr) => {
-          if (!error) {
-            resolve(stdout);
-            return;
-          }
-          // Docker can remove a listed container while Wings recreates it. Only
-          // this exact CLI failure is eligible for corroboration and one retry.
-          const requested = args.slice(4);
-          const lines = typeof stderr === 'string' ? stderr.trim().split('\n') : [];
-          const missing = lines.map(
-            (line) =>
-              /^(?:Error: No such object: |Error response from daemon: No such container: )([a-f0-9]{64})$/.exec(
-                line,
-              )?.[1],
-          );
-          if (
-            args[0] === 'container' &&
-            args[1] === 'inspect' &&
-            error.code === 1 &&
-            !error.killed &&
-            !error.signal &&
-            missing.length > 0 &&
-            missing.every(
-              (value): value is string => value !== undefined && requested.includes(value),
-            )
-          ) {
-            try {
-              if (typeof stdout !== 'string' || stdout.length > 4 * 1024 * 1024) throw new Error();
-              const rows = stdout.trim()
-                ? stdout
-                    .trim()
-                    .split('\n')
-                    .map((line) => containerSchema.parse(JSON.parse(line)).id)
-                : [];
-              const expected = requested.filter((value) => !missing.includes(value)).sort();
-              if (
-                new Set(missing).size !== missing.length ||
-                rows.sort().join() !== expected.join()
-              )
-                throw new Error();
-            } catch {
-              reject(new NetworkObservationError('container_parse'));
-              return;
-            }
-            reject(new MissingContainers(missing));
-          } else reject(new Error('Docker command failed'));
-        },
-      );
-    }),
+  docker: dockerReadCommand,
 };
 
 const id = z.string().regex(/^[a-f0-9]{64}$/);
@@ -338,12 +296,33 @@ export function createNetworkObserver(
   )
     throw new DomainError('configuration_invalid');
   const io = { ...production, ...dependencies };
+  async function hostNamespace() {
+    const path = `${config.hostProcDirectory}/ns/net`;
+    try {
+      return await io.link(path);
+    } catch (error) {
+      // Preserve legacy proc-directory proofs. Only a non-symlink may be a
+      // namespace bind; missing/unreadable proofs must never take this fallback.
+      if ((error as NodeJS.ErrnoException).code !== 'EINVAL') throw error;
+      const file = await io.namespaceFile(path);
+      // Linux NSFS_MAGIC: an ordinary file with a matching inode is not proof.
+      if (file.filesystemType !== 0x6e736673n || file.inode <= 0n) throw new Error();
+      return `net:[${file.inode}]`;
+    }
+  }
   return {
-    async observe() {
+    async observe(signal) {
+      const controller = new AbortController();
+      // Four inventory chunks can own eight bounded native requests each.
+      setMaxListeners(40, controller.signal);
+      const abort = () => controller.abort();
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
       const started = io.now();
       const deadline = started + 15000;
       let expired = false;
       function remaining() {
+        if (signal?.aborted) throw new NetworkObservationError('observation_cancelled');
         const value = deadline - io.now();
         if (expired || value <= 0) throw new NetworkObservationError('observation_timeout');
         return value;
@@ -365,7 +344,7 @@ export function createNetworkObserver(
       }
       async function command(args: readonly string[], reason: NetworkObservationFailure) {
         return stage(reason, async () => {
-          const value = await io.docker(args, config.dockerSocket, remaining());
+          const value = await io.docker(args, config.dockerSocket, remaining(), controller.signal);
           if (typeof value !== 'string' || value.length > 4 * 1024 * 1024) throw new Error();
           return value.trim();
         });
@@ -390,10 +369,7 @@ export function createNetworkObserver(
       }
       async function attempt(): Promise<NetworkObservation> {
         const [namespaceId, hostNamespaceId] = await stage('namespace', async () => {
-          const values = await Promise.all([
-            io.link('/proc/self/ns/net'),
-            io.link(`${config.hostProcDirectory}/ns/net`),
-          ]);
+          const values = await Promise.all([io.link('/proc/self/ns/net'), hostNamespace()]);
           if (
             !namespace(values[0]) ||
             values[0] !== values[1] ||
@@ -412,64 +388,72 @@ export function createNetworkObserver(
         ]);
         const rawContainers: z.infer<typeof containerSchema>[] = [];
         const networks: ObservedNetwork[] = [];
-        // Settle both inventories before considering a retry: an independent
-        // malformed network response must never be hidden by container churn.
-        const inspections = await Promise.allSettled([
-          (async () => {
-            for (let start = 0; start < beforeContainers.length; start += 64) {
-              const result = await command(
-                [
-                  'container',
-                  'inspect',
-                  '--format',
-                  containerFormat,
-                  ...beforeContainers.slice(start, start + 64),
-                ],
-                'container_inspect',
-              );
-              await stage('container_parse', () => {
-                const rows = result
-                  .split('\n')
-                  .map((line) => containerSchema.parse(JSON.parse(line)));
-                if (
-                  rows
-                    .map((row) => row.id)
-                    .sort()
-                    .join() !== beforeContainers.slice(start, start + 64).join()
-                )
-                  throw new NetworkObservationError('container_inventory');
-                rawContainers.push(...rows);
-              });
+        // Bound total CLI inspection concurrency across BOTH inventories. Every
+        // chunk is still complete and individually checked; settle all issued
+        // chunks so malformed evidence cannot be hidden by container churn.
+        const tasks: (() => Promise<void>)[] = [];
+        for (let start = 0; start < beforeContainers.length; start += 64) {
+          const expected = beforeContainers.slice(start, start + 64);
+          tasks.push(async () => {
+            const result = await command(
+              ['container', 'inspect', '--format', containerFormat, ...expected],
+              'container_inspect',
+            );
+            await stage('container_parse', () => {
+              const rows = result
+                .split('\n')
+                .map((line) => containerSchema.parse(JSON.parse(line)));
+              if (
+                rows
+                  .map((row) => row.id)
+                  .sort()
+                  .join() !== expected.join()
+              )
+                throw new NetworkObservationError('container_inventory');
+              rawContainers.push(...rows);
+            });
+          });
+        }
+        for (let start = 0; start < beforeNetworks.length; start += 64) {
+          const expected = beforeNetworks.slice(start, start + 64);
+          tasks.push(async () => {
+            const result = await command(
+              ['network', 'inspect', '--format', networkFormat, ...expected],
+              'network_inspect',
+            );
+            await stage('network_parse', () => {
+              const rows = result.split('\n').map((line) => networkSchema.parse(JSON.parse(line)));
+              if (
+                rows
+                  .map((row) => row.id)
+                  .sort()
+                  .join() !== expected.join()
+              )
+                throw new NetworkObservationError('network_inventory');
+              networks.push(...rows.map((row) => ({ ...row, options: row.options ?? {} })));
+            });
+          });
+        }
+        const inspections: PromiseSettledResult<void>[] = new Array(tasks.length);
+        let nextTask = 0;
+        await Promise.all(
+          Array.from({ length: Math.min(4, tasks.length) }, async () => {
+            while (nextTask < tasks.length) {
+              const index = nextTask++;
+              const task = tasks[index];
+              if (!task) return;
+              try {
+                await task();
+                inspections[index] = { status: 'fulfilled', value: undefined };
+              } catch (reason) {
+                inspections[index] = { status: 'rejected', reason };
+              }
             }
-          })(),
-          (async () => {
-            for (let start = 0; start < beforeNetworks.length; start += 64) {
-              const result = await command(
-                [
-                  'network',
-                  'inspect',
-                  '--format',
-                  networkFormat,
-                  ...beforeNetworks.slice(start, start + 64),
-                ],
-                'network_inspect',
-              );
-              await stage('network_parse', () => {
-                const rows = result
-                  .split('\n')
-                  .map((line) => networkSchema.parse(JSON.parse(line)));
-                if (
-                  rows
-                    .map((row) => row.id)
-                    .sort()
-                    .join() !== beforeNetworks.slice(start, start + 64).join()
-                )
-                  throw new NetworkObservationError('network_inventory');
-                networks.push(...rows.map((row) => ({ ...row, options: row.options ?? {} })));
-              });
-            }
-          })(),
-        ]);
+          }),
+        );
+        // Stable observation order does not depend on which CLI call finished first.
+        rawContainers.sort((a, b) => a.id.localeCompare(b.id));
+        networks.sort((a, b) => a.id.localeCompare(b.id));
         for (const result of inspections) {
           if (result.status === 'rejected' && !(result.reason instanceof MissingContainers))
             throw result.reason;
@@ -481,23 +465,21 @@ export function createNetworkObserver(
             .join() !== beforeNetworks.join()
         )
           throw new NetworkObservationError('network_inventory');
-        for (const result of inspections) {
-          if (result.status === 'rejected') {
-            const missing = result.reason as MissingContainers;
-            const [current, currentNetworks] = await Promise.all([
-              ids('container'),
-              ids('network'),
-            ]);
-            if (currentNetworks.join() !== beforeNetworks.join())
-              throw new NetworkObservationError('network_inventory');
-            if (
-              missing.ids.every(
-                (value) => beforeContainers.includes(value) && !current.includes(value),
-              )
-            )
-              throw new ContainerChurn();
-            throw new NetworkObservationError('container_inspect');
-          }
+        const missing = inspections.flatMap((result) =>
+          result.status === 'rejected' ? (result.reason as MissingContainers).ids : [],
+        );
+        if (missing.length) {
+          const [current, currentNetworks] = await Promise.all([ids('container'), ids('network')]);
+          if (currentNetworks.join() !== beforeNetworks.join())
+            throw new NetworkObservationError('network_inventory');
+          // Parallel chunks can report separate disappearances. Corroborate
+          // every claimed ID, never let the first valid disappearance hide an
+          // invalid missing-object response from a different chunk.
+          if (
+            missing.every((value) => beforeContainers.includes(value) && !current.includes(value))
+          )
+            throw new ContainerChurn();
+          throw new NetworkObservationError('container_inspect');
         }
         if (
           rawContainers
@@ -571,7 +553,10 @@ export function createNetworkObserver(
               remaining();
               sockets.push(
                 ...parseProcSockets(
-                  await io.read(`${config.hostProcDirectory}/net/${transport}${ipv6 ? '6' : ''}`),
+                  await io.read(
+                    `${config.hostProcDirectory}/net/${transport}${ipv6 ? '6' : ''}`,
+                    controller.signal,
+                  ),
                   transport,
                   ipv6,
                   ownedInodes,
@@ -587,8 +572,7 @@ export function createNetworkObserver(
           await stage('namespace', async () => {
             if ((await io.link('/proc/self/ns/net')) !== namespaceId) throw new Error();
             remaining();
-            if ((await io.link(`${config.hostProcDirectory}/ns/net`)) !== hostNamespaceId)
-              throw new Error();
+            if ((await hostNamespace()) !== hostNamespaceId) throw new Error();
           });
           return {
             observedAt: started,
@@ -603,6 +587,15 @@ export function createNetworkObserver(
         });
       }
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let abortWork: (() => void) | undefined;
+      const cancelled = new Promise<never>((_resolve, reject) => {
+        abortWork = () =>
+          reject(
+            new NetworkObservationError(expired ? 'observation_timeout' : 'observation_cancelled'),
+          );
+        controller.signal.addEventListener('abort', abortWork, { once: true });
+        if (controller.signal.aborted) abortWork();
+      });
       const complete = async () => {
         for (let number = 0; number < 2; number++) {
           try {
@@ -618,15 +611,20 @@ export function createNetworkObserver(
       try {
         return await Promise.race([
           complete(),
+          cancelled,
           new Promise<never>((_resolve, reject) => {
             timer = setTimeout(() => {
               expired = true;
+              controller.abort();
               reject(new NetworkObservationError('observation_timeout'));
             }, remaining());
           }),
         ]);
       } finally {
         if (timer !== undefined) clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        if (abortWork) controller.signal.removeEventListener('abort', abortWork);
+        controller.abort();
       }
     },
   };

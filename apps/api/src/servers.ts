@@ -79,6 +79,7 @@ import { boundedEventWriter } from './stream-buffer.js';
 
 type C = Context<{ Variables: Variables }>;
 export interface ServerRouteOptions {
+  codec?: import('@nickhosting/core').SecretCodec;
   provisioningCache?: PrivateTransferCache;
   logger?: ReturnType<typeof createLogger>;
   db: ReturnType<typeof createDatabase>['db'];
@@ -276,7 +277,10 @@ export function registerServerRoutes(
     const input = parse(createServerSchema, await body(c));
     await service.refreshStorage(db, { mappingId: input.mappingId });
     await service.refreshObservations();
-    return c.json(await createManagedServer(db, service.adapter, context, input, env), 202);
+    return c.json(
+      await createManagedServer(db, service.adapter, context, input, env, { codec: options.codec }),
+      202,
+    );
   });
   app.get('/v1/servers/:id', async (c) => {
     const server = await authorizeServer(db, await principal(c), c.req.param('id'));

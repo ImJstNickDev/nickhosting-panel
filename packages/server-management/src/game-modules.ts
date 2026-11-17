@@ -20,6 +20,7 @@ import type { Kysely, Selectable } from 'kysely';
 import type { DB, Environment } from './admission.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { minecraftModule } from './minecraft-module.js';
+import { satisfactoryModule } from './satisfactory-module.js';
 
 export type ManagedGameServer = Selectable<Database['managed_servers']>;
 export type GameMapping = Selectable<Database['runtime_egg_mappings']>;
@@ -40,6 +41,9 @@ export interface TrustedGameModule {
   id: string;
   manifest: GameManifest;
   provisionAsResourceOwner: boolean;
+  /** Management screens shipped by this module use compiled declarations even
+   * when the registered manifest predates them. Never overrides lifecycle policy. */
+  managementCapabilities?: readonly ('players' | 'mods' | 'worlds')[];
   /** Trusted integration supplies presentation defaults; no lifecycle authority.
    * The manifest declares the editor contract, this hook resolves Owner settings. */
   resolveGatewayMessages?(
@@ -85,6 +89,18 @@ export interface FileMutationContext {
 }
 export interface GameRuntimeHooks extends GameBackupHooks<GameLifecycleContext> {
   configureProvision(context: GameLifecycleContext): Promise<boolean>;
+  installationRetry?(
+    context: GameLifecycleContext,
+    logs: readonly { at: string; text: string }[],
+  ): Promise<number>;
+  /** Complete explicit first-run configuration after confirmed process start. */
+  finalizeStart?(context: GameLifecycleContext): Promise<boolean>;
+  /** Local protected-store cleanup after proven provider deletion, in its transaction. */
+  cleanupSecrets?(serverId: string, db: Kysely<Database>): Promise<void>;
+  /** Flush game state inside the existing durable stop/restart effect. */
+  prepareStop?(context: GameLifecycleContext): Promise<void>;
+  /** Best-effort maintenance after confirmed stop, under the existing lifecycle lock. */
+  finalizeStop?(context: GameLifecycleContext): Promise<void>;
   verifyInitialInstallation?(
     context: GameLifecycleContext,
   ): Promise<import('./lifecycle.js').InitialInstallationOutputs | null>;
@@ -170,7 +186,7 @@ export function createGameModuleRegistry(modules: readonly TrustedGameModule[]) 
     },
   });
 }
-export const trustedGameModules = createGameModuleRegistry([minecraftModule]);
+export const trustedGameModules = createGameModuleRegistry([minecraftModule, satisfactoryModule]);
 
 /** A registry-bound dispatcher protects all content/lifecycle entry points.
  * Unknown generic games retain M2 lifecycle support but cannot acquire content

@@ -36,6 +36,12 @@ import {
 import { type Kysely, sql, type Transaction } from 'kysely';
 import { z } from 'zod';
 import {
+  satisfactoryConfigurationSchema,
+  satisfactoryEggEnvironment,
+  satisfactoryPortArguments,
+} from '../../../games/satisfactory/src/index.js';
+import { satisfactoryModSelectionSchema } from '../../../games/satisfactory/src/mods.js';
+import {
   checkStorage,
   type DB,
   type Environment,
@@ -67,6 +73,13 @@ import { minecraftProvisionStartup } from './minecraft-startup.js';
 import { backupSchemaAvailable } from './provider-backup-events.js';
 import { retryableProvision } from './provision-retry.js';
 import { integrationImageCandidates, mappingProvisionImage } from './runtime-images.js';
+import {
+  assertSatisfactorySetupRetry,
+  persistSatisfactorySetup,
+  satisfactoryCreationHashInput,
+  satisfactorySetupSchema,
+} from './satisfactory-setup.js';
+import { ensureSatisfactoryTlsIdentity } from './satisfactory-tls.js';
 import { killRequestSchema, requestStopEscalation } from './stop-escalation.js';
 import { storageCommitments } from './storage-accounting.js';
 import { getUserStorageBudget } from './storage-user-budget.js';
@@ -100,6 +113,9 @@ export const createServerSchema = z
       })
       .strict()
       .optional(),
+    satisfactory: satisfactoryConfigurationSchema
+      .extend({ setup: satisfactorySetupSchema.optional() })
+      .optional(),
     minecraft: z
       .object({ choiceId: z.uuid(), configuration: minecraftConfigurationSchema })
       .strict()
@@ -107,6 +123,20 @@ export const createServerSchema = z
   })
   .strict();
 export const operationSchema = z.discriminatedUnion('action', [
+  z.strictObject({
+    action: z.literal('satisfactory-content'),
+    idempotencyKey: keySchema,
+    command: z.strictObject({
+      kind: z.literal('mods'),
+      mode: z.enum(['preview', 'apply', 'rollback']).optional(),
+      refreshMetadata: z.boolean().optional(),
+      selection: satisfactoryModSelectionSchema.optional(),
+      vanilla: z.boolean().optional(),
+      revision: z.number().int().nonnegative().optional(),
+      planId: z.uuid().optional(),
+      profileId: z.uuid().optional(),
+    }),
+  }),
   z
     .object({ action: z.literal('retry-provision'), failedJobId: id, idempotencyKey: keySchema })
     .strict(),
@@ -413,6 +443,7 @@ async function insertOperation(
   hash: string,
   action: Database['server_operations']['action'],
   plan: Record<string, unknown>,
+  beforeActivation?: () => Promise<void>,
 ) {
   await tx
     .insertInto('operation_jobs')
@@ -451,6 +482,10 @@ async function insertOperation(
       lease_token: null,
     })
     .execute();
+  // Admission needs the durable actor/operation, but must still see the previous
+  // active operation when checking reservation ownership. Failure rolls back all
+  // job rows before any notification or delivery can escape this transaction.
+  await beforeActivation?.();
   await tx.insertInto('job_outbox').values({ job_id: jobId, last_dispatched_at: null }).execute();
   await notifyJobOutbox(tx);
   await tx
@@ -498,19 +533,31 @@ export async function createManagedServer(
   context: AuthContext,
   input: unknown,
   env: Environment = {},
-  options: { minecraftInitialContent?: MinecraftPreparedContent; creationRequest?: unknown } = {},
+  options: {
+    minecraftInitialContent?: MinecraftPreparedContent;
+    creationRequest?: unknown;
+    codec?: import('@nickhosting/core').SecretCodec;
+  } = {},
 ) {
   assertPermission(context, 'server:manage', { ownerUserId: context.subjectUserId });
   const request = parse(createServerSchema, input);
   const hash = digest({
     kind: 'create',
     subject: context.subjectUserId,
-    value: options.creationRequest ?? request,
+    value: satisfactoryCreationHashInput(options.creationRequest ?? request),
   });
   return db.transaction().execute(async (tx) => {
     await requestLock(tx, context, request.idempotencyKey);
     const previous = await previousRequest(tx, context, request.idempotencyKey, hash);
-    if (previous) return previous;
+    if (previous) {
+      await assertSatisfactorySetupRetry(
+        tx,
+        options.codec,
+        previous.serverId,
+        request.satisfactory?.setup,
+      );
+      return previous;
+    }
     await lockResources(tx);
     await assertStoragePolicyIdle(tx);
     const { values: config } = await getSettings(tx, env);
@@ -826,13 +873,41 @@ export async function createManagedServer(
           allocationRows.find((allocation) => allocation.role === role.role)?.port,
         );
     }
+    let satisfactoryStartup: string | undefined;
+    if (mapping.game_id === 'satisfactory') {
+      if (!options.codec) throw new DomainError('configuration_invalid');
+      const game = allocationRows.find((row) => row.role === 'game');
+      const reliable = allocationRows.find((row) => row.role === 'reliable');
+      if (
+        !game ||
+        !reliable ||
+        !game.protocols.includes('tcp') ||
+        !game.protocols.includes('udp') ||
+        !reliable.protocols.includes('tcp')
+      )
+        throw new DomainError('configuration_invalid');
+      const publicReliable = gatewayProvision?.routes.find(
+        (route) => route.allocationId === reliable.id && route.transport === 'tcp',
+      );
+      const ports = {
+        game: game.port,
+        reliable: reliable.port,
+        externalReliable: publicReliable?.publicPort ?? reliable.port,
+      };
+      const { setup, ...runtimeConfiguration } = value.satisfactory ?? {};
+      Object.assign(environment, satisfactoryEggEnvironment(runtimeConfiguration, ports));
+      if (setup) await persistSatisfactorySetup(tx, options.codec, serverId, value.name, setup);
+      satisfactoryStartup = `${mapping.startup.replace(/\s+-(?:ExternalReliablePort|ReliablePort|Port)=(?:\{\{[^}]+\}\}|[^\s]+)/g, '')} ${satisfactoryPortArguments(ports).join(' ')}`;
+      await ensureSatisfactoryTlsIdentity(tx, options.codec, serverId);
+    } else if (value.satisfactory) throw new DomainError('validation_failed');
     const provision: ProvisionPlan = {
       name: value.name,
       externalId,
       userId: providerOwner.provider_id,
       eggId: mapping.egg_id,
       dockerImage: mappingProvisionImage(mapping, minecraft?.row.binding),
-      startup: minecraft ? minecraftProvisionStartup(minecraft) : mapping.startup,
+      startup:
+        satisfactoryStartup ?? (minecraft ? minecraftProvisionStartup(minecraft) : mapping.startup),
       environment,
       limits: value.limits,
       featureLimits: mapping.feature_limits,
@@ -956,8 +1031,11 @@ export async function enqueueLockedServerOperation(
   env: Environment = {},
   automation?: GatewayAutomationOperation,
   options: {
+    /** Internal provenance, supplied before initial admission by automation callers. */
+    requestSource?: 'automation';
     minecraftPlan?: MinecraftPreparedContent;
     minecraftInitialContent?: MinecraftPreparedContent;
+    satisfactoryContent?: true;
   } = {},
 ) {
   const value = parse(operationSchema, input);
@@ -993,6 +1071,16 @@ export async function enqueueLockedServerOperation(
   if (('backupBefore' in value && value.backupBefore) || options.minecraftPlan?.backupBefore)
     await authorizeServer(tx, context, serverId, 'backups.create');
   if (server.active_operation_id) throw new DomainError('conflict');
+  if (value.action === 'satisfactory-content' && !options.satisfactoryContent)
+    throw new DomainError('forbidden');
+  if (value.action !== 'stop') {
+    const modState = await tx
+      .selectFrom('satisfactory_mod_states')
+      .select('external_mode')
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    if (modState?.external_mode) throw new DomainError('conflict');
+  }
   await assertNoModpackPublication(tx, serverId);
   if (value.action === 'retry-provision') {
     if (automation) throw new DomainError('forbidden');
@@ -1082,6 +1170,7 @@ export async function enqueueLockedServerOperation(
     throw new DomainError('operation_uncertain');
   const jobId = randomUUID();
   const plan: Record<string, unknown> = automation ? { gatewayAutomation: automation } : {};
+  if (options.requestSource) plan.requestSource = options.requestSource;
   if (value.action === 'minecraft-content') {
     if (
       !options.minecraftPlan ||
@@ -1104,6 +1193,15 @@ export async function enqueueLockedServerOperation(
       throw new DomainError('conflict');
     plan.minecraftContent = options.minecraftPlan;
     plan.backupBefore = options.minecraftPlan.backupBefore;
+  }
+  if (value.action === 'satisfactory-content') {
+    const mapping = await tx
+      .selectFrom('runtime_egg_mappings')
+      .select('game_id')
+      .where('id', '=', server.mapping_id)
+      .executeTakeFirstOrThrow();
+    if (mapping.game_id !== 'satisfactory' || automation) throw new DomainError('forbidden');
+    plan.satisfactoryContent = value.command;
   }
   if (value.action === 'reinstall' || value.action === 'wipe') {
     const profile = await tx
@@ -1145,16 +1243,20 @@ export async function enqueueLockedServerOperation(
     throw new DomainError('operation_uncertain');
   if (
     !onlineWorldContent &&
-    ['configure', 'reinstall', 'wipe', 'restore', 'delete', 'minecraft-content'].includes(
-      value.action,
-    ) &&
+    [
+      'configure',
+      'reinstall',
+      'wipe',
+      'restore',
+      'delete',
+      'minecraft-content',
+      'satisfactory-content',
+    ].includes(value.action) &&
     reservation
   )
     throw new DomainError('operation_uncertain');
   if (value.action === 'start' || value.action === 'restart')
     plan.reservationCreated = !reservation;
-  if (value.action === 'start' || value.action === 'restart')
-    await reserveStartInTransaction(tx, serverId, jobId, value.action, env);
   if (value.action === 'stop') {
     await tx
       .updateTable('resource_reservations')
@@ -1169,9 +1271,15 @@ export async function enqueueLockedServerOperation(
   }
   if (
     !onlineWorldContent &&
-    ['wipe', 'reinstall', 'restore', 'configure', 'delete', 'minecraft-content'].includes(
-      value.action,
-    ) &&
+    [
+      'wipe',
+      'reinstall',
+      'restore',
+      'configure',
+      'delete',
+      'minecraft-content',
+      'satisfactory-content',
+    ].includes(value.action) &&
     !['offline', 'unknown'].includes(server.runtime_state)
   )
     throw new DomainError('conflict');
@@ -1260,6 +1368,8 @@ export async function enqueueLockedServerOperation(
       .execute();
   }
   if (value.action === 'delete') await revokeGatewayRoutesForDeletion(tx, serverId, new Date());
+  const computeAction =
+    value.action === 'start' || value.action === 'restart' ? value.action : null;
   return insertOperation(
     tx,
     context,
@@ -1269,6 +1379,9 @@ export async function enqueueLockedServerOperation(
     hash,
     value.action,
     plan,
+    computeAction
+      ? () => reserveStartInTransaction(tx, serverId, jobId, computeAction, env)
+      : undefined,
   );
 }
 
@@ -1281,6 +1394,7 @@ export async function enqueueServerOperation(
   options: {
     minecraftPlan?: MinecraftPreparedContent;
     minecraftInitialContent?: MinecraftPreparedContent;
+    satisfactoryContent?: true;
   } = {},
 ) {
   const value = parse(operationSchema, input);
@@ -1392,6 +1506,26 @@ export async function enqueueServerOperation(
       }
     }
     return result;
+  });
+}
+
+/** Let the game API replay an accepted content request before inspecting mutable
+ * plan/recovery state. This never creates work and always rechecks live access. */
+export async function replaySatisfactoryContentOperation(
+  db: Kysely<Database>,
+  context: AuthContext,
+  serverId: string,
+  input: unknown,
+  env: Environment = {},
+) {
+  const value = parse(operationSchema, input);
+  if (value.action !== 'satisfactory-content') throw new DomainError('validation_failed');
+  const hash = digest({ kind: 'operation', subject: context.subjectUserId, serverId, value });
+  return db.transaction().execute(async (tx) => {
+    await requestLock(tx, context, value.idempotencyKey);
+    const current = await currentInteractiveContext(tx, context, env);
+    await authorizeServer(tx, current, serverId, 'server:manage');
+    return previousRequest(tx, current, value.idempotencyKey, hash);
   });
 }
 

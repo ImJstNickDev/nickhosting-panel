@@ -2,7 +2,12 @@ import { isIP } from 'node:net';
 import { DomainError } from '@nickhosting/core';
 import {
   type GatewayControl,
+  gatewayConsoleCommandResponseSchema,
   gatewayObservationSchema,
+  gatewayOfflineApiRequestSchema,
+  gatewayOfflineApiResponseSchema,
+  gatewayPrivateStateMaxBytes,
+  gatewaySatisfactoryStateSchema,
   gatewaySnapshotSchema,
   gatewayWakeRequestSchema,
   gatewayWakeResultSchema,
@@ -22,7 +27,7 @@ export interface GatewayControlClientOptions {
  * or crosses cleartext networks. Loopback HTTP supports same-host IPC/tests. */
 export interface GatewayControlClient extends GatewayControl {
   /** Additional authenticated Core contracts must validate their own JSON response. */
-  requestJson(action: string, body?: unknown): Promise<unknown>;
+  requestJson(action: string, body?: unknown, signal?: AbortSignal): Promise<unknown>;
   close(): void;
 }
 /** Only minted from Core's authenticated, bounded explicit revision precondition.
@@ -95,7 +100,7 @@ export function createGatewayControlClient(
         headers: {
           Authorization: `Bearer ${options.token}`,
           Accept: 'application/json',
-          ...(action === 'snapshot'
+          ...(action === 'snapshot' || action === 'evidence'
             ? { 'X-NickHosting-Gateway-Features': 'completed-sleep-v1,presentation-variables-v1' }
             : {}),
           ...(action === 'observations'
@@ -115,12 +120,21 @@ export function createGatewayControlClient(
       if (!reader) throw new DomainError('integration_unavailable');
       const chunks: Uint8Array[] = [];
       let bytes = 0;
+      const enumeration =
+        action === 'offline-api' &&
+        z
+          .object({ request: z.object({ operation: z.literal('EnumerateSessions') }) })
+          .safeParse(body).success;
+      const maxBytes =
+        action === 'private-state-read' || enumeration
+          ? gatewayPrivateStateMaxBytes + 4096
+          : options.maxResponseBytes;
       try {
         while (true) {
           const part = await reader.read();
           if (part.done) break;
           bytes += part.value.byteLength;
-          if (bytes > options.maxResponseBytes) {
+          if (bytes > maxBytes) {
             await reader.cancel();
             throw new DomainError('integration_unavailable');
           }
@@ -149,6 +163,7 @@ export function createGatewayControlClient(
           response.status === 503 &&
           [
             'snapshot',
+            'evidence',
             'inventory',
             'context',
             'proof-read',
@@ -184,19 +199,20 @@ export function createGatewayControlClient(
           .safeParse(parsed);
         if (
           response.status === 412 &&
-          action === 'inventory' &&
           membershipChanged.success &&
-          z
-            .object({
-              operation: z.literal('servers'),
-              routeIds: z
-                .array(z.uuid())
-                .min(1)
-                .max(1000)
-                .refine((ids) => new Set(ids).size === ids.length),
-            })
-            .strict()
-            .safeParse(body).success
+          (action === 'evidence' ||
+            (action === 'inventory' &&
+              z
+                .object({
+                  operation: z.literal('servers'),
+                  routeIds: z
+                    .array(z.uuid())
+                    .min(1)
+                    .max(1000)
+                    .refine((ids) => new Set(ids).size === ids.length),
+                })
+                .strict()
+                .safeParse(body).success))
         )
           throw new GatewayRouteRevisionStaleError();
         if (
@@ -234,6 +250,78 @@ export function createGatewayControlClient(
   };
   return {
     requestJson: request,
+    async observeApplication(input) {
+      return z
+        .strictObject({
+          ready: z.boolean(),
+          idle: z.boolean().optional(),
+          playerCount: z.number().int().min(0).max(1000000).optional(),
+        })
+        .parse(await request('application-observation', input));
+    },
+    loadPrivateState(input) {
+      return request('private-state-read', input);
+    },
+    async requestOfflineApi(input) {
+      const value = z
+        .strictObject({
+          routeId: z.uuid(),
+          routeRevision: z.number().int().positive(),
+          request: gatewayOfflineApiRequestSchema,
+        })
+        .parse(input);
+      return gatewayOfflineApiResponseSchema.parse(await request('offline-api', value));
+    },
+    async requestConsoleCommand(input) {
+      const value = z
+        .strictObject({
+          routeId: z.uuid(),
+          routeRevision: z.number().int().positive(),
+          request: gatewayOfflineApiRequestSchema,
+        })
+        .parse(input);
+      return gatewayConsoleCommandResponseSchema.parse(
+        await request('console-command', value, undefined, 10000),
+      );
+    },
+    async savePrivateState(input) {
+      await request('private-state-write', input);
+    },
+    async loadProtocolState(input) {
+      const value = z
+        .object({ routeId: z.uuid(), routeRevision: z.number().int().positive() })
+        .strict()
+        .parse(input);
+      const result = z
+        .object({ state: gatewaySatisfactoryStateSchema.nullable() })
+        .strict()
+        .parse(await request('protocol-state-read', value));
+      return result.state ?? undefined;
+    },
+    async reportProtocolState(input) {
+      const value = z
+        .object({
+          routeId: z.uuid(),
+          routeRevision: z.number().int().positive(),
+          state: gatewaySatisfactoryStateSchema,
+        })
+        .strict()
+        .parse(input);
+      await request('protocol-state', value);
+    },
+    async fetchTlsIdentity(input) {
+      const value = z
+        .object({ routeId: z.uuid(), routeRevision: z.number().int().positive() })
+        .strict()
+        .parse(input);
+      return z
+        .object({
+          privateKeyPem: z.string().min(1).max(32768),
+          certificatePem: z.string().min(1).max(65536),
+        })
+        .strict()
+        .parse(await request('tls-identity', value));
+    },
     close() {
       closed = true;
       for (const controller of controllers) controller.abort();

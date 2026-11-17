@@ -19,6 +19,7 @@ import { createNetworkObserver, type NetworkObserver } from '@nickhosting/pterod
 import { z } from 'zod';
 import { createGatewayControlClient } from './control-client.js';
 import { createGatewayDataPlane } from './data-plane.js';
+import { createEvidenceCache } from './evidence.js';
 import { probeNodeEndpoint } from './node-probe.js';
 import { watchGatewayStartup } from './startup-client.js';
 
@@ -59,6 +60,87 @@ async function loadProtocols(env: Environment): Promise<GatewayProtocolAdapter[]
   }
   return protocols;
 }
+/** Share only overlapping host scans. A settled observation is never cached:
+ * later validation (including the final bind check) takes a new host snapshot.
+ * Each caller still checks the original observation timestamp and route proof. */
+export function coalesceNetworkObservations(source: NetworkObserver): NetworkObserver {
+  type Shared = {
+    work: ReturnType<NetworkObserver['observe']>;
+    controller: AbortController;
+    consumers: number;
+    settled: boolean;
+  };
+  let pending: Shared | undefined;
+  return {
+    async observeFresh(signal) {
+      signal?.throwIfAborted();
+      // New/changed admissions must not join a scan begun before Core evidence.
+      // The caller owns this read and its cancellation independently of renewals.
+      const value = await (source.observeFresh
+        ? source.observeFresh(signal)
+        : source.observe(signal));
+      signal?.throwIfAborted();
+      return structuredClone(value);
+    },
+    async observe(signal) {
+      signal?.throwIfAborted();
+      if (!pending) {
+        const controller = new AbortController();
+        const shared: Shared = {
+          controller,
+          consumers: 0,
+          settled: false,
+          work: Promise.resolve().then(() => {
+            controller.signal.throwIfAborted();
+            return source.observe(controller.signal);
+          }),
+        };
+        pending = shared;
+        const settled = () => {
+          shared.settled = true;
+          if (pending === shared) pending = undefined;
+        };
+        void shared.work.then(settled, settled);
+      }
+      const shared = pending;
+      shared.consumers++;
+      return new Promise((resolve, reject) => {
+        let done = false;
+        const release = () => {
+          if (done) return false;
+          done = true;
+          signal?.removeEventListener('abort', abort);
+          shared.consumers--;
+          if (!shared.settled && shared.consumers === 0) {
+            // An individual timeout cannot cancel another route's evidence.
+            // Once everyone leaves, stop the native work and evict it immediately.
+            if (pending === shared) pending = undefined;
+            shared.controller.abort();
+          }
+          return true;
+        };
+        const abort = () => {
+          if (release()) reject(signal?.reason);
+        };
+        signal?.addEventListener('abort', abort, { once: true });
+        if (signal?.aborted) abort();
+        void shared.work.then(
+          (value) => {
+            if (!release()) return;
+            try {
+              resolve(structuredClone(value));
+            } catch (error) {
+              reject(error);
+            }
+          },
+          (error: unknown) => {
+            if (release()) reject(error);
+          },
+        );
+      });
+    },
+  };
+}
 export async function createGatewayRuntime(
   env: Environment,
   dependencies: {
@@ -95,12 +177,30 @@ export async function createGatewayRuntime(
     )
       throw new DomainError('configuration_invalid');
     const networkPolicy = gatewayNetworkPolicySchema.parse(settings.gatewayNetworkPolicy);
-    const observer = dependencies.observer ?? createNetworkObserver(settings.gatewayObserver);
+    const observer = coalesceNetworkObservations(
+      dependencies.observer ?? createNetworkObserver(settings.gatewayObserver),
+    );
     const protocols = dependencies.protocols ?? (await loadProtocols(env));
     const serverRoutes = new Map<number, string>();
-    const context = async (route: { id: string; revision: number }) => {
+    const evidence = createEvidenceCache(networkPolicy.maximumObservationAgeMs);
+    const routeValues = new Map<string, import('@nickhosting/game-sdk').GatewayRoute>();
+    const context = async (
+      route: import('@nickhosting/game-sdk').GatewayRoute,
+      signal?: AbortSignal,
+    ) => {
+      signal?.throwIfAborted();
+      routeValues.set(route.id, route);
+      const cached = evidence.route(route);
+      if (cached) {
+        serverRoutes.set(cached.context.providerServerId, route.id);
+        return cached.context;
+      }
       const result = gatewaySafetyContextSchema.parse(
-        await client.requestJson('context', { routeId: route.id, routeRevision: route.revision }),
+        await client.requestJson(
+          'context',
+          { routeId: route.id, routeRevision: route.revision },
+          signal,
+        ),
       );
       serverRoutes.set(result.providerServerId, route.id);
       return result;
@@ -116,17 +216,29 @@ export async function createGatewayRuntime(
         ? T
         : never,
       validationId?: string,
+      signal?: AbortSignal,
     ) => {
+      signal?.throwIfAborted();
       const handler = protocols.find(
         (p) => p.id === route.protocol?.handlerId && p.supports(route),
       );
       if (!handler) return false;
       const controller = new AbortController();
+      const abort = () => controller.abort(signal?.reason);
+      signal?.addEventListener('abort', abort, { once: true });
       const timeout = setTimeout(() => controller.abort(), policy.probeTimeoutMs);
       const probeId = randomUUID();
       const probeContext = {
         route,
         signal: controller.signal,
+        persistState: async (state: import('@nickhosting/game-sdk').GatewaySatisfactoryState) => {
+          if (controller.signal.aborted) return;
+          await client.reportProtocolState?.({
+            routeId: route.id,
+            routeRevision: route.revision,
+            state,
+          });
+        },
         ...(route.mode === 'waking'
           ? {
               onProbeDiagnostic: (
@@ -144,7 +256,7 @@ export async function createGatewayRuntime(
           : {}),
       };
       try {
-        return await Promise.race([
+        const result = await Promise.race([
           handler.observe
             ? handler.observe(probeContext)
             : handler.probeReadiness(probeContext).then((r) => r.ready === true),
@@ -152,9 +264,13 @@ export async function createGatewayRuntime(
             controller.signal.addEventListener('abort', () => resolve(false), { once: true }),
           ),
         ]);
+        signal?.throwIfAborted();
+        return result;
       } catch {
+        if (signal?.aborted) throw signal.reason;
         return false;
       } finally {
+        signal?.removeEventListener('abort', abort);
         clearTimeout(timeout);
         controller.abort();
       }
@@ -171,24 +287,46 @@ export async function createGatewayRuntime(
             p.readinessSource === 'provider_running',
         ),
       provider: {
-        listNodes: async () =>
+        observedAt: () => evidence.current()?.observedAt,
+        listNodes: async (signal) =>
+          evidence.current()?.nodes ??
           z
             .array(safetyProviderNodeSchema)
             .max(1000)
-            .parse(await client.requestJson('inventory', { operation: 'nodes' })),
-        listAllocations: async (nodeId) =>
+            .parse(await client.requestJson('inventory', { operation: 'nodes' }, signal)),
+        listAllocations: async (nodeId, signal) =>
+          evidence.current()?.allocations.find((entry) => entry.nodeId === nodeId)?.allocations ??
           z
             .array(safetyProviderAllocationSchema)
             .max(100000)
-            .parse(await client.requestJson('inventory', { operation: 'allocations', nodeId })),
-        getApplicationServer: async (id) => {
+            .parse(
+              await client.requestJson('inventory', { operation: 'allocations', nodeId }, signal),
+            ),
+        getApplicationServer: async (id, signal) => {
           const routeId = serverRoutes.get(id);
           if (!routeId) throw new DomainError('provenance_mismatch');
+          const value = routeValues.get(routeId);
+          if (value && evidence.route(value)) {
+            const cached = evidence.current()?.servers.find((entry) => entry.id === id);
+            if (cached) return cached;
+          }
           return safetyProviderServerSchema.parse(
-            await client.requestJson('inventory', { operation: 'server', routeId }),
+            await client.requestJson('inventory', { operation: 'server', routeId }, signal),
           );
         },
-        getApplicationServers: async (routeIds) => {
+        getApplicationServers: async (routeIds, signal) => {
+          const cached = evidence.current();
+          if (
+            cached &&
+            routeIds.every((id) => cached.snapshot.routes.some((route) => route.id === id))
+          ) {
+            const ids = new Set(
+              cached.contexts
+                .filter((entry) => routeIds.includes(entry.routeId))
+                .map((entry) => entry.context.providerServerId),
+            );
+            return cached.servers.filter((entry) => ids.has(entry.id));
+          }
           const servers = new Map<number, z.infer<typeof safetyProviderServerSchema>>();
           // Keep each control request bounded without lowering the snapshot route
           // limit. Several roles may refer to the same server across chunks.
@@ -197,10 +335,14 @@ export async function createGatewayRuntime(
               .array(safetyProviderServerSchema)
               .max(1000)
               .parse(
-                await client.requestJson('inventory', {
-                  operation: 'servers',
-                  routeIds: routeIds.slice(offset, offset + 1000),
-                }),
+                await client.requestJson(
+                  'inventory',
+                  {
+                    operation: 'servers',
+                    routeIds: routeIds.slice(offset, offset + 1000),
+                  },
+                  signal,
+                ),
               );
             for (const server of values) {
               const previous = servers.get(server.id);
@@ -213,25 +355,36 @@ export async function createGatewayRuntime(
         },
       },
       resolveContext: context,
-      loadProof: async (route) =>
-        gatewayReachabilityProofSchema.nullable().parse(
-          await client.requestJson('proof-read', {
+      loadProof: async (route, signal) => {
+        const cached = evidence.route(route);
+        if (cached) return cached.proof;
+        return gatewayReachabilityProofSchema.nullable().parse(
+          await client.requestJson(
+            'proof-read',
+            {
+              routeId: route.id,
+              routeRevision: route.revision,
+            },
+            signal,
+          ),
+        );
+      },
+      saveProof: async (route, proof, signal) => {
+        await client.requestJson(
+          'proof-write',
+          {
             routeId: route.id,
             routeRevision: route.revision,
-          }),
-        ),
-      saveProof: async (route, proof) => {
-        await client.requestJson('proof-write', {
-          routeId: route.id,
-          routeRevision: route.revision,
-          proof,
-        });
+            proof,
+          },
+          signal,
+        );
       },
       probeBackend: probe,
-      probeNode: async (route, validatedContext) => {
+      probeNode: async (route, validatedContext, signal) => {
         // The validator already resolved this exact route immediately before
         // its fresh inspection; avoid a duplicate Core request in the same pass.
-        const identity = validatedContext ?? (await context(route)),
+        const identity = validatedContext ?? (await context(route, signal)),
           target = settings.gatewayNodeProbes[String(identity.providerNodeId)];
         return target
           ? probeNodeEndpoint(
@@ -239,6 +392,7 @@ export async function createGatewayRuntime(
               target.port,
               target.transport,
               policy.probeTimeoutMs,
+              signal,
             )
           : false;
       },
@@ -265,12 +419,12 @@ export async function createGatewayRuntime(
             signal,
           ),
         async fetchSnapshot() {
-          const current = await client.requestJson('configuration');
-          if (fingerprint(current) !== initial) {
+          const current = evidence.replace(await client.requestJson('evidence'));
+          if (fingerprint(current.configuration) !== initial) {
             changed = true;
             throw new DomainError('configuration_invalid');
           }
-          return client.fetchSnapshot();
+          return current.snapshot;
         },
       },
       policy: {

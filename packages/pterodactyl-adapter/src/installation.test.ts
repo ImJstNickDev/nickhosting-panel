@@ -41,6 +41,37 @@ function fixture(status: string | null = null) {
   };
 }
 describe('installation terminal evidence', () => {
+  it('keeps a legitimate long Steam installation subscribed past five minutes', async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      let complete!: () => void;
+      f.adapter.reinstall.mockImplementation(async () => {
+        complete = () => {
+          f.adapter.relayConsole.mock.calls[0]?.[1].onEvent({
+            type: 'installation',
+            phase: 'completed',
+          });
+        };
+      });
+      const result = confirmInstallation(
+        f.adapter,
+        1,
+        'fixture',
+        f.options,
+        true,
+        undefined,
+        f.observer,
+      );
+      await vi.advanceTimersByTimeAsync(310_000);
+      expect(f.close).not.toHaveBeenCalled();
+      complete();
+      await expect(result).resolves.toEqual({ confirmed: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('traces the request separately from terminal wait without adding provider reads', async () => {
     const f = fixture();
     const labels: string[] = [];

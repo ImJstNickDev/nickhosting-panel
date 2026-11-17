@@ -99,7 +99,7 @@ import {
 import { FolderUploadError, planFolderUpload, prepareFolderUpload } from './folder-upload.js';
 import { InlineFileRename } from './inline-file-rename.js';
 import { validFilename } from './inline-file-rename-model.js';
-import { gameUiRegistry, getFileEntryGroup } from './integrations.js';
+import { availableGameSections, gameUiRegistry, getFileEntryGroup } from './integrations.js';
 import { useDirectoryPrefetch } from './use-directory-prefetch.js';
 import { useViewerEscape } from './use-viewer-escape.js';
 import { isSingleCompressed } from './viewer-engine/core/compressed.js';
@@ -215,7 +215,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const reloadViewer = useMemo(() => readViewerBookmark(viewerKey), [viewerKey]);
   const restoreAttempt = useRef<string | undefined>(undefined);
   const [restoredViewerKey, setRestoredViewerKey] = useState<string>();
+  const requestedDirectory = new URLSearchParams(location.search).get('directory');
   const readDirectory = (key: string | undefined) => {
+    if (requestedDirectory !== null) {
+      const normalized = normalizeFilePath(requestedDirectory);
+      if (normalized !== undefined) return normalized;
+    }
     try {
       const path = key ? sessionStorage.getItem(key) : null;
       return path !== null && normalizeFilePath(path) !== undefined ? path : '';
@@ -1963,9 +1968,17 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         surface: displaying ? 'viewer' : 'directory',
         viewerId: displaying ? (viewing ? viewed?.viewerId : editorView) : undefined,
         readOnly: viewing || !canMutate,
+        selection: selectedEntries.map((entry) => ({
+          ...viewerSource(entry),
+          directory: !entry.is_file,
+          symlink: entry.is_symlink,
+        })),
         ...(viewing ? viewerContext : {}),
       }}
       extensions={gameFilemanExtensions}
+      navigateDirectory={navigate}
+      viewerIdentity={viewerIdentity}
+      sections={server.data ? availableGameSections(server.data).map((section) => section.id) : []}
     >
       <section
         className="file-manager"

@@ -335,9 +335,16 @@ async function describeServer(
   const idle = !row.active_operation_id && !upload;
   const configured = row.pterodactyl_id !== null && row.pterodactyl_identifier !== null;
   const installed = row.installation_state === 'installed';
+  const installedModule = trustedGameModules.get(mapping.game_id);
   const capabilities = manifest.success
     ? {
         ...manifest.data.capabilities,
+        ...Object.fromEntries(
+          (installedModule?.managementCapabilities ?? []).map((key) => [
+            key,
+            installedModule?.manifest.capabilities[key],
+          ]),
+        ),
         // Message handlers use the installed module; older persisted manifests
         // may predate this optional capability.
         gatewayMessages: !!trustedGameModules.get(mapping.game_id)?.manifest.gatewayMessages,

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { resolveConfig } from '@nickhosting/core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createGatewayRuntime, main } from './main.js';
+import { coalesceNetworkObservations, createGatewayRuntime, main } from './main.js';
 
 const token = randomBytes(32).toString('base64url');
 const id = randomUUID();
@@ -59,6 +59,16 @@ function fixture() {
     expect(init?.redirect).toBe('error');
     const url = new URL(String(input));
     if (url.pathname.endsWith('/configuration')) return Response.json(current);
+    if (url.pathname.endsWith('/evidence'))
+      return Response.json({
+        configuration: current,
+        snapshot: snapshot(),
+        observedAt: Date.now(),
+        contexts: [],
+        nodes: [],
+        allocations: [],
+        servers: [],
+      });
     if (url.pathname.endsWith('/snapshot')) return Response.json(snapshot());
     throw new Error('Unexpected control action');
   });
@@ -85,6 +95,9 @@ describe('separate permanent Gateway runtime composition', () => {
     expect(observe).not.toHaveBeenCalled();
     expect(runtime.gateway.health().controlAvailable).toBe(true);
     expect(f.fetcher).toHaveBeenCalled();
+    expect(
+      f.fetcher.mock.calls.map(([url]) => new URL(String(url)).pathname.split('/').at(-1)),
+    ).toEqual(['configuration', 'evidence']);
   });
   it('detects Owner policy changes and stops renewing the old runtime', async () => {
     const f = fixture();
@@ -215,4 +228,115 @@ it('quarantines a cold process before any control report or game forwarding and 
   expect(f.fetcher).not.toHaveBeenCalled();
   await service.close();
   expect(f.fetcher).not.toHaveBeenCalled();
+});
+
+describe('overlapping network observation reads', () => {
+  const observation = () => ({
+    observedAt: Date.now(),
+    namespaceId: 'net:[123]',
+    hostNamespaceId: 'net:[123]',
+    dockerDaemonId: 'fixture',
+    interfaceAddresses: ['127.0.0.1'],
+    sockets: [],
+    containers: [],
+    networks: [],
+  });
+  it('shares only an unfinished read and preserves independent original evidence', async () => {
+    let release!: (value: ReturnType<typeof observation>) => void;
+    const observe = vi.fn(
+      () =>
+        new Promise<ReturnType<typeof observation>>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const observer = coalesceNetworkObservations({ observe });
+    const first = observer.observe();
+    const second = observer.observe();
+    await Promise.resolve();
+    expect(observe).toHaveBeenCalledTimes(1);
+    const evidence = observation();
+    release(evidence);
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.observedAt).toBe(evidence.observedAt);
+    a.interfaceAddresses.push('127.0.0.2');
+    expect(b.interfaceAddresses).toEqual(['127.0.0.1']);
+    const third = observer.observe();
+    await Promise.resolve();
+    expect(observe).toHaveBeenCalledTimes(2);
+    release(observation());
+    await third;
+  });
+  it('cancels the source only after the last consumer leaves and evicts abandoned work', async () => {
+    const signals: AbortSignal[] = [];
+    const observe = vi.fn((signal?: AbortSignal) => {
+      if (signal) signals.push(signal);
+      return new Promise<ReturnType<typeof observation>>(() => {});
+    });
+    const observer = coalesceNetworkObservations({ observe });
+    const a = new AbortController(),
+      b = new AbortController();
+    const first = observer.observe(a.signal),
+      second = observer.observe(b.signal);
+    const firstRejected = expect(first).rejects.toThrow('first timeout');
+    const secondRejected = expect(second).rejects.toThrow('second timeout');
+    await Promise.resolve();
+    a.abort(new Error('first timeout'));
+    await firstRejected;
+    expect(signals[0]?.aborted).toBe(false);
+    b.abort(new Error('second timeout'));
+    await secondRejected;
+    expect(signals[0]?.aborted).toBe(true);
+    const c = new AbortController();
+    const third = observer.observe(c.signal);
+    const thirdRejected = expect(third).rejects.toThrow('third timeout');
+    await Promise.resolve();
+    expect(observe).toHaveBeenCalledTimes(2);
+    c.abort(new Error('third timeout'));
+    await thirdRejected;
+  });
+  it('starts admission evidence independently of an older shared scan and its cancellation', async () => {
+    const reads: {
+      signal?: AbortSignal;
+      resolve: (value: ReturnType<typeof observation>) => void;
+    }[] = [];
+    const observe = vi.fn(
+      (signal?: AbortSignal) =>
+        new Promise<ReturnType<typeof observation>>((resolve) => {
+          reads.push({ signal, resolve });
+        }),
+    );
+    const observer = coalesceNetworkObservations({ observe });
+    const renewal = new AbortController(),
+      admission = new AbortController();
+    const older = observer.observe(renewal.signal);
+    const rejected = expect(older).rejects.toThrow('renewal cancelled');
+    await Promise.resolve();
+    const fresh = observer.observeFresh?.(admission.signal);
+    expect(observe).toHaveBeenCalledTimes(2);
+    expect(reads[0]?.signal?.aborted).toBe(false);
+    renewal.abort(new Error('renewal cancelled'));
+    await rejected;
+    expect(reads[0]?.signal?.aborted).toBe(true);
+    expect(reads[1]?.signal).toBe(admission.signal);
+    expect(admission.signal.aborted).toBe(false);
+    const value = observation();
+    reads[1]?.resolve(value);
+    expect(await fresh).toEqual(value);
+    reads[0]?.resolve({ ...value, observedAt: value.observedAt - 1000 });
+  });
+  it('shares the failure without reusing failed or successful observations afterward', async () => {
+    const failure = new Error('host inspection failed');
+    const observe = vi.fn().mockRejectedValueOnce(failure).mockResolvedValue(observation());
+    const observer = coalesceNetworkObservations({ observe });
+    const results = await Promise.allSettled([observer.observe(), observer.observe()]);
+    expect(results).toEqual([
+      { status: 'rejected', reason: failure },
+      { status: 'rejected', reason: failure },
+    ]);
+    expect(observe).toHaveBeenCalledTimes(1);
+    await expect(observer.observe()).resolves.toMatchObject({ namespaceId: 'net:[123]' });
+    expect(observe).toHaveBeenCalledTimes(2);
+    await observer.observe();
+    expect(observe).toHaveBeenCalledTimes(3);
+  });
 });

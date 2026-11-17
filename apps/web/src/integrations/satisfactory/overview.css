@@ -1,0 +1,52 @@
+.ficsit-overview > p,
+.ficsit-overview > [role="alert"] {
+  margin: 20px 24px;
+}
+.ficsit-overview .details {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  margin: 0 24px;
+  border-bottom: 1px solid var(--line);
+}
+.ficsit-overview .details > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 8px;
+  padding: 20px 16px 20px 0;
+  border-bottom: 1px solid var(--line);
+}
+.ficsit-overview .details > div:first-child {
+  grid-column: 1 / -1;
+}
+.ficsit-overview .details > div:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+.ficsit-overview .details dt {
+  font-size: 0.8rem;
+}
+.ficsit-overview .details dd {
+  font-variant-numeric: tabular-nums;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+.ficsit-overview .details > div:first-child dd {
+  font-size: 1.4rem;
+}
+@media (max-width: 600px) {
+  .ficsit-overview .details {
+    margin-inline: 16px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ficsit-overview .details > div {
+    padding-block: 16px;
+  }
+}
+.ficsit-progression {
+  display: block;
+}
+.ficsit-progression > svg {
+  vertical-align: -6px;
+  margin-right: 8px;
+  color: #a95100;
+}

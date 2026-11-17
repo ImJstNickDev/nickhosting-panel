@@ -1,0 +1,493 @@
+import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { isAbsolute, join, relative } from 'node:path';
+import { promisify } from 'node:util';
+import { satisfies, validRange } from 'semver';
+import { z } from 'zod';
+import {
+  persistSatisfactoryDownloadCache,
+  seedSatisfactoryDownloadCache,
+} from './mods-download-cache.js';
+
+import {
+  type SatisfactoryModLimits,
+  satisfactoryModDefaultLimits,
+  satisfactoryModLimitsSchema,
+} from './mods-limits.js';
+import {
+  persistSatisfactoryMetadataCache,
+  satisfactoryMetadataCacheTtlMs,
+  seedSatisfactoryMetadataCache,
+} from './mods-metadata-cache.js';
+
+export const satisfactoryModReferenceSchema = z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,127}$/);
+export const satisfactoryModVersionSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(256)
+  .refine(
+    (value) =>
+      /^[0-9A-Za-z.*+<>=~^|, -]+$/.test(value) && validRange(value.replaceAll(',', ' ')) !== null,
+  );
+export function satisfiesSatisfactoryModVersion(version: string, constraint: string): boolean {
+  return satisfies(version, constraint.replaceAll(',', ' '));
+}
+export const satisfactoryModTargetsSchema = z
+  .array(z.enum(['Windows', 'WindowsServer', 'LinuxServer']))
+  .min(1)
+  .max(3)
+  .refine((targets) => new Set(targets).size === targets.length);
+export const satisfactoryModSelectionSchema = z
+  .array(
+    z.strictObject({
+      reference: satisfactoryModReferenceSchema,
+      version: satisfactoryModVersionSchema,
+      enabled: z.boolean().optional(),
+    }),
+  )
+  .max(256)
+  .superRefine((items, ctx) => {
+    if (new Set(items.map((item) => item.reference)).size !== items.length)
+      ctx.addIssue({ code: 'custom', message: 'duplicate_mod_reference' });
+  });
+export const satisfactoryModLockSchema = z.object({
+  version: z.literal(1),
+  mods: z.record(
+    satisfactoryModReferenceSchema,
+    z.object({
+      version: z.string(),
+      dependencies: z.record(z.string(), z.string()).nullable(),
+      targets: z.record(z.string(), z.object({ hash: z.string(), link: z.url() })),
+    }),
+  ),
+});
+export type SatisfactoryModSelection = z.infer<typeof satisfactoryModSelectionSchema>;
+export type SatisfactoryModLock = z.infer<typeof satisfactoryModLockSchema>;
+export type SatisfactoryModFile = { path: string; size: number; sha256: string };
+export const satisfactoryVersionPaths = [
+  'Engine/Binaries/Linux/UnrealServer-Linux-Shipping.version',
+  'Engine/Binaries/Linux/FactoryServer-Linux-Shipping.version',
+] as const;
+
+/** Resolves SML/dependencies with the upstream resolver in a private local staging tree.
+ * With outputDirectory, numbered artifacts survive in the durable job stage; returned
+ * metadata never contains payload buffers. Without it this only resolves/validates.
+ * The caller applies preserved files through the existing upload pipeline while stopped.
+ * Never gives ficsit-cli credentials, a server mount, or a remote installation URL.
+ */
+export async function prepareSatisfactoryMods(options: {
+  executable: string;
+  executableSha256: string;
+  sandboxExecutable?: string;
+  stagingRoot: string;
+  /** Trusted durable operation directory; artifacts are moved to <index>.bin. */
+  outputDirectory?: string;
+  /** Reuse only verified public archives from prior durable stages. */
+  downloadCache?: { sourceDirectories: string[] };
+  metadataCache?: { sourceDirectories: string[]; forceRefresh?: boolean };
+  limits?: SatisfactoryModLimits;
+  selection: SatisfactoryModSelection;
+  vanilla?: boolean;
+  requiredTargets?: z.infer<typeof satisfactoryModTargetsSchema>;
+  /** Only a lock previously resolved by this service; never an imported profile's lock. */
+  priorLock?: SatisfactoryModLock;
+  versionPath: (typeof satisfactoryVersionPaths)[number];
+  versionFile: Buffer;
+  launcherFile: Buffer;
+  signal?: AbortSignal;
+  run?: (executable: string, args: string[], cwd: string, signal?: AbortSignal) => Promise<void>;
+}): Promise<{
+  files: SatisfactoryModFile[];
+  lock: SatisfactoryModLock;
+  downloadCacheBytes?: number;
+  metadataCacheBytes?: number;
+  metadataCacheUsed?: boolean;
+  metadataExpiresAt?: string;
+  timings?: {
+    setupMs: number;
+    seedMs: number;
+    runMs: number;
+    publishMs: number;
+    cleanupMs: number;
+    totalMs: number;
+  };
+}> {
+  const limits = satisfactoryModLimitsSchema.parse(options.limits ?? satisfactoryModDefaultLimits);
+  const started = performance.now();
+  const timings = { setupMs: 0, seedMs: 0, runMs: 0, publishMs: 0, cleanupMs: 0, totalMs: 0 };
+  const selection = satisfactoryModSelectionSchema.parse(options.selection);
+  if ((options.downloadCache || options.metadataCache) && !options.outputDirectory)
+    throw new Error('satisfactory_mod_cache_output_required');
+  const requiredTargets = satisfactoryModTargetsSchema.parse(
+    options.requiredTargets ?? ['LinuxServer'],
+  );
+  if (!requiredTargets.includes('LinuxServer')) throw new Error('satisfactory_mod_target_invalid');
+  if (
+    !isAbsolute(options.executable) ||
+    !isAbsolute(options.stagingRoot) ||
+    !/^[a-f0-9]{64}$/.test(options.executableSha256) ||
+    !satisfactoryVersionPaths.includes(options.versionPath) ||
+    options.versionFile.length > 65536 ||
+    options.launcherFile.length > 1048576
+  )
+    throw new Error('satisfactory_mod_input_invalid');
+  const version = JSON.parse(options.versionFile.toString('utf8')) as Record<string, unknown>;
+  if (!Number.isSafeInteger(version.Changelist) || Number(version.Changelist) <= 0)
+    throw new Error('satisfactory_game_version_invalid');
+  const executableHash = createHash('sha256');
+  for await (const chunk of createReadStream(options.executable, { highWaterMark: 1_048_576 }))
+    executableHash.update(chunk);
+  if (executableHash.digest('hex') !== options.executableSha256)
+    throw new Error('satisfactory_cli_integrity_failed');
+  await mkdir(options.stagingRoot, { recursive: true, mode: 0o700 });
+  if (options.outputDirectory) {
+    const subpath = relative(options.stagingRoot, options.outputDirectory);
+    if (
+      !isAbsolute(options.outputDirectory) ||
+      !subpath ||
+      subpath.startsWith('..') ||
+      isAbsolute(subpath)
+    )
+      throw new Error('satisfactory_mod_output_invalid');
+    await mkdir(options.outputDirectory, { recursive: true, mode: 0o700 });
+    const directory = await lstat(options.outputDirectory);
+    if (!directory.isDirectory() || directory.isSymbolicLink())
+      throw new Error('satisfactory_mod_output_invalid');
+  }
+  const root = await mkdtemp(join(options.stagingRoot, 'satisfactory-mods-'));
+  try {
+    const game = join(root, 'game'),
+      state = join(root, 'state');
+    const initializeWorkingTree = async () => {
+      await mkdir(join(game, 'Engine/Binaries/Linux'), { recursive: true, mode: 0o700 });
+      await mkdir(join(game, 'FactoryGame/Mods'), { recursive: true, mode: 0o700 });
+      await mkdir(state, { mode: 0o700 });
+      await writeFile(join(game, options.versionPath), options.versionFile, { mode: 0o600 });
+      await writeFile(join(game, 'FactoryServer.sh'), options.launcherFile, { mode: 0o600 });
+      await writeFile(
+        join(state, 'profiles.json'),
+        JSON.stringify({
+          version: 0,
+          selected_profile: 'NickHosting',
+          profiles: {
+            NickHosting: {
+              name: 'NickHosting',
+              required_targets: requiredTargets,
+              mods: Object.fromEntries(
+                selection.map((item) => [
+                  item.reference,
+                  { version: item.version.replaceAll(',', ' '), enabled: item.enabled !== false },
+                ]),
+              ),
+            },
+          },
+        }),
+        { mode: 0o600 },
+      );
+      await writeFile(
+        join(state, 'installations.json'),
+        JSON.stringify({
+          version: 0,
+          selected_installation: game,
+          installations: [
+            { path: game, profile: 'NickHosting', vanilla: options.vanilla ?? false },
+          ],
+        }),
+        { mode: 0o600 },
+      );
+    };
+    await initializeWorkingTree();
+    timings.setupMs = Math.round(performance.now() - started);
+    const seedStarted = performance.now();
+    if (options.downloadCache && !options.vanilla)
+      await seedSatisfactoryDownloadCache({
+        stagingRoot: options.stagingRoot,
+        sourceDirectories: options.downloadCache.sourceDirectories,
+        destinationDirectory: join(root, 'cache/downloadCache'),
+        signal: options.signal,
+        limits,
+      });
+    const metadataIdentity = {
+      executableSha256: options.executableSha256,
+      gameBuild: Number(version.Changelist),
+      targets: requiredTargets,
+    };
+    let metadataSnapshot =
+      options.metadataCache && !options.metadataCache.forceRefresh && !options.vanilla
+        ? await seedSatisfactoryMetadataCache({
+            stagingRoot: options.stagingRoot,
+            sourceDirectories: options.metadataCache.sourceDirectories,
+            destinationDirectory: join(root, 'cache'),
+            identity: metadataIdentity,
+            selection,
+            maximumBytes: limits.metadataBytes,
+            signal: options.signal,
+          })
+        : null;
+    const seedPriorLock = async () => {
+      if (options.priorLock && !options.vanilla) {
+        const priorLock = satisfactoryModLockSchema.parse(options.priorLock);
+        // Even internal stored state must never seed non-public download locations.
+        for (const mod of Object.values(priorLock.mods))
+          for (const target of Object.values(mod.targets)) {
+            const url = new URL(target.link);
+            if (
+              url.protocol !== 'https:' ||
+              url.username ||
+              url.password ||
+              url.port ||
+              !['api.ficsit.app', 'storage.ficsit.app', 'ficsit.app'].includes(url.hostname)
+            )
+              throw new Error('satisfactory_mod_lock_url_invalid');
+          }
+        await writeFile(
+          join(game, 'FactoryGame/Mods/nick_hosting-lock.json'),
+          JSON.stringify(priorLock),
+          { mode: 0o600 },
+        );
+      }
+    };
+    await seedPriorLock();
+    timings.seedMs = Math.round(performance.now() - seedStarted);
+    const args = [
+      '--local-dir',
+      state,
+      '--cache-dir',
+      join(root, 'cache'),
+      '--pretty=false',
+      '--quiet',
+      ...(metadataSnapshot ? ['--offline'] : []),
+      'apply',
+      game,
+    ];
+    const run =
+      options.run ??
+      (async (binary, argv, cwd, signal) => {
+        const budget = new AbortController();
+        let scanning: Promise<void> | undefined;
+        const scan = async () => {
+          let bytes = 0,
+            entries = 0;
+          const walk = async (directory: string, depth = 0): Promise<void> => {
+            if (depth > 32) throw new Error('satisfactory_mod_output_limit');
+            for (const entry of await readdir(directory, { withFileTypes: true })) {
+              if (++entries > limits.maxFiles * 2 + 4096 || entry.isSymbolicLink())
+                throw new Error('satisfactory_mod_output_limit');
+              const path = join(directory, entry.name);
+              if (entry.isDirectory()) await walk(path, depth + 1);
+              else {
+                try {
+                  bytes += (await lstat(path)).size;
+                } catch (error) {
+                  if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+                }
+                if (bytes > limits.workingBytes) throw new Error('satisfactory_mod_output_limit');
+              }
+            }
+          };
+          await walk(cwd);
+        };
+        const timer = setInterval(() => {
+          if (scanning) return;
+          scanning = scan()
+            .catch((error: unknown) => budget.abort(error))
+            .finally(() => {
+              scanning = undefined;
+            });
+        }, 500);
+        try {
+          // Include privately copied caches in the same working-tree budget
+          // before starting the native process, then monitor its extraction.
+          await scan();
+          await promisify(execFile)(
+            options.sandboxExecutable ?? '/usr/local/bin/nh-content-sandbox',
+            [cwd, binary, ...argv],
+            {
+              cwd,
+              signal: signal ? AbortSignal.any([signal, budget.signal]) : budget.signal,
+              timeout: 300_000,
+              maxBuffer: 1_048_576,
+              env: {
+                PATH: process.env.PATH,
+                NH_CONTENT_MAX_FILE_BYTES: String(
+                  Math.max(limits.outputBytes, limits.archiveBytes, limits.metadataBytes),
+                ),
+                HOME: root,
+                TMPDIR: root,
+                XDG_CONFIG_HOME: state,
+                XDG_DATA_HOME: state,
+                XDG_CACHE_HOME: join(root, 'cache'),
+              },
+            },
+          );
+          await scan();
+          budget.signal.throwIfAborted();
+        } finally {
+          clearInterval(timer);
+          await scanning;
+        }
+      });
+    const runStarted = performance.now();
+    let metadataCapturedAt = metadataSnapshot?.capturedAt ?? Date.now();
+    try {
+      await run(options.executable, args, root, options.signal);
+    } catch (error) {
+      if (
+        !metadataSnapshot ||
+        options.signal?.aborted ||
+        (error as NodeJS.ErrnoException).code === 'ABORT_ERR'
+      )
+        throw error;
+      // An incomplete native registry or an offline resolver failure cannot
+      // contaminate the online retry. Keep only independently verified sources.
+      for (const entry of await readdir(root))
+        await rm(join(root, entry), { recursive: true, force: true });
+      await initializeWorkingTree();
+      if (options.downloadCache)
+        await seedSatisfactoryDownloadCache({
+          stagingRoot: options.stagingRoot,
+          sourceDirectories: options.downloadCache.sourceDirectories,
+          destinationDirectory: join(root, 'cache/downloadCache'),
+          signal: options.signal,
+          limits,
+        });
+      await seedPriorLock();
+      metadataSnapshot = null;
+      metadataCapturedAt = Date.now();
+      await run(
+        options.executable,
+        args.filter((arg) => arg !== '--offline'),
+        root,
+        options.signal,
+      );
+    }
+    timings.runMs = Math.round(performance.now() - runStarted);
+    const publishStarted = performance.now();
+    // Upstream vanilla mode deliberately skips resolution and writes no lockfile.
+    if (options.vanilla) return { files: [], lock: { version: 1, mods: {} }, timings };
+    const lockPath = join(game, 'FactoryGame/Mods/nick_hosting-lock.json');
+    const lockStat = await lstat(lockPath);
+    if (!lockStat.isFile() || lockStat.isSymbolicLink() || lockStat.size > 1048576)
+      throw new Error('satisfactory_mod_output_invalid');
+    const lock = satisfactoryModLockSchema.parse(JSON.parse(await readFile(lockPath, 'utf8')));
+    // The upstream resolver validates sidedness. A shared profile may contain
+    // client-only and server-only mods; each root needs a relevant target, not all.
+    for (const item of selection) {
+      if (item.enabled === false) continue;
+      const resolved = lock.mods[item.reference];
+      if (
+        !resolved ||
+        !satisfiesSatisfactoryModVersion(resolved.version, item.version) ||
+        !requiredTargets.some((target) => resolved.targets[target])
+      )
+        throw new Error('satisfactory_mod_resolution_mismatch');
+    }
+    const persistCache = () =>
+      options.downloadCache && options.outputDirectory
+        ? persistSatisfactoryDownloadCache({
+            stagingRoot: options.stagingRoot,
+            sourceDirectory: join(root, 'cache/downloadCache'),
+            destinationDirectory: join(options.outputDirectory, 'download-cache'),
+            lock,
+            signal: options.signal,
+            limits,
+          })
+        : undefined;
+    const entries: { path: string; source: string; size: number }[] = [];
+    let total = 0;
+    const collect = async (relative: string): Promise<void> => {
+      for (const entry of await readdir(join(game, relative), { withFileTypes: true })) {
+        if (!/^[A-Za-z0-9_. -]+$/.test(entry.name) || entry.isSymbolicLink())
+          throw new Error('satisfactory_mod_output_invalid');
+        const path = `${relative}/${entry.name}`;
+        if (path.length > 1024) throw new Error('satisfactory_mod_output_invalid');
+        if (entry.isDirectory()) await collect(path);
+        else if (entry.isFile()) {
+          const source = join(game, path);
+          const stat = await lstat(source);
+          const size = stat.size;
+          total += size;
+          if (total > limits.outputBytes || entries.length >= limits.maxFiles)
+            throw new Error('satisfactory_mod_output_limit');
+          entries.push({ path, source, size });
+        } else throw new Error('satisfactory_mod_output_invalid');
+      }
+    };
+    await collect('FactoryGame/Mods');
+    const files: SatisfactoryModFile[] = new Array(entries.length);
+    let cursor = 0;
+    const publish = async () => {
+      while (cursor < entries.length) {
+        const index = cursor++;
+        const entry = entries[index];
+        if (!entry) throw new Error('satisfactory_mod_output_invalid');
+        const hash = createHash('sha256');
+        let observed = 0;
+        for await (const chunk of createReadStream(entry.source, {
+          highWaterMark: 1_048_576,
+          signal: options.signal,
+        })) {
+          observed += chunk.length;
+          if (observed > entry.size) throw new Error('satisfactory_mod_output_invalid');
+          hash.update(chunk);
+        }
+        if (observed !== entry.size) throw new Error('satisfactory_mod_output_invalid');
+        if (options.outputDirectory)
+          await rename(entry.source, join(options.outputDirectory, `${index}.bin`));
+        files[index] = { path: entry.path, size: entry.size, sha256: hash.digest('hex') };
+      }
+    };
+    const published = await Promise.allSettled([
+      persistCache(),
+      options.metadataCache && options.outputDirectory
+        ? persistSatisfactoryMetadataCache({
+            stagingRoot: options.stagingRoot,
+            sourceDirectory: join(root, 'cache'),
+            destinationDirectory: join(options.outputDirectory, 'metadata-cache'),
+            identity: metadataIdentity,
+            lock,
+            capturedAt: metadataCapturedAt,
+            maximumBytes: limits.metadataBytes,
+            signal: options.signal,
+          })
+        : undefined,
+      ...Array.from({ length: 4 }, publish),
+    ]);
+    const failed = published.find((result) => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
+    const persisted = published[0];
+    const downloadCacheBytes = persisted?.status === 'fulfilled' ? persisted.value : undefined;
+    const metadataResult = published[1];
+    const metadataCacheBytes =
+      metadataResult?.status === 'fulfilled' ? metadataResult.value : undefined;
+
+    timings.publishMs = Math.round(performance.now() - publishStarted);
+    return {
+      files,
+      lock,
+      timings,
+      ...(downloadCacheBytes === undefined ? {} : { downloadCacheBytes }),
+      ...(metadataCacheBytes === undefined
+        ? {}
+        : {
+            metadataCacheBytes,
+            metadataCacheUsed: metadataSnapshot !== null,
+            ...(metadataCacheBytes
+              ? {
+                  metadataExpiresAt: new Date(
+                    metadataCapturedAt + satisfactoryMetadataCacheTtlMs,
+                  ).toISOString(),
+                }
+              : {}),
+          }),
+    };
+  } finally {
+    const cleanupStarted = performance.now();
+    await rm(root, { recursive: true, force: true });
+    timings.cleanupMs = Math.round(performance.now() - cleanupStarted);
+    timings.totalMs = Math.round(performance.now() - started);
+  }
+}

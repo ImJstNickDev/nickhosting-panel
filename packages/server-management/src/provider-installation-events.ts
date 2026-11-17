@@ -124,3 +124,74 @@ export async function applyProviderInstallationEvent(
     await wakeLocked(tx, operation.job_id, now);
   });
 }
+
+/** Only the worker's authenticated live installation channel calls this. A Panel
+ * status receipt is deliberately not convertible into this terminal evidence. */
+export async function recordNativeInstallationCompletion(
+  db: Kysely<Database>,
+  input: {
+    serverId: string;
+    jobId: string;
+    providerUuid: string;
+    observedAt: Date;
+    effectStartedAt?: Date;
+  },
+) {
+  return db.transaction().execute(async (tx) => {
+    const operation = await tx
+      .selectFrom('server_operations as o')
+      .innerJoin('operation_jobs as j', 'j.id', 'o.job_id')
+      .innerJoin('managed_servers as s', 's.id', 'o.server_id')
+      .select(['o.effect_started_at', 'o.phase', 'o.plan', 'o.action', 'j.state'])
+      .where('o.job_id', '=', input.jobId)
+      .where('s.id', '=', input.serverId)
+      .where('s.active_operation_id', '=', input.jobId)
+      .where('s.pterodactyl_uuid', '=', input.providerUuid)
+      .where('s.deleted_at', 'is', null)
+      .forUpdate('o')
+      .executeTakeFirst();
+    if (
+      !operation ||
+      !['queued', 'running'].includes(operation.state) ||
+      !['provision', 'reinstall'].includes(operation.action) ||
+      (!['provision', 'installation', 'reinstall'].includes(operation.phase) &&
+        !/^installation_retry:[1-5]$/.test(operation.phase)) ||
+      operation.plan.modpackOperationId ||
+      operation.plan.installConfirmed ||
+      !operation.effect_started_at ||
+      (input.effectStartedAt !== undefined &&
+        operation.effect_started_at.getTime() !== input.effectStartedAt.getTime()) ||
+      operation.effect_started_at > input.observedAt
+    )
+      return false;
+    const effectStartedAt = operation.effect_started_at.toISOString();
+    const duplicate = await tx
+      .selectFrom('server_events')
+      .select('id')
+      .where('job_id', '=', input.jobId)
+      .where('message_key', '=', 'servers.operation.installation_updated')
+      .where(sql<string>`data->>'source'`, '=', 'native_installation_completed')
+      .where(sql<string>`data->>'effectStartedAt'`, '=', effectStartedAt)
+      .executeTakeFirst();
+    if (duplicate) return true;
+    await tx
+      .insertInto('server_events')
+      .values({
+        server_id: input.serverId,
+        job_id: input.jobId,
+        actor_id: null,
+        subject_id: null,
+        support_session_id: null,
+        message_key: 'servers.operation.installation_updated',
+        data: JSON.stringify({
+          source: 'native_installation_completed',
+          state: 'completed',
+          providerUuid: input.providerUuid,
+          effectStartedAt,
+          occurredAt: input.observedAt.toISOString(),
+        }),
+      })
+      .execute();
+    return true;
+  });
+}

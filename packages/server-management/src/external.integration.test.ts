@@ -5,6 +5,7 @@ import { CloudflareDnsProvider, SftpGoAdapter } from '@nickhosting/external-serv
 import type { GameManifest } from '@nickhosting/game-sdk';
 import { sql } from 'kysely';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { satisfactoryManifest } from '../../../games/satisfactory/src/manifest.js';
 import {
   getGameConnectionAvailability,
   reserveGameConnection,
@@ -28,6 +29,8 @@ import {
   rotateSftpCredential,
   updateServerDns,
 } from './external.js';
+
+import { getPlatformConnections } from './platform-queries.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
 let sequence = 0;
@@ -2394,6 +2397,45 @@ describe('managed domain choices and durable automatic addresses', () => {
       { assignmentId: randomUUID(), domainId: 'first', subdomain: 'old-name' },
       options,
     );
+  });
+  it('publishes Satisfactory with the public port, no SRV and durable shared ownership', async () => {
+    const f = await fixture();
+    await sql`update game_integrations set manifest=jsonb_set(manifest,'{connection}',${JSON.stringify(satisfactoryManifest.connection)}::jsonb) where id=(select game_id from runtime_egg_mappings where id=(select mapping_id from managed_servers where id=${f.serverId}))`.execute(
+      f.db,
+    );
+    await f.db
+      .updateTable('gateway_routes')
+      .set({ public_port: 28001 })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    const preview = await previewServerDns(f.db, f.context, f.serverId, {}, f.options);
+    expect(preview).toMatchObject({
+      hostname: 'satisfactory.example.test',
+      displayAddress: 'satisfactory.example.test:28001',
+      port: 28001,
+    });
+    expect(preview.records).toHaveLength(1);
+    expect(preview.records[0]).toMatchObject({ type: 'A', proxied: false });
+    await expect(
+      previewServerDns(f.db, f.context, f.serverId, { subdomain: 'custom' }, f.options),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    const assigned = await assignServerDns(f.db, f.context, f.serverId, {}, f.options);
+    if (!assigned.id) throw new Error('Expected a persisted shared DNS assignment');
+    expect(assigned.connection.displayAddress).toBe('satisfactory.example.test:28001');
+    const connections = await getPlatformConnections(f.db, f.context, f.serverId, f.options.env);
+    expect(
+      connections.ports.find((port) => port.primary && port.transport === 'tcp'),
+    ).toMatchObject({
+      hostname: 'satisfactory.example.test',
+      port: 28001,
+      displayAddress: 'satisfactory.example.test:28001',
+    });
+    expect(f.records.size).toBe(1);
+    await deleteServerDns(f.db, f.context, f.serverId, assigned.id, f.options);
+    expect(f.records.size).toBe(1);
+    expect(await f.db.selectFrom('shared_dns_hosts').select('state').execute()).toEqual([
+      { state: 'active' },
+    ]);
   });
   it('keeps shared host ownership after server cleanup and removes old custom records when reverting to shared', async () => {
     const f = await fixture();

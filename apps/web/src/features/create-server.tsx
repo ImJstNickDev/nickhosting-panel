@@ -203,6 +203,17 @@ export function CreateServerPage() {
         return;
       }
     }
+    if (page?.kind === 'form') {
+      const invalid = validateUiValues(
+        module.descriptor.creation.fields.filter((field) => page.fields?.includes(field.id)),
+        values,
+        choices,
+      );
+      if (invalid.length) {
+        setErrors(Object.fromEntries(invalid.map((error) => [error.field, error.code])));
+        return;
+      }
+    }
     if (
       page?.kind === 'address' &&
       connectionChoice.subdomain &&
@@ -402,8 +413,15 @@ export function CreateServerPage() {
                         }
                       }}
                     >
-                      {art && <img src={art} alt="" width={480} height={240} />}
-                      <span>{t(extension.descriptor.nameKey)}</span>
+                      <span className="installer-game-art" aria-hidden="true">
+                        {art && <img src={art} alt="" width={480} height={240} />}
+                      </span>
+                      <span className="installer-game-label">
+                        <span>{t(extension.descriptor.nameKey)}</span>
+                        <span className="installer-game-selected" aria-hidden="true">
+                          ✓
+                        </span>
+                      </span>
                     </button>
                   );
                 })}
@@ -441,6 +459,20 @@ export function CreateServerPage() {
                   onChange={(v) => update(page.field, v)}
                   onChoices={receiveChoices}
                 />
+              )}
+              {page.kind === 'form' && (
+                <div className="stack">
+                  <GameFields
+                    module={module}
+                    fields={module.descriptor.creation.fields.filter((field) =>
+                      page.fields?.includes(field.id),
+                    )}
+                    values={values}
+                    onChange={update}
+                    errors={errors}
+                    onChoices={(field, options) => setChoices((v) => ({ ...v, [field]: options }))}
+                  />
+                </div>
               )}
               {page.kind === 'address' && (
                 <CreationConnection

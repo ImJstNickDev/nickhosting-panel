@@ -5,6 +5,7 @@ import { createTestDatabase } from '@nickhosting/database/testing';
 import { minecraftDigest, minecraftManifest } from '@nickhosting/minecraft';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { satisfactoryManifest } from '../../../games/satisfactory/src/manifest.js';
 import { setUserLimits } from './admission.js';
 import { setGatewayPolicy } from './gateway-orchestration.js';
 import { minecraftMappingDigest } from './minecraft-registry.js';
@@ -1761,4 +1762,39 @@ describe('M5 platform browser queries and metadata', () => {
     await recordAudit(f.db, f.owner, 'fixture.record', {});
     await expect(listPlatformAudit(f.db, support)).rejects.toThrow('forbidden');
   });
+});
+
+it('uses compiled Satisfactory management capabilities with an older registered manifest', async () => {
+  const id = await f.server();
+  const old = {
+    ...satisfactoryManifest,
+    capabilities: {
+      ...satisfactoryManifest.capabilities,
+      worlds: false,
+      wake: 'unsupported' as const,
+    },
+  };
+  await f.db
+    .insertInto('game_integrations')
+    .values({ id: 'satisfactory', version: old.version, manifest: old })
+    .onConflict((c) => c.column('id').doUpdateSet({ manifest: old }))
+    .execute();
+  await f.db
+    .updateTable('runtime_egg_mappings')
+    .set({ game_id: 'satisfactory', runtime_id: 'dedicated' })
+    .where('id', '=', f.mappingId)
+    .execute();
+  const details = await getPlatformServer(f.db, f.context, id);
+  expect(details.capabilities).toMatchObject({
+    worlds: true,
+    mods: true,
+    players: false,
+    wake: 'unsupported',
+  });
+  const stored = await f.db
+    .selectFrom('game_integrations')
+    .select('manifest')
+    .where('id', '=', 'satisfactory')
+    .executeTakeFirstOrThrow();
+  expect(stored.manifest).toMatchObject({ capabilities: { worlds: false } });
 });

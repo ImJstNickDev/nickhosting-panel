@@ -45,6 +45,7 @@ export * from './purpur-catalog.js';
 export * from './quilt-catalog.js';
 export * from './registry.js';
 export * from './runtime.js';
+export { ensureSatisfactoryTlsIdentity, readSatisfactoryTlsIdentity } from './satisfactory-tls.js';
 export * from './schedules.js';
 export * from './sleep-policy.js';
 export * from './storage-capacity.js';

@@ -11,6 +11,8 @@ import {
 const source: ViewerSource = { path: 'mods/example.jar', name: 'example.jar', size: 1200 };
 const scopes: ReturnType<typeof createGameViewerHost>[] = [];
 const signal = () => new AbortController().signal;
+const metadata = () =>
+  new Response(JSON.stringify({ revision: 'a'.repeat(64), size: 1000000, mtimeMs: 1 }));
 function scope(overrides: Partial<Parameters<typeof createGameViewerHost>[0]> = {}) {
   const value = createGameViewerHost({
     source,
@@ -163,4 +165,124 @@ describe('shared integration viewer host', () => {
     );
     expect(onViewerChange).toHaveBeenCalledOnce();
   });
+});
+
+it('reads only the selected save prefix through the existing ranged content endpoint', async () => {
+  const fetcher = vi.fn(async (_url: string, _options?: RequestInit) =>
+    !_url.includes('/content?')
+      ? metadata()
+      : new Response(new Uint8Array(32), {
+          status: 206,
+          headers: { 'content-range': 'bytes 0-31/1000000', 'content-length': '32' },
+        }),
+  );
+  vi.stubGlobal('fetch', fetcher);
+  const host = scope({ source: { path: 'world.sav', name: 'world.sav', size: 1000000 } }).host;
+  expect((await host.readPrefix?.(32, signal()))?.length).toBe(32);
+  expect(fetcher.mock.calls.find(([url]) => url.includes('/content?'))?.[1]).toMatchObject({
+    headers: { Range: 'bytes=0-31', 'If-Match': `"${'a'.repeat(64)}"` },
+  });
+  for (const size of [0, 65537, NaN])
+    await expect(host.readPrefix?.(size, signal())).rejects.toThrow();
+});
+it('rejects ignored range and mismatched range before consuming a full save', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) =>
+      !url.includes('/content?') ? metadata() : new Response(new Uint8Array(100)),
+    ),
+  );
+  await expect(scope().host.readPrefix?.(32, signal())).rejects.toMatchObject({
+    messageKey: 'viewer.unavailable',
+  });
+});
+it('rejects truncated prefix bodies even with a valid range header', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) =>
+      !url.includes('/content?')
+        ? metadata()
+        : new Response(new Uint8Array(20), {
+            status: 206,
+            headers: { 'content-range': 'bytes 0-31/1000000' },
+          }),
+    ),
+  );
+  await expect(scope().host.readPrefix?.(32, signal())).rejects.toMatchObject({
+    messageKey: 'viewer.unavailable',
+  });
+});
+
+it('reads a fresh revision-bound bounded physical tail and isolates it from prefix cache', async () => {
+  const fetcher = vi.fn(async (url: string, _options?: RequestInit) =>
+    !url.includes('/content?')
+      ? metadata()
+      : new Response(new Uint8Array(32), {
+          status: 206,
+          headers: { 'content-range': 'bytes 999968-999999/1000000' },
+        }),
+  );
+  vi.stubGlobal('fetch', fetcher);
+  const host = scope().host;
+  const result = await host.readTail?.(32, signal());
+  expect(result).toMatchObject({ truncated: true });
+  expect(result?.bytes.length).toBe(32);
+  expect(fetcher.mock.calls[1]?.[1]?.headers).toMatchObject({
+    Range: 'bytes=999968-999999',
+    'If-Match': `"${'a'.repeat(64)}"`,
+  });
+  await host.readTail?.(32, signal());
+  expect(fetcher.mock.calls.filter(([url]) => url.includes('/content?'))).toHaveLength(1);
+  expect(fetcher.mock.calls.filter(([url]) => !url.includes('/content?'))).toHaveLength(2);
+});
+it('refuses incorrect tail ranges, archive tails and oversized tail budgets', async () => {
+  const fetcher = vi.fn(async (url: string) =>
+    !url.includes('/content?')
+      ? metadata()
+      : new Response(new Uint8Array(32), {
+          status: 206,
+          headers: { 'content-range': 'bytes 0-31/1000000' },
+        }),
+  );
+  vi.stubGlobal('fetch', fetcher);
+  await expect(scope().host.readTail?.(32, signal())).rejects.toMatchObject({
+    messageKey: 'viewer.unavailable',
+  });
+  const before = fetcher.mock.calls.length;
+  await expect(
+    scope({ source: { ...source, entry: 'server.log' } }).host.readTail?.(32, signal()),
+  ).rejects.toThrow();
+  await expect(scope().host.readTail?.(65537, signal())).rejects.toThrow();
+  expect(fetcher.mock.calls.length).toBe(before);
+});
+
+it('refreshes a tail after growth or truncation and avoids ranges for an empty file', async () => {
+  let size = 100;
+  let revision = 'a';
+  const fetcher = vi.fn(async (url: string, options?: RequestInit) => {
+    if (!url.includes('/content?'))
+      return new Response(JSON.stringify({ size, revision: revision.repeat(64), mtimeMs: 1 }));
+    const start = Math.max(0, size - 32);
+    expect(options?.headers).toMatchObject({
+      Range: `bytes=${start}-${size - 1}`,
+      'If-Match': `"${revision.repeat(64)}"`,
+    });
+    return new Response(new Uint8Array(Math.min(size, 32)), {
+      status: 206,
+      headers: { 'content-range': `bytes ${start}-${size - 1}/${size}` },
+    });
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const host = scope().host;
+  expect((await host.readTail?.(32, signal()))?.truncated).toBe(true);
+  size = 200;
+  revision = 'b';
+  expect((await host.readTail?.(32, signal()))?.bytes.length).toBe(32);
+  size = 3;
+  revision = 'c';
+  expect((await host.readTail?.(32, signal()))?.truncated).toBe(false);
+  size = 0;
+  revision = 'd';
+  expect((await host.readTail?.(32, signal()))?.bytes.length).toBe(0);
+  expect(fetcher.mock.calls.filter(([url]) => url.includes('/content?'))).toHaveLength(3);
 });

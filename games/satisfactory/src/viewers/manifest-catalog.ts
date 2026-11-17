@@ -1,0 +1,60 @@
+const messages: Record<string, [string, string]> = {
+  name: ['Mod manifest', 'Manifest mod'],
+  loading: ['Reading manifest…', 'Lettura manifest…'],
+  unavailable: [
+    'This manifest could not be read. Use Open with to view the original file.',
+    'Impossibile leggere il manifest. Usa Apri con per visualizzare il file originale.',
+  ],
+  unsupported: [
+    'This manifest format is not supported. Use Open with to view the original file.',
+    'Questo formato di manifest non è supportato. Usa Apri con per visualizzare il file originale.',
+  ],
+  tooLarge: [
+    'This file is too large for the manifest view. Use Open with to view the original file.',
+    'Questo file è troppo grande per la vista manifest. Usa Apri con per visualizzare il file originale.',
+  ],
+  profile: ['Profile', 'Profilo'],
+  modName: ['Name', 'Nome'],
+  author: ['Author', 'Autore'],
+  description: ['Description', 'Descrizione'],
+  versionName: ['Display version', 'Versione visualizzata'],
+  version: ['Version', 'Versione'],
+  gameVersion: ['Game build requirement', 'Requisito build del gioco'],
+  gameBuild: ['Game build', 'Build del gioco'],
+  targets: ['Targets', 'Piattaforme'],
+  selected: ['Selected profile', 'Profilo selezionato'],
+  format: ['Format version', 'Versione formato'],
+  requiredOnRemote: ['Required on remote', 'Richiesta sul lato remoto'],
+  remoteVersion: ['Remote version range', 'Versioni remote accettate'],
+  gameFeature: ['Game Feature', 'Game Feature'],
+  reference: ['Mod reference', 'Riferimento mod'],
+  enabled: ['Enabled', 'Abilitata'],
+  dependencies: ['Dependencies', 'Dipendenze'],
+  mods: ['Mods', 'Mod'],
+  details: ['Details', 'Dettagli'],
+  optional: ['Optional', 'Facoltativa'],
+  basePlugin: ['Engine plugin', 'Plugin del motore'],
+  yes: ['Yes', 'Sì'],
+  no: ['No', 'No'],
+  unspecified: ['Not specified', 'Non specificato'],
+  emptyDependencies: ['No dependencies listed.', 'Nessuna dipendenza elencata.'],
+  empty: ['No mods listed.', 'Nessuna mod elencata.'],
+  noProfiles: ['No profiles listed.', 'Nessun profilo elencato.'],
+  previous: ['Previous', 'Precedente'],
+  next: ['Next', 'Successiva'],
+  page: ['Page {page} of {pages}', 'Pagina {page} di {pages}'],
+};
+export const manifestCatalogs = {
+  en: Object.fromEntries(
+    Object.entries(messages).map(([key, values]) => [
+      `games.satisfactory.viewers.manifest.${key}`,
+      values[0],
+    ]),
+  ),
+  it: Object.fromEntries(
+    Object.entries(messages).map(([key, values]) => [
+      `games.satisfactory.viewers.manifest.${key}`,
+      values[1],
+    ]),
+  ),
+};

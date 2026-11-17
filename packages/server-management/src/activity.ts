@@ -326,7 +326,7 @@ export async function listUnifiedActivity(db: DB, context: AuthContext, input: u
             when modpack.state = 'apply_queued' then 'queued' else 'running' end
           else job.state end as state,
         case when operation.action in ('backup','restore') then 'backups' when operation.action in ('configure','minecraft-content') then 'settings' else 'lifecycle' end as category,
-        case when operation.plan ? 'scheduleAutomation' or job.idempotency_key like 'schedule_%' then 'schedule' when operation.plan ? 'gatewayAutomation' or job.idempotency_key like 'gateway_wake_%' or job.idempotency_key like 'gateway_sleep_%' then 'system' else 'manual' end as source,
+        case when operation.plan ? 'scheduleAutomation' or job.idempotency_key like 'schedule_%' then 'schedule' when operation.plan ? 'gatewayAutomation' or operation.plan ? 'gatewayConsole' or job.idempotency_key like 'gateway_wake_%' or job.idempotency_key like 'gateway_sleep_%' then 'system' else 'manual' end as source,
         operation.action, job.actor_id as "actorId", job.subject_id as "subjectId", actor.name as "actorName", actor.username as "actorUsername", subject.name as "subjectName", subject.username as "subjectUsername",
         job.resource_owner_id as "resourceOwnerId", operation.server_id as "serverId", server.name as "serverName",
         job.attempts, job.max_attempts as "maxAttempts", job.error_code as "errorCode", operation.phase, operation.effect_state as "effectState",

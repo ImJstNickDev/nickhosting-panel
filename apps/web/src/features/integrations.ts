@@ -5,11 +5,15 @@ import {
   type GameUiClient,
 } from '@nickhosting/game-sdk/ui';
 import { minecraftUiModule } from '@nickhosting/minecraft/ui';
+import { satisfactoryUiModule } from '../../../../games/satisfactory/src/ui/index.js';
 import { api, queryClient, upload } from '../api/client.js';
 import type { ServerInfo } from './service-contracts.js';
 
 /** Executable modules and artwork are build-time imports, never API URLs. */
-export const gameUiRegistry = createTrustedGameUiRegistry([minecraftUiModule]);
+export const gameUiRegistry = createTrustedGameUiRegistry([
+  minecraftUiModule,
+  satisfactoryUiModule,
+]);
 export function availableGameSections(
   server: ServerInfo,
   module = gameUiRegistry.get(server.gameId),
@@ -134,7 +138,16 @@ const MinecraftVersions = lazy(() =>
 const MinecraftScan = lazy(() =>
   import('./minecraft-admin.js').then((module) => ({ default: module.MinecraftCatalogScan })),
 );
+const SatisfactoryInstallationPolicy = lazy(() =>
+  import('../integrations/satisfactory/installation-policy.js').then((module) => ({
+    default: module.SatisfactoryInstallationPolicy,
+  })),
+);
 const ownerComponents = new Map([
+  [
+    'satisfactory-installation',
+    { Component: SatisfactoryInstallationPolicy, Background: undefined },
+  ],
   [
     'minecraft-versions',
     {
@@ -192,7 +205,31 @@ const MinecraftModpacksSection = lazy(() =>
     default: module.MinecraftModpacksSection,
   })),
 );
+const SatisfactorySettingsSection = lazy(() =>
+  import('../integrations/satisfactory/settings.js').then((module) => ({
+    default: module.SatisfactorySettingsSection,
+  })),
+);
+const SatisfactoryModsSection = lazy(() =>
+  import('../integrations/satisfactory/mods.js').then((module) => ({
+    default: module.SatisfactoryModsSection,
+  })),
+);
+const SatisfactoryOverviewSection = lazy(() =>
+  import('../integrations/satisfactory/overview.js').then((module) => ({
+    default: module.SatisfactoryOverviewSection,
+  })),
+);
+const SatisfactoryWorldsSection = lazy(() =>
+  import('../integrations/satisfactory/worlds.js').then((module) => ({
+    default: module.SatisfactoryWorldsSection,
+  })),
+);
 const sectionViews = new Map<string, ComponentType<GameSectionViewProps>>([
+  ['satisfactory-overview', SatisfactoryOverviewSection],
+  ['satisfactory-worlds', SatisfactoryWorldsSection],
+  ['satisfactory-mods', SatisfactoryModsSection],
+  ['satisfactory-settings', SatisfactorySettingsSection],
   ['minecraft-players', MinecraftPlayersSection],
   ['minecraft-worlds', MinecraftWorldsSection],
   ['minecraft-datapacks', MinecraftDatapacksSection],

@@ -236,6 +236,7 @@ export const platformWebMessages: Record<string, readonly [string, string]> = {
   'platform.restore': ['Restore backup', 'Ripristina backup'],
   'platform.configure': ['Change resource limits', 'Modifica limiti delle risorse'],
   'platform.minecraft-content': ['Manage game content', 'Gestisci contenuti del gioco'],
+  'platform.satisfactory-content': ['Manage mods', 'Gestisci mod'],
   'platform.jobDetails': ['Operation details', 'Dettagli dell’operazione'],
   'platform.phase': ['Current phase', 'Fase attuale'],
   'platform.attempts': ['Attempts', 'Tentativi'],

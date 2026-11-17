@@ -1,0 +1,20 @@
+.satisfactory-file-locations select {
+  max-width: 100%;
+  min-height: 36px;
+  padding: 6px 28px 6px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: inherit;
+  background-color: var(--surface, #fff);
+  border: 1px solid var(--border, #dce0e5);
+  border-radius: 6px;
+}
+.satisfactory-file-locations .fm-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.satisfactory-file-locations {
+  flex-wrap: wrap;
+}
