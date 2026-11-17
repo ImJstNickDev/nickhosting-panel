@@ -151,6 +151,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   // Only a successfully applied snapshot can exempt an intentionally withheld
   // route from listener readiness. Failed candidates never change this count.
   let withheldRoutes = 0;
+  let committedWithheldServers = new Set<string>();
   // Authenticated candidates may be probed before they are safe to bind. This
   // breaks first-start readiness bootstrap without granting forwarding rights.
   let candidateSnapshot: GatewaySnapshot | undefined;
@@ -1204,10 +1205,16 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           if (!group) return;
           for (const route of group) {
             if (fatalValidation || stopping) return;
-            // New/rebound listeners receive their one full admission check just
-            // before native bind. Only retained listeners need renewal here.
+            // Reclassify previously withheld servers with the shared renewal
+            // evidence. Persistent absence must not trigger fresh admission
+            // scans on every poll. A recovered route still passes the separate
+            // fresh pre-bind gate; this classification never grants a listener.
             const retained = listeners.get(route.id);
-            if (!retained || !isDeepStrictEqual(retained.route.public, route.public)) continue;
+            if (
+              !committedWithheldServers.has(route.serverId) &&
+              (!retained || !isDeepStrictEqual(retained.route.public, route.public))
+            )
+              continue;
             try {
               const verdict = await bounded((signal) => validation.validate(route, owned, signal));
               readiness.set(route.id, verdict?.backendReady ?? true);
@@ -1546,6 +1553,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         )
           wakeRequests.delete(serverId);
       withheldRoutes = next.routes.filter((route) => withheldServers.has(route.serverId)).length;
+      committedWithheldServers = new Set(withheldServers);
       controlAvailable = true;
     } catch (error) {
       if (error instanceof GatewayProviderRateLimitedError) {

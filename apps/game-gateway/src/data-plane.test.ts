@@ -2238,6 +2238,44 @@ describe('sleep protocol handling and observations', () => {
       'sleeping\n',
     );
   });
+  it('rechecks 18 admitted and 8 withheld routes in one renewal batch, with fresh admission only on recovery', async () => {
+    const backends = await Promise.all(Array.from({ length: 26 }, () => tcpFixture()));
+    const routes = backends.map(({ port }) => route(port, 'tcp', 'sleeping'));
+    const withheld = new Set(routes.slice(18).map((route) => route.id));
+    const batches: { phase: string; routes: string[] }[] = [];
+    const createValidationBatch: NonNullable<GatewaySafety['createValidationBatch']> = (
+      _routes,
+      phase = 'initial',
+    ) => {
+      const batch = { phase, routes: [] as string[] };
+      batches.push(batch);
+      return {
+        async validate(route) {
+          batch.routes.push(route.id);
+          if (withheld.has(route.id)) throw new GatewaySafetyError('backend_active_binding');
+          return { backendReady: false };
+        },
+      };
+    };
+    const f = plane(routes, { safety: { createValidationBatch } });
+    await f.gateway.start();
+    expect(f.gateway.health()).toMatchObject({ routes: 18, withheldRoutes: 8, ready: true });
+    batches.length = 0;
+    await f.gateway.refresh();
+    expect(batches).toEqual([{ phase: 'initial', routes: routes.map((route) => route.id) }]);
+    expect(f.gateway.health()).toMatchObject({ routes: 18, withheldRoutes: 8, ready: true });
+    const recovered = routes[18];
+    if (!recovered) throw new Error('Missing recovered fixture');
+    withheld.delete(recovered.id);
+    batches.length = 0;
+    await f.gateway.refresh();
+    expect(batches).toEqual([
+      { phase: 'initial', routes: routes.map((route) => route.id) },
+      { phase: 'prebind', routes: [recovered.id] },
+    ]);
+    expect(f.gateway.health()).toMatchObject({ routes: 19, withheldRoutes: 7, ready: true });
+    expect((await exchange(recovered.public.port, 'STATUS\n')).toString()).toBe('sleeping\n');
+  });
   it('does not commit a pre-bind batch that finishes after its lease and reports the real reason', async () => {
     const backend = await tcpFixture();
     let clock = Date.now();
