@@ -279,14 +279,12 @@ export async function createGatewayRuntime(
       loadProof: async (route) => {
         const cached = evidence.route(route);
         if (cached) return cached.proof;
-        return gatewayReachabilityProofSchema
-          .nullable()
-          .parse(
-            await client.requestJson('proof-read', {
-              routeId: route.id,
-              routeRevision: route.revision,
-            }),
-          );
+        return gatewayReachabilityProofSchema.nullable().parse(
+          await client.requestJson('proof-read', {
+            routeId: route.id,
+            routeRevision: route.revision,
+          }),
+        );
       },
       saveProof: async (route, proof) => {
         await client.requestJson('proof-write', {
