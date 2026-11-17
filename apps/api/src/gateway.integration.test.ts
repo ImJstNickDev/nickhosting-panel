@@ -1383,6 +1383,45 @@ describe('M3 Core service authentication and managed control plane', () => {
     expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
   });
 
+  it.each(['new route', 'withdrawn route', 'changed identity'] as const)(
+    'fences %s during evidence provider reads using the final authoritative snapshot',
+    async (change) => {
+      vi.mocked(f.adapter.getApplicationServers).mockImplementationOnce(async () => {
+        if (change === 'new route')
+          await setGatewayRoute(
+            f.db,
+            f.owner,
+            { ...(routeInput as object), transport: 'udp' },
+            env,
+          );
+        else if (change === 'withdrawn route')
+          await f.db
+            .updateTable('gateway_routes')
+            .set({ enabled: false })
+            .where('id', '=', route.id)
+            .execute();
+        else
+          await f.db
+            .updateTable('managed_servers')
+            .set({ provider_user_id: remote.user + 1 })
+            .where('id', '=', serverId)
+            .execute();
+        return [remote];
+      });
+      const response = await request(`${prefix()}/evidence`);
+      expect(response.status).toBe(
+        change === 'new route' ? 412 : change === 'changed identity' ? 409 : 200,
+      );
+      if (change === 'withdrawn route') {
+        const evidence = await response.json();
+        expect(evidence.snapshot.routes).toEqual([]);
+        expect(evidence.contexts).toEqual([]);
+        expect(evidence.servers).toEqual([]);
+      }
+      expect(f.adapter.getApplicationServers).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('batches distinct managed servers while verifying every returned identity', async () => {
     vi.mocked(f.adapter.listAllocations).mockResolvedValue(f.inventory);
     const otherId = await f.server();
