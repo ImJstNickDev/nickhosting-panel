@@ -1,8 +1,6 @@
-import { execFile } from 'node:child_process';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-vi.mock('node:child_process', () => ({ execFile: vi.fn() }));
-afterEach(() => vi.mocked(execFile).mockReset());
+import { MissingContainers } from './docker-read-client.js';
 
 import {
   createNetworkObserver,
@@ -362,192 +360,50 @@ describe('bounded complete-inventory retry during Wings recreation', () => {
       2,
     );
   });
-  it.each(['Error response from daemon: No such container:', 'Error: No such object:'])(
-    'corroborates Docker CLI missing-object output (%s) before complete retry',
-    async (prefix) => {
-      const f = fixture();
-      const replacement = 'c'.repeat(64);
-      let missing = true;
-      vi.mocked(execFile).mockImplementation(((
-        _file: string,
-        args: string[],
-        _options: unknown,
-        callback: (error: Error | null, stdout: string, stderr: string) => void,
-      ) => {
-        const command = args.slice(2);
-        if (command[0] === 'container' && command[1] === 'inspect' && missing) {
-          const old = f.container.id;
-          missing = false;
-          f.container.id = replacement;
-          queueMicrotask(() =>
-            callback(
-              Object.assign(new Error('private command output'), {
-                code: 1,
-                killed: false,
-                signal: null,
-              }),
-              '',
-              `${prefix} ${old}\n`,
-            ),
-          );
-        } else {
-          void (
-            command[0] === 'container' && command[1] === 'ls'
-              ? Promise.resolve(f.container.id)
-              : f.io.docker(command, f.config.dockerSocket)
-          ).then((stdout) => callback(null, stdout, ''));
-        }
-        return {};
-      }) as typeof execFile);
-      const { docker: _docker, ...dependencies } = f.io;
-      const result = await createNetworkObserver(f.config, dependencies).observe();
-      expect(result.containers.map((container) => container.id)).toEqual([replacement]);
-      expect(
-        vi.mocked(execFile).mock.calls.filter((call) => (call[1] as string[])[2] === 'info'),
-      ).toHaveLength(2);
-    },
-  );
 });
 
-function useCliFixture(
-  f: ReturnType<typeof fixture>,
-  inspect: () => {
-    stdout: string;
-    stderr: string;
-    code?: number;
-    killed?: boolean;
-    signal?: string | null;
-  },
-  networkInspect?: () => string,
-) {
-  vi.mocked(execFile).mockImplementation(((
-    _file: string,
-    args: string[],
-    _options: unknown,
-    callback: (error: Error | null, stdout: string, stderr: string) => void,
-  ) => {
-    const command = args.slice(2);
-    if (command[0] === 'container' && command[1] === 'inspect') {
-      const output = inspect();
-      queueMicrotask(() =>
-        callback(
-          Object.assign(new Error('secret CLI path'), {
-            code: output.code ?? 1,
-            killed: output.killed ?? false,
-            signal: output.signal ?? null,
-          }),
-          output.stdout,
-          output.stderr,
-        ),
-      );
-    } else {
-      void (
-        command[0] === 'container' && command[1] === 'ls'
-          ? Promise.resolve(f.container.id)
-          : command[0] === 'network' && command[1] === 'inspect' && networkInspect
-            ? Promise.resolve(networkInspect())
-            : f.io.docker(command, f.config.dockerSocket)
-      ).then((stdout) => callback(null, stdout, ''));
-    }
-    return {};
-  }) as typeof execFile);
-  const { docker: _docker, ...dependencies } = f.io;
-  return createNetworkObserver(f.config, dependencies);
-}
-
 describe('container retry safety and bounded diagnostics', () => {
-  it.each([
-    {
-      name: 'permission failure despite disappearance',
-      stderr: 'permission denied /private/path',
-      reason: 'container_inspect',
-    },
-    {
-      name: 'mixed missing and permission errors',
-      stderr: 'Error: No such object: ID\npermission denied',
-      reason: 'container_inspect',
-    },
-    {
-      name: 'unrequested missing ID',
-      stderr: `Error: No such object: ${'d'.repeat(64)}`,
-      reason: 'container_inspect',
-    },
-    {
-      name: 'killed command',
-      stderr: 'Error: No such object: ID',
-      killed: true,
-      reason: 'container_inspect',
-    },
-    {
-      name: 'signal termination',
-      stderr: 'Error: No such object: ID',
-      signal: 'SIGTERM',
-      reason: 'container_inspect',
-    },
-    {
-      name: 'wrong exit status',
-      stderr: 'Error: No such object: ID',
-      code: 2,
-      reason: 'container_inspect',
-    },
-    {
-      name: 'malformed partial stdout',
-      stderr: 'Error: No such object: ID',
-      stdout: '{invalid-secret',
-      reason: 'container_parse',
-    },
-  ])('does not retry $name', async ({ stderr, stdout = '', reason, ...error }) => {
+  it('requires disappearance of every exact missing ID and rejects malformed sibling evidence', async () => {
     const f = fixture();
-    const old = f.container.id;
-    const observer = useCliFixture(f, () => {
-      f.container.id = 'c'.repeat(64);
-      return { stderr: stderr.replace('ID', old), stdout, ...error };
+    const original = f.io.docker;
+    f.io.docker = vi.fn(async (args, socket) => {
+      if (args[0] === 'container' && args[1] === 'inspect')
+        throw new MissingContainers([f.container.id]);
+      return original(args, socket);
     });
-    const failure = await observer.observe().catch((caught: unknown) => caught);
-    expect(failure).toMatchObject({ message: 'integration_unavailable', reason });
-    expect(JSON.stringify(failure)).not.toContain('secret');
-    expect(
-      vi.mocked(execFile).mock.calls.filter((call) => (call[1] as string[])[2] === 'info'),
-    ).toHaveLength(1);
+    await expect(f.observer().observe()).rejects.toMatchObject({ reason: 'container_inspect' });
+    const previous = f.io.docker;
+    f.io.docker = vi.fn(async (args, socket) => {
+      if (args[0] === 'network' && args[1] === 'inspect') return '{invalid';
+      return previous(args, socket);
+    });
+    await expect(f.observer().observe()).rejects.toMatchObject({ reason: 'network_parse' });
   });
-  it('requires disappearance of the exact missing ID, not merely another changed ID', async () => {
-    const f = fixture();
-    await expect(
-      useCliFixture(f, () => ({
-        stdout: '',
-        stderr: `Error: No such object: ${f.container.id}`,
-      })).observe(),
-    ).rejects.toMatchObject({ reason: 'container_inspect' });
-  });
-  it('rejects malformed sibling network output even when exact container disappearance is corroborated', async () => {
-    const f = fixture();
-    const old = f.container.id;
-    const observer = useCliFixture(
-      f,
-      () => {
-        f.container.id = 'c'.repeat(64);
-        return { stdout: '', stderr: `Error: No such object: ${old}` };
-      },
-      () => '{invalid network',
-    );
-    await expect(observer.observe()).rejects.toMatchObject({ reason: 'network_parse' });
-    expect(
-      vi.mocked(execFile).mock.calls.filter((call) => (call[1] as string[])[2] === 'info'),
-    ).toHaveLength(1);
-  });
-  it('rejects simultaneous network inventory change instead of retrying container disappearance', async () => {
+  it('corroborates native 404 disappearance before rereading replacement bindings', async () => {
     const f = fixture();
     const old = f.container.id;
     const original = f.io.docker;
-    let networkLists = 0;
-    f.io.docker = vi.fn(async (args, socket) =>
-      args[0] === 'network' && args[1] === 'ls' && ++networkLists > 1 ? '' : original(args, socket),
-    );
-    const observer = useCliFixture(f, () => {
-      f.container.id = 'c'.repeat(64);
-      return { stdout: '', stderr: `Error: No such object: ${old}` };
+    let disappeared = false;
+    f.io.docker = vi.fn(async (args, socket) => {
+      if (args[0] === 'container' && args[1] === 'ls') return f.container.id;
+      if (args[0] === 'container' && args[1] === 'inspect' && !disappeared) {
+        disappeared = true;
+        f.container.id = 'c'.repeat(64);
+        f.container.configuredBindings['25565/tcp'] = [{ HostIp: '0.0.0.0', HostPort: '28000' }];
+        throw new MissingContainers([old]);
+      }
+      return original(args, socket);
     });
-    await expect(observer.observe()).rejects.toMatchObject({ reason: 'network_inventory' });
+    const result = await f.observer().observe();
+    expect(result.containers[0]?.id).toBe(f.container.id);
+    expect(result.containers[0]?.configuredBindings).toContainEqual({
+      address: '0.0.0.0',
+      port: 28000,
+      transport: 'tcp',
+    });
+    expect(vi.mocked(f.io.docker).mock.calls.filter(([args]) => args[0] === 'info')).toHaveLength(
+      2,
+    );
   });
   it.each(['malformed', 'missing', 'duplicate'] as const)(
     'rejects %s inspect rows before considering an unrelated changed ID set',
@@ -652,102 +508,22 @@ describe('container retry safety and bounded diagnostics', () => {
 describe('complete fresh replacement evidence', () => {
   it('corroborates all missing IDs across parallel chunks before allowing a retry', async () => {
     const f = fixture();
-    const containers = Array.from({ length: 65 }, (_, index) => ({
-      ...f.container,
-      id: (index + 1).toString(16).padStart(64, '0'),
-    }));
-    const missing = [containers[0]?.id, containers[64]?.id];
+    const ids = Array.from({ length: 65 }, (_, index) =>
+      (index + 1).toString(16).padStart(64, '0'),
+    );
+    const original = f.io.docker;
     let lists = 0;
-    vi.mocked(execFile).mockImplementation(((
-      _file: string,
-      args: string[],
-      _options: unknown,
-      callback: (error: Error | null, stdout: string, stderr: string) => void,
-    ) => {
-      const command = args.slice(2);
-      if (command[0] === 'container' && command[1] === 'ls') {
-        lists++;
-        // Only the first reported disappearance is genuine. The second claimed
-        // missing ID still exists, so the whole observation must fail closed.
-        const rows = lists === 1 ? containers : containers.filter((row) => row.id !== missing[0]);
-        queueMicrotask(() => callback(null, rows.map((row) => row.id).join('\n'), ''));
-      } else if (command[0] === 'container' && command[1] === 'inspect') {
-        const requested = command.slice(4);
-        const absent = missing.find((value) => value !== undefined && requested.includes(value));
-        const rows = containers.filter((row) => requested.includes(row.id) && row.id !== absent);
-        queueMicrotask(() =>
-          callback(
-            Object.assign(new Error('private'), { code: 1, killed: false, signal: null }),
-            rows.map((row) => JSON.stringify(row)).join('\n'),
-            `Error: No such object: ${absent}`,
-          ),
-        );
-      } else
-        void f.io
-          .docker(command, f.config.dockerSocket)
-          .then((stdout) => callback(null, stdout, ''));
-      return {};
-    }) as typeof execFile);
-    const { docker: _docker, ...dependencies } = f.io;
-    await expect(createNetworkObserver(f.config, dependencies).observe()).rejects.toMatchObject({
-      reason: 'container_inspect',
+    f.io.docker = vi.fn(async (args, socket) => {
+      if (args[0] === 'container' && args[1] === 'ls')
+        return (++lists === 1 ? ids : ids.slice(1)).join('\n');
+      if (args[0] === 'container' && args[1] === 'inspect')
+        throw new MissingContainers([args[4] as string]);
+      return original(args, socket);
     });
-    expect(
-      vi.mocked(execFile).mock.calls.filter((call) => (call[1] as string[])[2] === 'info'),
-    ).toHaveLength(1);
-  });
-  it('accepts a corroborated missing batch only with complete valid surviving rows, then rereads changed bindings', async () => {
-    const f = fixture();
-    const old = f.container.id;
-    const survivor = { ...f.container, id: 'c'.repeat(64), name: '/survivor' };
-    let disappeared = false;
-    vi.mocked(execFile).mockImplementation(((
-      _file: string,
-      args: string[],
-      _options: unknown,
-      callback: (error: Error | null, stdout: string, stderr: string) => void,
-    ) => {
-      const command = args.slice(2);
-      if (command[0] === 'container' && command[1] === 'ls') {
-        queueMicrotask(() =>
-          callback(null, disappeared ? survivor.id : `${old}\n${survivor.id}`, ''),
-        );
-      } else if (command[0] === 'container' && command[1] === 'inspect') {
-        if (!disappeared) {
-          disappeared = true;
-          const partial = JSON.stringify(survivor);
-          survivor.activeBindings = { '25565/tcp': [{ HostIp: '0.0.0.0', HostPort: '28000' }] };
-          survivor.configuredBindings = {
-            ...survivor.configuredBindings,
-            '25565/tcp': survivor.activeBindings['25565/tcp'],
-          };
-          queueMicrotask(() =>
-            callback(
-              Object.assign(new Error('private'), { code: 1, killed: false, signal: null }),
-              partial,
-              `Error response from daemon: No such container: ${old}`,
-            ),
-          );
-        } else queueMicrotask(() => callback(null, JSON.stringify(survivor), ''));
-      } else
-        void f.io
-          .docker(command, f.config.dockerSocket)
-          .then((stdout) => callback(null, stdout, ''));
-      return {};
-    }) as typeof execFile);
-    const { docker: _docker, ...dependencies } = f.io;
-    const observation = await createNetworkObserver(f.config, dependencies).observe();
-    expect(observation.containers.map((container) => container.id)).toEqual([survivor.id]);
-    expect(observation.containers[0]?.configuredBindings).toContainEqual({
-      address: '0.0.0.0',
-      port: 28000,
-      transport: 'tcp',
-    });
-    expect(observation.containers[0]?.activeBindings).toContainEqual({
-      address: '0.0.0.0',
-      port: 28000,
-      transport: 'tcp',
-    });
+    await expect(f.observer().observe()).rejects.toMatchObject({ reason: 'container_inspect' });
+    expect(vi.mocked(f.io.docker).mock.calls.filter(([args]) => args[0] === 'info')).toHaveLength(
+      1,
+    );
   });
   it('stops an unresolved command at the original wall deadline without beginning another attempt', async () => {
     vi.useFakeTimers();

@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import { open, readdir, readFile, readlink, statfs } from 'node:fs/promises';
 import { isIP } from 'node:net';
@@ -6,6 +5,7 @@ import { networkInterfaces } from 'node:os';
 import { posix } from 'node:path';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import { dockerReadCommand, MissingContainers } from './docker-read-client.js';
 
 export type NetworkObservationFailure =
   | 'namespace'
@@ -29,11 +29,6 @@ export type NetworkObservationFailure =
 export class NetworkObservationError extends DomainError {
   constructor(readonly reason: NetworkObservationFailure) {
     super('integration_unavailable');
-  }
-}
-class MissingContainers extends Error {
-  constructor(readonly ids: string[]) {
-    super('missing containers');
   }
 }
 class ContainerChurn extends Error {}
@@ -120,70 +115,7 @@ const production: NetworkObserverDependencies = {
       .flatMap((addresses) => addresses ?? [])
       .map((address) => address.address),
   now: Date.now,
-  docker: (args, socket, timeoutMs = 10000) =>
-    new Promise((resolve, reject) => {
-      execFile(
-        'docker',
-        ['--host', `unix://${socket}`, ...args],
-        {
-          encoding: 'utf8',
-          timeout: Math.min(10000, timeoutMs),
-          maxBuffer: 4 * 1024 * 1024,
-          killSignal: 'SIGKILL',
-          shell: false,
-          env: Object.fromEntries(
-            Object.entries(process.env).filter(([key]) => !key.startsWith('DOCKER_')),
-          ),
-        },
-        (error, stdout, stderr) => {
-          if (!error) {
-            resolve(stdout);
-            return;
-          }
-          // Docker can remove a listed container while Wings recreates it. Only
-          // this exact CLI failure is eligible for corroboration and one retry.
-          const requested = args.slice(4);
-          const lines = typeof stderr === 'string' ? stderr.trim().split('\n') : [];
-          const missing = lines.map(
-            (line) =>
-              /^(?:Error: No such object: |Error response from daemon: No such container: )([a-f0-9]{64})$/.exec(
-                line,
-              )?.[1],
-          );
-          if (
-            args[0] === 'container' &&
-            args[1] === 'inspect' &&
-            error.code === 1 &&
-            !error.killed &&
-            !error.signal &&
-            missing.length > 0 &&
-            missing.every(
-              (value): value is string => value !== undefined && requested.includes(value),
-            )
-          ) {
-            try {
-              if (typeof stdout !== 'string' || stdout.length > 4 * 1024 * 1024) throw new Error();
-              const rows = stdout.trim()
-                ? stdout
-                    .trim()
-                    .split('\n')
-                    .map((line) => containerSchema.parse(JSON.parse(line)).id)
-                : [];
-              const expected = requested.filter((value) => !missing.includes(value)).sort();
-              if (
-                new Set(missing).size !== missing.length ||
-                rows.sort().join() !== expected.join()
-              )
-                throw new Error();
-            } catch {
-              reject(new NetworkObservationError('container_parse'));
-              return;
-            }
-            reject(new MissingContainers(missing));
-          } else reject(new Error('Docker command failed'));
-        },
-      );
-    }),
+  docker: dockerReadCommand,
 };
 
 const id = z.string().regex(/^[a-f0-9]{64}$/);
