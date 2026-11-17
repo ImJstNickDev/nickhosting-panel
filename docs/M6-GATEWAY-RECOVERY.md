@@ -26,18 +26,42 @@ listener. A full host reboot was not performed.
 ## Route validation
 
 The Gateway validates independent server groups with bounded concurrency, retaining
-ordered protocol roles within each server. Before opening new listeners it uses
-fresh provider and host evidence. Host observations for pre-bind checks may be
-shared only while a read is in progress; later admissions require another read.
-The complete Docker container/network inspection uses a pool of at most four
-commands, preserving per-chunk identities, final inventory checks and corroboration
-of every reported disappearance. Lease, evidence-age, namespace, ownership,
-all-provider allocation and Docker configured-binding collision checks remain mandatory. A failed apply waits for
-issued bind workers and closes their staged listeners before returning.
+ordered protocol roles within each server. Previously withheld routes join the
+shared renewal pass, avoiding repeated pre-bind scans while they remain withheld;
+a recovered route still requires fresh admission. Existing listeners renew once; new
+listeners receive one complete fresh admission immediately before staged binding.
+All issued work settles before rollback and no staged listener forwards until commit.
 
-Diagnostics preserve finite validation reasons instead of reporting every local
-validation failure as a Core communication failure. The lease duration and safety
-age limits are unchanged.
+Core supplies one authenticated evidence envelope with configuration, route snapshot,
+contexts, persisted proofs and provider inventories. Original source timestamps,
+complete inventory checks and exact route identities remain authoritative. Contexts,
+claims and proofs use set-based reads; snapshot state/protocol resolution is shared
+only within one construction, once per server rather than once per role.
+
+Host observations use pooled GET-only Docker Unix HTTP with bounded concurrency,
+response sizes and deadlines. There are no Docker CLI child processes. All containers
+(including stopped configured publications), all networks and provider allocations
+remain included. Native missing-container responses require exact disappearance
+corroboration; invalid sibling evidence prevents a churn retry. Namespace identity
+and socket ownership checks remain in place.
+
+Container, network, publication and socket indexes are built once from a private
+immutable host observation; allocation indexes are scoped to one provider batch.
+For exactly unchanged routes, fresh host acquisition overlaps the Core request.
+New, changed and rebound routes use a distinct post-Core observation epoch, never
+an older in-flight read. Prefetch is cycle-local and cannot grant or extend authority.
+Identical
+in-flight game and node probes share work without caching settled reachability.
+Periodic gameplay observations use committed route authority. Unknown infrastructure
+observations suppress lifecycle reports rather than reporting a negative game result.
+The probe, control, provider and host-observation paths accept cancellation; shared
+work is cancelled when its last consumer leaves. Abandoned work cannot start subsequent proof writes or publish a late grant or
+observation. Already-issued writes retain their Core revision checks; repeated
+callers cannot queue obsolete renewals.
+
+Lease duration, evidence-age, namespace, ownership, all-provider allocation and
+Docker configured-binding collision checks remain mandatory. Diagnostics preserve
+finite failure reasons, including validation timeouts.
 
 ## Resource limits
 
@@ -126,3 +150,69 @@ slept it after the player left, and the Owner later started it again. No further
 agent game-power operation was performed. Final IP and hostname status checks
 again passed after the Gateway restart. Internet-side reachability and a complete
 Minecraft play session were not independently exercised by the agent.
+
+
+## Efficiency follow-up — 2026-11-17
+
+The first recovery proved short-term reachability, not sustained stability. Further
+live evidence showed recurring lease expiry and full admission repeated during
+recovery. The follow-up above removes duplicate work rather than extending leases.
+Direct backend status measurements were 81–92 ms including Python startup; the
+initial failing full refresh exceeded 15 seconds and later reached 25 seconds.
+
+The work is separated into native observer transport, aggregate Core evidence,
+single admission/probe coordination, snapshot query reuse, and cancellation. Each
+has focused regression coverage and independent source review. No game power or
+file operation is needed for this follow-up. Final measured activation evidence is
+recorded below after verification; intermediate healthy checks are not a durability
+claim. Background/event-only inventory caching is not used to weaken freshness or
+hide incomplete inventories.
+
+
+### Targeted follow-up validation
+
+- Native observer/transport: 51 focused tests, plus identity/duplicate and cancellation regressions.
+- Final data-plane/validator suites: **403 passed** (215 data-plane, 188 validator), including single admission, 18 retained/8 withheld renewal, cancellation and fresh prefetch fences.
+- Runtime/control/node challenge suites: **83 passed** after signal wiring; final coalescer suite **13 passed** after independent fresh epochs.
+- API evidence: **4 isolated integration cases passed**, including membership addition/withdrawal and identity change during provider reads.
+- Snapshot state reuse: one focused integration regression passed, proving one state read for sibling routes and fresh state on the next snapshot.
+- `scripts/dev.sh pnpm typecheck`: passed for root and web. Root TypeScript passed again after the final prefetch integration.
+- `scripts/dev.sh pnpm lint`: passed with the existing 104 warnings and one informational diagnostic. Changed files passed scoped Biome; `git diff --check` passed.
+- Independent reviews covered native transport, evidence identity/freshness, cancellation, indexing, withheld-route recovery and distinct prefetch/prebind epochs. Existing very short wall-clock tests that failed under combined load passed focused reruns; their deadlines were not relaxed.
+
+No broad unrelated test suite was repeated for this follow-up. No dependency,
+DB migration, host port/network/DNS change or game-power operation was required.
+
+
+### Final live acceptance
+
+Final Gateway activation: 2026-11-17 16:39:33 UTC. The final Core-only cleanup was
+activated afterward; its cold API restart exceeded the 15-second lease and caused
+one maintenance disconnection. Minecraft itself was never restarted or stopped.
+This incident is separate from the subsequent steady-state acceptance window.
+
+During the final **139-second window**, **70 refresh cycles** completed with **zero
+new snapshot errors and zero new lease expirations**. All 45 sampled readiness
+responses were healthy, with two active connections. Both the configured LAN
+endpoint and hostname returned actual Minecraft/Forge status with two players.
+
+| Measured phase | Median | 95th percentile | Maximum sampled |
+| --- | ---: | ---: | ---: |
+| Complete renewal | 975 ms | 1,414 ms | 1,720 ms |
+| Core evidence fetch | 690 ms | 1,092 ms | 1,490 ms |
+| Snapshot validation/application after fetch | 253 ms | 489 ms | 601 ms |
+| Periodic backend probe | 13 ms | 118 ms | 247 ms |
+
+Host acquisition overlaps the Core request, so the application phase is the
+remaining validation/application work, not a separate measurement of the entire
+host scan. These are sampled steady-state measurements, not startup latency or a
+latency guarantee. Typical complete renewal is now subsecond, but the proposed
+**one-second p95 target was not reached**. Core-fetch tails remain measurable;
+no lease or observation-age limit was increased to conceal them.
+
+Root/web type checks and scoped regression evidence are recorded above. Final
+Core cleanup additionally passed its targeted history/policy regression, root
+TypeScript in the isolated checkout and independent review. Only scoped API/Gateway
+activation occurred; no new real game asset, provider/host configuration or game data
+change. Temporary implementation worktrees were removed. No full host reboot or
+Internet-side client test was performed.
