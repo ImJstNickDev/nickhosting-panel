@@ -100,7 +100,7 @@ export function createGatewayControlClient(
         headers: {
           Authorization: `Bearer ${options.token}`,
           Accept: 'application/json',
-          ...(action === 'snapshot'
+          ...(action === 'snapshot' || action === 'evidence'
             ? { 'X-NickHosting-Gateway-Features': 'completed-sleep-v1,presentation-variables-v1' }
             : {}),
           ...(action === 'observations'
@@ -163,6 +163,7 @@ export function createGatewayControlClient(
           response.status === 503 &&
           [
             'snapshot',
+            'evidence',
             'inventory',
             'context',
             'proof-read',
@@ -198,19 +199,20 @@ export function createGatewayControlClient(
           .safeParse(parsed);
         if (
           response.status === 412 &&
-          action === 'inventory' &&
           membershipChanged.success &&
-          z
-            .object({
-              operation: z.literal('servers'),
-              routeIds: z
-                .array(z.uuid())
-                .min(1)
-                .max(1000)
-                .refine((ids) => new Set(ids).size === ids.length),
-            })
-            .strict()
-            .safeParse(body).success
+          (action === 'evidence' ||
+            (action === 'inventory' &&
+              z
+                .object({
+                  operation: z.literal('servers'),
+                  routeIds: z
+                    .array(z.uuid())
+                    .min(1)
+                    .max(1000)
+                    .refine((ids) => new Set(ids).size === ids.length),
+                })
+                .strict()
+                .safeParse(body).success))
         )
           throw new GatewayRouteRevisionStaleError();
         if (

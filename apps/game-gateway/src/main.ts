@@ -19,6 +19,7 @@ import { createNetworkObserver, type NetworkObserver } from '@nickhosting/pterod
 import { z } from 'zod';
 import { createGatewayControlClient } from './control-client.js';
 import { createGatewayDataPlane } from './data-plane.js';
+import { createEvidenceCache } from './evidence.js';
 import { probeNodeEndpoint } from './node-probe.js';
 import { watchGatewayStartup } from './startup-client.js';
 
@@ -124,7 +125,15 @@ export async function createGatewayRuntime(
     );
     const protocols = dependencies.protocols ?? (await loadProtocols(env));
     const serverRoutes = new Map<number, string>();
-    const context = async (route: { id: string; revision: number }) => {
+    const evidence = createEvidenceCache(networkPolicy.maximumObservationAgeMs);
+    const routeValues = new Map<string, import('@nickhosting/game-sdk').GatewayRoute>();
+    const context = async (route: import('@nickhosting/game-sdk').GatewayRoute) => {
+      routeValues.set(route.id, route);
+      const cached = evidence.route(route);
+      if (cached) {
+        serverRoutes.set(cached.context.providerServerId, route.id);
+        return cached.context;
+      }
       const result = gatewaySafetyContextSchema.parse(
         await client.requestJson('context', { routeId: route.id, routeRevision: route.revision }),
       );
@@ -205,12 +214,15 @@ export async function createGatewayRuntime(
             p.readinessSource === 'provider_running',
         ),
       provider: {
+        observedAt: () => evidence.current()?.observedAt,
         listNodes: async () =>
+          evidence.current()?.nodes ??
           z
             .array(safetyProviderNodeSchema)
             .max(1000)
             .parse(await client.requestJson('inventory', { operation: 'nodes' })),
         listAllocations: async (nodeId) =>
+          evidence.current()?.allocations.find((entry) => entry.nodeId === nodeId)?.allocations ??
           z
             .array(safetyProviderAllocationSchema)
             .max(100000)
@@ -218,11 +230,28 @@ export async function createGatewayRuntime(
         getApplicationServer: async (id) => {
           const routeId = serverRoutes.get(id);
           if (!routeId) throw new DomainError('provenance_mismatch');
+          const value = routeValues.get(routeId);
+          if (value && evidence.route(value)) {
+            const cached = evidence.current()?.servers.find((entry) => entry.id === id);
+            if (cached) return cached;
+          }
           return safetyProviderServerSchema.parse(
             await client.requestJson('inventory', { operation: 'server', routeId }),
           );
         },
         getApplicationServers: async (routeIds) => {
+          const cached = evidence.current();
+          if (
+            cached &&
+            routeIds.every((id) => cached.snapshot.routes.some((route) => route.id === id))
+          ) {
+            const ids = new Set(
+              cached.contexts
+                .filter((entry) => routeIds.includes(entry.routeId))
+                .map((entry) => entry.context.providerServerId),
+            );
+            return cached.servers.filter((entry) => ids.has(entry.id));
+          }
           const servers = new Map<number, z.infer<typeof safetyProviderServerSchema>>();
           // Keep each control request bounded without lowering the snapshot route
           // limit. Several roles may refer to the same server across chunks.
@@ -247,13 +276,18 @@ export async function createGatewayRuntime(
         },
       },
       resolveContext: context,
-      loadProof: async (route) =>
-        gatewayReachabilityProofSchema.nullable().parse(
-          await client.requestJson('proof-read', {
-            routeId: route.id,
-            routeRevision: route.revision,
-          }),
-        ),
+      loadProof: async (route) => {
+        const cached = evidence.route(route);
+        if (cached) return cached.proof;
+        return gatewayReachabilityProofSchema
+          .nullable()
+          .parse(
+            await client.requestJson('proof-read', {
+              routeId: route.id,
+              routeRevision: route.revision,
+            }),
+          );
+      },
       saveProof: async (route, proof) => {
         await client.requestJson('proof-write', {
           routeId: route.id,
@@ -299,12 +333,12 @@ export async function createGatewayRuntime(
             signal,
           ),
         async fetchSnapshot() {
-          const current = await client.requestJson('configuration');
-          if (fingerprint(current) !== initial) {
+          const current = evidence.replace(await client.requestJson('evidence'));
+          if (fingerprint(current.configuration) !== initial) {
             changed = true;
             throw new DomainError('configuration_invalid');
           }
-          return client.fetchSnapshot();
+          return current.snapshot;
         },
       },
       policy: {

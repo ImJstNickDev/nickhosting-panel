@@ -59,6 +59,16 @@ function fixture() {
     expect(init?.redirect).toBe('error');
     const url = new URL(String(input));
     if (url.pathname.endsWith('/configuration')) return Response.json(current);
+    if (url.pathname.endsWith('/evidence'))
+      return Response.json({
+        configuration: current,
+        snapshot: snapshot(),
+        observedAt: Date.now(),
+        contexts: [],
+        nodes: [],
+        allocations: [],
+        servers: [],
+      });
     if (url.pathname.endsWith('/snapshot')) return Response.json(snapshot());
     throw new Error('Unexpected control action');
   });
@@ -85,6 +95,9 @@ describe('separate permanent Gateway runtime composition', () => {
     expect(observe).not.toHaveBeenCalled();
     expect(runtime.gateway.health().controlAvailable).toBe(true);
     expect(f.fetcher).toHaveBeenCalled();
+    expect(
+      f.fetcher.mock.calls.map(([url]) => new URL(String(url)).pathname.split('/').at(-1)),
+    ).toEqual(['configuration', 'evidence']);
   });
   it('detects Owner policy changes and stops renewing the old runtime', async () => {
     const f = fixture();

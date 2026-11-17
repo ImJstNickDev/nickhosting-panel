@@ -1360,6 +1360,29 @@ describe('M3 Core service authentication and managed control plane', () => {
     expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
   });
 
+  it('returns one revision-bound evidence envelope with batched contexts, proofs and provider reads', async () => {
+    await setGatewayRoute(f.db, f.owner, { ...(routeInput as object), transport: 'udp' }, env);
+    const response = await request(`${prefix()}/evidence`);
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).not.toContain(secret);
+    const evidence = JSON.parse(text);
+    expect(evidence.contexts).toHaveLength(2);
+    expect(evidence.servers).toHaveLength(1);
+    expect(evidence.observedAt).toBeLessThanOrEqual(Date.parse(evidence.snapshot.issuedAt));
+    for (const item of evidence.contexts) {
+      expect(item.routeRevision).toBe(
+        evidence.snapshot.routes.find((route: GatewayRoute) => route.id === item.routeId).revision,
+      );
+      expect(item.context.providerServerId).toBe(remote.id);
+      expect(item.proof).toBeNull();
+    }
+    expect(f.adapter.getApplicationServers).toHaveBeenCalledExactlyOnceWith([remote.uuid]);
+    expect(f.adapter.listNodes).toHaveBeenCalledTimes(1);
+    expect(f.adapter.listAllocations).toHaveBeenCalledTimes(1);
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+  });
+
   it('batches distinct managed servers while verifying every returned identity', async () => {
     vi.mocked(f.adapter.listAllocations).mockResolvedValue(f.inventory);
     const otherId = await f.server();

@@ -38,6 +38,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import { resolveSatisfactoryApi } from '../../../packages/server-management/src/satisfactory-api.js';
 import type { Variables } from './app.js';
+import { gatewayEvidence } from './gateway-evidence.js';
 import { gatewayClientFeatures, gatewayPresentationForClient } from './gateway-presentation.js';
 import { registerSatisfactoryConsoleApi } from './gateway-satisfactory-console.js';
 import {
@@ -136,6 +137,17 @@ export function registerGatewayRoutes(
   registerSatisfactoryOfflineApi(app, { ...options, route });
   registerSatisfactoryConsoleApi(app, { ...options, route });
   const prefix = '/internal/gateway/:gatewayId';
+  app.get(`${prefix}/evidence`, async (c) => {
+    const evidence = await gatewayEvidence(db, env, await options.management(), safetyServer);
+    c.header('Cache-Control', 'no-store');
+    return c.json({
+      ...evidence,
+      snapshot: gatewayPresentationForClient(
+        evidence.snapshot,
+        c.req.header('X-NickHosting-Gateway-Features'),
+      ),
+    });
+  });
   app.use(
     `${prefix}/private-state-write`,
     bodyLimit({
