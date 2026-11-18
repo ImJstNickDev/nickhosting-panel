@@ -14,6 +14,16 @@ replaced with a similarly named Mojang account. File modification time describes
 the saved snapshot, not the player's last login. Live presence retains the
 existing bounded console observation and its explicit unavailable state.
 
+The Players tab shares a permission-filtered saved-list query with the open server
+workspace, so navigation can display already-loaded rows while a fresh read runs.
+Its renderer loads alongside that read; UUID detail/inventory code loads only when
+opened. Warmup does not fetch skins, online presence or item textures. API list
+reads reuse the four authoritative root files, overlap independent discovery work
+and batch sibling directory listings. Every root file is read at most once per
+request; discovery failures remain separate from membership failures. No list GET
+prepares write grants, and no cross-request server cache or authorization bypass is
+introduced. Single-player API reads retain their existing path.
+
 Cards use compact three-quarter bust previews from the existing MCHeads skin
 provider. A visible preview lazily loads the unmodified MIT renderer, takes one
 still and releases its WebGL context. Stills and hover/focus waves share the same

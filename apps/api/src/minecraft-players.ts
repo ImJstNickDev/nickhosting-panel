@@ -63,12 +63,15 @@ async function readPlayerFiles(files: FilemanReadService) {
     const bytes = values.get(path);
     return bytes === undefined ? '[]' : Buffer.from(bytes).toString('utf8');
   };
-  return parseMinecraftPlayerFiles({
-    operators: text('ops.json'),
-    whitelist: text('whitelist.json'),
-    banned: text('banned-players.json'),
-    properties: text('server.properties'),
-  });
+  return {
+    values,
+    parsed: parseMinecraftPlayerFiles({
+      operators: text('ops.json'),
+      whitelist: text('whitelist.json'),
+      banned: text('banned-players.json'),
+      properties: text('server.properties'),
+    }),
+  };
 }
 /** Each confirmation opens a fresh read scope: a previous observation never
  * confirms a later command, and unrelated lists are not fetched or reconciled. */
@@ -189,7 +192,7 @@ export function registerMinecraftPlayerRoutes(
     const result = await service.fileReadScope(
       context,
       c.req.param('id'),
-      async (files, _id, connection, current) => {
+      async (files, _id, connection) => {
         const state = await profile(connection, c.req.param('id'));
         if (!state.supported || !state.value.installed)
           return {
@@ -201,14 +204,18 @@ export function registerMinecraftPlayerRoutes(
             whitelistEnabled: false,
             enforceWhitelist: false,
           };
-        void service
-          .prepareFileWrites(current, c.req.param('id'), [
-            'ops.json',
-            'whitelist.json',
-            'server.properties',
-          ])
-          .catch(() => {});
-        const known = await discoverMinecraftPlayers(files)
+        const [membership, root] = await Promise.allSettled([
+          readPlayerFiles(files),
+          files.list(''),
+        ]);
+        if (membership.status === 'rejected') throw membership.reason;
+        const known = await (root.status === 'fulfilled'
+          ? discoverMinecraftPlayers(files, {
+              root: root.value,
+              rootFiles: membership.value.values,
+            })
+          : Promise.reject(root.reason)
+        )
           .then((result) => ({
             knownPlayers: result.knownPlayers,
             knownPlayersState: 'available' as const,
@@ -218,7 +225,7 @@ export function registerMinecraftPlayerRoutes(
           supported: true,
           installed: true,
           ...known,
-          ...(await readPlayerFiles(files)),
+          ...membership.value.parsed,
         };
       },
       c.req.raw.signal,

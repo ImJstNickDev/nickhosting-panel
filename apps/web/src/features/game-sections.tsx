@@ -36,6 +36,7 @@ import {
 import type { GameSectionAcceptedOptions, GameSectionViewProps } from './game-section-view.js';
 import {
   availableGameSections,
+  gameSectionQuery,
   gameUiClient,
   gameUiRegistry,
   getGameFormView,
@@ -484,16 +485,10 @@ export function GameSections({
       availableGameSections(server.data, module).some((candidate) => candidate.id === sectionId),
   );
   const loaded = useQuery({
-    queryKey: ['game-section', serverId, gameId, sectionId],
+    ...gameSectionQuery(serverId, gameId, sectionId),
     enabled: Boolean(module && section && canReadSection),
     // An operation can finish while this section is unmounted and clear the active ID.
     refetchOnMount: 'always',
-    queryFn: ({ signal }) =>
-      module?.handlers[section?.loader ?? '']?.(gameUiClient, {
-        serverId,
-        values: { sectionId: section?.id },
-        signal,
-      }) as Promise<UiSectionData>,
   });
   const [trackedOperation, setTrackedOperation] = useState<{
     serverId: string;
