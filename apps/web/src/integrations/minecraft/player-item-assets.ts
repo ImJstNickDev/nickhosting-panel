@@ -30,3 +30,24 @@ export function minecraftPlayerHudAsset(name: string): string | undefined {
   if (!/^[a-z0-9_]+$/.test(name)) return undefined;
   return hud[`${base}player-hud/${name}.png`];
 }
+
+// Inventory slots load native PNGs only when used. This bypasses SVG-internal
+// resampling without eagerly fetching one Vite module per vanilla item.
+const itemPngs = import.meta.glob<string>(
+  '../../../../../games/minecraft/src/ui/assets/local-26.1/player-items/**/*.png',
+  { query: '?url&no-inline', import: 'default' },
+);
+export async function minecraftInventoryIcons(
+  ids: readonly string[],
+): Promise<Record<string, string>> {
+  const entries = await Promise.all(
+    ids.map(async (id) => {
+      if (!id.startsWith('minecraft:')) return undefined;
+      const name = id.slice('minecraft:'.length);
+      if (!/^[a-z0-9_]+(?:\/[a-z0-9_]+)*$/.test(name)) return undefined;
+      const load = itemPngs[`${base}player-items/${name}.png`];
+      return load ? ([id, await load()] as const) : undefined;
+    }),
+  );
+  return Object.fromEntries(entries.filter((entry) => entry !== undefined));
+}

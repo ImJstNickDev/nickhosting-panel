@@ -700,6 +700,110 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     );
     return files;
   }
+  it('renders mod inventory PNGs and pixel counts without smoothing on desktop and mobile', async () => {
+    await running(false);
+    await savedPlayer();
+    // Authored pixel fixture, not redistributed mod artwork. The API resolver has
+    // separate ZIP/model regressions; this journey exercises its browser contract.
+    const texture = await user.evaluate(() => {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 16;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Missing fixture canvas');
+      context.fillStyle = '#724029';
+      context.fillRect(3, 2, 10, 12);
+      context.fillStyle = '#f3d490';
+      context.fillRect(5, 3, 7, 10);
+      context.fillStyle = '#ed811b';
+      context.fillRect(7, 6, 3, 4);
+      context.fillStyle = '#418343';
+      context.fillRect(8, 4, 3, 2);
+      return canvas.toDataURL();
+    });
+    const detailUrl = `**${api()}/players/${uuid}`;
+    const textureUrl = `**${api()}/item-textures?*`;
+    let requests = 0;
+    await user.route(detailUrl, async (request) => {
+      const response = await request.fetch();
+      const detail = await response.json();
+      detail.inventory.push(
+        { ...detail.inventory[0], slot: 11, id: 'solcarrot:food_book', count: 1 },
+        { ...detail.inventory[0], slot: 12, id: 'fixture:missing', count: 2 },
+      );
+      await request.fulfill({ response, json: detail });
+    });
+    await user.route(textureUrl, async (request) => {
+      requests++;
+      const ids = new URL(request.request().url()).searchParams.get('ids')?.split(',');
+      expect(ids).toContain('solcarrot:food_book');
+      await request.fulfill({ json: { textures: { 'solcarrot:food_book': texture } } });
+    });
+    try {
+      await user.setViewportSize({ width: 1440, height: 1000 });
+      await user.goto(`${route()}/${uuid}`);
+      const book = user.getByRole('img', { name: /Slot 11:.*food.book.*1/i });
+      await browserExpect(book.locator('img')).toHaveAttribute('src', texture);
+      await browserExpect(book.locator('.minecraft-item-count')).toHaveCount(0);
+      const stack = user.getByRole('img', { name: 'Slot 2: Torch × 64', exact: true });
+      await browserExpect(stack.locator('.minecraft-item-count')).toBeVisible();
+      await expect
+        .poll(() =>
+          stack.locator('canvas').evaluate((element) => {
+            const canvas = element as HTMLCanvasElement;
+            const pixels = canvas
+              .getContext('2d')!
+              .getImageData(0, 0, canvas.width, canvas.height).data;
+            const colors = new Set<string>();
+            for (let i = 0; i < pixels.length; i += 4)
+              if (pixels[i + 3])
+                colors.add(`${pixels[i]},${pixels[i + 1]},${pixels[i + 2]},${pixels[i + 3]}`);
+            return [...colors].sort();
+          }),
+        )
+        .toEqual(['255,255,255,255', '63,63,63,255']);
+      await browserExpect(user.getByRole('img', { name: /Slot 12:.*missing.*2/i })).toBeVisible();
+      expect(
+        await book.locator('img').evaluate((image) => getComputedStyle(image).imageRendering),
+      ).toBe('pixelated');
+      await browserExpect(stack.locator('img')).toHaveAttribute('src', /player-items\/torch\.png/);
+      await user.getByRole('heading', { name: player.name, exact: true }).focus();
+      await screenshot(user, 'minecraft-player-inventory-textures-desktop-en');
+      await accessible();
+      await user.setViewportSize({ width: 390, height: 844 });
+      await screenshot(user, 'minecraft-player-inventory-textures-mobile-en');
+      await accessible();
+      expect(requests).toBe(1);
+      await user.unroute(textureUrl);
+      await user.route(textureUrl, (request) =>
+        request.fulfill({
+          status: 503,
+          json: {
+            error: {
+              code: 'integration_unavailable',
+              messageKey: 'errors.integration_unavailable',
+            },
+          },
+        }),
+      );
+      await user.reload();
+      await browserExpect(user.getByRole('alert')).toBeVisible();
+      await browserExpect(stack.locator('img')).toHaveAttribute('src', /player-items\/torch\.png/);
+      await browserExpect(book.locator('img')).toHaveCount(0);
+      await screenshot(user, 'minecraft-player-inventory-textures-error-mobile-en');
+      await user.unroute(textureUrl);
+      await user.route(textureUrl, (request) =>
+        request.fulfill({
+          json: { textures: { 'solcarrot:food_book': texture } },
+        }),
+      );
+      await user.getByRole('button', { name: 'Try again', exact: true }).click();
+      await browserExpect(book.locator('img')).toHaveAttribute('src', texture);
+    } finally {
+      await user.unroute(detailUrl);
+      await user.unroute(textureUrl);
+      await user.setViewportSize({ width: 1440, height: 1000 });
+    }
+  });
   it('opens compact bust cards, grouped anchored actions and the saved player detail', async () => {
     await running(false);
     await savedPlayer();

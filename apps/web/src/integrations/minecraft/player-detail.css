@@ -153,7 +153,8 @@
 .minecraft-inventory-surface {
   box-sizing: border-box;
   width: 100%;
-  max-width: 360px;
+  max-width: 350px;
+  --minecraft-inventory-pixel: 2;
   margin-inline: auto;
   padding: 10px;
   border: 3px solid;
@@ -171,6 +172,7 @@
   margin: 0 0 7px;
 }
 .minecraft-inventory-grid {
+  width: var(--minecraft-inventory-grid-width, 100%);
   display: grid;
   grid-template-columns: repeat(9, minmax(0, 1fr));
   gap: 0;
@@ -213,37 +215,36 @@
   color: #111;
 }
 .minecraft-item-id:has(img) {
-  width: 100%;
-  height: 100%;
+  padding: 0;
+  flex: none;
 }
 .minecraft-item-id img {
   display: block;
-  width: 100%;
-  height: 100%;
+  width: calc(16px * var(--minecraft-inventory-pixel, 2));
+  height: calc(16px * var(--minecraft-inventory-pixel, 2));
   object-fit: contain;
   image-rendering: pixelated;
 }
 .minecraft-item-count {
   position: absolute;
   bottom: 0;
-  right: 1px;
-  color: #fff;
-  font-size: 0.72rem;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  text-shadow:
-    1px 1px #333,
-    -1px -1px #333;
+  right: 0;
+  display: block;
+  height: calc(8px * var(--minecraft-inventory-pixel, 2));
+  image-rendering: pixelated;
+  pointer-events: none;
 }
 .minecraft-inventory-hotbar {
   margin-top: 7px;
 }
 .minecraft-inventory-extra {
+  width: var(--minecraft-inventory-grid-width, 100%);
   display: grid;
   grid-template-columns: repeat(9, minmax(0, 1fr));
   margin-top: 7px;
 }
 .minecraft-equipment-stage {
+  width: var(--minecraft-inventory-grid-width, 100%);
   display: grid;
   aspect-ratio: 9 / 4;
   min-height: 0;
@@ -456,7 +457,7 @@
 .minecraft-player-hud {
   --minecraft-xp-pixel: 2px;
   width: 100%;
-  max-width: 360px;
+  max-width: 350px;
   margin: 0 auto 18px;
 }
 .minecraft-player-hud-row {
@@ -628,9 +629,6 @@ button.minecraft-player-destructive:hover {
   .minecraft-item-id {
     font-size: 0.45rem;
     padding: 1px;
-  }
-  .minecraft-item-count {
-    font-size: 0.65rem;
   }
   .minecraft-player-hud {
     --minecraft-xp-pixel: 1.5px;

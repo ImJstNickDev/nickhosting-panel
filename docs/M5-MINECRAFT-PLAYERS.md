@@ -74,8 +74,31 @@ NBT decoding uses the same bounded structural preflight as world inspection,
 with a smaller compressed-player-file limit. Both legacy item tags and modern
 `count`/`components` are read. Modern `equipment` entries are normalized to the
 display's equipment slots rather than incorrectly treating armor as absent.
-Item images are optional locally prepared resources; identifiers and counts
-remain available without them or for modded items.
+Inventory images combine optional locally prepared vanilla PNGs with server-owned
+mod resources. The browser requests only the distinct item IDs in the inventory
+and Ender Chest, in batches of at most 64. The authenticated
+`GET /v1/servers/:id/minecraft/item-textures?ids=namespace:item,...` endpoint requires
+Minecraft Players READ, checks the installed profile and rechecks access before
+returning bytes. It accepts item IDs, never user-supplied file paths or remote URLs.
+
+The resolver reads installed `mods/*.jar` resources through the existing bounded
+SFTP/ZIP range reader; it never executes JAR code or changes game files. A bounded
+process-local cache keys resources by managed-server binding and JAR name, size
+and modification time. Model ancestry, texture references and namespaces are
+resolved for legacy `models/item` and modern `items` definitions. Static,
+single-layer generated/handheld models are supported, including
+`solcarrot:food_book` with its `solcarrot:items/food_book` texture. Ambiguous
+overrides, custom renderers, tinted/conditional/multilayer models and absent
+resources retain the descriptive item fallback. This is not a complete client
+renderer or a resource-pack installation mechanism. Vanilla fallback remains the
+optional local 26.1 catalog; it does not claim to reproduce every server version.
+
+Inventory slots use native PNGs and integer pixel scales, bypassing SVG image
+resampling. Stack quantities use bitmap digits with white fill and a lower-right
+dark shadow; one-item stacks omit the number. The existing optional XP font
+provides the glyph masks, with an authored bitmap fallback when unavailable.
+Counts still come directly from saved NBT, not a live inventory feed. Texture
+request failures leave saved data visible and expose a retry action.
 
 To prepare those resources explicitly, use Python 3.11+ with Pillow 12.1.1 and
 run `python scripts/prepare-minecraft-player-assets.py /path/to/26.1/client.jar`
@@ -90,8 +113,9 @@ Cube previews use a fixed projection, not the complete game renderer. Existing
 differing files and symlink output paths are rejected. Preparation grants no
 asset redistribution rights and is not an automatic build hook.
 
-The UI loads one optional atlas and its identifier manifest rather than importing
-one module for every available item. An explicit `--update-provenance` permits
+Statistics/action icons retain the optional atlas. Inventory PNG modules load
+lazily only for requested IDs, rather than eagerly importing every available
+item. An explicit `--update-provenance` permits
 only a verified additive preparation upgrade; existing artwork is not replaced.
 
 Static inspection of the official 26.3 client (SHA1

@@ -11,7 +11,13 @@ import { MinecraftPlayerBody } from './player-body.js';
 import { PlayerRoles } from './player-card.js';
 import type { PlayerGameMode, PlayerGameplayAction } from './player-detail-actions.js';
 import { PlayerIcon } from './player-icons.js';
-import { minecraftItemIcon, minecraftPlayerHudAsset } from './player-item-assets.js';
+import { fetchInventoryTextures, inventoryTextureIds } from './player-inventory-assets.js';
+import {
+  minecraftInventoryIcons,
+  minecraftItemIcon,
+  minecraftPlayerHudAsset,
+} from './player-item-assets.js';
+import { MinecraftItemCount } from './player-item-count.js';
 import { PlayerStatistics, readableMinecraftId } from './player-statistics.js';
 import { PlayerUuid } from './player-uuid.js';
 import { PlayerXpBar } from './player-xp-bar.js';
@@ -34,11 +40,13 @@ function ItemSlot({
   item,
   selected,
   equipment,
+  textures,
 }: {
   slot: number;
   item?: Item;
   selected?: boolean;
   equipment?: boolean;
+  textures: Readonly<Record<string, string>>;
 }) {
   const t = useT();
   const description = item
@@ -46,7 +54,8 @@ function ItemSlot({
     : equipment
       ? t(key(`equipment.${slot === 150 ? -106 : slot}`))
       : t(key('slotEmpty'), { slot });
-  const icon = item ? minecraftItemIcon(item.id) : undefined;
+  const icon = item ? textures[item.id] : undefined;
+  const [failedIcon, setFailedIcon] = useState<string>();
   const tooltip = [
     description,
     ...(item
@@ -78,13 +87,13 @@ function ItemSlot({
         {item && (
           <>
             <span className="minecraft-item-id" aria-hidden="true">
-              {icon ? <img src={icon} alt="" /> : readableMinecraftId(item.id)}
+              {icon && icon !== failedIcon ? (
+                <img src={icon} alt="" onError={() => setFailedIcon(icon)} />
+              ) : (
+                readableMinecraftId(item.id)
+              )}
             </span>
-            {item.count > 1 && (
-              <span className="minecraft-item-count" aria-hidden="true">
-                {item.count}
-              </span>
-            )}
+            <MinecraftItemCount count={item.count} />
           </>
         )}
       </span>
@@ -96,14 +105,33 @@ function Inventory({
   ender,
   selected,
   player,
+  textures,
 }: {
   items: Item[] | null;
   ender?: boolean;
   selected: number | null;
   player?: { name: string; uuid: string };
+  textures: Readonly<Record<string, string>>;
 }) {
   const t = useT();
   const [active, setActive] = useState(false);
+  const surface = useRef<HTMLDivElement>(null);
+  const unavailable = items === null;
+  useEffect(() => {
+    const element = surface.current;
+    if (!element || unavailable) return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry) return;
+      const slot = Math.floor(entry.contentRect.width / 9);
+      element.style.setProperty(
+        '--minecraft-inventory-pixel',
+        String(Math.max(1, Math.floor((slot - 4) / 16))),
+      );
+      element.style.setProperty('--minecraft-inventory-grid-width', `${slot * 9}px`);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [unavailable]);
   if (items === null) return <p className="muted">{t(key('inventoryUnavailable'))}</p>;
   const slots = ender
     ? Array.from({ length: 27 }, (_, index) => index)
@@ -115,6 +143,7 @@ function Inventory({
   const extra = items.filter((item) => !slots.includes(item.slot));
   return (
     <div
+      ref={surface}
       className={`minecraft-inventory-surface${ender ? ' minecraft-inventory-surface--ender' : ''}`}
     >
       {ender && <h4 className="minecraft-inventory-title">{t(key('enderChest'))}</h4>}
@@ -126,7 +155,13 @@ function Inventory({
         >
           <fieldset className="minecraft-equipment-grid" aria-label={t(key('equipment'))}>
             {[103, 102, 101, 100].map((slot) => (
-              <ItemSlot key={slot} slot={slot} item={bySlot.get(slot)} equipment />
+              <ItemSlot
+                textures={textures}
+                key={slot}
+                slot={slot}
+                item={bySlot.get(slot)}
+                equipment
+              />
             ))}
           </fieldset>
           <div className="minecraft-equipment-preview">
@@ -140,7 +175,7 @@ function Inventory({
             )}
           </div>
           <div className="minecraft-equipment-offhand">
-            <ItemSlot slot={150} item={bySlot.get(150)} equipment />
+            <ItemSlot textures={textures} slot={150} item={bySlot.get(150)} equipment />
           </div>
           <div
             className="minecraft-crafting-preview"
@@ -170,7 +205,12 @@ function Inventory({
             key={slot}
             className={!ender && index >= 27 ? 'minecraft-inventory-hotbar' : undefined}
           >
-            <ItemSlot slot={slot} item={bySlot.get(slot)} selected={!ender && slot === selected} />
+            <ItemSlot
+              textures={textures}
+              slot={slot}
+              item={bySlot.get(slot)}
+              selected={!ender && slot === selected}
+            />
           </div>
         ))}
       </fieldset>
@@ -180,7 +220,7 @@ function Inventory({
           {extra
             .filter((item) => ender || ![103, 102, 101, 100, 150].includes(item.slot))
             .map((item) => (
-              <ItemSlot key={item.slot} slot={item.slot} item={item} />
+              <ItemSlot textures={textures} key={item.slot} slot={item.slot} item={item} />
             ))}
         </div>
       )}
@@ -323,6 +363,27 @@ export function MinecraftPlayerDetailView({
     enabled: validUuid,
     retry: false,
   });
+  const textureIds = inventoryTextureIds(detail.data?.inventory, detail.data?.enderChest);
+  const localTextures = useQuery({
+    queryKey: ['minecraft-inventory-local-textures', textureIds],
+    queryFn: () => minecraftInventoryIcons(textureIds),
+    enabled: textureIds.length > 0,
+    staleTime: Infinity,
+    retry: false,
+  });
+  const serverTextures = useQuery({
+    queryKey: [
+      'minecraft-inventory-server-textures',
+      serverId,
+      textureIds,
+      detail.data?.snapshot.revision,
+    ],
+    queryFn: ({ signal }) => fetchInventoryTextures(serverId, textureIds, signal),
+    enabled: validUuid && textureIds.length > 0,
+    staleTime: 60_000,
+    retry: false,
+  });
+  const textures = { ...localTextures.data, ...serverTextures.data };
   useEffect(() => {
     if (detail.data?.player.uuid === uuid && focusedUuid.current !== uuid && heading.current) {
       heading.current.focus({ preventScroll: true });
@@ -452,14 +513,24 @@ export function MinecraftPlayerDetailView({
           <section className="minecraft-player-panel minecraft-player-inventory-panel">
             <h3>{t(key('inventory'))}</h3>
             <PlayerVitalsHud vitals={data.vitals} />
+            {(serverTextures.error || localTextures.error) && (
+              <ErrorNotice
+                error={serverTextures.error ?? localTextures.error}
+                retry={() => {
+                  if (serverTextures.error) void serverTextures.refetch();
+                  if (localTextures.error) void localTextures.refetch();
+                }}
+              />
+            )}
             <Inventory
+              textures={textures}
               items={data.inventory}
               selected={data.selectedSlot}
               player={{ name, uuid }}
             />
             <div className="minecraft-player-ender-section">
               {data.enderChest === null && <h4>{t(key('enderChest'))}</h4>}
-              <Inventory items={data.enderChest} ender selected={null} />
+              <Inventory textures={textures} items={data.enderChest} ender selected={null} />
             </div>
             {permissionKeys.includes('game.minecraft.players.reset') && (
               <div className="minecraft-player-reset-section">
