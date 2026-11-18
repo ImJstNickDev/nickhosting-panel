@@ -269,8 +269,8 @@ Gateway and game-container start times remained unchanged. API and Gateway
 health passed; the activation window recorded five transient snapshot errors
 and zero new lease expirations, with the existing connection retained.
 
-An authenticated request for the installed `solcarrot:food_book` returned HTTP200
-and a16×16 PNG. Cold indexing of158 installed mod JARs took17,704ms; the immediate
-warm request took647ms. These are single observed requests, not latency
+An authenticated request for the installed `solcarrot:food_book` returned HTTP 200
+and a 16×16 PNG. Cold indexing of 158 installed mod JARs took 17,704 ms; the immediate
+warm request took 647 ms. These are single observed requests, not latency
 guarantees. Initial metadata indexing remains asynchronous to saved-data display.
 No game file/power, infrastructure configuration or dependency change occurred.
