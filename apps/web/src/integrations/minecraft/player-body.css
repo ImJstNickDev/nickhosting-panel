@@ -8,25 +8,28 @@
   pointer-events: none;
   --player-frame-width: 100%;
   --player-frame-height: 100%;
-  --player-frame-top: 0px;
 }
 .minecraft-player-body--bust {
-  width: 96px;
-  height: 112px;
-  --player-frame-width: 144px;
-  --player-frame-height: 240px;
-  --player-frame-top: -4px;
+  width: 80px;
+  height: 104px;
+  --player-frame-width: 96px;
+  --player-frame-height: 160px;
 }
 .minecraft-player-body > img,
 .minecraft-player-body > canvas {
   position: absolute;
-  top: var(--player-frame-top);
+  top: 0;
   left: 50%;
   transform: translateX(-50%);
   display: block;
   width: var(--player-frame-width);
   height: var(--player-frame-height);
   object-fit: contain;
+}
+.minecraft-player-body--bust > img,
+.minecraft-player-body--bust > canvas {
+  left: 0;
+  transform: none;
 }
 .minecraft-player-body > img {
   image-rendering: pixelated;

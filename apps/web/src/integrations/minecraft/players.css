@@ -130,12 +130,10 @@
   outline: 2px solid var(--field-focus);
   outline-offset: 3px;
 }
-.minecraft-player-card-body {
+.minecraft-player .minecraft-player-card-body {
   position: absolute;
-  left: 6px;
-  bottom: 0;
-  width: 96px;
-  height: 112px;
+  inset: 0 auto 0 0;
+  height: auto;
   border-bottom-left-radius: 8px;
 }
 .minecraft-player-identity {

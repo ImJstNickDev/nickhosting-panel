@@ -11,7 +11,7 @@ import './player-body.css';
 
 type Renderer = typeof import('skinview3d');
 type Variant = 'bust' | 'full';
-const frames = { bust: { width: 144, height: 240 }, full: { width: 120, height: 180 } };
+const frames = { bust: { width: 96, height: 160 }, full: { width: 120, height: 180 } };
 // Data URLs contain only a small rendered preview; bound the session cache.
 const stills = new Map<string, string>();
 function remember(key: string, image: string) {
@@ -51,12 +51,21 @@ function createViewer(library: Renderer, texture: HTMLImageElement, variant: Var
   // Let the CSS frame fit narrow inventory slots without changing the camera.
   canvas.style.removeProperty('width');
   canvas.style.removeProperty('height');
-  // The same three-quarter camera and model pose are used for stills and animation.
-  // Keep the viewing angle outside the animated player: assigning an animation
-  // resets playerObject.rotation in skinview3d.
-  viewer.playerWrapper.rotation.y = 0.48;
-  viewer.camera.position.y = 3;
-  viewer.camera.lookAt(0, 0, 0);
+  if (variant === 'bust') {
+    // The reference rotates around the feet; skinview3d centers the player at the origin.
+    viewer.playerObject.position.y = 16;
+    viewer.playerWrapper.rotation.set((12 * Math.PI) / 180, (-28 * Math.PI) / 180, 0);
+    viewer.camera.position.set(0, 16, 80);
+    viewer.camera.lookAt(0, 16, 0);
+    // The card uses a fixed 96 × 160 frame with four CSS pixels per model unit.
+    const projection = viewer.camera.projectionMatrix;
+    projection.makeOrthographic(-12, 12, 20, -20, 0.1, 200);
+    viewer.camera.projectionMatrixInverse.copy(projection).invert();
+  } else {
+    viewer.playerWrapper.rotation.y = 0.48;
+    viewer.camera.position.y = 3;
+    viewer.camera.lookAt(0, 0, 0);
+  }
   return viewer;
 }
 
