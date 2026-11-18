@@ -776,7 +776,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
       context.fillRect(8, 4, 3, 2);
       return canvas.toDataURL();
     });
-    const detailUrl = `**${api()}/players/${uuid}`;
+    const detailUrl = `**${api()}/players/${uuid}?view=saved`;
     const textureUrl = `**${api()}/item-textures?*`;
     let requests = 0;
     await user.route(detailUrl, async (request) => {
@@ -1067,26 +1067,64 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     ).toHaveValue('Browser');
   });
   it('distinguishes pending and failed detail reads and lets blocked actions be cancelled', async () => {
-    let release = () => {};
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const url = `**${api()}/players/${uuid}`;
+    await running(false);
+    await savedPlayer();
+    const saved = Promise.withResolvers<void>();
+    const status = Promise.withResolvers<void>();
+    const url = `**${api()}/players/${uuid}?view=saved`;
+    const statusUrl = `**${api()}/players/${uuid}?view=status`;
     await user.route(url, async (request) => {
-      await gate;
+      await saved.promise;
+      await request.continue();
+    });
+    await user.route(statusUrl, async (request) => {
+      await status.promise;
       await request.continue();
     });
     try {
-      await user.goto(`${route()}/${uuid}`);
-      await browserExpect(user.getByRole('status').filter({ hasText: 'Loading' })).toBeVisible();
+      await user.goto(route());
+      const card = user.getByRole('link', { name: `View player: ${player.name}`, exact: true });
+      await card.evaluate((link) => {
+        link.addEventListener(
+          'click',
+          () => {
+            const click = performance.mark('detail-click');
+            const measure = () => {
+              if (
+                document.querySelector('.minecraft-player-detail-header h2')?.getClientRects()
+                  .length
+              )
+                performance.measure('detail-header-visible', 'detail-click');
+              else if (performance.now() - click.startTime < 5000) requestAnimationFrame(measure);
+            };
+            requestAnimationFrame(measure);
+          },
+          { once: true },
+        );
+      });
+      await card.click();
+      await browserExpect(
+        user.getByRole('heading', { name: player.name, exact: true }),
+      ).toBeVisible();
+      await browserExpect(
+        user.getByRole('status').filter({ hasText: 'Loading' }).first(),
+      ).toBeVisible();
       await screenshot(user, 'minecraft-player-detail-loading-desktop-en');
+      const headerTime = await user.evaluate(
+        () => performance.getEntriesByName('detail-header-visible')[0]?.duration,
+      );
+      if (headerTime !== undefined)
+        console.info(`Player click to visible header: ${Math.round(headerTime)} ms`);
+      saved.resolve();
+      await browserExpect(
+        user.getByRole('img', { name: 'Slot 2: Torch × 64', exact: true }),
+      ).toBeVisible();
     } finally {
-      release();
+      saved.resolve();
+      status.resolve();
       await user.unroute(url);
+      await user.unroute(statusUrl);
     }
-    await browserExpect(
-      user.getByRole('heading', { name: player.name, exact: true }),
-    ).toBeVisible();
     await user.route(url, async (request) =>
       request.fulfill({
         status: 503,
@@ -1137,6 +1175,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
   });
 
   it('dispatches authorized gameplay actions without presenting saved vitals as confirmation', async () => {
+    await savedPlayer();
     await running(true);
     await user.goto(`${route()}/${uuid}`);
     const modeSelect = user.getByRole('combobox', { name: 'Game mode', exact: true });

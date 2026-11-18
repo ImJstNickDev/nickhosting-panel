@@ -22,7 +22,15 @@ reads reuse the four authoritative root files, overlap independent discovery wor
 and batch sibling directory listings. Every root file is read at most once per
 request; discovery failures remain separate from membership failures. No list GET
 prepares write grants, and no cross-request server cache or authorization bypass is
-introduced. Single-player API reads retain their existing path.
+introduced.
+
+Clicking a player displays the selected row’s identity immediately. The browser requests
+saved data (`?view=saved`) and presence/action availability (`?view=status`) in parallel.
+Inventory and statistics use the current player `.dat` and statistics file. They can be
+shown while the console observation is pending. Reset confirmation requests the full
+snapshot, including backups and advancements, and submits its revision. The mutation
+rechecks that revision under the lifecycle lock. The unqualified detail GET retains its
+full response for existing clients.
 
 Cards use compact three-quarter bust previews from the existing MCHeads skin
 provider. A visible preview lazily loads the unmodified MIT renderer, takes one

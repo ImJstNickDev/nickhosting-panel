@@ -15,7 +15,11 @@ import {
   minecraftPlayerDetailActionNames,
   minecraftPlayerDetailActionSchema,
 } from '../../../games/minecraft/src/player-details-contracts.js';
-import { readMinecraftPlayerDetail } from '../../../packages/server-management/src/minecraft-player-details.js';
+import {
+  findMinecraftPlayer,
+  readMinecraftPlayerBinding,
+  readMinecraftPlayerDetail,
+} from '../../../packages/server-management/src/minecraft-player-details.js';
 import { permissionRuntime } from '../../../packages/server-management/src/permission-runtime.js';
 import type { Variables } from './app.js';
 import { registerMinecraftItemTextureRoutes } from './minecraft-item-textures-routes.js';
@@ -89,19 +93,54 @@ export function registerMinecraftPlayerDetailRoutes(
       serverId = c.req.param('id'),
       uuid = minecraftUuid(c.req.param('uuid'));
     const service = permissionRuntime(await management(), 'game.minecraft.players');
+    const view = c.req.query('view') ?? 'full';
+    if (view !== 'full' && view !== 'saved' && view !== 'status')
+      throw new DomainError('validation_failed');
+    c.header('Cache-Control', 'no-store');
+    if (view === 'saved') {
+      const saved = await service.fileReadScope(
+        context,
+        serverId,
+        async (files, _id, connection) => {
+          await profile(connection, serverId);
+          return (await readMinecraftPlayerDetail(files, uuid, 'saved')).detail;
+        },
+        c.req.raw.signal,
+      );
+      return c.json(saved);
+    }
     const result = await service.fileReadScope(
       context,
       serverId,
-      async (files, identifier, connection, current, server) => ({
-        ...(await readMinecraftPlayerDetail(files, uuid)),
-        identifier,
-        server,
-        choice: await profile(connection, serverId),
-        permissions: await getServerPermissionKeys(connection, current, server),
-      }),
+      async (files, identifier, connection, current, server) => {
+        const choice = await profile(connection, serverId);
+        const [permissions, resources] = await Promise.all([
+          getServerPermissionKeys(connection, current, server),
+          service.adapter.getResources(identifier),
+        ]);
+        const common = { choice, identifier, server, permissions, state: resources.current_state };
+        // A bound usercache entry proves identity for live presence. Offline reset
+        // eligibility and players known only from disk require directory metadata.
+        if (view === 'status' && resources.current_state === 'running') {
+          const name = await readMinecraftPlayerBinding(files, uuid);
+          if (name)
+            return { ...common, currentName: name, mixed: false, hasRefs: false, detail: null };
+        }
+        const snapshot =
+          view === 'full'
+            ? await readMinecraftPlayerDetail(files, uuid)
+            : { ...(await findMinecraftPlayer(files, uuid)), detail: null };
+        return {
+          ...common,
+          currentName: snapshot.discovered.usercache.get(uuid),
+          mixed: snapshot.discovered.layout === 'mixed',
+          hasRefs: snapshot.refs.length > 0,
+          detail: snapshot.detail,
+        };
+      },
       c.req.raw.signal,
     );
-    const state = (await service.adapter.getResources(result.identifier)).current_state;
+    const { currentName, state } = result;
     const authorize = async () => {
       try {
         await service.authorizeTransfer(context, serverId, false, db, undefined, result.server);
@@ -111,11 +150,15 @@ export function registerMinecraftPlayerDetailRoutes(
       }
     };
     const presence =
-      state === 'running'
-        ? await observeMinecraftPlayers(service, result.identifier, authorize)
+      state === 'running' && currentName
+        ? await observeMinecraftPlayers(
+            service,
+            result.identifier,
+            authorize,
+            result.choice.combination.profile,
+          )
         : null;
-    const currentName = result.discovered.usercache.get(uuid);
-    result.detail.online =
+    const online: MinecraftPlayerDetail['online'] =
       state === 'offline'
         ? 'offline'
         : presence?.state === 'available' && currentName
@@ -125,23 +168,23 @@ export function registerMinecraftPlayerDetailRoutes(
             ? 'online'
             : 'offline'
           : 'unknown';
-    result.detail.capabilities = minecraftPlayerDetailActionNames.map((action) => {
+    const capabilities = minecraftPlayerDetailActionNames.map((action) => {
       let reason: MinecraftPlayerDetail['capabilities'][number]['reason'] = null;
       if (!result.permissions.includes(`game.minecraft.players.${action}`)) reason = 'permission';
       else if (action === 'reset') {
         if (state !== 'offline') reason = state === 'running' ? 'online' : 'presence_unknown';
-        else if (result.detail.layout === 'mixed') reason = 'ambiguous_layout';
-        else if (!result.refs.length) reason = 'missing';
+        else if (result.mixed) reason = 'ambiguous_layout';
+        else if (!result.hasRefs) reason = 'missing';
       } else if (!minecraftDetailCommandsSupported(result.choice.combination.release))
         reason = 'unsupported_version';
       else if (!currentName) reason = 'identity_unknown';
-      else if (result.detail.online !== 'online')
-        reason = result.detail.online === 'offline' ? 'offline' : 'presence_unknown';
+      else if (online !== 'online') reason = online === 'offline' ? 'offline' : 'presence_unknown';
       return { action, available: reason === null, reason };
     });
     await service.authorizeTransfer(context, serverId, false, db, undefined, result.server);
-    c.header('Cache-Control', 'no-store');
-    return c.json(result.detail);
+    if (view === 'status')
+      return c.json({ currentName: currentName ?? null, online, capabilities });
+    return c.json({ ...result.detail, online, capabilities });
   });
   app.post('/v1/servers/:id/minecraft/players/:uuid/actions', async (c) => {
     const context = await principal(c),
@@ -158,8 +201,8 @@ export function registerMinecraftPlayerDetailRoutes(
         const authorize = () =>
           service.authorizeTransfer(current, serverId, true, connection, undefined, server);
         const files = service.fileReadPhase(identifier, server, c.req.raw.signal);
-        const snapshot = await readMinecraftPlayerDetail(files, uuid);
         if (input.action === 'reset') {
+          const snapshot = await readMinecraftPlayerDetail(files, uuid);
           if (
             snapshot.detail.snapshot.revision !== input.revision ||
             snapshot.detail.layout === 'mixed'
@@ -244,20 +287,29 @@ export function registerMinecraftPlayerDetailRoutes(
             throw error;
           }
         }
+        const name = await readMinecraftPlayerBinding(files, uuid);
+        if (!name) {
+          // Distinguish an absent UUID from an existing player without a unique binding.
+          await findMinecraftPlayer(files, uuid);
+          throw new DomainError('conflict');
+        }
         if (!minecraftDetailCommandsSupported(choice.combination.release))
           throw new DomainError('integration_unavailable');
         if ((await service.adapter.getResources(identifier)).current_state !== 'running')
           throw new DomainError('conflict');
-        const name = snapshot.discovered.usercache.get(uuid);
-        if (!name) throw new DomainError('conflict');
-        const presence = await observeMinecraftPlayers(service, identifier, async () => {
-          try {
-            await authorize();
-            return true;
-          } catch {
-            return false;
-          }
-        });
+        const presence = await observeMinecraftPlayers(
+          service,
+          identifier,
+          async () => {
+            try {
+              await authorize();
+              return true;
+            } catch {
+              return false;
+            }
+          },
+          choice.combination.profile,
+        );
         if (
           presence.state !== 'available' ||
           !presence.players.some((entry) => entry.name.toLowerCase() === name.toLowerCase())

@@ -57,13 +57,23 @@ export function PlayerGameplayActionDialog({
   const [scopes, setScopes] = useState<('playerdata' | 'stats' | 'advancements')[]>([]);
   const lock = useRef(false);
   useUnsavedChanges(busy, busy);
-  const detail = useQuery({
-    queryKey: ['minecraft-player-detail', serverId, selection?.uuid],
+  const isReset = selection?.action === 'reset';
+  const reset = useQuery({
+    queryKey: ['minecraft-player-detail', serverId, selection?.uuid, 'confirmation'],
     queryFn: ({ signal }) => controller.playerDetails(serverId, selection?.uuid ?? '', signal),
-    enabled: Boolean(selection),
+    enabled: isReset,
     retry: false,
     staleTime: 0,
   });
+  const status = useQuery({
+    queryKey: ['minecraft-player-detail', serverId, selection?.uuid, 'status'],
+    queryFn: ({ signal }) => controller.playerStatus(serverId, selection?.uuid ?? '', signal),
+    enabled: Boolean(selection) && !isReset,
+    staleTime: 0,
+    retry: false,
+  });
+  const detail = isReset ? reset : status;
+  const targetName = isReset ? reset.data?.player.name : status.data?.currentName;
   useEffect(() => {
     if (!selection) return;
     setScopes([]);
@@ -75,7 +85,8 @@ export function PlayerGameplayActionDialog({
     selection &&
       permissionKeys.includes(`game.minecraft.players.${selection.action}`) &&
       capability?.available &&
-      !detail.isError,
+      !detail.isError &&
+      !detail.isFetching,
   );
   const invalidCoordinates = Object.entries(coordinates).some(
     ([axis, value]) =>
@@ -87,9 +98,10 @@ export function PlayerGameplayActionDialog({
     if (!selection || !allowed || !detail.data || pending || lock.current || uncertain) return;
     const { action, uuid } = selection;
     let input: MinecraftPlayerDetailAction;
-    if (action === 'reset')
-      input = { action, scopes, revision: detail.data.snapshot.revision, confirm: true };
-    else if (action === 'teleport')
+    if (action === 'reset') {
+      if (!reset.data) return;
+      input = { action, scopes, revision: reset.data.snapshot.revision, confirm: true };
+    } else if (action === 'teleport')
       input = {
         action,
         x: Number(coordinates.x),
@@ -98,7 +110,7 @@ export function PlayerGameplayActionDialog({
       };
     else if (action === 'gamemode') input = { action, mode };
     else input = { action };
-    const name = detail.data.player.name ?? uuid;
+    const name = targetName ?? uuid;
     lock.current = true;
     setBusy(true);
     try {
@@ -106,7 +118,12 @@ export function PlayerGameplayActionDialog({
       setReceipt({ uuid, name, action, outcome: result.outcome, operationId: result.operationId });
       onClose();
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['minecraft-player-detail', serverId, uuid] }),
+        queryClient.invalidateQueries({
+          queryKey: ['minecraft-player-detail', serverId, uuid, 'saved'],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ['minecraft-player-detail', serverId, uuid, 'status'],
+        }),
         onChanged(),
       ]).catch(setRefreshError);
     } catch (error) {
@@ -165,15 +182,20 @@ export function PlayerGameplayActionDialog({
         }}
         onConfirm={apply}
       >
-        {detail.isPending && <Loading />}
+        {(detail.isPending || detail.isFetching) && <Loading />}
         {detail.isError && <ErrorNotice error={detail.error} retry={() => void detail.refetch()} />}
-        {selection && detail.data && (
+        {selection && detail.isSuccess && !detail.isFetching && (
           <>
             <p>
               {t(k(`confirm.${selection.action}`), {
-                name: detail.data.player.name ?? detail.data.player.uuid,
+                name: targetName ?? selection.uuid,
               })}
             </p>
+            {targetName && (
+              <p>
+                <code>{selection.uuid}</code>
+              </p>
+            )}
             {!allowed && capability?.reason && (
               <p className="muted">{t(k(`blocked.${capability.reason}`))}</p>
             )}

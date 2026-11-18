@@ -20,8 +20,8 @@ vi.mock('@nickhosting/database', async (original) => ({
 }));
 vi.mock('@nickhosting/server-management', async (original) => ({
   ...(await original<typeof import('@nickhosting/server-management')>()),
-  inspectMinecraftCombination: vi.fn(async () => ({
-    combination: { release: '26.3' },
+  inspectMinecraftCombination: vi.fn(async (db: { profile: string }) => ({
+    combination: { release: '26.3', profile: db.profile },
     capabilities: { playerManagement: true },
   })),
   getServerPermissionKeys: vi.fn(
@@ -33,7 +33,7 @@ const other = '22222222-2222-2222-2222-222222222222';
 const permission = (action: string) => `game.minecraft.players.${action}`;
 beforeEach(() => vi.clearAllMocks());
 
-function fixture(modern = true) {
+function fixture(modern = true, profile: 'paper' | 'vanilla' = 'vanilla') {
   const prefix = modern ? 'world/players/data' : 'world/playerdata';
   const statsPrefix = modern ? 'world/players/stats' : 'world/stats';
   const directories = new Set(['world', prefix, statsPrefix, ...(modern ? ['world/players'] : [])]);
@@ -110,6 +110,7 @@ function fixture(modern = true) {
     async prepare() {},
   });
   const db = {
+    profile,
     selectFrom: () => ({
       selectAll() {
         return this;
@@ -140,9 +141,11 @@ function fixture(modern = true) {
         if (await options.authorize?.())
           options.onEvent({
             type: 'console',
-            data: presence
-              ? '[12:34:56] [Server thread/INFO]: There are 1 of a max of 20 players online: PlayerOne'
-              : '[12:34:56] [Server thread/INFO]: There are 0 of a max of 20 players online: ',
+            data:
+              (profile === 'paper' ? '[12:34:56 INFO]: ' : '[12:34:56] [Server thread/INFO]: ') +
+              (presence
+                ? 'There are 1 of a max of 20 players online: PlayerOne'
+                : 'There are 0 of a max of 20 players online: '),
           });
         else options.onEvent({ type: 'closed' });
       },
@@ -244,6 +247,86 @@ describe('scoped player detail HTTP contract', () => {
       expect(f.permissions).not.toContain('files.read');
     },
   );
+  it('returns saved inventory and stats without presence or reset-only downloads', async () => {
+    const f = fixture(false);
+    f.directories.add('world/advancements');
+    const advancement = `world/advancements/${uuid}.json`;
+    f.contents.set(advancement, Buffer.from('{}'));
+    const value = minecraftPlayerDetailSchema.parse(
+      await (await f.app.request(`${url}?view=saved`)).json(),
+    );
+    expect(value).toMatchObject({ online: 'unknown', capabilities: [], vitals: { health: 13 } });
+    expect(value.statistics?.length).toBe(1);
+    expect(value.inventory).toHaveLength(6);
+    expect(f.requested.filter((path) => path.includes(uuid)).sort()).toEqual(
+      [`${f.prefix}/${uuid}.dat`, `${f.statsPrefix}/${uuid}.json`].sort(),
+    );
+    expect(f.adapter.getResources).not.toHaveBeenCalled();
+    expect(f.adapter.relayConsole).not.toHaveBeenCalled();
+    f.offline();
+    expect(
+      (
+        await action(f, {
+          action: 'reset',
+          scopes: ['playerdata'],
+          revision: value.snapshot.revision,
+          confirm: true,
+        })
+      ).status,
+    ).toBe(409);
+    expect(f.adapter.renameFiles).not.toHaveBeenCalled();
+  });
+
+  it('resolves running status from a unique usercache binding and excludes saved bytes', async () => {
+    const f = fixture();
+    const response = await f.app.request(`${url}?view=status`);
+    const value = await response.json();
+    expect(response.status).toBe(200);
+    expect(value).toEqual({
+      currentName: 'PlayerOne',
+      online: 'online',
+      capabilities: expect.arrayContaining([{ action: 'heal', available: true, reason: null }]),
+    });
+    expect(f.requested).toEqual(['', 'usercache.json']);
+    f.contents.set(
+      'usercache.json',
+      Buffer.from(
+        JSON.stringify([
+          { uuid, name: 'PlayerOne' },
+          { uuid: other, name: 'PlayerOne' },
+        ]),
+      ),
+    );
+    const ambiguous = await (await f.app.request(`${url}?view=status`)).json();
+    expect(ambiguous).toMatchObject({
+      currentName: null,
+      online: 'unknown',
+      capabilities: expect.arrayContaining([
+        { action: 'heal', available: false, reason: 'identity_unknown' },
+      ]),
+    });
+    f.offline();
+    const offline = await (await f.app.request(`${url}?view=status`)).json();
+    expect(offline.capabilities).toContainEqual({ action: 'reset', available: true, reason: null });
+    expect(f.requested.some((path) => path.includes(uuid))).toBe(false);
+    expect((await f.app.request(`${url}?view=oops`)).status).toBe(400);
+  });
+
+  it.each(['status', 'saved'])(
+    'requires player read permission and known UUID for %s',
+    async (view) => {
+      const f = fixture();
+      expect(
+        (
+          await f.app.request(
+            `${url.replace(uuid, '33333333-3333-3333-3333-333333333333')}?view=${view}`,
+          )
+        ).status,
+      ).toBe(404);
+      f.permissions.splice(f.permissions.indexOf(permission('read')), 1);
+      expect((await f.app.request(`${url}?view=${view}`)).status).toBe(403);
+    },
+  );
   it('does not present unreadable or absent player data as empty inventory', async () => {
     const f = fixture();
     f.contents.set(`${f.prefix}/${uuid}.dat`, Buffer.from('broken'));
@@ -287,6 +370,20 @@ describe('scoped player detail HTTP contract', () => {
       expect(f.adapter.sendCommand).toHaveBeenCalledWith('identifier', expected);
     },
   );
+  it('uses the Paper roster for status and command dispatch without reading personal files', async () => {
+    const f = fixture(true, 'paper');
+    expect(await (await f.app.request(`${url}?view=status`)).json()).toMatchObject({
+      currentName: 'PlayerOne',
+      online: 'online',
+      capabilities: expect.arrayContaining([{ action: 'heal', available: true, reason: null }]),
+    });
+    expect((await action(f, { action: 'heal' })).status).toBe(202);
+    expect(f.adapter.sendCommand).toHaveBeenCalledWith(
+      'identifier',
+      `effect give ${uuid} minecraft:instant_health 1 10 true`,
+    );
+    expect(f.requested).toEqual(['', 'usercache.json', '', 'usercache.json']);
+  });
   it('requires the specific action grant, fresh presence and current authority', async () => {
     const f = fixture();
     f.permissions.splice(f.permissions.indexOf(permission('kill')), 1);
