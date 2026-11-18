@@ -259,9 +259,18 @@ Screenshots: [desktop](screenshots/m6/minecraft-player-inventory-textures-deskto
 [mobile](screenshots/m6/minecraft-player-inventory-textures-mobile-en.png),
 [texture-request failure](screenshots/m6/minecraft-player-inventory-textures-error-mobile-en.png).
 
-Implementation and verification took place in an isolated checkout. No live
-application activation, game write or game restart was performed. The cold
-metadata scan of the full installed modpack has not been timed against live
-SFTP; it is bounded by the route deadline and does not block saved-data display.
+Implementation and regression verification took place in an isolated checkout.
 Existing isolated test services were used; no real game test assets were created.
 Rollback is application-source-only, with no migration or data restore.
+
+After explicit Owner confirmation, the source branch was activated on 2026-11-18.
+The API reloaded automatically; no explicit container restart was required.
+Gateway and game-container start times remained unchanged. API and Gateway
+health passed; the activation window recorded five transient snapshot errors
+and zero new lease expirations, with the existing connection retained.
+
+An authenticated request for the installed `solcarrot:food_book` returned HTTP200
+and a16×16 PNG. Cold indexing of158 installed mod JARs took17,704ms; the immediate
+warm request took647ms. These are single observed requests, not latency
+guarantees. Initial metadata indexing remains asynchronous to saved-data display.
+No game file/power, infrastructure configuration or dependency change occurred.
