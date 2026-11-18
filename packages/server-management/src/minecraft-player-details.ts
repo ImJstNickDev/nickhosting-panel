@@ -36,16 +36,33 @@ function jsonArray(bytes: Uint8Array | undefined) {
   }
 }
 /** Exact supported roots only; user-provided paths never enter the read contract. */
-export async function discoverMinecraftPlayers(files: FilemanReadService) {
-  const root = await files.list('');
-  const properties = await files.read({ path: 'server.properties', maxBytes: 1048576 });
+export async function discoverMinecraftPlayers(
+  files: FilemanReadService,
+  listSnapshot?: {
+    root: readonly FilemanEntry[];
+    rootFiles: ReadonlyMap<string, Uint8Array | undefined>;
+  },
+) {
+  const root = listSnapshot?.root ?? (await files.list(''));
+  const properties = listSnapshot
+    ? listSnapshot.rootFiles.get('server.properties')
+    : await files.read({ path: 'server.properties', maxBytes: 1048576 });
   if (!properties) throw new DomainError('integration_unavailable');
   const world = minecraftWorldName(
     parseMinecraftProperties(Buffer.from(properties).toString('utf8'))['level-name'] ?? 'world',
   );
   const worldEntry = root.find((entry) => entry.name === world);
   if (worldEntry && worldEntry.kind !== 'directory') throw new DomainError('conflict');
-  const worldEntries = worldEntry ? await files.list(world) : [];
+  const readUsercache = async () => {
+    const entry = root.find((entry) => entry.name === 'usercache.json');
+    if (!entry) return undefined;
+    if (entry.kind !== 'file' || entry.size > 1048576)
+      throw new DomainError('integration_unavailable');
+    return files.read({ path: 'usercache.json', maxBytes: 1048576 });
+  };
+  const [worldEntries, usercacheBytes] = listSnapshot
+    ? await Promise.all([worldEntry ? files.list(world) : [], readUsercache()])
+    : [worldEntry ? await files.list(world) : [], undefined];
   const playersEntry = worldEntries.find((entry) => entry.name === 'players');
   if (playersEntry && playersEntry.kind !== 'directory') throw new DomainError('conflict');
   const modernEntries = playersEntry ? await files.list(`${world}/players`) : [];
@@ -77,7 +94,15 @@ export async function discoverMinecraftPlayers(files: FilemanReadService) {
     if (!entry) continue;
     if (entry.kind !== 'file' || entry.size > 1048576)
       throw new DomainError('integration_unavailable');
-    for (const raw of jsonArray(await files.read({ path, maxBytes: 1048576 }))) {
+    const bytes =
+      listSnapshot && path === 'usercache.json'
+        ? usercacheBytes
+        : listSnapshot?.rootFiles.has(path)
+          ? listSnapshot.rootFiles.get(path)
+          : await files.read({ path, maxBytes: 1048576 });
+    // An entry that disappeared after listing is not an empty discovery source.
+    if (listSnapshot && !bytes) throw new DomainError('integration_unavailable');
+    for (const raw of jsonArray(bytes)) {
       if (!raw || typeof raw !== 'object' || !('uuid' in raw) || typeof raw.uuid !== 'string')
         continue;
       let uuid: string;
@@ -104,6 +129,7 @@ export async function discoverMinecraftPlayers(files: FilemanReadService) {
     byName.set(name.toLowerCase(), [...(byName.get(name.toLowerCase()) ?? []), uuid]);
   for (const ids of byName.values()) if (ids.length > 1) for (const id of ids) usercache.delete(id);
   const layouts = new Set<'legacy' | 'modern'>();
+  const directoriesToRead: { path: string; scope: Ref['scope']; layout: Ref['layout'] }[] = [];
   for (const [layout, parents, prefix, directories] of [
     ['legacy', worldEntries, world, ['playerdata', 'stats', 'advancements']],
     ['modern', modernEntries, `${world}/players`, ['data', 'stats', 'advancements']],
@@ -114,29 +140,40 @@ export async function discoverMinecraftPlayers(files: FilemanReadService) {
       if (parent.kind !== 'directory') throw new DomainError('conflict');
       layouts.add(layout);
       const scope = directory === 'data' ? 'playerdata' : directory;
-      const entries = await files.list(`${prefix}/${directory}`);
-      if (entries.length > 20000) throw new DomainError('resources_unavailable');
-      for (const entry of entries) {
-        const match = uuidFile.exec(entry.name);
-        if (match && entry.kind === 'symlink') throw new DomainError('conflict');
-        if (
-          !match ||
-          entry.kind !== 'file' ||
-          (scope === 'playerdata' ? !match[2]?.startsWith('dat') : match[2] !== 'json')
-        )
-          continue;
-        let uuid: string;
-        try {
-          uuid = minecraftUuid(match[1] ?? '');
-        } catch {
-          continue;
-        }
-        add(uuid, scope);
-        const refs = references.get(uuid) ?? [];
-        refs.push({ path: `${prefix}/${directory}/${entry.name}`, scope, layout, entry });
-        references.set(uuid, refs);
-      }
+      directoriesToRead.push({ path: `${prefix}/${directory}`, scope, layout });
     }
+  // Only the list route supplies a shared snapshot. Detail reads keep their
+  // existing sequencing, while sibling listings use Fileman's bounded batch.
+  const batch =
+    listSnapshot && directoriesToRead.length
+      ? await files.listMany(directoriesToRead.map(({ path }) => path))
+      : undefined;
+  for (const { path, scope, layout } of directoriesToRead) {
+    const result = batch?.find((entry) => entry.directory === path);
+    if (batch && (!result || 'error' in result)) throw new DomainError('integration_unavailable');
+    const entries = result && 'files' in result ? result.files : await files.list(path);
+    if (entries.length > 20000) throw new DomainError('resources_unavailable');
+    for (const entry of entries) {
+      const match = uuidFile.exec(entry.name);
+      if (match && entry.kind === 'symlink') throw new DomainError('conflict');
+      if (
+        !match ||
+        entry.kind !== 'file' ||
+        (scope === 'playerdata' ? !match[2]?.startsWith('dat') : match[2] !== 'json')
+      )
+        continue;
+      let uuid: string;
+      try {
+        uuid = minecraftUuid(match[1] ?? '');
+      } catch {
+        continue;
+      }
+      add(uuid, scope);
+      const refs = references.get(uuid) ?? [];
+      refs.push({ path: `${path}/${entry.name}`, scope, layout, entry });
+      references.set(uuid, refs);
+    }
+  }
   const layout =
     layouts.size === 2
       ? 'mixed'

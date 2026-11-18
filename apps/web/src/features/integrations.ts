@@ -3,6 +3,7 @@ import {
   createTrustedGameUiRegistry,
   type FilemanPathEntry,
   type GameUiClient,
+  type UiSectionData,
 } from '@nickhosting/game-sdk/ui';
 import { minecraftUiModule } from '@nickhosting/minecraft/ui';
 import { satisfactoryUiModule } from '../../../../games/satisfactory/src/ui/index.js';
@@ -175,11 +176,11 @@ export function getGameContentAdmin(gameId: string) {
   return ownerContentComponents.get(gameId);
 }
 
-const MinecraftPlayersSection = lazy(() =>
+const loadMinecraftPlayersSection = () =>
   import('../integrations/minecraft/players.js').then((module) => ({
     default: module.MinecraftPlayersSection,
-  })),
-);
+  }));
+const MinecraftPlayersSection = lazy(loadMinecraftPlayersSection);
 const MinecraftWorldsSection = lazy(() =>
   import('../integrations/minecraft/worlds.js').then((module) => ({
     default: module.MinecraftWorldsSection,
@@ -239,4 +240,29 @@ const sectionViews = new Map<string, ComponentType<GameSectionViewProps>>([
 ]);
 export function getGameSectionView(renderer: string | undefined) {
   return renderer ? sectionViews.get(renderer) : undefined;
+}
+
+// Opt-in per compiled renderer: opening a workspace must not load every game's
+// catalogs or run live observations. Players loads only its authorized saved list.
+const sectionPreloads = new Map([['minecraft-players', loadMinecraftPlayersSection]]);
+export function canPreloadGameSection(renderer: string | undefined) {
+  return Boolean(renderer && sectionPreloads.has(renderer));
+}
+export function gameSectionQuery(serverId: string, gameId: string, sectionId: string) {
+  const module = gameUiRegistry.get(gameId);
+  const section = module?.descriptor.sections.find((candidate) => candidate.id === sectionId);
+  return {
+    queryKey: ['game-section', serverId, gameId, sectionId],
+    queryFn: ({ signal }: { signal: AbortSignal }) => {
+      const preload = section?.renderer && sectionPreloads.get(section.renderer);
+      // Start module loading alongside the API, not after its response. A failed
+      // speculative import does not turn a successful saved-data read into failure.
+      if (preload) void preload().catch(() => {});
+      return module?.handlers[section?.loader ?? '']?.(gameUiClient, {
+        serverId,
+        values: { sectionId: section?.id },
+        signal,
+      }) as Promise<UiSectionData>;
+    },
+  };
 }

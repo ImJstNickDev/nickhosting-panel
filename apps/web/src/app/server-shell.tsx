@@ -1,8 +1,13 @@
+import { useQuery } from '@tanstack/react-query';
 import { Link, Navigate, Outlet, useLocation, useMatch, useParams } from 'react-router';
 import { ApiError } from '../api/client.js';
 import { ErrorNotice, Loading } from '../components/ui.js';
 import { GameSections } from '../features/game-sections.js';
-import { availableGameSections } from '../features/integrations.js';
+import {
+  availableGameSections,
+  canPreloadGameSection,
+  gameSectionQuery,
+} from '../features/integrations.js';
 import { ProvisioningHistory } from '../features/provisioning.js';
 import { useServer } from '../features/service-contracts.js';
 import { useT } from './i18n.js';
@@ -18,6 +23,21 @@ export function ServerShell() {
   const server = useServer(serverId);
   const location = useLocation();
   const t = useT();
+  const preloadSection =
+    server.data && !server.error && !server.data.activeOperationId
+      ? availableGameSections(server.data).find((section) =>
+          canPreloadGameSection(section.renderer),
+        )
+      : undefined;
+  // Keep one saved-list query warm while this server workspace is open. Its
+  // section shares the exact key/in-flight request and still refreshes on entry.
+  // No online console observation, skin or inventory assets are prefetched here.
+  useQuery({
+    ...gameSectionQuery(serverId, server.data?.gameId ?? '', preloadSection?.id ?? ''),
+    enabled: Boolean(preloadSection),
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
+  });
   if (server.isPending) return <Loading />;
   if (!server.data || (server.error && accessLost(server.error)))
     return <ErrorNotice error={server.error} retry={() => void server.refetch()} />;

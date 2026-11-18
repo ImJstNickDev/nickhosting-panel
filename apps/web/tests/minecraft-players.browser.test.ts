@@ -248,6 +248,62 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     return dialog;
   }
 
+  it('opens the prefetched Players list while fresh data is still pending without loading inventory', async () => {
+    const files = await provider.files();
+    const original = files.get('whitelist.json');
+    files.set('whitelist.json', Buffer.from(JSON.stringify([{ name: player.name, uuid }])));
+    const requests: string[] = [];
+    const capture = (request: import('@playwright/test').Request) => {
+      requests.push(new URL(request.url()).pathname);
+    };
+    let holdRefresh = false;
+    let releaseRefresh = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    const pattern = `**${api()}/players`;
+    user.on('request', capture);
+    await user.route(pattern, async (request) => {
+      if (holdRefresh) await gate;
+      await request.continue();
+    });
+    try {
+      const warmed = user.waitForResponse(
+        (response) => response.url().endsWith(`${api()}/players`) && response.status() === 200,
+      );
+      await user.goto(`${fixture.origin}/servers/${provider.ids.serverId}/status`);
+      await warmed;
+      await browserExpect
+        .poll(() => requests.some((path) => path.endsWith('/minecraft/players.tsx')))
+        .toBe(true);
+      expect(requests.some((path) => path.endsWith('/minecraft/player-detail.tsx'))).toBe(false);
+      expect(requests.some((path) => path.endsWith('/players/online'))).toBe(false);
+
+      holdRefresh = true;
+      files.set('whitelist.json', Buffer.from(JSON.stringify([{ name: 'UpdatedPlayer', uuid }])));
+      const refreshing = user.waitForRequest((request) =>
+        request.url().endsWith(`${api()}/players`),
+      );
+      const started = performance.now();
+      await user.locator(`a[href="/servers/${provider.ids.serverId}/game/players"]`).click();
+      await refreshing;
+      // The blocked refresh cannot supply these rows: cached authorized data must
+      // already be usable, without waiting for skins, online state or inventory.
+      await browserExpect(user.locator('.minecraft-players-list')).toContainText(player.name);
+      console.info(`Players cached navigation: ${Math.round(performance.now() - started)} ms`);
+      expect(requests.some((path) => path.endsWith('/minecraft/player-detail.tsx'))).toBe(false);
+      expect(requests.some((path) => path.endsWith('/item-textures'))).toBe(false);
+      releaseRefresh();
+      await browserExpect(user.locator('.minecraft-players-list')).toContainText('UpdatedPlayer');
+    } finally {
+      releaseRefresh();
+      await user.unroute(pattern);
+      user.off('request', capture);
+      if (original) files.set('whitelist.json', original);
+      else files.delete('whitelist.json');
+    }
+  });
+
   it('adds and removes verified player access offline through durable jobs', async () => {
     await user.goto(route());
     await browserExpect(
