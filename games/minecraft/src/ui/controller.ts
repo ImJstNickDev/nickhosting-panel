@@ -14,6 +14,10 @@ import {
 } from '../player-details-contracts.js';
 import { minecraftRuntimeArtwork } from './runtime-artwork.js';
 
+const minecraftPlayerStatusSchema = minecraftPlayerDetailSchema
+  .pick({ online: true, capabilities: true })
+  .extend({ currentName: minecraftKnownPlayerSchema.shape.name });
+
 export type {
   MinecraftKnownPlayer,
   MinecraftPlayerDetail,
@@ -554,6 +558,26 @@ export function createMinecraftUiController(client: GameUiClient) {
     async onlinePlayers(serverId: string, signal?: AbortSignal) {
       return minecraftOnlinePlayersSchema.parse(
         await request(serverPath(serverId, '/players/online'), 'GET', undefined, signal),
+      );
+    },
+    async savedPlayerDetails(serverId: string, playerUuid: string, signal?: AbortSignal) {
+      return minecraftPlayerDetailSchema.parse(
+        await request(
+          serverPath(serverId, `/players/${uuid.parse(playerUuid)}?view=saved`),
+          'GET',
+          undefined,
+          signal,
+        ),
+      );
+    },
+    async playerStatus(serverId: string, playerUuid: string, signal?: AbortSignal) {
+      return minecraftPlayerStatusSchema.parse(
+        await request(
+          serverPath(serverId, `/players/${uuid.parse(playerUuid)}?view=status`),
+          'GET',
+          undefined,
+          signal,
+        ),
       );
     },
     async playerDetails(serverId: string, playerUuid: string, signal?: AbortSignal) {

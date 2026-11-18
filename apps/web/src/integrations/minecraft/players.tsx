@@ -1,11 +1,11 @@
 import { createMinecraftUiController } from '@nickhosting/minecraft/ui';
-import { useQuery } from '@tanstack/react-query';
-import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router';
 import { ApiError, idempotencyKey } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
-import { Check, ConfirmDialog, ErrorNotice, Input, Loading, Select } from '../../components/ui.js';
+import { Check, ConfirmDialog, ErrorNotice, Input, Select } from '../../components/ui.js';
 import {
   IconAction,
   Pagination,
@@ -17,14 +17,12 @@ import { gameUiClient } from '../../features/integrations.js';
 import { MinecraftPlayerAvatar } from './player-avatar.js';
 import { PlayerCard } from './player-card.js';
 import { type PlayerActionSelection, PlayerGameplayActionDialog } from './player-detail-actions.js';
+import { MinecraftPlayerDetailView } from './player-detail-shell.js';
 import { PlayerIcon as Icon } from './player-icons.js';
 import { type MinecraftPlayerRow, mergeMinecraftPlayers } from './players-model.js';
 import './players.css';
 
 const controller = createMinecraftUiController(gameUiClient);
-const MinecraftPlayerDetailView = lazy(() =>
-  import('./player-detail.js').then((module) => ({ default: module.MinecraftPlayerDetailView })),
-);
 const key = (name: string) => `games.minecraft.players.${name}`;
 type Snapshot = Awaited<ReturnType<typeof controller.players>>;
 type VerifiedPlayer = Awaited<ReturnType<typeof controller.player>>;
@@ -46,6 +44,7 @@ const filters: Filter[] = ['all', 'online', 'operators', 'whitelist', 'banned'];
 export function MinecraftPlayersSection(props: GameSectionViewProps) {
   const t = useT();
   const detailUuid = useParams()['*'] ?? '';
+  const queryClient = useQueryClient();
   const [gameplaySelection, setGameplaySelection] = useState<PlayerActionSelection>();
   const returnFocus = useRef<string | undefined>(undefined);
   useEffect(() => {
@@ -106,7 +105,7 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
   const online = useQuery({
     queryKey: ['minecraft-online-players', props.serverId],
     queryFn: ({ signal }) => controller.onlinePlayers(props.serverId, signal),
-    enabled: supported && running,
+    enabled: supported && running && !detailUuid,
     refetchInterval: 15_000,
     refetchIntervalInBackground: false,
     retry: false,
@@ -298,7 +297,17 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
       setVerified(undefined);
       setUsername('');
       setAdding(false);
-      if (running) await refresh(['kick', 'ban'].includes(selection.action), receipt);
+      if (running) {
+        const presenceChanged = ['kick', 'ban'].includes(selection.action);
+        await Promise.all([
+          refresh(presenceChanged, receipt),
+          presenceChanged && player?.uuid
+            ? queryClient.invalidateQueries({
+                queryKey: ['minecraft-player-detail', props.serverId, player.uuid, 'status'],
+              })
+            : undefined,
+        ]);
+      }
     } catch (error) {
       if (
         running &&
@@ -387,22 +396,20 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
       aria-busy={props.pending || busy}
     >
       {detailUuid ? (
-        <Suspense fallback={<Loading />}>
-          <MinecraftPlayerDetailView
-            serverId={props.serverId}
-            uuid={detailUuid}
-            row={rows.find((row) => row.uuid === detailUuid)}
-            pending={disabled}
-            permissionKeys={props.permissionKeys}
-            legacyActions={(row) => playerActions(row, true)}
-            onAction={(action, mode) =>
-              setGameplaySelection({ uuid: detailUuid, action, ...(mode ? { mode } : {}) })
-            }
-            onBack={() => {
-              returnFocus.current = detailUuid;
-            }}
-          />
-        </Suspense>
+        <MinecraftPlayerDetailView
+          serverId={props.serverId}
+          uuid={detailUuid}
+          row={rows.find((row) => row.uuid === detailUuid)}
+          pending={disabled}
+          permissionKeys={props.permissionKeys}
+          legacyActions={(row) => playerActions(row, true)}
+          onAction={(action, mode) =>
+            setGameplaySelection({ uuid: detailUuid, action, ...(mode ? { mode } : {}) })
+          }
+          onBack={() => {
+            returnFocus.current = detailUuid;
+          }}
+        />
       ) : (
         <>
           <div className="minecraft-players-toolbar">
@@ -675,7 +682,7 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
         permissionKeys={props.permissionKeys}
         pending={props.pending || busy}
         onClose={() => setGameplaySelection(undefined)}
-        onChanged={() => refresh()}
+        onChanged={() => refresh(!detailUuid)}
       />
       <ConfirmDialog
         open={Boolean(selection)}

@@ -1,17 +1,13 @@
-import { createMinecraftUiController, type MinecraftPlayerDetail } from '@nickhosting/minecraft/ui';
+import type { MinecraftPlayerDetail } from '@nickhosting/minecraft/ui';
 import { useQuery } from '@tanstack/react-query';
-import { type ReactNode, useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router';
+import { useEffect, useRef, useState } from 'react';
 import { useFormat, useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
-import { ErrorNotice, Loading, Select } from '../../components/ui.js';
-import { gameUiClient } from '../../features/integrations.js';
+import { ErrorNotice, Select } from '../../components/ui.js';
 import { useMinecraftFont } from './minecraft-font.js';
-import { MinecraftPlayerAvatar } from './player-avatar.js';
 import { MinecraftPlayerBody } from './player-body.js';
-import { PlayerRoles } from './player-card.js';
 import type { PlayerGameMode, PlayerGameplayAction } from './player-detail-actions.js';
-import { PlayerIcon } from './player-icons.js';
+import type { PlayerDetailProps } from './player-detail-shell.js';
 import { fetchInventoryTextures, inventoryTextureIds } from './player-inventory-assets.js';
 import {
   minecraftInventoryIcons,
@@ -20,12 +16,8 @@ import {
 } from './player-item-assets.js';
 import { MinecraftItemCount } from './player-item-count.js';
 import { PlayerStatistics, readableMinecraftId } from './player-statistics.js';
-import { PlayerUuid } from './player-uuid.js';
 import { PlayerXpBar } from './player-xp-bar.js';
-import type { MinecraftPlayerRow } from './players-model.js';
-import './player-detail.css';
 
-const controller = createMinecraftUiController(gameUiClient);
 const key = (name: string) => `games.minecraft.players.${name}`;
 type Item = NonNullable<MinecraftPlayerDetail['inventory']>[number];
 
@@ -343,7 +335,7 @@ function PlayerVitalsHud({ vitals }: { vitals: MinecraftPlayerDetail['vitals'] }
     </div>
   );
 }
-export function MinecraftPlayerDetailView({
+export function MinecraftPlayerDetailContent({
   serverId,
   uuid,
   row,
@@ -351,30 +343,12 @@ export function MinecraftPlayerDetailView({
   permissionKeys,
   legacyActions,
   onAction,
-  onBack,
-}: {
-  serverId: string;
-  uuid: string;
-  row?: MinecraftPlayerRow;
-  pending: boolean;
-  permissionKeys: readonly string[];
-  legacyActions: (row: MinecraftPlayerRow) => ReactNode[];
-  onAction(action: PlayerGameplayAction, mode?: PlayerGameMode): void;
-  onBack(): void;
-}) {
+  data,
+  statusReady,
+}: Omit<PlayerDetailProps, 'onBack'> & { data: MinecraftPlayerDetail; statusReady: boolean }) {
   const t = useT();
   const format = useFormat();
-  const heading = useRef<HTMLHeadingElement>(null);
-  const focusedUuid = useRef<string | undefined>(undefined);
-
-  const validUuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(uuid);
-  const detail = useQuery({
-    queryKey: ['minecraft-player-detail', serverId, uuid],
-    queryFn: ({ signal }) => controller.playerDetails(serverId, uuid, signal),
-    enabled: validUuid,
-    retry: false,
-  });
-  const textureIds = inventoryTextureIds(detail.data?.inventory, detail.data?.enderChest);
+  const textureIds = inventoryTextureIds(data.inventory, data.enderChest);
   const localTextures = useQuery({
     queryKey: ['minecraft-inventory-local-textures', textureIds],
     queryFn: () => minecraftInventoryIcons(textureIds),
@@ -383,66 +357,24 @@ export function MinecraftPlayerDetailView({
     retry: false,
   });
   const serverTextures = useQuery({
-    queryKey: [
-      'minecraft-inventory-server-textures',
-      serverId,
-      textureIds,
-      detail.data?.snapshot.revision,
-    ],
+    queryKey: ['minecraft-inventory-server-textures', serverId, textureIds, data.snapshot.revision],
     queryFn: ({ signal }) => fetchInventoryTextures(serverId, textureIds, signal),
-    enabled: validUuid && textureIds.length > 0,
+    enabled: textureIds.length > 0,
     staleTime: 60_000,
     retry: false,
   });
   const textures = { ...localTextures.data, ...serverTextures.data };
-  useEffect(() => {
-    if (detail.data?.player.uuid === uuid && focusedUuid.current !== uuid && heading.current) {
-      heading.current.focus({ preventScroll: true });
-      focusedUuid.current = uuid;
-    }
-  }, [uuid, detail.data]);
-  const back = (
-    <Link
-      className="minecraft-player-back"
-      to={`/servers/${serverId}/game/players`}
-      onClick={onBack}
-    >
-      ← {t(key('backToPlayers'))}
-    </Link>
-  );
-  if (!validUuid)
-    return (
-      <>
-        {back}
-        <p role="alert">{t(key('invalidPlayer'))}</p>
-      </>
-    );
-  if (detail.isPending)
-    return (
-      <>
-        {back}
-        <Loading />
-      </>
-    );
-  if (detail.isError)
-    return (
-      <>
-        {back}
-        <ErrorNotice error={detail.error} retry={() => void detail.refetch()} />
-      </>
-    );
-  const data = detail.data;
-  if (!data) return null;
   const name = data.player.name ?? data.player.uuid;
-  const moderationActions = data.player.name
-    ? legacyActions({
-        whitelisted: false,
-        ...row,
-        name: data.player.name,
-        uuid,
-        online: data.online === 'online',
-      })
-    : [];
+  const moderationActions =
+    statusReady && data.player.name
+      ? legacyActions({
+          whitelisted: false,
+          ...row,
+          name: data.player.name,
+          uuid,
+          online: data.online === 'online',
+        })
+      : [];
   const actionButton = (action: PlayerGameplayAction) => {
     if (!permissionKeys.includes(`game.minecraft.players.${action}`)) return null;
     const capability = data.capabilities.find((value) => value.action === action);
@@ -480,151 +412,111 @@ export function MinecraftPlayerDetailView({
     );
   };
   return (
-    <div className="minecraft-player-detail">
-      <div className="minecraft-player-detail-toolbar">
-        {back}
-        <button
-          type="button"
-          className="secondary minecraft-player-refresh"
-          disabled={detail.isFetching || pending}
-          aria-busy={detail.isFetching}
-          onClick={() => void detail.refetch()}
-        >
-          <PlayerIcon name="refresh" />
-          {t(key('refreshDetail'))}
-        </button>
-      </div>
-      <header className="minecraft-player-detail-header">
-        <MinecraftPlayerAvatar name={name} uuid={uuid} />
-        <div className="minecraft-player-detail-identity">
-          <div className="minecraft-player-identity-line">
-            <h2 tabIndex={-1} ref={heading}>
-              {name}
-            </h2>
-            <PlayerUuid uuid={uuid} />
-          </div>
-          <div className="minecraft-player-detail-meta">
-            <span className="minecraft-player-presence">{t(key(`presence.${data.online}`))}</span>
-            {row && <PlayerRoles row={{ ...row, online: false }} />}
-            <span className="minecraft-player-saved-time">
-              {data.snapshot.savedAt
-                ? t(key('savedAt'), { date: format.date(data.snapshot.savedAt) })
-                : t(key('saveTimeUnknown'))}
-            </span>
-          </div>
-          {data.snapshot.state !== 'available' && (
-            <p className="minecraft-player-snapshot-state" role="status">
-              {t(key(`snapshot.${data.snapshot.state}`))}
-            </p>
-          )}
-        </div>
-      </header>
-      <div className="minecraft-player-detail-columns">
-        <div className="minecraft-player-detail-main">
-          <section className="minecraft-player-panel minecraft-player-inventory-panel">
-            <h3>{t(key('inventory'))}</h3>
-            <PlayerVitalsHud vitals={data.vitals} />
-            {(serverTextures.error || localTextures.error) && (
-              <ErrorNotice
-                error={serverTextures.error ?? localTextures.error}
-                retry={() => {
-                  if (serverTextures.error) void serverTextures.refetch();
-                  if (localTextures.error) void localTextures.refetch();
-                }}
-              />
-            )}
-            <Inventory
-              textures={textures}
-              items={data.inventory}
-              selected={data.selectedSlot}
-              player={{ name, uuid }}
+    <div className="minecraft-player-detail-columns">
+      <div className="minecraft-player-detail-main">
+        <section className="minecraft-player-panel minecraft-player-inventory-panel">
+          <h3>{t(key('inventory'))}</h3>
+          <PlayerVitalsHud vitals={data.vitals} />
+          {(serverTextures.error || localTextures.error) && (
+            <ErrorNotice
+              error={serverTextures.error ?? localTextures.error}
+              retry={() => {
+                if (serverTextures.error) void serverTextures.refetch();
+                if (localTextures.error) void localTextures.refetch();
+              }}
             />
-            <div className="minecraft-player-ender-section">
-              {data.enderChest === null && <h4>{t(key('enderChest'))}</h4>}
-              <Inventory textures={textures} items={data.enderChest} ender selected={null} />
+          )}
+          <Inventory
+            textures={textures}
+            items={data.inventory}
+            selected={data.selectedSlot}
+            player={{ name, uuid }}
+          />
+          <div className="minecraft-player-ender-section">
+            {data.enderChest === null && <h4>{t(key('enderChest'))}</h4>}
+            <Inventory textures={textures} items={data.enderChest} ender selected={null} />
+          </div>
+          {permissionKeys.includes('game.minecraft.players.reset') && (
+            <div className="minecraft-player-reset-section">
+              <p className="muted">{t(key('resetHelp'))}</p>
+              {actionButton('reset')}
             </div>
-            {permissionKeys.includes('game.minecraft.players.reset') && (
-              <div className="minecraft-player-reset-section">
-                <p className="muted">{t(key('resetHelp'))}</p>
-                {actionButton('reset')}
-              </div>
+          )}
+        </section>
+      </div>
+      <aside className="minecraft-player-detail-aside">
+        <section className="minecraft-player-panel">
+          <h3>{t(key('playerActions'))}</h3>
+          <div className="minecraft-player-action-group">
+            {data.online !== 'online' && (
+              <p className="minecraft-player-online-notice">{t(key('onlineActionsNotice'))}</p>
             )}
-          </section>
-        </div>
-        <aside className="minecraft-player-detail-aside">
-          <section className="minecraft-player-panel">
-            <h3>{t(key('playerActions'))}</h3>
-            <div className="minecraft-player-action-group">
-              {data.online !== 'online' && (
-                <p className="minecraft-player-online-notice">{t(key('onlineActionsNotice'))}</p>
-              )}
-              <Select
-                label={t(key('gamemode'))}
-                value={
-                  ['survival', 'creative', 'adventure', 'spectator'][data.vitals?.gameMode ?? -1] ??
-                  ''
-                }
-                disabled={
-                  pending ||
-                  !permissionKeys.includes('game.minecraft.players.gamemode') ||
-                  !data.capabilities.some((value) => value.action === 'gamemode' && value.available)
-                }
-                onChange={(event) => onAction('gamemode', event.target.value as PlayerGameMode)}
-              >
-                <option value="" disabled>
-                  —
+            <Select
+              label={t(key('gamemode'))}
+              value={
+                ['survival', 'creative', 'adventure', 'spectator'][data.vitals?.gameMode ?? -1] ??
+                ''
+              }
+              disabled={
+                pending ||
+                !permissionKeys.includes('game.minecraft.players.gamemode') ||
+                !data.capabilities.some((value) => value.action === 'gamemode' && value.available)
+              }
+              onChange={(event) => onAction('gamemode', event.target.value as PlayerGameMode)}
+            >
+              <option value="" disabled>
+                —
+              </option>
+              {(['survival', 'creative', 'adventure', 'spectator'] as const).map((mode) => (
+                <option key={mode} value={mode}>
+                  {t(key(`mode.${mode}`))}
                 </option>
-                {(['survival', 'creative', 'adventure', 'spectator'] as const).map((mode) => (
-                  <option key={mode} value={mode}>
-                    {t(key(`mode.${mode}`))}
-                  </option>
-                ))}
-              </Select>
-              <div className="minecraft-player-detail-actions minecraft-player-gameplay-actions">
-                {(['heal', 'feed', 'starve', 'kill'] as const).map(actionButton)}
-              </div>
+              ))}
+            </Select>
+            <div className="minecraft-player-detail-actions minecraft-player-gameplay-actions">
+              {(['heal', 'feed', 'starve', 'kill'] as const).map(actionButton)}
             </div>
-            <div className="minecraft-player-action-group">
-              <h4>{t(key('position'))}</h4>
-              {data.position ? (
-                <>
-                  <p className="minecraft-player-dimension">
-                    {typeof data.position.dimension === 'string'
-                      ? readableMinecraftId(data.position.dimension)
-                      : String(data.position.dimension ?? '—')}
-                  </p>
-                  <dl className="minecraft-player-coordinates">
-                    {(['x', 'y', 'z'] as const).map((axis) => (
-                      <div key={axis}>
-                        <dt>{axis.toUpperCase()}</dt>
-                        <dd>{data.position ? format.number(data.position[axis], 2) : '—'}</dd>
-                      </div>
-                    ))}
-                  </dl>
-                </>
-              ) : (
-                <p className="muted">{t(key('positionUnavailable'))}</p>
-              )}
-              <div className="minecraft-player-detail-actions minecraft-player-full-actions">
-                {actionButton('teleport')}
-              </div>
-            </div>
-            {moderationActions.length > 0 && (
-              <div className="minecraft-player-action-group">
-                <h4>{t(key('accessActions'))}</h4>
-                <div className="minecraft-player-detail-actions minecraft-player-full-actions">
-                  {moderationActions}
-                </div>
-              </div>
+          </div>
+          <div className="minecraft-player-action-group">
+            <h4>{t(key('position'))}</h4>
+            {data.position ? (
+              <>
+                <p className="minecraft-player-dimension">
+                  {typeof data.position.dimension === 'string'
+                    ? readableMinecraftId(data.position.dimension)
+                    : String(data.position.dimension ?? '—')}
+                </p>
+                <dl className="minecraft-player-coordinates">
+                  {(['x', 'y', 'z'] as const).map((axis) => (
+                    <div key={axis}>
+                      <dt>{axis.toUpperCase()}</dt>
+                      <dd>{data.position ? format.number(data.position[axis], 2) : '—'}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </>
+            ) : (
+              <p className="muted">{t(key('positionUnavailable'))}</p>
             )}
-          </section>
-        </aside>
-        <div className="minecraft-player-detail-statistics">
-          <section className="minecraft-player-panel">
-            <h3>{t(key('statistics'))}</h3>
-            <PlayerStatistics statistics={data.statistics} />
-          </section>
-        </div>
+            <div className="minecraft-player-detail-actions minecraft-player-full-actions">
+              {actionButton('teleport')}
+            </div>
+          </div>
+          {moderationActions.length > 0 && (
+            <div className="minecraft-player-action-group">
+              <h4>{t(key('accessActions'))}</h4>
+              <div className="minecraft-player-detail-actions minecraft-player-full-actions">
+                {moderationActions}
+              </div>
+            </div>
+          )}
+        </section>
+      </aside>
+      <div className="minecraft-player-detail-statistics">
+        <section className="minecraft-player-panel">
+          <h3>{t(key('statistics'))}</h3>
+          <PlayerStatistics statistics={data.statistics} />
+        </section>
       </div>
     </div>
   );
