@@ -313,3 +313,41 @@ and a 16×16 PNG. Cold indexing of 158 installed mod JARs took 17,704 ms; the im
 warm request took 647 ms. These are single observed requests, not latency
 guarantees. Initial metadata indexing remains asynchronous to saved-data display.
 No game file/power, infrastructure configuration or dependency change occurred.
+
+
+## Native model/layout follow-up — 2026-11-18
+
+The three reported failures were different model families: Quark diorite bricks
+inherit a standard cube, Mekanism cable uses a declared transmitter OBJ/MTL, and
+Cuboid chest delegates to a closed-chest entity renderer. Static inspection and
+private rendering of their installed resources confirmed all three outputs; no
+proprietary model, source or artwork was added to Git.
+
+The UI review applied the `unslop` polish workflow to the existing Minecraft
+surface, keeping the surrounding panel identity and task flow. The direction was
+native, compact and readable: a single coordinate system for the inventory, with
+original equipment/crafting positions and bitmap labels/counts. The audit found
+independent icon rounding, approximate slot coordinates and inherited fieldset
+spacing. These were corrected without changing unrelated management screens.
+
+Validation: seven focused renderer/cache regressions passed. The targeted browser
+journey passed icon/slot ratio 16/18, all four armor slots at 18-unit pitch, native
+origins and 176×166 frame at 1440, 390, 360 and 320 px, plus accessibility and texture
+error/retry behavior. Root/web TypeScript and scoped Biome passed. Independent
+source and visual reviews found no remaining blocker.
+
+One additional existing body/card journey fails before inventory because the
+headless host cannot create its WebGL context. A focused retry and a temporary
+local-only software-WebGL launch did not resolve that environment failure; the
+launch override was restored and no assertion or deadline was weakened. This
+limitation is separate from the passing inventory journey. No broad suite ran.
+
+Reviewed screenshots: [desktop](screenshots/m6/minecraft-native-inventory-desktop-en.png),
+[390px mobile](screenshots/m6/minecraft-native-inventory-mobile-en.png),
+[320px mobile](screenshots/m6/minecraft-native-inventory-320-en.png). The screenshots
+use synthetic identities and an authored book fixture; actual mod renderer outputs
+were inspected privately.
+
+Implementation remains in an isolated checkout pending live activation. No game
+writes/power operations, live reloads or new real game test assets occurred.
+Rollback restores application revision e4f42d4; no migration or data restore.
