@@ -776,9 +776,11 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
       context.fillRect(8, 4, 3, 2);
       return canvas.toDataURL();
     });
-    const detailUrl = `**${api()}/players/${uuid}?view=saved`;
-    const textureUrl = `**${api()}/item-textures?*`;
-    let requests = 0;
+    const detailUrl = (url: URL) =>
+      url.pathname === `${api()}/players/${uuid}` && url.searchParams.get('view') === 'saved';
+    const textureUrl = (url: URL) => url.pathname === `${api()}/item-textures`;
+    let prepared = false;
+    let readyResponses = 0;
     await user.route(detailUrl, async (request) => {
       const response = await request.fetch();
       const detail = await response.json();
@@ -789,14 +791,33 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
       await request.fulfill({ response, json: detail });
     });
     await user.route(textureUrl, async (request) => {
-      requests++;
       const ids = new URL(request.request().url()).searchParams.get('ids')?.split(',');
       expect(ids).toContain('solcarrot:food_book');
-      await request.fulfill({ json: { textures: { 'solcarrot:food_book': texture } } });
+      if (!prepared) {
+        await request.fulfill({
+          status: 202,
+          json: { revision: 'pack', preparing: true, textures: {} },
+        });
+      } else {
+        readyResponses++;
+        await request.fulfill({
+          json: { revision: 'pack', textures: { 'solcarrot:food_book': texture } },
+        });
+      }
     });
     try {
       await user.setViewportSize({ width: 1440, height: 1000 });
-      await user.goto(`${route()}/${uuid}`);
+      await Promise.all([
+        user.waitForResponse(
+          (response) => textureUrl(new URL(response.url())) && response.status() === 202,
+        ),
+        user.goto(`${route()}/${uuid}`),
+      ]);
+      await browserExpect(
+        user.getByRole('status').filter({ hasText: 'Preparing inventory textures' }),
+      ).toBeVisible();
+      await screenshot(user, 'minecraft-inventory-preparing-desktop-en');
+      prepared = true;
       const book = user.getByRole('img', { name: /Slot 11:.*food.book.*1/i });
       await browserExpect(book.locator('img')).toHaveAttribute('src', texture);
       await browserExpect(book.locator('.minecraft-item-count')).toHaveCount(0);
@@ -867,7 +888,7 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
         await accessible();
       }
       await screenshot(user, 'minecraft-native-inventory-320-en');
-      expect(requests).toBe(1);
+      expect(readyResponses).toBe(1);
       await user.unroute(textureUrl);
       await user.route(textureUrl, (request) =>
         request.fulfill({

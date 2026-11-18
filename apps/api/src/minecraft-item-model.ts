@@ -1,10 +1,12 @@
 import { PNG } from 'pngjs';
+import { forgeGuiTransform } from './minecraft-item-forge-transform.js';
 import {
   blockGuiTransform,
   cuboidPoints,
   type ItemFace,
   type ItemTransform,
   identityGuiTransform,
+  maxItemFaces,
   type Point3,
   point3,
   rasterizeItem,
@@ -95,7 +97,7 @@ function standardParent(id: string): Record<string, unknown> | undefined {
   return;
 }
 function elementsToFaces(elements: unknown): ItemFace[] | undefined {
-  if (!Array.isArray(elements) || elements.length > 64) return;
+  if (!Array.isArray(elements) || elements.length > maxItemFaces) return;
   const result: ItemFace[] = [];
   for (const raw of elements) {
     const e = object(raw),
@@ -115,7 +117,7 @@ function elementsToFaces(elements: unknown): ItemFace[] | undefined {
       east: [16 - Z, 16 - Y, 16 - z, 16 - y],
     };
     for (const [direction, rawFace] of Object.entries(faces)) {
-      if (!Object.hasOwn(positions, direction)) return;
+      if (result.length >= maxItemFaces || !Object.hasOwn(positions, direction)) return;
       const f = object(rawFace),
         points = positions[direction];
       if (!f || !points || typeof f.texture !== 'string' || f.tintindex !== undefined) return;
@@ -239,12 +241,16 @@ function chestFaces(): ItemFace[] {
   return result;
 }
 
-async function transmitterFaces(
+async function objFaces(
   model: Record<string, unknown>,
   read: Read,
 ): Promise<ItemFace[] | undefined> {
   const id = itemResource(model.model);
-  if (!id || !/^mekanism:models\/[a-z0-9_./-]+\.obj(?:\.mek)?$/.test(id)) return;
+  const transmitter = model.loader === 'mekanism:transmitter';
+  const validPath = transmitter
+    ? /^mekanism:models\/[a-z0-9_./-]+\.obj(?:\.mek)?$/
+    : /^[a-z0-9_.-]+:models\/[a-z0-9_./-]+\.obj(?:\.ie)?$/;
+  if (!id || !validPath.test(id)) return;
   const path = resourcePath(id),
     bytes = await read(path, 256 * 1024);
   if (!bytes) return;
@@ -290,9 +296,10 @@ async function transmitterFaces(
     else if (kind === 'usemtl') material = values.join(' ');
     else if (
       kind === 'f' &&
-      /^(?:upNORMAL|downNORMAL|northNONE|southNONE|eastNONE|westNONE)$/.test(group)
+      (!transmitter ||
+        /^(?:upNORMAL|downNORMAL|northNONE|southNONE|eastNONE|westNONE)$/.test(group))
     ) {
-      if (values.length < 3 || values.length > 4 || faces.length >= 512) return;
+      if (values.length < 3 || values.length > 4 || faces.length >= maxItemFaces) return;
       const texture = materials.get(material);
       if (!texture) return;
       const points: Point3[] = [],
@@ -306,10 +313,28 @@ async function transmitterFaces(
         points.push(p);
         uv.push(t);
       }
-      faces.push({ points, uv, texture });
+      faces.push({ points, uv, texture, shade: model['diffuse-lighting'] !== false });
     }
   }
   return faces.length ? faces : undefined;
+}
+
+/** Apply the default dye to layer zero, then composite the untinted overlay. */
+function colorGeneratedSprite(image: PNG, color: number, overlay?: PNG) {
+  const tint = [(color >>> 16) & 255, (color >>> 8) & 255, color & 255];
+  for (let at = 0; at < image.data.length; at += 4) {
+    const a = (image.data[at + 3] ?? 0) / 255;
+    const b = (overlay?.data[at + 3] ?? 0) / 255;
+    const combined = b + a * (1 - b);
+    if (!combined) continue;
+    for (let channel = 0; channel < 3; channel++) {
+      const dyed = ((image.data[at + channel] ?? 0) * (tint[channel] ?? 0)) / 255;
+      image.data[at + channel] = Math.round(
+        ((overlay?.data[at + channel] ?? 0) * b + dyed * a * (1 - b)) / combined,
+      );
+    }
+    image.data[at + 3] = Math.round(combined * 255);
+  }
 }
 
 export async function renderMinecraftItemModel(
@@ -330,15 +355,27 @@ export async function renderMinecraftItemModel(
     };
     let modelId = `${id.slice(0, id.indexOf(':'))}:item/${id.slice(id.indexOf(':') + 1)}`;
     const definition = pathFor(id, 'items', 'json');
+    let baseColor: number | undefined;
     if (has(definition)) {
-      const value = object((await json(definition))?.model);
-      if (
-        value?.type !== 'minecraft:model' ||
-        value.tints !== undefined ||
-        !itemResource(value.model)
-      )
-        return;
+      let value = object((await json(definition))?.model);
+      // Inventory IDs carry no trim or dye components. Use the declared untrimmed default.
+      if (value?.type === 'minecraft:select' && value.property === 'minecraft:trim_material')
+        value = object(value.fallback);
+      if (value?.type !== 'minecraft:model' || !itemResource(value.model)) return;
+      if (value.tints !== undefined) {
+        const tints = value.tints;
+        const dye = Array.isArray(tints) && tints.length === 1 ? object(tints[0]) : undefined;
+        if (
+          dye?.type !== 'minecraft:dye' ||
+          typeof dye.default !== 'number' ||
+          !Number.isInteger(dye.default)
+        )
+          return;
+        baseColor = dye.default;
+      }
       modelId = itemResource(value.model) as string;
+    } else if (/^minecraft:leather_(helmet|chestplate|leggings|boots)$/.test(id)) {
+      baseColor = 0xa06540;
     }
     let model: Record<string, unknown> = {},
       textures: Record<string, unknown> = {},
@@ -389,10 +426,23 @@ export async function renderMinecraftItemModel(
     };
     let output: PNG | undefined;
     if (generated && model.elements === undefined && model.loader === undefined) {
-      if (Object.keys(textures).some((k) => /^layer[1-9]/.test(k))) return;
+      if (
+        Object.keys(textures).some(
+          (k) => /^layer[1-9]/.test(k) && (k !== 'layer1' || baseColor === undefined),
+        )
+      )
+        return;
       const texture = resolveTexture('#layer0');
       if (!texture) return;
       output = decodeItemPng(await read(pathFor(texture, 'textures', 'png'), 512 * 1024));
+      if (output && baseColor !== undefined) {
+        const overlay = resolveTexture('#layer1');
+        const layer = overlay
+          ? decodeItemPng(await read(pathFor(overlay, 'textures', 'png'), 512 * 1024))
+          : undefined;
+        if (textures.layer1 !== undefined && (!layer || layer.width !== output.width)) return;
+        colorGeneratedSprite(output, baseColor, layer);
+      }
     } else {
       let faces: ItemFace[] | undefined;
       let fullSkin = false;
@@ -401,11 +451,15 @@ export async function renderMinecraftItemModel(
         textures.skin = `cuboidmod:model/${id.split(':')[1]}`;
         faces = chestFaces();
         fullSkin = true;
-      } else if (model.loader === 'mekanism:transmitter')
-        faces = await transmitterFaces(model, read);
+      } else if (model.loader === 'mekanism:transmitter' || model.loader === 'forge:obj')
+        faces = await objFaces(model, read);
       else if (model.loader === undefined) faces = elementsToFaces(model.elements);
       if (!faces?.length) return;
-      const transform = transformOf(display.gui, identityGuiTransform);
+      const forge = object(model.transform);
+      const transform =
+        forge?.gui === undefined
+          ? transformOf(display.gui, identityGuiTransform)
+          : forgeGuiTransform(forge.gui);
       if (!transform) return;
       const images = new Map<string, PNG>();
       for (const face of faces) {

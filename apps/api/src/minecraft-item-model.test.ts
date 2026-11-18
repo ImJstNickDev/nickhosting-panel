@@ -95,6 +95,86 @@ describe('native GUI model rendering', () => {
     expect(await render('mekanism:fixture_cable', assets)).toBeUndefined();
   });
 
+  it('renders Forge OBJ groups and materials with the declared quaternion GUI transform', async () => {
+    const assets = {
+      'assets/fixture/models/item/glasshouse.json': json({
+        loader: 'forge:obj',
+        model: 'fixture:models/block/glasshouse.obj.ie',
+        'flip-v': true,
+        transform: {
+          gui: {
+            origin: 'corner',
+            translation: [0.125, 0, 0],
+            rotation: [0, 0, Math.SQRT1_2, Math.SQRT1_2],
+            scale: [0.25, 0.5, 1],
+            'post-rotation': [0, 0, 0, 1],
+          },
+        },
+      }),
+      'assets/fixture/models/block/glasshouse.obj.ie': Buffer.from(
+        'mtllib glasshouse.mtl\no glass\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nusemtl glass\nf 1/1 2/2 3/3 4/4\n',
+      ),
+      'assets/fixture/models/block/glasshouse.mtl': Buffer.from(
+        'newmtl glass\nmap_Kd fixture:block/glass\n',
+      ),
+      'assets/fixture/textures/block/glass.png': png(),
+    };
+    expect(bounds(await render('fixture:glasshouse', assets))).toEqual([12, 12, 27, 19]);
+  });
+
+  it('admits detailed cuboid models up to the raster face budget', async () => {
+    const face = { texture: '#all' };
+    const cube = {
+      from: [1, 1, 1],
+      to: [15, 15, 15],
+      faces: { up: face, down: face, north: face, south: face, east: face, west: face },
+    };
+    const model = (count: number) =>
+      json({
+        parent: 'block/block',
+        textures: { all: 'fixture:block/pillar' },
+        elements: Array(count).fill(cube),
+      });
+    const assets = {
+      'assets/fixture/models/item/generator.json': model(83),
+      'assets/fixture/textures/block/pillar.png': png(),
+    };
+    expect(await render('fixture:generator', assets)).toBeDefined();
+    assets['assets/fixture/models/item/generator.json'] = model(86);
+    expect(await render('fixture:generator', assets)).toBeUndefined();
+  });
+
+  it('uses the untrimmed armor model and dyes only the base layer', async () => {
+    const base = new PNG({ width: 2, height: 2 });
+    base.data.fill(255);
+    const overlay = new PNG({ width: 2, height: 2 });
+    overlay.data.fill(0);
+    overlay.data.fill(255, 4, 8);
+    const assets = {
+      'assets/minecraft/items/leather_helmet.json': json({
+        model: {
+          type: 'minecraft:select',
+          property: 'minecraft:trim_material',
+          fallback: {
+            type: 'minecraft:model',
+            model: 'minecraft:item/leather_helmet',
+            tints: [{ type: 'minecraft:dye', default: -6265536 }],
+          },
+        },
+      }),
+      'assets/minecraft/models/item/leather_helmet.json': json({
+        parent: 'item/generated',
+        textures: { layer0: 'item/leather_helmet', layer1: 'item/leather_helmet_overlay' },
+      }),
+      'assets/minecraft/textures/item/leather_helmet.png': PNG.sync.write(base),
+      'assets/minecraft/textures/item/leather_helmet_overlay.png': PNG.sync.write(overlay),
+    };
+    const result = await render('minecraft:leather_helmet', assets);
+    expect([...(result?.data.subarray(0, 8) ?? [])]).toEqual([
+      160, 101, 64, 255, 255, 255, 255, 255,
+    ]);
+  });
+
   it('renders the verified closed Cuboid chest family with its skin UVs and rejects unknown entity models', async () => {
     const assets = {
       'assets/cuboidmod/models/item/fixture_chest.json': json({

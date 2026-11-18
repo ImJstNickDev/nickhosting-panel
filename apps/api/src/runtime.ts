@@ -23,6 +23,8 @@ import {
 import { createTransport } from 'nodemailer';
 import { createApp } from './app.js';
 import { closeFileViewers, closeViewerArchives } from './file-viewers.js';
+import { closeInventoryTextureCache } from './minecraft-texture-archives.js';
+import { startMinecraftTexturePreparation } from './minecraft-texture-preparation.js';
 
 /** Explicit factory: importing API modules never opens sockets or changes the DB. */
 export async function createRuntime(env: Readonly<Record<string, string | undefined>>) {
@@ -127,20 +129,21 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
       cached = { signature, identity: value };
       return value;
     };
+    const management = () =>
+      createManagementRuntime({
+        db: database.db,
+        codec,
+        env,
+        logger,
+        transportCoordinator,
+        directoryIdentityCache,
+        transferCache,
+      });
     const app = createApp({
       provisioningCache: transferCache,
       database,
       codec,
-      management: () =>
-        createManagementRuntime({
-          db: database.db,
-          codec,
-          env,
-          logger,
-          transportCoordinator,
-          directoryIdentityCache,
-          transferCache,
-        }),
+      management,
       logger,
       defaultLocale: async () => (await getSettings(database.db, env)).values.defaultLocale,
       identity,
@@ -152,12 +155,18 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
       },
       log: (data) => logger.log('warn', 'api.request_failed', data),
     });
+    const stopTexturePreparation = startMinecraftTexturePreparation(
+      { db: database.db, codec, env, management },
+      (serverId) => logger.log('warn', 'minecraft.texture_preparation_failed', { serverId }),
+    );
     return {
       app,
       database,
       logger,
       config: initial.values,
       close: async () => {
+        await stopTexturePreparation();
+        await closeInventoryTextureCache(database.db);
         directoryIdentityCache?.close();
         await closeViewerArchives(database.db);
         await closeFileViewers(database.db);
