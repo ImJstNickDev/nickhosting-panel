@@ -99,28 +99,36 @@ and Ender Chest, in batches of at most 64. The authenticated
 Minecraft Players READ, checks the installed profile and rechecks access before
 returning bytes. It accepts item IDs, never user-supplied file paths or remote URLs.
 
-The resolver reads installed `mods/*.jar` resources through the existing bounded
-SFTP/ZIP range reader; it never executes JAR code or changes game files. A bounded
-process-local cache keys resources by managed-server binding and JAR name, size
-and modification time, with a five-minute maximum age. Icons in the same cold
-batch share archive handles; warm cached icons require no archive reads. Model
-ancestry, texture references and namespaces are resolved for legacy `models/item`
-and modern `items` definitions. The bounded renderer supports static single-layer
-generated/handheld items and JSON cuboids with UVs, element rotations and GUI
-transforms. It uses nearest texture sampling and the native item-lighting model.
+The API schedules resource preparation after startup and checks installed Minecraft
+profiles every five minutes. A changed pack encountered earlier by an authorized
+request enters the same queue. One server is prepared at a time. Preparation
+verifies the managed provider binding and uses the read-only viewer for direct
+mod JARs. It reads ZIP metadata with bounded SFTP ranges, retains indexes per JAR
+and draws thumbnails in short batches with a resumable cursor. These derived
+indexes and PNGs live in the private application mount under `minecraft-inventory/`.
+Cache entries include the server binding, archive identity and renderer/pack revision.
+A changed JAR invalidates pack artwork while allowing unchanged JAR indexes to be reused.
 
-Two explicit renderer-family adapters cover the reported nonstandard resources:
-Mekanism transmitter models read their declared OBJ/MTL and inventory connection
-groups; Cuboid chest models use the statically verified closed-chest geometry and
-64×64 skin UV layout. Neither executes mod code. The real
-`quark:diorite_bricks`, `mekanism:basic_universal_cable` and
-`cuboidmod:notsogudium_chest` resources were rendered privately to 32×32 PNGs.
-The geometry keeps its declared GUI transform; thin cables are not artificially
-zoomed to fill the viewport. Unknown custom renderers, ambiguous overrides,
-tinted/conditional/multilayer models, interlaced PNGs and missing resources retain
-the descriptive fallback. Only enabled top-level mod JARs are discovered, not
-client-only mods or resource packs. Vanilla fallback remains the optional local
-26.1 catalog; this is not a complete Minecraft client renderer.
+The inventory request can draw a new icon from a prepared index or read a stored
+PNG directly. During initial preparation it returns HTTP 202 with available PNGs,
+`preparing: true` and the pack revision. The browser shows available icons and
+checks again while the view is open. Previously seen item IDs can be reused
+across inventories when the API confirms their pack revision. Neither player saves
+nor API restarts expire unchanged artwork.
+
+Install the optional official vanilla resources for a server release using
+`python3 scripts/prepare-minecraft-vanilla-resources.py <release> <client.jar> <application-mountdata>`.
+The script verifies the client against Mojang release metadata. The API resolves
+mod resources first and uses the matching local release for vanilla dependencies.
+Keep the resulting files in private persistent storage. The browser's bundled
+optional 26.1 sprites remain available while server artwork loads.
+
+Supported paths include generated items, JSON cuboids with element rotations,
+base armor with default tint/layers, and the Forge OBJ/MTL and GUI transform
+used by the Immersive Engineering cloche. The renderer also supports Mekanism
+transmitters and Cuboid chests. Bounds include 512 faces per thumbnail. The API
+never executes mod code. Unavailable client-only resources, ambiguous overrides
+and unsupported custom renderers retain a descriptive fallback.
 
 The inventory uses the original 176×166 logical frame, 18-unit slot pitch and
 16×16 item viewport. One continuous responsive scale applies to frame, slots,

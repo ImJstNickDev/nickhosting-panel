@@ -262,36 +262,67 @@ export class FileViewerService {
     accessScope = 'files.read',
   ) {
     const path = relativePath(inputPath).slice(1);
-    const settings = await this.settings();
-    const generation = await this.#configure(settings);
     const server = await service.fileReadAccess(
       context,
       serverId,
       async (_id, _db, _context, server) => server,
     );
     if (!server.pterodactyl_uuid) throw new DomainError('conflict');
-    const identity = service.uploadBatchBinding(server);
-    const connection = await this.#credential(
+    return this.#openReadSource(
       serverId,
       server.pterodactyl_uuid,
-      identity,
-      settings,
+      service.uploadBatchBinding(server),
+      path,
+      requestSignal,
+      [
+        accessScope,
+        context[authSessionId],
+        context.actorUserId,
+        context.subjectUserId,
+        context.support?.id,
+      ],
+      () => service.authorizeTransfer(context, serverId, false, undefined, undefined, server),
     );
-    generation.controller.signal.throwIfAborted();
-    // Issuing a first credential can take longer than a local request; recheck
-    // current permission before opening bytes (not once per chunk).
-    if (connection.issuedNow)
-      await service.authorizeTransfer(context, serverId, false, undefined, undefined, server);
-    const watchKey = fingerprint([
-      accessScope,
-      context[authSessionId],
-      context.actorUserId,
-      context.subjectUserId,
-      context.support?.id,
+  }
+
+  /** Internal resource preparation can only open a direct child JAR in the verified server's mods directory. */
+  async openMinecraftMod(
+    serverId: string,
+    uuid: string,
+    identity: string,
+    path: string,
+    signal: AbortSignal,
+    checkBinding: () => Promise<void>,
+  ) {
+    if (!/^mods\/[^/\\]+\.jar$/.test(path) || relativePath(path).slice(1) !== path)
+      throw new DomainError('validation_failed');
+    return this.#openReadSource(
       serverId,
+      uuid,
       identity,
-      connection.credentialId,
-    ]);
+      path,
+      signal,
+      ['minecraft-mod-index'],
+      checkBinding,
+    );
+  }
+
+  async #openReadSource(
+    serverId: string,
+    uuid: string,
+    identity: string,
+    path: string,
+    requestSignal: AbortSignal,
+    scope: unknown[],
+    authorize: () => Promise<void>,
+  ) {
+    requestSignal.throwIfAborted();
+    const settings = await this.settings();
+    const generation = await this.#configure(settings);
+    const connection = await this.#credential(serverId, uuid, identity, settings);
+    generation.controller.signal.throwIfAborted();
+    if (connection.issuedNow) await authorize();
+    const watchKey = fingerprint([...scope, serverId, identity, connection.credentialId]);
     const watch = generation.watch.subscribe(watchKey, async () => {
       const [current, row] = await Promise.all([
         this.settings(),
@@ -300,7 +331,7 @@ export class FileViewerService {
           .select(['status', 'expires_at'])
           .where('id', '=', connection.credentialId)
           .executeTakeFirst(),
-        service.authorizeTransfer(context, serverId, false, undefined, undefined, server),
+        authorize(),
       ]);
       if (
         current.signature !== settings.signature ||

@@ -1,5 +1,6 @@
 import { PNG } from 'pngjs';
 
+export const maxItemFaces = 512;
 export type Point3 = [number, number, number];
 export type Uv = [number, number];
 export type ItemFace = { points: Point3[]; uv: Uv[]; texture: string; shade?: boolean };
@@ -88,22 +89,26 @@ export function rectangleUv(rect: number[], rotation = 0): Uv[] {
 export function rasterizeItem(
   faces: readonly ItemFace[],
   textures: ReadonlyMap<string, PNG>,
-  transform: ItemTransform,
+  transform: ItemTransform | ((point: Point3) => Point3),
   frontLight: boolean,
   signal: AbortSignal,
 ): PNG | undefined {
-  if (!faces.length || faces.length > 512) return;
+  if (!faces.length || faces.length > maxItemFaces) return;
   const size = 32,
     result = new PNG({ width: size, height: size });
   const depth = new Float64Array(size * size).fill(-Infinity);
+  // Map model units (0..16) into normalized coordinates around the GUI center.
+  const project =
+    typeof transform === 'function'
+      ? transform
+      : (p: Point3): Point3 => {
+          const centered = p.map((n, i) => (n / 16 - 0.5) * (transform.scale[i] ?? 1)) as Point3;
+          const rotated = rotate(centered, transform.rotation);
+          return rotated.map((n, i) => n + (transform.translation[i] ?? 0) / 16) as Point3;
+        };
   const mapped = (p: Point3): Point3 => {
-    const centered = p.map((n, i) => (n / 16 - 0.5) * (transform.scale[i] ?? 1)) as Point3;
-    const rotated = rotate(centered, transform.rotation);
-    return [
-      (rotated[0] + transform.translation[0] / 16 + 0.5) * size,
-      (0.5 - rotated[1] - transform.translation[1] / 16) * size,
-      rotated[2] + transform.translation[2] / 16,
-    ];
+    const [x, y, z] = project(p);
+    return [(x + 0.5) * size, (0.5 - y) * size, z];
   };
   const triangles: { p: Point3[]; uv: Uv[]; texture: PNG; light: number }[] = [];
   for (const face of faces) {

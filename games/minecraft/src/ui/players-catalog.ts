@@ -39,6 +39,10 @@ export const minecraftPlayersMessages: Record<string, [string, string]> = {
     'Online players are unavailable. Saved players are still shown.',
     'Giocatori online non disponibili. I giocatori salvati sono visibili.',
   ],
+  'players.preparingTextures': [
+    'Preparing inventory textures…',
+    'Preparazione delle texture dell’inventario…',
+  ],
   'players.onlineLoading': ['Checking online players…', 'Verifica dei giocatori online…'],
   'players.offline': [
     'Server offline. Online players cannot be checked.',

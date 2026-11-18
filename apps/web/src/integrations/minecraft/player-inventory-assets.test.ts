@@ -1,3 +1,4 @@
+import { QueryClient } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../../api/client.js';
 import { fetchInventoryTextures, inventoryTextureIds } from './player-inventory-assets.js';
@@ -20,7 +21,8 @@ describe('Minecraft inventory artwork', () => {
     });
     const signal = new AbortController().signal;
     expect(await fetchInventoryTextures('server-id', ids, signal)).toEqual({
-      'solcarrot:food_book': png,
+      textures: { 'solcarrot:food_book': png },
+      preparing: false,
     });
     expect(api).toHaveBeenCalledOnce();
     expect(api).toHaveBeenCalledWith(
@@ -37,6 +39,21 @@ describe('Minecraft inventory artwork', () => {
     expect(
       vi.mocked(api).mock.calls.every(([path]) => path.startsWith('/v1/servers/other-server/')),
     ).toBe(true);
+  });
+
+  it('reuses an icon across inventories, retries pending work and discards replaced pack artwork', async () => {
+    const cache = new QueryClient();
+    const png = 'data:image/png;base64,original';
+    const load = (ids: string[]) => fetchInventoryTextures('s', ids, undefined, cache);
+    vi.mocked(api).mockResolvedValueOnce({ revision: 'v1', textures: { 'mod:a': png } });
+    await load(['mod:a']);
+    vi.mocked(api).mockResolvedValueOnce({ revision: 'v1', preparing: true, textures: {} });
+    expect(await load(['mod:a', 'mod:b'])).toEqual({ textures: { 'mod:a': png }, preparing: true });
+    expect(vi.mocked(api).mock.lastCall?.[0]).toContain('known=mod%3Aa');
+    vi.mocked(api).mockResolvedValueOnce({ revision: 'v2', textures: {} });
+    expect(await load(['mod:a', 'mod:b'])).toEqual({ textures: {}, preparing: false });
+    expect(vi.mocked(api).mock.lastCall?.[0]).toContain('revision=v1&known=mod%3Aa');
+    cache.clear();
   });
 
   it('extracts only bitmap font fill, excluding the XP outline and preserving pixel positions', () => {

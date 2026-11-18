@@ -2,7 +2,7 @@ import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { crc32, createGunzip, createZstdDecompress } from 'node:zlib';
 import { extract } from 'tar-stream';
-import { type Entry, fromRandomAccessReaderPromise, RandomAccessReader } from 'yauzl';
+import { Entry, fromRandomAccessReaderPromise, RandomAccessReader, type ZipFile } from 'yauzl';
 import {
   parseSevenZipListing,
   runSevenZipViewer,
@@ -100,6 +100,7 @@ class ZipSource extends RandomAccessReader {
   constructor(
     readonly source: ViewerReadSource,
     readonly signal: AbortSignal,
+    readonly coalesce = true,
   ) {
     super();
   }
@@ -115,6 +116,13 @@ class ZipSource extends RandomAccessReader {
   ): void {
     void (async () => {
       this.signal.throwIfAborted();
+      if (!this.coalesce) {
+        // A known directory needs only the end record and individual local headers.
+        const bytes = await this.source.read(position, length, this.signal);
+        if (bytes.byteLength !== length) throw new ViewerFormatError('viewer_archive_truncated');
+        buffer.set(bytes, offset);
+        return;
+      }
       const blockSize = 256 * 1024;
       let copied = 0;
       while (copied < length) {
@@ -254,6 +262,140 @@ class ArchiveIndex {
   }
 }
 
+function openZipSource(source: ViewerReadSource, signal: AbortSignal, coalesce = true) {
+  return fromRandomAccessReaderPromise(new ZipSource(source, signal, coalesce), source.size, {
+    lazyEntries: true,
+    autoClose: false,
+    strictFileNames: true,
+    validateEntrySizes: true,
+  });
+}
+
+async function scanZipDirectory(
+  zip: ZipFile,
+  limits: ViewerArchiveLimits,
+  signal: AbortSignal,
+  select?: (path: string) => boolean,
+) {
+  const index = new ArchiveIndex(limits);
+  const zipEntries = new Map<string, Entry>();
+  let bytes = 0;
+  for await (const entry of zip.eachEntry()) {
+    signal.throwIfAborted();
+    const path = viewerArchivePath(entry.fileName);
+    const type = (entry.externalFileAttributes >>> 16) & 0xf000;
+    if (![0, 0x4000, 0x8000].includes(type))
+      throw new ViewerFormatError('viewer_archive_special_file');
+    if (entry.isEncrypted()) throw new ViewerFormatError('viewer_archive_encrypted');
+    if (![0, 8].includes(entry.compressionMethod))
+      throw new ViewerFormatError('viewer_archive_compression');
+    if (entry.uncompressedSize / Math.max(1, entry.compressedSize) > limits.maxCompressionRatio)
+      throw new ViewerFormatError('viewer_archive_budget');
+    const directory = entry.fileName.endsWith('/');
+    if ((directory && entry.uncompressedSize !== 0) || (!directory && type === 0x4000))
+      throw new ViewerFormatError('viewer_archive_special_file');
+    const date = entry.getLastModDate();
+    index.add({
+      path,
+      name: path.split('/').at(-1) as string,
+      size: entry.uncompressedSize,
+      directory,
+      modifiedAt: Number.isFinite(date.getTime()) ? date.toISOString() : null,
+    });
+    if (directory || (select && !select(path))) continue;
+    if (select) {
+      // Only the scalar central-directory fields consumed by yauzl.openReadStream.
+      // Never pin names/comments/extra-field buffers or a previous source/stream.
+      const locator = new Entry();
+      locator.generalPurposeBitFlag = entry.generalPurposeBitFlag;
+      locator.compressionMethod = entry.compressionMethod;
+      locator.compressedSize = entry.compressedSize;
+      locator.uncompressedSize = entry.uncompressedSize;
+      locator.relativeOffsetOfLocalHeader = entry.relativeOffsetOfLocalHeader;
+      locator.crc32 = entry.crc32;
+      zipEntries.set(path, locator);
+      bytes += 192 + path.length * 2;
+    } else {
+      zipEntries.set(path, entry);
+    }
+  }
+  return { index, zipEntries, bytes };
+}
+
+async function readZipEntry(zip: ZipFile, entry: Entry, signal: AbortSignal) {
+  signal.throwIfAborted();
+  const stream = await zip.openReadStreamPromise(entry);
+  let length = 0;
+  let checksum = 0;
+  const checked = new Transform({
+    transform(chunk: Buffer, _encoding, done) {
+      length += chunk.length;
+      checksum = crc32(chunk, checksum);
+      done(
+        length > entry.uncompressedSize ? new ViewerFormatError('viewer_archive_integrity') : null,
+        chunk,
+      );
+    },
+    flush(done) {
+      done(
+        length !== entry.uncompressedSize || checksum !== entry.crc32
+          ? new ViewerFormatError('viewer_archive_integrity')
+          : null,
+      );
+    },
+  });
+  void pipeline(stream, checked, { signal }).catch(() => undefined);
+  return {
+    size: entry.uncompressedSize,
+    stream: Readable.toWeb(checked) as ReadableStream<Uint8Array>,
+  };
+}
+
+export type SelectedZipDirectory = {
+  readonly entries: ReadonlyMap<string, Entry>;
+  readonly bytes: number;
+};
+
+/** Resource readers may reuse a validated subset of a directory for the same source revision.
+ * Every entry still uses a fresh source, local ZIP header, size budget and CRC. */
+export async function openSelectedZip(
+  source: ViewerReadSource,
+  requestSignal: AbortSignal,
+  limits: Pick<ViewerArchiveLimits, 'maxEntries' | 'maxMetadataBytes'>,
+  select: (path: string) => boolean,
+  previous?: SelectedZipDirectory,
+) {
+  const controller = new AbortController();
+  const signal = AbortSignal.any([requestSignal, controller.signal]);
+  signal.throwIfAborted();
+  const zip = await openZipSource(source, signal, !previous);
+  let directory = previous;
+  try {
+    if (!directory) {
+      const scanned = await scanZipDirectory(zip, { ...defaultLimits, ...limits }, signal, select);
+      directory = { entries: scanned.zipEntries, bytes: scanned.bytes };
+    }
+    const entries = directory.entries;
+    return {
+      directory,
+      async open(path: string, maximum: number) {
+        const entry = entries.get(viewerArchivePath(path));
+        if (!entry) throw new ViewerFormatError('viewer_archive_not_found');
+        if (entry.uncompressedSize > maximum) throw new ViewerFormatError('viewer_archive_budget');
+        return readZipEntry(zip, entry, signal);
+      },
+      close() {
+        controller.abort();
+        zip.close();
+      },
+    };
+  } catch (error) {
+    controller.abort();
+    zip.close();
+    throw error;
+  }
+}
+
 export async function createArchiveViewer(
   source: ViewerReadSource,
   options: {
@@ -295,44 +437,14 @@ export async function createArchiveViewer(
       ((prefix[2] === 3 && prefix[3] === 4) || (prefix[2] === 5 && prefix[3] === 6));
   }
   if (name.endsWith('.zip') || name.endsWith('.jar') || zipSignature) {
-    const zip = await fromRandomAccessReaderPromise(new ZipSource(source, signal), source.size, {
-      lazyEntries: true,
-      autoClose: false,
-      strictFileNames: true,
-      validateEntrySizes: true,
-    });
-    const index = new ArchiveIndex(limits);
-    const zipEntries = new Map<string, Entry>();
-    try {
-      for await (const entry of zip.eachEntry()) {
-        signal.throwIfAborted();
-        const path = viewerArchivePath(entry.fileName);
-        const type = (entry.externalFileAttributes >>> 16) & 0xf000;
-        if (![0, 0x4000, 0x8000].includes(type))
-          throw new ViewerFormatError('viewer_archive_special_file');
-        if (entry.isEncrypted()) throw new ViewerFormatError('viewer_archive_encrypted');
-        if (![0, 8].includes(entry.compressionMethod))
-          throw new ViewerFormatError('viewer_archive_compression');
-        if (entry.uncompressedSize / Math.max(1, entry.compressedSize) > limits.maxCompressionRatio)
-          throw new ViewerFormatError('viewer_archive_budget');
-        const directory = entry.fileName.endsWith('/');
-        if ((directory && entry.uncompressedSize !== 0) || (!directory && type === 0x4000))
-          throw new ViewerFormatError('viewer_archive_special_file');
-        const date = entry.getLastModDate();
-        index.add({
-          path,
-          name: path.split('/').at(-1) as string,
-          size: entry.uncompressedSize,
-          directory,
-          modifiedAt: Number.isFinite(date.getTime()) ? date.toISOString() : null,
-        });
-        if (!directory) zipEntries.set(path, entry);
-      }
-    } catch (error) {
-      controller.abort();
-      zip.close();
-      throw error;
-    }
+    const zip = await openZipSource(source, signal);
+    const { index, zipEntries } = await scanZipDirectory(zip, limits, signal).catch(
+      (error: unknown) => {
+        controller.abort();
+        zip.close();
+        throw error;
+      },
+    );
     return {
       format: 'zip',
       list: (page) => {
@@ -343,34 +455,11 @@ export async function createArchiveViewer(
         signal.throwIfAborted();
         const entry = zipEntries.get(viewerArchivePath(path));
         if (!entry) throw new ViewerFormatError('viewer_archive_not_found');
-        const stream = await zip.openReadStreamPromise(entry);
-        const operationSignal = requestSignal ? AbortSignal.any([signal, requestSignal]) : signal;
-        let length = 0;
-        let checksum = 0;
-        const checked = new Transform({
-          transform(chunk: Buffer, _encoding, done) {
-            length += chunk.length;
-            checksum = crc32(chunk, checksum);
-            done(
-              length > entry.uncompressedSize
-                ? new ViewerFormatError('viewer_archive_integrity')
-                : null,
-              chunk,
-            );
-          },
-          flush(done) {
-            done(
-              length !== entry.uncompressedSize || checksum !== entry.crc32
-                ? new ViewerFormatError('viewer_archive_integrity')
-                : null,
-            );
-          },
-        });
-        void pipeline(stream, checked, { signal: operationSignal }).catch(() => undefined);
-        return {
-          size: entry.uncompressedSize,
-          stream: Readable.toWeb(checked) as ReadableStream<Uint8Array>,
-        };
+        return readZipEntry(
+          zip,
+          entry,
+          requestSignal ? AbortSignal.any([signal, requestSignal]) : signal,
+        );
       },
       close() {
         controller.abort();

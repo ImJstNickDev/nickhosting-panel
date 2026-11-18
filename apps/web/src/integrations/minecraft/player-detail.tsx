@@ -1,5 +1,5 @@
 import type { MinecraftPlayerDetail } from '@nickhosting/minecraft/ui';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { useFormat, useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
@@ -8,7 +8,11 @@ import { useMinecraftFont } from './minecraft-font.js';
 import { MinecraftPlayerBody } from './player-body.js';
 import type { PlayerGameMode, PlayerGameplayAction } from './player-detail-actions.js';
 import type { PlayerDetailProps } from './player-detail-shell.js';
-import { fetchInventoryTextures, inventoryTextureIds } from './player-inventory-assets.js';
+import {
+  cachedInventoryTextures,
+  fetchInventoryTextures,
+  inventoryTextureIds,
+} from './player-inventory-assets.js';
 import {
   minecraftInventoryIcons,
   minecraftItemIcon,
@@ -348,6 +352,7 @@ export function MinecraftPlayerDetailContent({
 }: Omit<PlayerDetailProps, 'onBack'> & { data: MinecraftPlayerDetail; statusReady: boolean }) {
   const t = useT();
   const format = useFormat();
+  const textureCache = useQueryClient();
   const textureIds = inventoryTextureIds(data.inventory, data.enderChest);
   const localTextures = useQuery({
     queryKey: ['minecraft-inventory-local-textures', textureIds],
@@ -357,13 +362,18 @@ export function MinecraftPlayerDetailContent({
     retry: false,
   });
   const serverTextures = useQuery({
-    queryKey: ['minecraft-inventory-server-textures', serverId, textureIds, data.snapshot.revision],
-    queryFn: ({ signal }) => fetchInventoryTextures(serverId, textureIds, signal),
+    queryKey: ['minecraft-inventory-server-textures', serverId, textureIds],
+    queryFn: ({ signal }) => fetchInventoryTextures(serverId, textureIds, signal, textureCache),
     enabled: textureIds.length > 0,
+    placeholderData: () => cachedInventoryTextures(textureCache, serverId, textureIds),
+    refetchInterval: (query) => (query.state.data?.preparing ? 2000 : false),
     staleTime: 60_000,
     retry: false,
   });
-  const textures = { ...localTextures.data, ...serverTextures.data };
+  const textures = {
+    ...localTextures.data,
+    ...(serverTextures.isError ? undefined : serverTextures.data?.textures),
+  };
   const name = data.player.name ?? data.player.uuid;
   const moderationActions =
     statusReady && data.player.name
@@ -417,6 +427,7 @@ export function MinecraftPlayerDetailContent({
         <section className="minecraft-player-panel minecraft-player-inventory-panel">
           <h3>{t(key('inventory'))}</h3>
           <PlayerVitalsHud vitals={data.vitals} />
+          {serverTextures.data?.preparing && <p role="status">{t(key('preparingTextures'))}</p>}
           {(serverTextures.error || localTextures.error) && (
             <ErrorNotice
               error={serverTextures.error ?? localTextures.error}
