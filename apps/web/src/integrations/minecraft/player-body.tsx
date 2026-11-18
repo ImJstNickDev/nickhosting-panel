@@ -1,12 +1,17 @@
 import { minecraftUiModule } from '@nickhosting/minecraft/ui';
 import { useEffect, useRef, useState } from 'react';
 import type { SkinViewer } from 'skinview3d';
-import { playerBodyRenderers, playerWavePose } from './player-body-motion.js';
+import {
+  cardWaveDurationMs,
+  playerBodyRenderers,
+  playerCardWavePose,
+  playerWavePose,
+} from './player-body-motion.js';
 import './player-body.css';
 
 type Renderer = typeof import('skinview3d');
 type Variant = 'bust' | 'full';
-const frames = { bust: { width: 144, height: 240 }, full: { width: 120, height: 180 } };
+const frames = { bust: { width: 96, height: 160 }, full: { width: 120, height: 180 } };
 // Data URLs contain only a small rendered preview; bound the session cache.
 const stills = new Map<string, string>();
 function remember(key: string, image: string) {
@@ -46,12 +51,21 @@ function createViewer(library: Renderer, texture: HTMLImageElement, variant: Var
   // Let the CSS frame fit narrow inventory slots without changing the camera.
   canvas.style.removeProperty('width');
   canvas.style.removeProperty('height');
-  // The same three-quarter camera and model pose are used for stills and animation.
-  // Keep the viewing angle outside the animated player: assigning an animation
-  // resets playerObject.rotation in skinview3d.
-  viewer.playerWrapper.rotation.y = 0.48;
-  viewer.camera.position.y = 3;
-  viewer.camera.lookAt(0, 0, 0);
+  if (variant === 'bust') {
+    // The reference rotates around the feet; skinview3d centers the player at the origin.
+    viewer.playerObject.position.y = 16;
+    viewer.playerWrapper.rotation.set((12 * Math.PI) / 180, (-28 * Math.PI) / 180, 0);
+    viewer.camera.position.set(0, 16, 80);
+    viewer.camera.lookAt(0, 16, 0);
+    // The card uses a fixed 96 × 160 frame with four CSS pixels per model unit.
+    const projection = viewer.camera.projectionMatrix;
+    projection.makeOrthographic(-12, 12, 20, -20, 0.1, 200);
+    viewer.camera.projectionMatrixInverse.copy(projection).invert();
+  } else {
+    viewer.playerWrapper.rotation.y = 0.48;
+    viewer.camera.position.y = 3;
+    viewer.camera.lookAt(0, 0, 0);
+  }
   return viewer;
 }
 
@@ -169,11 +183,13 @@ export function MinecraftPlayerBody({
     if (!active || !visible || !motionAllowed || !skin || prepared?.skin !== skin || !element)
       return;
     let stopped = false;
+    let frameId = 0;
     let viewer: SkinViewer | undefined;
     let release = () => {};
     const stop = () => {
       if (stopped) return;
       stopped = true;
+      cancelAnimationFrame(frameId);
       if (viewer) {
         viewer.canvas.removeEventListener('webglcontextlost', stop);
         viewer.canvas.remove();
@@ -191,15 +207,42 @@ export function MinecraftPlayerBody({
       const capture = viewer.canvas.toDataURL('image/png');
       remember(cacheKey, capture);
       setStill({ key: cacheKey, image: capture });
-      viewer.animation = new prepared.library.FunctionAnimation((player, seconds) => {
-        const pose = playerWavePose(seconds);
-        player.skin.rightArm.rotation.x = pose.x;
-        player.skin.rightArm.rotation.z = pose.z;
-      });
       viewer.canvas.addEventListener('webglcontextlost', stop);
       element.append(viewer.canvas);
       element.dataset.animated = 'true';
-      viewer.renderPaused = false;
+      if (variant === 'bust') {
+        const live = viewer;
+        const arm = live.playerObject.skin.rightArm;
+        // skinview3d places its joint below the shoulder. Orbit that joint
+        // about the top inside edge of the arm, preserving its resting pose.
+        const shoulderX = -4;
+        const offset = arm.position.clone();
+        offset.x -= shoulderX;
+        const started = performance.now();
+        const tick = (now: number) => {
+          if (stopped) return;
+          const elapsed = now - started;
+          if (elapsed >= cardWaveDurationMs) {
+            stop();
+            return;
+          }
+          const pose = playerCardWavePose(elapsed);
+          arm.rotation.z = pose.rotationZ;
+          arm.position.copy(offset).applyQuaternion(arm.quaternion);
+          arm.position.x += shoulderX;
+          arm.position.z += pose.depth;
+          live.render();
+          frameId = requestAnimationFrame(tick);
+        };
+        frameId = requestAnimationFrame(tick);
+      } else {
+        viewer.animation = new prepared.library.FunctionAnimation((player, seconds) => {
+          const pose = playerWavePose(seconds);
+          player.skin.rightArm.rotation.x = pose.x;
+          player.skin.rightArm.rotation.z = pose.z;
+        });
+        viewer.renderPaused = false;
+      }
     } catch {
       stop();
     }

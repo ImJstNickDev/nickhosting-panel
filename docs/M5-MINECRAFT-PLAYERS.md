@@ -35,9 +35,11 @@ full response for existing clients.
 Cards use compact three-quarter bust previews from the existing MCHeads skin
 provider. A visible preview lazily loads the unmodified MIT renderer, takes one
 still and releases its WebGL context. Stills and hover/focus waves share the same
-camera, angle and frame, so the head and torso do not resize on interaction.
+96 × 160 orthographic frame, anchored at the upper left within an 80-pixel-wide
+strip. The model is pitched 12° and turned −28° about its feet in both poses.
 Snapshot rendering is serialized, the session still cache is bounded to 64 entries,
-and only one preview animates at a time. Leaving the card, changing identity,
+and only one preview animates at a time. The card waves once for 1.6 seconds,
+then restores its captured still and releases the renderer. Leaving the card, changing identity,
 hiding the document, scrolling out of view or enabling reduced motion releases
 the animation. Reduced motion retains the angled still. Network/WebGL failures
 fall back to the original local illustration. No skin texture or reference-site

@@ -86,10 +86,41 @@ describe('Minecraft full-body previews', () => {
     expect(skinRequests).toBeGreaterThan(0);
     await browserExpect(page.locator('canvas')).toHaveCount(0);
     const stage = await first.locator('.minecraft-player-body').boundingBox();
-    expect(stage?.height).toBe(112);
-    expect(stage?.width).toBe(96);
+    expect(stage?.height).toBe(104);
+    expect(stage?.width).toBe(80);
     if (!stage) throw new Error('Missing body frame');
-    const headClip = { x: stage.x + 29, y: stage.y + 20, width: 34, height: 32 };
+    const frame = await first.locator('img').boundingBox();
+    expect(frame).toEqual({ x: stage.x, y: stage.y, width: 96, height: 160 });
+    const landmarks = await first.locator('img').evaluate(async (image: HTMLImageElement) => {
+      await image.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Missing pixel inspection context');
+      ctx.drawImage(image, 0, 0);
+      const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      const scale = canvas.width / 96;
+      let top = Infinity;
+      let eyeX = 0;
+      let eyePixels = 0;
+      for (let i = 0; i < pixels.length; i += 4) {
+        if ((pixels[i + 3] ?? 0) < 240) continue;
+        const y = Math.floor(i / 4 / canvas.width) / scale;
+        top = Math.min(top, y);
+        if (y < 55 && (pixels[i + 2] ?? 0) > 220) {
+          eyeX += ((i / 4) % canvas.width) / scale;
+          eyePixels++;
+        }
+      }
+      return { top, eyeCenter: eyeX / eyePixels };
+    });
+    // Projected head height and the fixture's white eyes distinguish this view from its mirror.
+    expect(landmarks.top).toBeGreaterThanOrEqual(13);
+    expect(landmarks.top).toBeLessThanOrEqual(16);
+    expect(landmarks.eyeCenter).toBeGreaterThan(35);
+    expect(landmarks.eyeCenter).toBeLessThan(44);
+    const headClip = { x: stage.x + 33, y: stage.y + 24, width: 25, height: 25 };
     const restingHead = await page.screenshot({
       clip: headClip,
       path: '/tmp/player-head-rest.png',
@@ -114,20 +145,21 @@ describe('Minecraft full-body previews', () => {
       return pixels;
     }, restingHead.toString('base64'));
     expect(skinPixels).toBeGreaterThan(100); // Compare a real head, never empty background.
-    await first.screenshot({ path: '/tmp/player-body-rest.png' });
+    await first.locator('.minecraft-player-body').screenshot({ path: '/tmp/player-body-rest.png' });
     await first.hover();
     await browserExpect(first.locator('canvas')).toBeVisible();
     await page.waitForTimeout(500);
-    await first.screenshot({ path: '/tmp/player-body-hover.png' });
+    await first
+      .locator('.minecraft-player-body')
+      .screenshot({ path: '/tmp/player-body-hover.png' });
     expect(
       (await page.screenshot({ clip: headClip, path: '/tmp/player-head-hover.png' })).equals(
         restingHead,
       ),
     ).toBe(true);
-    const initial = await first.screenshot();
-    await expect.poll(async () => (await first.screenshot()).equals(initial)).toBe(false);
-    await page.waitForTimeout(500);
-    await first.screenshot({ path: '/tmp/nickhosting-player-body-wave.png' });
+    // The card returns to its still even when the pointer remains over it.
+    await browserExpect(first.locator('canvas')).toHaveCount(0);
+    expect((await page.screenshot({ clip: headClip })).equals(restingHead)).toBe(true);
     await page.mouse.move(600, 400);
     await browserExpect(page.locator('canvas')).toHaveCount(0);
     await first.hover();
