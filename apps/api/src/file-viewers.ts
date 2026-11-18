@@ -59,6 +59,18 @@ export async function closeFileViewers(db: object) {
   services.delete(db);
   if (pending) await (await pending).close();
 }
+/** Shared broker for domain-specific read-only previews; callers supply their permission wrapper. */
+export function getFileViewerService(options: ConstructorParameters<typeof FileViewerService>[0]) {
+  let pending = services.get(options.db);
+  if (!pending) {
+    pending = import('./viewer-service.js').then((module) => new module.FileViewerService(options));
+    services.set(options.db, pending);
+    void pending.catch(() => {
+      if (services.get(options.db) === pending) services.delete(options.db);
+    });
+  }
+  return pending;
+}
 type Retained<T> = { value: T; signal: AbortSignal };
 const archiveCaches = new WeakMap<object, ViewerSessionCache<Retained<ViewerArchiveTree>>>();
 const sqliteCaches = new WeakMap<object, ViewerSessionCache<Retained<ViewerSqliteSession>>>();
@@ -84,19 +96,7 @@ export function registerFileViewerRoutes(
   options: ServerRouteOptions & { codec: SecretCodec },
 ) {
   const { db, principal, management } = options;
-  const viewer = () => {
-    let pending = services.get(db);
-    if (!pending) {
-      pending = import('./viewer-service.js').then(
-        (module) => new module.FileViewerService(options),
-      );
-      services.set(db, pending);
-      void pending.catch(() => {
-        if (services.get(db) === pending) services.delete(db);
-      });
-    }
-    return pending;
-  };
+  const viewer = () => getFileViewerService(options);
   logSessions.set(db, registerLogViewerRoutes(app, options, viewer));
   const archives = new ViewerSessionCache<Retained<ViewerArchiveTree>>();
   const databases = new ViewerSessionCache<Retained<ViewerSqliteSession>>({ maximum: 4 });

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { type AuthContext, DomainError } from '@nickhosting/core';
+import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
 import { type createDatabase, getSettings, recordAudit } from '@nickhosting/database';
 import type { FilemanReadService } from '@nickhosting/game-sdk';
 import {
@@ -37,6 +37,7 @@ import { registerMinecraftPlayerDetailRoutes } from './minecraft-player-details.
 
 type C = Context<{ Variables: Variables }>;
 export type MinecraftPlayerRouteOptions = {
+  codec?: SecretCodec;
   db: ReturnType<typeof createDatabase>['db'];
   env: Readonly<Record<string, string | undefined>>;
   principal: (c: C, regularOnly?: boolean) => Promise<AuthContext>;
