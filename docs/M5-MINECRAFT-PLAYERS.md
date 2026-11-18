@@ -89,8 +89,9 @@ batch share archive handles; warm cached icons require no archive reads. Model a
 resolved for legacy `models/item` and modern `items` definitions. Static,
 single-layer generated/handheld models are supported, including
 `solcarrot:food_book` with its `solcarrot:items/food_book` texture. Ambiguous
-overrides, custom renderers, tinted/conditional/multilayer models and absent
-resources retain the descriptive item fallback. This is not a complete client
+overrides, custom renderers, tinted/conditional/multilayer models, interlaced
+PNGs and absent resources retain the descriptive item fallback. Only enabled
+top-level mod JARs are discovered; client-only mods are not available on the server. This is not a complete client
 renderer or a resource-pack installation mechanism. Vanilla fallback remains the
 optional local 26.1 catalog; it does not claim to reproduce every server version.
 
