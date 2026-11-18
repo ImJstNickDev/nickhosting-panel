@@ -348,6 +348,15 @@ Reviewed screenshots: [desktop](screenshots/m6/minecraft-native-inventory-deskto
 use synthetic identities and an authored book fixture; actual mod renderer outputs
 were inspected privately.
 
-Implementation remains in an isolated checkout pending live activation. No game
-writes/power operations, live reloads or new real game test assets occurred.
+After explicit Owner authorization, PR #40 source b82d8bf was activated on
+2026-11-18. The API reloaded through its existing watcher; no container restart
+was needed. API, frontend and Gateway are healthy; Gateway and Minecraft container
+start times are unchanged. The reload recorded four transient snapshot errors and
+zero new lease expirations; no player was connected at activation.
+
+An authenticated live request resolved all three reported items to 32×32 PNGs
+(HTTP 200): 20,451 ms for cold mod indexing and 465 ms on the immediate warm request.
+These are single observations, not latency guarantees. Minecraft status responds
+on both the configured domain and direct LAN endpoint with Forge 1.16.5.
+No game writes/power operations or new real game test assets occurred.
 Rollback restores application revision e4f42d4; no migration or data restore.
