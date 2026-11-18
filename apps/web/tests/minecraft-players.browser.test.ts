@@ -766,12 +766,51 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
         await book.locator('img').evaluate((image) => getComputedStyle(image).imageRendering),
       ).toBe('pixelated');
       await browserExpect(stack.locator('img')).toHaveAttribute('src', /player-items\/torch\.png/);
+      const nativeGeometry = async () => {
+        await browserExpect(async () => {
+          const geometry = await book.evaluate((element) => {
+            const image = element.querySelector('img')?.getBoundingClientRect();
+            const slot = element.getBoundingClientRect();
+            const surface = element.closest('.minecraft-inventory-surface');
+            const panel = surface?.getBoundingClientRect();
+            const first = surface
+              ?.querySelector('.minecraft-inventory-grid .minecraft-item-slot')
+              ?.getBoundingClientRect();
+            if (!surface || !image || !panel || !first)
+              throw new Error('Missing native inventory geometry');
+            return {
+              ratio: image.width / slot.width,
+              panelRatio: panel.width / panel.height,
+              mainX: ((first.x - panel.x) / panel.width) * 176,
+              mainY: ((first.y - panel.y) / panel.width) * 176,
+              armorY: [
+                ...surface.querySelectorAll('.minecraft-equipment-grid .minecraft-item-slot'),
+              ].map((armor) => ((armor.getBoundingClientRect().y - panel.y) / panel.width) * 176),
+            };
+          });
+          expect(geometry.ratio).toBeCloseTo(16 / 18, 2);
+          expect(geometry.panelRatio).toBeCloseTo(176 / 166, 2);
+          expect(geometry.mainX).toBeCloseTo(7, 1);
+          expect(geometry.mainY).toBeCloseTo(83, 1);
+          expect(geometry.armorY).toHaveLength(4);
+          for (const [index, y] of geometry.armorY.entries())
+            expect(y).toBeCloseTo(7 + 18 * index, 1);
+        }).toPass({ timeout: 2000 });
+      };
       await user.getByRole('heading', { name: player.name, exact: true }).focus();
-      await screenshot(user, 'minecraft-player-inventory-textures-desktop-en');
+      await nativeGeometry();
+      await screenshot(user, 'minecraft-native-inventory-desktop-en');
       await accessible();
       await user.setViewportSize({ width: 390, height: 844 });
-      await screenshot(user, 'minecraft-player-inventory-textures-mobile-en');
+      await nativeGeometry();
+      await screenshot(user, 'minecraft-native-inventory-mobile-en');
       await accessible();
+      for (const width of [360, 320]) {
+        await user.setViewportSize({ width, height: 844 });
+        await nativeGeometry();
+        await accessible();
+      }
+      await screenshot(user, 'minecraft-native-inventory-320-en');
       expect(requests).toBe(1);
       await user.unroute(textureUrl);
       await user.route(textureUrl, (request) =>
@@ -789,7 +828,6 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
       await browserExpect(user.getByRole('alert')).toBeVisible();
       await browserExpect(stack.locator('img')).toHaveAttribute('src', /player-items\/torch\.png/);
       await browserExpect(book.locator('img')).toHaveCount(0);
-      await screenshot(user, 'minecraft-player-inventory-textures-error-mobile-en');
       await user.unroute(textureUrl);
       await user.route(textureUrl, (request) =>
         request.fulfill({
@@ -909,9 +947,13 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     const lastArmorBox = await armor.last().boundingBox();
     const previewBox = await user.locator('.minecraft-equipment-preview').boundingBox();
     if (!lastArmorBox || !previewBox) throw new Error('Missing equipment preview');
-    expect(lastArmorBox.y + lastArmorBox.height).toBeCloseTo(previewBox.y + previewBox.height, 0);
+    const unit = previewBox.height / 70;
+    expect(lastArmorBox.y + lastArmorBox.height - previewBox.y - previewBox.height).toBeCloseTo(
+      unit,
+      0,
+    );
     for (const surface of await user.locator('.minecraft-inventory-surface').all()) {
-      expect((await surface.boundingBox())?.width).toBeLessThanOrEqual(360);
+      expect((await surface.boundingBox())?.width).toBeLessThanOrEqual(440);
     }
     const hudGeometry = await user.locator('.minecraft-player-hud').evaluate((hud) => {
       const row = hud.querySelector('.minecraft-player-hud-row')?.getBoundingClientRect();

@@ -30,23 +30,11 @@ import {
   minecraftMessageLines,
   minecraftMotdWidth,
 } from './gateway-message-layout.js';
+import { useMinecraftFont } from './minecraft-font.js';
 import './gateway-editor.css';
 
 // All URLs are bundled first-party module resources, never API-supplied CSS or executable code.
 const assets = minecraftUiModule.assets ?? {};
-let fontRequest: Promise<boolean> | undefined;
-function prepareFont() {
-  if (!assets.gatewayFont || typeof FontFace === 'undefined') return Promise.resolve(false);
-  fontRequest ??= new FontFace('MinecraftPreview', `url(${JSON.stringify(assets.gatewayFont)})`)
-    .load()
-    .then((font) => {
-      document.fonts.add(font);
-      return true;
-    })
-    // A source checkout without locally supplied Mojang resources remains editable.
-    .catch(() => false);
-  return fontRequest;
-}
 const assetStyle = (name: string): CSSProperties =>
   assets[name] ? { backgroundImage: `url(${JSON.stringify(assets[name])})` } : {};
 
@@ -60,20 +48,6 @@ function ClientButton({ children }: { children: ReactNode }) {
 }
 function Panorama() {
   return <div className="mc-panorama" aria-hidden="true" style={assetStyle('gatewayPanorama')} />;
-}
-
-function useMinecraftFont() {
-  const [fontReady, setFontReady] = useState(false);
-  useEffect(() => {
-    let active = true;
-    void prepareFont().then((ready) => {
-      if (active) setFontReady(ready);
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
-  return fontReady;
 }
 
 export function MinecraftGatewayEditor(props: GatewayMessageExtensionProps) {

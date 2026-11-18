@@ -1,30 +1,10 @@
 import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import type { FilemanEntry } from '@nickhosting/game-sdk';
-import { PNG } from 'pngjs';
-import { ViewerFormatError } from './viewer-cache.js';
+import { renderMinecraftItemModel, itemResource as resource } from './minecraft-item-model.js';
 
-const MAX_RESOURCE_BYTES = 512 * 1024;
-const MAX_MODEL_BYTES = 64 * 1024;
 const MAX_CATALOG_BYTES = 24 * 1024 ** 2;
 const MAX_CACHE_BYTES = 64 * 1024 ** 2;
-const resourcePattern = /^[a-z0-9_.-]+:[a-z0-9_./-]+$/;
-const object = (value: unknown): Record<string, unknown> | undefined =>
-  value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-function resource(value: unknown): string | undefined {
-  if (typeof value !== 'string' || value.length > 256) return;
-  const id = value.includes(':') ? value : `minecraft:${value}`;
-  if (!resourcePattern.test(id)) return;
-  const path = id.slice(id.indexOf(':') + 1);
-  if (path.split('/').some((part) => !part || part === '.' || part === '..')) return;
-  return id;
-}
-function pathFor(id: string, kind: 'models' | 'items' | 'textures') {
-  const [namespace, name] = id.split(':');
-  return `assets/${namespace}/${kind}/${name}.${kind === 'textures' ? 'png' : 'json'}`;
-}
 export function minecraftTextureIds(input: string | undefined): string[] {
   const ids = input?.split(',') ?? [];
   if (!ids.length || ids.length > 64 || ids.some((id) => resource(id) !== id))
@@ -226,7 +206,8 @@ export class MinecraftItemTextureCache {
             for (const path of archive.assets()) {
               if (
                 !/^assets\/[a-z0-9_.-]+\/(?:models|items)\/[a-z0-9_./-]+\.json$/.test(path) &&
-                !/^assets\/[a-z0-9_.-]+\/textures\/[a-z0-9_./-]+\.png$/.test(path)
+                !/^assets\/[a-z0-9_.-]+\/textures\/[a-z0-9_./-]+\.png$/.test(path) &&
+                !/^assets\/[a-z0-9_.-]+\/models\/[a-z0-9_./-]+\.(?:obj(?:\.mek)?|mtl)$/.test(path)
               )
                 continue;
               if (path.split('/').some((part) => !part || part === '.' || part === '..')) continue;
@@ -281,7 +262,12 @@ async function renderBatch(
     let bytes = 0;
     for (const id of ids) {
       signal.throwIfAborted();
-      const texture = await renderItem(resources, id, read, signal);
+      const texture = await renderMinecraftItemModel(
+        id,
+        (path) => resources.has(path),
+        read,
+        signal,
+      );
       bytes += (texture?.length ?? 0) * 2;
       if (bytes > 8 * 1024 ** 2) throw new DomainError('resources_unavailable');
       result[id] = texture;
@@ -289,116 +275,5 @@ async function renderBatch(
     return result;
   } finally {
     await Promise.all([...archives.values()].map((archive) => archive.close()));
-  }
-}
-
-async function renderItem(
-  resources: ReadonlyMap<string, MinecraftTextureJar | null>,
-  id: string,
-  read: (path: string, maximum: number) => Promise<Uint8Array | undefined>,
-  signal: AbortSignal,
-): Promise<string | undefined> {
-  const json = async (path: string) => {
-    const bytes = await read(path, MAX_MODEL_BYTES);
-    if (!bytes) return;
-    try {
-      return object(JSON.parse(Buffer.from(bytes).toString('utf8')));
-    } catch {
-      return;
-    }
-  };
-  try {
-    const definitionPath = pathFor(id, 'items');
-    let modelId = `${id.slice(0, id.indexOf(':'))}:item/${id.slice(id.indexOf(':') + 1)}`;
-    if (resources.has(definitionPath)) {
-      const definition = await json(definitionPath),
-        model = object(definition?.model);
-      if (model?.type !== 'minecraft:model' || model.tints !== undefined || !resource(model.model))
-        return;
-      modelId = resource(model.model) as string;
-    }
-    const textures: Record<string, unknown> = {};
-    const seen = new Set<string>();
-    let generated = false;
-    while (seen.size < 32) {
-      if (seen.has(modelId)) return;
-      seen.add(modelId);
-      if (
-        [
-          'minecraft:item/generated',
-          'minecraft:item/handheld',
-          'minecraft:item/handheld_rod',
-          'minecraft:builtin/generated',
-        ].includes(modelId)
-      ) {
-        generated = true;
-        break;
-      }
-      const model = await json(pathFor(modelId, 'models'));
-      if (
-        !model ||
-        model.elements !== undefined ||
-        model.loader !== undefined ||
-        model.overrides !== undefined
-      )
-        return;
-      for (const [key, value] of Object.entries(object(model.textures) ?? {}))
-        if (!Object.hasOwn(textures, key)) textures[key] = value;
-      const parent = resource(model.parent);
-      if (!parent) return;
-      modelId = parent;
-    }
-    if (
-      !generated ||
-      typeof textures.layer0 !== 'string' ||
-      Object.keys(textures).some((key) => /^layer[1-9]/.test(key))
-    )
-      return;
-    let reference = textures.layer0;
-    const references = new Set<string>();
-    while (reference.startsWith('#')) {
-      if (references.has(reference) || references.size >= 32) return;
-      references.add(reference);
-      const value = textures[reference.slice(1)];
-      if (typeof value !== 'string') return;
-      reference = value;
-    }
-    const texture = resource(reference);
-    if (!texture) return;
-    const bytes = await read(pathFor(texture, 'textures'), MAX_RESOURCE_BYTES);
-    if (
-      !bytes ||
-      bytes.length < 33 ||
-      !Buffer.from(bytes.subarray(0, 8)).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-    )
-      return;
-    const header = Buffer.from(bytes);
-    // pngjs bounds non-interlaced inflation to the declared dimensions; its Adam7
-    // path uses unbounded inflateSync, so optional interlaced artwork falls back.
-    if (
-      header.readUInt32BE(8) !== 13 ||
-      header.toString('ascii', 12, 16) !== 'IHDR' ||
-      header[28] !== 0
-    )
-      return;
-    const width = header.readUInt32BE(16),
-      height = header.readUInt32BE(20);
-    if (!width || width > 256 || !height || height > 4096 || height % width !== 0) return;
-    // Decode validates PNG CRC/data, strips ancillary metadata and selects the first animation frame.
-    let image: PNG;
-    try {
-      image = PNG.sync.read(header, { checkCRC: true });
-    } catch {
-      return;
-    }
-    const frame = new PNG({ width, height: width });
-    image.data.copy(frame.data, 0, 0, width * width * 4);
-    const encoded = PNG.sync.write(frame);
-    if (encoded.length > MAX_RESOURCE_BYTES) return;
-    return `data:image/png;base64,${encoded.toString('base64')}`;
-  } catch (error) {
-    signal.throwIfAborted();
-    if (error instanceof ViewerFormatError || error instanceof SyntaxError) return;
-    throw error;
   }
 }

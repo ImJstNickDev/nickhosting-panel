@@ -6,6 +6,7 @@ import { useFormat, useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
 import { ErrorNotice, Loading, Select } from '../../components/ui.js';
 import { gameUiClient } from '../../features/integrations.js';
+import { useMinecraftFont } from './minecraft-font.js';
 import { MinecraftPlayerAvatar } from './player-avatar.js';
 import { MinecraftPlayerBody } from './player-body.js';
 import { PlayerRoles } from './player-card.js';
@@ -115,6 +116,7 @@ function Inventory({
 }) {
   const t = useT();
   const [active, setActive] = useState(false);
+  const fontReady = useMinecraftFont();
   const surface = useRef<HTMLDivElement>(null);
   const unavailable = items === null;
   useEffect(() => {
@@ -122,12 +124,13 @@ function Inventory({
     if (!element || unavailable) return;
     const observer = new ResizeObserver(([entry]) => {
       if (!entry) return;
-      const slot = Math.floor(entry.contentRect.width / 9);
+      // Minecraft draws a 176-unit panel with 18-unit slots and 16-unit
+      // item viewports. Scale that entire coordinate system together: rounding
+      // only icons made them abruptly halve while their slots stayed full size.
       element.style.setProperty(
         '--minecraft-inventory-pixel',
-        String(Math.max(1, Math.floor((slot - 4) / 16))),
+        String(entry.contentRect.width / 176),
       );
-      element.style.setProperty('--minecraft-inventory-grid-width', `${slot * 9}px`);
     });
     observer.observe(element);
     return () => observer.disconnect();
@@ -142,78 +145,86 @@ function Inventory({
   const bySlot = new Map(items.map((item) => [item.slot, item]));
   const extra = items.filter((item) => !slots.includes(item.slot));
   return (
-    <div
-      ref={surface}
-      className={`minecraft-inventory-surface${ender ? ' minecraft-inventory-surface--ender' : ''}`}
-    >
-      {ender && <h4 className="minecraft-inventory-title">{t(key('enderChest'))}</h4>}
-      {!ender && (
-        <div
-          className="minecraft-equipment-stage"
-          onPointerEnter={() => setActive(true)}
-          onPointerLeave={() => setActive(false)}
+    <div ref={surface} className="minecraft-inventory" data-native-font={fontReady || undefined}>
+      <div
+        className={`minecraft-inventory-surface${ender ? ' minecraft-inventory-surface--ender' : ''}`}
+      >
+        {ender && <h4 className="minecraft-inventory-title">{t(key('enderChest'))}</h4>}
+        {!ender && (
+          <div
+            className="minecraft-equipment-stage"
+            onPointerEnter={() => setActive(true)}
+            onPointerLeave={() => setActive(false)}
+          >
+            <fieldset className="minecraft-equipment-grid" aria-label={t(key('equipment'))}>
+              {[103, 102, 101, 100].map((slot) => (
+                <ItemSlot
+                  textures={textures}
+                  key={slot}
+                  slot={slot}
+                  item={bySlot.get(slot)}
+                  equipment
+                />
+              ))}
+            </fieldset>
+            <div className="minecraft-equipment-preview">
+              {player && (
+                <MinecraftPlayerBody
+                  name={player.name}
+                  uuid={player.uuid}
+                  active={active}
+                  className="minecraft-player-inventory-body"
+                />
+              )}
+            </div>
+            <div className="minecraft-equipment-offhand">
+              <ItemSlot textures={textures} slot={150} item={bySlot.get(150)} equipment />
+            </div>
+            <div
+              className="minecraft-crafting-preview"
+              role="img"
+              aria-label={t(key('craftingNotSaved'))}
+            >
+              <span className="minecraft-crafting-title">{t(key('crafting'))}</span>
+              <div className="minecraft-crafting-slots" aria-hidden="true">
+                <div className="minecraft-crafting-inputs">
+                  {[0, 1, 2, 3].map((slot) => (
+                    <span key={slot}>—</span>
+                  ))}
+                </div>
+                <svg
+                  className="minecraft-crafting-arrow"
+                  viewBox="0 0 16 13"
+                  shapeRendering="crispEdges"
+                  aria-hidden="true"
+                >
+                  <path d="M0 5h9V0l7 6.5L9 13V8H0Z" />
+                </svg>
+                <span className="minecraft-crafting-output">—</span>
+              </div>
+              <span className="minecraft-crafting-note">{t(key('notSaved'))}</span>
+            </div>
+          </div>
+        )}
+        <fieldset
+          className="minecraft-inventory-grid"
+          aria-label={t(key(ender ? 'enderChest' : 'inventory'))}
         >
-          <fieldset className="minecraft-equipment-grid" aria-label={t(key('equipment'))}>
-            {[103, 102, 101, 100].map((slot) => (
+          {slots.map((slot, index) => (
+            <div
+              key={slot}
+              className={!ender && index >= 27 ? 'minecraft-inventory-hotbar' : undefined}
+            >
               <ItemSlot
                 textures={textures}
-                key={slot}
                 slot={slot}
                 item={bySlot.get(slot)}
-                equipment
+                selected={!ender && slot === selected}
               />
-            ))}
-          </fieldset>
-          <div className="minecraft-equipment-preview">
-            {player && (
-              <MinecraftPlayerBody
-                name={player.name}
-                uuid={player.uuid}
-                active={active}
-                className="minecraft-player-inventory-body"
-              />
-            )}
-          </div>
-          <div className="minecraft-equipment-offhand">
-            <ItemSlot textures={textures} slot={150} item={bySlot.get(150)} equipment />
-          </div>
-          <div
-            className="minecraft-crafting-preview"
-            role="img"
-            aria-label={t(key('craftingNotSaved'))}
-          >
-            <span className="minecraft-crafting-title">{t(key('crafting'))}</span>
-            <div className="minecraft-crafting-slots" aria-hidden="true">
-              <div className="minecraft-crafting-inputs">
-                {[0, 1, 2, 3].map((slot) => (
-                  <span key={slot}>—</span>
-                ))}
-              </div>
-              <span className="minecraft-crafting-arrow">→</span>
-              <span className="minecraft-crafting-output">—</span>
             </div>
-            <span className="minecraft-crafting-note">{t(key('notSaved'))}</span>
-          </div>
-        </div>
-      )}
-      <fieldset
-        className="minecraft-inventory-grid"
-        aria-label={t(key(ender ? 'enderChest' : 'inventory'))}
-      >
-        {slots.map((slot, index) => (
-          <div
-            key={slot}
-            className={!ender && index >= 27 ? 'minecraft-inventory-hotbar' : undefined}
-          >
-            <ItemSlot
-              textures={textures}
-              slot={slot}
-              item={bySlot.get(slot)}
-              selected={!ender && slot === selected}
-            />
-          </div>
-        ))}
-      </fieldset>
+          ))}
+        </fieldset>
+      </div>
       {extra.filter((item) => ender || ![103, 102, 101, 100, 150].includes(item.slot)).length >
         0 && (
         <div className="minecraft-inventory-extra">
