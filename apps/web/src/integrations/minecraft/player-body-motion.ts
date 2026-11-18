@@ -48,3 +48,27 @@ export function playerWavePose(seconds: number) {
     z: -(2.35 + Math.sin(seconds * 8) * 0.28) * ease,
   };
 }
+
+export const cardWaveDurationMs = 1600;
+const cardWaveFrames = [
+  [400, 145],
+  [640, 115],
+  [880, 145],
+  [1120, 115],
+  [cardWaveDurationMs, 0],
+] as const;
+
+export function playerCardWavePose(elapsedMs: number) {
+  let previous: readonly [number, number] = [0, 0];
+  for (const frame of cardWaveFrames) {
+    if (elapsedMs <= frame[0]) {
+      const phase = Math.max(0, elapsedMs - previous[0]) / (frame[0] - previous[0]);
+      const ease = (1 - Math.cos(Math.PI * phase)) / 2;
+      const angle = ((previous[1] + (frame[1] - previous[1]) * ease) * Math.PI) / 180;
+      const lift = Math.min(1, angle / (Math.PI / 6));
+      return { rotationZ: -angle, depth: -2 * lift * lift * (3 - 2 * lift) };
+    }
+    previous = frame;
+  }
+  return { rotationZ: 0, depth: 0 };
+}

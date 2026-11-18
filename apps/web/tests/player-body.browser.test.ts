@@ -124,10 +124,9 @@ describe('Minecraft full-body previews', () => {
         restingHead,
       ),
     ).toBe(true);
-    const initial = await first.screenshot();
-    await expect.poll(async () => (await first.screenshot()).equals(initial)).toBe(false);
-    await page.waitForTimeout(500);
-    await first.screenshot({ path: '/tmp/nickhosting-player-body-wave.png' });
+    // The card returns to its still even when the pointer remains over it.
+    await browserExpect(first.locator('canvas')).toHaveCount(0);
+    expect((await page.screenshot({ clip: headClip })).equals(restingHead)).toBe(true);
     await page.mouse.move(600, 400);
     await browserExpect(page.locator('canvas')).toHaveCount(0);
     await first.hover();

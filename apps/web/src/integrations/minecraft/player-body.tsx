@@ -1,7 +1,12 @@
 import { minecraftUiModule } from '@nickhosting/minecraft/ui';
 import { useEffect, useRef, useState } from 'react';
 import type { SkinViewer } from 'skinview3d';
-import { playerBodyRenderers, playerWavePose } from './player-body-motion.js';
+import {
+  cardWaveDurationMs,
+  playerBodyRenderers,
+  playerCardWavePose,
+  playerWavePose,
+} from './player-body-motion.js';
 import './player-body.css';
 
 type Renderer = typeof import('skinview3d');
@@ -169,11 +174,13 @@ export function MinecraftPlayerBody({
     if (!active || !visible || !motionAllowed || !skin || prepared?.skin !== skin || !element)
       return;
     let stopped = false;
+    let frameId = 0;
     let viewer: SkinViewer | undefined;
     let release = () => {};
     const stop = () => {
       if (stopped) return;
       stopped = true;
+      cancelAnimationFrame(frameId);
       if (viewer) {
         viewer.canvas.removeEventListener('webglcontextlost', stop);
         viewer.canvas.remove();
@@ -191,15 +198,42 @@ export function MinecraftPlayerBody({
       const capture = viewer.canvas.toDataURL('image/png');
       remember(cacheKey, capture);
       setStill({ key: cacheKey, image: capture });
-      viewer.animation = new prepared.library.FunctionAnimation((player, seconds) => {
-        const pose = playerWavePose(seconds);
-        player.skin.rightArm.rotation.x = pose.x;
-        player.skin.rightArm.rotation.z = pose.z;
-      });
       viewer.canvas.addEventListener('webglcontextlost', stop);
       element.append(viewer.canvas);
       element.dataset.animated = 'true';
-      viewer.renderPaused = false;
+      if (variant === 'bust') {
+        const live = viewer;
+        const arm = live.playerObject.skin.rightArm;
+        // skinview3d places its joint below the shoulder. Orbit that joint
+        // about the top inside edge of the arm, preserving its resting pose.
+        const shoulderX = -4;
+        const offset = arm.position.clone();
+        offset.x -= shoulderX;
+        const started = performance.now();
+        const tick = (now: number) => {
+          if (stopped) return;
+          const elapsed = now - started;
+          if (elapsed >= cardWaveDurationMs) {
+            stop();
+            return;
+          }
+          const pose = playerCardWavePose(elapsed);
+          arm.rotation.z = pose.rotationZ;
+          arm.position.copy(offset).applyQuaternion(arm.quaternion);
+          arm.position.x += shoulderX;
+          arm.position.z += pose.depth;
+          live.render();
+          frameId = requestAnimationFrame(tick);
+        };
+        frameId = requestAnimationFrame(tick);
+      } else {
+        viewer.animation = new prepared.library.FunctionAnimation((player, seconds) => {
+          const pose = playerWavePose(seconds);
+          player.skin.rightArm.rotation.x = pose.x;
+          player.skin.rightArm.rotation.z = pose.z;
+        });
+        viewer.renderPaused = false;
+      }
     } catch {
       stop();
     }

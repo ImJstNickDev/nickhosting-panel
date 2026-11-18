@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createPlayerBodyRendererQueue, playerWavePose } from './player-body-motion.js';
+import {
+  createPlayerBodyRendererQueue,
+  playerCardWavePose,
+  playerWavePose,
+} from './player-body-motion.js';
 
 describe('decorative player preview resource boundaries', () => {
   it('defers and cancels static captures while a live preview owns the GPU', async () => {
@@ -36,6 +40,25 @@ describe('decorative player preview resource boundaries', () => {
     acquire(cancel)();
     acquire(vi.fn());
     expect(cancel).not.toHaveBeenCalled();
+  });
+  it('matches the card wave keyframes, cosine easing and shoulder depth', () => {
+    for (const [ms, degrees] of [
+      [0, 0],
+      [400, 145],
+      [640, 115],
+      [880, 145],
+      [1120, 115],
+      [1600, 0],
+      [1800, 0],
+    ] as const) {
+      const pose = playerCardWavePose(ms);
+      expect(pose.rotationZ).toBeCloseTo((-degrees * Math.PI) / 180);
+      expect(pose.depth).toBeCloseTo(degrees ? -2 : 0);
+    }
+    const quarterLift = ((1 - Math.cos(Math.PI / 4)) / 2) * 145;
+    const lift = quarterLift / 30;
+    expect(playerCardWavePose(100).rotationZ).toBeCloseTo((-quarterLift * Math.PI) / 180);
+    expect(playerCardWavePose(100).depth).toBeCloseTo(-2 * lift * lift * (3 - 2 * lift));
   });
   it('starts naturally at rest and keeps shoulder angles within radians', () => {
     expect(playerWavePose(0)).toEqual({ x: -0, z: -0 });

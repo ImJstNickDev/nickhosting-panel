@@ -37,7 +37,8 @@ provider. A visible preview lazily loads the unmodified MIT renderer, takes one
 still and releases its WebGL context. Stills and hover/focus waves share the same
 camera, angle and frame, so the head and torso do not resize on interaction.
 Snapshot rendering is serialized, the session still cache is bounded to 64 entries,
-and only one preview animates at a time. Leaving the card, changing identity,
+and only one preview animates at a time. The card waves once for 1.6 seconds,
+then restores its captured still and releases the renderer. Leaving the card, changing identity,
 hiding the document, scrolling out of view or enabling reduced motion releases
 the animation. Reduced motion retains the angled still. Network/WebGL failures
 fall back to the original local illustration. No skin texture or reference-site
