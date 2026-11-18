@@ -53,7 +53,7 @@ they do not claim to be the player's current live inventory. Missing, malformed,
 ambiguous and unsupported data remain distinct from an empty inventory or zero
 statistics. Unknown item IDs/components are preserved as descriptive metadata.
 Inventory editing and crafting are not offered. The gray beveled inventory is
-capped at 360px, with armor, full-body preview, offhand, three inventory rows,
+capped at 440px, with armor, full-body preview, offhand, three inventory rows,
 hotbar and a separate Ender Chest. The crafting illustration explicitly marks
 its unavailable saved state. Health/food/XP sit above the inventory; actions and
 position share the middle column. Statistics show four key figures and at most
@@ -85,22 +85,61 @@ The resolver reads installed `mods/*.jar` resources through the existing bounded
 SFTP/ZIP range reader; it never executes JAR code or changes game files. A bounded
 process-local cache keys resources by managed-server binding and JAR name, size
 and modification time, with a five-minute maximum age. Icons in the same cold
-batch share archive handles; warm cached icons require no archive reads. Model ancestry, texture references and namespaces are
-resolved for legacy `models/item` and modern `items` definitions. Static,
-single-layer generated/handheld models are supported, including
-`solcarrot:food_book` with its `solcarrot:items/food_book` texture. Ambiguous
-overrides, custom renderers, tinted/conditional/multilayer models, interlaced
-PNGs and absent resources retain the descriptive item fallback. Only enabled
-top-level mod JARs are discovered; client-only mods are not available on the server. This is not a complete client
-renderer or a resource-pack installation mechanism. Vanilla fallback remains the
-optional local 26.1 catalog; it does not claim to reproduce every server version.
+batch share archive handles; warm cached icons require no archive reads. Model
+ancestry, texture references and namespaces are resolved for legacy `models/item`
+and modern `items` definitions. The bounded renderer supports static single-layer
+generated/handheld items and JSON cuboids with UVs, element rotations and GUI
+transforms. It uses nearest texture sampling and the native item-lighting model.
 
-Inventory slots use native PNGs and integer pixel scales, bypassing SVG image
-resampling. Stack quantities use bitmap digits with white fill and a lower-right
-dark shadow; one-item stacks omit the number. The existing optional XP font
-provides the glyph masks, with an authored bitmap fallback when unavailable.
-Counts still come directly from saved NBT, not a live inventory feed. Texture
-request failures leave saved data visible and expose a retry action.
+Two explicit renderer-family adapters cover the reported nonstandard resources:
+Mekanism transmitter models read their declared OBJ/MTL and inventory connection
+groups; Cuboid chest models use the statically verified closed-chest geometry and
+64×64 skin UV layout. Neither executes mod code. The real
+`quark:diorite_bricks`, `mekanism:basic_universal_cable` and
+`cuboidmod:notsogudium_chest` resources were rendered privately to 32×32 PNGs.
+The geometry keeps its declared GUI transform; thin cables are not artificially
+zoomed to fill the viewport. Unknown custom renderers, ambiguous overrides,
+tinted/conditional/multilayer models, interlaced PNGs and missing resources retain
+the descriptive fallback. Only enabled top-level mod JARs are discovered, not
+client-only mods or resource packs. Vanilla fallback remains the optional local
+26.1 catalog; this is not a complete Minecraft client renderer.
+
+The inventory uses the original 176×166 logical frame, 18-unit slot pitch and
+16×16 item viewport. One continuous responsive scale applies to frame, slots,
+icons, borders and bitmap quantities. The previous independent integer rounding
+could halve icons while leaving their slots large; it has been removed. Direct
+PNGs bypass SVG resampling. Counts are white with a lower-right shadow; one-item
+stacks omit the number. The existing optional XP font supplies glyph masks and
+the existing local Minecraft font is shared by inventory labels and message
+previews. Both retain readable fallbacks without local resources. Saved counts
+remain NBT observations, not live inventory data; texture failures leave saved
+data visible and expose retry.
+
+### Native layout reference
+
+Static inspection used the entitled Minecraft 26.1 client
+(SHA1 `191771837687b766537a8c4607cb6fad79c533a1`), corroborated against 26.3.
+`AbstractContainerScreen`, `InventoryMenu`, `AbstractContainerMenu`,
+`InventoryScreen`, `GuiItemRenderState`, `GuiGraphicsExtractor`, `ItemTransform`
+and the client lighting definitions supplied behavioral measurements. No client
+or mod class was executed, and no decompiled source or texture was committed.
+
+| Element | Logical item origin / size |
+| --- | --- |
+| Inventory frame | 176×166 |
+| Item / slot pitch | 16×16 / 18 |
+| Main inventory | (8,84), 9 columns × 3 rows |
+| Hotbar | (8,142) |
+| Armor | (8,8), 18-unit vertical pitch |
+| Offhand | (77,62) |
+| Crafting inputs / output | (98,18) / (154,28) |
+| Player preview | (26,8)–(75,78) |
+| Quantity baseline origin | item Y+9; right edge at item X+17 |
+
+The standalone Ender Chest adapts the native chest's upper three rows into a
+176×78 panel; it does not duplicate the player's inventory below. The crafting
+area remains an explicitly unavailable saved-data preview. Minecraft's native
+proportions take precedence over generic web spacing tokens within these panels.
 
 To prepare those resources explicitly, use Python 3.11+ with Pillow 12.1.1 and
 run `python scripts/prepare-minecraft-player-assets.py /path/to/26.1/client.jar`
