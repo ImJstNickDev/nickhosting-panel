@@ -84,7 +84,8 @@ returning bytes. It accepts item IDs, never user-supplied file paths or remote U
 The resolver reads installed `mods/*.jar` resources through the existing bounded
 SFTP/ZIP range reader; it never executes JAR code or changes game files. A bounded
 process-local cache keys resources by managed-server binding and JAR name, size
-and modification time. Model ancestry, texture references and namespaces are
+and modification time, with a five-minute maximum age. Icons in the same cold
+batch share archive handles; warm cached icons require no archive reads. Model ancestry, texture references and namespaces are
 resolved for legacy `models/item` and modern `items` definitions. Static,
 single-layer generated/handheld models are supported, including
 `solcarrot:food_book` with its `solcarrot:items/food_book` texture. Ambiguous
@@ -237,3 +238,29 @@ XP alignment refinement: the centered bar uses an odd native-column count, match
 Player actions refinement: game mode is selected directly in the actions card, then passed to the existing guarded confirmation flow. Cancelling sends no command; the card continues to show saved state until refreshed. Access actions are ordered whitelist, operator (including existing permission editing), kick, then ban. The identity header reuses the shared player-head image with its existing privacy/fallback behavior. English and Italian detail action labels and desktop/mobile screenshot evidence are included. No backend or permission contracts change.
 
 Unavailable player actions remain discoverable in the detail card: authorized kick/ban controls stay visible while the server is offline, with execution disabled; kick additionally requires online presence. Moderation buttons use left-aligned shared icons, with red kick/ban icons. An English/Italian notice above game mode explains the online-player requirement, and the disabled selector has a distinct gray surface. List menus retain their existing availability behavior.
+
+## Inventory follow-up validation — 2026-11-18
+
+Focused coverage: four resolver/cache regressions, two browser-side asset/font
+regressions, one real isolated permission-revocation integration case and one
+browser journey covering desktop/mobile PNG display, count palette, missing
+assets, request failure and retry. No broad test suite was run. Root/web TypeScript
+and scoped Biome checks pass (existing warnings in shared viewer files).
+Independent source review covered authorization, ZIP/PNG limits, cache lifetime,
+shared cancellation and aggregate response bounds.
+
+Read-only inspection confirmed the reported installed mod uses the standard
+`item/generated` parent and `solcarrot:items/food_book` PNG. The actual PNG resolved
+locally to a 16×16 output with the new resolver; no mod artwork was committed.
+The browser journey uses an authored pixel fixture for its mod icon.
+
+Screenshots: [desktop](screenshots/m6/minecraft-player-inventory-textures-desktop-en.png),
+[mobile](screenshots/m6/minecraft-player-inventory-textures-mobile-en.png),
+[texture-request failure](screenshots/m6/minecraft-player-inventory-textures-error-mobile-en.png).
+
+Implementation and verification took place in an isolated checkout. No live
+application activation, game write or game restart was performed. The cold
+metadata scan of the full installed modpack has not been timed against live
+SFTP; it is bounded by the route deadline and does not block saved-data display.
+Existing isolated test services were used; no real game test assets were created.
+Rollback is application-source-only, with no migration or data restore.

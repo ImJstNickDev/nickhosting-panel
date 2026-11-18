@@ -1,0 +1,217 @@
+import { randomBytes } from 'node:crypto';
+import { PNG } from 'pngjs';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  MinecraftItemTextureCache,
+  type MinecraftTextureArchive,
+  type MinecraftTextureJar,
+  minecraftTextureIds,
+  minecraftTextureJars,
+} from './minecraft-item-textures.js';
+
+const jar: MinecraftTextureJar = {
+  path: 'mods/fixture.jar',
+  size: 100,
+  modifiedAt: '2026-11-18T12:00:00Z',
+};
+const json = (value: unknown) => Buffer.from(JSON.stringify(value));
+function image() {
+  const png = new PNG({ width: 2, height: 4 });
+  png.data.fill(255, 0, 2 * 2 * 4);
+  png.data.fill(0, 2 * 2 * 4);
+  return PNG.sync.write(png);
+}
+function fixture(extra: Record<string, Buffer> = {}) {
+  const assets: Record<string, Buffer> = {
+    'assets/solcarrot/models/item/food_book.json': json({
+      parent: 'item/generated',
+      textures: { layer0: 'solcarrot:items/food_book' },
+    }),
+    'assets/solcarrot/textures/items/food_book.png': image(),
+    ...extra,
+  };
+  const close = vi.fn(async () => {});
+  const read = vi.fn(async (path: string) => assets[path]);
+  const open = vi.fn(
+    async (_jar: MinecraftTextureJar, signal: AbortSignal): Promise<MinecraftTextureArchive> => {
+      signal.throwIfAborted();
+      return { assets: () => Object.keys(assets), read, close };
+    },
+  );
+  return { open, read, close };
+}
+const signal = () => new AbortController().signal;
+
+describe('bounded installed-mod inventory textures', () => {
+  it('resolves the legacy food_book and modern cross-namespace ancestry, caches warm requests and invalidates changed installs', async () => {
+    const f = fixture({
+      'assets/example/items/guide.json': json({
+        model: { type: 'minecraft:model', model: 'example:item/guide' },
+      }),
+      'assets/example/models/item/guide.json': json({ parent: 'solcarrot:item/food_book' }),
+    });
+    const cache = new MinecraftItemTextureCache();
+    const result = await cache.resolve(
+      'server-a',
+      [jar],
+      ['solcarrot:food_book', 'example:guide'],
+      f.open,
+      signal(),
+    );
+    expect(Object.keys(result).sort()).toEqual(['example:guide', 'solcarrot:food_book']);
+    expect(f.open).toHaveBeenCalledTimes(2); // one catalogue scan, one shared render handle
+    expect(result['example:guide']).toBe(result['solcarrot:food_book']);
+    const png = PNG.sync.read(
+      Buffer.from(result['solcarrot:food_book']?.split(',')[1] ?? '', 'base64'),
+    );
+    expect([png.width, png.height]).toEqual([2, 2]);
+    expect([...png.data]).toEqual(Array(16).fill(255));
+    const reads = f.read.mock.calls.length,
+      opens = f.open.mock.calls.length;
+    expect(
+      await cache.resolve('server-a', [jar], ['solcarrot:food_book'], f.open, signal()),
+    ).toEqual({ 'solcarrot:food_book': result['solcarrot:food_book'] });
+    expect(f.read).toHaveBeenCalledTimes(reads);
+    expect(f.open).toHaveBeenCalledTimes(opens);
+    await cache.resolve(
+      'server-a',
+      [{ ...jar, modifiedAt: '2026-11-18T12:01:00Z' }],
+      ['solcarrot:food_book'],
+      f.open,
+      signal(),
+    );
+    expect(f.open.mock.calls.length).toBeGreaterThan(opens);
+    expect(f.close.mock.calls.length).toBe(f.open.mock.calls.length);
+    expect(await cache.resolve('server-a', [], ['solcarrot:food_book'], f.open, signal())).toEqual(
+      {},
+    );
+  });
+
+  it('rejects path inputs and preserves fallback for ambiguous, cyclic, custom and invalid resources', async () => {
+    for (const id of ['../x', 'solcarrot:../x', 'solcarrot:/x', 'solcarrot:x//y', 'no_namespace'])
+      expect(() => minecraftTextureIds(id)).toThrow();
+    expect(() => minecraftTextureIds(Array(65).fill('a:x').join(','))).toThrow();
+    expect(minecraftTextureIds('a:x,a:x')).toEqual(['a:x']);
+    expect(
+      minecraftTextureJars([
+        { name: 'disabled.jar.disabled', kind: 'file', size: 1 },
+        { name: 'unsafe.jar', kind: 'symlink', size: 1 },
+      ]),
+    ).toEqual([]);
+    const f = fixture({
+      'assets/example/models/item/cycle.json': json({ parent: 'example:item/cycle' }),
+      'assets/example/models/item/custom.json': json({
+        parent: 'item/generated',
+        loader: 'example:special',
+        textures: { layer0: 'solcarrot:items/food_book' },
+      }),
+      'assets/example/models/item/broken.json': json({
+        parent: 'item/generated',
+        textures: { layer0: 'example:item/broken' },
+      }),
+      'assets/example/textures/item/broken.png': image().subarray(0, 33),
+    });
+    const cache = new MinecraftItemTextureCache();
+    expect(
+      await cache.resolve(
+        'server',
+        [jar],
+        ['example:cycle', 'example:custom', 'example:broken'],
+        f.open,
+        signal(),
+      ),
+    ).toEqual({});
+    expect(
+      await cache.resolve(
+        'other',
+        [jar, { ...jar, path: 'mods/duplicate.jar' }],
+        ['solcarrot:food_book'],
+        f.open,
+        signal(),
+      ),
+    ).toEqual({});
+  });
+
+  it('applies the response budget to warm and mixed cached textures as well as cold batches', async () => {
+    const png = new PNG({ width: 256, height: 256 });
+    png.data = randomBytes(png.data.length);
+    const assets: Record<string, Buffer> = {
+      'assets/example/textures/item/large.png': PNG.sync.write(png),
+    };
+    const ids = Array.from({ length: 16 }, (_, index) => `example:item_${index}`);
+    for (const id of ids)
+      assets[`assets/example/models/item/${id.split(':')[1]}.json`] = json({
+        parent: 'item/generated',
+        textures: { layer0: 'example:item/large' },
+      });
+    const f = fixture(assets),
+      cache = new MinecraftItemTextureCache();
+    await cache.resolve('large', [jar], ids.slice(0, 8), f.open, signal());
+    await expect(cache.resolve('large', [jar], ids, f.open, signal())).rejects.toMatchObject({
+      code: 'resources_unavailable',
+    });
+    const opens = f.open.mock.calls.length;
+    await expect(cache.resolve('large', [jar], ids, f.open, signal())).rejects.toMatchObject({
+      code: 'resources_unavailable',
+    });
+    expect(f.open).toHaveBeenCalledTimes(opens);
+  });
+
+  it('coalesces cold work while cancelling only the last consumer and never caches cancelled work', async () => {
+    const f = fixture();
+    const gate = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    let sourceSignal: AbortSignal | undefined;
+    const open = vi.fn(async (current: MinecraftTextureJar, currentSignal: AbortSignal) => {
+      sourceSignal = currentSignal;
+      entered.resolve();
+      await gate.promise;
+      return f.open(current, currentSignal);
+    });
+    const cache = new MinecraftItemTextureCache();
+    const first = new AbortController(),
+      second = new AbortController();
+    const one = cache.resolve('server', [jar], ['solcarrot:food_book'], open, first.signal);
+    const rejected = expect(one).rejects.toThrow();
+    await entered.promise;
+    const two = cache.resolve('server', [jar], ['solcarrot:food_book'], open, second.signal);
+    first.abort(new Error('caller_left'));
+    await rejected;
+    expect(sourceSignal?.aborted).toBe(false);
+    gate.resolve();
+    expect(await two).toHaveProperty('solcarrot:food_book');
+    expect(open).toHaveBeenCalledTimes(2); // one index, one selected resource render
+    const cancelled = new AbortController();
+    cancelled.abort();
+    await expect(
+      cache.resolve('server', [jar], ['solcarrot:food_book'], open, cancelled.signal),
+    ).rejects.toBeDefined();
+    expect(open).toHaveBeenCalledTimes(2);
+    const abandoned = new AbortController();
+    const abandonedGate = Promise.withResolvers<void>();
+    const abandonedEntered = Promise.withResolvers<void>();
+    let abandonedSignal: AbortSignal | undefined;
+    const blockedOpen = async (value: MinecraftTextureJar, pendingSignal: AbortSignal) => {
+      abandonedSignal = pendingSignal;
+      abandonedEntered.resolve();
+      await abandonedGate.promise;
+      return f.open(value, pendingSignal);
+    };
+    const pending = cache.resolve(
+      'abandoned',
+      [jar],
+      ['solcarrot:food_book'],
+      blockedOpen,
+      abandoned.signal,
+    );
+    const discarded = expect(pending).rejects.toThrow('left');
+    await abandonedEntered.promise;
+    abandoned.abort(new Error('left'));
+    await discarded;
+    expect(abandonedSignal?.aborted).toBe(true);
+    abandonedGate.resolve();
+    expect(
+      await cache.resolve('abandoned', [jar], ['solcarrot:food_book'], f.open, signal()),
+    ).toHaveProperty('solcarrot:food_book');
+  });
+});

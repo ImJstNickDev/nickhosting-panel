@@ -750,9 +750,9 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
         .poll(() =>
           stack.locator('canvas').evaluate((element) => {
             const canvas = element as HTMLCanvasElement;
-            const pixels = canvas
-              .getContext('2d')!
-              .getImageData(0, 0, canvas.width, canvas.height).data;
+            const context = canvas.getContext('2d');
+            if (!context) throw new Error('Missing stack count canvas');
+            const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
             const colors = new Set<string>();
             for (let i = 0; i < pixels.length; i += 4)
               if (pixels[i + 3])

@@ -259,6 +259,7 @@ export class FileViewerService {
     serverId: string,
     inputPath: string,
     requestSignal: AbortSignal,
+    accessScope = 'files.read',
   ) {
     const path = relativePath(inputPath).slice(1);
     const settings = await this.settings();
@@ -282,6 +283,7 @@ export class FileViewerService {
     if (connection.issuedNow)
       await service.authorizeTransfer(context, serverId, false, undefined, undefined, server);
     const watchKey = fingerprint([
+      accessScope,
       context[authSessionId],
       context.actorUserId,
       context.subjectUserId,

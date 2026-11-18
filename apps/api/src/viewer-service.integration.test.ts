@@ -300,6 +300,30 @@ describe('private viewer service with persisted credentials and isolated SFTP bo
     await expect(second.source.read(0, 1)).rejects.toThrow('viewer_access_revoked');
   });
 
+  it('keeps players and file permission revocation watches separate for the same session', async () => {
+    const playersAuthorize = vi.fn().mockResolvedValue(undefined);
+    const playersRuntime = { ...management, authorizeTransfer: playersAuthorize };
+    const players = await service.open(
+      fixture.context,
+      playersRuntime,
+      serverId,
+      'mods/fixture.jar',
+      new AbortController().signal,
+      'game.minecraft.players.read',
+    );
+    closeFiles.push(players.close);
+    const file = await open();
+    authorize.mockRejectedValue(new DomainError('forbidden'));
+    await vi.waitFor(() => expect(file.signal.aborted).toBe(true), { timeout: 2000, interval: 20 });
+    expect(players.signal.aborted).toBe(false);
+    expect(await players.source.read(0, 1)).toEqual(bytes.subarray(0, 1));
+    playersAuthorize.mockRejectedValue(new DomainError('forbidden'));
+    await vi.waitFor(() => expect(players.signal.aborted).toBe(true), {
+      timeout: 2000,
+      interval: 20,
+    });
+  });
+
   it('invalidates active sources when the persisted credential is revoked', async () => {
     const current = await open();
     const [credential] = await credentials();

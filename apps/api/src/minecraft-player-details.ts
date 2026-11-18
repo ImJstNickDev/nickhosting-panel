@@ -18,6 +18,7 @@ import {
 import { readMinecraftPlayerDetail } from '../../../packages/server-management/src/minecraft-player-details.js';
 import { permissionRuntime } from '../../../packages/server-management/src/permission-runtime.js';
 import type { Variables } from './app.js';
+import { registerMinecraftItemTextureRoutes } from './minecraft-item-textures-routes.js';
 import { type MinecraftPlayerRouteOptions, observeMinecraftPlayers } from './minecraft-players.js';
 
 /** UUID literals are validated entity arguments; no selector or command fragment is accepted. */
@@ -82,6 +83,7 @@ export function registerMinecraftPlayerDetailRoutes(
     if (!choice.capabilities.playerManagement) throw new DomainError('integration_unavailable');
     return choice;
   };
+  registerMinecraftItemTextureRoutes(app, options, profile);
   app.get('/v1/servers/:id/minecraft/players/:uuid', async (c) => {
     const context = await principal(c),
       serverId = c.req.param('id'),
