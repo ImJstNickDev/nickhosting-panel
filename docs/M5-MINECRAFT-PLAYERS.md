@@ -351,7 +351,7 @@ were inspected privately.
 After explicit Owner authorization, PR #40 source b82d8bf was activated on
 2026-11-18. The API reloaded through its existing watcher; no container restart
 was needed. API, frontend and Gateway are healthy; Gateway and Minecraft container
-start times are unchanged. The reload recorded four transient snapshot errors and
+start times are unchanged. The reload recorded five transient snapshot errors and
 zero new lease expirations; no player was connected at activation.
 
 An authenticated live request resolved all three reported items to 32×32 PNGs
