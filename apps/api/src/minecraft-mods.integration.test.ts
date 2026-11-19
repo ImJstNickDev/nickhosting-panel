@@ -7,7 +7,10 @@ import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import { createManagementRuntime } from '@nickhosting/server-management';
 import { Hono } from 'hono';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
+import {
+  managementFixture,
+  minecraftManagementFixture,
+} from '../../../packages/server-management/src/test-fixtures.js';
 import { createApp, type Variables } from './app.js';
 import { registerMinecraftModRoutes } from './minecraft-mods.js';
 
@@ -73,7 +76,7 @@ describe('Mods HTTP catalog and mutation boundaries', () => {
     json.mockReset();
     download.mockReset();
     providerRead.mockReset();
-    fixture = await managementFixture(database.db, { interactive: true });
+    fixture = await minecraftManagementFixture(database.db, { interactive: true });
     actor = fixture.context;
     serverId = await fixture.server();
     const combinationId = randomUUID();
@@ -192,6 +195,7 @@ describe('Mods HTTP catalog and mutation boundaries', () => {
       });
       expect(response.status).toBe(400);
     }
+    expect((await app.request(`${plugins}/github`, { method: 'POST' })).status).toBe(404);
     expect((await app.request(`${plugins}/catalog/search?provider=voxel`)).status).toBe(400);
     expect(json).not.toHaveBeenCalled();
     expect(download).not.toHaveBeenCalled();
@@ -256,6 +260,15 @@ describe('Mods HTTP catalog and mutation boundaries', () => {
         })
       ).status,
     ).toBe(400);
+    for (const url of [
+      'https://github.com/owner/repo',
+      'https://other.example.test/owner/repo/releases/download/v1/mod.jar',
+      'https://github.com/owner/repo/releases/download/v1/mod.zip',
+    ]) {
+      expect(
+        (await mutation('/github', { url, revision: 0, idempotencyKey: randomUUID() })).status,
+      ).toBe(400);
+    }
     for (const body of [
       { path: '../server.jar', action: 'disable' },
       { path: 'mods/test.jar', action: 'delete' },
@@ -550,6 +563,15 @@ describe('Mods HTTP catalog and mutation boundaries', () => {
     ).toBe(403);
     expect(
       (await app.request(`${base()}/changes/${randomUUID()}`, { method: 'DELETE' })).status,
+    ).toBe(403);
+    expect(
+      (
+        await mutation('/github', {
+          url: 'https://github.com/owner/repo/releases/download/v1/mod.jar',
+          revision: 0,
+          idempotencyKey: randomUUID(),
+        })
+      ).status,
     ).toBe(403);
     expect((await mutation('/recover')).status).toBe(403);
     expect(providerRead).not.toHaveBeenCalled();

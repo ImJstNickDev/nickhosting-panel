@@ -58,7 +58,14 @@ function registerMinecraftAddonRoutes(
             .providers ?? {})
         : await runtime.minecraftOptions()
       : {};
-    return createMinecraftModsService({ db, env, runtime, ...content, kind });
+    return createMinecraftModsService({
+      db,
+      env,
+      runtime,
+      ...content,
+      githubHttp: options.contentHttp,
+      kind,
+    });
   };
   app.get(base, async (c) => {
     c.header('cache-control', 'no-store');
@@ -99,6 +106,18 @@ function registerMinecraftAddonRoutes(
       202,
     ),
   );
+  if (kind === 'mod')
+    app.post(`${base}/github`, async (c) => {
+      return c.json(
+        await (await service()).github(
+          await principal(c),
+          c.req.param('id'),
+          await body(c),
+          c.req.raw.signal,
+        ),
+        201,
+      );
+    });
   app.post(`${base}/changes`, async (c) =>
     c.json(
       await (await service()).change(await principal(c), c.req.param('id'), await body(c)),

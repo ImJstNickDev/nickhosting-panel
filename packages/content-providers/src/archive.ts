@@ -190,17 +190,30 @@ export type JarEnvironment = JarSide | 'both';
 export interface JarMetadata {
   environment: JarEnvironment;
   fabric?: { id: string; version?: string };
+  descriptors?: string[];
 }
 /** One existing bounded archive pass supplies side and runtime identity; no extra read per mod. */
 export async function inspectJarMetadata(
   path: string,
   limits: Partial<ContentLimits> = {},
+  inspectDescriptors = false,
 ): Promise<JarMetadata> {
   const observations: JarEnvironment[] = [];
   let fabric: JarMetadata['fabric'];
+  const descriptors: string[] = [];
+  const names = new Set(['fabric.mod.json']);
+  if (inspectDescriptors)
+    for (const name of [
+      'quilt.mod.json',
+      'META-INF/mods.toml',
+      'META-INF/neoforge.mods.toml',
+      'mcmod.info',
+    ])
+      names.add(name);
   await visitZip(
     path,
     async (file) => {
+      if (inspectDescriptors && file.size > 0) descriptors.push(file.path);
       if (file.path === 'fabric.mod.json') {
         const metadata = JSON.parse(
           (await readArchiveFile(file, contentLimits(limits).maxMetadataBytes)).toString('utf8'),
@@ -225,7 +238,7 @@ export async function inspectJarMetadata(
     },
     limits,
     undefined,
-    new Set(['fabric.mod.json']),
+    names,
   );
   const environment: JarEnvironment = observations.includes('client')
     ? 'client'
@@ -234,7 +247,11 @@ export async function inspectJarMetadata(
       : observations.includes('both')
         ? 'both'
         : 'unknown';
-  return { environment, ...(fabric ? { fabric } : {}) };
+  return {
+    environment,
+    ...(fabric ? { fabric } : {}),
+    ...(inspectDescriptors ? { descriptors } : {}),
+  };
 }
 /** Fabric environment evidence; Forge displayTest is not a side guarantee. */
 export async function inspectJarEnvironment(

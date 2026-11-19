@@ -1,1 +1,25 @@
 @import "../../components/addon-workspace.css";
+
+dialog.mods-github-dialog {
+  box-sizing: border-box;
+  width: min(29rem, calc(100vw - 2rem));
+  padding: 1.25rem;
+}
+.mods-github-dialog .section-heading {
+  margin-bottom: 1rem;
+}
+.mods-github-dialog .dialog-close-icon {
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+}
+.mods-github-dialog .form-footer {
+  justify-content: flex-end;
+}
+.minecraft-mods[data-kind="mods"] .mods-header-actions {
+  flex-wrap: wrap;
+}

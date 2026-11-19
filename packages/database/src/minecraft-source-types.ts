@@ -27,7 +27,7 @@ export interface MinecraftSourceTables {
     idempotency_key: string;
     identity_digest: string;
     kind: 'world' | 'modpack' | 'datapack' | 'mod' | 'plugin';
-    origin: 'upload' | 'modrinth' | 'curseforge' | 'hangar' | 'spiget';
+    origin: 'upload' | 'modrinth' | 'curseforge' | 'hangar' | 'spiget' | 'github';
     declared_bytes: string;
     reserved_bytes: string;
     expected_hashes: ColumnType<unknown, string, string>;

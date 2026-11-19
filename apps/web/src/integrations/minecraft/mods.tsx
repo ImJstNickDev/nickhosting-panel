@@ -25,6 +25,7 @@ import {
   useAddonsT,
 } from './addons-context.js';
 import { contentPreparationErrorKey } from './content-preparation-error.js';
+import { GithubModDialog } from './mods-github-dialog.js';
 import {
   currentModUpdates,
   eligibleModUpdates,
@@ -60,6 +61,8 @@ type Selection = ReturnType<typeof useModsSelection>;
 type Snapshot = MinecraftModsSnapshot;
 const rootIdentity = (root: Pick<MinecraftModRoot, 'provider' | 'projectId'>) =>
   `${root.provider}:${root.projectId}`;
+const isStandaloneChange = (change: MinecraftModQueueItem) =>
+  change.action !== 'install' || (!change.metadata && !change.dependency);
 const sameProject = (
   root: Pick<MinecraftModRoot, 'provider' | 'projectId'>,
   project: Pick<ModCatalogProject, 'provider' | 'id'>,
@@ -114,6 +117,8 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
   const [view, setView] = useState<'installed' | 'discover' | 'review'>(
     initial?.packs.length ? 'installed' : 'discover',
   );
+  const [githubOpen, setGithubOpen] = useState(false);
+  const [reviewOrigin, setReviewOrigin] = useState<'installed' | 'discover'>('discover');
   const [project, setProject] = useState<ModCatalogProject>();
   const workspace = useRef<HTMLElement>(null);
   const previousView = useRef(view);
@@ -138,8 +143,13 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
   const disabled = props.pending || !data?.supported || !data.installed || Boolean(busy);
   const canApply =
     data?.changes.every((change) => (change.action === 'delete' ? canDelete : canWrite)) === true;
-  const nonInstallChanges = data?.changes.filter((change) => change.action !== 'install') ?? [];
-  const count = selection.roots.length + nonInstallChanges.length;
+  const count = selection.roots.length + (data?.changes.filter(isStandaloneChange).length ?? 0);
+  const githubDisabled =
+    disabled || selection.saving || Boolean(selection.error || data?.preparing || toggles.pending);
+  function openReview(origin: 'installed' | 'discover') {
+    setReviewOrigin(origin);
+    setView('review');
+  }
   const uncertain = data?.changes.some((change) => change.state === 'uncertain');
   const ready =
     Boolean(data?.changes.length) &&
@@ -304,8 +314,8 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
           <div className="mods-review-heading">
             <ModsAction
               icon="back"
-              label={t(modsKey('back'))}
-              onClick={() => setView('discover')}
+              label={t(modsKey(reviewOrigin === 'installed' ? 'backInstalled' : 'back'))}
+              onClick={() => setView(reviewOrigin)}
             />
             <h2 data-view-focus tabIndex={-1}>
               {t(modsKey('review'))}
@@ -338,6 +348,20 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
               {t(modsKey('applied'))}
             </span>
           )}
+          {view === 'installed' &&
+            kind === 'mods' &&
+            canWrite &&
+            data?.supported &&
+            data.installed && (
+              <button
+                type="button"
+                className="secondary"
+                disabled={githubDisabled}
+                onClick={() => setGithubOpen(true)}
+              >
+                {t(modsKey('githubInstall'))}
+              </button>
+            )}
           {view !== 'review' && (
             <>
               <ModsAction
@@ -347,7 +371,11 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
                 onClick={() => void inventory.refetch()}
               />
               {count > 0 && (
-                <button type="button" className="mods-primary" onClick={() => setView('review')}>
+                <button
+                  type="button"
+                  className="mods-primary"
+                  onClick={() => openReview(kind === 'mods' ? view : 'discover')}
+                >
                   <ModsIcon name="queue" />
                   {t(modsKey('install'), { count })}
                 </button>
@@ -367,6 +395,25 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
           )}
         </div>
       </header>
+      {githubOpen &&
+        view === 'installed' &&
+        kind === 'mods' &&
+        canWrite &&
+        data?.supported &&
+        data.installed && (
+          <GithubModDialog
+            serverId={props.serverId}
+            revision={data.revision}
+            disabled={githubDisabled}
+            onClose={() => setGithubOpen(false)}
+            onStaged={async () => {
+              await inventory.refetch();
+              setGithubOpen(false);
+              openReview('installed');
+            }}
+            refresh={() => inventory.refetch()}
+          />
+        )}
       {Boolean(error || inventory.error) && (
         <ErrorNotice
           error={error ?? inventory.error}
@@ -399,7 +446,7 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
               {...common}
               deleteDisabled={disabled || !canDelete}
               onDiscover={() => setView('discover')}
-              onReview={() => setView('review')}
+              onReview={() => openReview(kind === 'mods' ? 'installed' : 'discover')}
               onProject={(value) => {
                 openProject(value);
                 setView('discover');
@@ -442,7 +489,8 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
                 openProject(value);
                 setView('discover');
               }}
-              onBack={() => setView('discover')}
+              backLabel={t(modsKey(reviewOrigin === 'installed' ? 'backInstalled' : 'back'))}
+              onBack={() => setView(reviewOrigin)}
               onDiscard={(changeId) =>
                 void operation(`discard:${changeId}`, () =>
                   modsController.discard(props.serverId, changeId),
@@ -1087,6 +1135,7 @@ function ReviewMods(
     uncertain: boolean;
     onRecover(): void;
     onDiscard(changeId: string): void;
+    backLabel: string;
     onBack(): void;
   },
 ) {
@@ -1096,7 +1145,7 @@ function ReviewMods(
   const resolving = props.selection.saving || props.data?.preparing;
   const changes = props.data?.changes ?? [];
   const dependencies = changes.filter((item) => item.action === 'install' && item.dependency);
-  const otherChanges = changes.filter((item) => item.action !== 'install');
+  const otherChanges = changes.filter(isStandaloneChange);
   const optionalItems = new Map<string, NonNullable<Snapshot['optional']>[number]>();
   for (const item of props.data?.optional ?? []) {
     const key = `${item.provider}:${item.projectId}`;
@@ -1134,7 +1183,7 @@ function ReviewMods(
         <ModsEmpty
           action={
             <button type="button" className="secondary" onClick={props.onBack}>
-              {t(modsKey('back'))}
+              {props.backLabel}
             </button>
           }
         >

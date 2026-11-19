@@ -7,6 +7,36 @@ import {
 
 export const minecraftModProviderSchema = z.enum(['modrinth', 'curseforge']);
 const identifier = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
+// Accept a public release asset only. Path components are decoded exactly once.
+export const minecraftGithubModUrlSchema = z
+  .string()
+  .max(2048)
+  .refine((value) => {
+    const match =
+      /^https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+)\/releases\/download\/([^/?#]+)\/([^/?#]+)$/u.exec(
+        value,
+      );
+    if (!match) return false;
+    try {
+      const [, owner, repo, tag, asset] = match.map(decodeURIComponent);
+      return (
+        [owner, repo, tag, asset].every(
+          (part) => part && part !== '.' && part !== '..' && !/[\p{C}\\/%?#]/u.test(part),
+        ) &&
+        !!asset &&
+        !asset.startsWith('.') &&
+        asset.endsWith('.jar') &&
+        asset.length <= 240
+      );
+    } catch {
+      return false;
+    }
+  });
+export const minecraftGithubModRequestSchema = z.strictObject({
+  url: minecraftGithubModUrlSchema,
+  revision: z.number().int().nonnegative(),
+  idempotencyKey: identifier,
+});
 const catalogId = z
   .string()
   .min(1)
