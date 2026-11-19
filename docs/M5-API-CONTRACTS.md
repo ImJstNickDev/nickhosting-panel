@@ -73,6 +73,8 @@ text; server/project/job identities are UUIDs. Invalid cursors are domain errors
 | `POST /v1/platform/jobs/:id/retry` | `{idempotencyKey}`; returns 202 for an authorized safe new operation intent. Never resets the historical job. |
 | `GET /v1/platform/owner/users` | Regular Owner; paginated search/role filtering of NickHosting identities. |
 | `GET /v1/platform/owner/users/:id` | Safe identity profile and quota summary; historical quota actions remain available through audit. |
+| `GET /v1/owner/users/:userId/recovery-link` | Returns eligibility and active expiry to a regular Owner. Eligible targets have a password account and a non-Owner role. |
+| `POST /v1/owner/users/:userId/recovery-link` | Requires a single-use Owner step-up grant for the recovery action and the target user. The request carries `mode` (`create` or `reveal`) and optional `expiresAt`. New links default to 24 hours. An active link can be reopened or its expiry changed. The response contains the URL and its expiry and is served with `Cache-Control: no-store`. Redemption uses the normal password-reset flow. |
 | `GET /v1/platform/owner/audit` | Regular session with `audit:read` (Owner or platform operator); cursor pagination and action/actor/subject/user filters. Preserves actor/subject attribution. |
 | `GET /v1/platform/owner/games` | Stored manifests, rollout policies and tester IDs; not a public compatibility catalog. |
 

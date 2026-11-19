@@ -51,6 +51,14 @@ export function buildBetterAuth(options: IdentityOptions) {
     basePath: '/api/auth',
     secret: options.authSecret,
     database: options.pool,
+    verification: {
+      storeIdentifier: {
+        default: 'plain',
+        overrides: {
+          'reset-password:owner_': { hash: async (identifier) => tokenHash(identifier) },
+        },
+      },
+    },
     trustedOrigins: [
       ...new Set([
         new URL(options.baseURL).origin,
