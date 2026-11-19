@@ -1003,6 +1003,34 @@ export function createMinecraftModsService(options: {
     await coalesce(context, serverId, revision);
     await refreshGraph(context, serverId, revision);
   }
+  function markReady(connection: Kysely<Database>, id: string) {
+    return connection
+      .updateTable(tables.changes)
+      .set({ state: 'ready', error: null, updated_at: new Date() })
+      .where('id', '=', id)
+      .where('state', 'in', ['preparing', 'uncertain'])
+      .execute();
+  }
+  // Direct imports are appended independently of catalog selection. A pending
+  // Review in another browser must refresh before it can publish their bytes.
+  async function advanceDirectRevision(tx: Kysely<Database>, serverId: string, revision: number) {
+    await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${directory}:${serverId}`},0))`.execute(
+      tx,
+    );
+    await checkRevision(tx, serverId, revision);
+    await tx
+      .updateTable(tables.changes)
+      .set({ revision: revision + 1 })
+      .where('server_id', '=', serverId)
+      .where('revision', '=', revision)
+      .where('state', 'in', active)
+      .execute();
+    await tx
+      .updateTable(tables.drafts)
+      .set({ revision: revision + 1, updated_at: new Date() })
+      .where('server_id', '=', serverId)
+      .execute();
+  }
   async function prepareItem(
     context: AuthContext,
     serverId: string,
@@ -1184,35 +1212,12 @@ export function createMinecraftModsService(options: {
                   runtime.authorizeTransfer(current, serverId, true, connection, undefined, server),
               });
               await claim.complete();
-              const ready = (tx: Kysely<Database>) =>
-                tx
-                  .updateTable(tables.changes)
-                  .set({ state: 'ready', updated_at: new Date() })
-                  .where('id', '=', id)
-                  .where('state', '=', 'preparing')
-                  .execute();
               if (startDirect) {
                 await connection.transaction().execute(async (tx) => {
-                  await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${directory}:${serverId}`},0))`.execute(
-                    tx,
-                  );
-                  await checkRevision(tx, serverId, revision);
-                  await ready(tx);
-                  // Fence already-open reviews and carry forward their pending changes.
-                  await tx
-                    .updateTable(tables.changes)
-                    .set({ revision: revision + 1 })
-                    .where('server_id', '=', serverId)
-                    .where('revision', '=', revision)
-                    .where('state', 'in', active)
-                    .execute();
-                  await tx
-                    .updateTable(tables.drafts)
-                    .set({ revision: revision + 1, updated_at: new Date() })
-                    .where('server_id', '=', serverId)
-                    .execute();
+                  await advanceDirectRevision(tx, serverId, revision);
+                  await markReady(tx, id);
                 });
-              } else await ready(connection);
+              } else await markReady(connection, id);
             } catch (error) {
               if (!dispatched || isUploadNotDispatched(error)) {
                 await claim.rejectBeforeDispatch();
@@ -2473,11 +2478,8 @@ export function createMinecraftModsService(options: {
                   .where('server_id', '=', serverId)
                   .where('scope_hash', '=', plan.claimScope as string)
                   .execute();
-                await tx
-                  .updateTable(tables.changes)
-                  .set({ state: 'ready', error: null, updated_at: new Date() })
-                  .where('id', '=', row.id)
-                  .execute();
+                if (plan.githubUrl) await advanceDirectRevision(tx, serverId, row.revision);
+                await markReady(tx, row.id);
                 await recordAudit(tx, current, `minecraft.${directory}.preparation_reconciled`, {
                   serverId,
                   changeId: row.id,
