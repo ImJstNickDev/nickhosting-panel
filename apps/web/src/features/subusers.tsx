@@ -270,6 +270,10 @@ export function ServerSubusers() {
                   <input
                     type="email"
                     autoComplete="off"
+                    data-1p-ignore="true"
+                    data-lpignore="true"
+                    data-bwignore="true"
+                    data-protonpass-ignore="true"
                     required
                     value={identifier}
                     disabled={pending}
