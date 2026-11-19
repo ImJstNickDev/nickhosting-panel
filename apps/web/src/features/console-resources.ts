@@ -37,3 +37,16 @@ export function rollingTelemetry(samples: TelemetrySample[], now: number) {
   }
   return [...seconds.values()].slice(-31);
 }
+
+export function networkRates(samples: TelemetrySample[], direction: 'rx' | 'tx') {
+  return samples.map((sample, index) => {
+    const previous = samples[index - 1];
+    if (!previous) return { time: sample.time, value: NaN };
+    const elapsed = sample.time - previous.time;
+    const delta = sample[direction] - previous[direction];
+    return {
+      time: sample.time,
+      value: elapsed > 0 && elapsed <= 2500 && delta >= 0 ? (delta * 1000) / elapsed : NaN,
+    };
+  });
+}
