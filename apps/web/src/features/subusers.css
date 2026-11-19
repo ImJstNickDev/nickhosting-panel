@@ -136,3 +136,26 @@
   height: 36px;
   min-height: 36px;
 }
+
+dialog.subusers-lookup {
+  box-sizing: border-box;
+  width: min(420px, calc(100vw - 32px));
+  padding: 20px;
+}
+.subusers-lookup .section-heading {
+  margin: 0 0 20px;
+}
+.subusers-lookup .field {
+  display: grid;
+  gap: 6px;
+}
+.subusers-lookup .field input {
+  box-sizing: border-box;
+  width: 100%;
+}
+.subusers-lookup .actions {
+  justify-content: flex-end;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border, #cdd6d9);
+}

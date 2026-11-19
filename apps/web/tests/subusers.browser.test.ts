@@ -37,12 +37,28 @@ describe('M5 Subusers direct granular permissions', () => {
   async function editor() {
     await user.getByRole('button', { name: 'Add subuser', exact: true }).click();
     const dialog = user.getByRole('dialog', { name: 'Add subuser', exact: true });
-    await dialog
-      .getByRole('textbox', { name: 'Registered email address' })
-      .fill(identities.peerEmail);
+    const email = dialog.getByRole('textbox', { name: 'Email', exact: true });
+    await browserExpect(email).toBeFocused();
+    await email.fill(identities.peerEmail);
     await dialog.getByRole('button', { name: 'Find user', exact: true }).click();
     return user.getByRole('dialog', { name: 'Permissions for Taylor', exact: true });
   }
+  it('fits the email lookup on desktop and mobile', async () => {
+    for (const width of [1440, 390]) {
+      await user.setViewportSize({ width, height: 850 });
+      await user.goto(`${base}/subusers`);
+      await user.getByRole('button', { name: 'Add subuser', exact: true }).click();
+      const dialog = user.getByRole('dialog', { name: 'Add subuser', exact: true });
+      await browserExpect(dialog.getByRole('textbox', { name: 'Email' })).toBeFocused();
+      await browserExpect(dialog.getByRole('button', { name: 'Find user' })).toBeDisabled();
+      expect(await dialog.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+      await user.screenshot({
+        path: resolve('docs/screenshots/m5', `subusers-lookup-${width}.png`),
+      });
+      await user.keyboard.press('Escape');
+    }
+    await user.setViewportSize({ width: 1440, height: 850 });
+  });
   it('grants direct access without a project, applies READ dependencies, and hides unauthorized destinations', async () => {
     await user.goto(`${base}/subusers`);
     await browserExpect(user.getByRole('heading', { name: 'Subusers', exact: true })).toBeVisible();
