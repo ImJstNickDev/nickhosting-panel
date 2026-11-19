@@ -20,7 +20,6 @@ export const serverNavigationWebMessages: Record<string, readonly [string, strin
     'No subusers have access to this server.',
     'Nessun subuser ha accesso a questo server.',
   ],
-  'subusers.email': ['Registered email address', 'Email di un utente registrato'],
   'subusers.find': ['Find user', 'Cerca utente'],
   'subusers.notFound': [
     'No eligible registered user found.',

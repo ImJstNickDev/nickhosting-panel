@@ -253,7 +253,8 @@ export function ServerSubusers() {
         onClose={closeEditor}
         closeIcon
         closeDisabled={pending}
-        className="subusers-dialog"
+        className={selected ? 'subusers-dialog' : 'subusers-dialog subusers-lookup'}
+        initialFocusSelector={selected ? undefined : 'input[type="email"]'}
       >
         {editorOpen && (
           <form
@@ -265,7 +266,7 @@ export function ServerSubusers() {
             {!selected ? (
               <>
                 <label className="field">
-                  <span>{t('subusers.email')}</span>
+                  <span>{t('web.email')}</span>
                   <input
                     type="email"
                     autoComplete="off"
@@ -390,7 +391,9 @@ export function ServerSubusers() {
               {(!selected || selected.canEdit) && (
                 <button
                   type="submit"
-                  disabled={pending || Boolean(selected && (!canEdit || !dirty || !draft.length))}
+                  disabled={
+                    pending || (selected ? !canEdit || !dirty || !draft.length : !identifier.trim())
+                  }
                 >
                   {t(pending ? 'web.loading' : selected ? 'web.save' : 'subusers.find')}
                 </button>
