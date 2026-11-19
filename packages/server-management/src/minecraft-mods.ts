@@ -1056,7 +1056,7 @@ export function createMinecraftModsService(options: {
           idempotencyKey: digest([serverId, revision, id]),
         },
         artifact,
-        signal,
+        sourceProvider === 'github' ? signal : undefined,
       );
       const archive = await store.jarArchiveResolver(source.id, serverId, kind);
       // The source store has sealed exact bytes, including providers with rounded sizes.
@@ -1136,7 +1136,7 @@ export function createMinecraftModsService(options: {
               sourceProvider === 'github' &&
               (await list(files)).some(
                 (entry) =>
-                  entry.name === leaf(plan.to) || entry.name === leaf(plan.to) + '.disabled',
+                  entry.name === leaf(plan.to) || entry.name === `${leaf(plan.to)}.disabled`,
               )
             )
               throw new DomainError('conflict');
@@ -1753,11 +1753,14 @@ export function createMinecraftModsService(options: {
         )
           throw new DomainError('conflict');
         if (previous.state === 'ready' || previous.state === 'applied') return previous.id;
-        if (previous.state !== 'failed' && previous.state !== 'cancelled')
-          throw new DomainError('operation_uncertain');
+        if (previous.state === 'cancelled') throw new DomainError('conflict');
+        if (previous.state !== 'failed') throw new DomainError('operation_uncertain');
       }
       const replayId = await replay(db);
       if (replayId) return { changeId: replayId };
+      const initialDraft = await draft(db, serverId);
+      if ((initialDraft?.revision ?? 0) !== value.revision || initialDraft?.state === 'preparing')
+        throw new DomainError('conflict');
       const settings = await getSettings(db, env);
       const { artifact, http } = await githubModArtifact(
         value.url,
@@ -1774,7 +1777,7 @@ export function createMinecraftModsService(options: {
           );
           const already = await replay(tx);
           if (already) return already;
-          // Reattempts may replace only failed/cancelled reservations. Their
+          // Reattempts may replace only failed reservations. Their
           // generated pending filenames remain owned by the cleanup journal.
           await tx
             .updateTable(tables.changes)
@@ -1785,7 +1788,7 @@ export function createMinecraftModsService(options: {
             .where('server_id', '=', serverId)
             .where('actor_user_id', '=', actor.actorUserId)
             .where('idempotency_key', '=', value.idempotencyKey)
-            .where('state', 'in', ['failed', 'cancelled'])
+            .where('state', '=', 'failed')
             .execute();
           const current = await draft(tx, serverId);
           if ((current?.revision ?? 0) !== value.revision || current?.state === 'preparing')
