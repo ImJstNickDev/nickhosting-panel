@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseConsoleResources, rollingTelemetry } from './console-resources.js';
+import { networkRates, parseConsoleResources, rollingTelemetry } from './console-resources.js';
 
 describe('console resource snapshots', () => {
   it('leaves absent network and uptime unavailable while retaining provider cached disk', () => {
@@ -56,4 +56,15 @@ describe('rolling telemetry window', () => {
     expect(rollingTelemetry([missing], 5000)).toEqual([missing]);
     expect(rollingTelemetry([missing], 32000)).toEqual([]);
   });
+});
+
+it('plots independent rates over elapsed time and skips counter resets and gaps', () => {
+  const samples = [
+    { time: 1000, rx: 100, tx: 50 },
+    { time: 2500, rx: 106, tx: 50 },
+    { time: 3500, rx: 0, tx: 53 },
+    { time: 7500, rx: 10, tx: 60 },
+  ].map((sample) => ({ ...sample, cpu: 0, memory: 0 }));
+  expect(networkRates(samples, 'rx').map((point) => point.value)).toEqual([NaN, 4, NaN, NaN]);
+  expect(networkRates(samples, 'tx').map((point) => point.value)).toEqual([NaN, 0, 3, NaN]);
 });

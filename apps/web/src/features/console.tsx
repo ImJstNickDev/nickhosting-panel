@@ -16,6 +16,7 @@ import {
 } from '../components/ui.js';
 import {
   type DisplayResources,
+  networkRates,
   parseConsoleResources,
   rollingTelemetry,
   type TelemetrySample,
@@ -813,8 +814,8 @@ function Telemetry({
             time: sampleAt,
             cpu: cpu ?? NaN,
             memory: memory === undefined ? NaN : memory / 1048576,
-            rx: rx === undefined ? NaN : rx / 1048576,
-            tx: tx === undefined ? NaN : tx / 1048576,
+            rx: rx === undefined ? NaN : rx / 1024,
+            tx: tx === undefined ? NaN : tx / 1024,
           },
         ],
         Date.now(),
@@ -830,8 +831,8 @@ function Telemetry({
       time: Date.parse(row.observed_at),
       memory: Number(row.memory_bytes) / 1048576,
       cpu: row.cpu_percent,
-      rx: Number(row.network_rx_bytes) / 1048576,
-      tx: Number(row.network_tx_bytes) / 1048576,
+      rx: Number(row.network_rx_bytes ?? NaN) / 1024,
+      tx: Number(row.network_tx_bytes ?? NaN) / 1024,
     })),
     ...observations,
     ...(sampleAt && !stale
@@ -840,8 +841,8 @@ function Telemetry({
             time: sampleAt,
             cpu: cpu ?? NaN,
             memory: memory === undefined ? NaN : memory / 1048576,
-            rx: rx === undefined ? NaN : rx / 1048576,
-            tx: tx === undefined ? NaN : tx / 1048576,
+            rx: rx === undefined ? NaN : rx / 1024,
+            tx: tx === undefined ? NaN : tx / 1024,
           },
         ]
       : []),
@@ -897,19 +898,19 @@ function Telemetry({
             offline={offline}
             end={end}
             title={t('service.networkTraffic')}
-            unit="MiB"
+            unit="KiB/s"
             series={[
               {
                 label: t('service.received'),
                 color: '#164cb1',
                 direction: 'inbound',
-                values: samples.map((s) => ({ time: s.time, value: s.rx })),
+                values: networkRates(samples, 'rx'),
               },
               {
                 label: t('service.sent'),
                 color: '#a34b08',
                 direction: 'outbound',
-                values: samples.map((s) => ({ time: s.time, value: s.tx })),
+                values: networkRates(samples, 'tx'),
               },
             ]}
           />
