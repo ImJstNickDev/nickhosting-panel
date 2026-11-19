@@ -383,7 +383,6 @@ export function ServerSubusers() {
                     })}
                   </tbody>
                 </table>
-                <p className="muted">{t('subusers.delegation')}</p>
                 {(query.error || server.error) && <p role="status">{t('subusers.unavailable')}</p>}
               </>
             )}

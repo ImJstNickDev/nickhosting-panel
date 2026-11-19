@@ -54,10 +54,6 @@ export const serverNavigationWebMessages: Record<string, readonly [string, strin
     'Checkboxes control direct grants. Write and additional permissions require Read. Project permissions remain effective when unchecked.',
     'Le caselle controllano i permessi diretti. Scrittura e permessi aggiuntivi richiedono Lettura. I permessi del progetto restano attivi anche senza spunta.',
   ],
-  'subusers.delegation': [
-    'You can grant only permissions you hold. Protected access cannot be changed here.',
-    'Puoi assegnare solo i permessi che possiedi. Gli accessi protetti non possono essere modificati qui.',
-  ],
   'subusers.saved': ['Permissions saved.', 'Permessi salvati.'],
   'subusers.removed': ['Direct access removed.', 'Accesso diretto rimosso.'],
   'subusers.discardTitle': ['Discard permission changes?', 'Scartare le modifiche ai permessi?'],
