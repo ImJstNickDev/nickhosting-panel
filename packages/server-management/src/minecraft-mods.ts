@@ -1184,12 +1184,35 @@ export function createMinecraftModsService(options: {
                   runtime.authorizeTransfer(current, serverId, true, connection, undefined, server),
               });
               await claim.complete();
-              await connection
-                .updateTable(tables.changes)
-                .set({ state: 'ready', updated_at: new Date() })
-                .where('id', '=', id)
-                .where('state', '=', 'preparing')
-                .execute();
+              const ready = (tx: Kysely<Database>) =>
+                tx
+                  .updateTable(tables.changes)
+                  .set({ state: 'ready', updated_at: new Date() })
+                  .where('id', '=', id)
+                  .where('state', '=', 'preparing')
+                  .execute();
+              if (startDirect) {
+                await connection.transaction().execute(async (tx) => {
+                  await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${directory}:${serverId}`},0))`.execute(
+                    tx,
+                  );
+                  await checkRevision(tx, serverId, revision);
+                  await ready(tx);
+                  // Fence already-open reviews and carry forward their pending changes.
+                  await tx
+                    .updateTable(tables.changes)
+                    .set({ revision: revision + 1 })
+                    .where('server_id', '=', serverId)
+                    .where('revision', '=', revision)
+                    .where('state', 'in', active)
+                    .execute();
+                  await tx
+                    .updateTable(tables.drafts)
+                    .set({ revision: revision + 1, updated_at: new Date() })
+                    .where('server_id', '=', serverId)
+                    .execute();
+                });
+              } else await ready(connection);
             } catch (error) {
               if (!dispatched || isUploadNotDispatched(error)) {
                 await claim.rejectBeforeDispatch();
@@ -1864,7 +1887,7 @@ export function createMinecraftModsService(options: {
         },
         startDirect,
       );
-      await refreshGraph(actor, serverId, value.revision);
+      if (changeId === id) await refreshGraph(actor, serverId, value.revision + 1);
       queueCleanup(actor, serverId);
       return { changeId };
     },

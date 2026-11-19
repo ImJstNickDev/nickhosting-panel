@@ -420,6 +420,9 @@ describe('Minecraft Mods durable preparation and publication', () => {
       { id: change.changeId, state: 'ready', metadata: null, path: 'mods/direct.jar' },
     ]);
     expect(f.files.has('mods/direct.jar')).toBe(false);
+    await expect(
+      svc.apply(f.context, f.serverId, { revision: 0, idempotencyKey: randomUUID() }),
+    ).rejects.toMatchObject({ code: 'conflict' });
     githubHttp.json.mockClear();
     expect(await stage()).toEqual(change);
     expect(githubHttp.json).not.toHaveBeenCalled();
