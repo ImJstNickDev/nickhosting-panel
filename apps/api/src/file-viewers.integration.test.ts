@@ -407,10 +407,18 @@ describe('viewer routes with isolated database and fixture byte source', () => {
     expect(listing.status).toBe(200);
     expect(await listing.json()).toMatchObject({ entries: [{ name: 'folder', directory: true }] });
     const indexedReads = reads;
-    const next = await request('/archive?path=fixture.zip&directory=folder');
-    expect(next.status).toBe(200);
-    expect((await next.json()).entries).toHaveLength(2);
-    expect(reads).toBe(indexedReads);
+    const acknowledgement = Promise.withResolvers<void>();
+    closeSource.mockImplementationOnce(() => acknowledgement.promise);
+    try {
+      // Navigation validates a fresh readable handle; a slow CLOSE for that check
+      // must not hold up a response served from the retained, separately owned handle.
+      const next = await request('/archive?path=fixture.zip&directory=folder');
+      expect(next.status).toBe(200);
+      expect((await next.json()).entries).toHaveLength(2);
+      expect(reads).toBe(indexedReads);
+    } finally {
+      acknowledgement.resolve();
+    }
     const body = await request('/archive/content?path=fixture.zip&entry=folder/a.txt', {
       headers: { Range: 'bytes=1-3' },
     });

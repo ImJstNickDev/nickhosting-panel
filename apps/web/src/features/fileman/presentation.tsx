@@ -5,6 +5,7 @@ import {
   type ReactNode,
   type Ref,
   useCallback,
+  useEffect,
   useId,
   useLayoutEffect,
   useState,
@@ -371,6 +372,7 @@ export function FilemanParent(
 
 export interface FilemanListingProps<T extends FilemanEntry> {
   entries: readonly T[];
+  directoryKey?: string;
   hiddenEntries?: readonly T[];
   hiddenExpanded?: boolean;
   onHiddenToggle?: (expanded: boolean) => void;
@@ -396,8 +398,50 @@ export interface FilemanListingProps<T extends FilemanEntry> {
   empty?: ReactNode;
 }
 
+// Keep native rows and tab order. Yield between batches so the first files can
+// paint and accept input while a large directory finishes mounting.
+function FileRows<T>({
+  entries,
+  render,
+  offset = 0,
+  eager,
+}: {
+  entries: readonly T[];
+  render: (entry: T) => ReactNode;
+  offset?: number;
+  eager: boolean;
+}) {
+  const [showNext, setShowNext] = useState(false);
+  const end = entries.length <= 256 ? entries.length : Math.min(entries.length, offset + 96);
+  const remaining = end < entries.length;
+  useEffect(() => {
+    if (!remaining || showNext) return;
+    if (eager) {
+      setShowNext(true);
+      return;
+    }
+    let timer: number | undefined;
+    const frame = requestAnimationFrame(() => {
+      timer = window.setTimeout(() => setShowNext(true), 0);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
+  }, [remaining, showNext, eager]);
+  return (
+    <>
+      {entries.slice(offset, end).map(render)}
+      {remaining && (showNext || eager) && (
+        <FileRows entries={entries} render={render} eager={eager} offset={end} />
+      )}
+    </>
+  );
+}
+
 export function FilemanListing<T extends FilemanEntry>({
   entries,
+  directoryKey,
   hiddenEntries = [],
   hiddenExpanded = false,
   onHiddenToggle,
@@ -578,7 +622,14 @@ export function FilemanListing<T extends FilemanEntry>({
           <span className="sr-only">{t('web.actions')}</span>
         </div>
         {parent}
-        <ul aria-label={t('file.entries')}>{entries.map(renderEntry)}</ul>
+        <ul aria-label={t('file.entries')}>
+          <FileRows
+            key={directoryKey}
+            entries={entries}
+            render={renderEntry}
+            eager={selected.size > 0 || Boolean(menuEntry)}
+          />
+        </ul>
         {hiddenEntries.length > 0 && (
           <section className="fm-hidden-group">
             <button
@@ -606,7 +657,12 @@ export function FilemanListing<T extends FilemanEntry>({
             <div id={hiddenId} hidden={!hiddenExpanded}>
               {hiddenExpanded && (
                 <ul className="fm-hidden-entries" aria-label={t('file.hiddenEntries')}>
-                  {hiddenEntries.map(renderEntry)}
+                  <FileRows
+                    key={directoryKey}
+                    entries={hiddenEntries}
+                    render={renderEntry}
+                    eager={selected.size > 0 || Boolean(menuEntry)}
+                  />
                 </ul>
               )}
             </div>

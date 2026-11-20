@@ -2682,6 +2682,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           </>
         ) : (
           <FilemanListing
+            directoryKey={directory}
             entries={groupedRows.normal}
             hiddenEntries={groupedRows.hidden}
             hiddenExpanded={hiddenExpanded}

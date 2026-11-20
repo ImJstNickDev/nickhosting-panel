@@ -49,21 +49,28 @@ export function useT() {
   return (key: string, values?: Record<string, string | number>) =>
     active._(key in (messages.en as Record<string, unknown>) ? key : 'web.unknown', values);
 }
+function localeFormats(tag: string) {
+  const numbers = new Map<number, Intl.NumberFormat>();
+  const date = new Intl.DateTimeFormat(tag, { dateStyle: 'medium', timeStyle: 'short' });
+  const relative = new Intl.RelativeTimeFormat(tag, { numeric: 'auto' });
+  const number = (value: number, maximumFractionDigits = 1) => {
+    let formatter = numbers.get(maximumFractionDigits);
+    if (!formatter) {
+      formatter = new Intl.NumberFormat(tag, { maximumFractionDigits });
+      numbers.set(maximumFractionDigits, formatter);
+    }
+    return formatter.format(value);
+  };
+  return {
+    number,
+    date: (value: string | Date) => date.format(new Date(value)),
+    bytes: (value: number) => formatBytes(value, tag, number),
+    relative: (value: string | Date) =>
+      relative.format(Math.round((new Date(value).getTime() - Date.now()) / 60000), 'minute'),
+  };
+}
+const formats = { en: localeFormats('en-GB'), it: localeFormats('it-IT') };
 export function useFormat() {
   const { locale } = useLocale();
-  const tag = locale === 'it' ? 'it-IT' : 'en-GB';
-  return {
-    number: (value: number, maximumFractionDigits = 1) =>
-      new Intl.NumberFormat(tag, { maximumFractionDigits }).format(value),
-    date: (value: string | Date) =>
-      new Intl.DateTimeFormat(tag, { dateStyle: 'medium', timeStyle: 'short' }).format(
-        new Date(value),
-      ),
-    bytes: (value: number) => formatBytes(value, tag),
-    relative: (value: string | Date) =>
-      new Intl.RelativeTimeFormat(tag, { numeric: 'auto' }).format(
-        Math.round((new Date(value).getTime() - Date.now()) / 60000),
-        'minute',
-      ),
-  };
+  return locale === 'it' ? formats.it : formats.en;
 }

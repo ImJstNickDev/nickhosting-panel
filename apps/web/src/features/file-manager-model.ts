@@ -27,6 +27,10 @@ export function fileBreadcrumbs(directory: string) {
       })),
   ];
 }
+const compareFileNames = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+  .compare;
+const compareTies = new Intl.Collator().compare;
+
 export function visibleFiles(
   files: ServerFile[],
   search: string,
@@ -34,19 +38,19 @@ export function visibleFiles(
   descending: boolean,
 ): ServerFile[] {
   const query = search.trim().toLocaleLowerCase();
-  return files
-    .filter((file) => file.name.toLocaleLowerCase().includes(query))
-    .sort((a, b) => {
-      const folders = Number(a.is_file || a.is_symlink) - Number(b.is_file || b.is_symlink);
-      if (folders) return folders;
-      const value =
-        order === 'size'
-          ? a.size - b.size
-          : order === 'date'
-            ? Date.parse(a.modified_at) - Date.parse(b.modified_at)
-            : a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
-      return (value || a.name.localeCompare(b.name)) * (descending ? -1 : 1);
-    });
+  return (
+    query ? files.filter((file) => file.name.toLocaleLowerCase().includes(query)) : [...files]
+  ).sort((a, b) => {
+    const folders = Number(a.is_file || a.is_symlink) - Number(b.is_file || b.is_symlink);
+    if (folders) return folders;
+    const value =
+      order === 'size'
+        ? a.size - b.size
+        : order === 'date'
+          ? Date.parse(a.modified_at) - Date.parse(b.modified_at)
+          : compareFileNames(a.name, b.name);
+    return (value || compareTies(a.name, b.name)) * (descending ? -1 : 1);
+  });
 }
 export function selectFileRange(
   visible: ServerFile[],
@@ -61,13 +65,17 @@ export function selectFileRange(
   const end = visible.findIndex((entry) => entry.name === name);
   const names =
     range && start >= 0 && end >= 0
-      ? visible.slice(Math.min(start, end), Math.max(start, end) + 1).map((entry) => entry.name)
-      : [name];
-  for (const item of names.filter(
-    (name) => !visible.find((entry) => entry.name === name)?.is_symlink,
-  ))
+      ? visible
+          .slice(Math.min(start, end), Math.max(start, end) + 1)
+          .filter((entry) => !entry.is_symlink)
+          .map((entry) => entry.name)
+      : visible[end]?.is_symlink
+        ? []
+        : [name];
+  for (const item of names) {
     if (checked) result.add(item);
     else result.delete(item);
+  }
   return result;
 }
 /** Explorer name/row selection, separate from additive checkbox range selection. */
