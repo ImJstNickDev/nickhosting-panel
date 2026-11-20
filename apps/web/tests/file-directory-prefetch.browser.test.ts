@@ -152,6 +152,28 @@ describe('M5 silent visible-directory metadata prefetch', () => {
     }
   });
 
+  it('sorts, searches and selects across large directory render batches', async () => {
+    const files = await provider.files();
+    for (let index = 1; index <= 1000; index++) {
+      files.set(`folder-499/nested/region-${index}.mca`, Buffer.from('Region'));
+    }
+    await user.goto(`${base}?directory=folder-499%2Fnested`);
+    const checkbox = (index: number) =>
+      user.getByRole('checkbox', { name: `Select region-${index}.mca`, exact: true });
+    await checkbox(2).check();
+    await checkbox(999).click({ modifiers: ['Shift'] });
+    await browserExpect(user.locator('.fm-selection-count')).toContainText('998');
+    await browserExpect(checkbox(100)).toBeChecked();
+    await browserExpect(checkbox(1000)).not.toBeChecked();
+    await user.getByRole('button', { name: 'Clear selection', exact: true }).click();
+    await user.getByRole('searchbox').fill('region-1000');
+    await browserExpect(user.locator('.fm-entry')).toHaveCount(1);
+    await browserExpect(checkbox(1000)).toBeVisible();
+    await user.getByRole('searchbox').fill('');
+    await checkbox(999).scrollIntoViewIfNeeded();
+    await browserExpect(checkbox(999)).toBeVisible();
+  });
+
   it('keeps normal folder browsing functional when the optional batch endpoint is unavailable', async () => {
     let attempts = 0;
     await user.route(`${harness.origin}${endpoint}/directories`, async (route) => {

@@ -1549,6 +1549,11 @@ file bounds, recovery semantics and limitations.
 Minecraft Properties exposes the current runtime and eligible version choices through
 `GET /v1/servers/:id/minecraft/versions`. A manager submits the chosen target to the
 same URL with an exact source combination, file policy, confirmation and idempotency key.
+The change-version dialog requests `?view=choices` to load eligible targets, then
+requests `GET /v1/servers/:id/minecraft/versions/loaders?runtime=…&version=…`
+when the selected target requires a loader. Both reads require server management
+access. The choice list checks eligibility for the actor and the server owner. Clients that
+request the original versions URL still receive the full response.
 The server must be stopped. The keep policy preserves user files and offers an
 optional backup, off by default. Fresh clears the server files before installing the
 selected target. Both modes retain the server ID and return a job visible in Activity.
