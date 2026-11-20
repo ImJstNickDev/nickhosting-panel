@@ -1769,6 +1769,124 @@ describe('management runtime execution-time authorization', () => {
       'read',
     );
   });
+  it.each([1, 10])(
+    'serves concurrent resource reads through scoped provider credentials with a %i-connection pool',
+    async (max) => {
+      const sessionId = randomUUID();
+      await database.pool.query(
+        'INSERT INTO session(id,token,"userId","expiresAt") VALUES($1,$2,$3,now()+interval \'1 hour\')',
+        [sessionId, randomUUID(), f.context.actorUserId],
+      );
+      const context = { ...f.context, [authSessionId]: sessionId };
+      const account = await f.db
+        .selectFrom('provider_accounts')
+        .selectAll()
+        .where('user_id', '=', context.subjectUserId)
+        .executeTakeFirstOrThrow();
+      const clientKey = 'isolated-resource-client';
+      await f.db
+        .updateTable('provider_accounts')
+        .set({
+          key_envelope: codec.encrypt(
+            clientKey,
+            `provider-client:${account.instance_id}:${account.user_id}:${account.key_operation_id}`,
+          ),
+        })
+        .where('user_id', '=', account.user_id)
+        .execute();
+      const ids: string[] = [];
+      const remoteServers = new Map<number, ApplicationServer>();
+      for (let index = 0; index < 10; index++) {
+        const id = await f.server();
+        ids.push(id);
+        const remote = await providerIdentity(id);
+        remoteServers.set(remote.id, remote);
+      }
+      const small = createDatabase(process.env.NH_TEST_DATABASE_URL ?? '', {
+        max,
+        connectionTimeoutMillis: 1000,
+        options: `-c search_path=${database.schema}`,
+      });
+      const resources = {
+        current_state: 'offline',
+        is_suspended: false,
+        resources: {
+          disk_bytes: 12,
+          memory_bytes: 0,
+          cpu_absolute: 0,
+          network_rx_bytes: 0,
+          network_tx_bytes: 0,
+        },
+      };
+      const appReads: number[] = [];
+      const clientReads: string[] = [];
+      const provider = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+        const path = new URL(String(url)).pathname;
+        const app = /^\/api\/application\/servers\/(\d+)$/.exec(path);
+        const client = /^\/api\/client\/servers\/([^/]+)\/resources$/.exec(path);
+        if (app) {
+          const remote = remoteServers.get(Number(app[1]));
+          if (!remote) throw new Error('Unknown fixture server');
+          appReads.push(remote.id);
+          return Response.json({
+            attributes: {
+              ...remote,
+              name: 'fixture',
+              description: null,
+              suspended: false,
+              nest: 1,
+              egg: 1,
+              limits: { memory: 128, swap: 0, disk: 256, io: 500, cpu: 25 },
+              feature_limits: { databases: 0, allocations: 1, backups: 1 },
+              container: { startup_command: 'fixture', image: 'fixture:image', installed: 1 },
+              relationships: {
+                allocations: { ...remote.relationships?.allocations, object: 'list' },
+              },
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+            },
+          });
+        }
+        if (
+          !client?.[1] ||
+          new Headers(init?.headers).get('authorization') !== `Bearer ${clientKey}`
+        )
+          throw new Error('Unexpected fixture request or credential');
+        clientReads.push(client[1]);
+        return Response.json({ attributes: resources });
+      });
+      try {
+        const runtime = await createManagementRuntime({
+          db: small.db,
+          codec,
+          env: { NH_PTERODACTYL_APPLICATION_KEY: 'fixture-application' },
+        });
+        const read = (id: string) =>
+          runtime.access(
+            context,
+            id,
+            false,
+            (identifier) => runtime.adapter.getResources(identifier),
+            undefined,
+            'console.read',
+          );
+        const results = await Promise.allSettled(ids.map(read));
+        expect(results).toEqual(ids.map(() => ({ status: 'fulfilled', value: resources })));
+        expect(appReads.sort()).toEqual([...remoteServers.keys()].sort());
+        expect(clientReads.sort()).toEqual(
+          [...remoteServers.values()].map((remote) => remote.identifier).sort(),
+        );
+        await small.db.deleteFrom('session').where('id', '=', sessionId).execute();
+        await Promise.all(
+          ids.map((id) => expect(read(id)).rejects.toMatchObject({ code: 'unauthenticated' })),
+        );
+        expect(clientReads).toHaveLength(10);
+      } finally {
+        provider.mockRestore();
+        await small.db.destroy();
+      }
+    },
+  );
   it('keeps a two-connection pool available for reads and revocation while an upload holds its server lock', async () => {
     const serverId = await f.server(),
       sessionId = randomUUID();

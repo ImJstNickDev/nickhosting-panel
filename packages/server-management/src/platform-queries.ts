@@ -21,16 +21,17 @@ import {
 import { currentInteractiveContext } from './interactive-context.js';
 import { loadModpackProvisioning, modpackJobState } from './modpack-provisioning.js';
 import { backupSchemaAvailable, providerBackupEventsEnabled } from './provider-backup-events.js';
-import { provisioningPresentation, successfulStartAfter } from './provisioning.js';
+import { provisioningPresentation } from './provisioning.js';
 import {
   authorizeServer,
   enqueueServerOperation,
-  getServerPermissionKeys,
   ownerOnly,
   parse,
   publicServer,
   revokeReducedServerCredentialPermissions,
+  serverPermissionDefinitionsForGame,
   serverSubusersAvailable,
+  sharedServerPermissionKeys,
   snapshotServerCredentialPermissions,
 } from './registry.js';
 import { publicIdleTimeout, resolveIdleTimeout } from './sleep-policy.js';
@@ -38,6 +39,7 @@ import { hasStopProcessBaseline, stopEscalation } from './stop-escalation.js';
 import { serverStorageLimitBytes } from './storage-capacity.js';
 import { effectiveUploadPolicy } from './upload-policy.js';
 
+const storageDisplayLifetimeMs = 30_000;
 const pageSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(30),
   cursor: z.string().max(1024).optional(),
@@ -94,8 +96,7 @@ function page<T>(rows: T[], limit: number, key: (row: T) => { at: Date; id: stri
 function owner(context: AuthContext) {
   return context.role === 'owner' && context.sessionType === 'regular';
 }
-async function visibleServers(db: DB, context: AuthContext) {
-  const directAvailable = await serverSubusersAvailable(db);
+function visibleServers(db: DB, context: AuthContext, directAvailable: boolean) {
   assertAuthContext(context);
   let query = db
     .selectFrom('managed_servers')
@@ -130,7 +131,7 @@ async function visibleServers(db: DB, context: AuthContext) {
 }
 async function scopedServer(db: DB, context: AuthContext, serverId: string) {
   parse(z.uuid(), serverId);
-  const row = await (await visibleServers(db, context))
+  const row = await visibleServers(db, context, await serverSubusersAvailable(db))
     .where('id', '=', serverId)
     .executeTakeFirst();
   if (!row) throw new DomainError('not_found');
@@ -158,7 +159,8 @@ export async function listPlatformServers(
   const value = parse(serverQuerySchema, input),
     after = cursor(value.cursor, true);
   if (value.scope === 'others') ownerOnly(context);
-  let inventory = await visibleServers(db, context);
+  const directAvailable = await serverSubusersAvailable(db);
+  let inventory = visibleServers(db, context, directAvailable);
   if (value.scope === 'mine') inventory = inventory.where('owner_id', '=', context.subjectUserId);
   if (value.scope === 'others')
     inventory = inventory.where('owner_id', '!=', context.subjectUserId);
@@ -215,10 +217,13 @@ export async function listPlatformServers(
       sql<boolean>`(date_trunc('milliseconds',created_at),id) < (${new Date(after.at)},${after.id})`,
     );
   if (value.page !== undefined) query = query.offset((pageNumber - 1) * value.limit);
-  const rows = await query
+  const selection = query
     .orderBy(sql`date_trunc('milliseconds',created_at)`, 'desc')
     .orderBy('id', 'desc')
-    .limit(value.limit + 1)
+    .limit(value.limit + 1);
+  const rows = await serverPresentationRows(db, context, selection, directAvailable)
+    .orderBy(sql`date_trunc('milliseconds',server.created_at)`, 'desc')
+    .orderBy('server.id', 'desc')
     .execute();
   const result = page(rows, value.limit, (r) => ({ at: r.created_at, id: r.id }));
   const games = new Map<string, { id: string; nameKey: string | null }>();
@@ -238,8 +243,11 @@ export async function listPlatformServers(
     if (value.scope === 'others' && owner(context))
       owners.set(facet.owner_id, { id: facet.owner_id, name: facet.owner_name });
   }
+  const gamesForPage = await serverPresentationGames(db, result.items);
+  const now = new Date();
   return {
     ...result,
+    observedAt: now.toISOString(),
     total,
     page: pageNumber,
     totalPages,
@@ -250,8 +258,8 @@ export async function listPlatformServers(
       projects: [...projects.values()].sort((a, b) => a.name.localeCompare(b.name)),
       owners: [...owners.values()].sort((a, b) => a.name.localeCompare(b.name)),
     },
-    items: await Promise.all(
-      result.items.map((row) => describeServer(db, context, row, gatewayEnabled)),
+    items: result.items.map((row) =>
+      describeServer(context, row, gamesForPage, gatewayEnabled, now),
     ),
   };
 }
@@ -261,81 +269,149 @@ async function configuredGatewayWake(db: DB, env: Environment) {
   return Boolean(values.gatewayEnabled && values.gatewayId && values.gatewayPhysicalHostId);
 }
 
-async function describeServer(
+// The relations joined here have at most one row per server. Apply them to the
+// authorized page, so a claim, membership or historic sample cannot duplicate a card.
+function serverPresentationRows(
   db: DB,
   context: AuthContext,
-  row: Awaited<ReturnType<typeof scopedServer>>,
-  gatewayEnabled = false,
+  selection: ReturnType<typeof visibleServers>,
+  directAvailable: boolean,
 ) {
-  const [mapping, member, policy, initialDenied, upload, reservation, activeStop] =
-    await Promise.all([
-      db
-        .selectFrom('runtime_egg_mappings as mapping')
-        .innerJoin('game_integrations as game', 'game.id', 'mapping.game_id')
-        .select([
-          'mapping.game_id',
-          'mapping.runtime_id',
-          'mapping.feature_limits',
-          'game.manifest',
-        ])
-        .where('mapping.id', '=', row.mapping_id)
-        .executeTakeFirstOrThrow(),
-      row.project_id
-        ? db
-            .selectFrom('project_members')
-            .select('role')
-            .where('project_id', '=', row.project_id)
+  return db
+    .selectFrom(selection.as('server'))
+    .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
+    .leftJoin('project_members as member', (join) =>
+      join
+        .onRef('member.project_id', '=', 'server.project_id')
+        .on('member.user_id', '=', context.subjectUserId),
+    )
+    .leftJoin('gateway_server_states as policy', 'policy.server_id', 'server.id')
+    .leftJoin('resource_reservations as reservation', 'reservation.server_id', 'server.id')
+    .leftJoin('server_operations as stop', (join) =>
+      join.onRef('stop.job_id', '=', 'server.active_operation_id').on('stop.action', '=', 'stop'),
+    )
+    .leftJoin('operation_jobs as job', 'job.id', 'stop.job_id')
+    .leftJoinLateral(
+      (eb) =>
+        eb
+          .selectFrom('server_metrics')
+          .select(['disk_bytes', 'observed_at'])
+          .whereRef('server_id', '=', 'server.id')
+          .orderBy('observed_at', 'desc')
+          .limit(1)
+          .as('metric'),
+      (join) => join.onTrue(),
+    )
+    .leftJoinLateral(
+      (eb) =>
+        eb
+          .selectFrom('server_events')
+          .select(['message_key', 'created_at'])
+          .whereRef('server_id', '=', 'server.id')
+          // Keep the partial-index predicate visible even to a generic prepared plan.
+          .where('message_key', '=', sql.lit('servers.operation.initial_start_denied'))
+          .orderBy('id', 'desc')
+          .limit(1)
+          .as('denial'),
+      (join) =>
+        join.on((eb) =>
+          eb.not(
+            eb.exists(
+              eb
+                .selectFrom('server_operations as operation')
+                .innerJoin('operation_jobs as completed', 'completed.id', 'operation.job_id')
+                .select('completed.id')
+                .whereRef('operation.server_id', '=', 'server.id')
+                .where('operation.action', 'in', ['start', 'restart'])
+                .where('completed.state', '=', 'succeeded')
+                .whereRef('completed.completed_at', '>', 'denial.created_at'),
+            ),
+          ),
+        ),
+    )
+    .selectAll('server')
+    .select([
+      'mapping.game_id',
+      'mapping.runtime_id',
+      'mapping.feature_limits',
+      'member.role as member_role',
+      'policy.state as gateway_state',
+      'policy.enabled as gateway_enabled',
+      'reservation.server_id as reservation_id',
+      'stop.phase as stop_phase',
+      'stop.effect_started_at as stop_started_at',
+      'denial.message_key as denied_message',
+      'denial.created_at as denied_at',
+      'metric.disk_bytes',
+      'metric.observed_at as metric_at',
+    ])
+    .select(sql<unknown>`stop.plan->'stopProcessStartedAt'`.as('stop_baseline'))
+    .select(sql<unknown>`job.policy_snapshot->'stopEscalation'`.as('stop_escalation'))
+    .select((eb) => [
+      eb
+        .exists(
+          eb
+            .selectFrom('upload_ingestion_claims')
+            .select('id')
+            .whereRef('server_id', '=', 'server.id'),
+        )
+        .as('uploading'),
+      (directAvailable && context.role !== 'owner'
+        ? eb
+            .selectFrom('server_subusers')
+            .select('permission_keys')
+            .whereRef('server_id', '=', 'server.id')
             .where('user_id', '=', context.subjectUserId)
-            .executeTakeFirst()
-        : undefined,
-      db
-        .selectFrom('gateway_server_states')
-        .select(['state', 'enabled'])
-        .where('server_id', '=', row.id)
-        .executeTakeFirst(),
-      db
-        .selectFrom('server_events')
-        .select(['id', 'created_at', 'message_key'])
-        .where('server_id', '=', row.id)
-        .where('message_key', '=', 'servers.operation.initial_start_denied')
-        .orderBy('id', 'desc')
-        .executeTakeFirst(),
-      db
-        .selectFrom('upload_ingestion_claims')
-        .select('id')
-        .where('server_id', '=', row.id)
-        .executeTakeFirst(),
-      db
-        .selectFrom('resource_reservations')
-        .select('state')
-        .where('server_id', '=', row.id)
-        .executeTakeFirst(),
-      row.active_operation_id
-        ? db
-            .selectFrom('server_operations as operation')
-            .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
-            .select([
-              'operation.action',
-              'operation.phase',
-              'operation.effect_started_at',
-              'operation.plan',
-              'job.policy_snapshot',
-            ])
-            .where('job.id', '=', row.active_operation_id)
-            .executeTakeFirst()
-        : undefined,
+        : sql<string[] | null>`null`
+      ).as('direct_permissions'),
     ]);
-  const unresolvedFirstStart =
-    initialDenied && !(await successfulStartAfter(db, row.id, initialDenied.created_at));
-  const manifest = gameManifestSchema.safeParse(mapping.manifest);
-  const scope = { ownerUserId: row.owner_id, memberRole: member?.role };
-  const permissionKeys = await getServerPermissionKeys(db, context, row);
+}
+
+type PresentationRow = Awaited<
+  ReturnType<ReturnType<typeof serverPresentationRows>['execute']>
+>[number];
+
+async function serverPresentationGames(db: DB, rows: PresentationRow[]) {
+  const ids = [...new Set(rows.map((row) => row.game_id))];
+  const games = ids.length
+    ? await db
+        .selectFrom('game_integrations')
+        .select(['id', 'manifest'])
+        .where('id', 'in', ids)
+        .execute()
+    : [];
+  return new Map(
+    games.map((game) => [
+      game.id,
+      {
+        manifest: gameManifestSchema.safeParse(game.manifest),
+        definitions: serverPermissionDefinitionsForGame(game.id),
+      },
+    ]),
+  );
+}
+
+function describeServer(
+  context: AuthContext,
+  row: PresentationRow,
+  games: Awaited<ReturnType<typeof serverPresentationGames>>,
+  gatewayEnabled: boolean,
+  now: Date,
+) {
+  const game = games.get(row.game_id);
+  if (!game) throw new DomainError('integration_unavailable');
+  const { manifest, definitions } = game;
+  const scope = { ownerUserId: row.owner_id, memberRole: row.member_role ?? undefined };
+  const permissionKeys =
+    context.role === 'owner' || row.owner_id === context.subjectUserId
+      ? definitions.map(({ key }) => key)
+      : sharedServerPermissionKeys(definitions, scope.memberRole, row.direct_permissions);
   const manage = hasPermission(context, 'server:manage', scope),
     operate = permissionKeys.includes('console.power');
-  const idle = !row.active_operation_id && !upload;
+  const idle = !row.active_operation_id && !row.uploading;
   const configured = row.pterodactyl_id !== null && row.pterodactyl_identifier !== null;
   const installed = row.installation_state === 'installed';
-  const installedModule = trustedGameModules.get(mapping.game_id);
+  const installedModule = trustedGameModules.get(row.game_id);
   const capabilities = manifest.success
     ? {
         ...manifest.data.capabilities,
@@ -347,32 +423,50 @@ async function describeServer(
         ),
         // Message handlers use the installed module; older persisted manifests
         // may predate this optional capability.
-        gatewayMessages: !!trustedGameModules.get(mapping.game_id)?.manifest.gatewayMessages,
+        gatewayMessages: !!installedModule?.manifest.gatewayMessages,
         ...(row.connection_mode === 'direct'
           ? { idleDetection: false, readiness: false, wake: 'unsupported' as const }
           : {}),
       }
     : null;
+  const escalation = stopEscalation({ stopEscalation: row.stop_escalation });
+  const diskBytes = Number(row.disk_bytes);
+  const sampleMs = row.metric_at?.getTime();
+  const diskUsage =
+    configured &&
+    permissionKeys.includes('console.read') &&
+    row.disk_bytes !== null &&
+    Number.isSafeInteger(diskBytes) &&
+    diskBytes >= 0 &&
+    sampleMs !== undefined &&
+    sampleMs <= now.getTime() &&
+    now.getTime() - sampleMs < storageDisplayLifetimeMs
+      ? {
+          bytes: diskBytes,
+          observedAt: new Date(sampleMs).toISOString(),
+          expiresAt: new Date(sampleMs + storageDisplayLifetimeMs).toISOString(),
+        }
+      : null;
   // Permission is separate from transient availability. These hints never replace
   // the live handler's locks, provider identity, admission or runtime proof.
   return {
     ...publicServer(row),
-    gameId: mapping.game_id,
-    runtimeId: mapping.runtime_id,
+    diskUsage,
+    gameId: row.game_id,
+    runtimeId: row.runtime_id,
     runtimeNameKey: manifest.success
-      ? (manifest.data.runtimes.find((runtime) => runtime.id === mapping.runtime_id)?.nameKey ??
-        null)
+      ? (manifest.data.runtimes.find((runtime) => runtime.id === row.runtime_id)?.nameKey ?? null)
       : null,
     version: row.installed_version,
     gameNameKey: manifest.success ? manifest.data.nameKey : null,
     connectionMode: row.connection_mode,
     readiness: capabilities?.readiness === false ? ('unknown' as const) : row.readiness,
-    sleepState: row.connection_mode === 'direct' ? null : (policy?.state ?? null),
+    sleepState: row.connection_mode === 'direct' ? null : row.gateway_state,
     // Enabled policies already validate their installed protocol binding on write.
     // Base manifests may declare manual wake; this is configuration, not live readiness.
     wakeEnabled: Boolean(
       gatewayEnabled &&
-        policy?.enabled &&
+        row.gateway_enabled &&
         row.connection_mode === 'gateway' &&
         capabilities !== null &&
         capabilities.wake !== 'unsupported' &&
@@ -380,10 +474,10 @@ async function describeServer(
         !['manually_stopped', 'maintenance'].includes(row.intent),
     ),
     capabilities,
-    backupPolicy: trustedGameModules.get(mapping.game_id)?.manifest.backupPolicy ?? {
+    backupPolicy: installedModule?.manifest.backupPolicy ?? {
       offline: 'required' as const,
     },
-    backupLimit: mapping.feature_limits.backups,
+    backupLimit: row.feature_limits.backups,
     permissionKeys,
     permissions: {
       read: true,
@@ -398,18 +492,16 @@ async function describeServer(
         configured &&
         installed &&
         row.runtime_state === 'offline' &&
-        !reservation,
+        !row.reservation_id,
       stop: operate && idle && configured && installed && row.runtime_state !== 'offline',
       kill:
         operate &&
         configured &&
         installed &&
-        activeStop?.action === 'stop' &&
-        activeStop.phase === 'power' &&
-        hasStopProcessBaseline(activeStop.plan) &&
-        !!activeStop.effect_started_at &&
-        (!stopEscalation(activeStop.policy_snapshot) ||
-          stopEscalation(activeStop.policy_snapshot)?.state === 'rejected'),
+        row.stop_phase === 'power' &&
+        hasStopProcessBaseline({ stopProcessStartedAt: row.stop_baseline }) &&
+        !!row.stop_started_at &&
+        (!escalation || escalation.state === 'rejected'),
       restart: operate && idle && configured && installed && row.runtime_state === 'running',
       backup:
         permissionKeys.includes('backups.create') &&
@@ -417,30 +509,49 @@ async function describeServer(
         configured &&
         installed &&
         capabilities?.backups === true,
-      configure: manage && idle && row.runtime_state === 'offline' && !reservation,
+      configure: manage && idle && row.runtime_state === 'offline' && !row.reservation_id,
       metadata: permissionKeys.includes('settings.write'),
-      delete: manage && idle && row.runtime_state === 'offline' && !reservation,
+      delete: manage && idle && row.runtime_state === 'offline' && !row.reservation_id,
       files: permissionKeys.includes('files.read') && configured && capabilities?.files === true,
       console:
         permissionKeys.includes('console.read') && configured && capabilities?.console === true,
     },
-    firstStart: unresolvedFirstStart
-      ? {
-          outcome: 'denied' as const,
-          messageKey: initialDenied.message_key,
-          occurredAt: initialDenied.created_at,
-        }
-      : null,
+    firstStart:
+      row.denied_message && row.denied_at
+        ? {
+            outcome: 'denied' as const,
+            messageKey: row.denied_message,
+            occurredAt: row.denied_at,
+          }
+        : null,
   };
 }
+async function scopedServerPresentation(db: DB, context: AuthContext, serverId: string) {
+  parse(z.uuid(), serverId);
+  const directAvailable = await serverSubusersAvailable(db);
+  const selection = visibleServers(db, context, directAvailable).where('id', '=', serverId);
+  const row = await serverPresentationRows(
+    db,
+    context,
+    selection,
+    directAvailable,
+  ).executeTakeFirst();
+  if (!row) throw new DomainError('not_found');
+  return row;
+}
+
 export async function getPlatformServer(
   db: DB,
   context: AuthContext,
   serverId: string,
   env: Environment = {},
 ) {
-  const server = await scopedServer(db, context, serverId);
-  return describeServer(db, context, server, await configuredGatewayWake(db, env));
+  const row = await scopedServerPresentation(db, context, serverId);
+  const [games, gatewayEnabled] = await Promise.all([
+    serverPresentationGames(db, [row]),
+    configuredGatewayWake(db, env),
+  ]);
+  return describeServer(context, row, games, gatewayEnabled, new Date());
 }
 
 export async function updatePlatformServer(
@@ -763,7 +874,6 @@ export async function getPlatformQuota(
   // Home telemetry has the same 30-second display lifetime as server cards.
   // Admission and measured.stale retain their separate, stricter safety lifetime.
   const displayNow = Date.now();
-  const displayLifetimeMs = 30_000;
   const samples = new Map(metrics.map((metric) => [metric.server_id, metric]));
   let usageBytes = 0;
   let oldestObservation: number | null = null;
@@ -779,7 +889,7 @@ export async function getPlatformQuota(
       at === undefined ||
       !Number.isFinite(at) ||
       at > displayNow ||
-      displayNow - at >= displayLifetimeMs ||
+      displayNow - at >= storageDisplayLifetimeMs ||
       !Number.isSafeInteger(usageBytes + bytes)
     ) {
       completeUsage = false;
@@ -792,7 +902,7 @@ export async function getPlatformQuota(
     bytes: completeUsage ? usageBytes : null,
     expiresAt:
       completeUsage && oldestObservation !== null
-        ? new Date(oldestObservation + displayLifetimeMs).toISOString()
+        ? new Date(oldestObservation + storageDisplayLifetimeMs).toISOString()
         : null,
   };
   return {
@@ -1400,8 +1510,8 @@ export async function getPlatformTransfers(
   serverId: string,
   env: Environment = {},
 ) {
-  const server = await scopedServer(db, context, serverId);
-  const [host, settings, secrets, info, pending, providerAccount] = await Promise.all([
+  const server = await scopedServerPresentation(db, context, serverId);
+  const [host, settings, secrets, games, providerAccount] = await Promise.all([
     db
       .selectFrom('managed_nodes as node')
       .innerJoin('physical_hosts as host', 'host.id', 'node.physical_host_id')
@@ -1410,12 +1520,7 @@ export async function getPlatformTransfers(
       .executeTakeFirstOrThrow(),
     getSettings(db, env),
     secretStatus(db, env),
-    describeServer(db, context, server),
-    db
-      .selectFrom('upload_ingestion_claims')
-      .select('id')
-      .where('server_id', '=', serverId)
-      .executeTakeFirst(),
+    serverPresentationGames(db, [server]),
     db
       .selectFrom('provider_accounts as account')
       .innerJoin('provider_change_feeds as feed', 'feed.instance_id', 'account.instance_id')
@@ -1425,6 +1530,7 @@ export async function getPlatformTransfers(
       .where('account.user_id', '=', server.owner_id)
       .executeTakeFirst(),
   ]);
+  const info = describeServer(context, server, games, false, new Date());
   const policy = effectiveUploadPolicy(host, env),
     configured =
       providerAccount?.status === 'ready' &&
@@ -1432,7 +1538,7 @@ export async function getPlatformTransfers(
       providerAccount.provider_url === settings.values.pterodactylBaseUrl?.replace(/\/$/, '');
   const reason = !info.permissionKeys.includes('files.write')
     ? 'forbidden'
-    : server.active_operation_id || pending
+    : server.active_operation_id || server.uploading
       ? 'conflict'
       : !configured
         ? 'provider_account_unavailable'

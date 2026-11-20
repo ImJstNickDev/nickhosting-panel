@@ -584,9 +584,9 @@ guided application. Finite/unlimited crossings cannot use ordinary server resize
 `GET /v1/platform/quotas` returns `creationStorage.defaultDiskMiB=0` for shared
 storage, `storageBudgetOverrideMiB`, and `storageUsage.bytes` (30-second display freshness, null when any current
 measurement is missing, invalid or stale). The server list returns a response-level
-`observedAt` timestamp. Each item has `diskUsage` with `bytes`, `observedAt` and
+`observedAt` timestamp. Each configured server exposes `diskUsage` with `bytes`, `observedAt` and
 `expiresAt` from the latest worker measurement when the viewer has `console.read`.
-Missing, invalid, future or expired measurements and missing permission yield
+Pending provider binding, missing permission and missing, invalid, future or expired measurements yield
 `diskUsage: null`. Home, project and inventory cards use the list response and
 display the sample until 30 seconds after observation. A fresh measured zero is
 valid. The Console continues to use its live resources transport.

@@ -243,7 +243,11 @@ export async function getServerPermissionDefinitions(
     .select('game_id')
     .where('id', '=', server.mapping_id)
     .executeTakeFirst();
-  const manifest = mapping ? trustedGameModules.get(mapping.game_id)?.manifest : undefined;
+  return serverPermissionDefinitionsForGame(mapping?.game_id);
+}
+
+export function serverPermissionDefinitionsForGame(gameId: string | undefined) {
+  const manifest = gameId ? trustedGameModules.get(gameId)?.manifest : undefined;
   const extension =
     (manifest as { serverPermissions?: ServerPermissionDefinition[] } | undefined)
       ?.serverPermissions ?? [];
@@ -275,11 +279,19 @@ export async function getServerPermissionKeys(
         .where('user_id', '=', context.subjectUserId)
         .executeTakeFirst()
     : undefined;
+  return sharedServerPermissionKeys(definitions, member?.role, direct?.permission_keys);
+}
+
+export function sharedServerPermissionKeys(
+  definitions: ServerPermissionDefinition[],
+  memberRole: Database['project_members']['role'] | undefined,
+  direct: string[] | null | undefined,
+) {
   const known = new Set(definitions.map(({ key }) => key));
   return [
     ...new Set([
-      ...legacyServerPermissionKeys(member?.role, definitions),
-      ...(direct?.permission_keys ?? []).filter((key) => known.has(key)),
+      ...legacyServerPermissionKeys(memberRole, definitions),
+      ...(direct ?? []).filter((key) => known.has(key)),
     ]),
   ];
 }

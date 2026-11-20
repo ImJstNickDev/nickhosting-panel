@@ -36,10 +36,11 @@ it('keeps list query count bounded at 1, 10, 50 and 100 rows for owners, project
   let queries = 0;
   const measured = f.db.withPlugin({
     transformQuery({ node }) {
-      queries++;
       return node;
     },
     async transformResult({ result }) {
+      // Derived tables are compiled separately, but only executed statements have a result.
+      queries++;
       return result;
     },
   });
@@ -51,7 +52,8 @@ it('keeps list query count bounded at 1, 10, 50 and 100 rows for owners, project
       counts.push(queries);
       expect(page.total).toBe(100);
       expect(page.items).toHaveLength(limit);
-      const row = page.items[0]!;
+      const row = page.items[0];
+      if (!row) throw new Error('Expected a visible server');
       const detail = await getPlatformServer(f.db, context, row.id);
       expect(row).toMatchObject({
         permissions: detail.permissions,
@@ -98,32 +100,32 @@ it('serves the latest safe, current disk observation only to readers with consol
       .execute();
     return at;
   }
-  const list = async (context = f.context) =>
+  const usage = async (context = f.context) =>
     (await listPlatformServers(f.db, context, { ownerId: f.context.subjectUserId })).items.find(
       (row) => row.id === id,
-    )!;
-  expect((await list()).diskUsage).toBeNull();
+    )?.diskUsage;
+  expect(await usage()).toBeNull();
   await sample(-60_000, '123');
-  expect((await list()).diskUsage).toBeNull();
+  expect(await usage()).toBeNull();
   const fresh = await sample(-1_000, '0');
   const expected = {
     bytes: 0,
     observedAt: fresh.toISOString(),
     expiresAt: new Date(fresh.getTime() + 30_000).toISOString(),
   };
-  expect((await list()).diskUsage).toEqual(expected);
-  expect((await list(other.context)).diskUsage).toBeNull();
+  expect(await usage()).toEqual(expected);
+  expect(await usage(other.context)).toBeNull();
   await f.db
     .updateTable('server_subusers')
     .set({ permission_keys: JSON.stringify(['console.read']) })
     .where('server_id', '=', id)
     .where('user_id', '=', other.context.subjectUserId)
     .execute();
-  expect((await list(other.context)).diskUsage).toEqual(expected);
+  expect(await usage(other.context)).toEqual(expected);
   await sample(-500, '9007199254740992');
-  expect((await list()).diskUsage).toBeNull();
+  expect(await usage()).toBeNull();
   await sample(60_000, '90');
-  expect((await list()).diskUsage).toBeNull();
+  expect(await usage()).toBeNull();
 });
 
 it('can list project members and their permissions on an installation predating direct grants', async () => {

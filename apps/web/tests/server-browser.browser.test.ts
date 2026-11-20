@@ -5,7 +5,7 @@ import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
-import { installBrowserFixtures } from './provider-fixture.js';
+import { installBrowserFixtures, recordBrowserDiskUsage } from './provider-fixture.js';
 
 describe('M5 server browser filters, ownership and bounded views', () => {
   let fixture: Awaited<ReturnType<typeof browserHarness>>;
@@ -67,9 +67,9 @@ describe('M5 server browser filters, ownership and bounded views', () => {
                 : identities.userId,
           project_id: index < 4 ? projectId : null,
           external_id: `isolated-server-browser-${id}`,
-          pterodactyl_id: null,
-          pterodactyl_uuid: null,
-          pterodactyl_identifier: null,
+          pterodactyl_id: 2000 + index,
+          pterodactyl_uuid: id,
+          pterodactyl_identifier: id.slice(0, 8),
           provider_user_id: null,
           limits: JSON.stringify({ ...source.limits, memory: 32768, cpu: 1250 }),
           runtime_state: index % 2 === 0 ? 'running' : 'offline',
@@ -263,6 +263,7 @@ describe('M5 server browser filters, ownership and bounded views', () => {
   });
 
   it('aligns resource columns across short and long disk values at zoom-equivalent widths', async () => {
+    await user.setViewportSize({ width: 1440, height: 1000 });
     const rows = await fixture.database.db
       .selectFrom('managed_servers')
       .select(['id', 'name'])
@@ -271,22 +272,17 @@ describe('M5 server browser filters, ownership and bounded views', () => {
       .execute();
     const small = rows.find((row) => row.name === 'World 31');
     if (!small) throw new Error('Missing small-storage fixture');
-    const pattern = '**/v1/servers/*/resources';
-    await user.route(pattern, async (route) => {
-      await route.fulfill({
-        json: {
-          current_state: 'offline',
-          resources: {
-            disk_bytes: route.request().url().includes(small.id) ? 164 : 12.34 * 1024 ** 3,
-            cpu_absolute: 0,
-            memory_bytes: 0,
-            network_rx_bytes: 0,
-            network_tx_bytes: 0,
-            uptime: 0,
-          },
-        },
-      });
-    });
+    const resourceReads: string[] = [];
+    const onRequest = (request: { url(): string }) => {
+      if (new URL(request.url()).pathname.endsWith('/resources')) resourceReads.push(request.url());
+    };
+    user.on('request', onRequest);
+    for (const row of rows)
+      await recordBrowserDiskUsage(
+        fixture.database,
+        row.id,
+        row.id === small.id ? 164 : Math.round(12.34 * 1024 ** 3),
+      );
     try {
       await user.goto(`${fixture.origin}/servers`);
       await user.getByRole('searchbox', { name: 'Search servers' }).fill('World 3');
@@ -353,8 +349,60 @@ describe('M5 server browser filters, ownership and bounded views', () => {
       }
       await accessible(user);
     } finally {
-      await user.unroute(pattern);
+      user.off('request', onRequest);
+      expect(resourceReads).toEqual([]);
       await user.setViewportSize({ width: 1440, height: 1000 });
+    }
+  });
+
+  it('expires individual project samples and refreshes all cards with one list read', async () => {
+    const rows = await fixture.database.db
+      .selectFrom('managed_servers')
+      .select(['id', 'name'])
+      .where('project_id', '=', projectId)
+      .orderBy('name')
+      .execute();
+    const [first, second] = rows;
+    if (!first || !second) throw new Error('Missing project servers');
+    await recordBrowserDiskUsage(fixture.database, first.id, 0, new Date(Date.now() - 15_000));
+    await recordBrowserDiskUsage(fixture.database, second.id, 1024);
+    const projectPage = await user.context().newPage();
+    const resourceReads: string[] = [];
+    let stallRefresh = false;
+    let refreshReads = 0;
+    const resume = Promise.withResolvers<void>();
+    try {
+      projectPage.on('request', (request) => {
+        if (new URL(request.url()).pathname.endsWith('/resources'))
+          resourceReads.push(request.url());
+      });
+      await projectPage.clock.install({ time: new Date(Date.now() + 30 * 60 * 1000) });
+      await projectPage.route('**/v1/platform/servers?**', async (route) => {
+        if (stallRefresh) {
+          refreshReads++;
+          await resume.promise;
+        }
+        await route.continue();
+      });
+      await projectPage.goto(`${fixture.origin}/projects/${projectId}`);
+      const diskOf = (id: string) => projectPage.locator(`#server-card-resources-${id} dd`).last();
+      await browserExpect(diskOf(first.id)).toHaveText('0 B');
+      await browserExpect(diskOf(second.id)).toHaveText('1 KiB');
+      stallRefresh = true;
+      await projectPage.clock.fastForward(18_000);
+      await browserExpect.poll(() => refreshReads).toBe(1);
+      await browserExpect(diskOf(first.id)).toHaveText('Unavailable');
+      await browserExpect(diskOf(second.id)).toHaveText('1 KiB');
+      await projectPage.clock.fastForward(13_000);
+      await browserExpect(diskOf(second.id)).toHaveText('Unavailable');
+      expect(refreshReads).toBe(1);
+      await recordBrowserDiskUsage(fixture.database, first.id, 4096);
+      resume.resolve();
+      await browserExpect(diskOf(first.id)).toHaveText('4 KiB');
+      expect(resourceReads).toEqual([]);
+    } finally {
+      resume.resolve();
+      await projectPage.close();
     }
   });
 

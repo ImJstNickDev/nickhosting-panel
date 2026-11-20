@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useRef } from 'react';
 import { Link } from 'react-router';
 import type {
   getPlatformQuota,
@@ -22,13 +22,34 @@ import {
 } from '../components/ui.js';
 import { activityLabelKey, activityStatus } from './activity-labels.js';
 import { getGameArtwork } from './integrations.js';
-import { type Resources, type ServerInfo, serverPath, useServer } from './service-contracts.js';
-import { useStorageUsage } from './use-storage-usage.js';
+import { type ServerInfo, serverPath, useServer } from './service-contracts.js';
+import {
+  storageDisplayDeadline,
+  useRefreshAtExpiry,
+  useStorageUsage,
+} from './use-storage-usage.js';
 import './home.css';
 
 export { ServersPage } from './server-browser.js';
 
 type ServerList = Result<typeof listPlatformServers>;
+export async function fetchServerCardPage(query: string | URLSearchParams, signal: AbortSignal) {
+  // Anchor before I/O: an already generated response may be delayed in transit.
+  const requestedAt = performance.now();
+  const page = await api<ServerList>(`/v1/platform/servers?${query}`, { signal });
+  return {
+    ...page,
+    items: page.items.map((server) => ({
+      ...server,
+      diskDeadline: storageDisplayDeadline(
+        server.diskUsage?.expiresAt,
+        page.observedAt,
+        requestedAt,
+      ),
+    })),
+  };
+}
+type CardServer = Awaited<ReturnType<typeof fetchServerCardPage>>['items'][number];
 type Quota = Result<typeof getPlatformQuota>;
 type Activity = Result<typeof listPlatformActivity>;
 export function statusKey(state: string) {
@@ -105,7 +126,7 @@ function ServerCardResource({
     </div>
   );
 }
-function serverListState(server: ServerInfo): { tone: string; label: string } {
+function serverListState(server: CardServer): { tone: string; label: string } {
   if (server.installationState === 'pending' || server.installationState === 'installing')
     return {
       tone: 'pending',
@@ -130,35 +151,20 @@ function serverListState(server: ServerInfo): { tone: string; label: string } {
 }
 function ServerCard({
   server,
+  diskBytes,
   headingLevel = 2,
   ownerName,
   view,
 }: {
-  server: ServerInfo;
+  server: CardServer;
+  diskBytes: number | null;
   headingLevel?: 2 | 3;
   ownerName?: string;
   view: 'grid' | 'list';
 }) {
   const t = useT(),
     format = useFormat();
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
-  const resources = useQuery({
-    queryKey: ['resources', server.id],
-    queryFn: ({ signal }) => api<Resources>(`${serverPath(server.id)}/resources`, { signal }),
-    refetchInterval: 10000,
-  });
-  const bytes =
-    !resources.error && now - resources.dataUpdatedAt < 30000
-      ? resources.data?.resources.disk_bytes
-      : undefined;
-  const disk =
-    bytes !== undefined && Number.isFinite(bytes) && bytes >= 0
-      ? format.bytes(bytes)
-      : t(resources.isPending ? 'web.loading' : 'web.unavailable');
+  const disk = diskBytes === null ? t('web.unavailable') : format.bytes(diskBytes);
   const Heading = headingLevel === 3 ? 'h3' : 'h2';
   const artwork = getGameArtwork(server.gameId);
   const listState = serverListState(server);
@@ -232,23 +238,32 @@ function ServerCard({
     </li>
   );
 }
+const cardClock = () => performance.now();
+
 export function ServerCards({
   items,
   headingLevel = 2,
   view = 'grid',
   ownerNames,
 }: {
-  items: ServerInfo[];
+  items: CardServer[];
   headingLevel?: 2 | 3;
   view?: 'grid' | 'list';
   ownerNames?: Map<string, string>;
 }) {
+  const now = cardClock();
+  let nextExpiry = Number.POSITIVE_INFINITY;
+  for (const { diskDeadline } of items) {
+    if (diskDeadline > now) nextExpiry = Math.min(nextExpiry, diskDeadline);
+  }
+  useRefreshAtExpiry(nextExpiry, cardClock);
   return (
     <ul className={`server-grid ${view === 'list' ? 'server-list' : ''}`}>
       {items.map((server) => (
         <ServerCard
           key={server.id}
           server={server}
+          diskBytes={server.diskDeadline > now ? (server.diskUsage?.bytes ?? null) : null}
           headingLevel={headingLevel}
           view={view}
           ownerName={ownerNames?.get(server.ownerId)}
@@ -403,7 +418,7 @@ export function HomePage() {
   const t = useT();
   const servers = useQuery({
     queryKey: ['servers', 'recent'],
-    queryFn: () => api<ServerList>('/v1/platform/servers?limit=4'),
+    queryFn: ({ signal }) => fetchServerCardPage('limit=4', signal),
     refetchInterval: 15000,
   });
   const activity = useQuery({

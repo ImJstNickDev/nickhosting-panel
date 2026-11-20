@@ -484,6 +484,10 @@
       align-items: flex-start;
       gap: 2px;
     }
+    .server-browser-results[data-tight="true"][data-view="list"] .server-card-resource {
+      flex-direction: row;
+      align-items: center;
+    }
   }
   .server-browser-results {
     container: server-results / inline-size;

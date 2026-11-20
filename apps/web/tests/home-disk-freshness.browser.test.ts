@@ -2,7 +2,7 @@ import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { browserHarness } from './harness.js';
 import { prepareJourneyIdentities } from './journey-fixture.js';
-import { installBrowserFixtures } from './provider-fixture.js';
+import { installBrowserFixtures, recordBrowserDiskUsage } from './provider-fixture.js';
 
 describe('Home disk usage has a bounded display lifetime', () => {
   let fixture: Awaited<ReturnType<typeof browserHarness>>;
@@ -10,6 +10,7 @@ describe('Home disk usage has a bounded display lifetime', () => {
   let provider: Awaited<ReturnType<typeof installBrowserFixtures>>;
   let user: Page, owner: Page;
   const pageErrors: string[] = [];
+  const resourceReads: string[] = [];
 
   beforeAll(async () => {
     fixture = await browserHarness();
@@ -25,9 +26,10 @@ describe('Home disk usage has a bounded display lifetime', () => {
     fixture.setManagement(provider.management);
     for (const page of [user, owner]) {
       page.on('pageerror', (error) => pageErrors.push(error.message));
-      // Keep the stored worker measurement deterministic: Home's independent
-      // recent-server card must not obtain a newer on-demand provider sample.
-      await page.route('**/v1/servers/*/resources', (route) => route.abort());
+      page.on('request', (request) => {
+        if (new URL(request.url()).pathname.endsWith('/resources'))
+          resourceReads.push(request.url());
+      });
     }
   });
   afterAll(async () => {
@@ -39,18 +41,15 @@ describe('Home disk usage has a bounded display lifetime', () => {
     const db = fixture.database.db;
     await db.deleteFrom('server_metrics').where('server_id', '=', provider.ids.serverId).execute();
     if (bytes !== null)
-      await db
-        .insertInto('server_metrics')
-        .values({
-          server_id: provider.ids.serverId,
-          observed_at: new Date(Date.now() - ageMs),
-          memory_bytes: '0',
-          cpu_percent: 0,
-          disk_bytes: String(bytes),
-          network_rx_bytes: '0',
-          network_tx_bytes: '0',
-        })
-        .execute();
+      await recordBrowserDiskUsage(
+        fixture.database,
+        provider.ids.serverId,
+        bytes,
+        new Date(Date.now() - ageMs),
+      );
+  }
+  function cardDisk() {
+    return user.locator('.server-card-resources dd').last();
   }
   function disk() {
     return user
@@ -61,8 +60,10 @@ describe('Home disk usage has a bounded display lifetime', () => {
   it('shows five-second-old disk usage across reloads without an extra timestamp or indicator', async () => {
     await sample(4 * 1024 ** 2);
     await user.goto(fixture.origin);
+    await browserExpect(cardDisk()).toHaveText('4 MiB');
     await browserExpect(disk().locator('dd').first()).toHaveText('4 MiB');
     await user.reload();
+    await browserExpect(cardDisk()).toHaveText('4 MiB');
     await browserExpect(disk().locator('dd').first()).toHaveText('4 MiB');
     await browserExpect(disk().getByRole('button')).toHaveCount(0);
     await browserExpect(disk()).not.toContainText(/measurement|observed|updated|last/i);
@@ -75,12 +76,13 @@ describe('Home disk usage has a bounded display lifetime', () => {
     await sample(4 * 1024 ** 2);
     await user.clock.install({ time: new Date(Date.now() + 30 * 60 * 1000) });
     await user.goto(fixture.origin);
+    await browserExpect(cardDisk()).toHaveText('4 MiB');
     await browserExpect(disk().locator('dd').first()).toHaveText('4 MiB');
     let release: (() => void) | undefined;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const path = '**/v1/platform/quotas';
+    const path = /\/v1\/platform\/(?:quotas|servers\?limit=4)$/;
     let intercepted = 0;
     await user.route(path, async (route) => {
       intercepted++;
@@ -90,11 +92,13 @@ describe('Home disk usage has a bounded display lifetime', () => {
     try {
       await user.clock.fastForward(31000);
       await browserExpect.poll(() => intercepted).toBeGreaterThan(0);
+      await browserExpect(cardDisk()).toHaveText('Unavailable');
       await browserExpect(disk().locator('dd').first()).toHaveText('Unavailable');
       await browserExpect(disk().getByRole('button')).toHaveCount(0);
       await sample(8 * 1024 ** 2, 0);
       await user.clock.setSystemTime(new Date());
       release?.();
+      await browserExpect(cardDisk()).toHaveText('8 MiB');
       await browserExpect(disk().locator('dd').first()).toHaveText('8 MiB');
     } finally {
       release?.();
@@ -104,7 +108,60 @@ describe('Home disk usage has a bounded display lifetime', () => {
     }
   });
 
+  it('keeps an already expired list response invisible when it arrives after a delayed transfer', async () => {
+    await sample(1024, 0);
+    const page = await user.context().newPage();
+    const release = Promise.withResolvers<void>();
+    let held = false;
+    try {
+      await page.clock.install({ time: new Date(Date.now() - 30 * 60 * 1000) });
+      await page.goto(fixture.origin);
+      const card = page.locator('.server-card-resources dd').last();
+      await browserExpect(card).toHaveText('1 KiB');
+      await sample(2048, 0);
+      const path = '**/v1/platform/servers?limit=4';
+      await page.route(
+        path,
+        async (route) => {
+          const response = await route.fetch();
+          held = true;
+          await release.promise;
+          await route.fulfill({ response });
+        },
+        { times: 1 },
+      );
+      await page.clock.fastForward(15_001);
+      await browserExpect.poll(() => held).toBe(true);
+      await page.clock.fastForward(31_000);
+      await browserExpect(card).toHaveText('Unavailable');
+      const values = await card.evaluateHandle((element) => {
+        const readings = [element.textContent];
+        new MutationObserver(() => readings.push(element.textContent)).observe(element, {
+          subtree: true,
+          characterData: true,
+          childList: true,
+        });
+        return readings;
+      });
+      const delivered = page.waitForResponse((response) =>
+        response.url().endsWith('/v1/platform/servers?limit=4'),
+      );
+      release.resolve();
+      await delivered;
+      await sample(4096, 0);
+      await page.clock.fastForward(15_001);
+      await browserExpect(card).toHaveText('4 KiB');
+      expect(await values.jsonValue()).not.toContain('2 KiB');
+    } finally {
+      release.resolve();
+      await page.close();
+    }
+  });
+
   it('shows unavailable for missing, expired and invalid future samples on a new load', async () => {
+    await sample(0);
+    await user.goto(fixture.origin);
+    await browserExpect(cardDisk()).toHaveText('0 B');
     for (const [bytes, ageMs] of [
       [null, 0],
       [4194304, 31000],
@@ -112,6 +169,7 @@ describe('Home disk usage has a bounded display lifetime', () => {
     ] as const) {
       await sample(bytes, ageMs);
       await user.goto(fixture.origin);
+      await browserExpect(cardDisk()).toHaveText('Unavailable');
       await browserExpect(disk().locator('dd').first()).toHaveText('Unavailable');
     }
   });
@@ -150,6 +208,7 @@ describe('Home disk usage has a bounded display lifetime', () => {
       await owner.clock.setSystemTime(new Date());
       await owner.clock.resume();
     }
+    expect(resourceReads).toEqual([]);
     expect(pageErrors).toEqual([]);
   });
 });
