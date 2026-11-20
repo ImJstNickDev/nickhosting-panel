@@ -102,10 +102,11 @@ export async function observeSatisfactoryMods(
         oc
           .column('server_id')
           .doUpdateSet({ lease_id: lease, lease_binding: scope.binding, lease_until: until })
+          // A superseded waiter must never displace an active refresh.
+          .where(revision(id), '=', scope.revision)
           .where((eb) =>
             eb.or([
               eb(`${table}.lease_id`, 'is', null),
-              eb(`${table}.lease_binding`, '!=', scope.binding),
               eb(`${table}.lease_until`, '<=', sql<Date>`clock_timestamp()`),
             ]),
           )
@@ -120,6 +121,8 @@ export async function observeSatisfactoryMods(
       .returning('server_id')
       .executeTakeFirst();
     if (claimed) break;
+    if ((await satisfactoryObservationScope(db, server)).binding !== scope.binding)
+      throw new DomainError('conflict');
     const saved = await savedSatisfactoryObservation(db, id, scope.binding);
     if (saved && Date.parse(saved.observedAt) >= startedAt) {
       await check();
@@ -184,6 +187,7 @@ export async function observeSatisfactoryMods(
       })
       .where('server_id', '=', id)
       .where('lease_id', '=', lease)
+      .where('lease_binding', '=', scope.binding)
       .where(revision(id), '=', scope.revision)
       .returning('observed_at')
       .executeTakeFirst();

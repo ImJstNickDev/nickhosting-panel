@@ -530,6 +530,45 @@ it('opens twenty observed mods without binary reads and coalesces a cold observa
   expect(adapter.downloadFile).not.toHaveBeenCalled();
 });
 
+it('prevents an obsolete reader from stealing an active observation for the current revision', async () => {
+  const current = await server();
+  const previous = await satisfactoryObservationScope(f.db, current);
+  await f.db
+    .updateTable('satisfactory_mod_states')
+    .set({ revision: 1 })
+    .where('server_id', '=', id)
+    .execute();
+  const next = await satisfactoryObservationScope(f.db, current);
+  const entered = Promise.withResolvers<void>();
+  const gate = Promise.withResolvers<void>();
+  const original = vi.mocked(adapter.listFiles).getMockImplementation();
+  if (!original) throw Error('missing provider fixture');
+  vi.mocked(adapter.listFiles).mockImplementationOnce(async (...args) => {
+    entered.resolve();
+    await gate.promise;
+    return original(...args);
+  });
+  const observe = (scope: typeof previous) =>
+    observeSatisfactoryMods(
+      f.db,
+      current,
+      scope,
+      adapter,
+      async () => {},
+      satisfactoryModDefaultLimits,
+      new AbortController().signal,
+    );
+  const active = observe(next);
+  await entered.promise;
+  try {
+    await expect(observe(previous)).rejects.toMatchObject({ code: 'conflict' });
+  } finally {
+    gate.resolve();
+  }
+  expect((await active).items).toHaveLength(2);
+  expect(await savedSatisfactoryObservation(f.db, id, next.binding)).not.toBeNull();
+});
+
 it('does not publish cancelled, superseded, or unauthorized observations', async () => {
   const current = await server(),
     scope = await satisfactoryObservationScope(f.db, current);
