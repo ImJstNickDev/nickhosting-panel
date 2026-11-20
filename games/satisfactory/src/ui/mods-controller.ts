@@ -69,6 +69,11 @@ export type ModInventory = {
   gameVersion: number | null;
   issues?: { path: string; reason: string }[];
 };
+export type InstalledModInventory = Pick<ModInventory, 'items' | 'issues' | 'gameVersion'> & {
+  observedAt: string;
+  stale: boolean;
+  diverged: boolean;
+};
 export type ModChange = {
   reference: string;
   action: 'install' | 'update' | 'remove' | 'enable' | 'disable' | 'unchanged';
@@ -113,6 +118,12 @@ export function createSatisfactoryModsController(client: GameUiClient) {
   return {
     snapshot: (id: string, signal?: AbortSignal) => get<ModSnapshot>(id, '', signal),
     inventory: (id: string, signal?: AbortSignal) => get<ModInventory>(id, '/inventory', signal),
+    installed: (id: string, refresh: boolean, signal?: AbortSignal) =>
+      get<InstalledModInventory>(
+        id,
+        refresh ? '/inventory?view=refresh' : '/inventory?view=installed',
+        signal,
+      ),
     catalog: (id: string, query: string, offset: number, signal?: AbortSignal) =>
       get<{ items: ModProject[]; total: number }>(
         id,

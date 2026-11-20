@@ -3,12 +3,18 @@ import { createTestDatabase } from '@nickhosting/database/testing';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { satisfactoryManifest } from '../../../games/satisfactory/src/manifest.js';
+import { satisfactoryModDefaultLimits } from '../../../games/satisfactory/src/mods-limits.js';
 import {
   ensureSatisfactoryModState,
   inspectSatisfactoryModInventory,
   readSatisfactoryGameBuild,
   reconcileSatisfactoryMods,
 } from './satisfactory-mod-manager.js';
+import {
+  observeSatisfactoryMods,
+  satisfactoryObservationScope,
+  savedSatisfactoryObservation,
+} from './satisfactory-mod-observations.js';
 import { managementFixture } from './test-fixtures.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -430,4 +436,109 @@ it('cancels and drains every active inventory stream when a capture fails', asyn
   await expect(pending).rejects.toThrow();
   expect(cancelled).toBeGreaterThan(0);
   expect(active).toBe(0);
+});
+
+it('opens twenty observed mods without binary reads and coalesces a cold observation', async () => {
+  files.clear();
+  await f.db
+    .updateTable('satisfactory_mod_states')
+    .set({ lock: '{}' })
+    .where('server_id', '=', id)
+    .execute();
+  const binary = Buffer.alloc(1024 * 1024, 17);
+  for (let i = 0; i < 20; i++) {
+    const name = `Mod${i}`,
+      path = `FactoryGame/Mods/${name}`;
+    files.set(
+      `${path}/${name}.uplugin`,
+      Buffer.from(JSON.stringify({ FriendlyName: name, VersionName: '1.0.0' })),
+    );
+    files.set(`${path}/payload.pak`, binary);
+  }
+  const current = await server(),
+    scope = await satisfactoryObservationScope(f.db, current);
+  const observe = (signal = new AbortController().signal) =>
+    observeSatisfactoryMods(
+      f.db,
+      current,
+      scope,
+      adapter,
+      async () => {},
+      satisfactoryModDefaultLimits,
+      signal,
+    );
+  const gate = Promise.withResolvers<void>(),
+    entered = Promise.withResolvers<void>(),
+    original = vi.mocked(adapter.listFiles).getMockImplementation()!;
+  vi.mocked(adapter.listFiles).mockImplementationOnce(async (...args) => {
+    entered.resolve();
+    await gate.promise;
+    return original(...args);
+  });
+  const first = observe();
+  await entered.promise;
+  const second = observe();
+  gate.resolve();
+  const [a, b] = await Promise.all([first, second]);
+  expect(a).toEqual(b);
+  expect(a.items).toHaveLength(20);
+  expect(vi.mocked(adapter.listFiles).mock.calls).toHaveLength(23);
+  expect(vi.mocked(adapter.readFile).mock.calls).toHaveLength(20);
+  expect(adapter.downloadFile).not.toHaveBeenCalled();
+  vi.mocked(adapter.listFiles).mockClear();
+  vi.mocked(adapter.readFile).mockClear();
+  expect(await savedSatisfactoryObservation(f.db, id, scope.binding)).toEqual(a);
+  expect(adapter.listFiles).not.toHaveBeenCalled();
+  expect(adapter.readFile).not.toHaveBeenCalled();
+  expect(await savedSatisfactoryObservation(f.db, id, 'different-binding')).toBeNull();
+  files.delete('FactoryGame/Mods/Mod5/Mod5.uplugin');
+  const refreshed = await observe();
+  expect(refreshed.items.find((m) => m.reference === 'Mod5')?.issues).toContain(
+    'missing_descriptor',
+  );
+  expect(adapter.downloadFile).not.toHaveBeenCalled();
+});
+
+it('does not publish cancelled, superseded, or unauthorized observations', async () => {
+  const current = await server(),
+    scope = await satisfactoryObservationScope(f.db, current);
+  const controller = new AbortController();
+  const original = vi.mocked(adapter.listFiles).getMockImplementation()!;
+  vi.mocked(adapter.listFiles).mockImplementationOnce(async (...args) => {
+    controller.abort();
+    return original(...args);
+  });
+  const observe = (signal: AbortSignal, check = async () => {}) =>
+    observeSatisfactoryMods(
+      f.db,
+      current,
+      scope,
+      adapter,
+      check,
+      satisfactoryModDefaultLimits,
+      signal,
+    );
+  await expect(observe(controller.signal)).rejects.toThrow();
+  const allowed = new AbortController().signal;
+  await expect(
+    observe(allowed, async () => {
+      throw new Error('revoked');
+    }),
+  ).rejects.toThrow('revoked');
+  vi.mocked(adapter.listFiles).mockImplementationOnce(async (...args) => {
+    await f.db
+      .updateTable('satisfactory_mod_states')
+      .set({ revision: 1 })
+      .where('server_id', '=', id)
+      .execute();
+    return original(...args);
+  });
+  await expect(observe(allowed)).rejects.toMatchObject({ code: 'conflict' });
+  expect(await savedSatisfactoryObservation(f.db, id, scope.binding)).toBeNull();
+  const row = await f.db
+    .selectFrom('satisfactory_mod_inventory_observations')
+    .select('lease_id')
+    .where('server_id', '=', id)
+    .executeTakeFirstOrThrow();
+  expect(row.lease_id).toBeNull();
 });

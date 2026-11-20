@@ -1,8 +1,9 @@
-import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
 import { lazy, Suspense, useEffect, useId, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import {
   createSatisfactoryModsController,
+  type InstalledModInventory,
   type ModChoice,
   type ModInventoryItem,
   type ModPlan,
@@ -11,6 +12,7 @@ import {
 } from '../../../../../games/satisfactory/src/ui/mods-controller.js';
 import { ApiError, api, idempotencyKey } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
+import { type WebSession, webSessionScope } from '../../app/session.js';
 import {
   ModsAction,
   ModsArtwork,
@@ -19,7 +21,7 @@ import {
   ModsIcon,
 } from '../../components/addon-primitives.js';
 import { useUnsavedChanges } from '../../components/navigation-guard.js';
-import { ConfirmDialog, Dialog, ErrorNotice, Input, Select } from '../../components/ui.js';
+import { ConfirmDialog, Dialog, ErrorNotice, Input, Select, Time } from '../../components/ui.js';
 import { Pagination, SearchField } from '../../components/workspace-controls.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { useRequestOperation } from '../../features/servers.js';
@@ -258,19 +260,56 @@ function ModsWorkspace(props: GameSectionViewProps) {
     placeholderData: keepPreviousData,
     staleTime: 0,
   });
+  const queryClient = useQueryClient();
+  const session = useQuery<WebSession>({ queryKey: ['session'], enabled: false });
+  const inventoryKey = [
+    'satisfactory-mods-inventory',
+    ...webSessionScope(session.data),
+    props.serverId,
+    props.permissionKeys,
+    snapshot.data?.revision,
+    props.runtimeState,
+  ];
+  const forceInventoryRefresh = useRef(false);
   const inventory = useQuery({
-    queryKey: [
-      'satisfactory-mods-inventory',
-      props.serverId,
-      snapshot.data?.revision,
-      snapshot.data?.externalMode,
-      props.runtimeState,
-    ],
-    queryFn: ({ signal }) => controller.inventory(props.serverId, signal),
+    queryKey: inventoryKey,
+    queryFn: async ({ signal, queryKey }) => {
+      const forced = forceInventoryRefresh.current;
+      forceInventoryRefresh.current = false;
+      const known = await controller.installed(props.serverId, forced, signal);
+      if (!forced && known.stale) {
+        signal.throwIfAborted();
+        queryClient.setQueryData<InstalledModInventory>(queryKey, known);
+        return controller.installed(props.serverId, true, signal);
+      }
+      return known;
+    },
     enabled: !!snapshot.data,
     staleTime: 0,
     refetchOnWindowFocus: false,
   });
+  const verified = useQuery({
+    queryKey: [...inventoryKey, 'verified', snapshot.data?.externalMode],
+    queryFn: ({ signal }) => controller.inventory(props.serverId, signal),
+    enabled:
+      externalOpen &&
+      !!snapshot.data?.externalMode &&
+      props.canManage &&
+      !props.pending &&
+      ['offline', 'stopped'].includes(props.runtimeState),
+    staleTime: 0,
+    refetchOnWindowFocus: false,
+  });
+  const deniedInventory =
+    inventory.error instanceof ApiError &&
+    ([401, 403, 404, 409].includes(inventory.error.status) ||
+      inventory.error.code === 'provenance_mismatch');
+  const installedData = deniedInventory ? undefined : inventory.data;
+  const diverged =
+    !deniedInventory &&
+    (verified.data && !verified.isError && verified.dataUpdatedAt >= inventory.dataUpdatedAt
+      ? verified.data.diverged
+      : installedData?.diverged);
   const catalog = useQuery({
     queryKey: ['satisfactory-mods-catalog', props.serverId, search, offset],
     queryFn: ({ signal }) => controller.catalog(props.serverId, search, offset, signal),
@@ -358,7 +397,10 @@ function ModsWorkspace(props: GameSectionViewProps) {
     if (!props.pending && lastPending.current && unrelatedPending.current) {
       unrelatedPending.current = false;
       // Revision/runtime changes already select a fresh inventory query.
-      if (pendingInventoryKey.current === inventoryKey) void inventory.refetch();
+      if (pendingInventoryKey.current === inventoryKey) {
+        forceInventoryRefresh.current = true;
+        void inventory.refetch();
+      }
     }
     lastPending.current = props.pending;
   }, [props.pending, props.runtimeState, ownPreview, data, inventory.refetch]);
@@ -366,8 +408,13 @@ function ModsWorkspace(props: GameSectionViewProps) {
     if (view === 'review') viewHeading.current?.focus();
   }, [view]);
 
-  async function refresh() {
-    await Promise.all([snapshot.refetch(), inventory.refetch()]);
+  async function refresh(checkFingerprint = true) {
+    forceInventoryRefresh.current = true;
+    await Promise.all([
+      snapshot.refetch(),
+      inventory.refetch(),
+      ...(checkFingerprint && verified.isEnabled ? [verified.refetch()] : []),
+    ]);
   }
   async function execute(action: () => Promise<void>, repeatable = false) {
     if (operationPending.current) return;
@@ -548,6 +595,20 @@ function ModsWorkspace(props: GameSectionViewProps) {
     link.click();
     setTimeout(() => URL.revokeObjectURL(href), 1000);
   }
+  const [adoption, setAdoption] = useState<{ fingerprint: string; revision: number }>();
+  function reviewAdoption() {
+    if (!data?.externalMode || !props.canManage || !stopped || busy) return;
+    const revision = data.revision;
+    void execute(async () => {
+      const scan =
+        externalOpen && verified.data && !verified.isError
+          ? verified.data
+          : (await verified.refetch({ throwOnError: true })).data;
+      if (!scan) return;
+      setAdoption({ revision, fingerprint: scan.fingerprint });
+      setConfirm('reconcile');
+    });
+  }
   async function confirmAction() {
     if (!data) return;
     const action = confirm;
@@ -569,9 +630,11 @@ function ModsWorkspace(props: GameSectionViewProps) {
           setExternalOpen(true);
           cancelSelections();
           setDraft(undefined);
-        } else if (action === 'reconcile' && inventory.data) {
+        } else if (action === 'reconcile') {
+          if (!adoption || adoption.revision !== revision)
+            throw new ApiError('conflict', 'errors.conflict');
           await controller.reconcile(props.serverId, {
-            fingerprint: inventory.data.fingerprint,
+            fingerprint: adoption.fingerprint,
             selection: current.selection,
             revision,
             profileId: current.profileId,
@@ -590,7 +653,7 @@ function ModsWorkspace(props: GameSectionViewProps) {
     );
   }
   const installed = new Map<string, ModInventoryItem>(
-    (inventory.data?.items ?? []).map((item) => [item.reference, item]),
+    (installedData?.items ?? []).map((item) => [item.reference, item]),
   );
   for (const item of current.selection)
     if (!installed.has(item.reference))
@@ -648,7 +711,7 @@ function ModsWorkspace(props: GameSectionViewProps) {
               onClick={() => setView('installed')}
             >
               {t(key('installed'))}
-              {inventory.data && <span>{inventory.data.items.length}</span>}
+              {installedData && <span>{installedData.items.length}</span>}
             </button>
             <button
               type="button"
@@ -697,7 +760,7 @@ function ModsWorkspace(props: GameSectionViewProps) {
             <button
               type="button"
               className="mods-primary"
-              disabled={!editable || !planReady || !stopped || !!inventory.data?.diverged}
+              disabled={!editable || !planReady || !stopped || !!diverged}
               onClick={apply}
             >
               <ModsIcon name="check" />
@@ -740,11 +803,11 @@ function ModsWorkspace(props: GameSectionViewProps) {
           </button>
         </div>
       )}
-      {!!inventory.data?.issues?.length && (
+      {!!installedData?.issues?.length && (
         <details className="satisfactory-notice">
           <summary>{t(key('inventoryWarnings'))}</summary>
           <ul>
-            {inventory.data.issues.map((issue) => (
+            {installedData.issues.map((issue) => (
               <li key={`${issue.path}-${issue.reason}`}>
                 <code>{issue.path}</code>:{' '}
                 {t(
@@ -757,14 +820,14 @@ function ModsWorkspace(props: GameSectionViewProps) {
           </ul>
         </details>
       )}
-      {inventory.data?.diverged && (
+      {diverged && (
         <div className="satisfactory-notice">
           <p>{t(key('diverged'))}</p>
           <button
             type="button"
             className="secondary"
             disabled={!props.canManage || busy || !stopped}
-            onClick={() => (data?.externalMode ? setConfirm('reconcile') : setExternalOpen(true))}
+            onClick={() => (data?.externalMode ? reviewAdoption() : setExternalOpen(true))}
           >
             {t(key('reconcile'))}
           </button>
@@ -818,9 +881,13 @@ function ModsWorkspace(props: GameSectionViewProps) {
               {t(key('noUpdates'))}
             </p>
           )}
-          {inventory.error ? (
-            <ErrorNotice error={inventory.error} retry={() => void inventory.refetch()} />
-          ) : inventory.isPending ? (
+          {installedData?.observedAt && (
+            <small>
+              {t(key('observedAt'))} <Time value={installedData.observedAt} />
+            </small>
+          )}
+          {inventory.error && <ErrorNotice error={inventory.error} retry={() => void refresh()} />}
+          {inventory.error && !installedData ? null : inventory.isPending ? (
             <p role="status">{t(key('readingInventory'))}</p>
           ) : visibleInstalled.length === 0 ? (
             <ModsEmpty
@@ -956,7 +1023,7 @@ function ModsWorkspace(props: GameSectionViewProps) {
               </button>
             )}
           </footer>
-          {current.vanilla && inventory.data?.items.some((item) => !item.managed) && (
+          {current.vanilla && installedData?.items.some((item) => !item.managed) && (
             <p className="muted">{t(key('unmanagedRemain'))}</p>
           )}
         </>
@@ -1431,6 +1498,10 @@ function ModsWorkspace(props: GameSectionViewProps) {
           }}
           className="satisfactory-mod-dialog"
         >
+          {verified.error && (
+            <ErrorNotice error={verified.error} retry={() => void verified.refetch()} />
+          )}
+          {verified.isFetching && <p role="status">{t(key('readingInventory'))}</p>}
           {errorNode}
           <p>{t(key(data?.externalMode ? 'externalSteps' : 'externalIntro'))}</p>
           {data?.externalMode ? (
@@ -1473,17 +1544,19 @@ function ModsWorkspace(props: GameSectionViewProps) {
                     !props.canManage ||
                     busy ||
                     !stopped ||
-                    !inventory.data ||
-                    inventory.data.diverged ||
-                    data.inventoryFingerprint !== inventory.data.fingerprint
+                    !verified.data ||
+                    verified.isError ||
+                    verified.isFetching ||
+                    verified.data.diverged ||
+                    data.inventoryFingerprint !== verified.data.fingerprint
                   }
                   onClick={() => {
-                    if (!data || !inventory.data) return;
-                    const fingerprint = inventory.data.fingerprint;
+                    if (!data || !verified.data || verified.isError || verified.isFetching) return;
+                    const fingerprint = verified.data.fingerprint;
                     const revision = data.revision;
                     void execute(async () => {
                       await controller.finishExternal(props.serverId, revision, fingerprint);
-                      await refresh();
+                      await refresh(false);
                       setExternalOpen(false);
                     });
                   }}
@@ -1491,11 +1564,11 @@ function ModsWorkspace(props: GameSectionViewProps) {
                   {t(key('finishExternal'))}
                 </button>
               </div>
-              {!!inventory.data?.issues?.length && (
+              {!!verified.data?.issues?.length && (
                 <details className="satisfactory-notice">
                   <summary>{t(key('inventoryWarnings'))}</summary>
                   <ul>
-                    {inventory.data.issues.map((issue) => (
+                    {verified.data.issues.map((issue) => (
                       <li key={`${issue.path}-${issue.reason}`}>
                         <code>{issue.path}</code>:{' '}
                         {t(
@@ -1508,14 +1581,19 @@ function ModsWorkspace(props: GameSectionViewProps) {
                   </ul>
                 </details>
               )}
-              {inventory.data && (
+              {installedData && (
                 <button
                   type="button"
                   className="secondary"
-                  disabled={busy || !stopped || !props.canManage}
-                  onClick={() =>
-                    data?.externalMode ? setConfirm('reconcile') : setExternalOpen(true)
+                  disabled={
+                    busy ||
+                    verified.isFetching ||
+                    !verified.data ||
+                    verified.isError ||
+                    !stopped ||
+                    !props.canManage
                   }
+                  onClick={reviewAdoption}
                 >
                   {t(key('reconcile'))}
                 </button>

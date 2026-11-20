@@ -55,6 +55,7 @@ export const satisfactoryWebMessages: Record<string, [string, string]> = {
   'games.satisfactory.mods.discover': ['Discover', 'Scopri'],
   'games.satisfactory.mods.review': ['Review changes', 'Rivedi modifiche'],
   'games.satisfactory.mods.back': ['Back to discovery', 'Torna al catalogo'],
+  'games.satisfactory.mods.observedAt': ['Last checked', 'Ultimo controllo'],
   'games.satisfactory.mods.refresh': ['Read server files again', 'Rileggi i file del server'],
   'games.satisfactory.mods.profiles': ['Profiles', 'Profili'],
   'games.satisfactory.mods.connectSmm': [

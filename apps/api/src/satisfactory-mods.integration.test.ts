@@ -290,6 +290,8 @@ it('permits SMM profile import during external mode while content jobs remain bl
 it('denies other users before reading server files or modifying profiles', async () => {
   actor = (await managementFixture(f.db, { interactive: true })).context;
   expect((await request('/inventory')).status).toBe(403);
+  expect((await request('/inventory?view=installed')).status).toBe(403);
+  expect((await request('/inventory?view=refresh')).status).toBe(403);
   expect((await request('/profiles', profile())).status).toBe(403);
   expect(listFiles).not.toHaveBeenCalled();
 });
@@ -496,4 +498,48 @@ it('persists explicit metadata refresh in preview identity and rejects a changed
     .executeTakeFirstOrThrow();
   expect(operation.plan.satisfactoryContent).toMatchObject({ refreshMetadata: true });
   expect((await request('/preview', { ...body, refreshMetadata: false })).status).toBe(409);
+});
+
+it('reads the persisted inventory even when the provider is offline and rechecks file permission', async () => {
+  const fresh = await request('/inventory?view=installed');
+  expect(fresh.status).toBe(200);
+  const view = await fresh.json();
+  expect(view).toMatchObject({ items: [], stale: false });
+  expect(Date.parse(view.observedAt)).toBeGreaterThan(0);
+  listFiles.mockClear();
+  listFiles.mockRejectedValue(new Error('offline'));
+  const saved = await request('/inventory?view=installed');
+  expect(saved.status).toBe(200);
+  expect(await saved.json()).toEqual(view);
+  expect(listFiles).not.toHaveBeenCalled();
+  expect((await request('/inventory?view=refresh')).ok).toBe(false);
+  const stale = await request('/inventory?view=installed');
+  expect(await stale.json()).toEqual(view);
+  const instanceId = randomUUID();
+  await f.db
+    .insertInto('provider_change_feeds')
+    .values({
+      instance_id: instanceId,
+      provider_url: `https://${instanceId}.invalid`,
+      callback_url: 'https://panel.invalid/feed',
+      generation: '0',
+      enabled: true,
+    })
+    .execute();
+  await f.db
+    .insertInto('provider_server_projections')
+    .values({
+      server_id: serverId,
+      instance_id: instanceId,
+      revision: '1',
+      payload: {},
+      synchronized_at: new Date(),
+      identity_invalidated: true,
+      valid: false,
+    })
+    .execute();
+  const invalid = await request('/inventory?view=installed');
+  expect(await invalid.json()).toMatchObject({ code: 'provenance_mismatch' });
+  actor = (await managementFixture(f.db, { interactive: true })).context;
+  expect((await request('/inventory?view=installed')).status).toBe(403);
 });

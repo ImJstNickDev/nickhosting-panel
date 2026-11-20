@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { authorizeServer, enqueueServerOperation } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
+import { sql } from 'kysely';
 import { z } from 'zod';
 import {
   satisfactoryModLockSchema,
@@ -35,6 +36,11 @@ import {
   reconcileSatisfactoryMods,
   sameSatisfactorySelection,
 } from '../../../packages/server-management/src/satisfactory-mod-manager.js';
+import {
+  observeSatisfactoryMods,
+  satisfactoryObservationScope,
+  savedSatisfactoryObservation,
+} from '../../../packages/server-management/src/satisfactory-mod-observations.js';
 import type { Variables } from './app.js';
 import { registerSatisfactoryModExternalRoutes } from './satisfactory-mod-external.js';
 import type { ServerRouteOptions } from './servers.js';
@@ -138,7 +144,18 @@ export function registerSatisfactoryModRoutes(
     const server = await access(await options.principal(c), c.req.param('id'));
     const row = await options.db
       .selectFrom('satisfactory_mod_states')
-      .selectAll()
+      .select([
+        'selection',
+        'lock',
+        'revision',
+        'vanilla',
+        'active_profile_id',
+        'external_mode',
+        'inventory_fingerprint',
+        sql<boolean>`recovery is not null and (recovery -> 'obsolete') is distinct from 'true'::jsonb`.as(
+          'rollback_available',
+        ),
+      ])
       .where('server_id', '=', c.req.param('id'))
       .executeTakeFirst();
     const profiles = await options.db
@@ -174,7 +191,7 @@ export function registerSatisfactoryModRoutes(
       activeProfileId: row?.active_profile_id ?? null,
       externalMode: row?.external_mode ?? false,
       inventoryFingerprint: row?.inventory_fingerprint ?? null,
-      rollbackAvailable: !!row?.recovery && !(row.recovery as { obsolete?: boolean }).obsolete,
+      rollbackAvailable: row?.rollback_available ?? false,
       profiles: profiles.map((profile) => ({
         ...profile,
         requiredTargets: profile.required_targets,
@@ -185,10 +202,42 @@ export function registerSatisfactoryModRoutes(
     const actor = await options.principal(c),
       id = c.req.param('id'),
       server = await access(actor, id);
+    c.header('cache-control', 'no-store');
     await authorizeServer(options.db, actor, id, 'files.read');
+    const view = c.req.query('view');
+    if (view === 'installed' || view === 'refresh') {
+      const scope = await satisfactoryObservationScope(options.db, server);
+      if (view === 'installed') {
+        const saved = await savedSatisfactoryObservation(options.db, id, scope.binding);
+        if (saved) {
+          const current = await currentInteractiveContext(options.db, actor, options.env);
+          const latest = await authorizeServer(options.db, current, id, 'files.read');
+          if ((await satisfactoryObservationScope(options.db, latest)).binding !== scope.binding)
+            throw new DomainError('conflict');
+          return c.json(saved);
+        }
+      }
+      return c.json(
+        await withFiles(actor, id, async (service, verified, authorize, connection) => {
+          const fresh = await satisfactoryObservationScope(connection, verified);
+          if (fresh.binding !== scope.binding) throw new DomainError('conflict');
+          return observeSatisfactoryMods(
+            connection,
+            verified,
+            fresh,
+            service.adapter,
+            authorize,
+            resolveSatisfactoryModLimits(options.env),
+            c.req.raw.signal,
+          );
+        }),
+      );
+    }
+    if (view !== undefined) throw new DomainError('validation_failed');
     return c.json(
       await withFiles(actor, id, (service, verified, authorize, connection) =>
         inspectSatisfactoryModInventory(connection, service.adapter, verified, authorize, {
+          signal: c.req.raw.signal,
           limits: resolveSatisfactoryModLimits(options.env),
         }),
       ),

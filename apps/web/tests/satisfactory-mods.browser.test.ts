@@ -1518,3 +1518,68 @@ it('saves Satisfactory installation retry limits and respects the environment lo
     await context.close();
   }
 });
+
+it('shows the dated installed list while refreshing descriptors and never requests byte verification just to browse', async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  const started = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>();
+  let offline = true;
+  const reads: string[] = [];
+  const item = {
+    reference: 'Example',
+    name: 'Known factory mod',
+    version: '1.0.0',
+    path: 'FactoryGame/Mods/Example',
+    managed: false,
+    dependency: false,
+    gameFeature: false,
+    issues: [],
+  };
+  await page.route('**/v1/**', async (route) => {
+    const url = new URL(route.request().url());
+    if (!url.pathname.endsWith('/inventory')) return route.fulfill({ json: emptySnapshot() });
+    const view = url.searchParams.get('view') ?? 'verified';
+    reads.push(view);
+    if (view === 'refresh') {
+      started.resolve();
+      await release.promise;
+      if (offline)
+        return route.fulfill({
+          status: 503,
+          json: {
+            error: {
+              code: 'integration_unavailable',
+              messageKey: 'errors.integration_unavailable',
+            },
+          },
+        });
+    }
+    return route.fulfill({
+      json: {
+        items: [{ ...item, name: offline ? item.name : 'Updated factory mod' }],
+        issues: [],
+        gameVersion: 400001,
+        stale: offline,
+        diverged: false,
+        observedAt: '2025-01-01T01:00:00Z',
+      },
+    });
+  });
+  try {
+    await page.goto(`${origin}satisfactory-fixture`);
+    await started.promise;
+    await check(page.getByText('Known factory mod', { exact: true })).toBeVisible();
+    await check(page.locator('time[datetime="2025-01-01T01:00:00Z"]')).toBeVisible();
+    release.resolve();
+    await check(page.getByRole('alert')).toBeVisible();
+    await check(page.getByText('Known factory mod', { exact: true })).toBeVisible();
+    offline = false;
+    await page.getByRole('button', { name: 'Try again', exact: true }).click();
+    await check(page.getByText('Updated factory mod', { exact: true })).toBeVisible();
+    expect(reads).toEqual(['installed', 'refresh', 'refresh']);
+  } finally {
+    release.resolve();
+    await context.close();
+  }
+});
