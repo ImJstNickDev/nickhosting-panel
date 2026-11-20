@@ -716,15 +716,28 @@ export async function getPlatformQuota(
       .where('s.owner_id', '=', userId)
       .where('s.deleted_at', 'is', null)
       .execute(),
+    // Read one index entry per active server, even when metric history is large.
     db
-      .selectFrom('server_metrics as m')
-      .innerJoin('managed_servers as s', 's.id', 'm.server_id')
-      .select(['m.server_id', 'm.memory_bytes', 'm.cpu_percent', 'm.disk_bytes', 'm.observed_at'])
+      .selectFrom('managed_servers as s')
+      .crossJoinLateral((eb) =>
+        eb
+          .selectFrom('server_metrics as m')
+          .select([
+            'm.server_id',
+            'm.memory_bytes',
+            'm.cpu_percent',
+            'm.disk_bytes',
+            'm.observed_at',
+          ])
+          .whereRef('m.server_id', '=', 's.id')
+          .orderBy('m.observed_at', 'desc')
+          .limit(1)
+          .as('latest'),
+      )
+      .selectAll('latest')
       .where('s.owner_id', '=', userId)
       .where('s.deleted_at', 'is', null)
-      .distinctOn('m.server_id')
-      .orderBy('m.server_id')
-      .orderBy('m.observed_at', 'desc')
+      .orderBy('s.id')
       .execute(),
     db
       .selectFrom('storage_user_budgets')

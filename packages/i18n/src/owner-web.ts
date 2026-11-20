@@ -215,7 +215,41 @@ export const ownerWebMessages: Record<string, readonly [string, string]> = {
   'owner.overrideActive': ['Individual limits active', 'Limiti individuali attivi'],
   'owner.noExpiry': ['No expiration', 'Senza scadenza'],
   'owner.overrideExpired': ['Individual limits expired', 'Limiti individuali scaduti'],
+  'owner.userHistory': ['History', 'Cronologia'],
   'owner.quotaHistory': ['Limit change history', 'Cronologia modifiche ai limiti'],
+  'owner.verifyIdentity': ['Verify your identity', 'Verifica la tua identità'],
+  'owner.adminAccount': ['Administrator account', 'Account amministratore'],
+  'owner.verifyFailed': [
+    'Check your credentials and try again.',
+    'Controlla le credenziali e riprova.',
+  ],
+  'owner.useAuthenticator': ['Use the authenticator', 'Usa l’app di autenticazione'],
+  'owner.supportContext': [
+    'You’ll assist {name}. Actions are recorded under your account.',
+    'Assisterai {name}. Le azioni saranno registrate a tuo nome.',
+  ],
+  'owner.confirmSupport': [
+    'Start an assisted session for {name}.',
+    'Avvia una sessione assistita per {name}.',
+  ],
+  'owner.recoveryLink': ['Recovery link', 'Link di recupero'],
+  'owner.showRecoveryLink': ['Show recovery link', 'Mostra link di recupero'],
+  'owner.generateRecoveryLink': ['Generate recovery link', 'Genera link di recupero'],
+  'owner.confirmRecovery': [
+    'Generate a password reset link for {name}.',
+    'Genera un link per reimpostare la password di {name}.',
+  ],
+  'owner.confirmReveal': [
+    'Open the current recovery link for {name}.',
+    'Apri il link di recupero attivo per {name}.',
+  ],
+  'owner.confirmExpiry': [
+    'Set the recovery link for {name} to expire on {expires}.',
+    'Imposta la scadenza del link di {name} al {expires}.',
+  ],
+  'owner.changeExpiry': ['Change expiry', 'Modifica scadenza'],
+  'owner.recoveryDuration': ['Expires in 24 hours', 'Scade tra 24 ore'],
+  'owner.copyLink': ['Copy link', 'Copia link'],
   'owner.startSupport': ['Start assistance', 'Avvia assistenza'],
   'owner.supportWarning': [
     'Actions remain attributed to your account. The assisted user’s own session is not changed.',

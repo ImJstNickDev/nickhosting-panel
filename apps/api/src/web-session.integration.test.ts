@@ -276,6 +276,9 @@ describe('WebPanel parent-bound HttpOnly assisted sessions', () => {
         })
       ).status,
     ).toBe(403);
+    const recovery = `/v1/owner/users/${userId}/recovery-link`;
+    expect((await request(owner, recovery, undefined, assistedHeaders())).status).toBe(403);
+    expect((await request(owner, recovery, {}, assistedHeaders())).status).toBe(403);
     expect((await request(user, '/v1/web/session')).status).toBe(200);
     expect((await request(user, '/v1/web/session', undefined, assistedHeaders(user))).status).toBe(
       403,
@@ -320,5 +323,126 @@ describe('WebPanel parent-bound HttpOnly assisted sessions', () => {
     expect(exit.status).toBe(204);
     expect(exit.headers.getSetCookie().join(';')).toContain('Max-Age=0');
     expect((await request(user, '/v1/web/session')).status).toBe(200);
+  });
+  it('binds recoverable password links to regular Owner proof, target, purpose and expiry', async () => {
+    const signed = await owner.request('/sign-in/email', { email: 'owner@example.test', password });
+    const ownerId: string = (await signed.json()).user.id;
+    await database.pool.query('DELETE FROM identity_throttle WHERE key=$1', [`step-up:${ownerId}`]);
+    const path = `/v1/owner/users/${userId}/recovery-link`;
+    const proof = async () => {
+      const response = await request(owner, '/v1/identity/step-up', {
+        password,
+        purpose: 'recovery-link',
+        subjectUserId: userId,
+      });
+      expect(response.status).toBe(200);
+      return (await response.json()).token as string;
+    };
+    expect((await request(user, path)).status).toBe(403);
+    expect(await (await request(owner, path)).json()).toEqual({ available: true, expiresAt: null });
+    expect(await (await request(owner, `/v1/owner/users/${ownerId}/recovery-link`)).json()).toEqual(
+      { available: false, expiresAt: null },
+    );
+    const support = await identity.stepUp(owner.headers(), { password });
+    expect(
+      (await request(owner, path, { mode: 'create', stepUpToken: support.token })).status,
+    ).toBe(403);
+    const stepUpToken = await proof();
+    const body = { mode: 'create', stepUpToken };
+    expect(
+      (await request(owner, path, body, { origin: 'https://other.example.test' })).status,
+    ).toBe(403);
+    expect(
+      (
+        await request(owner, '/v1/web/support', {
+          stepUpToken,
+          subjectUserId: userId,
+          reason: 'Different action',
+        })
+      ).status,
+    ).toBe(403);
+    expect((await request(owner, `/v1/owner/users/${ownerId}/recovery-link`, body)).status).toBe(
+      403,
+    );
+    const before = Date.now();
+    const created = await request(owner, path, body);
+    expect(created.status).toBe(200);
+    expect(created.headers.get('cache-control')).toBe('no-store');
+    const { url, expiresAt } = await created.json();
+    expect(Date.parse(expiresAt)).toBeGreaterThanOrEqual(before + 86_400_000);
+    expect(Date.parse(expiresAt)).toBeLessThanOrEqual(Date.now() + 86_400_000);
+    expect((await request(owner, path, body)).status).toBe(403);
+    expect(await (await request(owner, path)).json()).toEqual({ available: true, expiresAt });
+    const token = new URL(url).searchParams.get('token');
+    if (!token) throw new Error('Missing reset token');
+    const stored = await database.pool.query(
+      'SELECT * FROM verification WHERE owner_recovery_account_id IS NOT NULL',
+    );
+    expect(stored.rowCount).toBe(1);
+    expect(JSON.stringify(stored.rows)).not.toContain(token);
+    const reveal = { mode: 'reveal', stepUpToken: await proof() };
+    const newExpiry = new Date(Date.now() + 3600_000).toISOString();
+    expect(await (await request(owner, path, { ...reveal, expiresAt: newExpiry })).json()).toEqual({
+      url,
+      expiresAt: newExpiry,
+    });
+    const action = { token, newPassword: `${password}-updated` };
+    expect((await request(user, '/api/auth/reset-password', action)).status).toBe(200);
+    expect((await request(user, '/api/auth/reset-password', action)).status).toBe(400);
+    expect((await request(user, '/v1/web/session')).status).toBe(401);
+    expect(await (await request(owner, path)).json()).toEqual({ available: true, expiresAt: null });
+    const fresh = await proof();
+    expect((await request(owner, path, { mode: 'reveal', stepUpToken: fresh })).status).toBe(404);
+    const regenerated = await request(owner, path, { mode: 'create', stepUpToken: fresh });
+    const newUrl = (await regenerated.json()).url;
+    expect(newUrl).not.toBe(url);
+    await database.pool.query(
+      `UPDATE verification SET "expiresAt"=now() - interval '1 second' WHERE owner_recovery_account_id IS NOT NULL`,
+    );
+    expect(
+      (
+        await request(user, '/api/auth/reset-password', {
+          ...action,
+          token: new URL(newUrl).searchParams.get('token'),
+        })
+      ).status,
+    ).toBe(400);
+    expect(await (await request(owner, path)).json()).toEqual({ available: true, expiresAt: null });
+    const finalGrant = await proof();
+    const active = await (
+      await request(owner, path, { mode: 'create', stepUpToken: finalGrant })
+    ).json();
+    expect(
+      (
+        await user.request('/sign-in/email', {
+          email: 'member@example.test',
+          password: action.newPassword,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await user.request('/change-password', {
+          currentPassword: action.newPassword,
+          newPassword: password,
+        })
+      ).status,
+    ).toBe(200);
+    expect(await (await request(owner, path)).json()).toEqual({ available: true, expiresAt: null });
+    expect(
+      (
+        await request(user, '/api/auth/reset-password', {
+          ...action,
+          token: new URL(active.url).searchParams.get('token'),
+        })
+      ).status,
+    ).toBe(400);
+    const audit = (
+      await database.pool.query(
+        "SELECT * FROM audit_events WHERE action LIKE 'identity.recovery_link_%'",
+      )
+    ).rows;
+    expect(audit.length).toBe(4);
+    expect(JSON.stringify(audit)).not.toContain(token);
   });
 });

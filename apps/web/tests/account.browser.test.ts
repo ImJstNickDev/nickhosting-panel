@@ -382,6 +382,48 @@ describe('M5 real browser identity and Owner setup', () => {
     await fixture.screenshot(user, 'settings-security-desktop-it');
     expect(pageErrors).toEqual([]);
   });
+  it('issues, reopens and changes the expiry of a user recovery link after Owner verification', async () => {
+    const member = await fixture.database.db
+      .selectFrom('user')
+      .select('id')
+      .where('email', '=', 'member@browser.example.test')
+      .executeTakeFirstOrThrow();
+    const path = `${fixture.origin}/owner/users/${member.id}`;
+    await owner.goto(path);
+    await owner.getByRole('button', { name: 'Generate recovery link' }).click();
+    const verify = owner.getByRole('dialog', { name: 'Verify your identity' });
+    const account = verify.getByLabel('Administrator account');
+    await browserExpect(account).toHaveAttribute('autocomplete', 'username');
+    await browserExpect(account).toHaveValue('owner@browser.example.test');
+    const password = verify.getByLabel('Current password');
+    await browserExpect(password).toHaveAttribute('autocomplete', 'current-password');
+    await browserExpect(password).toBeFocused();
+    await password.fill(browserPassword);
+    await verify.getByRole('button', { name: 'Generate recovery link' }).click();
+    const result = owner.getByRole('dialog', { name: 'Recovery link', exact: true });
+    const link = result.getByRole('textbox', { name: 'Recovery link' });
+    await browserExpect(link).toBeVisible();
+    const original = await link.inputValue();
+    const deadline = Date.parse((await result.locator('time').getAttribute('datetime')) ?? '');
+    expect(Math.abs(deadline - Date.now() - 86400000)).toBeLessThan(60000);
+    await owner.reload();
+    await owner.getByRole('button', { name: 'Show recovery link' }).click();
+    await password.fill(browserPassword);
+    await verify.getByRole('button', { name: 'Show recovery link' }).click();
+    await browserExpect(link).toHaveValue(original);
+    await result.getByRole('button', { name: 'Change expiry' }).click();
+    const local = await owner.evaluate(() => {
+      const date = new Date(Date.now() + 3600000);
+      return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    });
+    await result.getByLabel('Expires', { exact: true }).fill(local);
+    await result.getByRole('button', { name: 'Next' }).click();
+    await password.fill(browserPassword);
+    await verify.getByRole('button', { name: 'Save changes' }).click();
+    await browserExpect(link).toHaveValue(original);
+    const updated = Date.parse((await result.locator('time').getAttribute('datetime')) ?? '');
+    expect(updated).toBeLessThan(deadline);
+  });
   it('recovers sign-in after parent-session expiry leaves an assisted-session cookie', async () => {
     const member = await fixture.database.db
       .selectFrom('user')
@@ -392,10 +434,17 @@ describe('M5 real browser identity and Owner setup', () => {
     await owner.getByRole('button', { name: 'Assisted session', exact: true }).click();
     const dialog = owner.getByRole('dialog');
     await dialog.getByLabel('Reason').fill('Browser assisted session verification');
+    await fixture.screenshot(owner, 'owner-assisted-reason-desktop-en');
+    await dialog.getByRole('button', { name: 'Next' }).click();
+    await browserExpect(dialog.getByLabel('Administrator account')).toHaveValue(
+      'owner@browser.example.test',
+    );
+    await owner.setViewportSize({ width: 390, height: 844 });
+    await fixture.screenshot(owner, 'owner-assisted-verify-mobile-en');
     await dialog.getByLabel('Current password').fill(browserPassword);
-    await dialog.getByLabel('Confirm', { exact: true }).check();
     await dialog.getByRole('button', { name: 'Start assistance' }).click();
     await browserExpect(owner.locator('.support-banner')).toBeVisible();
+    await owner.setViewportSize({ width: 1440, height: 1000 });
     await fixture.screenshot(owner, 'assisted-session-desktop-it');
     const actor = await fixture.database.db
       .selectFrom('user')

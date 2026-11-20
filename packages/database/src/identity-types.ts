@@ -50,6 +50,8 @@ export interface AuthTables {
   session: AuthSession;
   account: AuthAccount;
   verification: {
+    owner_recovery_account_id: string | null;
+    owner_recovery_ciphertext: EncryptedSecret | null;
     id: string;
     identifier: string;
     value: string;
@@ -100,6 +102,8 @@ export interface AuthTables {
     completed_at: Date | null;
   };
   step_up_grants: {
+    purpose: Generated<'support' | 'recovery-link'>;
+    subject_user_id: string | null;
     token_hash: string;
     user_id: string;
     session_id: string;

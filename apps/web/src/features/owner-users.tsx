@@ -1,6 +1,6 @@
 import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router';
+import { Link, useParams, useSearchParams } from 'react-router';
 import type {
   getPlatformUser,
   listPlatformAudit,
@@ -9,12 +9,10 @@ import type {
 import { api } from '../api/client.js';
 import type { Result } from '../api/contracts.js';
 import { useFormat, useT } from '../app/i18n.js';
-import { identityChanged, useSession } from '../app/session.js';
+import { useSession } from '../app/session.js';
 import {
   ActionForm,
-  Check,
   Details,
-  Dialog,
   Empty,
   ErrorNotice,
   Input,
@@ -28,6 +26,7 @@ import {
   Time,
   text,
 } from '../components/ui.js';
+import { OwnerUserActions } from './owner-user-actions.js';
 import { useStorageUsage } from './use-storage-usage.js';
 import './owner-users.css';
 
@@ -207,236 +206,245 @@ export function OwnerUserPage() {
   const queryClient = useQueryClient();
   const t = useT(),
     format = useFormat(),
-    session = useSession(),
-    navigate = useNavigate();
-  const [assisting, setAssisting] = useState(false);
+    session = useSession();
+  const [params] = useSearchParams();
+  const history = params.get('view') === 'history';
+  const [editingRole, setEditingRole] = useState(false);
   const user = useQuery({
     queryKey: ['owner-user', userId],
     refetchInterval: 15000,
-    queryFn: () =>
-      api<Result<typeof getPlatformUser>>(`/v1/platform/owner/users/${encodeURIComponent(userId)}`),
+    queryFn: ({ signal }) =>
+      api<Result<typeof getPlatformUser>>(
+        `/v1/platform/owner/users/${encodeURIComponent(userId)}`,
+        { signal },
+      ),
   });
   const storageUsage = useStorageUsage(
     user.data?.quota.storageUsage,
     user.data?.quota.observedAt,
     user.dataUpdatedAt,
   );
-  if (user.isPending) return <Loading />;
-  if (user.error) return <ErrorNotice error={user.error} />;
-  const value = user.data,
-    quota = value.quota;
+  if (user.error) return <ErrorNotice error={user.error} retry={() => void user.refetch()} />;
+  const value =
+    user.data ??
+    queryClient
+      .getQueriesData<Result<typeof listPlatformUsers>>({ queryKey: ['owner-users'] })
+      .map(([, page]) => page?.items.find((item) => item.id === userId))
+      .find((item) => item !== undefined);
+  if (!value) return <Loading />;
+  const quota = user.data?.quota;
   return (
-    <Page
-      title={value.name}
-      actions={
-        userId !== session.data?.actor.id ? (
-          <button type="button" className="secondary" onClick={() => setAssisting(true)}>
-            {t('web.support')}
-          </button>
-        ) : undefined
-      }
-    >
-      <div className="columns">
-        <Section title={t('web.profile')}>
-          <Details
-            values={[
-              [t('web.email'), value.email],
-              [t('web.role'), t(`owner.role.${value.role}`)],
-              [t('web.created'), <Time key="created" value={value.createdAt} />],
-            ]}
-          />
-          {value.role !== 'owner' && (
-            <ActionForm
-              onSubmit={async (data) => {
-                await api('/v1/owner/roles', {
-                  method: 'PATCH',
-                  body: { userId, role: text(data, 'role') },
-                });
-                await user.refetch();
-              }}
-            >
-              <Select label={t('web.role')} name="role" defaultValue={value.role}>
-                <option value="user">{t('owner.role.user')}</option>
-                <option value="operator">{t('owner.role.operator')}</option>
-              </Select>
-            </ActionForm>
-          )}
-          <p>
-            <Link to={`/owner/servers?ownerId=${encodeURIComponent(userId)}`}>
-              {t('web.servers')}
-            </Link>
-          </p>
-        </Section>
-        <Section title={t('web.quota')}>
-          <Details
-            values={[
-              [
-                t('web.memory'),
-                `${format.number(quota.committed.memoryMiB)} / ${format.number(quota.limits.memoryMiB)} MiB`,
-              ],
-              [
-                t('web.cpu'),
-                `${format.number(quota.committed.cpuPercent)} / ${format.number(quota.limits.cpuPercent)}%`,
-              ],
-              [
-                quota.limits.storageMiB === null
-                  ? `${t('web.disk')} · ${t('web.usage')}`
-                  : t('web.disk'),
-                quota.limits.storageMiB === null
-                  ? `${storageUsage === null ? t('web.unavailable') : format.bytes(storageUsage)} / ${t(quota.storageBudgetMiB === 0 ? 'platform.unlimited' : 'owner.globalPool')}`
-                  : `${format.number(quota.committed.storageMiB)} MiB / ${format.number(quota.limits.storageMiB)} MiB`,
-              ],
-              [
-                t('web.servers'),
-                `${format.number(quota.committed.serverCount)} / ${quota.limits.serverCount === null ? t('owner.noCountLimit') : format.number(quota.limits.serverCount)}`,
-              ],
-            ]}
-          />
-          <details>
-            <summary>{t('owner.overrideQuota')}</summary>
-            <ActionForm
-              onSubmit={async (data) => {
-                await api('/v1/owner/user-limits', {
-                  method: 'PUT',
-                  body: {
-                    userId,
-                    memoryMiB: number(data, 'memory'),
-                    cpuPercent: number(data, 'cpu'),
-                    ...(quota.storageBudgetMiB === 0
-                      ? {}
-                      : { storageMiB: number(data, 'storage') }),
-                    reason: text(data, 'reason'),
-                    ...(text(data, 'expires')
-                      ? { expiresAt: new Date(text(data, 'expires')).toISOString() }
-                      : {}),
-                  },
-                });
-                await Promise.all([
-                  user.refetch(),
-                  queryClient.invalidateQueries({ queryKey: ['audit', userId] }),
-                ]);
-              }}
-            >
-              <Input
-                label={`${t('web.memory')} (MiB)`}
-                name="memory"
-                type="number"
-                min={1}
-                defaultValue={quota.limits.memoryMiB}
-                required
+    <div className="owner-user-detail" key={userId}>
+      <Link to="/owner/users" className="owner-user-back">
+        ‹ {t('web.users')}
+      </Link>
+      <Page title={value.name}>
+        <div className="owner-user-summary">
+          <div className="owner-user-byline">
+            <span className="owner-user-initial" aria-hidden="true">
+              {Array.from(value.name.trim())[0]?.toUpperCase()}
+            </span>
+            <span>{value.email}</span>
+            <small>
+              {t(value.emailVerified ? 'web.accountEmailVerified' : 'web.accountEmailUnverified')}
+            </small>
+          </div>
+          {session.data?.context.sessionType === 'regular' &&
+            session.data.context.role === 'owner' && (
+              <div className="actions">
+                <OwnerUserActions key={userId} actor={session.data.actor} user={value} />
+              </div>
+            )}
+        </div>
+        <nav className="tabs" aria-label={value.name}>
+          <Link to={{ search: '' }} aria-current={!history ? 'page' : undefined}>
+            {t('web.overview')}
+          </Link>
+          <Link to="?view=history" aria-current={history ? 'page' : undefined}>
+            {t('owner.userHistory')}
+          </Link>
+        </nav>
+        {!history && (
+          <div className="owner-user-overview">
+            <Section title={t('web.profile')}>
+              <Details
+                values={[
+                  [t('web.created'), <Time key="created" value={value.createdAt} />],
+                  [
+                    t('web.role'),
+                    <span key="role" className="owner-user-role">
+                      {t(`owner.role.${value.role}`)}
+                      {value.role !== 'owner' && (
+                        <button
+                          type="button"
+                          className="secondary"
+                          aria-expanded={editingRole}
+                          onClick={() => setEditingRole(!editingRole)}
+                        >
+                          {t(editingRole ? 'web.cancel' : 'web.edit')}
+                        </button>
+                      )}
+                    </span>,
+                  ],
+                ]}
               />
-              <Input
-                label={`${t('web.cpu')} (%)`}
-                name="cpu"
-                type="number"
-                min={1}
-                defaultValue={quota.limits.cpuPercent}
-                required
-              />
-              {quota.storageBudgetMiB === 0 ? (
-                <p>
-                  {t('web.disk')}: {t('platform.unlimited')}{' '}
-                  <Link to="/owner/settings">{t('web.settings')}</Link>
-                </p>
-              ) : (
-                <Input
-                  label={`${t('web.disk')} (MiB)`}
-                  name="storage"
-                  type="number"
-                  min={1}
-                  defaultValue={quota.storageBudgetMiB}
-                  required
-                />
+              {editingRole && value.role !== 'owner' && (
+                <ActionForm
+                  onSubmit={async (data) => {
+                    await api('/v1/owner/roles', {
+                      method: 'PATCH',
+                      body: { userId, role: text(data, 'role') },
+                    });
+                    await user.refetch();
+                    setEditingRole(false);
+                  }}
+                >
+                  <Select label={t('web.role')} name="role" defaultValue={value.role}>
+                    <option value="user">{t('owner.role.user')}</option>
+                    <option value="operator">{t('owner.role.operator')}</option>
+                  </Select>
+                </ActionForm>
               )}
-              <Input
-                label={t('web.expires')}
-                name="expires"
-                type="datetime-local"
-                step={1}
-                defaultValue={
-                  quota.override?.expiresAt
-                    ? new Date(
-                        Date.parse(quota.override.expiresAt) -
-                          new Date(quota.override.expiresAt).getTimezoneOffset() * 60000,
-                      )
-                        .toISOString()
-                        .slice(0, 19)
-                    : ''
+            </Section>
+            {!quota ? (
+              <Section title={t('web.quota')}>
+                <Loading />
+              </Section>
+            ) : (
+              <Section
+                title={t('web.quota')}
+                actions={
+                  <Link to={`/owner/servers?ownerId=${encodeURIComponent(userId)}`}>
+                    {t('web.servers')} →
+                  </Link>
                 }
-              />
-              <Textarea
-                label={t('web.reason')}
-                name="reason"
-                minLength={8}
-                maxLength={300}
-                required
-              />
-            </ActionForm>
-          </details>
-          {quota.override && (
-            <Notice>
-              {t(quota.override.active ? 'owner.overrideActive' : 'owner.overrideExpired')}{' '}
-              {quota.override.expiresAt ? (
-                <Time value={quota.override.expiresAt} />
-              ) : (
-                t('owner.noExpiry')
-              )}
-            </Notice>
-          )}
-        </Section>
-      </div>
-      <Section title={t('owner.quotaHistory')}>
-        <AuditTable userId={userId} />
-      </Section>
-      <Dialog open={assisting} title={t('web.support')} onClose={() => setAssisting(false)}>
-        <ActionForm
-          success={false}
-          submitLabel={t('owner.startSupport')}
-          onSubmit={async (data) => {
-            const totp = text(data, 'totp'),
-              recovery = text(data, 'recovery');
-            const grant = await api<{ token: string }>('/v1/identity/step-up', {
-              body: {
-                password: String(data.get('password')),
-                ...(totp ? { totpCode: totp } : {}),
-                ...(recovery ? { recoveryCode: recovery } : {}),
-              },
-            });
-            await api('/v1/web/support', {
-              body: {
-                stepUpToken: grant.token,
-                subjectUserId: userId,
-                reason: text(data, 'reason'),
-              },
-            });
-            await identityChanged();
-            navigate('/');
-          }}
-        >
-          <p>{t('owner.supportWarning')}</p>
-          <Textarea label={t('web.reason')} name="reason" minLength={8} maxLength={300} required />
-          <Input
-            label={t('web.currentPassword')}
-            name="password"
-            type="password"
-            autoComplete="current-password"
-            required
-          />
-          {session.data?.actor.twoFactorEnabled && (
-            <>
-              <Input
-                label={t('web.code')}
-                name="totp"
-                autoComplete="one-time-code"
-                inputMode="numeric"
-              />
-              <Input label={t('web.recoveryCode')} name="recovery" autoComplete="off" />
-            </>
-          )}
-          <Check required label={t('web.confirm')} />
-        </ActionForm>
-      </Dialog>
-    </Page>
+              >
+                <Details
+                  values={[
+                    [
+                      t('web.memory'),
+                      `${format.number(quota.committed.memoryMiB)} / ${format.number(quota.limits.memoryMiB)} MiB`,
+                    ],
+                    [
+                      t('web.cpu'),
+                      `${format.number(quota.committed.cpuPercent)} / ${format.number(quota.limits.cpuPercent)}%`,
+                    ],
+                    [
+                      quota.limits.storageMiB === null
+                        ? `${t('web.disk')} · ${t('web.usage')}`
+                        : t('web.disk'),
+                      quota.limits.storageMiB === null
+                        ? `${storageUsage === null ? t('web.unavailable') : format.bytes(storageUsage)} / ${t(quota.storageBudgetMiB === 0 ? 'platform.unlimited' : 'owner.globalPool')}`
+                        : `${format.number(quota.committed.storageMiB)} MiB / ${format.number(quota.limits.storageMiB)} MiB`,
+                    ],
+                    [
+                      t('web.servers'),
+                      `${format.number(quota.committed.serverCount)} / ${quota.limits.serverCount === null ? t('owner.noCountLimit') : format.number(quota.limits.serverCount)}`,
+                    ],
+                  ]}
+                />
+                <details>
+                  <summary>{t('owner.overrideQuota')}</summary>
+                  <ActionForm
+                    onSubmit={async (data) => {
+                      await api('/v1/owner/user-limits', {
+                        method: 'PUT',
+                        body: {
+                          userId,
+                          memoryMiB: number(data, 'memory'),
+                          cpuPercent: number(data, 'cpu'),
+                          ...(quota.storageBudgetMiB === 0
+                            ? {}
+                            : { storageMiB: number(data, 'storage') }),
+                          reason: text(data, 'reason'),
+                          ...(text(data, 'expires')
+                            ? { expiresAt: new Date(text(data, 'expires')).toISOString() }
+                            : {}),
+                        },
+                      });
+                      await Promise.all([
+                        user.refetch(),
+                        queryClient.invalidateQueries({ queryKey: ['audit', userId] }),
+                      ]);
+                    }}
+                  >
+                    <Input
+                      label={`${t('web.memory')} (MiB)`}
+                      name="memory"
+                      type="number"
+                      min={1}
+                      defaultValue={quota.limits.memoryMiB}
+                      required
+                    />
+                    <Input
+                      label={`${t('web.cpu')} (%)`}
+                      name="cpu"
+                      type="number"
+                      min={1}
+                      defaultValue={quota.limits.cpuPercent}
+                      required
+                    />
+                    {quota.storageBudgetMiB === 0 ? (
+                      <p>
+                        {t('web.disk')}: {t('platform.unlimited')}{' '}
+                        <Link to="/owner/settings">{t('web.settings')}</Link>
+                      </p>
+                    ) : (
+                      <Input
+                        label={`${t('web.disk')} (MiB)`}
+                        name="storage"
+                        type="number"
+                        min={1}
+                        defaultValue={quota.storageBudgetMiB}
+                        required
+                      />
+                    )}
+                    <Input
+                      label={t('web.expires')}
+                      name="expires"
+                      type="datetime-local"
+                      step={1}
+                      defaultValue={
+                        quota.override?.expiresAt
+                          ? new Date(
+                              Date.parse(quota.override.expiresAt) -
+                                new Date(quota.override.expiresAt).getTimezoneOffset() * 60000,
+                            )
+                              .toISOString()
+                              .slice(0, 19)
+                          : ''
+                      }
+                    />
+                    <Textarea
+                      label={t('web.reason')}
+                      name="reason"
+                      minLength={8}
+                      maxLength={300}
+                      required
+                    />
+                  </ActionForm>
+                </details>
+                {quota.override && (
+                  <Notice>
+                    {t(quota.override.active ? 'owner.overrideActive' : 'owner.overrideExpired')}{' '}
+                    {quota.override.expiresAt ? (
+                      <Time value={quota.override.expiresAt} />
+                    ) : (
+                      t('owner.noExpiry')
+                    )}
+                  </Notice>
+                )}
+              </Section>
+            )}
+          </div>
+        )}
+        {history && (
+          <Section title={t('owner.userHistory')}>
+            <AuditTable userId={userId} />
+          </Section>
+        )}
+      </Page>
+    </div>
   );
 }
 export { InvitationsPage } from './owner-invitations.js';
@@ -467,24 +475,33 @@ function AuditTable({ userId }: { userId?: string }) {
       return api<Result<typeof listPlatformAudit>>(`/v1/platform/owner/audit?${params}`);
     },
   });
+  const filters = (
+    <form
+      className="toolbar"
+      onSubmit={(event) => {
+        event.preventDefault();
+        const data = new FormData(event.currentTarget);
+        setAction(text(data, 'action'));
+        setActor(text(data, 'actor'));
+        setCursor(undefined);
+      }}
+    >
+      <Input label={t('owner.eventType')} name="action" defaultValue={action} />
+      <Input label={t('owner.actorId')} name="actor" defaultValue={actor} />
+      <button type="submit" className="secondary">
+        {t('web.filter')}
+      </button>
+    </form>
+  );
   return (
     <>
-      <form
-        className="toolbar"
-        onSubmit={(event) => {
-          event.preventDefault();
-          const data = new FormData(event.currentTarget);
-          setAction(text(data, 'action'));
-          setActor(text(data, 'actor'));
-          setCursor(undefined);
-        }}
-      >
-        <Input label={t('owner.eventType')} name="action" defaultValue={action} />
-        <Input label={t('owner.actorId')} name="actor" defaultValue={actor} />
-        <button type="submit" className="secondary">
-          {t('web.filter')}
-        </button>
-      </form>
+      {userId && (
+        <details className="owner-audit-filter">
+          <summary>{t('web.filter')}</summary>
+          {filters}
+        </details>
+      )}
+      {!userId && filters}
       {events.isPending ? (
         <Loading />
       ) : events.error ? (
@@ -498,8 +515,8 @@ function AuditTable({ userId }: { userId?: string }) {
               <tr>
                 <th>{t('web.created')}</th>
                 <th>{t('owner.eventType')}</th>
-                <th>{t('owner.actorId')}</th>
-                <th>{t('owner.subjectId')}</th>
+                {!userId && <th>{t('owner.actorId')}</th>}
+                {!userId && <th>{t('owner.subjectId')}</th>}
                 <th>{t('web.details')}</th>
               </tr>
             </thead>
@@ -512,12 +529,24 @@ function AuditTable({ userId }: { userId?: string }) {
                   <td>
                     <code>{event.action}</code>
                   </td>
-                  <td>{event.actor_user_id}</td>
-                  <td>{event.subject_user_id}</td>
+                  {!userId && <td>{event.actor_user_id}</td>}
+                  {!userId && <td>{event.subject_user_id}</td>}
                   <td>
                     <details>
                       <summary>{t('web.details')}</summary>
                       <dl className="details">
+                        {userId && (
+                          <>
+                            <div>
+                              <dt>{t('owner.actorId')}</dt>
+                              <dd>{event.actor_user_id}</dd>
+                            </div>
+                            <div>
+                              <dt>{t('owner.subjectId')}</dt>
+                              <dd>{event.subject_user_id}</dd>
+                            </div>
+                          </>
+                        )}
                         {Object.entries(event.metadata as Record<string, unknown>).map(
                           ([key, value]) => (
                             <div key={key}>
@@ -549,7 +578,7 @@ function AuditTable({ userId }: { userId?: string }) {
           <button
             type="button"
             className="secondary"
-            onClick={() => setCursor(events.data.nextCursor!)}
+            onClick={() => setCursor(events.data?.nextCursor ?? undefined)}
           >
             {t('web.next')}
           </button>

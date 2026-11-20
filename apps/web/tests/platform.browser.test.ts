@@ -467,18 +467,23 @@ describe('M5 real browser platform and Owner journeys', () => {
       );
     });
     await owner.getByRole('link', { name: 'Alex', exact: true }).click();
+    await owner.getByRole('link', { name: 'History', exact: true }).click();
     const initialHistory = (await (await historyResponse).json()) as {
       items: Array<{ action: string }>;
     };
     const history = owner
       .locator('section')
-      .filter({ has: owner.getByRole('heading', { name: 'Limit change history', exact: true }) });
+      .filter({ has: owner.getByRole('heading', { name: 'History', exact: true }) });
     const initialLimitChanges = initialHistory.items.filter(
       (event) => event.action === 'resource.user_limits.updated',
     ).length;
     await browserExpect(
       history.getByText('resource.user_limits.updated', { exact: true }),
     ).toHaveCount(initialLimitChanges);
+    await owner
+      .locator('.owner-user-detail')
+      .getByRole('link', { name: 'Overview', exact: true })
+      .click();
     await owner.getByText('Set individual limits', { exact: true }).click();
     const quotaSection = owner
       .locator('section')
@@ -492,6 +497,7 @@ describe('M5 real browser platform and Owner journeys', () => {
       quotaSection.getByText('Individual limits active', { exact: false }),
     ).toBeVisible();
     await browserExpect(quotaSection.getByText('No expiration', { exact: false })).toBeVisible();
+    await owner.getByRole('link', { name: 'History', exact: true }).click();
     await browserExpect(
       history.getByText('resource.user_limits.updated', { exact: true }),
     ).toHaveCount(initialLimitChanges + 1);
@@ -509,7 +515,18 @@ describe('M5 real browser platform and Owner journeys', () => {
         )
       ).quota.limits.memoryMiB,
     ).toBe(3072);
+    await owner
+      .locator('.owner-user-detail')
+      .getByRole('link', { name: 'Overview', exact: true })
+      .click();
     await fixture.screenshot(owner, 'owner-user-quota-desktop-en');
+    const originalSize = owner.viewportSize();
+    await owner.setViewportSize({ width: 390, height: 844 });
+    expect(await owner.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    await fixture.screenshot(owner, 'owner-user-overview-mobile-en');
+    if (originalSize) await owner.setViewportSize(originalSize);
     for (const [path, heading, name] of [
       ['/owner', 'Platform health', 'owner-health-desktop-en'],
       ['/owner/infrastructure', 'Infrastructure', 'owner-infrastructure-desktop-en'],

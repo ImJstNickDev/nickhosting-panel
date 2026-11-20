@@ -428,6 +428,22 @@ export function createApp(options: Options) {
     noSupport(c);
     return c.json(await c.get('identity').stepUp(c.get('authHeaders'), await body(c)));
   });
+  app.get('/v1/owner/users/:userId/recovery-link', async (c) => {
+    noSupport(c);
+    c.header('Cache-Control', 'no-store');
+    return c.json(
+      await c.get('identity').recoveryLinkStatus(c.get('authHeaders'), c.req.param('userId')),
+    );
+  });
+  app.post('/v1/owner/users/:userId/recovery-link', async (c) => {
+    noSupport(c);
+    c.header('Cache-Control', 'no-store');
+    return c.json(
+      await c
+        .get('identity')
+        .recoveryLink(c.get('authHeaders'), c.req.param('userId'), await body(c)),
+    );
+  });
   app.post('/v1/support', async (c) => {
     noSupport(c);
     return c.json(await c.get('identity').startSupport(c.get('authHeaders'), await body(c)), 201);

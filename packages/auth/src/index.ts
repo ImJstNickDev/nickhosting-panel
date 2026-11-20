@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { AuthContext } from '@nickhosting/core';
 import { assertPermission, authSessionId, DomainError } from '@nickhosting/core';
 import { hashPassword, verifyPassword } from 'better-auth/crypto';
+import type { PoolClient } from 'pg';
 import { z } from 'zod';
 import { buildBetterAuth } from './better-auth.js';
 import type { IdentityOptions } from './contracts.js';
@@ -405,6 +406,8 @@ export function createIdentity(options: IdentityOptions) {
     const input = parse(
       z
         .object({
+          purpose: z.enum(['support', 'recovery-link']).default('support'),
+          subjectUserId: z.string().min(1).max(128).optional(),
           password,
           totpCode: z
             .string()
@@ -415,6 +418,8 @@ export function createIdentity(options: IdentityOptions) {
         .strict(),
       raw,
     );
+    if (input.purpose === 'recovery-link' && !input.subjectUserId)
+      throw new DomainError('validation_failed');
     await throttle(pool, `step-up:${actor.context.actorUserId}`);
     const account = await pool.query<{ password: string }>(
       'SELECT password FROM account WHERE "userId"=$1 AND "providerId"=\'credential\'',
@@ -439,8 +444,15 @@ export function createIdentity(options: IdentityOptions) {
     const expiresAt = new Date(Date.now() + 300_000);
     await transaction(pool, async (tx) => {
       await tx.query(
-        'INSERT INTO step_up_grants(token_hash,user_id,session_id,expires_at) VALUES($1,$2,$3,$4)',
-        [tokenHash(value), actor.context.actorUserId, actor.sessionId, expiresAt],
+        'INSERT INTO step_up_grants(token_hash,user_id,session_id,expires_at,purpose,subject_user_id) VALUES($1,$2,$3,$4,$5,$6)',
+        [
+          tokenHash(value),
+          actor.context.actorUserId,
+          actor.sessionId,
+          expiresAt,
+          input.purpose,
+          input.subjectUserId ?? null,
+        ],
       );
       await writeAudit(tx, {
         actorUserId: actor.context.actorUserId,
@@ -450,6 +462,121 @@ export function createIdentity(options: IdentityOptions) {
     });
     return { token: value, expiresAt };
   }
+  async function consumeStepUp(
+    tx: PoolClient,
+    actor: Awaited<ReturnType<typeof owner>>,
+    grant: string,
+    purpose: 'support' | 'recovery-link',
+    userId: string,
+  ) {
+    const result = await tx.query(
+      `DELETE FROM step_up_grants WHERE token_hash=$1 AND session_id=$2 AND user_id=$3
+       AND expires_at>clock_timestamp() AND purpose=$4 AND (subject_user_id=$5 OR subject_user_id IS NULL)`,
+      [tokenHash(grant), actor.sessionId, actor.context.actorUserId, purpose, userId],
+    );
+    if (!result.rowCount) throw new DomainError('forbidden');
+  }
+
+  async function recoveryLinkStatus(headers: Headers, userId: string) {
+    await owner(headers);
+    const result = await pool.query<{ available: boolean; expiresAt: Date | null }>(
+      `SELECT u.role <> 'owner' AND a.password IS NOT NULL AS available, v."expiresAt"
+       FROM "user" u LEFT JOIN account a ON a."userId"=u.id AND a."providerId"='credential'
+       LEFT JOIN verification v ON v.owner_recovery_account_id=a.id AND v."expiresAt">now()
+       WHERE u.id=$1`,
+      [userId],
+    );
+    const status = result.rows[0];
+    if (!status) throw new DomainError('not_found');
+    return status;
+  }
+
+  async function recoveryLink(headers: Headers, userId: string, raw: unknown) {
+    const actor = await owner(headers);
+    const input = parse(
+      z
+        .object({
+          stepUpToken: token,
+          mode: z.enum(['create', 'reveal']),
+          expiresAt: z.iso
+            .datetime({ offset: true })
+            .transform((value) => new Date(value))
+            .optional(),
+        })
+        .strict(),
+      raw,
+    );
+    return transaction(pool, async (tx) => {
+      await consumeStepUp(tx, actor, input.stepUpToken, 'recovery-link', userId);
+      const account = (
+        await tx.query<{ id: string }>(
+          `SELECT a.id FROM "user" u JOIN account a ON a."userId"=u.id
+         WHERE u.id=$1 AND u.role <> 'owner' AND a."providerId"='credential'
+           AND a.password IS NOT NULL FOR UPDATE OF u,a`,
+          [userId],
+        )
+      ).rows[0];
+      if (!account) throw new DomainError('forbidden');
+      const existing = (
+        await tx.query<{
+          id: string;
+          identifier: string;
+          owner_recovery_ciphertext: unknown;
+          expiresAt: Date;
+        }>(
+          'SELECT id,identifier,owner_recovery_ciphertext,"expiresAt" FROM verification WHERE owner_recovery_account_id=$1 FOR UPDATE',
+          [account.id],
+        )
+      ).rows[0];
+      const now = Date.now();
+      const active = existing && existing.expiresAt.getTime() > now ? existing : undefined;
+      if (!active && input.mode === 'reveal') throw new DomainError('not_found');
+      const requestedExpiry = active && input.mode === 'create' ? undefined : input.expiresAt;
+      const expiresAt = requestedExpiry ?? active?.expiresAt ?? new Date(now + 86_400_000);
+      if (expiresAt.getTime() <= now || expiresAt.getTime() > now + 31_536_000_000)
+        throw new DomainError('validation_failed');
+      const aad = `owner-recovery:${userId}:${account.id}`;
+      let value: string;
+      if (active) {
+        value = options.secretCodec.decrypt(active.owner_recovery_ciphertext, aad);
+        if (!equalToken(tokenHash(`reset-password:${value}`), active.identifier))
+          throw new DomainError('secret_invalid');
+        if (requestedExpiry)
+          await tx.query('UPDATE verification SET "expiresAt"=$2,"updatedAt"=now() WHERE id=$1', [
+            active.id,
+            expiresAt,
+          ]);
+      } else {
+        if (existing) await tx.query('DELETE FROM verification WHERE id=$1', [existing.id]);
+        value = `owner_${opaqueToken()}`;
+        await tx.query(
+          `INSERT INTO verification(identifier,value,"expiresAt",owner_recovery_account_id,owner_recovery_ciphertext)
+           VALUES($1,$2,$3,$4,$5)`,
+          [
+            tokenHash(`reset-password:${value}`),
+            userId,
+            expiresAt,
+            account.id,
+            options.secretCodec.encrypt(value, aad),
+          ],
+        );
+      }
+      await writeAudit(tx, {
+        actorUserId: actor.context.actorUserId,
+        subjectUserId: userId,
+        action: !active
+          ? 'identity.recovery_link_created'
+          : requestedExpiry
+            ? 'identity.recovery_link_updated'
+            : 'identity.recovery_link_revealed',
+        metadata: { userId, expiresAt: expiresAt.toISOString() },
+      });
+      const url = new URL('/reset-password', publicURL);
+      url.searchParams.set('token', value);
+      return { url: url.href, expiresAt };
+    });
+  }
+
   async function startSupport(headers: Headers, raw: unknown) {
     const actor = await owner(headers);
     const input = parse(
@@ -467,11 +594,7 @@ export function createIdentity(options: IdentityOptions) {
     const id = randomUUID();
     const expiresAt = new Date(Date.now() + absoluteTtlSeconds * 1000);
     await transaction(pool, async (tx) => {
-      const grant = await tx.query(
-        'DELETE FROM step_up_grants WHERE token_hash=$1 AND session_id=$2 AND user_id=$3 AND expires_at>now() RETURNING token_hash',
-        [tokenHash(input.stepUpToken), actor.sessionId, actor.context.actorUserId],
-      );
-      if (!grant.rowCount) throw new DomainError('forbidden');
+      await consumeStepUp(tx, actor, input.stepUpToken, 'support', input.subjectUserId);
       if (!(await tx.query('SELECT id FROM "user" WHERE id=$1', [input.subjectUserId])).rowCount)
         throw new DomainError('not_found');
       await tx.query(
@@ -653,6 +776,8 @@ export function createIdentity(options: IdentityOptions) {
     updateInvitation,
     revokeInvitation,
     stepUp,
+    recoveryLinkStatus,
+    recoveryLink,
     startSupport,
     endSupport,
     addEmailPassword,

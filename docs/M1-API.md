@@ -24,7 +24,7 @@ digest to the callback; never put it in arbitrary OAuth `additionalData`.
 | GET `/v1/me` | Verified identity context, including separate actor/subject and temporary support metadata. |
 | POST `/v1/identity/link-email` | Recent regular session; `{email,password}` starts a verified email/password link for a social-only account. |
 | POST `/v1/identity/confirm-email` | Same session plus `{token}` from email; atomic link, no identity merge. |
-| POST `/v1/identity/step-up` | Verified Owner; `{password,totpCode?,recoveryCode?}` creates one-use support grant. |
+| POST `/v1/identity/step-up` | Verified Owner; `{password,totpCode?,recoveryCode?,purpose?,subjectUserId?}` creates a single-use grant bound to the regular Owner session. The Owner UI specifies the target and either `support` or `recovery-link`. Recovery requires a target, and legacy support clients can omit the new fields. |
 | GET `/api/auth/error` | Localized safe OAuth failure; raw `error_description` is discarded. |
 
 Better Auth lives under `/api/auth/*`: `sign-up/email`, `sign-in/email`,

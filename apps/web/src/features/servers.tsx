@@ -297,7 +297,7 @@ export function QuotaSummary() {
     format = useFormat();
   const quota = useQuery({
     queryKey: ['quota'],
-    queryFn: () => api<Quota>('/v1/platform/quotas'),
+    queryFn: ({ signal }) => api<Quota>('/v1/platform/quotas', { signal }),
     refetchInterval: 15000,
   });
   const storageUsage = useStorageUsage(

@@ -116,6 +116,29 @@ describe('Home disk usage has a bounded display lifetime', () => {
     }
   });
 
+  it('opens the Owner profile from the directory while its allowance is pending', async () => {
+    await owner.goto(`${fixture.origin}/owner/users`);
+    const path = `**/v1/platform/owner/users/${identities.userId}`;
+    const { promise, resolve: release } = Promise.withResolvers<void>();
+    await owner.route(path, async (route) => {
+      await promise;
+      await route.continue();
+    });
+    try {
+      await owner.getByRole('link', { name: 'Alex', exact: true }).click();
+      await browserExpect(owner.getByRole('heading', { name: 'Alex', exact: true })).toBeVisible();
+      const quota = owner
+        .locator('section')
+        .filter({ has: owner.getByRole('heading', { name: 'Allowance' }) });
+      await browserExpect(quota.getByRole('status')).toBeVisible();
+      release();
+      await browserExpect(quota.getByText('Set individual limits')).toBeVisible();
+    } finally {
+      release();
+      await owner.unroute(path);
+    }
+  });
+
   it('expires the same cached disk usage in the Owner user quota view', async () => {
     await sample(4 * 1024 ** 2);
     await owner.clock.install({ time: new Date() });
