@@ -1049,9 +1049,6 @@ export async function processServerOperation(
               }),
             })
             .execute();
-          await sql`select pg_notify('nh_server_events_' || md5(current_database() || ':' || current_schema()), ${server.id})`.execute(
-            tx,
-          );
           await tx.deleteFrom('job_outbox').where('job_id', '=', jobId).execute();
           return true;
         }),
