@@ -174,6 +174,24 @@ describe('Home disk usage has a bounded display lifetime', () => {
     }
   });
 
+  it('picks up an initially missing shared disk measurement on the open Owner overview', async () => {
+    const page = await owner.context().newPage();
+    await sample(null);
+    try {
+      await page.clock.install({ time: new Date() });
+      await page.goto(`${fixture.origin}/owner/users/${identities.userId}`);
+      const disk = page
+        .locator('.owner-user-overview dd')
+        .filter({ hasText: /^(Unavailable|2 KiB) \/ / });
+      await browserExpect(disk).toContainText('Unavailable /');
+      await sample(2048, 0);
+      await page.clock.fastForward(60_010);
+      await browserExpect(disk).toContainText('2 KiB /');
+    } finally {
+      await page.close();
+    }
+  });
+
   it('expires the same cached disk usage in the Owner user quota view', async () => {
     await sample(4 * 1024 ** 2);
     await owner.clock.install({ time: new Date() });
@@ -187,7 +205,7 @@ describe('Home disk usage has a bounded display lifetime', () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const path = `**/v1/platform/owner/users/${identities.userId}`;
+    const path = `**/v1/platform/owner/users/${identities.userId}/quota`;
     let intercepted = 0;
     await owner.route(path, async (route) => {
       intercepted++;

@@ -61,6 +61,26 @@ export const hostPolicySchema = z
       v.storagePoolMiB > v.diskHeadroomMiB,
   );
 
+/** Parse a shared environment override once when projecting multiple physical hosts. */
+export function hostPolicyOverrides(
+  env: Environment,
+): Record<string, z.infer<typeof hostPolicySchema>> {
+  if (env.NH_HOST_POLICIES === undefined) return {};
+  let raw: unknown;
+  try {
+    raw = JSON.parse(env.NH_HOST_POLICIES);
+  } catch {
+    throw new DomainError('configuration_invalid');
+  }
+  const parsed = z.record(z.uuid(), hostPolicySchema).safeParse(raw);
+  if (
+    !parsed.success ||
+    Object.values(parsed.data).some((value) => value.uploadPolicy !== undefined)
+  )
+    throw new DomainError('configuration_invalid');
+  return parsed.data;
+}
+
 /** Optional explicit host-policy override is resolved over each Owner database row. */
 export function resolveHostOverride<
   T extends {
@@ -75,21 +95,8 @@ export function resolveHostOverride<
     observer_id: string;
     enabled: boolean;
   },
->(host: T, env: Environment): T {
-  if (env.NH_HOST_POLICIES === undefined) return host;
-  let raw: unknown;
-  try {
-    raw = JSON.parse(env.NH_HOST_POLICIES);
-  } catch {
-    throw new DomainError('configuration_invalid');
-  }
-  const parsed = z.record(z.uuid(), hostPolicySchema).safeParse(raw);
-  if (
-    !parsed.success ||
-    Object.values(parsed.data).some((value) => value.uploadPolicy !== undefined)
-  )
-    throw new DomainError('configuration_invalid');
-  const override = parsed.data[host.id];
+>(host: T, env: Environment, policies = hostPolicyOverrides(env)): T {
+  const override = policies[host.id];
   if (!override) return host;
   return {
     ...host,

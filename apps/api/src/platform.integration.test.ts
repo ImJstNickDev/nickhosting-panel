@@ -308,6 +308,7 @@ describe('M5 additive platform HTTP contracts with actual identity/session handl
     expect((await request(user, '/v1/owner/game-modules')).status).toBe(403);
     expect(await (await request(owner, '/v1/owner/game-modules')).json()).toEqual([
       expect.objectContaining({ id: 'minecraft' }),
+      expect.objectContaining({ id: 'satisfactory' }),
     ]);
     expect((await request(owner, '/v1/platform/owner/games')).status).toBe(200);
     const auditedProject = await (
@@ -330,6 +331,28 @@ describe('M5 additive platform HTTP contracts with actual identity/session handl
     expect(await userDetail.json()).toMatchObject({
       id: f.context.subjectUserId,
       quota: { userId: f.context.subjectUserId },
+    });
+  });
+  it('serves profile and quota independently and restricts both to an Owner, including own-account requests', async () => {
+    const target = f.context.subjectUserId;
+    for (const section of ['profile', 'quota']) {
+      const path = `/v1/platform/owner/users/${target}/${section}`;
+      expect((await request(null, path)).status).toBe(401);
+      expect((await request(user, path)).status).toBe(403);
+      expect((await request(peer, path)).status).toBe(403);
+      expect(
+        (await request(owner, `/v1/platform/owner/users/missing-user/${section}`)).status,
+      ).toBe(404);
+    }
+    const path = `/v1/platform/owner/users/${target}`;
+    const legacy = await (await request(owner, path)).json();
+    const { quota: legacyQuota, ...expectedProfile } = legacy;
+    expect(await (await request(owner, `${path}/profile`)).json()).toEqual(expectedProfile);
+    const quota = await (await request(owner, `${path}/quota`)).json();
+    expect(quota).toMatchObject({
+      userId: target,
+      committed: legacyQuota.committed,
+      limits: legacyQuota.limits,
     });
   });
   it('requires regular Owner authorization for inherited sleep policies and rejects unknown runtimes', async () => {

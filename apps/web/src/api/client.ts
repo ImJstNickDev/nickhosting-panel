@@ -112,6 +112,10 @@ export async function api<T = unknown>(
     }
   }
 }
+/** A bounded panel read. Navigating away cancels it and a stalled response becomes retryable. */
+export function readApi<T = unknown>(path: string, signal: AbortSignal): Promise<T> {
+  return api<T>(path, { signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) });
+}
 /** Same-origin authenticated reads whose consumers validate and render records incrementally. */
 export async function apiStream(
   path: string,

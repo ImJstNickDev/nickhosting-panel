@@ -22,13 +22,9 @@ import { creationGamesQuery, prefetchCreationCatalog } from './creation-catalog.
 import { GameFields } from './game-sections.js';
 import { PlayerList, VersionList } from './installer-fields.js';
 import { gameUiClient, gameUiRegistry, getGameArtwork } from './integrations.js';
+import { platformQuotaQuery } from './platform-quota.js';
 import './installer.css';
 
-type Quota = {
-  remaining: { memoryMiB: number; cpuPercent: number; storageMiB: number | null };
-  storagePolicy: 'GLOBAL_POOL' | 'PER_USER_BUDGET';
-  creationStorage: { mode: 'shared' | 'limited'; defaultDiskMiB: number };
-};
 export function CreateServerPage() {
   const t = useT(),
     format = useFormat(),
@@ -61,10 +57,7 @@ export function CreateServerPage() {
   const [connectionReservation, setConnectionReservation] = useState<ConnectionReservation>();
   const previousReservation = useRef<string | undefined>(undefined);
   const reserving = useRef(false);
-  const quota = useQuery({
-    queryKey: ['creation-quota'],
-    queryFn: ({ signal }) => api<Quota>('/v1/platform/quotas', { signal }),
-  });
+  const quota = useQuery(platformQuotaQuery(session.data));
   const module = gameUiRegistry.get(gameId);
   const declaredPages = module?.descriptor.creation.pages ?? [];
   const versionField = declaredPages.find((entry) => entry.kind === 'version-list')?.field;

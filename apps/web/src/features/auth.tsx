@@ -5,7 +5,7 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { api, apiError, queryClient } from '../api/client.js';
 import { useLocale, useT } from '../app/i18n.js';
-import { identityChanged, useSession, useWebConfig } from '../app/session.js';
+import { identityChanged, publicSetupQuery, useSession, useWebConfig } from '../app/session.js';
 import {
   ActionForm,
   ErrorNotice,
@@ -373,17 +373,14 @@ export function Setup() {
   const { locale } = useLocale();
   const session = useSession();
   const navigate = useNavigate();
-  const setup = useQuery({
-    queryKey: ['setup'],
-    queryFn: () => api<{ ownerClaimed: boolean; completed: boolean }>('/v1/setup'),
-  });
+  const setup = useQuery(publicSetupQuery);
   return (
     <AuthLayout>
       <h1>{t('web.setup')}</h1>
       {setup.isPending ? (
         <Loading />
       ) : setup.error ? (
-        <ErrorNotice error={setup.error} />
+        <ErrorNotice error={setup.error} retry={() => void setup.refetch()} />
       ) : setup.data?.completed ? (
         <Link to="/">{t('web.home')}</Link>
       ) : !setup.data?.ownerClaimed ? (
@@ -451,7 +448,10 @@ export function Setup() {
                 pterodactylApplicationKey: String(data.get('applicationKey')),
               },
             });
-            await queryClient.invalidateQueries({ queryKey: ['setup'] });
+            await Promise.all([
+              queryClient.invalidateQueries({ queryKey: ['setup'] }),
+              queryClient.invalidateQueries({ queryKey: ['session'] }),
+            ]);
             navigate('/owner');
           }}
         >

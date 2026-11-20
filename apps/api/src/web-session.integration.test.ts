@@ -103,6 +103,8 @@ describe('WebPanel parent-bound HttpOnly assisted sessions', () => {
     const json = await profile.json();
     expect(json.subject.id).toBe(userId);
     expect(json.actor.id).toBe(userId);
+    expect(json.setup).toEqual({ ownerClaimed: true, completed: false });
+    expect(json.subject).not.toHaveProperty('setupId');
     expect(JSON.stringify(json)).not.toContain(password);
   });
   it('lists persisted sessions without freshness or tokens and revokes only owned identities', async () => {

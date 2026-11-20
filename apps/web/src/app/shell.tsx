@@ -19,7 +19,13 @@ import { FileSaveNotices } from '../features/file-save-notices.js';
 import { platformPath, type ServerInfo } from '../features/service-contracts.js';
 import { useLocale, useT } from './i18n.js';
 import { serverNavigation } from './server-navigation.js';
-import { identityChanged, isSignedOut, useSession, useWebConfig } from './session.js';
+import {
+  identityChanged,
+  isSignedOut,
+  publicSetupQuery,
+  useSession,
+  useWebConfig,
+} from './session.js';
 import { focusWorkspace } from './workspace-focus.js';
 
 export function Shell() {
@@ -29,7 +35,8 @@ export function Shell() {
   const location = useLocation();
   const navigate = useNavigate();
   const serverRoute = useMatch('/servers/:serverId/*');
-  const serverId = serverRoute?.params.serverId;
+  const creatingServer = useMatch('/servers/new');
+  const serverId = creatingServer ? undefined : serverRoute?.params.serverId;
   const server = useQuery({
     queryKey: ['server', serverId],
     queryFn: () => api<ServerInfo>(platformPath(serverId ?? '')),
@@ -41,9 +48,12 @@ export function Shell() {
   const [collapsed, toggleSidebar] = useSidebarCollapsed();
   const [exitError, setExitError] = useState<unknown>();
   const { locale, setLocale } = useLocale();
-  const setup = useQuery({
-    queryKey: ['setup'],
-    queryFn: () => api<{ ownerClaimed: boolean; completed: boolean }>('/v1/setup'),
+  const signedOut = isSignedOut(session.error);
+  // Anonymous first-run clients and older API instances use the public setup check.
+  const needsPublicSetup = !session.data?.setup && (signedOut || Boolean(session.data));
+  const publicSetup = useQuery({
+    ...publicSetupQuery,
+    enabled: needsPublicSetup,
   });
   const ownerArea = location.pathname.startsWith('/owner');
   // biome-ignore lint/correctness/useExhaustiveDependencies: close navigation and restore focus on each route transition.
@@ -70,27 +80,39 @@ export function Shell() {
       setExitError(error);
     }
   }
-  if (session.isPending || setup.isPending)
+  if (session.isPending || (needsPublicSetup && publicSetup.isPending))
     return (
       <main>
         <Loading />
       </main>
     );
-  if (setup.data && !setup.data.ownerClaimed) return <Navigate to="/setup" replace />;
+  if (needsPublicSetup && publicSetup.error)
+    return (
+      <main>
+        <ErrorNotice error={publicSetup.error} retry={() => void publicSetup.refetch()} />
+      </main>
+    );
+  const setup = needsPublicSetup ? publicSetup.data : session.data?.setup;
+  if (setup && !setup.ownerClaimed) return <Navigate to="/setup" replace />;
   // A failed background refresh must not discard in-memory forms/recovery codes.
   // Authentication failures and support sessions still leave the authenticated shell.
   const transientSessionFailure =
     session.data?.context.sessionType === 'regular' &&
     ((session.error instanceof ApiError && session.error.status >= 500) ||
-      session.error instanceof TypeError);
+      session.error instanceof TypeError ||
+      (session.error instanceof DOMException && session.error.name === 'TimeoutError'));
   if (session.error && !transientSessionFailure) {
-    if (isSignedOut(session.error)) return <Navigate to="/login" replace />;
+    if (signedOut) return <Navigate to="/login" replace />;
     return (
       <main>
-        <ErrorNotice error={session.error} />
-        <button type="button" onClick={exit}>
-          {t('web.exitSupport')}
-        </button>
+        <ErrorNotice error={session.error} retry={() => void session.refetch()} />
+        {(config.data?.supportSessionPresent ||
+          session.data?.context.sessionType === 'support' ||
+          (session.error instanceof ApiError && session.error.code === 'support_invalid')) && (
+          <button type="button" onClick={exit}>
+            {t('web.exitSupport')}
+          </button>
+        )}
         {Boolean(exitError) && <ErrorNotice error={exitError} />}
       </main>
     );
@@ -99,7 +121,7 @@ export function Shell() {
   const current = session.data;
   const support = current.context.sessionType === 'support';
   const ordinaryOwner = current.context.role === 'owner' && !support;
-  if (ordinaryOwner && setup.data && !setup.data.completed) return <Navigate to="/setup" replace />;
+  if (ordinaryOwner && setup && !setup.completed) return <Navigate to="/setup" replace />;
   const readOnlyAdmin = current.context.role === 'operator' && !support;
   if (
     ownerArea &&
@@ -241,7 +263,7 @@ export function Shell() {
             {session.error && transientSessionFailure && (
               <ErrorNotice error={session.error} retry={() => void session.refetch()} />
             )}
-            <Outlet />
+            <Outlet context={current} />
             <FileSaveNotices scope={fileSaveScope(current)} />
           </main>
         </div>

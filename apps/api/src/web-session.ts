@@ -46,9 +46,10 @@ export function registerWebSessionRoutes(
   });
   app.get('/v1/web/session', async (c) => {
     const context = await principal(c);
-    const users = await db
+    const rows = await db
       .selectFrom('user')
       .leftJoin('user_profile_photos', 'user_profile_photos.user_id', 'user.id')
+      .leftJoin('instance_setup', (join) => join.on('instance_setup.id', '=', 1))
       .select([
         'user.id',
         'user.name',
@@ -59,19 +60,27 @@ export function registerWebSessionRoutes(
         'user.role',
         'user.twoFactorEnabled',
         'user_profile_photos.revision',
+        'instance_setup.id as setupId',
+        'instance_setup.completed_at as setupCompletedAt',
       ])
       .where('user.id', 'in', [context.actorUserId, context.subjectUserId])
-      .execute()
-      .then((rows) =>
-        rows.map(({ revision, ...user }) => ({
-          ...user,
-          avatarUrl: profilePhotoUrl(user.id, revision),
-        })),
-      );
+      .execute();
+    const users = rows.map(({ revision, setupId, setupCompletedAt, ...user }) => ({
+      ...user,
+      avatarUrl: profilePhotoUrl(user.id, revision),
+    }));
     const actor = users.find((user) => user.id === context.actorUserId);
     const subject = users.find((user) => user.id === context.subjectUserId);
     if (!actor || !subject) throw new DomainError('unauthenticated');
-    return c.json({ context, actor, subject });
+    return c.json({
+      context,
+      actor,
+      subject,
+      setup: {
+        ownerClaimed: rows[0]?.setupId === 1,
+        completed: Boolean(rows[0]?.setupCompletedAt),
+      },
+    });
   });
   // Unlike Better Auth's token-bearing list, this projection needs only an
   // authenticated session. A closed browser still owns a valid session.

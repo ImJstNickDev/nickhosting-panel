@@ -135,26 +135,40 @@ export async function checkedObservation(tx: DB, hostId: string, env: Environmen
     .where('host_id', '=', hostId)
     .executeTakeFirst();
   const { values: config } = await getSettings(tx, env);
+  const snapshot = host && validHostSnapshot(host, observation, config.observationMaxAgeSeconds);
+  if (!host || !snapshot) throw new DomainError('resources_unavailable');
+  return { host, snapshot, config };
+}
+
+/** Admission and shared-pool reporting validate exactly the same stored evidence. */
+export function validHostSnapshot(
+  host: { id: string; enabled: boolean; observer_id: string; local_disk_path: string },
+  observation:
+    | { snapshot: HostSnapshot | null; observer_id: string | null; observed_at: Date | null }
+    | undefined,
+  maxAgeSeconds: number,
+  now = Date.now(),
+) {
   const parsed = hostSnapshotSchema.safeParse(observation?.snapshot);
-  const age = observation ? Date.now() - observation.observed_at.getTime() : Infinity;
+  const age = observation?.observed_at ? now - observation.observed_at.getTime() : Infinity;
   if (
-    !host?.enabled ||
-    !observation ||
+    !host.enabled ||
+    !observation?.observed_at ||
     observation.observer_id !== host.observer_id ||
     !parsed.success ||
     age < 0 ||
-    age > Math.min(config.observationMaxAgeSeconds, 4) * 1000
+    age > Math.min(maxAgeSeconds, 4) * 1000
   )
-    throw new DomainError('resources_unavailable');
+    return null;
   if (
     parsed.data.availableMemoryMiB > parsed.data.totalMemoryMiB ||
     (parsed.data.sourceFingerprint !== undefined &&
       parsed.data.sourceFingerprint !==
-        hostObservationFingerprint(hostId, host.observer_id, host.local_disk_path)) ||
+        hostObservationFingerprint(host.id, host.observer_id, host.local_disk_path)) ||
     new Date(parsed.data.observedAt).getTime() !== observation.observed_at.getTime()
   )
-    throw new DomainError('resources_unavailable');
-  return { host, snapshot: parsed.data, config };
+    return null;
+  return parsed.data;
 }
 
 /** New work is charged in addition to sampled host usage. Cached managed telemetry
