@@ -3,7 +3,11 @@ import { type Messages, setupI18n } from '@lingui/core';
 import { expect, it } from 'vitest';
 import { platformConfigSchema } from '../../../../packages/core/src/config.js';
 import { formatBytes } from './format.js';
-import messages from './messages.json';
+import en from './messages/en.json';
+import itCatalog from './messages/it.json';
+import pseudo from './messages/pseudo.json';
+
+const messages = { en, it: itCatalog, pseudo };
 
 it('ships matching complete catalogs and labels for every configurable setting', () => {
   expect(Object.keys(messages.it).sort()).toEqual(Object.keys(messages.en).sort());
@@ -21,6 +25,7 @@ it('ships matching complete catalogs and labels for every configurable setting',
     dnsNameReuseDelaySeconds: 'connection.reuseDelay',
     gameContentPolicies: 'integrationConfig.modAlternatives',
     gameAutoWakePolicies: 'automation.autoWake',
+    satisfactoryInstallationRetries: 'ownerIntegration.installationRetries',
     defaultAutoWakeEnabled: 'automation.autoWake',
     autoWakeUserAccess: 'automation.wakeAccess',
   };

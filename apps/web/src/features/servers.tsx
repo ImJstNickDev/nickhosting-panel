@@ -21,7 +21,7 @@ import {
   Time,
 } from '../components/ui.js';
 import { activityLabelKey, activityStatus } from './activity-labels.js';
-import { getGameArtwork } from './integrations.js';
+import { getGameArtwork } from './game-artwork.js';
 import { platformQuotaQuery } from './platform-quota.js';
 import { type ServerInfo, serverPath, useServer } from './service-contracts.js';
 import {
@@ -30,8 +30,6 @@ import {
   useStorageUsage,
 } from './use-storage-usage.js';
 import './home.css';
-
-export { ServersPage } from './server-browser.js';
 
 type ServerList = Result<typeof listPlatformServers>;
 export async function fetchServerCardPage(query: string | URLSearchParams, signal: AbortSignal) {

@@ -474,7 +474,9 @@ pairs are in `packages/i18n/src/*web.ts`; game catalogs live with their first-pa
 module. `scripts/compile-web-i18n.ts` merges those reviewed sources and compiles
 Lingui ICU messages for `en`, `it` and a development pseudolocale. Missing locale
 keys/empty pairs or malformed ICU fail compilation. The compiled JSON is build
-output checked by `pnpm i18n:check`; do not hand-edit it.
+output checked by `pnpm i18n:check`; do not hand-edit it. The browser fetches the
+selected locale on startup and reuses it across routes. Switching languages loads
+the requested catalog while keeping the current screen mounted.
 
 `useT` localizes application content/errors; unknown keys show a localized generic
 fallback, not a raw implementation key. `useFormat` uses `Intl` for dates, relative

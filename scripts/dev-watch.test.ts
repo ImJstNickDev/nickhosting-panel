@@ -123,7 +123,7 @@ describe('development source selection', () => {
     ])
       expect(watchAction('web', path)).toBe('catalogs');
     for (const path of [
-      'apps/web/src/app/messages.json',
+      'apps/web/src/app/messages/en.json',
       'apps/web/src/app/styles.css',
       'games/minecraft/src/ui/assets/art.svg',
       'apps/web/src/features/account.tsx',

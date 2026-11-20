@@ -65,9 +65,21 @@ try {
 const allKeys = Object.keys(catalogs.en!).sort();
 if (JSON.stringify(allKeys) !== JSON.stringify(Object.keys(catalogs.it!).sort()))
   throw new Error('Catalog parity failed');
-const output: Record<string, Record<string, unknown>> = {};
+const directory = new URL('../apps/web/src/app/messages/', import.meta.url);
+const check = process.argv.includes('--check');
+if (!check) await mkdir(directory, { recursive: true });
+async function emit(name: string, data: unknown) {
+  const target = new URL(name + '.json', directory);
+  const content = JSON.stringify(data) + '\n';
+  if (check) {
+    if ((await readFile(target, 'utf8')) !== content) throw new Error('Run pnpm i18n:compile');
+  } else {
+    await writeFile(target, content);
+  }
+}
+
 for (const locale of ['en', 'it', 'pseudo']) {
-  output[locale] = Object.fromEntries(
+  const messages = Object.fromEntries(
     allKeys.map((key) => [
       key,
       compileMessageOrThrow(
@@ -76,13 +88,20 @@ for (const locale of ['en', 'it', 'pseudo']) {
       ),
     ]),
   );
+  await emit(locale, messages);
 }
-const target = new URL('../apps/web/src/app/messages.json', import.meta.url);
-const content = `${JSON.stringify(output)}\n`;
-if (process.argv.includes('--check')) {
-  if ((await readFile(target, 'utf8')) !== content) throw new Error('Run pnpm i18n:compile');
-} else {
-  await mkdir(new URL('../apps/web/src/app/', import.meta.url), { recursive: true });
-  await writeFile(target, content);
-}
+// These messages must be available even when the selected catalog fails to load.
+await emit(
+  'bootstrap',
+  Object.fromEntries(
+    Object.entries(catalogs).map(([locale, messages]) => [
+      locale,
+      {
+        loading: messages['web.loading'],
+        retry: messages['web.retry'],
+        failed: messages['web.localeLoadFailed'],
+      },
+    ]),
+  ),
+);
 process.stdout.write(`Compiled ${allKeys.length} keys in English, Italian and pseudolocale\n`);

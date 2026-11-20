@@ -6,7 +6,10 @@ import { availableGameSections } from '../features/integrations.js';
 import { ProvisioningHistory } from '../features/provisioning.js';
 import { useServer } from '../features/service-contracts.js';
 import { useT } from './i18n.js';
+import { serverNavigation } from './server-navigation.js';
 import './server-game.css';
+
+export const workspaceHandle = { serverNavigation };
 
 function accessLost(error: unknown) {
   return error instanceof ApiError && [401, 403, 404].includes(error.status);

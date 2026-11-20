@@ -1,7 +1,10 @@
 import { z } from 'zod';
 import { fileSchema, type ServerFile } from '../../../../packages/pterodactyl-adapter/src/types.js';
 
-const storageKey = 'nickhosting.file-listing.v1';
+import { clearFileListing, fileListingStorageKey } from './file-listing-storage.js';
+
+export { clearFileListing } from './file-listing-storage.js';
+
 const maxBytes = 1024 * 1024;
 const maxEntries = 5000;
 const snapshotSchema = z.object({
@@ -24,7 +27,7 @@ export function readFileListing(
 ): ServerFile[] | undefined {
   if (!scope?.length) return undefined;
   try {
-    const serialized = sessionStorage.getItem(storageKey);
+    const serialized = sessionStorage.getItem(fileListingStorageKey);
     if (!serialized || !withinSizeLimit(serialized)) return undefined;
     const result = snapshotSchema.safeParse(JSON.parse(serialized));
     if (!result.success) return undefined;
@@ -71,16 +74,8 @@ export function writeFileListing(
       clearFileListing();
       return;
     }
-    sessionStorage.setItem(storageKey, serialized);
+    sessionStorage.setItem(fileListingStorageKey, serialized);
   } catch {
     clearFileListing();
-  }
-}
-
-export function clearFileListing(): void {
-  try {
-    sessionStorage.removeItem(storageKey);
-  } catch {
-    // Storage is optional, including when the browser denies access or exhausts its quota.
   }
 }

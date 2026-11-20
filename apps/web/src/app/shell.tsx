@@ -5,12 +5,13 @@ import {
   Navigate,
   Outlet,
   useLocation,
-  useMatch,
+  useMatches,
   useNavigate,
   useSearchParams,
 } from 'react-router';
 import { ApiError, api } from '../api/client.js';
 import { AccountMenu } from '../components/account-menu.js';
+import { NavigationGuardProvider } from '../components/navigation-guard.js';
 import { Sidebar, type SidebarIconName, useSidebarCollapsed } from '../components/sidebar.js';
 import { Tooltip } from '../components/tooltip.js';
 import { ErrorNotice, Loading, Time } from '../components/ui.js';
@@ -18,7 +19,7 @@ import { fileSaveScope } from '../features/file-background-save.js';
 import { FileSaveNotices } from '../features/file-save-notices.js';
 import { platformPath, type ServerInfo } from '../features/service-contracts.js';
 import { useLocale, useT } from './i18n.js';
-import { serverNavigation } from './server-navigation.js';
+import type { workspaceHandle } from './server-shell.js';
 import {
   identityChanged,
   isSignedOut,
@@ -29,14 +30,22 @@ import {
 import { focusWorkspace } from './workspace-focus.js';
 
 export function Shell() {
+  return (
+    <NavigationGuardProvider>
+      <ShellContent />
+    </NavigationGuardProvider>
+  );
+}
+
+function ShellContent() {
   const t = useT();
   const session = useSession();
   const config = useWebConfig();
   const location = useLocation();
   const navigate = useNavigate();
-  const serverRoute = useMatch('/servers/:serverId/*');
-  const creatingServer = useMatch('/servers/new');
-  const serverId = creatingServer ? undefined : serverRoute?.params.serverId;
+  const workspace = useMatches().find((match) => match.id === 'server-workspace');
+  const serverId = workspace?.params.serverId;
+  const navigationHandle = workspace?.handle as typeof workspaceHandle | undefined;
   const server = useQuery({
     queryKey: ['server', serverId],
     queryFn: () => api<ServerInfo>(platformPath(serverId ?? '')),
@@ -189,7 +198,7 @@ export function Shell() {
             serverId
               ? server.data &&
                 !(server.error instanceof ApiError && [401, 403, 404].includes(server.error.status))
-                ? serverNavigation(server.data, location.pathname, t)
+                ? (navigationHandle?.serverNavigation(server.data, location.pathname, t) ?? [])
                 : []
               : navigation.map(([to, key, icon]) => ({ to, label: t(key), icon }))
           }

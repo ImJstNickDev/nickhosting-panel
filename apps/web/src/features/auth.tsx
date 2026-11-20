@@ -1,6 +1,4 @@
-import { passkeyClient } from '@better-auth/passkey/client';
 import { useQuery } from '@tanstack/react-query';
-import { createAuthClient } from 'better-auth/react';
 import { useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { api, apiError, queryClient } from '../api/client.js';
@@ -16,11 +14,9 @@ import {
   text,
 } from '../components/ui.js';
 
-export const authClient = createAuthClient({ plugins: [passkeyClient()] });
-
 export function AuthLayout({ children }: { children: React.ReactNode }) {
   const t = useT();
-  const { locale, setLocale } = useLocale();
+  const { requestedLocale, setLocale } = useLocale();
   const config = useWebConfig();
   const [exitError, setExitError] = useState<unknown>();
   return (
@@ -51,7 +47,10 @@ export function AuthLayout({ children }: { children: React.ReactNode }) {
       <Section>{children}</Section>
       <label className="field">
         {t('web.locale')}
-        <select value={locale} onChange={(event) => setLocale(event.target.value as 'en' | 'it')}>
+        <select
+          value={requestedLocale}
+          onChange={(event) => setLocale(event.target.value as 'en' | 'it')}
+        >
           <option value="en">English</option>
           <option value="it">Italiano</option>
         </select>
@@ -157,6 +156,7 @@ export function Login() {
               className="secondary"
               onClick={async () => {
                 try {
+                  const { authClient } = await import('./passkey-client.js');
                   const result = await authClient.signIn.passkey();
                   if (result.error) throw apiError(result.error);
                   await completed();
