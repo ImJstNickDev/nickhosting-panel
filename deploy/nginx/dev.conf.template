@@ -41,6 +41,15 @@ http {
     }
     location /internal/ { return 404; }
     location /api/ { return 404; }
-    location / { include /opt/nickhosting/proxy.conf; proxy_pass http://vite; }
+    location / {
+      gzip on;
+      gzip_min_length 1024;
+      gzip_comp_level 4;
+      gzip_proxied any;
+      gzip_vary on;
+      gzip_types application/javascript text/javascript application/json text/css image/svg+xml;
+      include /opt/nickhosting/proxy.conf;
+      proxy_pass http://vite;
+    }
   }
 }

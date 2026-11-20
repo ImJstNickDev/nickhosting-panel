@@ -90,8 +90,17 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
         transport.close();
       }
     };
-    const identity = async () => {
-      const { values } = await getSettings(database.db, env);
+    const settingsByRequest = new WeakMap<Request, ReturnType<typeof getSettings>>();
+    const requestSettings = (request: Request) => {
+      let current = settingsByRequest.get(request);
+      if (!current) {
+        current = getSettings(database.db, env);
+        settingsByRequest.set(request, current);
+      }
+      return current;
+    };
+    const identity = async (request: Request) => {
+      const { values } = await requestSettings(request);
       assertPublicUrls(values);
       // Server-only digest invalidates the instance when DB-backed provider settings change.
       const discordSecret = await getSecret(database.db, codec, 'discordClientSecret', env);
@@ -143,11 +152,11 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
           transferCache,
         }),
       logger,
-      defaultLocale: async () => (await getSettings(database.db, env)).values.defaultLocale,
+      defaultLocale: async (request) => (await requestSettings(request)).values.defaultLocale,
       identity,
       env,
-      origins: async () => {
-        const { values } = await getSettings(database.db, env);
+      origins: async (request) => {
+        const { values } = await requestSettings(request);
         assertPublicUrls(values);
         return [new URL(values.apiUrl).origin, new URL(values.publicUrl).origin];
       },

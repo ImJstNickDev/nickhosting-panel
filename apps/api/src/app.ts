@@ -60,11 +60,11 @@ const uploadSlots = new WeakMap<Store['pool'], { active: number }>();
 interface Options {
   logger?: ReturnType<typeof createLogger>;
   database: Store;
-  identity: () => Promise<Identity>;
+  identity: (request: Request) => Promise<Identity>;
   codec: SecretCodec;
-  origins: readonly string[] | (() => Promise<readonly string[]>);
+  origins: readonly string[] | ((request: Request) => Promise<readonly string[]>);
   env?: Readonly<Record<string, string | undefined>>;
-  defaultLocale?: () => Promise<'en' | 'it'>;
+  defaultLocale?: (request: Request) => Promise<'en' | 'it'>;
   log?: (event: Record<string, unknown>) => void;
   provisioningCache?: import('@nickhosting/pterodactyl-adapter').PrivateTransferCache;
   management?: () => Promise<ManagementRuntime>;
@@ -75,6 +75,7 @@ export type Variables = {
   identity: Identity;
   requestId: string;
   authHeaders: Headers;
+  checkedOrigins?: Promise<readonly string[]>;
   locale?: 'en' | 'it';
   gatewayAuthenticated?: boolean;
 };
@@ -98,8 +99,12 @@ export function createApp(options: Options) {
   const app = new Hono<{ Variables: Variables }>();
   const { db, pool } = options.database;
   const env = options.env ?? {};
-  const origins = async () =>
-    typeof options.origins === 'function' ? await options.origins() : options.origins;
+  const origins = (c: Context<{ Variables: Variables }>) => {
+    if (typeof options.origins !== 'function') return options.origins;
+    const pending = c.get('checkedOrigins') ?? options.origins(c.req.raw);
+    c.set('checkedOrigins', pending);
+    return pending;
+  };
   app.use('*', async (c, next) => {
     c.set('requestId', randomUUID());
     const headers = new Headers(c.req.raw.headers);
@@ -128,7 +133,8 @@ export function createApp(options: Options) {
   app.use(
     '*',
     cors({
-      origin: async (origin) => ((await origins()).includes(origin) ? origin : undefined),
+      origin: async (origin, c) =>
+        origin && (await origins(c)).includes(origin) ? origin : undefined,
       credentials: true,
       allowHeaders: [
         'Content-Type',
@@ -218,7 +224,7 @@ export function createApp(options: Options) {
       if (c.req.method === 'POST' && [PROVIDER_EVENTS_PATH, SFTP_EVENTS_PATH].includes(c.req.path))
         return next();
       const origin = c.req.header('origin');
-      if (!origin || !(await origins()).includes(origin)) throw new DomainError('forbidden');
+      if (!origin || !(await origins(c)).includes(origin)) throw new DomainError('forbidden');
     }
     await next();
   });
@@ -257,7 +263,7 @@ export function createApp(options: Options) {
     const locale = resolveLocale(
       c.get('locale'),
       c.req.header('accept-language'),
-      await options.defaultLocale?.().catch(() => 'en' as const),
+      await options.defaultLocale?.(c.req.raw).catch(() => 'en' as const),
     );
     if (
       c.get('gatewayAuthenticated') &&
@@ -322,7 +328,7 @@ export function createApp(options: Options) {
     }
   });
   app.use('/api/*', async (c, next) => {
-    const identity = await options.identity();
+    const identity = await options.identity(c.req.raw);
     c.set('identity', identity);
     const session = await identity.auth.api.getSession({ headers: c.get('authHeaders') });
     if (session) c.set('locale', session.user.locale === 'it' ? 'it' : 'en');
@@ -331,7 +337,7 @@ export function createApp(options: Options) {
   app.use('/v1/*', async (c, next) => {
     if (c.req.method === 'POST' && [PROVIDER_EVENTS_PATH, SFTP_EVENTS_PATH].includes(c.req.path))
       return next();
-    const identity = await options.identity();
+    const identity = await options.identity(c.req.raw);
     c.set('identity', identity);
     await next();
   });
@@ -363,7 +369,7 @@ export function createApp(options: Options) {
           resolveLocale(
             c.get('locale'),
             c.req.header('accept-language'),
-            await options.defaultLocale?.().catch(() => 'en' as const),
+            await options.defaultLocale?.(c.req.raw).catch(() => 'en' as const),
           ),
         ),
         requestId: c.get('requestId'),
@@ -384,7 +390,7 @@ export function createApp(options: Options) {
     const locale = resolveLocale(
       c.get('locale'),
       c.req.header('accept-language'),
-      await options.defaultLocale?.().catch(() => 'en' as const),
+      await options.defaultLocale?.(c.req.raw).catch(() => 'en' as const),
     );
     const headers = new Headers(response.headers);
     headers.delete('content-length');

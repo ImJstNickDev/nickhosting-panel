@@ -33,6 +33,7 @@ import {
   Textarea,
   Time,
 } from '../components/ui.js';
+import { gameProgressInterval, watchGameOperation } from './game-operation-progress.js';
 import { readSectionWithPreview } from './game-section-observation.js';
 import type { GameSectionAcceptedOptions, GameSectionViewProps } from './game-section-view.js';
 import {
@@ -582,68 +583,49 @@ export function GameSections({
         state: string;
         effectState: string | null;
         fileTransfer?: GameSectionViewProps['fileTransfer'];
-      }>(`/v1/platform/jobs/${operationId}`, {
+      }>(`/v1/platform/jobs/${operationId}?view=progress`, {
         signal,
       });
       if (result.serverId !== serverId)
         throw new ApiError('not_found', 'errors.not_found', undefined, 404);
       return result;
     },
-    refetchInterval: (query) => {
-      const result = query.state.data;
-      const interval =
-        trackedOperation?.serverId === serverId &&
-        trackedOperation.id === operationId &&
-        !operationEventsConnected &&
-        Date.now() < (trackedOperation.quickUntil ?? 0)
-          ? 250
-          : 1000;
-      if (result && ['uncertain', 'prepared'].includes(result.effectState ?? ''))
-        return result.state === 'failed' ? 5000 : interval;
-      return result && ['succeeded', 'failed'].includes(result.state) ? false : interval;
-    },
+    refetchInterval: (query) =>
+      gameProgressInterval(
+        query.state.data,
+        operationEventsConnected,
+        trackedOperation?.serverId === serverId && trackedOperation.id === operationId
+          ? trackedOperation.quickUntil
+          : undefined,
+      ),
   });
   const operationState = operation.data?.state;
   const effectState = operation.data?.effectState;
-  const operationTerminal = operationState === 'succeeded' || operationState === 'failed';
+  const operationTerminal =
+    (operationState === 'succeeded' || operationState === 'failed') &&
+    !['uncertain', 'prepared'].includes(effectState ?? '');
   useEffect(() => {
-    if (!canReadSection || !operationId || operationTerminal) return;
+    if (!canReadSection || !operationId || operationTerminal || typeof EventSource === 'undefined')
+      return;
     const queryKey = ['game-operation', serverId, operationId];
-    let closed = false;
-    const refresh = () => {
-      // A read already in flight may describe the state before the commit.
-      // Discard it before requesting the authoritative outcome after the hint.
-      void queryClient.cancelQueries({ queryKey, exact: true }).then(() => {
-        if (!closed) return queryClient.refetchQueries({ queryKey, exact: true });
-      });
-    };
     const events = new EventSource(`/v1/servers/${serverId}/events/stream?after=latest`, {
       withCredentials: true,
     });
-    events.addEventListener('ready', () => {
-      setOperationEventsConnected(true);
-      refresh();
-    });
-    events.addEventListener('activity', (event: MessageEvent<string>) => {
-      try {
-        const value = JSON.parse(event.data) as Record<string, unknown>;
-        if (
-          value.serverId === serverId ||
-          (value.server_id === serverId &&
-            value.job_id === operationId &&
-            ['servers.operation.succeeded', 'servers.operation.failed'].includes(
-              String(value.message_key),
-            ))
-        )
-          refresh();
-      } catch {
-        // Malformed notifications cannot confirm an effect. Polling remains available.
-      }
-    });
-    events.onerror = () => setOperationEventsConnected(false);
+    let active = true;
+    const stop = watchGameOperation(
+      events,
+      serverId,
+      operationId,
+      setOperationEventsConnected,
+      async () => {
+        // The first active read can predate the commit that emitted this hint.
+        await queryClient.cancelQueries({ queryKey, exact: true });
+        if (active) await queryClient.refetchQueries({ queryKey, exact: true, type: 'active' });
+      },
+    );
     return () => {
-      closed = true;
-      events.close();
+      active = false;
+      stop();
       setOperationEventsConnected(false);
     };
   }, [canReadSection, operationId, operationTerminal, serverId]);

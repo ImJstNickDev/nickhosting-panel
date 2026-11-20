@@ -2820,6 +2820,7 @@ export async function processServerOperation(
           .where('operation.action', '=', 'provision')
           .orderBy('job.created_at', 'desc')
           .orderBy('operation.job_id', 'desc')
+          .limit(1)
           .executeTakeFirst();
         if (
           rejected?.state !== 'failed' ||
@@ -3916,6 +3917,7 @@ export async function reconcileManagedServer(
       ])
       .orderBy('operation.updated_at', 'desc')
       .orderBy('operation.job_id', 'desc')
+      .limit(1)
       .executeTakeFirst();
     const restart = latestPower?.action === 'restart';
     const epoch = processStartTime(
@@ -3997,6 +3999,7 @@ export async function reconcileManagedServer(
       .where('action', 'in', ['start', 'restart', 'stop', 'provision', 'backup'])
       .orderBy('updated_at', 'desc')
       .orderBy('job_id', 'desc')
+      .limit(1)
       .executeTakeFirst();
     const confirmedAt =
       typeof latestPower?.plan.stopConfirmedAt === 'string'
