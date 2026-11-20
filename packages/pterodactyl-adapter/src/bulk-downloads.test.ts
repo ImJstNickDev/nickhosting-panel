@@ -81,6 +81,18 @@ function timingFixture() {
 }
 
 describe('private Blueprint signed download pool', () => {
+  it('consumes prepared export grants without issuing a refill per file', async () => {
+    const f = fixture();
+    const paths = ['a.txt', 'b.txt', 'c.txt'];
+    await f.adapter.prefetchDownloads('fixture', paths);
+    for (const path of paths)
+      expect(
+        await text(await f.adapter.downloadFile('fixture', path, { refillGrant: false })),
+      ).toBe('fixture');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(f.batches).toEqual([paths]);
+    expect(f.used).toHaveLength(paths.length);
+  });
   it('separates settings HTTP/cache and issuance timings without private values or extra requests', async () => {
     const f = fixture();
     const trace = timingFixture();

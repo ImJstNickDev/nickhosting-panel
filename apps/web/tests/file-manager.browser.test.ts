@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { Readable } from 'node:stream';
 import { AxeBuilder } from '@axe-core/playwright';
 import { expect as browserExpect, type Locator, type Page } from '@playwright/test';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { ZipFile } from 'yazl';
 import { browserHarness } from './harness.js';
 import {
   journeyRequest,
@@ -729,6 +731,14 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     }
   });
   it('extracts a ZIP into a new folder and moves files by folder and breadcrumb drops', async () => {
+    const archive = new ZipFile();
+    archive.addBuffer(Buffer.from('Alpha notes'), 'alpha.txt');
+    archive.addBuffer(Buffer.from('Beta notes'), 'beta.txt');
+    archive.end();
+    const bytes = await new Response(
+      Readable.toWeb(archive.outputStream as Readable) as ReadableStream<Uint8Array>,
+    ).arrayBuffer();
+    (await provider.files()).set('selection.zip', Buffer.from(bytes));
     await openRoot(user);
     await menu('selection.zip');
     await user.getByRole('menuitem', { name: 'Extract', exact: true }).click();

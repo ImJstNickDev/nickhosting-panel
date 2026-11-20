@@ -30,9 +30,11 @@ import {
 import type { Hono } from 'hono';
 import { z } from 'zod';
 import type { Variables } from './app.js';
-import { inspectFilePath } from './file-browsing.js';
+import { sameArchiveFile } from './file-archive-reader.js';
 import { createFileDirectoryPlan, fileDirectoryAncestors } from './file-directory-plan.js';
+import { publishExtractedFiles } from './file-extraction-publication.js';
 import { createFileOperationTrace } from './file-operation-trace.js';
+import { inspectFilePath } from './file-path-inspection.js';
 import type { ServerRouteOptions } from './servers.js';
 
 export const extractFormats = [
@@ -996,10 +998,9 @@ export function registerFileOperationRoutes(
     try {
       stage = await mkdtemp(join(base, 'extract-'));
       const stagePath = stage;
-      return await service.access(
+      const prepared = await service.fileReadAccess(
         context,
         serverId,
-        true,
         async (id, connection, current, server) => {
           if (root) {
             const directory = await inspectFilePath(service.adapter, id, root);
@@ -1016,7 +1017,10 @@ export function registerFileOperationRoutes(
           const archive = join(stagePath, 'source');
           const download = await service.adapter.downloadFile(id, pathJoin(root, name), {
             signal: c.req.raw.signal,
-            authorize: () => service.authorizeTransfer(current, serverId, false, connection),
+            maxBytes: source.size,
+            refillGrant: false,
+            authorize: () =>
+              service.authorizeTransfer(current, serverId, false, connection, undefined, server),
           });
           let bytes = 0;
           await pipeline(
@@ -1031,18 +1035,36 @@ export function registerFileOperationRoutes(
             { signal: c.req.raw.signal },
           );
           if (bytes !== source.size) throw new DomainError('conflict');
-          const filesRoot = join(stagePath, 'files');
-          await mkdir(filesRoot, { mode: 0o700 });
-          const files = await stageFileArchive(
-            archive,
-            format,
-            filesRoot,
-            c.req.raw.signal,
-            diskPolicy,
-            { entries: input.entries, archives: input.archives, name },
-          );
-          if (files.some((file) => file.size > (transferLimits.upload.providerMaxFileBytes ?? 0)))
-            throw new DomainError('validation_failed', 413);
+          return { id, binding: service.uploadBatchBinding(server), source, archive };
+        },
+        undefined,
+        'files.write',
+      );
+      const filesRoot = join(stagePath, 'files');
+      await mkdir(filesRoot, { mode: 0o700 });
+      const files = await stageFileArchive(
+        prepared.archive,
+        format,
+        filesRoot,
+        c.req.raw.signal,
+        diskPolicy,
+        { entries: input.entries, archives: input.archives, name },
+      );
+      if (files.some((file) => file.size > (transferLimits.upload.providerMaxFileBytes ?? 0)))
+        throw new DomainError('validation_failed', 413);
+      // Local validation and decoding can be slow. Reacquire current write authority,
+      // server storage admission and the source revision before publishing any file.
+      return await service.access(
+        context,
+        serverId,
+        true,
+        async (id, connection, current, server) => {
+          c.req.raw.signal.throwIfAborted();
+          if (id !== prepared.id || service.uploadBatchBinding(server) !== prepared.binding)
+            throw new DomainError('conflict');
+          await service.authorizeTransfer(current, serverId, false, connection, undefined, server);
+          const latest = await inspectFilePath(service.adapter, id, pathJoin(root, name));
+          if (!sameArchiveFile(prepared.source, latest)) throw new DomainError('conflict');
           await service.assertFileMutation(
             serverId,
             files.map((file) => pathJoin(destination, file.path)),
@@ -1086,63 +1108,26 @@ export function registerFileOperationRoutes(
             }
             dispatched = true;
             await service.adapter.createDirectory(id, root, input.destination);
-            const directories = new Set([destination]);
-            for (const file of files) {
-              const target = pathJoin(destination, file.path),
-                parts = target.split('/');
-              if (!file.directory) parts.pop();
-              for (let i = destination.split('/').length + 1; i <= parts.length; i++) {
-                const dir = parts.slice(0, i).join('/');
-                if (!directories.has(dir)) {
-                  await service.authorizeTransfer(current, serverId, true, connection);
-                  const parent = await inspectFilePath(
-                    service.adapter,
-                    id,
-                    parts.slice(0, i - 1).join('/'),
-                  );
-                  if (!parent || parent.is_file) throw new DomainError('conflict');
-                  await service.adapter.createDirectory(
-                    id,
-                    parts.slice(0, i - 1).join('/'),
-                    parts[i - 1] ?? '',
-                  );
-                  directories.add(dir);
-                }
-              }
-              if (file.directory) {
+            await publishExtractedFiles({
+              adapter: service.adapter,
+              id,
+              destination,
+              files,
+              concurrency: transferLimits.upload.concurrency,
+              batchBytes: transferLimits.upload.batchMaxBytes ?? 0,
+              signal: c.req.raw.signal,
+              authorize: () =>
+                service.authorizeTransfer(current, serverId, true, connection, undefined, server),
+              guard: (targets) => service.assertFileMutation(serverId, targets, connection),
+              reserve: (bytes, largest, count) =>
+                reserveUploadIngestion(connection, current, serverId, bytes, env, {
+                  multipartCount: count,
+                  providerLargestFileBytes: largest,
+                }),
+              completed: () => {
                 completed++;
-                continue;
-              }
-              await service.assertFileMutation(serverId, [target], connection);
-              if (
-                (await service.adapter.listFiles(id, parts.join('/'))).some(
-                  (item) => item.name.toLowerCase() === file.path.split('/').at(-1)?.toLowerCase(),
-                )
-              )
-                throw new DomainError('conflict');
-              const parent = await inspectFilePath(service.adapter, id, parts.join('/'));
-              if (!parent || parent.is_file) throw new DomainError('conflict');
-              const claim = await reserveUploadIngestion(
-                connection,
-                current,
-                serverId,
-                file.size,
-                env,
-              );
-              try {
-                await service.adapter.uploadFile(id, target, {
-                  body: Readable.toWeb(createReadStream(file.local)) as ReadableStream<Uint8Array>,
-                  contentLength: file.size,
-                  maxBytes: file.size,
-                  signal: c.req.raw.signal,
-                  authorize: () => service.authorizeTransfer(current, serverId, true, connection),
-                });
-                await claim.complete();
-              } finally {
-                await claim.unlock();
-              }
-              completed++;
-            }
+              },
+            });
             await recordAudit(connection, current, 'server.files.completed', {
               ...metadata,
               completed,

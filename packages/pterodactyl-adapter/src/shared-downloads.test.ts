@@ -78,6 +78,19 @@ const read = async (adapter: ReturnType<typeof createPterodactylAdapter>) =>
   Buffer.from(await adapter.readFileForEditor('server', 'server.properties')).toString();
 
 describe('shared private download grants', () => {
+  it('does not refill a consumed shared export grant', async () => {
+    const f = fixture();
+    const api = f.process('api');
+    const paths = ['a.txt', 'b.txt'];
+    await api.adapter.prefetchDownloads('server', paths);
+    for (const path of paths) {
+      const file = await api.adapter.downloadFile('server', path, { refillGrant: false });
+      expect(await new Response(file.body).text()).toBe('fresh');
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(f.issued).toHaveLength(2);
+    expect(f.events.filter((event) => event.endsWith(':issue'))).toHaveLength(1);
+  });
   it('consumes an API-prepared grant in a separate worker without another settings or grant request first', async () => {
     const f = fixture();
     const api = f.process('api');

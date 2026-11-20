@@ -580,6 +580,7 @@ export function createDownloadPool(
     identifier: string,
     path: string,
     timing?: FileReadTiming,
+    refill = true,
   ): Promise<string> {
     const key = keyFor(identifier, path);
     const pool = state();
@@ -610,11 +611,16 @@ export function createDownloadPool(
       token = tokens[0];
       if (!token) throw invalid();
     }
-    void prefetchShared(identifier, [path]).catch(() => {});
+    if (refill) void prefetchShared(identifier, [path]).catch(() => {});
     return token.url;
   }
-  async function take(identifier: string, path: string, timing?: FileReadTiming): Promise<string> {
-    if (shared) return takeShared(identifier, path, timing);
+  async function take(
+    identifier: string,
+    path: string,
+    timing?: FileReadTiming,
+    refill = true,
+  ): Promise<string> {
+    if (shared) return takeShared(identifier, path, timing, refill);
     const pool = state();
     const key = keyFor(identifier, path);
     for (;;) {
@@ -631,7 +637,7 @@ export function createDownloadPool(
         if (timing) timing.measureSync('grant.ready', () => remove(pool, key));
         else remove(pool, key);
         // Detached refill must never retain the consuming request's timing collector.
-        void prefetch(identifier, [path]).catch(() => {});
+        if (refill) void prefetch(identifier, [path]).catch(() => {});
         return current.token.url;
       }
       remove(pool, key);
