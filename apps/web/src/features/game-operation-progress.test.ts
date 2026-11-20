@@ -15,7 +15,9 @@ it('coalesces a burst and catches up once for hints committed during a read', as
   const stop = watchGameOperation(stream as unknown as EventSource, 's', 'j', connected, refresh);
   const hint = (value: unknown) =>
     stream.dispatchEvent(new MessageEvent('activity', { data: JSON.stringify(value) }));
-  stream.dispatchEvent(new Event('ready'));
+  stream.dispatchEvent(
+    new MessageEvent('ready', { data: JSON.stringify({ serverId: 's', notifications: true }) }),
+  );
   for (let i = 0; i < 200; i++) hint({ server_id: 's', job_id: 'j' });
   await vi.advanceTimersByTimeAsync(40);
   expect(refresh).toHaveBeenCalledTimes(1);
@@ -31,7 +33,12 @@ it('coalesces a burst and catches up once for hints committed during a read', as
   expect(refresh).toHaveBeenCalledTimes(2);
   stream.onerror?.();
   expect(connected.mock.calls).toEqual([[true], [false]]);
-  stream.dispatchEvent(new Event('ready'));
+  stream.dispatchEvent(
+    new MessageEvent('ready', { data: JSON.stringify({ serverId: 's', notifications: false }) }),
+  );
+  expect(connected).toHaveBeenLastCalledWith(false);
+  stream.dispatchEvent(new MessageEvent('ready', { data: JSON.stringify({ serverId: 's' }) }));
+  expect(connected).toHaveBeenLastCalledWith(false);
   await vi.advanceTimersByTimeAsync(50);
   expect(refresh).toHaveBeenCalledTimes(3);
   hint({ serverId: 's' });

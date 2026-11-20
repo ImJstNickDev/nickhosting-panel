@@ -51,11 +51,17 @@ export function watchGameOperation(
       }
     }, 32);
   }
-  events.addEventListener('ready', () => {
-    if (!closed) {
-      connected(true);
-      schedule();
+  events.addEventListener('ready', (event: MessageEvent<string>) => {
+    if (closed) return;
+    let notifications = false;
+    try {
+      const ready = JSON.parse(event.data);
+      notifications = ready?.serverId === serverId && ready.notifications === true;
+    } catch {
+      // Older bridges and malformed frames keep the ordinary REST fallback.
     }
+    connected(notifications);
+    schedule();
   });
   events.addEventListener('activity', (event: MessageEvent<string>) => {
     try {

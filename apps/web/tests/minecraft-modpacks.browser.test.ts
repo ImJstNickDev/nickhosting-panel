@@ -145,7 +145,9 @@ describe('Minecraft Modpacks full-page experience', () => {
                 if (streamProgress) {
                   streamResponse = res;
                   res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-                  res.write('retry: 30000\nevent: ready\ndata: {}\n\n');
+                  res.write(
+                    `retry: 30000\nevent: ready\ndata: ${JSON.stringify({ serverId: server, notifications: true })}\n\n`,
+                  );
                   return;
                 }
                 res.statusCode = 204;
