@@ -42,14 +42,15 @@ import {
 } from '../../../games/minecraft/src/runtime.js';
 import { type DB, type Environment, lockResources } from './admission.js';
 import { getFabricCatalog } from './fabric-catalog.js';
-import { getFoliaCatalog, getFoliaCatalogSnapshot } from './folia-catalog.js';
-import { getForgeCatalog, getForgeCatalogSnapshot } from './forge-catalog.js';
+import { getFoliaCatalogSnapshot } from './folia-catalog.js';
+import { getForgeCatalogSnapshot } from './forge-catalog.js';
 import { currentInteractiveContext } from './interactive-context.js';
+import { minecraftCatalogGames } from './minecraft-catalog-projections.js';
 import { cachedMinecraftManifest, getMinecraftMetadataStatus } from './minecraft-metadata.js';
-import { getNeoForgeCatalog, getNeoForgeCatalogSnapshot } from './neoforge-catalog.js';
-import { getPaperCatalog, getPaperCatalogSnapshot } from './paper-catalog.js';
-import { getPurpurCatalog, getPurpurCatalogSnapshot } from './purpur-catalog.js';
-import { getQuiltCatalog, getQuiltCatalogSnapshot } from './quilt-catalog.js';
+import { getNeoForgeCatalogSnapshot } from './neoforge-catalog.js';
+import { getPaperCatalogSnapshot } from './paper-catalog.js';
+import { getPurpurCatalogSnapshot } from './purpur-catalog.js';
+import { getQuiltCatalogSnapshot } from './quilt-catalog.js';
 import { ownerOnly, parse } from './registry.js';
 
 type Mapping = Selectable<Database['runtime_egg_mappings']>;
@@ -341,39 +342,6 @@ const catalogRuntimes = [
 ] as const;
 type CatalogRuntime = (typeof catalogRuntimes)[number];
 
-async function catalogGames(db: DB, runtime: CatalogRuntime, target?: ContentTarget) {
-  if (runtime === 'fabric' || runtime === 'quilt') {
-    const catalog = await (runtime === 'quilt' ? getQuiltCatalog : getFabricCatalog)(db);
-    if (
-      !catalog.synced ||
-      !catalog.latestInstallerVersion ||
-      !catalog.loaders.length ||
-      (target && !catalog.loaders.some((loader) => loader.version === target.loaderVersion))
-    )
-      return [];
-    return catalog.games;
-  }
-  if (runtime === 'forge' || runtime === 'neoforge') {
-    const catalog = await (runtime === 'forge' ? getForgeCatalog : getNeoForgeCatalog)(db);
-    if (!catalog.synced) return [];
-    return catalog.versions
-      .filter(
-        (game) =>
-          !target ||
-          (game.minecraftVersion === target.minecraftVersion &&
-            game.loaders.some((loader) => loader.version === target.loaderVersion)),
-      )
-      .map((game) => ({ version: game.minecraftVersion, stable: true }));
-  }
-  const catalog = await (runtime === 'paper'
-    ? getPaperCatalog
-    : runtime === 'folia'
-      ? getFoliaCatalog
-      : getPurpurCatalog)(db);
-  if (!catalog.synced || target?.loaderVersion) return [];
-  return catalog.versions.map((game) => ({ version: game.version, stable: undefined }));
-}
-
 async function runtimeCreationCatalog(
   db: DB,
   target?: ContentTarget,
@@ -410,7 +378,7 @@ async function runtimeCreationCatalog(
     Promise.all(
       Array.from(
         runtimes,
-        async (runtime) => [runtime, await catalogGames(db, runtime, target)] as const,
+        async (runtime) => [runtime, await minecraftCatalogGames(db, runtime, target)] as const,
       ),
     ),
     releaseQuery.execute(),

@@ -104,7 +104,7 @@ async function attest(kind: 'protocol-fixture' | 'real-server' = 'real-server') 
   );
 }
 describe('Minecraft Owner evidence and user eligibility', () => {
-  it('loads more than 1000 declared choices in twelve bounded queries and orders all families by local dates', async () => {
+  it('loads more than 1000 declared choices in four queries without unrelated catalog reads and orders them by local dates', async () => {
     const source = await f.db
       .selectFrom('minecraft_combinations')
       .selectAll()
@@ -156,8 +156,8 @@ describe('Minecraft Owner evidence and user eligibility', () => {
       },
     });
     const choices = await minecraftCatalog(measured, f.context, env);
-    // Rollout, choices, bulk mappings; seven provider caches; catalog mappings, dates, protocols.
-    expect(count).toBe(13);
+    // Rollout, registered choices, runtime mappings, and bulk mapping inspection.
+    expect(count).toBe(4);
     expect(choices.filter((choice) => entries.some((row) => row.id === choice.id))).toHaveLength(
       1001,
     );

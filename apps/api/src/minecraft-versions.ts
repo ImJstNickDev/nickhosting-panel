@@ -21,6 +21,7 @@ import {
 import type { Context, Hono } from 'hono';
 import type { Kysely } from 'kysely';
 import { z } from 'zod';
+import { minecraftCatalogLoaders } from '../../../packages/server-management/src/minecraft-catalog-projections.js';
 import {
   minecraftRuntimeOwner,
   modpackMappingCompatible,
@@ -147,15 +148,7 @@ export function registerMinecraftVersionRoutes(
       c.req.query(),
     );
     c.header('Cache-Control', 'no-store');
-    if (runtime === 'fabric' || runtime === 'quilt') {
-      const catalog = await (runtime === 'fabric' ? getFabricCatalog : getQuiltCatalog)(db);
-      return c.json(catalog.loaders.map((l) => l.version));
-    }
-    const catalog = await (runtime === 'forge' ? getForgeCatalog : getNeoForgeCatalog)(db);
-    return c.json(
-      catalog.versions.find((v) => v.minecraftVersion === version)?.loaders.map((l) => l.version) ??
-        [],
-    );
+    return c.json(await minecraftCatalogLoaders(db, runtime, version));
   });
   app.post(base, async (c) => {
     const resource = await scope(c);
