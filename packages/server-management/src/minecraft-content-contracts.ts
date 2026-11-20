@@ -154,7 +154,7 @@ export interface MinecraftPreparedContent {
     dataVersion?: number;
     existing: boolean;
     /** Internal observation from Worlds inspection, never accepted in a public command. */
-    observation?: { name: string; dataVersion: number; sha256: string };
+    observation?: { name: string; dataVersion: number; sha256: string; revision?: string };
   };
 }
 

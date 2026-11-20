@@ -5,7 +5,11 @@ import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { pendingUploadFixture } from '../../../packages/server-management/src/test-fixtures.js';
 import { browserHarness } from './harness.js';
-import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
+import {
+  journeyRequest,
+  prepareJourneyIdentities,
+  showRootFixtureFiles,
+} from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
 
 type CopyRequest = {
@@ -86,6 +90,8 @@ describe('M5 copy tree and conflict decisions with isolated real API handlers', 
   }
   async function openCopy(names: string[], source = '', italian = false) {
     await user.goto(base);
+    await user.getByRole('button', { name: 'root', exact: true }).click();
+    await showRootFixtureFiles(user);
     for (const part of source.split('/').filter(Boolean)) {
       try {
         await row(part).getByRole('button', { name: part, exact: true }).click();
@@ -190,6 +196,7 @@ describe('M5 copy tree and conflict decisions with isolated real API handlers', 
     await dialog().getByRole('button', { name: 'Chiudi', exact: true }).click();
     await locale('en');
     await user.goto(base);
+    await user.getByRole('button', { name: 'root', exact: true }).click();
     await row('source').getByRole('button', { name: 'source', exact: true }).click();
     await row('a.txt').getByRole('button', { name: 'Actions for a.txt', exact: true }).click();
     await user.getByRole('menuitem', { name: 'Copy', exact: true }).click();
@@ -490,6 +497,7 @@ describe('M5 copy tree and conflict decisions with isolated real API handlers', 
       ).toHaveCount(0);
       await dialog().getByRole('button', { name: 'Close', exact: true }).click();
       await user.reload();
+      await showRootFixtureFiles(user);
       await browserExpect(row('uncertain-copy.txt')).toBeVisible();
       expect(copies).toHaveLength(before + 1);
       expect(remote.get('uncertain-copy.txt')?.toString()).toBe(

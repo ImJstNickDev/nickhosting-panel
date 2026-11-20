@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { posix } from 'node:path';
 import { type AuthContext, type createLogger, DomainError } from '@nickhosting/core';
 import { type createDatabase, recordAudit } from '@nickhosting/database';
+import { affectsMinecraftWorldIndex, minecraftWorldDirectoryMove } from '@nickhosting/minecraft';
 import {
   isUploadCancelled,
   isUploadNotDispatched,
@@ -703,6 +704,7 @@ export function registerServerRoutes(
           operationId: randomUUID(),
           source: 'panel',
           action: 'upload',
+          worldIndexChanged: affectsMinecraftWorldIndex(path),
           path,
           count: 1,
           bytes: contentLength,
@@ -877,6 +879,23 @@ export function registerServerRoutes(
               source: 'panel',
               serverId: c.req.param('id'),
               action: input.action,
+              // Large batches still invalidate using every path. Project only a complete
+              // bounded batch, since a partial or truncated rename is ambiguous.
+              ...(input.action === 'rename' && input.files.length <= 100
+                ? {
+                    worldMoves: input.files.flatMap(({ from, to }) =>
+                      minecraftWorldDirectoryMove(
+                        posix.join(input.root, from),
+                        posix.join(input.root, to),
+                      ),
+                    ),
+                  }
+                : input.action === 'delete' && paths.length <= 100
+                  ? { worldMoves: paths.flatMap((path) => minecraftWorldDirectoryMove(path)) }
+                  : {}),
+              worldIndexChanged: paths.some((path) =>
+                affectsMinecraftWorldIndex(path, input.action !== 'write'),
+              ),
               count:
                 input.action === 'delete' || input.action === 'rename' ? input.files.length : 1,
               ...(input.action === 'write' ? { path: input.path } : { root: input.root }),

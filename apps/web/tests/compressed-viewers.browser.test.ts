@@ -2,7 +2,11 @@ import { Buffer } from 'node:buffer';
 import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { browserHarness } from './harness.js';
-import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
+import {
+  journeyRequest,
+  prepareJourneyIdentities,
+  showRootFixtureFiles,
+} from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
 
 describe('single compressed viewers', () => {
@@ -91,6 +95,7 @@ describe('single compressed viewers', () => {
   async function open(name: string) {
     await page.goto(base);
     await page.getByRole('button', { name: 'root', exact: true }).click();
+    await showRootFixtureFiles(page);
     await page.locator('.fm-filename').getByText(name, { exact: true }).click();
   }
   const choose = async (name: string) => {

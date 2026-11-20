@@ -10,6 +10,10 @@ import {
 } from '@nickhosting/server-management';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  readMinecraftWorldIndex,
+  refreshMinecraftWorldIndex,
+} from '../../../packages/server-management/src/minecraft-world-index.js';
 import type { Variables } from './app.js';
 import { registerMinecraftRoutes } from './minecraft.js';
 
@@ -19,6 +23,10 @@ vi.mock('@nickhosting/server-management', async (original) => ({
   getServerPermissionKeys: vi.fn(),
   inspectMinecraftWorlds: vi.fn(),
   inspectMinecraftCombination: vi.fn(),
+}));
+vi.mock('../../../packages/server-management/src/minecraft-world-index.js', () => ({
+  readMinecraftWorldIndex: vi.fn(),
+  refreshMinecraftWorldIndex: vi.fn(),
 }));
 const actor = { subjectUserId: 'reader' } as AuthContext;
 const db = {} as ReturnType<typeof createDatabase>['db'];
@@ -30,6 +38,8 @@ const snapshot = {
   compatibility: 'unavailable' as const,
   worlds: [],
 };
+
+const inventory = { snapshot, nonWorldDirectories: ['cache'], observedAt: new Date() };
 
 function fixture(connection = db) {
   const app = new Hono<{ Variables: Variables }>();
@@ -55,6 +65,7 @@ function fixture(connection = db) {
   const prepareWorldSelection = vi.fn(async () => {});
   const prepareFileWrites = vi.fn(async () => {});
   const service = {
+    consoleProviderBinding: 'test-binding',
     adapter: { readFileForEditor },
     fileReadScope: access,
     prepareFileWrites,
@@ -84,6 +95,8 @@ beforeEach(() => {
   vi.mocked(authorizeServer)
     .mockReset()
     .mockResolvedValue({} as Awaited<ReturnType<typeof authorizeServer>>);
+  vi.mocked(readMinecraftWorldIndex).mockReset().mockResolvedValue(inventory);
+  vi.mocked(refreshMinecraftWorldIndex).mockReset().mockResolvedValue(inventory);
   vi.mocked(inspectMinecraftWorlds).mockReset().mockResolvedValue(snapshot);
   vi.mocked(getServerPermissionKeys)
     .mockReset()
@@ -109,24 +122,68 @@ describe('world snapshot HTTP access contract', () => {
       expect.any(AbortSignal),
       'game.minecraft.worlds.read',
     );
-    const authorize = vi.mocked(inspectMinecraftWorlds).mock.calls[0]?.[3];
-    await authorize?.();
-    expect(f.authorizeTransfer).toHaveBeenCalledExactlyOnceWith(actor, 'server', false, db);
+    expect(refreshMinecraftWorldIndex).toHaveBeenCalledOnce();
+    expect(f.authorizeTransfer).toHaveBeenLastCalledWith(
+      actor,
+      'server',
+      false,
+      db,
+      undefined,
+      expect.anything(),
+      false,
+      'game.minecraft.worlds.read',
+    );
   });
   it('overlaps opening preparation with inventory and tolerates unavailable preparation', async () => {
     const f = fixture();
     const preparation = Promise.withResolvers<void>();
     f.prepareWorldSelection.mockReturnValueOnce(preparation.promise);
     const inspected = Promise.withResolvers<void>();
-    vi.mocked(inspectMinecraftWorlds).mockImplementationOnce(async () => {
+    vi.mocked(refreshMinecraftWorldIndex).mockImplementationOnce(async () => {
       inspected.resolve();
-      return snapshot;
+      return inventory;
     });
     const response = f.app.request('/v1/servers/server/minecraft/worlds');
     await inspected.promise;
     expect(f.prepareWorldSelection).toHaveBeenCalledOnce();
     preparation.reject(new Error('optional preparation unavailable'));
     expect((await response).status).toBe(200);
+  });
+  it('publishes a prepared inventory without waiting for provider files', async () => {
+    const f = fixture();
+    const response = await f.app.request('/v1/servers/server/minecraft/worlds?cached=1');
+    expect(await response.json()).toEqual(snapshot);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(readMinecraftWorldIndex).toHaveBeenCalledWith(db, 'server', 'test-binding');
+    expect(f.authorizeTransfer).toHaveBeenCalledWith(
+      actor,
+      'server',
+      false,
+      db,
+      undefined,
+      expect.anything(),
+      false,
+      'game.minecraft.worlds.read',
+    );
+    expect(f.access).not.toHaveBeenCalled();
+    expect(refreshMinecraftWorldIndex).not.toHaveBeenCalled();
+    vi.mocked(readMinecraftWorldIndex).mockResolvedValueOnce(undefined);
+    expect(
+      await (await f.app.request('/v1/servers/server/minecraft/worlds?cached=1')).json(),
+    ).toBeNull();
+  });
+  it('projects only root classification with files.read and rechecks the caller before disclosure', async () => {
+    const f = fixture();
+    const path = '/v1/servers/server/minecraft/worlds/fileman';
+    expect(await (await f.app.request(path)).json()).toEqual({
+      worlds: [],
+      selectedWorld: 'world',
+      nonWorldDirectories: ['cache'],
+    });
+    expect(authorizeServer).toHaveBeenCalledWith(db, actor, 'server', 'files.read');
+    f.authorizeTransfer.mockRejectedValueOnce(new DomainError('forbidden'));
+    expect((await f.app.request(path)).status).toBe(403);
+    expect(refreshMinecraftWorldIndex).not.toHaveBeenCalled();
   });
   it('opens Settings through Fileman identity access and one direct signed read', async () => {
     const profile = {
@@ -188,7 +245,9 @@ describe('world snapshot HTTP access contract', () => {
   });
   it('does not inspect files when managed provider identity verification rejects access', async () => {
     const f = fixture();
-    f.access.mockRejectedValue(new DomainError('provenance_mismatch'));
+    vi.mocked(refreshMinecraftWorldIndex).mockRejectedValueOnce(
+      new DomainError('provenance_mismatch'),
+    );
     const response = await f.app.request('/v1/servers/server/minecraft/worlds');
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({ code: 'provenance_mismatch' });

@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import { AxeBuilder } from '@axe-core/playwright';
 import { expect as check, type Page } from '@playwright/test';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
@@ -12,7 +12,23 @@ describe('Minecraft root hidden file grouping', () => {
   let page: Page;
   let base: string;
   const errors: string[] = [];
-  const hidden = ['.fixture-cache', 'libraries', 'versions', 'eula.txt', 'usercache.json'];
+  const hidden = [
+    '.fixture-cache',
+    '.dotfile',
+    'libraries',
+    'versions',
+    'eula.txt',
+    'usercache.json',
+    'whitelist.json',
+    'pack.jar',
+    'generated-assets',
+  ];
+  const worldIndex = {
+    worlds: ['Example World'],
+    selectedWorld: 'Example World',
+    nonWorldDirectories: ['generated-assets', 'Example World_nether', 'kubejs'],
+  };
+  let indexReads = 0;
   beforeAll(async () => {
     harness = await browserHarness();
     const identities = await prepareJourneyIdentities(harness);
@@ -28,22 +44,40 @@ describe('Minecraft root hidden file grouping', () => {
     harness.setManagement(provider.management);
     base = `${harness.origin}/servers/${provider.ids.serverId}/files`;
     const endpoint = `/v1/servers/${provider.ids.serverId}/files`;
-    for (const name of ['.fixture-cache', 'libraries', 'versions', 'ordinary'])
+    for (const name of [
+      '.fixture-cache',
+      'libraries',
+      'versions',
+      'ordinary',
+      'Example World',
+      'Example World_nether',
+      'kubejs',
+      'generated-assets',
+    ])
       await journeyRequest(harness, page, endpoint, { action: 'mkdir', root: '', name });
     for (const name of ['.nested', 'libraries'])
       await journeyRequest(harness, page, endpoint, { action: 'mkdir', root: 'ordinary', name });
     const files = await provider.files();
     for (const name of [
-      'visible.txt',
+      'server.jar',
       '.dotfile',
       'eula.txt',
       'usercache.json',
+      'whitelist.json',
+      'pack.jar',
       'libraries/inside.txt',
       'ordinary/eula.txt',
       'ordinary/usercache.json',
     ])
       files.set(name, Buffer.from('Isolated grouping fixture'));
     await mkdir('.codex/local/m5-browser/screenshots', { recursive: true });
+  });
+  beforeEach(async () => {
+    indexReads = 0;
+    await page.route(`**/v1/servers/${provider.ids.serverId}/minecraft/worlds/fileman`, (route) => {
+      indexReads++;
+      return route.fulfill({ json: worldIndex });
+    });
   });
   afterEach(async () => {
     await page.unrouteAll({ behavior: 'ignoreErrors' });
@@ -68,7 +102,7 @@ describe('Minecraft root hidden file grouping', () => {
   async function open() {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(base);
-    await check(row('visible.txt')).toBeVisible();
+    await check(row('server.jar')).toBeVisible();
     await check(toggle()).toHaveAttribute('aria-expanded', 'false');
   }
   async function screenshot(name: string) {
@@ -88,9 +122,11 @@ describe('Minecraft root hidden file grouping', () => {
     ).toEqual([]);
   }
 
-  it('keeps normal dotfiles visible and exposes grouped rows with their ordinary actions', async () => {
+  it('shows useful root entries and exposes grouped rows with their ordinary actions', async () => {
     await open();
-    await check(row('.dotfile')).toBeVisible();
+    for (const name of ['Example World', 'Example World_nether', 'ordinary', 'kubejs'])
+      await check(row(name)).toBeVisible();
+    await check.poll(() => indexReads).toBeGreaterThan(0);
     for (const name of hidden) await check(row(name)).toHaveCount(0);
     await screenshot('collapsed-desktop-en');
     await toggle().click();
@@ -106,11 +142,32 @@ describe('Minecraft root hidden file grouping', () => {
     await check(toggle()).toHaveCount(0);
   });
 
+  it('re-reads the shared index on root refresh and keeps uncertain folders visible if it fails', async () => {
+    await open();
+    await check(row('generated-assets')).toHaveCount(0);
+    const indexEndpoint = `**/v1/servers/${provider.ids.serverId}/minecraft/worlds/fileman`;
+    await page.route(indexEndpoint, (route) =>
+      route.fulfill({
+        json: { ...worldIndex, worlds: [...worldIndex.worlds, 'generated-assets'] },
+      }),
+    );
+    await page.getByRole('button', { name: 'Refresh files', exact: true }).click();
+    await check(row('generated-assets')).toBeVisible();
+    await page.route(indexEndpoint, (route) =>
+      route.fulfill({ status: 503, json: { code: 'integration_unavailable' } }),
+    );
+    await page.getByRole('button', { name: 'Refresh files', exact: true }).click();
+    await check(page.getByRole('alert')).toBeVisible();
+    await check(row('ordinary')).toBeVisible();
+    await check(row('server.jar')).toBeVisible();
+    await check(row('pack.jar')).toHaveCount(0);
+  });
+
   it('limits selection to displayed rows and removes hidden selection when collapsed', async () => {
     await open();
-    await row('visible.txt').getByRole('checkbox').focus();
+    await row('server.jar').getByRole('checkbox').focus();
     await page.keyboard.press('Control+a');
-    await check(row('visible.txt').getByRole('checkbox')).toBeChecked();
+    await check(row('server.jar').getByRole('checkbox')).toBeChecked();
     await toggle().click();
     for (const name of hidden) await check(row(name).getByRole('checkbox')).not.toBeChecked();
     await row('eula.txt').getByRole('checkbox').check();
@@ -118,7 +175,7 @@ describe('Minecraft root hidden file grouping', () => {
     await toggle().click();
     await toggle().click();
     await check(row('eula.txt').getByRole('checkbox')).not.toBeChecked();
-    await check(row('visible.txt').getByRole('checkbox')).toBeChecked();
+    await check(row('server.jar').getByRole('checkbox')).toBeChecked();
     await page.getByRole('checkbox', { name: 'Select all files', exact: true }).check();
     for (const name of hidden) await check(row(name).getByRole('checkbox')).toBeChecked();
     await page.keyboard.press('Escape');
@@ -153,10 +210,13 @@ describe('Minecraft root hidden file grouping', () => {
 
   it('does not group matching names below root or on a different game', async () => {
     await open();
+    await check.poll(() => indexReads).toBeGreaterThan(0);
+    const rootReads = indexReads;
     await row('ordinary').getByRole('button', { name: 'ordinary', exact: true }).click();
     for (const name of ['.nested', 'libraries', 'eula.txt', 'usercache.json'])
       await check(row(name)).toBeVisible();
     await check(toggle()).toHaveCount(0);
+    expect(indexReads).toBe(rootReads);
     await page.getByRole('button', { name: 'root', exact: true }).click();
     await check(toggle()).toBeVisible();
     const endpoint = `**/v1/platform/servers/${provider.ids.serverId}`;

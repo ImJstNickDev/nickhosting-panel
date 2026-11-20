@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { posix } from 'node:path';
 import { DomainError, type SecretCodec } from '@nickhosting/core';
 import { type Database, getSecret, getSettings } from '@nickhosting/database';
+import { affectsMinecraftWorldIndex, minecraftWorldDirectoryMove } from '@nickhosting/minecraft';
 import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
 
@@ -148,6 +149,19 @@ export async function receiveSftpEvent(options: {
         serverId: credential.server_id,
         operationId,
         outcome: event.status === 1 ? 'succeeded' : 'failed',
+        ...(event.status === 1 && ['delete', 'rmdir', 'rename'].includes(event.event)
+          ? { worldMoves: minecraftWorldDirectoryMove(event.virtualPath, event.virtualTargetPath) }
+          : {}),
+        worldIndexChanged:
+          event.status === 1 &&
+          event.event !== 'download' &&
+          ((event.event !== 'copy' &&
+            affectsMinecraftWorldIndex(
+              event.virtualPath,
+              ['mkdir', 'rmdir', 'rename'].includes(event.event),
+            )) ||
+            (['rename', 'copy'].includes(event.event) &&
+              affectsMinecraftWorldIndex(event.virtualTargetPath, true))),
         path: event.virtualPath,
         ...(event.virtualTargetPath ? { target: event.virtualTargetPath } : {}),
         credentialUsername: event.username,

@@ -47,9 +47,10 @@ export function getFileEntryGroup(
   runtimeId: string | undefined,
   path: string,
   entry: FilemanPathEntry,
+  directoryGroup?: 'visible' | 'hidden',
 ) {
   if (!gameId || !runtimeId) return undefined;
-  return gameUiRegistry.get(gameId)?.fileEntryGroup?.({ path, runtimeId, entry });
+  return gameUiRegistry.get(gameId)?.fileEntryGroup?.({ path, runtimeId, entry, directoryGroup });
 }
 /** Directory artwork is selected from existing metadata by the compiled integration. */
 export function getFileDirectoryIcon(

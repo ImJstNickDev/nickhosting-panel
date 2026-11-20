@@ -14,6 +14,7 @@ import {
 } from '@nickhosting/content-providers';
 import { DomainError } from '@nickhosting/core';
 import { getSettings, recordAudit } from '@nickhosting/database';
+import { affectsMinecraftWorldIndex } from '@nickhosting/minecraft';
 import {
   type PterodactylAdapter,
   relativePath,
@@ -825,6 +826,9 @@ export function registerFileOperationRoutes(
                 operationId: randomUUID(),
                 source: 'panel',
                 action: 'copy',
+                worldIndexChanged: entries.some((entry) =>
+                  affectsMinecraftWorldIndex(entry.path, entry.directory),
+                ),
                 root: input.root,
                 target: input.destination,
                 count: entries.length,
@@ -1063,6 +1067,7 @@ export function registerFileOperationRoutes(
             operationId: randomUUID(),
             source: 'panel',
             action: 'extract',
+            worldIndexChanged: affectsMinecraftWorldIndex(destination, true),
             path: pathJoin(root, name),
             target: destination,
             count: files.length,

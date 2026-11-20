@@ -2,6 +2,24 @@ import type { ColumnType, Generated } from 'kysely';
 
 type Json = ColumnType<unknown, string, string>;
 export interface MinecraftTables {
+  minecraft_world_indexes: {
+    server_id: string;
+    generation: Generated<string>;
+    operation_generation: Generated<string>;
+    next_scan_at: Date;
+    lease_id: string | null;
+    lease_until: Date | null;
+    finished_id: string | null;
+    denied_reason: 'forbidden' | 'provenance_mismatch' | 'not_found' | null;
+    successful_generation: string | null;
+    binding: string | null;
+    local_binding: string | null;
+    snapshot: Json;
+    level_stamps: ColumnType<unknown, string | undefined, string>;
+    non_world_directories: Generated<string[]>;
+    observed_at: Date | null;
+    last_file_change_at: Date | null;
+  };
   minecraft_combinations: {
     id: string;
     mapping_id: string;

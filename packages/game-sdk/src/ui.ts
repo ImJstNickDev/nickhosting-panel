@@ -684,6 +684,10 @@ export interface TrustedGameUiModule {
   descriptor: GameUiDescriptor;
   catalogs: { en: Readonly<Record<string, string>>; it: Readonly<Record<string, string>> };
   handlers: Readonly<Record<string, GameUiHandler>>;
+  /** Optional fast observations shown on section entry while the normal loader revalidates. */
+  sectionPreviews?: Readonly<
+    Record<string, (client: GameUiClient, context: GameUiContext) => Promise<UiSectionData | null>>
+  >;
   /** Optional bundled editor key. Resolved only by the application's trusted UI registry. */
   gatewayMessageEditor?: string;
   /** Trusted code only: one authorized catalog, synchronous field projections. */
@@ -697,11 +701,18 @@ export interface TrustedGameUiModule {
   assets?: Readonly<Record<string, string>>;
   /** Optional runtime mark from the same bundled asset registry used by creation. */
   runtimeArtwork?(runtimeId: string): UiOption['artwork'];
+  /** Optional file-reader projection from the integration's existing root inventory. */
+  fileRootGroups?(
+    client: GameUiClient,
+    serverId: string,
+    signal: AbortSignal,
+  ): Promise<ReadonlyMap<string, 'visible' | 'hidden'>>;
   /** Presentation grouping only; entries remain accessible and keep existing filesystem permissions. */
   fileEntryGroup?(context: {
     readonly path: string;
     readonly runtimeId: string;
     readonly entry: FilemanPathEntry;
+    readonly directoryGroup?: 'visible' | 'hidden';
   }): 'hidden' | undefined;
   /** Bundled directory mark, optionally overridden by a direct-child PNG; Fileman owns authorized reads. */
   fileDirectoryIcon?(context: {
@@ -826,9 +837,13 @@ export function defineTrustedGameUiModule(module: TrustedGameUiModule): TrustedG
     descriptor: deepFreeze(descriptor),
     catalogs: deepFreeze({ en: { ...module.catalogs.en }, it: { ...module.catalogs.it } }),
     handlers: Object.freeze({ ...module.handlers }),
+    ...(module.sectionPreviews
+      ? { sectionPreviews: Object.freeze({ ...module.sectionPreviews }) }
+      : {}),
     ...(module.gatewayMessageEditor ? { gatewayMessageEditor: module.gatewayMessageEditor } : {}),
     assets: Object.freeze({ ...module.assets }),
     ...(module.runtimeArtwork ? { runtimeArtwork: module.runtimeArtwork } : {}),
+    ...(module.fileRootGroups ? { fileRootGroups: module.fileRootGroups } : {}),
     ...(module.fileEntryGroup ? { fileEntryGroup: module.fileEntryGroup } : {}),
     ...(module.fileDirectoryIcon ? { fileDirectoryIcon: module.fileDirectoryIcon } : {}),
     ...(module.creationCatalog

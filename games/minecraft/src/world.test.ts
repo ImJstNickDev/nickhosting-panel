@@ -810,6 +810,22 @@ describe('world operation consent and discovery', () => {
 });
 
 describe('world inventory observations', () => {
+  it('discovers imported worlds with literal spaces and Unicode while rejecting unsafe paths', async () => {
+    const readLevelDat = vi.fn(async () => levelDat(5000));
+    const worlds = await discoverMinecraftWorlds(
+      {
+        listRoot: async () =>
+          ['Vecchia città', '../other', 'dir/file', '.private', 'a%2fb'].map((name) => ({
+            name,
+            isDirectory: true,
+          })),
+        readLevelDat,
+      },
+      { release: '26.1', expectedDataVersion: 5000 },
+    );
+    expect(worlds.map((world) => world.name)).toEqual(['Vecchia città']);
+    expect(readLevelDat).toHaveBeenCalledOnce();
+  });
   it('retains actual version metadata without granting compatibility when evidence is unavailable', async () => {
     const worlds = await discoverMinecraftWorlds(
       {

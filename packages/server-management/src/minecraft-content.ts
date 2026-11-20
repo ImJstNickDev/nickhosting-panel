@@ -37,7 +37,7 @@ import {
   minecraftManifest,
   minecraftWorldDataVersion,
 } from '@nickhosting/minecraft';
-import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
+import { type PterodactylAdapter, PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
 import { z } from 'zod';
 import {
@@ -72,11 +72,13 @@ import {
 import {
   discoverMinecraftWorlds,
   inspectMinecraftWorldTransfer,
+  type MinecraftWorldValidation,
   planMinecraftWorldReplacement,
   recoverMinecraftWorldStageLock,
   stageMinecraftWorld,
   validateMinecraftLevelDat,
 } from '../../../games/minecraft/src/world.js';
+import { isMinecraftWorldDirectory } from '../../../games/minecraft/src/world-names.js';
 import { assessMinecraftWorldCompatibility } from '../../../games/minecraft/src/world-version.js';
 import type {
   FilemanDirectoryResult,
@@ -342,8 +344,10 @@ export async function prepareMinecraftContentPlan(
       const inspected = await options.worldPreparation?.read(server, profile.combination_id);
       if (inspected) {
         const observation = inspected.worlds.find((world) => world.name === name);
-        if (!observation) throw new DomainError('conflict');
-        result.world.observation = observation;
+        // A newly imported or renamed world can postdate the optional observation.
+        // A miss uses the normal fresh level.dat validation at dispatch.
+        if (observation)
+          result.world.observation = { ...observation, revision: inspected.revision };
       }
     }
     if (command.kind === 'world-import') {
@@ -626,6 +630,7 @@ export async function applyMinecraftTextChange(
   files?: FilemanReadService,
   knownPath = false,
   comparison?: Promise<Awaited<ReturnType<typeof readTextSnapshot>>>,
+  beforeWrite?: () => Promise<void>,
 ): Promise<void> {
   textChangeSchema.parse(change);
   if (sha256(change.content) !== change.afterSha256) throw new DomainError('conflict');
@@ -671,17 +676,22 @@ export async function applyMinecraftTextChange(
     return;
   }
   if ((current?.hash ?? null) !== change.beforeSha256) throw new DomainError('conflict');
-  await context.effect(step, async () => {
-    const identifier = context.server.pterodactyl_identifier ?? '';
-    if (context.timing)
-      await context.adapter.writeFile(
-        identifier,
-        change.path,
-        change.content,
-        context.timing.child('write'),
-      );
-    else await context.adapter.writeFile(identifier, change.path, change.content);
-  });
+  await context.effect(
+    step,
+    async () => {
+      const identifier = context.server.pterodactyl_identifier ?? '';
+      if (context.timing)
+        await context.adapter.writeFile(
+          identifier,
+          change.path,
+          change.content,
+          context.timing.child('write'),
+        );
+      else await context.adapter.writeFile(identifier, change.path, change.content);
+    },
+    undefined,
+    beforeWrite,
+  );
   // The provider acknowledgement commits the write. A lost response is handled by
   // the recovery branch above; acknowledged writes do not download the file again.
   await complete(context, step);
@@ -748,6 +758,7 @@ async function applyTextPlan(
   files?: FilemanReadService,
   knownPath = false,
   comparison?: Promise<Awaited<ReturnType<typeof readTextSnapshot>>>,
+  beforeWrite?: () => Promise<void>,
 ) {
   const scopedFiles = files ?? minecraftFileScope(context);
   if (context.operation().plan.minecraftText === undefined) {
@@ -769,6 +780,7 @@ async function applyTextPlan(
       index === 0 ? scopedFiles : undefined,
       knownPath,
       comparison,
+      beforeWrite,
     );
 }
 const initialConfigurationSchema = z.discriminatedUnion('status', [
@@ -2522,6 +2534,19 @@ export interface MinecraftWorldSnapshot {
   compatibility: 'available' | 'unavailable';
   worlds: Awaited<ReturnType<typeof discoverMinecraftWorlds>>;
 }
+export interface MinecraftWorldFileStamp {
+  name: string;
+  size: number;
+  modifiedAt: string;
+  validatedAt: number;
+}
+export interface MinecraftWorldIndexInspection {
+  previous: ReadonlyMap<string, MinecraftWorldFileStamp & { validation: MinecraftWorldValidation }>;
+  stamps: MinecraftWorldFileStamp[];
+  presentDirectories: Set<string>;
+  worldMarkerDirectories: Set<string>;
+  nonWorldDirectories: string[];
+}
 /** Caller establishes authorization and managed identity through ManagementRuntime.fileReadAccess. */
 export async function inspectMinecraftWorlds(
   db: Kysely<Database>,
@@ -2532,6 +2557,8 @@ export async function inspectMinecraftWorlds(
   signal?: AbortSignal,
   fileman?: FilemanReadService,
   preparation?: MinecraftContentOptions['worldPreparation'],
+  indexInspection?: MinecraftWorldIndexInspection,
+  preparationRevision?: string,
 ): Promise<MinecraftWorldSnapshot> {
   const profile = await db
     .selectFrom('minecraft_server_profiles')
@@ -2545,7 +2572,7 @@ export async function inspectMinecraftWorlds(
     .where('deleted_at', 'is', null)
     .executeTakeFirst();
   if (!profile || !server) throw new DomainError('not_found');
-  if (!server.pterodactyl_identifier) throw new DomainError('conflict');
+  const revision = preparationRevision ?? (await preparation?.revisionFor(server));
   const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
   const expectedDataVersion = minecraftWorldDataVersion(choice.combination.release);
   const snapshot: MinecraftWorldSnapshot = {
@@ -2557,9 +2584,10 @@ export async function inspectMinecraftWorlds(
     worlds: [],
   };
   if (!snapshot.installed || !snapshot.supported) {
-    await preparation?.invalidate(server, profile.combination_id);
+    await preparation?.invalidate(server, profile.combination_id, revision);
     return snapshot;
   }
+  if (!server.pterodactyl_identifier) throw new DomainError('conflict');
   signal?.throwIfAborted();
   const files =
     fileman ??
@@ -2578,35 +2606,63 @@ export async function inspectMinecraftWorlds(
   // Preserve the observed value, including legacy names that managed mutations cannot accept.
   snapshot.selectedWorld = properties['level-name'] ?? 'world';
   const directories = new Map<string, FilemanDirectoryResult>();
+  const reusable = new Map<string, MinecraftWorldValidation>();
   snapshot.worlds = await discoverMinecraftWorlds(
     {
       listRoot: async () => {
         // The same candidates as discovery, bounded before any remote fan-out.
-        const candidates = root.filter((entry) => {
-          if (entry.kind !== 'directory') return false;
-          try {
-            minecraftWorldName(entry.name);
-            return true;
-          } catch {
-            return false;
-          }
-        });
+        const candidates = root.filter(
+          (entry) => entry.kind === 'directory' && isMinecraftWorldDirectory(entry.name),
+        );
+        if (indexInspection)
+          indexInspection.presentDirectories = new Set(candidates.map((entry) => entry.name));
         if (candidates.length > 100) throw new DomainError('validation_failed');
         if (candidates.length) {
           const results = await files.listMany(candidates.map(({ name }) => name));
           const paths: string[] = [];
           for (const result of results) {
             directories.set(result.directory, result);
+            if (!('files' in result)) continue;
+            const level = result.files.find((entry) => entry.name === 'level.dat');
             if (
-              'files' in result &&
-              result.files.some(
-                (entry) =>
-                  entry.name === 'level.dat' &&
-                  entry.kind === 'file' &&
-                  entry.size <= 8 * 1024 ** 2,
-              )
+              indexInspection &&
+              (level?.kind === 'file' ||
+                result.files.some(
+                  (entry) =>
+                    (entry.kind === 'file' &&
+                      /^(?:level[.]dat_old|session[.]lock)$/i.test(entry.name)) ||
+                    (entry.kind === 'directory' &&
+                      /^(?:region|DIM-?1|dimensions)$/i.test(entry.name)),
+                ))
             )
-              paths.push(`${result.directory}/level.dat`);
+              indexInspection.worldMarkerDirectories.add(result.directory);
+            if (level?.kind !== 'file') continue;
+            if (level.size > 8 * 1024 ** 2) continue;
+            if (
+              indexInspection &&
+              level.modifiedAt &&
+              Number.isFinite(Date.parse(level.modifiedAt))
+            ) {
+              const previous = indexInspection.previous.get(result.directory);
+              const now = Date.now();
+              const same =
+                previous &&
+                previous.size === level.size &&
+                previous.modifiedAt === level.modifiedAt &&
+                previous.validatedAt <= now &&
+                now - previous.validatedAt < 15 * 60_000;
+              indexInspection.stamps.push({
+                name: result.directory,
+                size: level.size,
+                modifiedAt: level.modifiedAt,
+                validatedAt: same ? previous.validatedAt : now,
+              });
+              if (same) {
+                reusable.set(result.directory, previous.validation);
+                continue;
+              }
+            }
+            paths.push(`${result.directory}/level.dat`);
           }
           if (paths.length) await files.prepare(paths);
         }
@@ -2616,10 +2672,16 @@ export async function inspectMinecraftWorlds(
           isSymlink: entry.kind === 'symlink',
         }));
       },
+      observedValidation: (world) => reusable.get(world),
       readLevelDat: async (world, maxBytes) => {
         const directory = directories.get(world);
         if (!directory || 'error' in directory) {
-          if (directory && 'error' in directory && directory.error === 'not_found')
+          if (
+            !indexInspection &&
+            directory &&
+            'error' in directory &&
+            directory.error === 'not_found'
+          )
             return undefined;
           throw new DomainError(
             directory && 'error' in directory && directory.error === 'forbidden'
@@ -2630,31 +2692,58 @@ export async function inspectMinecraftWorlds(
         const level = directory.files.find((entry) => entry.name === 'level.dat');
         if (!level) return undefined;
         if (level.kind !== 'file' || level.size > maxBytes) throw new DomainError('conflict');
-        return files.read({ path: `${world}/level.dat`, maxBytes });
+        try {
+          return await files.read({ path: `${world}/level.dat`, maxBytes });
+        } catch (error) {
+          if (error instanceof PterodactylError && [401, 403].includes(error.upstreamStatus ?? 0)) {
+            throw new DomainError('forbidden');
+          }
+          throw error;
+        }
       },
     },
     { expectedDataVersion, release: choice.combination.release, signal },
   );
   await authorize();
+  // These are direct children of root whose own listing was conclusive.
+  // Empty directories, dimension layouts and interrupted saves may still be worlds.
+  if (indexInspection)
+    indexInspection.nonWorldDirectories = [...directories.values()].flatMap((result) =>
+      'files' in result &&
+      result.files.length > 0 &&
+      !result.files.some((entry) =>
+        /^(?:level[.]dat(?:[._-].*)?|region|entities|poi|data|dimensions|DIM-?1|chunks[.]dat|session[.]lock)$/i.test(
+          entry.name,
+        ),
+      )
+        ? [result.directory]
+        : [],
+    );
   // Reuse the root already inspected, including the fixed configuration file's
   // case/type guard. No later selection needs another directory listing.
   const propertiesEntries = root.filter(
     (entry) => entry.name.toLowerCase() === 'server.properties',
   );
   if (
+    reusable.size === 0 &&
     propertiesEntries.length === 1 &&
     propertiesEntries[0]?.name === 'server.properties' &&
     propertiesEntries[0].kind === 'file' &&
     propertiesEntries[0].size <= 1048576
   ) {
-    await preparation?.save(server, profile.combination_id, {
-      worlds: snapshot.worlds,
-      properties: {
-        content: Buffer.from(propertiesBytes).toString('utf8'),
-        hash: sha256(propertiesBytes),
+    await preparation?.save(
+      server,
+      profile.combination_id,
+      {
+        worlds: snapshot.worlds,
+        properties: {
+          content: Buffer.from(propertiesBytes).toString('utf8'),
+          hash: sha256(propertiesBytes),
+        },
       },
-    });
-  } else await preparation?.invalidate(server, profile.combination_id);
+      revision,
+    );
+  } else await preparation?.invalidate(server, profile.combination_id, revision);
   return snapshot;
 }
 /** Array contract retained for trusted integration scripts. */
@@ -2696,8 +2785,15 @@ async function applyWorldContent(
   if (command.kind === 'world-select') {
     if (prepared.world.dataVersion === undefined) throw new DomainError('integration_unavailable');
     const files = minecraftFileScope(context);
-    if (prepared.world.observation) {
-      const observation = prepared.world.observation;
+    const observation = prepared.world.observation;
+    // Recovery of an already dispatched write must use the original journal and
+    // readback; it cannot send another write. Every new dispatch needs current proof.
+    const recovering = uncertainEffect(context, stepId('text', 'server.properties'));
+    if (
+      observation &&
+      (recovering ||
+        (await options.worldPreparation?.isCurrent(context.server, observation.revision)))
+    ) {
       if (observation.name !== target) throw new DomainError('conflict');
       // Overlap fresh provider bytes with local intent construction/persistence.
       // Persisted plans and uncertain effects retain their fresh recovery reads.
@@ -2740,6 +2836,13 @@ async function applyWorldContent(
           files,
           true,
           comparison,
+          async () => {
+            if (
+              !recovering &&
+              !(await options.worldPreparation?.isCurrent(context.server, observation.revision))
+            )
+              throw new DomainError('conflict');
+          },
         );
       } finally {
         await comparison?.catch(() => {});
@@ -2867,6 +2970,26 @@ async function applyWorldContent(
     .digest('hex');
   const archivePath = prepared.archivePath;
   const preparedWorld = prepared.world;
+  async function recordImport(files: number, validation: MinecraftWorldValidation) {
+    // The private effect journal lets the successful job project this proven row
+    // atomically. Activity retains only its existing world name, count and digest.
+    const inventory = {
+      name: target,
+      status: assessMinecraftWorldCompatibility(validation, {
+        expectedDataVersion: preparedWorld.dataVersion,
+        release: choice.combination.release,
+      }),
+      validation,
+    };
+    await context.update({
+      plan: { ...context.operation().plan, minecraftImportedWorld: inventory },
+    });
+    await context.event('minecraft.world.imported', {
+      world: target,
+      files,
+      levelDatSha256: validation.sha256,
+    });
+  }
   // Additive imports transfer one normalized compressed archive. Replacement
   // retains its existing offline/backup recovery path and never borrows this path.
   const pinnedArchive = context.operation().plan.fileArchive !== undefined;
@@ -2964,11 +3087,7 @@ async function applyWorldContent(
           },
         });
         await verifyMinecraftPendingContent(context);
-        await context.event('minecraft.world.imported', {
-          world: target,
-          files: transfer.files,
-          levelDatSha256: selected.validation.sha256,
-        });
+        await recordImport(transfer.files, selected.validation);
         return true;
       } finally {
         stream.cancel();
@@ -3085,13 +3204,9 @@ async function applyWorldContent(
       return Readable.toWeb(createReadStream(source)) as ReadableStream<Uint8Array>;
     },
   });
-  const levelDatSha256 = staged.validation.levelDatSha256;
   await verifyMinecraftPendingContent(context);
-  await context.event('minecraft.world.imported', {
-    world: target,
-    files: staged.manifest.length,
-    levelDatSha256,
-  });
+  const { targetRelease: _release, levelDatSha256: _stageHash, ...validation } = staged.validation;
+  await recordImport(staged.manifest.length, validation);
   return true;
 }
 

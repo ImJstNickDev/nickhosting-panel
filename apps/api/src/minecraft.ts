@@ -67,6 +67,10 @@ import {
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import { minecraftStoredConfigurationSchema } from '../../../packages/server-management/src/minecraft-content-contracts.js';
+import {
+  readMinecraftWorldIndex,
+  refreshMinecraftWorldIndex,
+} from '../../../packages/server-management/src/minecraft-world-index.js';
 import { permissionRuntime } from '../../../packages/server-management/src/permission-runtime.js';
 import type { Variables } from './app.js';
 import { downloadServerArchive } from './file-browsing.js';
@@ -708,36 +712,73 @@ export function registerMinecraftRoutes(
       },
     });
   });
-  app.get('/v1/servers/:id/minecraft/worlds', async (c) => {
-    const context = await principal(c),
-      serverId = c.req.param('id');
-    await authorizeServer(db, context, serverId, 'game.minecraft.worlds.read');
-    const service = permissionRuntime(await management(), 'game.minecraft.worlds');
-    c.header('cache-control', 'no-store');
-    return c.json(
-      await service.fileReadScope(
-        context,
-        serverId,
-        async (files, _identifier, connection, _current, server) => {
-          const results = await Promise.allSettled([
-            service.prepareWorldSelection(server, connection),
-            inspectMinecraftWorlds(
-              connection,
-              service.adapter,
-              serverId,
-              async () => {},
-              env,
-              c.req.raw.signal,
-              files,
-              service.worldPreparation,
-            ),
-          ]);
-          if (results[1].status === 'rejected') throw results[1].reason;
-          return results[1].value;
-        },
-        c.req.raw.signal,
-      ),
+  async function cachedWorldIndex(
+    c: C,
+    serverId: string,
+    permission: 'files.read' | 'game.minecraft.worlds.read',
+  ) {
+    const context = await principal(c);
+    const server = await authorizeServer(db, context, serverId, permission);
+    const service = await management();
+    const index = await readMinecraftWorldIndex(db, serverId, service.consoleProviderBinding);
+    await service.authorizeTransfer(
+      context,
+      serverId,
+      false,
+      db,
+      undefined,
+      server,
+      false,
+      permission,
     );
+    c.header('Cache-Control', 'no-store');
+    return index;
+  }
+  app.get('/v1/servers/:id/minecraft/worlds/fileman', async (c) => {
+    const index = await cachedWorldIndex(c, c.req.param('id'), 'files.read');
+    return c.json({
+      worlds: index?.snapshot.worlds.map((world) => world.name) ?? [],
+      selectedWorld: index?.snapshot.selectedWorld ?? null,
+      nonWorldDirectories: index?.nonWorldDirectories ?? [],
+    });
+  });
+  app.get('/v1/servers/:id/minecraft/worlds', async (c) => {
+    if (c.req.query('cached') === '1') {
+      const index = await cachedWorldIndex(c, c.req.param('id'), 'game.minecraft.worlds.read');
+      return c.json(index?.snapshot ?? null);
+    }
+    const context = await principal(c);
+    const serverId = c.req.param('id');
+    const permission = 'game.minecraft.worlds.read';
+    const server = await authorizeServer(db, context, serverId, permission);
+    const service = await management();
+    c.header('Cache-Control', 'no-store');
+    // The shared reconciler owns the provider identity check and records upstream denials.
+    // Optional selection preparation keeps its own interactive access boundary.
+    const [index] = await Promise.all([
+      refreshMinecraftWorldIndex(db, serverId, service, env, c.req.raw.signal),
+      service
+        .fileReadScope(
+          context,
+          serverId,
+          (_files, _identifier, connection, _current, currentServer) =>
+            service.prepareWorldSelection(currentServer, connection),
+          c.req.raw.signal,
+          permission,
+        )
+        .catch(() => {}),
+    ]);
+    await service.authorizeTransfer(
+      context,
+      serverId,
+      false,
+      db,
+      undefined,
+      server,
+      false,
+      permission,
+    );
+    return c.json(index.snapshot);
   });
   app.get('/v1/servers/:id/minecraft', async (c) => {
     const serverId = c.req.param('id');

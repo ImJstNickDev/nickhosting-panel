@@ -3,7 +3,11 @@ import { rm } from 'node:fs/promises';
 import { expect as browserExpect, type ConsoleMessage, type Page } from '@playwright/test';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { browserHarness } from './harness.js';
-import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
+import {
+  journeyRequest,
+  prepareJourneyIdentities,
+  showRootFixtureFiles,
+} from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
 
 describe('M5 file explorer selection and clipboard shortcuts', () => {
@@ -66,6 +70,7 @@ describe('M5 file explorer selection and clipboard shortcuts', () => {
   const dialog = () => user.getByRole('dialog');
   async function open() {
     await user.goto(base);
+    await showRootFixtureFiles(user);
     await browserExpect(nameButton('sel-a.txt')).toBeVisible();
     await browserExpect(
       user.getByRole('button', { name: 'New folder', exact: true }),
@@ -77,6 +82,7 @@ describe('M5 file explorer selection and clipboard shortcuts', () => {
   }
   async function root() {
     await user.getByRole('button', { name: 'root', exact: true }).click();
+    await showRootFixtureFiles(user);
     await browserExpect(nameButton('sel-a.txt')).toBeVisible();
   }
 
@@ -503,6 +509,7 @@ describe('M5 file explorer selection and clipboard shortcuts', () => {
     const name = 'delete-confirm-retry.txt';
     remote.set(name, Buffer.from(name));
     await user.goto(base);
+    await showRootFixtureFiles(user);
     await select(name);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -556,6 +563,7 @@ describe('M5 file explorer selection and clipboard shortcuts', () => {
         locale === 'it' ? { width: 390, height: 844 } : { width: 1440, height: 1000 },
       );
       await user.goto(base);
+      await showRootFixtureFiles(user);
       await select(name);
       const before = writes.length;
       await user.keyboard.press('Delete');

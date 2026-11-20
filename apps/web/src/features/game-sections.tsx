@@ -483,17 +483,26 @@ export function GameSections({
       module &&
       availableGameSections(server.data, module).some((candidate) => candidate.id === sectionId),
   );
+  const preview = module?.sectionPreviews?.[sectionId];
   const loaded = useQuery({
     queryKey: ['game-section', serverId, gameId, sectionId],
     enabled: Boolean(module && section && canReadSection),
-    // An operation can finish while this section is unmounted and clear the active ID.
+    // A completed operation may clear its active ID while this section is unmounted.
     refetchOnMount: 'always',
-    queryFn: ({ signal }) =>
-      module?.handlers[section?.loader ?? '']?.(gameUiClient, {
-        serverId,
-        values: { sectionId: section?.id },
-        signal,
-      }) as Promise<UiSectionData>,
+    ...(preview ? { staleTime: 0 } : {}),
+    queryFn: async ({ signal, queryKey }) => {
+      const context = { serverId, values: { sectionId: section?.id }, signal };
+      if (preview) {
+        const observation = await preview(gameUiClient, context);
+        signal.throwIfAborted();
+        // A cold or rebound index also supersedes an older tab-local observation.
+        queryClient.setQueryData(queryKey, observation);
+      }
+      return module?.handlers[section?.loader ?? '']?.(
+        gameUiClient,
+        context,
+      ) as Promise<UiSectionData>;
+    },
   });
   const [trackedOperation, setTrackedOperation] = useState<{
     serverId: string;
@@ -723,14 +732,16 @@ export function GameSections({
   if (server.error && !server.data) return <ErrorNotice error={server.error} retry={retryReads} />;
   if (!hasSectionPermission) return <Notice>{t('gameUi.noPermission')}</Notice>;
   if (!canReadSection) return <Empty text={t('gameUi.missingSection')} />;
-  if (loaded.isPending) return <Loading />;
+  if (loaded.isPending || (!loaded.data && loaded.isFetching)) return <Loading />;
   // Retain custom view state (including frozen uncertain submission keys) when a
   // background read fails. Stale data is visible, but mutations remain blocked.
   if (
     refreshError &&
     (!server.data ||
       !loaded.data ||
-      (refreshError instanceof ApiError && [401, 403, 404].includes(refreshError.status)))
+      (refreshError instanceof ApiError &&
+        ([401, 403, 404].includes(refreshError.status) ||
+          refreshError.code === 'provenance_mismatch')))
   )
     return <ErrorNotice error={refreshError} retry={retryReads} />;
   if (!server.data || !loaded.data) return <Empty />;

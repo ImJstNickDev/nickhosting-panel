@@ -24,6 +24,7 @@ import { decodeMinecraftNbt, type MinecraftNbtLimits, nbtLimits } from './nbt.js
 export type { MinecraftNbtLimits } from './nbt.js';
 
 import { minecraftWorldName, planMinecraftWorldImport } from './management.js';
+import { isMinecraftWorldDirectory } from './world-names.js';
 import {
   assessMinecraftWorldCompatibility,
   identifyMinecraftWorldRelease,
@@ -568,6 +569,39 @@ export function planMinecraftWorldReplacement(
     requiresStoppedServer: exists,
   };
 }
+/** Fileman paths are validated by the caller. Accept both its relative names
+ * and SFTPGo's absolute virtual names; only direct root membership and the
+ * direct level.dat of a root directory affect this inventory. */
+export function affectsMinecraftWorldIndex(path: string, mayBeDirectory = false): boolean {
+  const relative = path.replace(/^\/|\/$/g, '');
+  if (!relative) return false;
+  const slash = relative.indexOf('/');
+  if (slash === -1) return mayBeDirectory || relative === 'server.properties';
+  return relative.slice(slash + 1) === 'level.dat';
+}
+
+/** The acknowledged source disappearance proves removal; only moving the whole
+ * directory can carry its last observed metadata to another root name. */
+export function minecraftWorldDirectoryMove(from: string, to?: string) {
+  const source = from.replace(/^\/|\/$/g, '');
+  const target = to?.replace(/^\/|\/$/g, '');
+  const [name, child, ...descendants] = source.split('/');
+  if (
+    !name ||
+    !isMinecraftWorldDirectory(name) ||
+    descendants.length ||
+    (child !== undefined && child !== 'level.dat') ||
+    source === target
+  )
+    return [];
+  return [
+    {
+      name,
+      ...(child === undefined && target && isMinecraftWorldDirectory(target) ? { target } : {}),
+    },
+  ];
+}
+
 export interface MinecraftWorldDiscovery {
   name: string;
   status: 'verified' | 'incompatible' | 'unknown' | 'invalid' | 'unavailable';
@@ -577,6 +611,7 @@ export interface MinecraftWorldDiscovery {
 export async function discoverMinecraftWorlds(
   services: {
     listRoot(): Promise<readonly { name: string; isDirectory: boolean; isSymlink?: boolean }[]>;
+    observedValidation?(world: string): MinecraftWorldValidation | undefined;
     readLevelDat(world: string, maxBytes: number): Promise<Uint8Array | undefined>;
   },
   options: {
@@ -598,12 +633,8 @@ export async function discoverMinecraftWorlds(
   const seen = new Set<string>();
   for (const entry of entries) {
     if (!entry.isDirectory || entry.isSymlink) continue;
-    let name: string;
-    try {
-      name = minecraftWorldName(entry.name);
-    } catch {
-      continue;
-    }
+    const name = entry.name;
+    if (!isMinecraftWorldDirectory(name)) continue;
     if (candidates.length >= maxWorlds) fail('discovery_limits');
     if (seen.has(name.toLowerCase())) fail('discovery_duplicate');
     seen.add(name.toLowerCase());
@@ -620,6 +651,15 @@ export async function discoverMinecraftWorlds(
       const index = next++;
       const name = candidates[index];
       if (name === undefined) return;
+      const observed = services.observedValidation?.(name);
+      if (observed) {
+        worlds[index] = {
+          name,
+          status: assessMinecraftWorldCompatibility(observed, options),
+          validation: observed,
+        };
+        continue;
+      }
       let bytes: Uint8Array | undefined;
       try {
         bytes = await services.readLevelDat(name, limits.maxCompressedBytes);

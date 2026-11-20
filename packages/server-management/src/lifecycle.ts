@@ -91,6 +91,7 @@ export interface GameLifecycleContext {
     phase: string,
     perform: () => Promise<T>,
     patch?: (result: T) => Record<string, unknown>,
+    beforeDispatch?: () => Promise<void>,
   ) => Promise<boolean>;
   event: (messageKey: string, data?: Record<string, unknown>) => Promise<void>;
   backup: () => Promise<boolean>;
@@ -1248,6 +1249,7 @@ export async function processServerOperation(
       perform: (verifiedServer?: ApplicationServer) => Promise<T>,
       patch?: (result: T) => Record<string, unknown>,
       preparationServer?: ApplicationServer,
+      beforeDispatch?: () => Promise<void>,
     ): Promise<boolean> => {
       // Prepared selection has just authorized its file read. No external effect
       // occurs in the journal work below; current authority is checked again at
@@ -1359,6 +1361,7 @@ export async function processServerOperation(
           .where('server_id', '=', server.id)
           .executeTakeFirst()) !== undefined;
       if (
+        beforeDispatch ||
         finalPowerIdentity ||
         phase === 'configure' ||
         worldFileContent ||
@@ -1497,6 +1500,7 @@ export async function processServerOperation(
           if (phase === 'initial_start') await assertProvisionGatewayStart(db, server.id, jobId);
           if (phase === 'backup_resume' && !(await backupResumeAllowed()))
             throw new DomainError('forbidden');
+          await beforeDispatch?.();
         } catch (error) {
           await update({
             effect_state: 'none',
@@ -1878,7 +1882,8 @@ export async function processServerOperation(
         adapter: options.adapter,
         operation: () => operation,
         update,
-        effect,
+        effect: (phase, perform, patch, beforeDispatch) =>
+          effect(phase, perform, patch, undefined, beforeDispatch),
         event,
         backup,
         authorize: async () => {

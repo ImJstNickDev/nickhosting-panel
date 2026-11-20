@@ -1,4 +1,9 @@
-import { createMinecraftUiController, type MinecraftWorlds } from '@nickhosting/minecraft/ui';
+import {
+  configuredMinecraftWorldRoots,
+  createMinecraftUiController,
+  isManagedMinecraftWorldName,
+  type MinecraftWorlds,
+} from '@nickhosting/minecraft/ui';
 import { useEffect, useId, useRef, useState } from 'react';
 import { ApiError, download, idempotencyKey } from '../../api/client.js';
 import { hashFile } from '../../api/hash.js';
@@ -20,22 +25,6 @@ type Progress = {
   sent: number;
   total: number;
 };
-
-function configuredWorldRoots(value: string | null | undefined): string[] | undefined {
-  if (!value || value.startsWith('/') || value.startsWith('\\')) return undefined;
-  const parts: string[] = [];
-  for (const part of value.replaceAll('\\', '/').split('/')) {
-    if (!part || part === '.') continue;
-    if (part === '..') {
-      if (!parts.length) return undefined;
-      parts.pop();
-    } else parts.push(part.toLowerCase());
-  }
-  const root = parts[0];
-  if (!root) return undefined;
-  // The list shows root directories; protect the ancestor of a nested world too.
-  return parts.length === 1 ? [root, `${root}_nether`, `${root}_the_end`] : [root];
-}
 
 function Icon({
   name,
@@ -118,7 +107,9 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
     offline || (props.runtimeState === 'running' && snapshot?.selectedWorld != null);
   const importDisabled = mutationsDisabled || !importStateAllowed || !can('import');
   const removeDisabled = mutationsDisabled || !importStateAllowed || !can('delete');
-  const activeRoots = configuredWorldRoots(snapshot?.selectedWorld);
+  const activeRoots = configuredMinecraftWorldRoots(snapshot?.selectedWorld)?.map((root) =>
+    root.toLowerCase(),
+  );
   const activeWorld = (name: string) => !activeRoots || activeRoots.includes(name.toLowerCase());
   const rows = snapshot?.worlds ?? [];
   const visible = rows.filter((row) =>
@@ -446,7 +437,9 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
       if (
         !snapshot?.selectedWorld ||
         activeWorld(selection.name) ||
-        !rows.some((row) => row.name === selection.name && row.validation)
+        !rows.some(
+          (row) => row.name === selection.name && row.status !== 'unavailable' && row.validation,
+        )
       )
         return;
       await submit({
@@ -597,6 +590,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
             <ul className="minecraft-worlds-list">
               {pageRows.map((world) => {
                 const selected = world.name === snapshot.selectedWorld;
+                const observed = world.status !== 'unavailable';
                 const actionName = (action: string) =>
                   t(key('actionFor'), { action: t(key(action)), name: world.name });
                 return (
@@ -624,70 +618,74 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
                         )}
                       </div>
                     </div>
-                    <div className="minecraft-world-actions">
-                      {can('select') && !selected && (
+                    {isManagedMinecraftWorldName(world.name) && (
+                      <div className="minecraft-world-actions">
+                        {can('select') && !selected && (
+                          <IconAction
+                            tooltip={
+                              world.status !== 'verified'
+                                ? t(key('cannotChange'))
+                                : actionName('select')
+                            }
+                            label={actionName('select')}
+                            disabled={
+                              disabled ||
+                              world.status !== 'verified' ||
+                              snapshot.compatibility !== 'available'
+                            }
+                            onClick={() => choose('select', world.name)}
+                          >
+                            <Icon name="select" />
+                          </IconAction>
+                        )}
                         <IconAction
-                          tooltip={
-                            world.status !== 'verified'
-                              ? t(key('cannotChange'))
-                              : actionName('select')
-                          }
-                          label={actionName('select')}
+                          tooltip={actionName('download')}
+                          label={actionName('download')}
                           disabled={
-                            disabled ||
-                            world.status !== 'verified' ||
-                            snapshot.compatibility !== 'available'
+                            !can('download') ||
+                            !observed ||
+                            !offline ||
+                            props.pending ||
+                            busy ||
+                            Boolean(uncertain)
                           }
-                          onClick={() => choose('select', world.name)}
+                          onClick={() => {
+                            try {
+                              download(
+                                `/v1/servers/${props.serverId}/minecraft/worlds/${encodeURIComponent(world.name)}/archive`,
+                              );
+                            } catch (error) {
+                              setOperationError(error);
+                            }
+                          }}
                         >
-                          <Icon name="select" />
+                          <Icon name="download" />
                         </IconAction>
-                      )}
-                      <IconAction
-                        tooltip={actionName('download')}
-                        label={actionName('download')}
-                        disabled={
-                          !can('download') ||
-                          !offline ||
-                          props.pending ||
-                          busy ||
-                          Boolean(uncertain)
-                        }
-                        onClick={() => {
-                          try {
-                            download(
-                              `/v1/servers/${props.serverId}/minecraft/worlds/${encodeURIComponent(world.name)}/archive`,
-                            );
-                          } catch (error) {
-                            setOperationError(error);
-                          }
-                        }}
-                      >
-                        <Icon name="download" />
-                      </IconAction>
-                      {can('delete') && (
-                        <IconAction
-                          tooltip={
-                            activeWorld(world.name)
-                              ? t(key('selectedCannotDelete'))
-                              : !world.validation
-                                ? t(key('cannotDelete'))
-                                : actionName('delete')
-                          }
-                          destructive
-                          label={actionName('delete')}
-                          disabled={
-                            removeDisabled ||
-                            activeWorld(world.name) ||
-                            !world.validation ||
-                            snapshot.selectedWorld === null
-                          }
-                          onClick={() => choose('delete', world.name)}
-                        >
-                          <Icon name="delete" />
-                        </IconAction>
-                      )}
-                    </div>
+                        {can('delete') && (
+                          <IconAction
+                            tooltip={
+                              activeWorld(world.name)
+                                ? t(key('selectedCannotDelete'))
+                                : !observed || !world.validation
+                                  ? t(key('cannotDelete'))
+                                  : actionName('delete')
+                            }
+                            destructive
+                            label={actionName('delete')}
+                            disabled={
+                              removeDisabled ||
+                              activeWorld(world.name) ||
+                              !observed ||
+                              !world.validation ||
+                              snapshot.selectedWorld === null
+                            }
+                            onClick={() => choose('delete', world.name)}
+                          >
+                            <Icon name="delete" />
+                          </IconAction>
+                        )}
+                      </div>
+                    )}
                   </li>
                 );
               })}

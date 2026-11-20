@@ -125,6 +125,27 @@ describe('SFTPGo machine events', () => {
     expect(identity).not.toHaveBeenCalled();
     expect(JSON.stringify(rows)).not.toContain(secret);
   });
+  it('marks only successful SFTP mutations that can change root world membership or selection', async () => {
+    const cases: [Partial<SftpEvent>, boolean][] = [
+      [{ virtualPath: '/Old Save é/level.dat' }, true],
+      [{ virtualPath: '/Old Save é/region/r.0.0.mca' }, false],
+      [{ event: 'download', virtualPath: '/Old Save é/level.dat' }, false],
+      [{ event: 'upload', status: 2, virtualPath: '/Old Save é/level.dat' }, false],
+      [{ event: 'rename', virtualPath: '/staging/ready', virtualTargetPath: '/world' }, true],
+      [{ event: 'copy', virtualPath: '/world', virtualTargetPath: '/archives/stashed' }, false],
+      [{ event: 'delete', virtualPath: '/server.properties' }, true],
+      [{ event: 'rmdir', virtualPath: '/Old Save é/' }, true],
+    ];
+    for (const [patch, expected] of cases) {
+      const value = event(patch);
+      expect((await send(value)).status).toBe(200);
+      expect(
+        (await audits()).find((row) => row.id === sftpEventAuditId(value))?.metadata
+          .worldIndexChanged,
+      ).toBe(expected);
+    }
+  });
+
   it('keeps auxiliary username as details and the same real panel actor for failures', async () => {
     const value = event({
       username: auxiliaryUsername,

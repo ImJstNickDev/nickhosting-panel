@@ -1,5 +1,5 @@
 import type { FilemanContext } from '@nickhosting/game-sdk/ui';
-import { useQuery } from '@tanstack/react-query';
+import { skipToken, useQuery } from '@tanstack/react-query';
 import {
   type DragEvent,
   type KeyboardEvent,
@@ -99,7 +99,12 @@ import {
 import { FolderUploadError, planFolderUpload, prepareFolderUpload } from './folder-upload.js';
 import { InlineFileRename } from './inline-file-rename.js';
 import { validFilename } from './inline-file-rename-model.js';
-import { availableGameSections, gameUiRegistry, getFileEntryGroup } from './integrations.js';
+import {
+  availableGameSections,
+  gameUiClient,
+  gameUiRegistry,
+  getFileEntryGroup,
+} from './integrations.js';
 import { useDirectoryPrefetch } from './use-directory-prefetch.js';
 import { useViewerEscape } from './use-viewer-escape.js';
 import { isSingleCompressed } from './viewer-engine/core/compressed.js';
@@ -555,28 +560,56 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         void queryClient.cancelQueries({ queryKey, exact: true });
     };
   }, [directory, files.refetch, serverId, uploadIdentity]);
+  const rootGroupsLoader = gameUiRegistry.get(server.data?.gameId ?? '')?.fileRootGroups;
+  const canLoadRootGroups = Boolean(
+    !directory &&
+      !displaying &&
+      saveScope &&
+      server.data?.availableActions.files &&
+      rootGroupsLoader,
+  );
+  const rootGroups = useQuery({
+    queryKey: ['file-root-groups', serverId, server.data?.gameId, directoryQuery.queryKey[3]],
+    enabled: false,
+    queryFn: rootGroupsLoader
+      ? ({ signal }) => rootGroupsLoader(gameUiClient, serverId, signal)
+      : skipToken,
+  });
+  // A successful root listing already follows navigation, focus, refresh and
+  // managed changes. Refresh its optional index alongside that lifecycle.
+  useEffect(() => {
+    if (canLoadRootGroups && files.dataUpdatedAt && !files.isFetching && !files.error) {
+      void rootGroups.refetch();
+    }
+  }, [canLoadRootGroups, files.dataUpdatedAt, files.isFetching, files.error, rootGroups.refetch]);
+
+  const directoryGroups = canLoadRootGroups && !rootGroups.error ? rootGroups.data : undefined;
+  const hiddenNames = useMemo(
+    () =>
+      new Set(
+        (files.data ?? [])
+          .filter(
+            (entry) =>
+              getFileEntryGroup(
+                server.data?.gameId,
+                server.data?.runtimeId,
+                directory,
+                entry,
+                directoryGroups?.get(entry.name),
+              ) === 'hidden',
+          )
+          .map((entry) => entry.name),
+      ),
+    [files.data, server.data?.gameId, server.data?.runtimeId, directory, directoryGroups],
+  );
   const groupedRows = useMemo(() => {
     const normal: ServerFile[] = [];
     const hidden: ServerFile[] = [];
     for (const entry of visibleFiles(files.data ?? [], search, order, descending)) {
-      const group = getFileEntryGroup(
-        server.data?.gameId,
-        server.data?.runtimeId,
-        directory,
-        entry,
-      );
-      (group === 'hidden' ? hidden : normal).push(entry);
+      (hiddenNames.has(entry.name) ? hidden : normal).push(entry);
     }
     return { normal, hidden };
-  }, [
-    files.data,
-    search,
-    order,
-    descending,
-    server.data?.gameId,
-    server.data?.runtimeId,
-    directory,
-  ]);
+  }, [files.data, search, order, descending, hiddenNames]);
   const hiddenScope = JSON.stringify([
     saveScope,
     serverId,
@@ -592,27 +625,9 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     () => (hiddenExpanded ? [...groupedRows.normal, ...groupedRows.hidden] : groupedRows.normal),
     [groupedRows, hiddenExpanded],
   );
-  const collapsedNames = useMemo(
-    () =>
-      new Set(
-        hiddenExpanded
-          ? []
-          : (files.data ?? [])
-              .filter(
-                (entry) =>
-                  getFileEntryGroup(
-                    server.data?.gameId,
-                    server.data?.runtimeId,
-                    directory,
-                    entry,
-                  ) === 'hidden',
-              )
-              .map((entry) => entry.name),
-      ),
-    [hiddenExpanded, files.data, server.data?.gameId, server.data?.runtimeId, directory],
-  );
+  const collapsedNames = hiddenExpanded ? undefined : hiddenNames;
   useEffect(() => {
-    if (!collapsedNames.size) return;
+    if (!collapsedNames?.size) return;
     setSelected((current) =>
       [...current].some((name) => collapsedNames.has(name))
         ? new Set([...current].filter((name) => !collapsedNames.has(name)))
@@ -2451,6 +2466,9 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           </FilemanSelectionBar>
         )}
         {Boolean(error) && <ErrorNotice error={error} />}
+        {canLoadRootGroups && rootGroups.error && (
+          <ErrorNotice error={rootGroups.error} retry={() => void rootGroups.refetch()} />
+        )}
         {capabilities.error && (
           <ErrorNotice error={capabilities.error} retry={() => void capabilities.refetch()} />
         )}

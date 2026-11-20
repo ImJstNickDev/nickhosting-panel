@@ -4882,6 +4882,28 @@ describe('Minecraft world selection without telemetry settling', () => {
                 : { kind, list: 'operators', action: 'add', name: 'Player' },
           },
         };
+  it('rejects a world selection whose preparation expires after intent and before provider dispatch', async () => {
+    const f = await fixture('minecraft-content', plan());
+    let current = true;
+    const write = vi.fn(async () => {});
+    f.options.confirmAlreadyStopped = async () => true;
+    f.options.checkpoint = async (stage) => {
+      if (stage === 'prepared') current = false;
+    };
+    f.options.processGameContent = async (context) => {
+      await context.effect('minecraft.text.fixture', write, undefined, async () => {
+        if (!current) throw new DomainError('conflict');
+      });
+      return true;
+    };
+    expect(await f.run()).toBe('failed');
+    expect(write).not.toHaveBeenCalled();
+    expect(await f.operation()).toMatchObject({
+      effect_state: 'none',
+      plan: { rejectionCode: 'conflict' },
+    });
+  });
+
   async function resourceBlockedWorker(jobId: string) {
     const worker = createDatabase(process.env.NH_TEST_DATABASE_URL ?? '', {
       options: `-c search_path=${database.schema} -c lock_timeout=200ms`,

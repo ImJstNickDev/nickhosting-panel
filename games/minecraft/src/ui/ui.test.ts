@@ -5,6 +5,7 @@ import {
 } from '@nickhosting/game-sdk/ui';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  configuredMinecraftWorldRoots,
   createMinecraftUiController,
   minecraftPropertyValues,
   minecraftUiCatalogs,
@@ -134,25 +135,112 @@ describe('Minecraft browser module and exact API contracts', () => {
       file: 'icon.png',
     });
   });
-  it('groups only Minecraft root housekeeping entries through the trusted registry', () => {
+  it('keeps administrative files and likely worlds visible only in the Minecraft root', async () => {
     const registry = createTrustedGameUiRegistry([minecraftUiModule]);
-    const grouping = registry.get('minecraft')?.fileEntryGroup;
-    expect(grouping).toBeTypeOf('function');
+    const module = registry.get('minecraft');
+    if (!module?.fileRootGroups) throw new Error('Missing Minecraft root inventory');
+    const client = clientFixture();
+    const signal = new AbortController().signal;
+    client.request.mockResolvedValueOnce({
+      worlds: ['Lobby', '.Imported'],
+      selectedWorld: 'Older World',
+      nonWorldDirectories: [
+        'AddonData',
+        'Lobby',
+        'Older World_nether',
+        'kubejs',
+        'world',
+        'legacy_the_end',
+      ],
+    });
+    const groups = await module.fileRootGroups(client, serverId, signal);
+    expect(client.request).toHaveBeenCalledWith(
+      `/v1/servers/${serverId}/minecraft/worlds/fileman`,
+      { signal },
+    );
     const group = (name: string, is_file: boolean, path = '', runtimeId = 'fabric') =>
-      grouping?.({ path, runtimeId, entry: { name, is_file, is_symlink: false } });
-    for (const runtime of ['vanilla', 'fabric', 'paper', 'forge', 'folia', 'future-runtime']) {
-      for (const name of ['libraries', 'versions', 'eula.txt', 'usercache.json']) {
-        expect(group(name, true, '', runtime)).toBe('hidden');
-        expect(group(name, false, '/', runtime)).toBe('hidden');
-        expect(group(name, true, 'world', runtime)).toBeUndefined();
+      module.fileEntryGroup?.({
+        path,
+        runtimeId,
+        entry: { name, is_file, is_symlink: false },
+        directoryGroup: groups.get(name),
+      });
+    for (const runtime of [
+      'vanilla',
+      'fabric',
+      'quilt',
+      'paper',
+      'purpur',
+      'forge',
+      'neoforge',
+      'folia',
+    ]) {
+      for (const name of [
+        'whitelist.json',
+        'usernamecache.json',
+        'banned-ips.json',
+        'banned-players.json',
+        'ops.json',
+        'fabric-installer.json',
+        'installer.jar.log',
+        'fabric-server-launcher.properties',
+        'custom.jar',
+        'server.jar.bak',
+        'Server.jar',
+        'usercache.json',
+        'eula.txt',
+        '.dotfile',
+        'notes.txt',
+      ]) {
+        expect(group(name, true, '/', runtime)).toBe('hidden');
+        expect(group(name, true, 'mods', runtime)).toBeUndefined();
       }
-      expect(group('.cache', false, '', runtime)).toBe('hidden');
-      expect(group('.cache', true, '', runtime)).toBeUndefined();
-      expect(group('.cache', false, 'world', runtime)).toBeUndefined();
     }
-    for (const name of ['world', 'mods', 'server.properties', 'Libraries', 'eula.txt.bak'])
+    for (const name of [
+      'server.jar',
+      'server.properties',
+      'server-icon.png',
+      'commands.yml',
+      'paper.yml',
+      'purpur.yml',
+    ])
       expect(group(name, true)).toBeUndefined();
-    expect(registry.get('other-game')?.fileEntryGroup).toBeUndefined();
+    for (const name of [
+      'world',
+      'Lobby',
+      '.Imported',
+      'Older World_nether',
+      'legacy_the_end',
+      'New World',
+      'folders with spaces',
+      'backups',
+      'ftbbackups3',
+      'kubejs',
+      'patchouli_books',
+      'schematics',
+      'scripts',
+      'mods',
+      'plugins',
+      'crash-reports',
+      'config',
+      'defaultconfigs',
+      'datapacks',
+      'logs',
+    ])
+      expect(group(name, false)).toBeUndefined();
+    for (const name of ['versions', 'libraries', '.hidden', 'AddonData']) {
+      expect(group(name, false)).toBe('hidden');
+      expect(group(name, false, 'mods')).toBeUndefined();
+    }
+    expect(group('Lobby', true)).toBe('hidden');
+    expect(configuredMinecraftWorldRoots('worlds/../Legacy World')).toEqual([
+      'Legacy World',
+      'Legacy World_nether',
+      'Legacy World_the_end',
+    ]);
+    expect(configuredMinecraftWorldRoots('Saves/Season 2')).toEqual(['Saves']);
+    expect(configuredMinecraftWorldRoots('../external')).toBeUndefined();
+    expect(registry.get('other-game')?.fileRootGroups).toBeUndefined();
   });
   it('retains bundled runtime artwork through the trusted module factory', () => {
     const artwork = minecraftUiModule.runtimeArtwork?.('forge');
