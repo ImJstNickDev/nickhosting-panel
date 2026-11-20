@@ -22,7 +22,7 @@ export function useRefreshAtExpiry(deadline: number, now = Date.now) {
     const update = () => {
       window.clearTimeout(timer);
       const remaining = deadline - now();
-      if (remaining > 0) timer = window.setTimeout(update, remaining);
+      if (remaining > 0) timer = window.setTimeout(update, Math.min(remaining, 2_147_483_647));
       else refresh();
     };
     update();

@@ -1,6 +1,6 @@
-import { useQuery } from '@tanstack/react-query';
+import { queryOptions, useQuery } from '@tanstack/react-query';
 import { z } from 'zod';
-import { ApiError, api, queryClient } from '../api/client.js';
+import { ApiError, api, queryClient, readApi } from '../api/client.js';
 import { clearFileListing } from '../features/file-listing-cache.js';
 
 const user = z.object({
@@ -16,6 +16,7 @@ const user = z.object({
   twoFactorEnabled: z.boolean(),
 });
 const sessionSchema = z.object({
+  setup: z.object({ ownerClaimed: z.boolean(), completed: z.boolean() }).optional(),
   context: z.object({
     actorUserId: z.string(),
     subjectUserId: z.string(),
@@ -37,10 +38,28 @@ const sessionSchema = z.object({
   subject: user,
 });
 export type WebSession = z.infer<typeof sessionSchema>;
+// Include both sides of an assisted session in private query cache keys.
+export function webSessionScope(session: WebSession | undefined) {
+  const context = session?.context;
+  return [
+    context?.actorUserId,
+    context?.subjectUserId,
+    context?.role,
+    context?.sessionType,
+    context?.support?.id,
+  ];
+}
+export const publicSetupQuery = queryOptions({
+  queryKey: ['setup'],
+  networkMode: 'always',
+  queryFn: ({ signal }) =>
+    readApi<{ ownerClaimed: boolean; completed: boolean }>('/v1/setup', signal),
+});
 export function useSession() {
   return useQuery({
     queryKey: ['session'],
-    queryFn: async () => sessionSchema.parse(await api('/v1/web/session')),
+    networkMode: 'always',
+    queryFn: async ({ signal }) => sessionSchema.parse(await readApi('/v1/web/session', signal)),
     refetchInterval: 30000,
     retry: false,
   });

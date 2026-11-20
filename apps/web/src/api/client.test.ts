@@ -5,12 +5,37 @@ import {
   apiStream,
   consumeEvents,
   download,
+  readApi,
   readText,
   safeApiPath,
   upload,
 } from './client.js';
 
 afterEach(() => vi.unstubAllGlobals());
+it.each(['deadline', 'navigation'] as const)(
+  'cancels a pending panel read on %s',
+  async (cause) => {
+    const deadline = new AbortController();
+    const navigation = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
+    try {
+      vi.stubGlobal(
+        'fetch',
+        (_url: string, { signal }: { signal: AbortSignal }) =>
+          new Promise((_resolve, reject) =>
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+          ),
+      );
+      const read = readApi('/v1/platform/quotas', navigation.signal);
+      const reason = new DOMException(cause, cause === 'deadline' ? 'TimeoutError' : 'AbortError');
+      (cause === 'deadline' ? deadline : navigation).abort(reason);
+      await expect(read).rejects.toBe(reason);
+      expect(timeout).toHaveBeenCalledWith(15_000);
+    } finally {
+      timeout.mockRestore();
+    }
+  },
+);
 it('exposes streamed records before completion and forwards reader cancellation', async () => {
   const cancel = vi.fn();
   const stream = new ReadableStream<Uint8Array>({

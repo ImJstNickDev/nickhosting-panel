@@ -14,6 +14,8 @@ import {
   getPlatformSleepPolicy,
   getPlatformTransfers,
   getPlatformUser,
+  getPlatformUserProfile,
+  getPlatformUserQuota,
   getServerAutoWakePolicy,
   listPlatformActivity,
   listPlatformAudit,
@@ -297,6 +299,12 @@ export function registerPlatformRoutes(
   );
   app.get('/v1/platform/owner/users/:id', async (c) =>
     c.json(await getPlatformUser(db, await principal(c, true), c.req.param('id'), env)),
+  );
+  app.get('/v1/platform/owner/users/:id/profile', async (c) =>
+    c.json(await getPlatformUserProfile(db, await principal(c, true), c.req.param('id'))),
+  );
+  app.get('/v1/platform/owner/users/:id/quota', async (c) =>
+    c.json(await getPlatformUserQuota(db, await principal(c, true), c.req.param('id'), env)),
   );
   app.get('/v1/platform/owner/audit', async (c) =>
     c.json(await listPlatformAudit(db, await principal(c, true), c.req.query())),

@@ -10,8 +10,8 @@ import { gameManifestSchema } from '@nickhosting/game-sdk';
 import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
 import { listUnifiedActivity } from './activity.js';
-import { checkedObservation, type DB, type Environment, lockResources } from './admission.js';
-import { resolveHostOverride } from './configuration.js';
+import { type DB, type Environment, lockResources, validHostSnapshot } from './admission.js';
+import { hostPolicyOverrides, resolveHostOverride } from './configuration.js';
 import { trustedGameModules } from './game-modules.js';
 import {
   type GatewayPolicy,
@@ -772,10 +772,29 @@ export async function deletePlatformProject(
 }
 
 /** Reuse the worker's filesystem samples; nodes on one host share one disk reading. */
-async function sharedStorageAvailableBytes(db: DB, env: Environment): Promise<number | null> {
+async function sharedStorageAvailableBytes(
+  db: DB,
+  env: Environment,
+  maxAgeSeconds: number,
+): Promise<number | null> {
   const hosts = await db
     .selectFrom('physical_hosts as h')
-    .selectAll('h')
+    .leftJoin('host_observations as o', 'o.host_id', 'h.id')
+    .select([
+      'h.id',
+      'h.memory_limit_mib',
+      'h.cpu_limit_percent',
+      'h.storage_pool_mib',
+      'h.memory_headroom_mib',
+      'h.cpu_headroom_percent',
+      'h.disk_headroom_mib',
+      'h.local_disk_path',
+      'h.observer_id',
+      'h.enabled',
+      'o.snapshot',
+      'o.observer_id as observedBy',
+      'o.observed_at',
+    ])
     .where((eb) =>
       eb.exists(
         eb
@@ -786,22 +805,28 @@ async function sharedStorageAvailableBytes(db: DB, env: Environment): Promise<nu
       ),
     )
     .execute();
-  const activeHosts = hosts.filter((host) => resolveHostOverride(host, env).enabled);
-  if (!activeHosts.length) return null;
-  const samples = await Promise.all(
-    activeHosts.map(async ({ id }) => {
-      try {
-        const { snapshot } = await checkedObservation(db, id, env);
-        return Math.floor(snapshot.availableDiskMiB * 1048576);
-      } catch (error) {
-        if (error instanceof DomainError && error.code === 'resources_unavailable') return null;
-        throw error;
-      }
-    }),
-  );
-  if (samples.some((bytes) => bytes === null)) return null;
-  const total = samples.reduce<number>((sum, bytes) => sum + (bytes ?? 0), 0);
-  return Number.isSafeInteger(total) ? total : null;
+  if (!hosts.length) return null;
+  const policies = hostPolicyOverrides(env);
+  const now = Date.now();
+  let total: number | null = null;
+  for (const row of hosts) {
+    const host = resolveHostOverride(row, env, policies);
+    if (!host.enabled) continue;
+    const snapshot = validHostSnapshot(
+      host,
+      {
+        snapshot: row.snapshot,
+        observer_id: row.observedBy,
+        observed_at: row.observed_at,
+      },
+      maxAgeSeconds,
+      now,
+    );
+    if (!snapshot) return null;
+    total = (total ?? 0) + Math.floor(snapshot.availableDiskMiB * 1048576);
+    if (!Number.isSafeInteger(total)) return null;
+  }
+  return total;
 }
 
 export async function getPlatformQuota(
@@ -812,37 +837,57 @@ export async function getPlatformQuota(
 ) {
   assertAuthContext(context);
   if (userId !== context.subjectUserId) ownerOnly(context);
-  const [settings, override, reservations, servers, metrics, storageOverride] = await Promise.all([
+  const [settings, override, reservations, servers, budget] = await Promise.all([
     getSettings(db, env),
     db
       .selectFrom('resource_user_limits')
       .selectAll()
       .where('user_id', '=', userId)
       .executeTakeFirst(),
-    db.selectFrom('resource_reservations').selectAll().where('owner_id', '=', userId).execute(),
+    db
+      .selectFrom('resource_reservations')
+      .select((eb) => [
+        eb.fn.sum<string>('memory_mib').as('memory'),
+        eb.fn.sum<string>('cpu_percent').as('cpu'),
+      ])
+      .where('owner_id', '=', userId)
+      .executeTakeFirstOrThrow(),
     db
       .selectFrom('managed_servers as s')
       .innerJoin('runtime_egg_mappings as m', 'm.id', 's.mapping_id')
-      .select(['s.id', 's.limits', 'm.feature_limits'])
+      .leftJoinLateral(
+        (eb) =>
+          eb
+            .selectFrom('server_metrics')
+            .select(['memory_bytes', 'cpu_percent', 'disk_bytes', 'observed_at'])
+            .whereRef('server_id', '=', 's.id')
+            .orderBy('observed_at', 'desc')
+            .limit(1)
+            .as('metric'),
+        (join) => join.onTrue(),
+      )
+      .select([
+        's.id',
+        's.limits',
+        'm.feature_limits',
+        'metric.memory_bytes',
+        'metric.cpu_percent',
+        'metric.disk_bytes',
+        'metric.observed_at',
+      ])
       .where('s.owner_id', '=', userId)
       .where('s.deleted_at', 'is', null)
+      .orderBy('s.id')
       .execute(),
     db
-      .selectFrom('server_metrics as m')
-      .innerJoin('managed_servers as s', 's.id', 'm.server_id')
-      .select(['m.server_id', 'm.memory_bytes', 'm.cpu_percent', 'm.disk_bytes', 'm.observed_at'])
-      .where('s.owner_id', '=', userId)
-      .where('s.deleted_at', 'is', null)
-      .distinctOn('m.server_id')
-      .orderBy('m.server_id')
-      .orderBy('m.observed_at', 'desc')
-      .execute(),
-    db
-      .selectFrom('storage_user_budgets')
-      .select('storage_mib')
-      .where('user_id', '=', userId)
+      .selectFrom('user as subject')
+      .leftJoin('storage_user_budgets as budget', 'budget.user_id', 'subject.id')
+      .select(['budget.user_id', 'budget.storage_mib'])
+      .where('subject.id', '=', userId)
       .executeTakeFirst(),
   ]);
+  if (!budget) throw new DomainError('not_found');
+  const storageOverride = budget.user_id === null ? undefined : budget;
   const { values } = settings,
     effective =
       override && (!override.expires_at || override.expires_at > new Date()) ? override : null;
@@ -859,13 +904,12 @@ export async function getPlatformQuota(
     serverCount: values.maxServersPerUser,
   };
   const committed = {
-    memoryMiB: reservations.reduce((n, r) => n + r.memory_mib, 0),
-    cpuPercent: reservations.reduce((n, r) => n + r.cpu_percent, 0),
+    memoryMiB: Number(reservations.memory ?? 0),
+    cpuPercent: Number(reservations.cpu ?? 0),
     storageMiB: servers.reduce(
       (n, r) =>
         n +
-        (r.limits.disk ||
-          Math.ceil(Number(metrics.find((m) => m.server_id === r.id)?.disk_bytes ?? 0) / 1048576)) *
+        (r.limits.disk || Math.ceil(Number(r.disk_bytes ?? 0) / 1048576)) *
           (1 + r.feature_limits.backups),
       0,
     ),
@@ -874,16 +918,14 @@ export async function getPlatformQuota(
   // Home telemetry has the same 30-second display lifetime as server cards.
   // Admission and measured.stale retain their separate, stricter safety lifetime.
   const displayNow = Date.now();
-  const samples = new Map(metrics.map((metric) => [metric.server_id, metric]));
   let usageBytes = 0;
   let oldestObservation: number | null = null;
   let completeUsage = true;
   for (const server of servers) {
-    const metric = samples.get(server.id);
-    const bytes = Number(metric?.disk_bytes);
-    const at = metric?.observed_at.getTime();
+    const bytes = Number(server.disk_bytes);
+    const at = server.observed_at?.getTime();
     if (
-      !metric ||
+      server.disk_bytes === null ||
       !Number.isSafeInteger(bytes) ||
       bytes < 0 ||
       at === undefined ||
@@ -910,7 +952,9 @@ export async function getPlatformQuota(
     storageBudgetMiB,
     storagePolicy: values.storagePolicy,
     sharedStorageAvailableBytes:
-      limits.storageMiB === null ? await sharedStorageAvailableBytes(db, env) : null,
+      limits.storageMiB === null
+        ? await sharedStorageAvailableBytes(db, env, values.observationMaxAgeSeconds)
+        : null,
     creationStorage: {
       mode: limits.storageMiB === null ? 'shared' : 'limited',
       defaultDiskMiB: limits.storageMiB === null ? 0 : values.defaultServerStorageMiB,
@@ -942,17 +986,21 @@ export async function getPlatformQuota(
           updatedAt: override.updated_at,
         }
       : null,
-    measured: metrics.map((m) => ({
-      serverId: m.server_id,
-      memoryBytes: m.memory_bytes,
-      cpuPercent: m.cpu_percent,
-      diskBytes: m.disk_bytes,
-      observedAt: m.observed_at,
-      stale: Date.now() - m.observed_at.getTime() > values.observationMaxAgeSeconds * 1000,
-    })),
-    missingMeasurements: servers
-      .filter((s) => !metrics.some((m) => m.server_id === s.id))
-      .map((s) => s.id),
+    measured: servers.flatMap((s) =>
+      s.observed_at && s.memory_bytes !== null && s.cpu_percent !== null && s.disk_bytes !== null
+        ? [
+            {
+              serverId: s.id,
+              memoryBytes: s.memory_bytes,
+              cpuPercent: s.cpu_percent,
+              diskBytes: s.disk_bytes,
+              observedAt: s.observed_at,
+              stale: Date.now() - s.observed_at.getTime() > values.observationMaxAgeSeconds * 1000,
+            },
+          ]
+        : [],
+    ),
+    missingMeasurements: servers.filter((s) => s.observed_at === null).map((s) => s.id),
     observedAt: new Date(),
   };
 }
@@ -991,12 +1039,7 @@ export async function listPlatformUsers(db: DB, context: AuthContext, input: unk
     (r) => ({ at: r.createdAt, id: r.id }),
   );
 }
-export async function getPlatformUser(
-  db: DB,
-  context: AuthContext,
-  userId: string,
-  env: Environment = {},
-) {
+export async function getPlatformUserProfile(db: DB, context: AuthContext, userId: string) {
   ownerOnly(context);
   const user = await db
     .selectFrom('user')
@@ -1004,6 +1047,26 @@ export async function getPlatformUser(
     .where('id', '=', userId)
     .executeTakeFirst();
   if (!user) throw new DomainError('not_found');
+  return user;
+}
+
+export function getPlatformUserQuota(
+  db: DB,
+  context: AuthContext,
+  userId: string,
+  env: Environment = {},
+) {
+  ownerOnly(context);
+  return getPlatformQuota(db, context, userId, env);
+}
+
+export async function getPlatformUser(
+  db: DB,
+  context: AuthContext,
+  userId: string,
+  env: Environment = {},
+) {
+  const user = await getPlatformUserProfile(db, context, userId);
   return { ...user, quota: await getPlatformQuota(db, context, userId, env) };
 }
 

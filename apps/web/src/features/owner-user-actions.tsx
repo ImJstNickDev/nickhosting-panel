@@ -1,11 +1,12 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { api } from '../api/client.js';
+import { api, readApi } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { identityChanged, type WebSession } from '../app/session.js';
 import { ActionForm, Dialog, ErrorNotice, Input, Textarea, text } from '../components/ui.js';
 import { OwnerAuthDialog } from './owner-auth-dialog.js';
+import { useRefreshAtExpiry } from './use-storage-usage.js';
 import './owner-user-actions.css';
 
 type Recovery = { url: string; expiresAt: string };
@@ -115,25 +116,37 @@ function RecoveryDialog({
   );
 }
 
+function recoveryStatusKey(ownerId: string, userId: string) {
+  return ['owner-recovery-status', ownerId, userId] as const;
+}
+
+export function useOwnerRecoveryStatus(ownerId: string, userId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: recoveryStatusKey(ownerId, userId),
+    networkMode: 'always',
+    queryFn: ({ signal }) =>
+      readApi<Status>(`/v1/owner/users/${encodeURIComponent(userId)}/recovery-link`, signal),
+    enabled,
+  });
+}
+
 export function OwnerUserActions({
   actor,
   user,
+  status,
+  profileConfirmed,
 }: {
   actor: WebSession['actor'];
+  status: ReturnType<typeof useOwnerRecoveryStatus>;
+  profileConfirmed: boolean;
   user: { id: string; name: string; email: string; role: string };
 }) {
   const t = useT(),
     format = useFormat(),
     navigate = useNavigate(),
     queryClient = useQueryClient();
-  const key = ['owner-recovery-status', user.id];
+  const key = recoveryStatusKey(actor.id, user.id);
   const path = `/v1/owner/users/${encodeURIComponent(user.id)}/recovery-link`;
-  const status = useQuery({
-    queryKey: key,
-    queryFn: ({ signal }) => api<Status>(path, { signal }),
-    enabled: user.role !== 'owner',
-    refetchInterval: 15000,
-  });
   const [phase, setPhase] = useState<Phase>();
   const [customExpiry, setCustomExpiry] = useState('');
   const trigger = useRef<HTMLButtonElement>(null);
@@ -148,7 +161,20 @@ export function OwnerUserActions({
       if (document.activeElement === document.body) trigger.current?.focus();
     });
   };
-  const active = Boolean(status.data?.expiresAt && Date.parse(status.data.expiresAt) > Date.now());
+  const deadline = status.data?.expiresAt ? Date.parse(status.data.expiresAt) : Number.NaN;
+  useRefreshAtExpiry(deadline);
+  const canRecover =
+    profileConfirmed && user.role !== 'owner' && !status.isError && status.data?.available;
+  const active = canRecover && Date.now() < deadline;
+  const showingLink = phase?.kind === 'link';
+  const { refetch } = status;
+  useEffect(() => {
+    if (!showingLink) return;
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void refetch();
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [showingLink, refetch]);
   useEffect(() => {
     if (phase?.kind === 'link' && (!active || status.data?.expiresAt !== phase.link.expiresAt)) {
       setPhase(undefined);
@@ -156,8 +182,10 @@ export function OwnerUserActions({
   }, [active, phase, status.data?.expiresAt]);
   return (
     <>
-      {status.isError && <ErrorNotice error={status.error} retry={() => void status.refetch()} />}
-      {status.data?.available && (
+      {profileConfirmed && user.role !== 'owner' && status.isError && (
+        <ErrorNotice error={status.error} retry={() => void status.refetch()} />
+      )}
+      {canRecover && (
         <button
           type="button"
           className="secondary"
@@ -191,6 +219,7 @@ export function OwnerUserActions({
             onCancel={close}
             success={false}
             submitLabel={t('web.next')}
+            submitDisabled={!profileConfirmed}
             onSubmit={async (data) => setPhase({ kind: 'support', reason: text(data, 'reason') })}
           >
             <Textarea

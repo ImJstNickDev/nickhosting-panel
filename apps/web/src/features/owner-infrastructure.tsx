@@ -6,7 +6,7 @@ import type { Allocation, Nest, Node } from '../../../../packages/pterodactyl-ad
 import type { listGatewayRoutes } from '../../../../packages/server-management/src/gateway-registry.js';
 import type { getOwnerHealth } from '../../../../packages/server-management/src/health.js';
 import type { listPlatformServers } from '../../../../packages/server-management/src/platform-queries.js';
-import { ApiError, api } from '../api/client.js';
+import { ApiError, api, readApi } from '../api/client.js';
 import type { Json, Result } from '../api/contracts.js';
 import { useFormat, useT } from '../app/i18n.js';
 import {
@@ -84,7 +84,8 @@ export function OwnerHealthPage() {
     format = useFormat();
   const health = useQuery({
     queryKey: ['owner-health'],
-    queryFn: () => api<Result<typeof getOwnerHealth>>(path('health')),
+    networkMode: 'always',
+    queryFn: ({ signal }) => readApi<Result<typeof getOwnerHealth>>(path('health'), signal),
     refetchInterval: 15000,
   });
   return (

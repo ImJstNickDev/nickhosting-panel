@@ -1,14 +1,14 @@
 import { useQuery } from '@tanstack/react-query';
 import { type ReactNode, useRef } from 'react';
-import { Link } from 'react-router';
+import { Link, useOutletContext } from 'react-router';
 import type {
-  getPlatformQuota,
   listPlatformActivity,
   listPlatformServers,
 } from '../../../../packages/server-management/src/platform-queries.js';
 import { api, idempotencyKey, queryClient } from '../api/client.js';
 import type { Result } from '../api/contracts.js';
 import { useFormat, useT } from '../app/i18n.js';
+import { type WebSession, webSessionScope } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
 import {
   Badge,
@@ -22,6 +22,7 @@ import {
 } from '../components/ui.js';
 import { activityLabelKey, activityStatus } from './activity-labels.js';
 import { getGameArtwork } from './integrations.js';
+import { platformQuotaQuery } from './platform-quota.js';
 import { type ServerInfo, serverPath, useServer } from './service-contracts.js';
 import {
   storageDisplayDeadline,
@@ -50,7 +51,6 @@ export async function fetchServerCardPage(query: string | URLSearchParams, signa
   };
 }
 type CardServer = Awaited<ReturnType<typeof fetchServerCardPage>>['items'][number];
-type Quota = Result<typeof getPlatformQuota>;
 type Activity = Result<typeof listPlatformActivity>;
 export function statusKey(state: string) {
   return [
@@ -307,18 +307,17 @@ const quotaIcons = {
   serverCount: 'M4 3h16v7H4ZM4 14h16v7H4ZM7 6h1m-1 11h1',
 };
 
-export function QuotaSummary() {
+function QuotaSummary({ session }: { session: WebSession | undefined }) {
   const t = useT(),
     format = useFormat();
   const quota = useQuery({
-    queryKey: ['quota'],
-    queryFn: () => api<Quota>('/v1/platform/quotas'),
+    ...platformQuotaQuery(session),
     refetchInterval: 15000,
   });
   const storageUsage = useStorageUsage(
     quota.data?.storageUsage,
     quota.data?.observedAt,
-    quota.dataUpdatedAt,
+    quota.data?.requestedAt ?? 0,
   );
   return (
     <HomeSection title={t('web.quota')}>
@@ -416,14 +415,16 @@ export function QuotaSummary() {
 }
 export function HomePage() {
   const t = useT();
+  const session = useOutletContext<WebSession>();
+  const scope = webSessionScope(session);
   const servers = useQuery({
-    queryKey: ['servers', 'recent'],
+    queryKey: ['servers', 'recent', ...scope],
     queryFn: ({ signal }) => fetchServerCardPage('limit=4', signal),
     refetchInterval: 15000,
   });
   const activity = useQuery({
-    queryKey: ['activity', 'recent'],
-    queryFn: () => api<Activity>('/v1/platform/activity?limit=5'),
+    queryKey: ['activity', 'recent', ...scope],
+    queryFn: ({ signal }) => api<Activity>('/v1/platform/activity?limit=5', { signal }),
     refetchInterval: 15000,
   });
   return (
@@ -449,7 +450,7 @@ export function HomePage() {
           <Empty text={t('web.noServers')} />
         )}
       </HomeSection>
-      <QuotaSummary />
+      <QuotaSummary session={session} />
       <HomeSection
         title={t('platform.recentActivity')}
         action={{ to: '/activity', label: t('platform.allActivity') }}

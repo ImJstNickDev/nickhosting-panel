@@ -24,7 +24,7 @@ in JavaScript-readable storage. Locale preference is not an authentication token
 | Method/path | Result or behavior |
 | --- | --- |
 | `GET /v1/web/config` | Safe instance name/default locale, email/Discord configuration availability, supported passkey/TOTP flows and whether a support cookie is present. Presence is not proof of authorization. |
-| `GET /v1/web/session` | Current `context`, safe `actor` and `subject` profiles, including nullable same-origin `avatarUrl` for their uploaded photo. Actor and effective subject are displayed separately in assisted mode. No image bytes or OAuth image URLs are projected. |
+| `GET /v1/web/session` | Current `context`, safe `actor` and `subject` profiles, including nullable same-origin `avatarUrl` for their uploaded photo. Actor and effective subject are displayed separately in assisted mode. No image bytes or OAuth image URLs are projected. The authenticated response includes the singleton setup state as `setup.ownerClaimed` and `setup.completed`. The public setup read remains available before sign-in. |
 | `GET /v1/web/account/sessions` | Regular session; all of the caller's unexpired persisted browser sessions, newest first. Array of `id`, `createdAt`, `expiresAt`, nullable `userAgent`/`ipAddress`, and `current`. No tokens or user IDs. Closing a browser does not remove a session; no five-minute freshness requirement applies. |
 | `DELETE /v1/web/account/sessions/:id` | Regular session and Origin protection; resolves only the caller's session ID, then uses Better Auth revocation and its audit hooks. Returns 204; unknown/foreign IDs return 404. Revoking the current session signs out this browser. |
 | `PUT /v1/web/profile-photo` | Regular session; `image/png` body, at most 300 KiB, exactly 256×256 pixels. Validates and re-encodes a static, non-interlaced PNG, atomically replaces the caller's thumbnail and audits the change; returns `{avatarUrl}`. |
@@ -73,6 +73,8 @@ text; server/project/job identities are UUIDs. Invalid cursors are domain errors
 | `POST /v1/platform/jobs/:id/retry` | `{idempotencyKey}`; returns 202 for an authorized safe new operation intent. Never resets the historical job. |
 | `GET /v1/platform/owner/users` | Regular Owner; paginated search/role filtering of NickHosting identities. |
 | `GET /v1/platform/owner/users/:id` | Safe identity profile and quota summary; historical quota actions remain available through audit. |
+| `GET /v1/platform/owner/users/:id/profile` | Regular Owner. Safe identity fields for the selected account, including creation and update times. |
+| `GET /v1/platform/owner/users/:id/quota` | Regular Owner. Returns the target account's allowance in the same format as the effective subject's quota. A missing account returns 404. |
 | `GET /v1/owner/users/:userId/recovery-link` | Returns eligibility and active expiry to a regular Owner. Eligible targets have a password account and a non-Owner role. |
 | `POST /v1/owner/users/:userId/recovery-link` | Requires a single-use Owner step-up grant for the recovery action and the target user. The request carries `mode` (`create` or `reveal`) and optional `expiresAt`. New links default to 24 hours. An active link can be reopened or its expiry changed. The response contains the URL and its expiry and is served with `Cache-Control: no-store`. Redemption uses the normal password-reset flow. |
 | `GET /v1/platform/owner/audit` | Regular session with `audit:read` (Owner or platform operator); cursor pagination and action/actor/subject/user filters. Preserves actor/subject attribution. |
@@ -423,6 +425,8 @@ shortcut around active upload claims.
 
 `GET /v1/owner/health` is regular-Owner-only, even for a cached result. Read-only
 provider probes coalesce for five seconds and retain one in-flight probe when slow.
+Each application read scope checks the first page with one requested record. Empty
+accessible lists count as available. Each scope retains its own error status.
 The response is `no-store` and includes `checkedAt`, API/database, Redis, worker,
 Gateway, provider read scopes, physical-host observations, operation counts and
 SFTP/DNS configuration indicators. Status values distinguish `healthy`, `degraded`,
