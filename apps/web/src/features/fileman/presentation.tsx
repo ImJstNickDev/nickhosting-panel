@@ -2,6 +2,7 @@ import {
   type ButtonHTMLAttributes,
   type HTMLAttributes,
   type MouseEvent,
+  memo,
   type ReactNode,
   type Ref,
   useCallback,
@@ -400,43 +401,40 @@ export interface FilemanListingProps<T extends FilemanEntry> {
 
 // Keep native rows and tab order. Yield between batches so the first files can
 // paint and accept input while a large directory finishes mounting.
-function FileRows<T>({
+function FileRowContent<T>({ entry, render }: { entry: T; render: (entry: T) => ReactNode }) {
+  return render(entry);
+}
+const FileRow = memo(FileRowContent) as typeof FileRowContent;
+
+function FileRows<T extends FilemanEntry>({
   entries,
   render,
-  offset = 0,
   eager,
 }: {
   entries: readonly T[];
   render: (entry: T) => ReactNode;
-  offset?: number;
   eager: boolean;
 }) {
-  const [showNext, setShowNext] = useState(false);
-  const end = entries.length <= 256 ? entries.length : Math.min(entries.length, offset + 96);
-  const remaining = end < entries.length;
+  const [count, setCount] = useState(96);
+  const end = eager || entries.length <= 256 ? entries.length : Math.min(count, entries.length);
   useEffect(() => {
-    if (!remaining || showNext) return;
-    if (eager) {
-      setShowNext(true);
+    if (count >= entries.length) return;
+    if (eager || entries.length <= 256) {
+      setCount(entries.length);
       return;
     }
     let timer: number | undefined;
     const frame = requestAnimationFrame(() => {
-      timer = window.setTimeout(() => setShowNext(true), 0);
+      timer = window.setTimeout(() => setCount(count + 96), 0);
     });
     return () => {
       cancelAnimationFrame(frame);
       window.clearTimeout(timer);
     };
-  }, [remaining, showNext, eager]);
-  return (
-    <>
-      {entries.slice(offset, end).map(render)}
-      {remaining && (showNext || eager) && (
-        <FileRows entries={entries} render={render} eager={eager} offset={end} />
-      )}
-    </>
-  );
+  }, [count, entries.length, eager]);
+  return entries
+    .slice(0, end)
+    .map((entry) => <FileRow key={entry.name} entry={entry} render={render} />);
 }
 
 export function FilemanListing<T extends FilemanEntry>({

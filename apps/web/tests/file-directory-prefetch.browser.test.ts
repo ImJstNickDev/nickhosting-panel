@@ -160,6 +160,17 @@ describe('M5 silent visible-directory metadata prefetch', () => {
     await user.goto(`${base}?directory=folder-499%2Fnested`);
     const checkbox = (index: number) =>
       user.getByRole('checkbox', { name: `Select region-${index}.mca`, exact: true });
+    // The nested folder is the first row, so file 95 sits at a render boundary.
+    await checkbox(95).focus();
+    const focused = await checkbox(95).elementHandle();
+    files.set('folder-499/nested/region-0.mca', Buffer.from('External change'));
+    // Trigger a background-style refresh while leaving keyboard focus in the listing.
+    await user.getByRole('button', { name: 'Refresh files', exact: true }).evaluate((button) => {
+      if (button instanceof HTMLButtonElement) button.click();
+    });
+    await browserExpect(checkbox(0)).toBeVisible();
+    await browserExpect(checkbox(95)).toBeFocused();
+    expect(await focused?.evaluate((node) => node === document.activeElement)).toBe(true);
     await checkbox(2).check();
     await checkbox(999).click({ modifiers: ['Shift'] });
     await browserExpect(user.locator('.fm-selection-count')).toContainText('998');
