@@ -75,6 +75,10 @@ export const webMessages: Record<string, readonly [string, string]> = {
   'web.search': ['Search', 'Cerca'],
   'web.filter': ['Filter', 'Filtra'],
   'web.all': ['All', 'Tutti'],
+  'web.localeLoadFailed': [
+    'Could not load the language files.',
+    'Impossibile caricare i file della lingua.',
+  ],
   'web.loading': ['Loading…', 'Caricamento…'],
   'web.pending': ['Saving…', 'Salvataggio…'],
   'web.empty': ['No results', 'Nessun risultato'],

@@ -20,6 +20,7 @@ import {
 import { minecraftDatapacksMessages } from './datapacks-catalog.js';
 import { minecraftFileDirectoryIcon } from './file-directory-icon.js';
 import { minecraftFileEntryGroup, minecraftFileRootGroups } from './file-entry-group.js';
+import { minecraftGameArtwork } from './game-artwork.js';
 import { minecraftModpacksMessages } from './modpacks-catalog.js';
 import { createMinecraftModpacksController } from './modpacks-controller.js';
 import { minecraftModsMessages } from './mods-catalog.js';
@@ -338,7 +339,7 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
   gameId: 'minecraft',
   schemaVersion: 1,
   nameKey: k('name'),
-  artwork: { assetId: 'landscape' },
+  artwork: { assetId: minecraftGameArtwork.assetId },
   administration: [
     { id: 'versions', titleKey: k('admin.versions'), component: 'minecraft-versions' },
   ],
@@ -616,7 +617,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
     gatewayServerIcon: new URL('./assets/local-26.1/server-icon.png', import.meta.url).href,
     gatewayPing: new URL('./assets/local-26.1/ping.png', import.meta.url).href,
     gatewayButton: new URL('./assets/local-26.1/button.png', import.meta.url).href,
-    landscape: new URL('./assets/minecraft-landscape.svg', import.meta.url).href,
+    [minecraftGameArtwork.assetId]: minecraftGameArtwork.src,
     ...minecraftRuntimeLogos,
     'directory-logs': new URL('./assets/file-icons/logs.svg', import.meta.url).href,
     'directory-mods': new URL('./assets/file-icons/mods.svg', import.meta.url).href,

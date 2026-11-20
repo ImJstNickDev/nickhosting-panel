@@ -435,11 +435,18 @@ export function registerServerRoutes(
       try {
         // Subscribe before sampling a cursor/reading. An overlapping commit
         // either appears in that read or wakes the next one.
-        if (serverEvents)
-          release = await serverEvents.subscribe(server.id, changed, () => {
-            lost = true;
-            wake?.();
-          });
+        if (serverEvents && options.pool?.options?.max !== 1) {
+          try {
+            release = await serverEvents.subscribe(server.id, changed, () => {
+              lost = true;
+              wake?.();
+            });
+          } catch {
+            // A missing listener can still replay durable events at the polling cadence.
+            lost = false;
+          }
+        }
+        if (stream.aborted || lost) return;
         if (requested === 'latest') {
           const last = await db
             .selectFrom('server_events')
@@ -456,20 +463,28 @@ export function registerServerRoutes(
         await stream.writeSSE({
           id: after,
           event: 'ready',
-          data: JSON.stringify({ serverId: server.id }),
+          data: JSON.stringify({ serverId: server.id, notifications: Boolean(release) }),
         });
         const end = Date.now() + 900000;
+        let nextHistoryRead = 0;
         while (!stream.aborted && !lost && Date.now() < end) {
-          dirty = false;
           await authorizeServer(db, await principal(c), server.id);
-          const events = await db
-            .selectFrom('server_events')
-            .selectAll()
-            .where('server_id', '=', server.id)
-            .where('id', '>', after)
-            .orderBy('id')
-            .limit(100)
-            .execute();
+          if (stream.aborted || lost) return;
+          // Authorization still runs on every heartbeat. With LISTEN available,
+          // reread the durable cursor on hints or to recover a silent legacy write.
+          const read = dirty || !release || Date.now() >= nextHistoryRead;
+          dirty = false;
+          const events = read
+            ? await db
+                .selectFrom('server_events')
+                .selectAll()
+                .where('server_id', '=', server.id)
+                .where('id', '>', after)
+                .orderBy('id')
+                .limit(100)
+                .execute()
+            : [];
+          if (read) nextHistoryRead = Date.now() + 15000;
           for (const event of events) {
             // Authority is not carried over a slow client write or a batch.
             const current = await principal(c);
@@ -485,7 +500,10 @@ export function registerServerRoutes(
             });
             after = event.id;
           }
-          if (events.length === 100) continue;
+          if (events.length === 100) {
+            dirty = true;
+            continue;
+          }
           await new Promise<void>((resolve) => {
             const timer = setTimeout(done, 2000);
             function done() {

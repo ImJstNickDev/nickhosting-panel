@@ -34,7 +34,16 @@ http {
     location /api/auth/ { include /opt/nickhosting/proxy.conf; proxy_pass http://core; }
     location /api/ { return 404; }
     root /usr/share/nginx/html;
-    location /assets/ { try_files $uri =404; add_header Cache-Control "public, max-age=31536000, immutable"; }
+    location /assets/ {
+      gzip on;
+      gzip_min_length 1024;
+      gzip_comp_level 4;
+      gzip_proxied any;
+      gzip_vary on;
+      gzip_types application/javascript text/javascript application/json text/css image/svg+xml;
+      try_files $uri =404;
+      add_header Cache-Control "public, max-age=31536000, immutable";
+    }
     location = /index.html { add_header Cache-Control "no-store"; }
     location / { try_files $uri $uri/ /index.html; }
   }

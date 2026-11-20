@@ -8,6 +8,7 @@ import {
   getGameSleepPolicy,
   getPlatformConnections,
   getPlatformJob,
+  getPlatformJobProgress,
   getPlatformProject,
   getPlatformQuota,
   getPlatformServer,
@@ -284,9 +285,10 @@ export function registerPlatformRoutes(
   app.get('/v1/platform/activity', async (c) =>
     c.json(await listPlatformActivity(db, await principal(c), c.req.query())),
   );
-  app.get('/v1/platform/jobs/:id', async (c) =>
-    c.json(await getPlatformJob(db, await principal(c), c.req.param('id'))),
-  );
+  app.get('/v1/platform/jobs/:id', async (c) => {
+    const read = c.req.query('view') === 'progress' ? getPlatformJobProgress : getPlatformJob;
+    return c.json(await read(db, await principal(c), c.req.param('id')));
+  });
   app.post('/v1/platform/jobs/:id/retry', async (c) => {
     const context = await principal(c),
       input = await body(c);

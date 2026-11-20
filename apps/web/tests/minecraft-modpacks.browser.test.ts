@@ -1,4 +1,5 @@
 import { mkdir } from 'node:fs/promises';
+import type { ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
 import { AxeBuilder } from '@axe-core/playwright';
 import {
@@ -79,6 +80,9 @@ describe('Minecraft Modpacks full-page experience', () => {
   let core: { activeOperationId: string; manage: boolean; state: string };
   let recoveryGate: Promise<void> | undefined;
   let recoveryResumes = false;
+  let streamProgress = false;
+  let streamResponse: ServerResponse | undefined;
+  const progressReads: string[] = [];
   beforeAll(async () => {
     vite = await createServer({
       root: `${process.cwd()}/apps/web`,
@@ -133,9 +137,19 @@ describe('Minecraft Modpacks full-page experience', () => {
                   capabilities: { files: true },
                   activeOperationId: core.activeOperationId,
                 });
-              if (url.pathname === `/v1/platform/jobs/${core.activeOperationId}`)
+              if (url.pathname === `/v1/platform/jobs/${core.activeOperationId}`) {
+                progressReads.push(url.search);
                 return json({ serverId: server, state: core.state, effectState: null });
+              }
               if (url.pathname === `/v1/servers/${server}/events/stream`) {
+                if (streamProgress) {
+                  streamResponse = res;
+                  res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+                  res.write(
+                    `retry: 30000\nevent: ready\ndata: ${JSON.stringify({ serverId: server, notifications: true })}\n\n`,
+                  );
+                  return;
+                }
                 res.statusCode = 204;
                 return res.end();
               }
@@ -326,6 +340,9 @@ describe('Minecraft Modpacks full-page experience', () => {
     core = { activeOperationId: op, manage: true, state: 'uncertain' };
     recoveryGate = undefined;
     recoveryResumes = false;
+    streamProgress = false;
+    streamResponse = undefined;
+    progressReads.length = 0;
     context = await browser.newContext({ viewport: { width: 1360, height: 1000 } });
     page = await context.newPage();
     page.on('pageerror', (error) => errors.push(error.message));
@@ -439,6 +456,24 @@ describe('Minecraft Modpacks full-page experience', () => {
     await check(page.getByRole('button', { name: 'Install', exact: true })).toBeDisabled();
     expect(writes).toHaveLength(1);
   });
+  it('uses compact progress on activity and resumes polling after a silent disconnect', async () => {
+    streamProgress = true;
+    core.state = 'running';
+    await openPausedCore();
+    await expect.poll(() => !!streamResponse && progressReads.length > 0).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const afterReady = progressReads.length;
+    await new Promise((resolve) => setTimeout(resolve, 1300));
+    expect(progressReads).toHaveLength(afterReady);
+    streamResponse?.write(
+      `event: activity\ndata: ${JSON.stringify({ server_id: server, job_id: op })}\n\n`,
+    );
+    await expect.poll(() => progressReads.length).toBeGreaterThan(afterReady);
+    const beforeLoss = progressReads.length;
+    streamResponse?.end();
+    await expect.poll(() => progressReads.length, { timeout: 6500 }).toBeGreaterThan(beforeLoss);
+    expect(new Set(progressReads)).toEqual(new Set(['?view=progress']));
+  });
   it.each(['different-operation', 'running', 'read-only'] as const)(
     'keeps recovery locked through Core for %s',
     async (scenario) => {
@@ -465,8 +500,9 @@ describe('Minecraft Modpacks full-page experience', () => {
           : query === 'game-operation'
             ? `/v1/platform/jobs/${op}`
             : base;
-      await page.route(`**${path}`, (route) =>
-        route.fulfill({ status: 503, json: { code: 'internal_error' } }),
+      await page.route(
+        (url) => url.pathname === path,
+        (route) => route.fulfill({ status: 503, json: { code: 'internal_error' } }),
       );
       await page.evaluate(
         `import('/src/api/client.ts').then(({ queryClient }) => queryClient.invalidateQueries({ queryKey: ['${query}'] }))`,

@@ -1070,14 +1070,14 @@ export async function getPlatformUser(
   return { ...user, quota: await getPlatformQuota(db, context, userId, env) };
 }
 
-async function activityQuery(db: DB, context: AuthContext) {
-  const directAvailable = await serverSubusersAvailable(db);
+async function authorizedJobQuery(db: DB, context: AuthContext) {
   assertAuthContext(context);
   let query = db
     .selectFrom('operation_jobs as job')
     .leftJoin('server_operations as operation', 'operation.job_id', 'job.id')
     .leftJoin('managed_servers as server', 'server.id', 'operation.server_id');
-  if (!owner(context))
+  if (!owner(context)) {
+    const directAvailable = await serverSubusersAvailable(db);
     query = query.where((e) =>
       e.or([
         e.and([
@@ -1111,7 +1111,11 @@ async function activityQuery(db: DB, context: AuthContext) {
         ),
       ]),
     );
-  return query.select([
+  }
+  return query;
+}
+async function activityQuery(db: DB, context: AuthContext) {
+  return (await authorizedJobQuery(db, context)).select([
     'job.id',
     'job.state',
     'job.actor_id as actorId',
@@ -1160,6 +1164,40 @@ const publicFileTransferSchema = z
   .refine(
     (value) => value.completedFiles <= value.totalFiles && value.completedBytes <= value.totalBytes,
   );
+
+export async function getPlatformJobProgress(db: DB, context: AuthContext, jobId: string) {
+  parse(z.uuid(), jobId);
+  const job = await (await authorizedJobQuery(db, context))
+    .select([
+      'operation.server_id as serverId',
+      'job.state',
+      'operation.effect_state as effectState',
+      sql<
+        string | null
+      >`CASE WHEN operation.action IN ('provision','reinstall') THEN operation.plan->>'modpackOperationId' END`.as(
+        'modpackId',
+      ),
+      sql<unknown>`operation.plan->'fileTransfer'`.as('transfer'),
+    ])
+    .where('job.id', '=', jobId)
+    .executeTakeFirst();
+  if (!job) throw new DomainError('not_found');
+  const { serverId, effectState } = job;
+  let state: string = job.state;
+  if (serverId && job.modpackId === jobId) {
+    const sources = await loadModpackProvisioning(db, [
+      { serverId, jobId, plan: { modpackOperationId: jobId } },
+    ]);
+    state = modpackJobState(sources.get(jobId));
+  }
+  const transfer = publicFileTransferSchema.safeParse(job.transfer);
+  return {
+    serverId,
+    state,
+    effectState,
+    ...(transfer.success ? { fileTransfer: transfer.data } : {}),
+  };
+}
 
 export async function getPlatformJob(db: DB, context: AuthContext, jobId: string) {
   parse(z.uuid(), jobId);

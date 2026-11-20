@@ -143,11 +143,28 @@ function uptimeLabel(milliseconds: number, locale: string) {
   return parts.join(' ');
 }
 
+function Uptime({ milliseconds, observedAt }: { milliseconds: number; observedAt?: number }) {
+  const { locale } = useLocale();
+  const [now, setNow] = useState(Date.now);
+  const ticking = Boolean(observedAt);
+  useEffect(() => {
+    if (!ticking) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [ticking]);
+  return uptimeLabel(
+    milliseconds + (observedAt ? Math.max(0, now - observedAt) : 0),
+    locale === 'it' ? 'it-IT' : 'en-GB',
+  );
+}
+
 export function ConsoleSummary({
   serverId,
   resources,
   availability,
+  observedAt,
 }: {
+  observedAt?: number;
   serverId: string;
   resources?: DisplayResources;
   availability: 'loading' | 'unavailable' | 'ready';
@@ -183,15 +200,17 @@ export function ConsoleSummary({
   const fallback = t(availability === 'loading' ? 'web.loading' : 'web.unavailable');
   const offline = current?.current_state === 'offline';
   const uptime = current?.resources.uptime;
-  const duration = offline
-    ? t('web.offline')
-    : current?.current_state === 'starting'
-      ? t('service.summary.starting')
-      : current?.current_state === 'stopping'
-        ? t('service.summary.stopping')
-        : current && uptime !== undefined && Number.isFinite(uptime) && uptime >= 0
-          ? uptimeLabel(uptime, locale === 'it' ? 'it-IT' : 'en-GB')
-          : fallback;
+  const duration = offline ? (
+    t('web.offline')
+  ) : current?.current_state === 'starting' ? (
+    t('service.summary.starting')
+  ) : current?.current_state === 'stopping' ? (
+    t('service.summary.stopping')
+  ) : current && uptime !== undefined && Number.isFinite(uptime) && uptime >= 0 ? (
+    <Uptime milliseconds={uptime} observedAt={observedAt} />
+  ) : (
+    fallback
+  );
 
   return (
     <dl className="console-summary" aria-label={t('service.summary.title')}>

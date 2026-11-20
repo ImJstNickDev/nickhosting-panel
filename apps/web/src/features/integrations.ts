@@ -74,11 +74,7 @@ export function getRuntimeArtwork(gameId: string, runtimeId: string) {
   const src = artwork && module?.assets?.[artwork.assetId];
   return src ? { src, tone: artwork?.tone } : undefined;
 }
-export function getGameArtwork(gameId: string): string | undefined {
-  const module = gameUiRegistry.get(gameId);
-  const asset = module?.descriptor.artwork;
-  return asset ? module?.assets?.[asset.assetId] : undefined;
-}
+export { getGameArtwork } from './game-artwork.js';
 /** Decorative metadata only; an icon never establishes editor support or permission. */
 export function getGameFileIcon(gameId: string | undefined, name: string): string | undefined {
   const module = gameId ? gameUiRegistry.get(gameId) : undefined;

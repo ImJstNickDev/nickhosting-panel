@@ -54,6 +54,64 @@ describe('M5 Console bounded output', () => {
       if (!stream.signal?.aborted) stream.onEvent({ type: 'console', data });
   }
 
+  it('commits a burst in order, flushes on EOF and drops retained output on a denied reconnect', async () => {
+    const gate = Promise.withResolvers<void>();
+    const retry = Promise.withResolvers<void>();
+    let attempts = 0;
+    let requestedHistory: string | null = null;
+    const output = user.locator('.console [role="log"]');
+    const expected = Array.from({ length: 2000 }, (_, i) => `burst ${i}`);
+    await user.route('**/v1/servers/*/console*', async (route) => {
+      if (route.request().method() !== 'GET') return route.continue();
+      attempts++;
+      if (!new URL(route.request().url()).searchParams.has('history')) {
+        await gate.promise;
+        return route.fulfill({
+          contentType: 'text/event-stream',
+          body: expected
+            .map((data) => `event: console\ndata: ${JSON.stringify({ data })}\n\n`)
+            .join(''),
+        });
+      }
+      requestedHistory = new URL(route.request().url()).searchParams.get('history');
+      await retry.promise;
+      return route.fulfill({
+        status: 403,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: { code: 'forbidden', messageKey: 'errors.forbidden' } }),
+      });
+    });
+    try {
+      await user.goto(base);
+      await browserExpect.poll(() => attempts).toBeGreaterThan(0);
+      // Count actual cache publications independently of how React batches DOM updates.
+      await user.evaluate(`import('/src/api/client.ts').then(({queryClient}) => {
+        window.consolePublications = 0;
+        window.stopConsoleCount = queryClient.getQueryCache().subscribe(event => {
+          if (event.type === 'updated' && event.action.type === 'success' && event.query.queryKey[0] === 'console-buffer')
+            window.consolePublications++;
+        });
+      })`);
+      gate.resolve();
+      await browserExpect(output).toHaveText(expected.slice(-300).join('\n'), {
+        useInnerText: true,
+      });
+      const writes = await user.evaluate('window.consolePublications');
+      expect(writes).toBeGreaterThan(0);
+      expect(writes).toBeLessThan(100);
+      await browserExpect.poll(() => requestedHistory).toBe('0');
+      retry.resolve();
+      await browserExpect(user.getByRole('alert')).toContainText('You do not have permission');
+      await browserExpect(output).not.toContainText('burst 1999');
+    } finally {
+      gate.resolve();
+      retry.resolve();
+      await user.evaluate('window.stopConsoleCount?.()');
+      await user.goto(`${fixture.origin}/servers`);
+      await user.unrouteAll({ behavior: 'ignoreErrors' });
+    }
+  });
+
   async function geometry() {
     return user.evaluate(() => {
       const terminal = document.querySelector('.console-terminal');

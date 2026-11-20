@@ -13,6 +13,7 @@ import {
   deletePlatformProject,
   getPlatformConnections,
   getPlatformJob,
+  getPlatformJobProgress,
   getPlatformProject,
   getPlatformQuota,
   getPlatformServer,
@@ -1160,6 +1161,16 @@ describe('M5 platform browser queries and metadata', () => {
       .set({ plan: JSON.stringify(plan) })
       .where('job_id', '=', queued.jobId)
       .execute();
+    const progress = await getPlatformJobProgress(f.db, f.context, queued.jobId);
+    expect(progress).toEqual({
+      serverId: id,
+      state: 'queued',
+      effectState: 'none',
+      fileTransfer: counters,
+    });
+    await expect(
+      getPlatformJobProgress(f.db, (await peer()).context, queued.jobId),
+    ).rejects.toThrow('not_found');
     const detail = await getPlatformJob(f.db, f.context, queued.jobId);
     expect(detail.fileTransfer).toEqual(counters);
     expect(detail.backupResult?.state).toBe('succeeded');

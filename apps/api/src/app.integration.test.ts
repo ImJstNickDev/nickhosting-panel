@@ -117,6 +117,27 @@ describe('Hono public backend contracts', () => {
     expect(forbidden.headers.get('cache-control')).toBe('no-store');
     expect((await request('/v1/setup/owner', { value: 'x'.repeat(70000) })).status).toBe(413);
   });
+  it('skips origin resolution on originless reads and rechecks once per cross-origin request', async () => {
+    const origins = vi.fn(async () => ['http://localhost:3999']);
+    const identity = vi.fn(async () => {
+      throw new Error('identity fixture');
+    });
+    const isolated = createApp({ database, codec, identity, origins });
+    expect((await isolated.request('/healthz')).status).toBe(200);
+    expect(origins).not.toHaveBeenCalled();
+    const mutation = () =>
+      isolated.request('/v1/setup/owner', {
+        method: 'POST',
+        headers: { origin: 'http://localhost:3999' },
+      });
+    await mutation();
+    expect(identity).toHaveBeenCalledOnce();
+    expect(origins).toHaveBeenCalledTimes(1);
+    origins.mockResolvedValue([]);
+    expect((await mutation()).status).toBe(403);
+    expect(origins).toHaveBeenCalledTimes(2);
+    expect(identity).toHaveBeenCalledOnce();
+  });
   it('permits browser invitation preflight only from configured frontend origins', async () => {
     const response = await request('/api/auth/sign-up/email', undefined, {
       method: 'OPTIONS',

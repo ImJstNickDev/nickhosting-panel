@@ -94,7 +94,7 @@ the optimizer cache lives in `/tmp/vite-cache`.
 
 Workspace `src` directories are mounted separately, preserving image-installed
 workspace dependencies. Backend/game/shared sources are read-only. Web source is
-writable solely because catalog compilation updates `apps/web/src/app/messages.json`.
+writable solely because catalog compilation updates `apps/web/src/app/messages/*.json`.
 Initial compilation precedes Vite; English/Italian/game catalog changes trigger
 recompilation and browser updates. API/worker source changes debounce, send SIGTERM
 and wait for actual process closure before launching a replacement. CSS, ordinary

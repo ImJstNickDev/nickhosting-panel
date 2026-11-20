@@ -19,7 +19,6 @@ import { AccountIcon as SecurityIcon } from './account-icons.js';
 import { SecurityDrawer, SecuritySection } from './account-security-section.js';
 import { refreshAccount, useLinkedAccounts } from './account-shared.js';
 import { TwoFactorSettings } from './account-two-factor.js';
-import { authClient } from './auth.js';
 import './account-security.css';
 
 type Passkey = { id: string; name?: string; createdAt: string };
@@ -302,6 +301,7 @@ function PasskeySettings() {
             onCancel={cancel}
             onSubmit={(data) =>
               mutate(async () => {
+                const { authClient } = await import('./passkey-client.js');
                 const result = await authClient.passkey.addPasskey({ name: text(data, 'name') });
                 if (result.error) throw apiError(result.error);
                 await refreshAccount();

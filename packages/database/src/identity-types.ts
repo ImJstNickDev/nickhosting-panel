@@ -133,6 +133,22 @@ export interface AuthTables {
     metadata: Generated<Record<string, unknown>>;
     created_at: Generated<Date>;
   };
+  activity_audit_receipts: {
+    audit_id: string;
+    server_id: string;
+    group_id: string;
+    grouped: boolean;
+    actor_user_id: string | null;
+    subject_user_id: string | null;
+    created_at: Date;
+    terminal_order: number;
+    job_id: string | null;
+    action: string;
+    outcome: string | null;
+    source: string | null;
+    has_detail_action: boolean;
+    detail_action: string | null;
+  };
   email_credential_claims: {
     token_hash: string;
     user_id: string;

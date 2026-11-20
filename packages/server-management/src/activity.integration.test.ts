@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { AuthContext } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { sql } from 'kysely';
@@ -555,6 +555,94 @@ describe('unified activity', () => {
     expect(moved.items.some((row) => row.id === joined.items[0]?.id)).toBe(true);
   });
 
+  it('tracks corrected, removed and re-scoped receipts and evaluates current job links', async () => {
+    const serverId = await f.server();
+    const operationId = randomUUID();
+    const base = new Date('2026-01-01T00:00:00Z');
+    const onlyAudit = async (filters = {}) =>
+      (await listUnifiedActivity(f.db, f.context, { serverId, ...filters })).items.filter(
+        (row) => row.kind === 'audit',
+      );
+    const request = await audit(
+      serverId,
+      'server.files.requested',
+      {
+        operationId,
+        action: 'copy',
+        path: 'source.dat',
+      },
+      base,
+    );
+    const completion = await audit(
+      serverId,
+      'server.files.completed',
+      {
+        operationId,
+        jobId: 'legacy invalid job reference',
+      },
+      new Date(base.getTime() + 10),
+    );
+    // Disallowed event types never contribute grouping, terminal state or search fields.
+    await audit(
+      serverId,
+      'owner.secret.changed',
+      {
+        operationId,
+        action: 'secret',
+        target: 'private marker',
+      },
+      new Date(base.getTime() + 20),
+    );
+    expect(await onlyAudit({ action: 'copy' })).toHaveLength(1);
+    expect(await onlyAudit({ q: 'private marker' })).toHaveLength(0);
+    const job = await enqueueServerOperation(f.db, f.context, serverId, {
+      action: 'backup',
+      idempotencyKey: randomUUID(),
+    });
+    await f.db
+      .updateTable('audit_events')
+      .set({
+        metadata: { serverId, operationId, jobId: job.jobId },
+      })
+      .where('id', '=', completion)
+      .execute();
+    expect(await onlyAudit()).toMatchObject([{ state: 'requested' }]);
+    await f.db
+      .updateTable('audit_events')
+      .set({
+        metadata: { serverId, operationId, action: null },
+      })
+      .where('id', '=', completion)
+      .execute();
+    expect(await onlyAudit({ action: 'copy' })).toHaveLength(0);
+    expect(await onlyAudit()).toMatchObject([{ state: 'succeeded' }]);
+    await f.db
+      .updateTable('audit_events')
+      .set({ metadata: { serverId: 'malformed' } })
+      .where('id', '=', completion)
+      .execute();
+    expect(await onlyAudit()).toMatchObject([{ state: 'requested' }]);
+    // A concurrent reader must see the same committed version of the receipt and its payload.
+    const rollback = new Error('rollback isolated receipt correction');
+    await expect(
+      f.db.transaction().execute(async (tx) => {
+        await tx
+          .updateTable('audit_events')
+          .set({ metadata: {} })
+          .where('id', '=', request)
+          .execute();
+        expect(
+          (await listUnifiedActivity(tx, f.context, { serverId, category: 'files' })).items,
+        ).toHaveLength(0);
+        expect(await onlyAudit()).toMatchObject([{ state: 'requested' }]);
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
+    expect(await onlyAudit()).toMatchObject([{ state: 'requested' }]);
+    await f.db.deleteFrom('audit_events').where('id', '=', request).execute();
+    expect(await onlyAudit()).toHaveLength(0);
+  });
+
   it('bounds snapshot hydration on a page with thousands of large historical snapshots', async () => {
     const serverId = await f.server();
     await sql`insert into audit_events (id,actor_user_id,subject_user_id,action,correlation_id,metadata,created_at)
@@ -567,6 +655,7 @@ describe('unified activity', () => {
       from generate_series(1,96) group_number cross join generate_series(1,32) snapshot`.execute(
       f.db,
     );
+    await sql`analyze activity_audit_receipts`.execute(f.db);
     await sql`analyze audit_events`.execute(f.db);
     let captured: { sql: string; parameters: readonly unknown[] } | undefined;
     const traced = f.db.withPlugin({
@@ -589,6 +678,7 @@ describe('unified activity', () => {
     type Node = {
       'Node Type': string;
       'Index Name'?: string;
+      'Relation Name'?: string;
       'Subplan Name'?: string;
       'Actual Rows': number;
       'Actual Loops': number;
@@ -600,18 +690,11 @@ describe('unified activity', () => {
     const candidates = nodes.find((node) => node['Subplan Name'] === 'CTE audit_candidates');
     expect(candidates?.['Actual Rows']).toBe(6);
     expect(nodes.some((node) => node['Node Type'] === 'WindowAgg')).toBe(false);
-    const lookups = nodes.filter(
-      (node) => node['Index Name'] === 'audit_events_activity_group_history',
-    );
-    const snapshotRows = lookups.reduce(
-      (sum, node) => sum + node['Actual Rows'] * node['Actual Loops'],
-      0,
-    );
+    const lookups = nodes.filter((node) => node['Relation Name'] === 'audit_events');
     expect(lookups).toHaveLength(2);
-    expect(snapshotRows).toBe(12);
-    process.stdout.write(
-      `Activity EXPLAIN fixture: 3,072 large snapshots, 96 groups, 6 page candidates, ${snapshotRows} first/latest index rows, ${plan['Execution Time']} ms.\n`,
-    );
+    expect(lookups.every((node) => node['Index Name'] === 'audit_events_pkey')).toBe(true);
+    expect(lookups.every((node) => node['Actual Loops'] <= 6)).toBe(true);
+    expect(nodes.some((node) => node['Relation Name'] === 'activity_audit_receipts')).toBe(true);
     expect(
       (
         await listUnifiedActivity(f.db, f.context, {
@@ -621,6 +704,17 @@ describe('unified activity', () => {
         })
       ).items,
     ).toEqual([]);
+    const oldestGroupPath = createHash('md5')
+      .update(String(10000 + 32 * 100 + 99))
+      .digest('hex');
+    const matched = await listUnifiedActivity(f.db, f.context, {
+      serverId,
+      q: oldestGroupPath,
+      limit: 5,
+    });
+    expect(matched.items).toHaveLength(1);
+    expect(matched.items[0]?.createdAt.toISOString()).toBe('2026-01-01T00:01:01.000Z');
+    expect(matched.nextCursor).toBeNull();
     const ranged = await listUnifiedActivity(f.db, f.context, {
       serverId,
       from: '2026-01-01T01:30:00Z',

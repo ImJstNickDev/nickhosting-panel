@@ -3,7 +3,10 @@ import { I18nProvider, useLingui } from '@lingui/react';
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useState } from 'react';
 import { setRequestLocale } from '../api/client.js';
 import { formatBytes } from './format.js';
-import messages from './messages.json';
+import bootstrap from './messages/bootstrap.json';
+import englishUrl from './messages/en.json?url';
+import italianUrl from './messages/it.json?url';
+import pseudoUrl from './messages/pseudo.json?url';
 
 export type Locale = 'en' | 'it' | 'pseudo';
 const detectLocale = (): Locale => {
@@ -11,34 +14,89 @@ const detectLocale = (): Locale => {
   if (saved === 'en' || saved === 'it' || (import.meta.env.DEV && saved === 'pseudo')) return saved;
   return navigator.language.startsWith('it') ? 'it' : 'en';
 };
-const i18n = setupI18n({ locale: 'en', messages: messages as unknown as Record<string, Messages> });
-const LocaleContext = createContext<{ locale: Locale; setLocale: (locale: Locale) => void }>({
+const catalogs = { en: englishUrl, it: italianUrl, pseudo: pseudoUrl };
+const loaded = new Map<Locale, Promise<Messages>>();
+function loadCatalog(locale: Locale) {
+  const cached = loaded.get(locale);
+  if (cached) return cached;
+  const request = fetch(catalogs[locale], {
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(15_000),
+  })
+    .then(async (response): Promise<Messages> => {
+      if (!response.ok) throw new Error('locale_unavailable');
+      return response.json();
+    })
+    .catch((error: unknown) => {
+      loaded.delete(locale);
+      throw error;
+    });
+  loaded.set(locale, request);
+  return request;
+}
+const LocaleContext = createContext<{
+  locale: Locale;
+  requestedLocale: Locale;
+  setLocale: (locale: Locale) => void;
+}>({
   locale: 'en',
+  requestedLocale: 'en',
   setLocale: () => {},
 });
-const activate = (value: Locale) => {
-  i18n.activate(value);
-  document.documentElement.lang = value === 'pseudo' ? 'en' : value;
-  setRequestLocale(value === 'pseudo' ? 'en' : value);
-};
 export function LocaleProvider({ children }: { children: ReactNode }) {
-  const [locale, update] = useState(detectLocale);
+  const [i18n] = useState(() => setupI18n());
+  const [selection, request] = useState(() => ({ locale: detectLocale() }));
+  const [active, setActive] = useState<Locale>();
+  const [failed, setFailed] = useState(false);
   useEffect(() => {
-    activate(locale);
-  }, [locale]);
+    const requested = selection.locale;
+    let current = true;
+    setFailed(false);
+    void loadCatalog(requested).then(
+      (messages) => {
+        if (!current) return;
+        const language = requested === 'pseudo' ? 'en' : requested;
+        document.documentElement.lang = language;
+        setRequestLocale(language);
+        i18n.loadAndActivate({ locale: requested, messages });
+        setActive(requested);
+      },
+      () => {
+        if (current) setFailed(true);
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [selection, i18n]);
   const setLocale = useCallback((value: Locale) => {
     if (value !== 'pseudo') localStorage.setItem('nh.locale', value);
-    update(value);
+    request({ locale: value });
   }, []);
+  const requested = selection.locale;
+  const copy = bootstrap[requested === 'pseudo' ? 'en' : requested];
   return (
-    <LocaleContext.Provider
-      value={{
-        locale,
-        setLocale,
-      }}
-    >
-      <I18nProvider i18n={i18n}>{children}</I18nProvider>
-    </LocaleContext.Provider>
+    <>
+      {failed && (
+        <div role="alert" className="notice error">
+          <p>{copy.failed}</p>
+          <button type="button" onClick={() => request({ locale: requested })}>
+            {copy.retry}
+          </button>
+        </div>
+      )}
+      {active ? (
+        <LocaleContext.Provider value={{ locale: active, requestedLocale: requested, setLocale }}>
+          <I18nProvider i18n={i18n}>{children}</I18nProvider>
+        </LocaleContext.Provider>
+      ) : (
+        !failed && (
+          <p role="status" className="muted">
+            {copy.loading}
+          </p>
+        )
+      )}
+    </>
   );
 }
 export function useLocale() {
@@ -47,7 +105,7 @@ export function useLocale() {
 export function useT() {
   const { i18n: active } = useLingui();
   return (key: string, values?: Record<string, string | number>) =>
-    active._(key in (messages.en as Record<string, unknown>) ? key : 'web.unknown', values);
+    active._(Object.hasOwn(active.messages, key) ? key : 'web.unknown', values);
 }
 function localeFormats(tag: string) {
   const numbers = new Map<number, Intl.NumberFormat>();
@@ -71,6 +129,6 @@ function localeFormats(tag: string) {
 }
 const formats = { en: localeFormats('en-GB'), it: localeFormats('it-IT') };
 export function useFormat() {
-  const { locale } = useLocale();
-  return locale === 'it' ? formats.it : formats.en;
+  const { i18n: active } = useLingui();
+  return active.locale === 'it' ? formats.it : formats.en;
 }
