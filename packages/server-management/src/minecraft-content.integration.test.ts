@@ -1499,6 +1499,44 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     ).toEqual({ state: 'running' });
   });
 
+  it('requires shutdown to remove a Paper secondary world with no authoritative load observation', async () => {
+    const { f, serverId, options, files, context } = await minecraftFixture(
+      undefined,
+      true,
+      'paper',
+    );
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({ installed: true })
+      .where('server_id', '=', serverId)
+      .execute();
+    files.set('server.properties', Buffer.from('level-name=world\n'));
+    files.set('arena/level.dat', Buffer.from('arena'));
+    const command = { kind: 'world-remove', world: 'arena', confirm: true, backupBefore: false };
+    const settings = { ...options, adapter: context.adapter };
+    for (const runtime_state of ['running', 'starting', 'stopping', 'unknown'] as const) {
+      await f.db
+        .updateTable('managed_servers')
+        .set({ runtime_state })
+        .where('id', '=', serverId)
+        .execute();
+      await expect(
+        prepareMinecraftContentPlan(f.db, serverId, command, settings),
+      ).rejects.toMatchObject({
+        code: 'conflict',
+        details: { reason: 'minecraft_world_requires_stopped' },
+      });
+    }
+    await f.db
+      .updateTable('managed_servers')
+      .set({ runtime_state: 'offline' })
+      .where('id', '=', serverId)
+      .execute();
+    const prepared = await prepareMinecraftContentPlan(f.db, serverId, command, settings);
+    expect(prepared.world?.allowOnlineRemoval).toBeUndefined();
+    expect(files.has('arena/level.dat')).toBe(true);
+  });
+
   it.each([false, true])(
     'removes an inactive world online through the real lifecycle, with final selection protection=%s',
     async (selectedAfterQueue) => {

@@ -20,11 +20,14 @@ type Runtime = Pick<
   'adapter' | 'fileReadPhase' | 'consoleProviderBinding' | 'worldPreparation'
 >;
 export interface MinecraftWorldIndex {
+  current: boolean;
   snapshot: MinecraftWorldSnapshot;
   nonWorldDirectories: string[];
   observedAt: Date;
 }
 type Stored = {
+  scan_after: string | null;
+  negative_until: Record<string, number> | null;
   snapshot: MinecraftWorldSnapshot | null;
   non_world_directories: string[];
   observed_at: Date | null;
@@ -34,19 +37,24 @@ type Stored = {
 };
 function record(row?: Stored): MinecraftWorldIndex | undefined {
   if (!row?.snapshot || !row.observed_at) return;
+  const now = Date.now();
+  const current =
+    row.successful_generation === row.generation && now - row.observed_at.getTime() < 60_000;
   return {
+    current,
     snapshot: row.snapshot,
     observedAt: row.observed_at,
-    nonWorldDirectories:
-      row.successful_generation === row.generation &&
-      Date.now() - row.observed_at.getTime() < 60_000
-        ? row.non_world_directories
-        : [],
+    nonWorldDirectories: current
+      ? row.non_world_directories.filter(
+          (name) => !row.negative_until || (row.negative_until[name] ?? 0) > now,
+        )
+      : [],
   };
 }
 async function boundRow(db: DB, serverId: string, binding: string) {
   const result = await sql<Stored>`
-    SELECT snapshot, non_world_directories, observed_at, generation, finished_id, successful_generation
+    SELECT snapshot - 'scanAfter' - 'negativeUntil' AS snapshot,
+      snapshot->>'scanAfter' AS scan_after, snapshot->'negativeUntil' AS negative_until, non_world_directories, observed_at, generation, finished_id, successful_generation
     FROM minecraft_world_indexes WHERE server_id=${serverId} AND binding=${binding}
       AND local_binding=minecraft_world_local_binding(server_id)`.execute(db);
   return result.rows[0];
@@ -102,7 +110,7 @@ async function reconcile(
       .selectFrom('managed_servers')
       .innerJoin('minecraft_server_profiles as profile', 'profile.server_id', 'managed_servers.id')
       .selectAll('managed_servers')
-      .select('profile.installed')
+      .select(['profile.installed', 'profile.combination_id'])
       .where('managed_servers.id', '=', serverId)
       .where('managed_servers.deleted_at', 'is', null)
       .executeTakeFirst();
@@ -138,7 +146,7 @@ async function reconcile(
         validation: NonNullable<MinecraftWorldSnapshot['worlds'][number]['validation']>;
       }
     > = new Map();
-    if (scheduled && cached?.successful_generation === token.generation) {
+    if (cached?.successful_generation === token.generation) {
       const revisions = await db
         .selectFrom('minecraft_world_indexes')
         .select('level_stamps')
@@ -152,7 +160,12 @@ async function reconcile(
       }
     }
     const inspection: MinecraftWorldIndexInspection = {
-      previous,
+      previous: scheduled ? previous : new Map(),
+      scanAfter: cached?.scan_after ?? null,
+      rotationMilliseconds: 60_000,
+      knownWorlds: new Set(known.keys()),
+      scannedDirectories: new Set(),
+      forbiddenDirectories: new Set(),
       stamps: [],
       nonWorldDirectories: [],
       presentDirectories: new Set(),
@@ -169,8 +182,7 @@ async function reconcile(
         ? runtime.fileReadPhase(server.pterodactyl_identifier, server, signal)
         : undefined,
       scheduled ? undefined : runtime.worldPreparation,
-      inspection,
-      `${token.generation}:${token.id}`,
+      { indexInspection: inspection, preparationRevision: `${token.generation}:${token.id}` },
     );
     // A listing timeout cannot turn a previously observed world into a deleted world.
     // Retain the earlier metadata, but make its unavailable status explicit.
@@ -182,7 +194,13 @@ async function reconcile(
     );
     for (const world of snapshot.worlds) {
       const validation = known.get(world.name)?.validation;
-      if (world.status === 'unavailable' && validation) world.validation = validation;
+      if (
+        world.status === 'unavailable' &&
+        validation &&
+        !inspection.forbiddenDirectories.has(world.name)
+      ) {
+        world.validation = validation;
+      }
     }
     const { nonWorldDirectories, stamps } = inspection;
     const observed = new Set([
@@ -190,8 +208,20 @@ async function reconcile(
       ...nonWorldDirectories,
     ]);
     for (const [name, world] of known) {
-      if (inspection.presentDirectories.has(name) && !observed.has(name))
+      if (!inspection.presentDirectories.has(name) || observed.has(name)) continue;
+      if (inspection.scannedDirectories.has(name)) {
         snapshot.worlds.push({ ...world, status: 'unavailable' });
+      } else {
+        snapshot.worlds.push(world);
+        const stamp = previous.get(name);
+        if (stamp)
+          stamps.push({
+            name,
+            size: stamp.size,
+            modifiedAt: stamp.modifiedAt,
+            validatedAt: stamp.validatedAt,
+          });
+      }
     }
     signal.throwIfAborted();
     // A split dimension or interrupted save can be recognized before its first readable level.dat.
@@ -199,8 +229,39 @@ async function reconcile(
       if (!observed.has(name) && !known.has(name))
         snapshot.worlds.push({ name, status: 'unavailable' });
     }
+    // Merged rows keep the provider's root order as the scan window advances.
+    const byName = new Map(snapshot.worlds.map((world) => [world.name, world]));
+    snapshot.worlds = [...inspection.presentDirectories].flatMap((name) => byName.get(name) ?? []);
+    // A large root can take several staggered minute slots to revisit each folder.
+    // Keep an untouched negative only while its original proof is still valid.
+    // Receipts that dirty the inventory clear the negative names in the same transaction.
+    const negativeUntil = new Map<string, number>();
+    if (inspection.scanAfter !== null) {
+      const now = Date.now();
+      for (const name of nonWorldDirectories)
+        negativeUntil.set(name, now + inspection.rotationMilliseconds);
+      if (cached?.successful_generation === token.generation && cached.observed_at) {
+        for (const name of cached.non_world_directories) {
+          if (!inspection.presentDirectories.has(name) || inspection.scannedDirectories.has(name))
+            continue;
+          const expires = cached.negative_until?.[name] ?? cached.observed_at.getTime() + 60_000;
+          if (expires > now) {
+            negativeUntil.set(name, expires);
+            nonWorldDirectories.push(name);
+          }
+        }
+      }
+    }
+    const storedSnapshot =
+      inspection.scanAfter === null
+        ? snapshot
+        : {
+            ...snapshot,
+            scanAfter: inspection.scanAfter,
+            negativeUntil: Object.fromEntries(negativeUntil),
+          };
     const update = await sql<{ observed_at: Date }>`UPDATE minecraft_world_indexes
-      SET snapshot=${JSON.stringify(snapshot)}::jsonb, level_stamps=${JSON.stringify(stamps)}::jsonb, non_world_directories=${nonWorldDirectories}::text[],
+      SET snapshot=${JSON.stringify(storedSnapshot)}::jsonb, level_stamps=${JSON.stringify(stamps)}::jsonb, non_world_directories=${nonWorldDirectories}::text[],
         observed_at=clock_timestamp(), successful_generation=generation, finished_id=${token.id}, denied_reason=NULL,
         local_binding=${token.localBinding}, binding=${runtime.consoleProviderBinding}, lease_id=NULL, lease_until=NULL,
         next_scan_at=minecraft_world_next_scan(server_id,clock_timestamp())
@@ -210,7 +271,21 @@ async function reconcile(
         AND minecraft_world_local_binding(server_id)=${token.localBinding}
       RETURNING observed_at`.execute(db);
     const observedAt = update.rows[0]?.observed_at;
-    if (observedAt) return { snapshot, nonWorldDirectories, observedAt };
+    if (observedAt) {
+      // Publication retires the old revision even if its cache entry cannot be deleted.
+      if (
+        inspection.forbiddenDirectories.size &&
+        cached?.successful_generation &&
+        cached.finished_id
+      ) {
+        await runtime.worldPreparation?.invalidate(
+          server,
+          server.combination_id,
+          `${cached.successful_generation}:${cached.finished_id}`,
+        );
+      }
+      return { current: true, snapshot, nonWorldDirectories, observedAt };
+    }
     // An invalidation overtook this observation. Leave it due so a fresh read wins.
     await sql`UPDATE minecraft_world_indexes SET lease_id=NULL,lease_until=NULL
       WHERE server_id=${serverId} AND lease_id=${token.id}`.execute(db);

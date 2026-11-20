@@ -577,7 +577,8 @@ describe('Minecraft datapack durable preparation and publication', () => {
         changes: [],
         reload: { state: 'not_required' },
       });
-      expect(f.listFiles.mock.calls.map(([, path]) => path)).toEqual(['']);
+      expect([...new Set(f.listFiles.mock.calls.map(([, path]) => path))]).toEqual(['']);
+      expect(f.listFiles.mock.calls.length).toBeLessThanOrEqual(2);
       expect(f.renameFiles).not.toHaveBeenCalled();
       expect(f.uploadFile).not.toHaveBeenCalled();
       await expect(f.service.snapshot(f.context, f.serverId, 'world')).rejects.toMatchObject({
@@ -585,6 +586,57 @@ describe('Minecraft datapack durable preparation and publication', () => {
       });
     },
   );
+  it('offers discovered worlds when the configured world is gone and confines edits to the explicit choice', async () => {
+    const f = await fixture();
+    const name = 'Piazza città';
+    const properties = Buffer.from('level-name=Missing world\n');
+    f.directories.add(name);
+    f.directories.add(`${name}/datapacks`);
+    const level = f.files.get('world/level.dat');
+    if (!level) throw new Error('Missing fixture level.dat');
+    f.files.set(`${name}/level.dat`, level);
+    const pack = `${name}/datapacks/manual.zip`;
+    f.files.set(pack, Buffer.from('datapack fixture'));
+    expect((await f.service.snapshot(f.context, f.serverId)).world).toBe('world');
+    // External edits are possible between background scans while the original folder still exists.
+    f.files.set('server.properties', properties);
+    await expect(f.service.snapshot(f.context, f.serverId)).resolves.toMatchObject({
+      world: '',
+      selectedWorld: 'Missing world',
+      worlds: expect.arrayContaining([
+        { name, selected: false },
+        { name: 'world', selected: false },
+      ]),
+      packs: [],
+    });
+    await expect(f.service.snapshot(f.context, f.serverId, name)).resolves.toMatchObject({
+      world: name,
+      selectedWorld: 'Missing world',
+      packs: [expect.objectContaining({ path: pack })],
+    });
+    await expect(f.service.snapshot(f.context, f.serverId, 'Missing world')).rejects.toMatchObject({
+      code: 'not_found',
+    });
+    await expect(f.service.snapshot(f.context, f.serverId, '../world')).rejects.toMatchObject({
+      code: 'validation_failed',
+    });
+    await f.service.prepare(f.context, f.serverId, {
+      world: name,
+      action: 'disable',
+      path: pack,
+      idempotencyKey: 'explicit',
+    });
+    await expect(
+      f.service.apply(f.context, f.serverId, { world: name, idempotencyKey: 'apply-explicit' }),
+    ).resolves.toMatchObject({ state: 'published', reload: 'not_required' });
+    expect(f.files.has(`${pack}.disabled`)).toBe(true);
+    expect(f.files.get('server.properties')).toEqual(properties);
+    expect(f.sendCommand).not.toHaveBeenCalled();
+    f.files.delete(`${name}/level.dat`);
+    await expect(f.service.snapshot(f.context, f.serverId, name)).rejects.toMatchObject({
+      code: 'not_found',
+    });
+  });
   it('keeps unavailable world discovery distinct from an empty inventory', async () => {
     const f = await fixture(false);
     const batch = f.adapter.listDirectoriesBatch.bind(f.adapter);

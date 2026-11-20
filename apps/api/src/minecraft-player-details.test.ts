@@ -33,13 +33,18 @@ const other = '22222222-2222-2222-2222-222222222222';
 const permission = (action: string) => `game.minecraft.players.${action}`;
 beforeEach(() => vi.clearAllMocks());
 
-function fixture(modern = true) {
-  const prefix = modern ? 'world/players/data' : 'world/playerdata';
-  const statsPrefix = modern ? 'world/players/stats' : 'world/stats';
-  const directories = new Set(['world', prefix, statsPrefix, ...(modern ? ['world/players'] : [])]);
+function fixture(modern = true, world = 'world') {
+  const prefix = modern ? `${world}/players/data` : `${world}/playerdata`;
+  const statsPrefix = modern ? `${world}/players/stats` : `${world}/stats`;
+  const directories = new Set([
+    world,
+    prefix,
+    statsPrefix,
+    ...(modern ? [`${world}/players`] : []),
+  ]);
   const data = minecraftPlayerDataFixture(modern);
   const contents = new Map<string, Buffer>([
-    ['server.properties', Buffer.from('level-name=world\nwhite-list=false')],
+    ['server.properties', Buffer.from(`level-name=${world}\nwhite-list=false`)],
     ['usercache.json', Buffer.from(JSON.stringify([{ uuid, name: 'PlayerOne' }]))],
     [`${prefix}/${uuid}.dat`, data],
     [`${prefix}/${uuid}.dat_old`, data],
@@ -242,6 +247,30 @@ describe('scoped player detail HTTP contract', () => {
       expect(known.knownPlayers.find((player) => player.uuid === other)?.name).toBeNull();
       expect(f.requested.some((path) => path.endsWith(`${other}.dat`))).toBe(false);
       expect(f.permissions).not.toContain('files.read');
+    },
+  );
+  it('reads the known players and saved card from a configured external world', async () => {
+    const world = 'Piazza città';
+    const f = fixture(true, world);
+    expect((await discoverMinecraftPlayers(f.readService())).knownPlayers).toContainEqual(
+      expect.objectContaining({ uuid, name: 'PlayerOne' }),
+    );
+    const response = await f.app.request(url);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ world, snapshot: { state: 'available' } });
+    expect(f.requested).toContain(`${world}/players/data/${uuid}.dat`);
+    expect(f.requested).not.toContain('world');
+  });
+  it.each(['../archive', 'sub/world', '.internal', 'plugins', '%2F', 'world\\backup'])(
+    'rejects the unsafe configured player directory %s before listing its contents',
+    async (name) => {
+      const f = fixture();
+      f.contents.set(
+        'server.properties',
+        Buffer.from(`level-name=${name.replaceAll('\\', '\\\\')}\n`),
+      );
+      expect((await f.app.request(url)).status).toBe(400);
+      expect(f.requested).toEqual(['', 'server.properties']);
     },
   );
   it('does not present unreadable or absent player data as empty inventory', async () => {

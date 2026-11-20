@@ -106,7 +106,9 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
   const importStateAllowed =
     offline || (props.runtimeState === 'running' && snapshot?.selectedWorld != null);
   const importDisabled = mutationsDisabled || !importStateAllowed || !can('import');
-  const removeDisabled = mutationsDisabled || !importStateAllowed || !can('delete');
+  const removeStateAllowed =
+    offline || (importStateAllowed && snapshot?.allowOnlineRemoval === true);
+  const removeDisabled = mutationsDisabled || !removeStateAllowed || !can('delete');
   const activeRoots = configuredMinecraftWorldRoots(snapshot?.selectedWorld)?.map((root) =>
     root.toLowerCase(),
   );
@@ -303,7 +305,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
       return false;
     if (intent.command.kind === 'world-remove')
       return (
-        importStateAllowed &&
+        removeStateAllowed &&
         typeof intent.command.world === 'string' &&
         !activeWorld(intent.command.world)
       );
@@ -616,6 +618,12 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
                               t(key('versionUnknown'))}
                           </span>
                         )}
+                        {can('delete') &&
+                          isManagedMinecraftWorldName(world.name) &&
+                          world.validation &&
+                          observed &&
+                          !activeWorld(world.name) &&
+                          !removeStateAllowed && <span>{t(key('stopToDelete'))}</span>}
                       </div>
                     </div>
                     {isManagedMinecraftWorldName(world.name) && (
@@ -668,7 +676,9 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
                                 ? t(key('selectedCannotDelete'))
                                 : !observed || !world.validation
                                   ? t(key('cannotDelete'))
-                                  : actionName('delete')
+                                  : !removeStateAllowed
+                                    ? t(key('stopToDelete'))
+                                    : actionName('delete')
                             }
                             destructive
                             label={actionName('delete')}

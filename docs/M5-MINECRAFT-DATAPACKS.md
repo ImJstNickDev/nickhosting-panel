@@ -1,7 +1,10 @@
 # Minecraft datapacks
 
-Datapacks belong to a world. The Minecraft tab starts on the configured world;
-the world selector also exposes the other discovered worlds. The inventory reads
+The Datapacks selector uses the Worlds inventory and starts on the configured
+world when available. If that folder is missing, choose an existing world
+before managing its packs. A visit stays on the chosen world until the user
+switches or that world disappears. Browsing another world leaves `level-name` intact.
+The inventory reads
 the actual server directories, including packs uploaded through Fileman/SFTP or
 included with an imported world. Filesystem presence and Minecraft's loaded pack
 selection are distinct observations.

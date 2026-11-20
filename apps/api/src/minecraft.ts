@@ -704,6 +704,8 @@ export function registerMinecraftRoutes(
           env,
           c.req.raw.signal,
           service.fileReadPhase(identifier, server, c.req.raw.signal),
+          undefined,
+          { targetWorld: world },
         );
         if (
           !snapshot.worlds.some((entry) => entry.name === world && entry.status !== 'unavailable')

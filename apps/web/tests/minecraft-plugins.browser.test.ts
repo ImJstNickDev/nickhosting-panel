@@ -353,7 +353,19 @@ describe('Minecraft Plugins shared catalog experience', () => {
     await check(page.getByRole('button', { name: 'Apply', exact: true })).toBeEnabled();
     await capture('minecraft-plugins-review');
     await page.getByRole('button', { name: 'Back to Discover', exact: true }).click();
-    await check(page.getByRole('button', { name: 'Install (1)', exact: true })).toBeVisible();
+    await check(
+      page.getByRole('checkbox', { name: 'Select World Tools', exact: true }).first(),
+    ).toBeChecked();
+    await page.getByRole('button', { name: 'Installed', exact: true }).click();
+    const installedSearch = page.getByRole('searchbox', { name: 'Search installed plugins' });
+    await installedSearch.fill('tools');
+    await page.getByRole('button', { name: 'Install (1)', exact: true }).click();
+    await page.getByRole('button', { name: 'Back to Installed', exact: true }).click();
+    await check(installedSearch).toHaveValue('tools');
+    await check(page.getByRole('button', { name: 'Installed', exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
     await page.getByRole('button', { name: 'Install (1)', exact: true }).click();
     await page.getByRole('button', { name: 'Apply', exact: true }).click();
     await check(

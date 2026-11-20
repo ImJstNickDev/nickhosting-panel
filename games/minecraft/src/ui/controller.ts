@@ -295,12 +295,13 @@ const worldSchema = z
   .strip();
 export const minecraftWorldsSchema = z
   .object({
+    allowOnlineRemoval: z.boolean().optional(),
     installed: z.boolean(),
     supported: z.boolean(),
     selectedWorld: z.string().max(1024).nullable(),
     release: z.string().max(128),
     compatibility: z.enum(['available', 'unavailable']),
-    worlds: z.array(worldSchema).max(1000),
+    worlds: z.array(worldSchema).max(10_000),
   })
   .strip();
 export type MinecraftWorlds = z.infer<typeof minecraftWorldsSchema>;

@@ -10,6 +10,7 @@ import {
   reconcileDueMinecraftWorldIndex,
   refreshMinecraftWorldIndex,
 } from './minecraft-world-index.js';
+import { createMinecraftWorldPreparation } from './minecraft-world-preparation.js';
 import { minecraftManagementFixture } from './test-fixtures.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -135,6 +136,7 @@ async function fixture() {
   const dirty = () => sql`SELECT dirty_minecraft_world_index(${serverId})`.execute(db);
   return {
     db,
+    userId: server.owner_id,
     serverId,
     remote,
     provider,
@@ -196,6 +198,172 @@ describe('persistent Minecraft world inventory', () => {
     f.provider.mockResolvedValueOnce({ ...f.remote, uuid: randomUUID() });
     await expect(f.refresh()).rejects.toMatchObject({ code: 'provenance_mismatch' });
     expect(await f.cached()).toBeUndefined();
+  });
+  it('walks oversized roots in bounded passes, keeping known worlds and skipping inconclusive negatives', async () => {
+    const f = await fixture();
+    await f.refresh();
+    const names = Array.from({ length: 224 }, (_, i) => `arena${String(i).padStart(3, '0')}`);
+    for (const name of names) f.dirs.add(name);
+    f.unreachable.add('Multiverse Lobby');
+    f.unreachable.add('arena000');
+    f.dirs.add('00-notes');
+    const original = f.files.listMany;
+    f.files.listMany = async (paths) =>
+      (await original(paths)).map((entry) =>
+        entry.directory === '00-notes'
+          ? { directory: entry.directory, files: [{ name: 'notes.txt', kind: 'file', size: 1 }] }
+          : entry,
+      );
+    const batches = vi.spyOn(f.files, 'listMany');
+    const first = await f.refresh();
+    expect(batches.mock.calls[0]?.[0]).toEqual(
+      expect.arrayContaining(['survival', 'Multiverse Lobby']),
+    );
+    expect(first.snapshot.worlds).toContainEqual(
+      expect.objectContaining({
+        name: 'Multiverse Lobby',
+        status: 'unavailable',
+        validation: expect.objectContaining({ dataVersion: 169 }),
+      }),
+    );
+    expect(first.nonWorldDirectories).not.toContain('arena000');
+    expect(first.snapshot.worlds.some((world) => world.name === 'arena223')).toBe(false);
+    expect(first.nonWorldDirectories).toContain('00-notes');
+    const scanned = new Set(batches.mock.calls[0]?.[0]);
+    const previous = new Map(first.snapshot.worlds.map((world) => [world.name, world]));
+    for (let pass = 0; pass < 3; pass++) {
+      const result = await f.refresh();
+      const batch = batches.mock.calls.at(-1)?.[0] ?? [];
+      expect(batch).toHaveLength(100);
+      if (pass === 0) {
+        expect(batch).not.toContain('00-notes');
+        expect(result.nonWorldDirectories).toContain('00-notes');
+        await sql`UPDATE minecraft_world_indexes SET snapshot=jsonb_set(snapshot,'{negativeUntil,00-notes}','0')
+          WHERE server_id=${f.serverId}`.execute(f.db);
+        expect((await f.cached())?.nonWorldDirectories).not.toContain('00-notes');
+      }
+      for (const name of batch) scanned.add(name);
+      for (const [name, world] of previous) {
+        if (!batch.includes(name)) expect(result.snapshot.worlds).toContainEqual(world);
+      }
+      for (const world of result.snapshot.worlds) previous.set(world.name, world);
+    }
+    expect(scanned).toEqual(f.dirs);
+    const cached = await f.cached();
+    expect(cached?.snapshot.worlds.map((world) => world.name)).toContain('arena223');
+    expect(cached?.snapshot).not.toHaveProperty('scanAfter');
+  });
+  it('retires denied paths from a successful batch without stalling the cursor or weakening request-level denials', async () => {
+    const f = await fixture();
+    const cache = new Map<string, string>();
+    const worldPreparation = createMinecraftWorldPreparation(
+      {
+        get: async (key) => cache.get(key),
+        take: async (key) => {
+          const value = cache.get(key);
+          cache.delete(key);
+          return value;
+        },
+        put: async (key, value) => {
+          cache.set(key, value);
+        },
+        delete: async (key) => {
+          cache.delete(key);
+        },
+      },
+      'isolated',
+    );
+    const root = f.files.list;
+    f.files.list = async (directory) => [
+      ...(await root(directory)),
+      { name: 'server.properties', kind: 'file', size: 20 },
+    ];
+    const runtime = { ...f.runtime, worldPreparation };
+    const refresh = () => refreshMinecraftWorldIndex(f.db, f.serverId, runtime, {});
+    const first = await refresh();
+    expect(first.snapshot.worlds.find((w) => w.name === 'survival')?.validation).toBeDefined();
+    expect(first.nonWorldDirectories).toContain('scratch');
+    expect([...cache.values()].some((value) => value.includes('"name":"survival"'))).toBe(true);
+
+    for (let i = 0; i < 150; i++) f.dirs.add(`zz${String(i).padStart(3, '0')}`);
+    f.dirs.add('00-private');
+    const denied = new Set(['00-private', 'survival', 'scratch']);
+    const list = f.files.listMany;
+    f.files.listMany = async (paths) =>
+      (await list(paths)).map((entry) =>
+        denied.has(entry.directory) ? { directory: entry.directory, error: 'forbidden' } : entry,
+      );
+    const partial = await refresh();
+    expect(partial.snapshot.worlds.find((w) => w.name === 'survival')).toEqual({
+      name: 'survival',
+      status: 'unavailable',
+    });
+    expect(partial.snapshot.worlds.map((w) => w.name)).not.toContain('00-private');
+    expect(partial.nonWorldDirectories).not.toContain('scratch');
+    expect([...cache.values()].some((value) => value.includes('"name":"survival"'))).toBe(false);
+    expect(partial.snapshot.worlds.map((w) => w.name)).not.toContain('zz149');
+    const next = await refresh();
+    expect(next.snapshot.worlds.map((w) => w.name)).toContain('zz149');
+    expect((await f.cached())?.snapshot.worlds.find((w) => w.name === 'survival')).toEqual({
+      name: 'survival',
+      status: 'unavailable',
+    });
+
+    f.files.listMany = async () => {
+      throw new PterodactylError('permission_denied', 'client', 'rejected', 403);
+    };
+    await expect(refresh()).rejects.toMatchObject({ code: 'forbidden' });
+    expect(await f.cached()).toBeUndefined();
+  });
+  it('fences a partial scan at a concurrent SFTP rename and resumes without resurrecting the old name', async () => {
+    const f = await fixture();
+    for (let i = 0; i < 142; i++) f.dirs.add(`arena${i}`);
+    await f.refresh();
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const list = f.files.listMany;
+    f.files.listMany = vi
+      .fn()
+      .mockImplementationOnce(async (paths: readonly string[]) => {
+        const old = await list(paths);
+        started.resolve();
+        await release.promise;
+        return old;
+      })
+      .mockImplementation(list);
+    const scan = f.refresh();
+    await started.promise;
+    try {
+      f.dirs.delete('survival');
+      f.dirs.add('Old Survival');
+      await f.db
+        .insertInto('audit_events')
+        .values({
+          id: randomUUID(),
+          correlation_id: randomUUID(),
+          actor_user_id: f.userId,
+          subject_user_id: f.userId,
+          action: 'server.sftp.file.rename',
+          metadata: {
+            serverId: f.serverId,
+            outcome: 'succeeded',
+            worldIndexChanged: true,
+            worldMoves: [{ name: 'survival', target: 'Old Survival' }],
+          },
+        })
+        .execute();
+      const projected = await f.cached();
+      expect(projected?.current).toBe(false);
+      expect(projected?.snapshot.worlds.map((world) => world.name)).toContain('Old Survival');
+    } finally {
+      release.resolve();
+    }
+    const fresh = await scan;
+    expect(fresh.current).toBe(true);
+    const names = fresh.snapshot.worlds.map((world) => world.name);
+    expect(names).toContain('Old Survival');
+    expect(names).not.toContain('survival');
+    expect(f.files.listMany).toHaveBeenCalledTimes(2);
   });
   it('fences an obsolete in-flight scan and coalesces a concurrent open with the worker', async () => {
     const f = await fixture();

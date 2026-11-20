@@ -3,7 +3,6 @@ import { DomainError } from '@nickhosting/core';
 import type { FilemanEntry, FilemanReadService } from '@nickhosting/game-sdk';
 import {
   minecraftUuid,
-  minecraftWorldName,
   parseMinecraftProperties,
 } from '../../../games/minecraft/src/management.js';
 import {
@@ -14,6 +13,7 @@ import type {
   MinecraftKnownPlayer,
   MinecraftPlayerDetail,
 } from '../../../games/minecraft/src/player-details-contracts.js';
+import { isMinecraftWorldDirectory } from '../../../games/minecraft/src/world-names.js';
 
 type Source = MinecraftKnownPlayer['sources'][number];
 type Ref = {
@@ -40,9 +40,9 @@ export async function discoverMinecraftPlayers(files: FilemanReadService) {
   const root = await files.list('');
   const properties = await files.read({ path: 'server.properties', maxBytes: 1048576 });
   if (!properties) throw new DomainError('integration_unavailable');
-  const world = minecraftWorldName(
-    parseMinecraftProperties(Buffer.from(properties).toString('utf8'))['level-name'] ?? 'world',
-  );
+  const world =
+    parseMinecraftProperties(Buffer.from(properties).toString('utf8'))['level-name'] ?? 'world';
+  if (!isMinecraftWorldDirectory(world)) throw new DomainError('validation_failed');
   const worldEntry = root.find((entry) => entry.name === world);
   if (worldEntry && worldEntry.kind !== 'directory') throw new DomainError('conflict');
   const worldEntries = worldEntry ? await files.list(world) : [];

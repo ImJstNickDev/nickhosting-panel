@@ -35,6 +35,7 @@ import {
 import { minecraftModContentReceipts } from './minecraft-mod-receipts.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
+import { readMinecraftWorldIndex, refreshMinecraftWorldIndex } from './minecraft-world-index.js';
 import { permissionRuntime } from './permission-runtime.js';
 import { authorizeServer, parse } from './registry.js';
 import type { ManagementRuntime } from './runtime.js';
@@ -117,7 +118,21 @@ export function createMinecraftDatapackService(options: {
     const choice = await inspectMinecraftCombination(connection, value.combination_id, env);
     return { installed: value.installed, version: choice.combination.release };
   }
-  async function worlds(files: FilemanReadService) {
+  async function worldSelection(
+    files: FilemanReadService,
+    serverId: string,
+    requestedWorld: string | undefined,
+    signal?: AbortSignal,
+  ) {
+    const requested =
+      requestedWorld === undefined
+        ? undefined
+        : parse(minecraftDatapackWorldSchema, requestedWorld);
+    const cached = await readMinecraftWorldIndex(db, serverId, runtime.consoleProviderBinding);
+    const { snapshot } = cached?.current
+      ? cached
+      : await refreshMinecraftWorldIndex(db, serverId, runtime, env, signal);
+    // The roster is indexed; the configured world can change independently between scans.
     const [properties, root] = await Promise.all([
       files.read({ path: 'server.properties', maxBytes: 1048576, missing: 'allow' }),
       files.list(''),
@@ -125,25 +140,41 @@ export function createMinecraftDatapackService(options: {
     const selected =
       parseMinecraftProperties(Buffer.from(properties ?? []).toString('utf8'))['level-name'] ??
       'world';
-    const candidates = root.filter(
-      (entry) =>
-        entry.kind === 'directory' && minecraftDatapackWorldSchema.safeParse(entry.name).success,
+    const preferred = requested ?? selected;
+    const directories = new Set(
+      root.filter((entry) => entry.kind === 'directory').map((entry) => entry.name),
     );
-    if (candidates.length > 100) throw new DomainError('validation_failed');
-    const results = candidates.length
-      ? await files.listMany(candidates.map((entry) => entry.name))
-      : [];
-    if (results.some((result) => 'error' in result && result.error !== 'not_found'))
-      throw new DomainError('integration_unavailable');
+    const available = new Set(
+      snapshot.worlds
+        .filter((world) => world.status !== 'unavailable' && directories.has(world.name))
+        .map((world) => world.name),
+    );
+    // A direct observation covers a newly uploaded world between index passes and
+    // prevents a stale entry from selecting a directory whose level.dat has gone.
+    let world = '';
+    if (minecraftDatapackWorldSchema.safeParse(preferred).success && directories.has(preferred)) {
+      const [result] = await files.listMany([preferred]);
+      if (!result) throw new DomainError('integration_unavailable');
+      if ('error' in result && result.error !== 'not_found')
+        throw new DomainError(
+          result.error === 'forbidden' ? 'forbidden' : 'integration_unavailable',
+        );
+      if (
+        'files' in result &&
+        result.files.some((entry) => entry.name === 'level.dat' && entry.kind === 'file')
+      ) {
+        world = preferred;
+        available.add(preferred);
+      }
+    }
+    if (!world) {
+      if (requested !== undefined) throw new DomainError('not_found');
+      available.delete(preferred);
+    }
     return {
-      selected,
-      worlds: results
-        .filter(
-          (result) =>
-            'files' in result &&
-            result.files.some((entry) => entry.name === 'level.dat' && entry.kind === 'file'),
-        )
-        .map((result) => ({ name: result.directory, selected: result.directory === selected })),
+      world,
+      selectedWorld: selected,
+      worlds: [...available].map((name) => ({ name, selected: name === selected })),
     };
   }
   async function listOptional(
@@ -160,6 +191,11 @@ export function createMinecraftDatapackService(options: {
       if (entry.kind !== 'directory') throw new DomainError('provenance_mismatch');
     }
     return files.list(path);
+  }
+  async function requireDatapackWorld(files: FilemanReadService, world: string) {
+    const entries = await listOptional(files, world);
+    if (!entries.some((entry) => entry.name === 'level.dat' && entry.kind === 'file'))
+      throw new DomainError('not_found');
   }
   async function inventory(
     files: FilemanReadService,
@@ -376,6 +412,7 @@ export function createMinecraftDatapackService(options: {
       context: AuthContext,
       serverId: string,
       requestedWorld?: string,
+      signal?: AbortSignal,
     ): Promise<MinecraftDatapackSnapshot> {
       return runtime.fileReadScope(
         context,
@@ -395,14 +432,11 @@ export function createMinecraftDatapackService(options: {
               changes: [],
               reload: { state: 'not_required' },
             };
-          const available = await worlds(files);
-          // An installed server may not have generated its first world yet.
-          // An explicitly requested missing world remains a genuine 404.
-          if (requestedWorld === undefined && available.worlds.length === 0)
+          const selection = await worldSelection(files, serverId, requestedWorld, signal);
+          const { world } = selection;
+          if (!world)
             return {
-              world: '',
-              selectedWorld: available.selected,
-              worlds: [],
+              ...selection,
               running: server.runtime_state === 'running',
               version: info.version,
               supported: datapacksSupported(info.version),
@@ -411,9 +445,6 @@ export function createMinecraftDatapackService(options: {
               changes: [],
               reload: { state: 'not_required' },
             };
-          const world = parse(minecraftDatapackWorldSchema, requestedWorld ?? available.selected);
-          if (!available.worlds.some((item) => item.name === world))
-            throw new DomainError('not_found');
           const [changes, applies] = await Promise.all([
             changeRows(connection, serverId, world),
             connection
@@ -427,9 +458,7 @@ export function createMinecraftDatapackService(options: {
           const apply = applies[0];
           const fenced = new Set(applies.flatMap((item) => item.changes));
           return {
-            world,
-            selectedWorld: available.selected,
-            worlds: available.worlds,
+            ...selection,
             running: server.runtime_state === 'running',
             version: info.version,
             supported: datapacksSupported(info.version),
@@ -457,6 +486,7 @@ export function createMinecraftDatapackService(options: {
             },
           };
         },
+        signal,
       );
     },
     async inspect(context: AuthContext, serverId: string, input: unknown) {
@@ -722,9 +752,7 @@ export function createMinecraftDatapackService(options: {
           if (!info.installed || !datapacksSupported(info.version))
             throw new DomainError('integration_unavailable');
           const files = runtime.fileReadPhase(identifier, server);
-          const worldEntries = await files.list(value.world);
-          if (!worldEntries.some((entry) => entry.name === 'level.dat' && entry.kind === 'file'))
-            throw new DomainError('not_found');
+          await requireDatapackWorld(files, value.world);
           const id = randomUUID();
           let name = value.name?.replace(/\.zip$/i, '.zip') ?? '',
             plan: Plan;
@@ -1034,6 +1062,7 @@ export function createMinecraftDatapackService(options: {
             if (latest?.reload !== 'required') throw new DomainError('conflict');
           }
           const files = runtime.fileReadPhase(identifier, server);
+          await requireDatapackWorld(files, value.world);
           const properties = await files.read({ path: 'server.properties', maxBytes: 1048576 });
           const selected =
             parseMinecraftProperties(Buffer.from(properties ?? []).toString('utf8'))[

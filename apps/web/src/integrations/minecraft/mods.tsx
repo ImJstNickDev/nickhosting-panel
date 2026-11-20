@@ -386,11 +386,7 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
                 onClick={() => void inventory.refetch()}
               />
               {count > 0 && (
-                <button
-                  type="button"
-                  className="mods-primary"
-                  onClick={() => openReview(kind === 'mods' ? view : 'discover')}
-                >
+                <button type="button" className="mods-primary" onClick={() => openReview(view)}>
                   <ModsIcon name="queue" />
                   {t(modsKey('install'), { count })}
                 </button>
@@ -462,7 +458,7 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
               githubAction={githubAction}
               deleteDisabled={disabled || !canDelete}
               onDiscover={() => setView('discover')}
-              onReview={() => openReview(kind === 'mods' ? 'installed' : 'discover')}
+              onReview={() => openReview('installed')}
               onProject={(value) => {
                 openProject(value);
                 setView('discover');

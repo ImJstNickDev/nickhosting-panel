@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isMinecraftWorldDirectory } from './world-names.js';
 
 export const minecraftDatapackNameSchema = z
   .string()
@@ -7,7 +8,7 @@ export const minecraftDatapackNameSchema = z
   .refine(
     (name) => !/[\\/\p{C}]/u.test(name) && name !== '.' && name !== '..' && !name.startsWith('.'),
   );
-export const minecraftDatapackWorldSchema = minecraftDatapackNameSchema;
+export const minecraftDatapackWorldSchema = z.string().refine(isMinecraftWorldDirectory);
 export const minecraftDatapackChangeSchema = z.strictObject({
   world: minecraftDatapackWorldSchema,
   action: z.enum(['install', 'enable', 'disable', 'delete']),

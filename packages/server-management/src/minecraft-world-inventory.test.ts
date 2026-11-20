@@ -220,6 +220,29 @@ describe('Minecraft world inventory snapshot', () => {
     expect(f.listFiles).not.toHaveBeenCalled();
   });
 
+  it('checks only the requested archive world in a large root', async () => {
+    const f = fixture();
+    const names = Array.from({ length: 180 }, (_, i) => `world${i}`);
+    f.listFiles.mockImplementation(async (_identifier, directory) =>
+      directory
+        ? [{ name: 'level.dat', is_file: true, size: level.byteLength }]
+        : names.map((name) => ({ name, is_file: false })),
+    );
+    const snapshot = await inspectMinecraftWorlds(
+      f.db,
+      f.adapter,
+      'server',
+      f.authorize,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      { targetWorld: 'world179' },
+    );
+    expect(snapshot.worlds.map((world) => world.name)).toEqual(['world179']);
+    expect(f.listFiles.mock.calls.map(([, path]) => path)).toEqual(['', 'world179']);
+  });
+
   it('rejects absent profiles and provider property errors instead of inventing an empty world list', async () => {
     const missing = fixture({ missing: true });
     await expect(

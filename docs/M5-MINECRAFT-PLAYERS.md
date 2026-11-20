@@ -39,8 +39,9 @@ the former generic saved-files disclaimer. Statistics use “Playtime” and
 
 ## Saved player data
 
-The reader derives the world from validated `server.properties` and considers
-both directory layouts:
+Players reads the configured world from `server.properties`. Discovery and
+saved player details accept the same readable root names as Worlds, including
+spaces and Unicode. The reader considers both directory layouts.
 
 | Data | Older layout | Recent layout |
 | --- | --- | --- |

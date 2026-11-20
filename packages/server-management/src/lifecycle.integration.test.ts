@@ -5719,15 +5719,15 @@ describe('additive Minecraft world imports', () => {
 });
 
 describe('inactive Minecraft world removal', () => {
-  const plan = (backupBefore = false) => ({
+  const plan = (backupBefore = false, allowOnlineRemoval = true) => ({
     minecraftContent: {
       combinationId: randomUUID(),
       command: { kind: 'world-remove', world: 'unused_world', confirm: true, backupBefore },
-      world: { existing: true },
+      world: { existing: true, allowOnlineRemoval },
       backupBefore,
     },
   });
-  function guardedBridge(f: Awaited<ReturnType<typeof fixture>>) {
+  function guardedBridge(f: Awaited<ReturnType<typeof fixture>>, allowOnlineRemoval = true) {
     const identity = {
       providerId: f.remote.id,
       providerUuid: f.remote.uuid,
@@ -5762,9 +5762,26 @@ describe('inactive Minecraft world removal', () => {
       uploadStaged: vi.fn(),
     });
     f.options.processGameContent = (context) =>
-      applyMinecraftWorldRemoval(context, 'unused_world', { backupBefore: false });
+      applyMinecraftWorldRemoval(context, 'unused_world', {
+        backupBefore: false,
+        allowOnlineRemoval,
+      });
     return { snapshot, adapter };
   }
+
+  it('blocks a guarded secondary-world removal if shutdown ceases to be confirmed at dispatch', async () => {
+    const f = await fixture('minecraft-content', plan(false, false));
+    const bridge = guardedBridge(f, false);
+    f.setState('offline');
+    f.options.confirmAlreadyStopped = vi.fn(async () => false);
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('failed');
+    expect(f.options.confirmAlreadyStopped).toHaveBeenCalled();
+    expect(bridge.adapter.inspectFileOperation).toHaveBeenCalledOnce();
+    expect(bridge.adapter.guardedDeleteDirectory).not.toHaveBeenCalled();
+    expect((await f.operation()).effect_state).toBe('none');
+  });
 
   it.each(['running', 'offline'] as const)(
     'confirms guarded removal while %s without an Application identity request',

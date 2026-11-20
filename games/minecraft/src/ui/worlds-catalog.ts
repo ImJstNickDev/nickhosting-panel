@@ -75,6 +75,10 @@ export const minecraftWorldsMessages: Record<string, [string, string]> = {
   'worlds.status.invalid': ['Invalid world data', 'Dati del mondo non validi'],
   'worlds.status.unavailable': ['Metadata unavailable', 'Metadati non disponibili'],
   'worlds.versionUnknown': ['Version unknown', 'Versione sconosciuta'],
+  'worlds.stopToDelete': [
+    'Stop the server to delete this world.',
+    'Arresta il server per eliminare questo mondo.',
+  ],
   'worlds.selectedCannotDelete': [
     'Select another world before deleting this one.',
     'Seleziona un altro mondo prima di eliminare questo.',

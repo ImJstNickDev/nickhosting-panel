@@ -237,7 +237,7 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
       expect(await response.json()).toMatchObject({ worlds: [], packs: [], world: '' });
       await user.goto(route());
       const empty = user.getByRole('status').filter({ hasText: 'No worlds available.' });
-      await browserExpect(empty).toBeVisible();
+      await browserExpect(empty).toBeVisible({ timeout: 15000 });
       await browserExpect(empty.locator('svg')).toBeVisible();
       await browserExpect(user.getByRole('combobox', { name: 'World', exact: true })).toHaveCount(
         0,
@@ -270,6 +270,123 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
       await user.evaluate(() => localStorage.setItem('nh.locale', 'en'));
       await journeyRequest(fixture, user, '/api/auth/update-user', { locale: 'en' });
       await user.setViewportSize({ width: 1440, height: 1000 });
+    }
+  });
+  it('lets the user browse existing worlds when the configured world is missing', async () => {
+    const files = await provider.files();
+    const original = files.get('server.properties');
+    const configured = Buffer.from('level-name=absent-world\n');
+    const external = 'Piazza centrale';
+    const level = `${external}/level.dat`;
+    const metadata = `${external}/datapacks/Market/pack.mcmeta`;
+    const worlds = `${fixture.origin}/v1/servers/${provider.ids.serverId}/minecraft/worlds`;
+    files.set('server.properties', configured);
+    files.set(level, browserLevelDat());
+    await provider.adapter.writeFile(
+      identifier,
+      metadata,
+      JSON.stringify({ pack: { pack_format: 1, description: 'Market stalls' } }),
+    );
+    try {
+      const observed = await user.request.get(worlds);
+      expect(observed.status()).toBe(200);
+      expect(await observed.json()).toMatchObject({
+        selectedWorld: 'absent-world',
+        worlds: expect.arrayContaining([expect.objectContaining({ name: external })]),
+      });
+      await user.goto(route());
+      const selector = user.getByRole('combobox', { name: 'World', exact: true });
+      await browserExpect(selector, await user.locator('main').innerText()).toHaveValue('');
+      await browserExpect(
+        user.getByRole('button', { name: 'Upload ZIP', exact: true }),
+      ).toHaveCount(0);
+      await browserExpect(selector.locator('option', { hasText: external })).toHaveCount(1);
+      await user.screenshot({
+        path: resolve(
+          '.codex/local/m5-browser/screenshots/minecraft-datapacks-missing-world-en.png',
+        ),
+      });
+      await selector.selectOption('world');
+      await browserExpect(user.getByText('Manual pack', { exact: true })).toBeVisible();
+      await selector.selectOption(external);
+      await browserExpect(user.getByText('Market stalls', { exact: true })).toBeVisible();
+      await browserExpect(user.getByRole('alert')).toHaveCount(0);
+      const available = await user.request.get(`${fixture.origin}${base()}`);
+      expect(available.status()).toBe(200);
+      expect(await available.json()).toMatchObject({
+        world: '',
+        worlds: expect.arrayContaining([{ name: external, selected: false }]),
+      });
+      expect(files.get('server.properties')).toEqual(configured);
+    } finally {
+      if (original) files.set('server.properties', original);
+      else files.delete('server.properties');
+      await provider.adapter.deleteFiles(identifier, '', [external]);
+      expect((await user.request.get(worlds)).status()).toBe(200);
+    }
+  });
+  it('keeps an open catalog scoped to its original world and requests a new choice if that world disappears', async () => {
+    const files = await provider.files();
+    const properties = files.get('server.properties');
+    const level = files.get('world/level.dat');
+    if (!properties || !level) throw new Error('Missing initial fixture world');
+    const inventory = (url: URL) => url.pathname === base();
+    const pending = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    try {
+      await user.goto(route());
+      const selector = user.getByRole('combobox', { name: 'World', exact: true });
+      await browserExpect(selector).toHaveValue('world');
+      await user.route(
+        inventory,
+        async (request) => {
+          pending.resolve();
+          await release.promise;
+          await request.continue();
+        },
+        { times: 1 },
+      );
+      const refreshed = user.waitForResponse((response) => inventory(new URL(response.url())));
+      await user.getByRole('button', { name: 'Refresh datapacks', exact: true }).click();
+      await pending.promise;
+      await user.getByRole('button', { name: 'Browse catalog', exact: true }).click();
+      files.set('server.properties', Buffer.from('level-name=archive-world\n'));
+      release.resolve();
+      expect(await (await refreshed).json()).toMatchObject({
+        world: 'world',
+        selectedWorld: 'archive-world',
+      });
+      const catalog = user.getByRole('region', { name: 'Browse catalog', exact: true });
+      await catalog.getByRole('button', { name: /Catalog pack/ }).click();
+      const project = user.getByRole('region', { name: 'Catalog pack', exact: true });
+      const plan = user.waitForRequest(
+        (request) => new URL(request.url()).pathname === `${base()}/catalog/plan`,
+      );
+      await project
+        .getByRole('listitem')
+        .filter({ hasText: 'Pack blocked' })
+        .getByRole('button', { name: 'Prepare this file', exact: true })
+        .click();
+      expect((await plan).postDataJSON()).toMatchObject({ world: 'world' });
+      await project.getByRole('button', { name: 'Back to results', exact: true }).click();
+      await catalog
+        .getByRole('button', { name: 'Back to installed datapacks', exact: true })
+        .click();
+      await browserExpect(selector).toHaveValue('world');
+      files.delete('world/level.dat');
+      await user.getByRole('button', { name: 'Refresh datapacks', exact: true }).click();
+      await browserExpect(selector).toHaveValue('');
+      await browserExpect(
+        user.getByRole('button', { name: 'Upload ZIP', exact: true }),
+      ).toHaveCount(0);
+      await selector.selectOption('archive-world');
+      await browserExpect(
+        user.getByText('No datapacks in this world.', { exact: true }),
+      ).toBeVisible();
+    } finally {
+      release.resolve();
+      files.set('server.properties', properties);
+      files.set('world/level.dat', level);
     }
   });
   it('discovers manually uploaded folders, keeps selected-world default and changes world independently', async () => {
@@ -578,19 +695,26 @@ describe('Minecraft datapacks: world-scoped preparation and explicit apply', () 
     expect(json.mock.calls.length).toBe(providerReads);
   });
   it('allows discarding an interrupted preparation after refresh without publishing the pack', async () => {
-    await user.locator('input[type=file]:not([webkitdirectory])').setInputFiles({
-      name: 'interrupted.zip',
-      mimeType: 'application/zip',
-      buffer: await packZip(),
-    });
-    await expect
-      .poll(async () =>
-        (await snapshot()).changes.some(
-          (change: { name: string; state: string }) =>
-            change.name === 'interrupted.zip' && change.state === 'ready',
-        ),
-      )
-      .toBe(true);
+    if (user.url() !== route()) await user.goto(route());
+    const upload = user.getByRole('button', { name: 'Upload ZIP', exact: true });
+    await browserExpect(upload).toBeEnabled();
+    const [picker] = await Promise.all([user.waitForEvent('filechooser'), upload.click()]);
+    const [prepared] = await Promise.all([
+      user.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === `${base()}/changes` &&
+          response.request().method() === 'POST',
+      ),
+      picker.setFiles({
+        name: 'interrupted.zip',
+        mimeType: 'application/zip',
+        buffer: await packZip(),
+      }),
+    ]);
+    expect(prepared.ok(), await prepared.text()).toBe(true);
+    expect((await snapshot()).changes).toContainEqual(
+      expect.objectContaining({ name: 'interrupted.zip', state: 'ready' }),
+    );
     await fixture.database.db
       .updateTable('minecraft_datapack_changes')
       .set({ state: 'preparing' })

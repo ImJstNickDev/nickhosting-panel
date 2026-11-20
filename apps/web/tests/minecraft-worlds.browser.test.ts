@@ -228,6 +228,45 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     }
   });
 
+  it('explains secondary-world removal on the affected row until the server stops', async () => {
+    const arena = 'plugin-arena';
+    const files = await provider.files();
+    await provider.adapter.createDirectory(identifier, '', arena);
+    files.set(`${arena}/level.dat`, browserLevelDat());
+    const matchesWorlds = (url: URL) => url.pathname === `${api()}/worlds`;
+    // Supply the extensible-runtime policy to the shared Vanilla browser fixture.
+    await user.route(matchesWorlds, async (request) => {
+      const response = await request.fetch();
+      const snapshot = await response.json();
+      await request.fulfill({
+        response,
+        json: snapshot && { ...snapshot, allowOnlineRemoval: false },
+      });
+    });
+    try {
+      await running(true);
+      await user.goto(route());
+      const row = user
+        .locator('.minecraft-world')
+        .filter({ has: user.getByText(arena, { exact: true }) });
+      const remove = row.getByRole('button', { name: `Delete world: ${arena}`, exact: true });
+      const reason = row.getByText('Stop the server to delete this world.', { exact: true });
+      await browserExpect(remove).toBeDisabled();
+      await browserExpect(reason).toBeVisible();
+      await user.setViewportSize({ width: 390, height: 844 });
+      await accessible();
+      await screenshot(user, 'minecraft-worlds-stop-to-delete-mobile-en');
+      await running(false);
+      await user.reload();
+      await browserExpect(remove).toBeEnabled();
+      await browserExpect(reason).toHaveCount(0);
+    } finally {
+      await user.unroute(matchesWorlds);
+      await user.setViewportSize({ width: 1440, height: 1000 });
+      await provider.adapter.deleteFiles(identifier, '', [arena]);
+    }
+  });
+
   it('removes an inactive world while running and updates immediately before slow inventory refreshes finish', async () => {
     const world = 'online-remove';
     const files = await provider.files();
@@ -845,20 +884,25 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
   });
 
   it('shows indexed worlds while discovery is blocked, retains rows on failure, and uses observed version metadata', async () => {
+    const world = 'indexed-world';
+    const files = await provider.files();
+    await provider.adapter.createDirectory(identifier, '', world);
+    files.set(`${world}/level.dat`, browserLevelDat());
+    await journeyRequest(fixture, user, `${api()}/worlds`);
     let release = () => {};
     readGate = new Promise<void>((resolve) => {
       release = resolve;
     });
     try {
       await user.goto(route());
-      await browserExpect(user.getByText('replacement', { exact: true }).first()).toBeVisible();
+      await browserExpect(user.getByText(world, { exact: true }).first()).toBeVisible();
       await browserExpect(user.locator('.minecraft-worlds-list')).toBeVisible();
     } finally {
       release();
       readGate = undefined;
     }
     await browserExpect(
-      user.getByRole('button', { name: 'Select world: replacement', exact: true }),
+      user.getByRole('button', { name: `Select world: ${world}`, exact: true }),
     ).toBeEnabled();
     failFiles = true;
     await user.goto(route());
@@ -881,11 +925,12 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
         user.getByRole('button', { name: 'Import world', exact: true }),
       ).toBeEnabled();
       await browserExpect(
-        user.getByRole('button', { name: 'Select world: replacement', exact: true }),
+        user.getByRole('button', { name: `Select world: ${world}`, exact: true }),
       ).toBeEnabled();
       await screenshot(user, 'minecraft-worlds-version-metadata-desktop-en');
       await accessible();
     } finally {
+      await provider.adapter.deleteFiles(identifier, '', [world]);
       for (const row of evidence)
         await fixture.database.db
           .insertInto('minecraft_verification_evidence')

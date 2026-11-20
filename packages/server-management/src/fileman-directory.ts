@@ -56,10 +56,15 @@ export async function removeFilemanDirectory(
     });
   }
   const expected = request;
-  await context.effect(phase, async () => {
-    const receipt = await context.adapter.guardedDeleteDirectory(identifier, expected);
-    if (receipt.state !== 'confirmed') throw new DomainError('operation_uncertain');
-  });
+  await context.effect(
+    phase,
+    async () => {
+      const receipt = await context.adapter.guardedDeleteDirectory(identifier, expected);
+      if (receipt.state !== 'confirmed') throw new DomainError('operation_uncertain');
+    },
+    undefined,
+    input.beforeWrite,
+  );
   await context.update({
     plan: {
       ...context.operation().plan,

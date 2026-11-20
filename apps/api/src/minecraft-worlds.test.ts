@@ -39,7 +39,12 @@ const snapshot = {
   worlds: [],
 };
 
-const inventory = { snapshot, nonWorldDirectories: ['cache'], observedAt: new Date() };
+const inventory = {
+  current: true,
+  snapshot,
+  nonWorldDirectories: ['cache'],
+  observedAt: new Date(),
+};
 
 function fixture(connection = db) {
   const app = new Hono<{ Variables: Variables }>();

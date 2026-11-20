@@ -1539,8 +1539,10 @@ the same server. Both routes require `game.minecraft.worlds.read` and use
 `Cache-Control: no-store`. The archive and mutation routes continue to verify their
 own permissions, current server identity and operation preconditions.
 
-The snapshot contains `installed`, `supported`, `selectedWorld`, `release`,
-`compatibility` and `worlds`. The selection comes from `level-name` and defaults
+The snapshot includes `installed`, `supported`, `selectedWorld`, `release`,
+`compatibility`, `worlds` and `allowOnlineRemoval`. Only a current Vanilla
+profile grants online removal of an inactive root world. An older snapshot
+without that flag requires a confirmed stop. The selection comes from `level-name` and defaults
 to `world` when omitted. Each world has a name, a status and optional bounded
 version metadata. An externally created world can have a name with spaces or
 Unicode. The stricter existing name rules still apply to managed operations.
@@ -1553,13 +1555,20 @@ cycle. Successful world operations update a prepared inventory from their
 receipts. Relevant Fileman and SFTPGo changes request reconciliation when their
 receipts commit. The worker also reconciles external filesystem changes, including
 worlds added or removed by plugins. Overlapping reads and mutations are fenced
-so an older scan cannot undo a newer change.
+so an older scan cannot undo a newer change. Each pass inspects up to 100
+candidate directories. On larger roots it prioritizes the configured world and
+known worlds, and resumes its rotation from a persisted directory name. Each
+completed pass publishes its discoveries and carries forward known worlds that
+are still present but have yet to be rechecked.
 
 `GET /v1/servers/:id/minecraft/worlds/fileman` requires `files.read` and returns
 only `worlds` (directory names), `selectedWorld`, and `nonWorldDirectories`.
 Fileman uses the projection only at the Minecraft server root. Unclassified
 directories that could be worlds stay visible. A cold read returns empty arrays
-and a null selection. Neither cached endpoint starts a provider scan.
+and a null selection. On larger roots, Fileman can reuse a confirmed non-world
+classification across a scan rotation, for up to 15 minutes. It drops those
+classifications if the index has not been refreshed for a minute or a file event
+invalidates them. Neither cached endpoint starts a provider scan.
 
 World directory selection (2026-10-18) is a browser input alternative, not a new
 API contract: the worker prepares a ZIP source and uses the same authenticated
@@ -1748,7 +1757,9 @@ normal runtime console continues to use its existing route.
 
 The default datapack inventory read for an installed server without worlds now
 returns HTTP 200 with `world: ""`, `worlds: []`, empty packs/changes and
-`reload.state: "not_required"`. An explicit missing world remains 404. Missing
+`reload.state: "not_required"`. If the configured world is missing but other
+worlds exist, the response contains their names, the configured `selectedWorld`
+and an empty `world` until the user chooses one. An explicit missing world remains 404. Missing
 `server.properties` is tolerated during discovery; provider errors and current
 authorization remain authoritative. See [Datapacks](M5-MINECRAFT-DATAPACKS.md).
 
