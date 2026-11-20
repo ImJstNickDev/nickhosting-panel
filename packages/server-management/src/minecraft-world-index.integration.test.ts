@@ -191,6 +191,10 @@ describe('persistent Minecraft world inventory', () => {
     });
     expect(f.provider).toHaveBeenCalledTimes(1);
     expect(await readMinecraftWorldIndex(f.db, f.serverId, 'another-provider')).toBeUndefined();
+    const lobbyObservation = fresh.snapshot.worlds.find(
+      (world) => world.name === 'Multiverse Lobby',
+    )?.observedAt;
+    expect(lobbyObservation).toEqual(expect.any(String));
     f.dirs.delete('survival');
     f.unreachable.add('Multiverse Lobby');
     await f.dirty();
@@ -199,6 +203,7 @@ describe('persistent Minecraft world inventory', () => {
     expect(observed.snapshot.worlds).toEqual([
       expect.objectContaining({
         name: 'Multiverse Lobby',
+        observedAt: lobbyObservation,
         status: 'unavailable',
         validation: expect.objectContaining({ dataVersion: 169 }),
       }),

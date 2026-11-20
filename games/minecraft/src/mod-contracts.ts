@@ -32,6 +32,14 @@ export const minecraftGithubModUrlSchema = z
       return false;
     }
   });
+export function githubReleaseSource(value: string | undefined) {
+  if (!value || !minecraftGithubModUrlSchema.safeParse(value).success) return undefined;
+  const [, owner, repo, , , tag, asset] = new URL(value).pathname
+    .split('/')
+    .map(decodeURIComponent);
+  if (!owner || !repo || !tag || !asset) return undefined;
+  return { repository: `${owner}/${repo}`, tag, asset };
+}
 export const minecraftGithubModRequestSchema = z.strictObject({
   url: minecraftGithubModUrlSchema,
   revision: z.number().int().nonnegative(),
@@ -182,6 +190,7 @@ export interface MinecraftModsSnapshot {
     name: string;
     size: number;
     state: 'enabled' | 'disabled';
+    githubRelease?: { repository: string; tag: string; asset: string };
     metadata: MinecraftModMetadata | null;
     aliases?: MinecraftModAlias[];
   }[];

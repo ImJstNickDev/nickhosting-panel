@@ -19,6 +19,10 @@ import {
   minecraftMappingDigest,
   signMinecraftEvidence,
 } from './minecraft-registry.js';
+import {
+  assertMinecraftRemoteLaunch,
+  requireMinecraftRuntimeImageEvidence,
+} from './minecraft-runtime-evidence.js';
 import { createManagedServer, enqueueServerOperation } from './registry.js';
 import { authorizeQueuedEffect, createManagementRuntime } from './runtime.js';
 import {
@@ -1043,6 +1047,116 @@ describe('host-bound Minecraft runtime image evidence', () => {
       .execute();
     return operationId;
   }
+  it.each(['installation-confirmed', 'verified'])(
+    'recovers the active version installer after %s while ordinary power stays fenced',
+    async (state) => {
+      const value = await installed();
+      const choice = await inspectMinecraftCombination(f.db, choiceId, env);
+      const server = await f.db
+        .selectFrom('managed_servers')
+        .selectAll()
+        .where('id', '=', value.serverId)
+        .executeTakeFirstOrThrow();
+      const transition = { source: 'server-operation' as const, operationId: value.jobId };
+      const journal = {
+        state,
+        operationId: value.jobId,
+        serverId: value.serverId,
+        mappingDigest: choice.mappingDigest,
+        target: { combinationId: choiceId, mappingId: choice.mapping.id },
+      };
+      await f.db
+        .updateTable('server_operations')
+        .set({ action: 'reinstall', plan: JSON.stringify({ minecraftVersionTransition: journal }) })
+        .where('job_id', '=', value.jobId)
+        .execute();
+      await f.db
+        .updateTable('managed_servers')
+        .set({ active_operation_id: value.jobId, installation_state: 'installed' })
+        .where('id', '=', value.serverId)
+        .execute();
+      await f.db
+        .updateTable('operation_jobs')
+        .set({ state: 'running', completed_at: null })
+        .where('id', '=', value.jobId)
+        .execute();
+      await f.db
+        .updateTable('minecraft_server_profiles')
+        .set({
+          runtime_image_digest: null,
+          runtime_image_transition: JSON.stringify({
+            ...transition,
+            combinationId: choiceId,
+            after: '2026-10-09T09:59:00.000Z',
+          }),
+        })
+        .where('server_id', '=', value.serverId)
+        .execute();
+      const remote = await value.external.adapter.getApplicationServer(
+        server.pterodactyl_id as number,
+      );
+      await expect(
+        assertMinecraftRemoteLaunch(
+          f.db,
+          server.id,
+          remote,
+          env,
+          value.external.adapter,
+          true,
+          transition,
+        ),
+      ).resolves.toBeUndefined();
+      await expect(
+        assertMinecraftRemoteLaunch(f.db, server.id, remote, env, value.external.adapter),
+      ).rejects.toMatchObject({ code: 'provenance_mismatch' });
+      await expect(
+        assertMinecraftRemoteLaunch(f.db, server.id, remote, env, value.external.adapter, true, {
+          ...transition,
+          operationId: randomUUID(),
+        }),
+      ).rejects.toMatchObject({ code: 'provenance_mismatch' });
+      await expect(
+        requireMinecraftRuntimeImageEvidence(
+          f.db,
+          server.id,
+          imageDigest,
+          env,
+          undefined,
+          transition,
+        ),
+      ).rejects.toMatchObject({ code: 'provenance_mismatch' });
+      const after = await f.db
+        .selectFrom('minecraft_server_profiles')
+        .select(['runtime_image_digest', 'runtime_image_transition'])
+        .where('server_id', '=', server.id)
+        .executeTakeFirstOrThrow();
+      expect(after).toMatchObject({
+        runtime_image_digest: null,
+        runtime_image_transition: transition,
+      });
+      await f.db
+        .updateTable('server_operations')
+        .set({
+          plan: JSON.stringify({ minecraftVersionTransition: { ...journal, state: 'verified' } }),
+        })
+        .where('job_id', '=', value.jobId)
+        .execute();
+      await f.db
+        .updateTable('operation_jobs')
+        .set({ state: 'succeeded', completed_at: new Date() })
+        .where('id', '=', value.jobId)
+        .execute();
+      expect(
+        await requireMinecraftRuntimeImageEvidence(
+          f.db,
+          server.id,
+          imageDigest,
+          env,
+          '2026-10-09T10:00:00.000Z',
+        ),
+      ).toMatchObject({ verified: true, expected: imageDigest });
+    },
+  );
   it('Modpacks image transition leaves the old container unpinned during first-start preflight', async () => {
     const value = await installed();
     await pendingModpackImage(value);

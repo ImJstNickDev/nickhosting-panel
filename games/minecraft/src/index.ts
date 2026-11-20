@@ -32,6 +32,7 @@ export * from './runtime.js';
 export * from './server-permissions.js';
 export * from './vanilla-egg.js';
 export * from './vanilla-policy.js';
+export * from './version-change-contracts.js';
 export * from './wizard.js';
 export * from './world.js';
 export * from './world-version.js';

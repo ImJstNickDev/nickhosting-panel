@@ -122,6 +122,11 @@ export const createServerSchema = z
       .optional(),
   })
   .strict();
+const minecraftVersionRequest = z.strictObject({
+  sourceCombinationId: z.uuid(),
+  choiceId: z.string().min(1).max(256),
+  loaderVersion: z.string().min(1).max(128).optional(),
+});
 export const operationSchema = z.discriminatedUnion('action', [
   z.strictObject({
     action: z.literal('satisfactory-content'),
@@ -156,6 +161,7 @@ export const operationSchema = z.discriminatedUnion('action', [
       idempotencyKey: keySchema,
       confirm: z.literal(true),
       backupBefore: z.boolean().default(false),
+      minecraftVersion: minecraftVersionRequest.optional(),
     })
     .strict(),
   z
@@ -1035,6 +1041,7 @@ export async function enqueueLockedServerOperation(
     requestSource?: 'automation';
     minecraftPlan?: MinecraftPreparedContent;
     minecraftInitialContent?: MinecraftPreparedContent;
+    minecraftVersionTarget?: import('./minecraft-modpacks-plan.js').MinecraftModpackRuntimeBinding;
     satisfactoryContent?: true;
   } = {},
 ) {
@@ -1063,6 +1070,14 @@ export async function enqueueLockedServerOperation(
             ? 'server:read'
             : 'server:manage',
   );
+  if (
+    'minecraftVersion' in value &&
+    value.minecraftVersion &&
+    (!options.minecraftVersionTarget ||
+      !['wipe', 'reinstall'].includes(value.action) ||
+      (value.action === 'wipe' && value.backupBefore))
+  )
+    throw new DomainError('forbidden');
   if (value.action === 'minecraft-content') {
     if (!options.minecraftPlan) throw new DomainError('forbidden');
     for (const permission of minecraftContentPermissionKeys(options.minecraftPlan.command))
@@ -1209,7 +1224,29 @@ export async function enqueueLockedServerOperation(
       .selectAll()
       .where('server_id', '=', serverId)
       .executeTakeFirst();
-    if (profile) {
+    if (value.minecraftVersion) {
+      const target = options.minecraftVersionTarget;
+      if (
+        !profile?.installed ||
+        !target ||
+        !server.pterodactyl_id ||
+        server.runtime_state !== 'offline' ||
+        server.installation_state !== 'installed' ||
+        profile.combination_id !== value.minecraftVersion.sourceCombinationId ||
+        profile.combination_id === target.combinationId
+      )
+        throw new DomainError('conflict');
+      const {
+        rows: [pending],
+      } = await sql<{ busy: boolean }>`select
+        exists (select 1 from minecraft_mod_changes where server_id = ${serverId} and state in ('queued','preparing','ready','dispatched','uncertain'))
+        or exists (select 1 from minecraft_plugin_changes where server_id = ${serverId} and state in ('queued','preparing','ready','dispatched','uncertain'))
+        or exists (select 1 from minecraft_datapack_changes where server_id = ${serverId} and state in ('preparing','ready','dispatched','uncertain')) as busy`.execute(
+        tx,
+      );
+      if (pending?.busy) throw new DomainError('operation_busy');
+      plan.minecraftVersion = { sourceCombinationId: profile.combination_id, target };
+    } else if (profile) {
       const configuration = parse(minecraftStoredConfigurationSchema, profile.configuration);
       if (configuration.modpack) {
         const selected = configuration.modpack;
@@ -1394,6 +1431,7 @@ export async function enqueueServerOperation(
   options: {
     minecraftPlan?: MinecraftPreparedContent;
     minecraftInitialContent?: MinecraftPreparedContent;
+    minecraftVersionTarget?: import('./minecraft-modpacks-plan.js').MinecraftModpackRuntimeBinding;
     satisfactoryContent?: true;
   } = {},
 ) {
@@ -1511,7 +1549,7 @@ export async function enqueueServerOperation(
 
 /** Let the game API replay an accepted content request before inspecting mutable
  * plan/recovery state. This never creates work and always rechecks live access. */
-export async function replaySatisfactoryContentOperation(
+export async function replayManagedGameOperation(
   db: Kysely<Database>,
   context: AuthContext,
   serverId: string,
@@ -1519,7 +1557,11 @@ export async function replaySatisfactoryContentOperation(
   env: Environment = {},
 ) {
   const value = parse(operationSchema, input);
-  if (value.action !== 'satisfactory-content') throw new DomainError('validation_failed');
+  if (
+    value.action !== 'satisfactory-content' &&
+    !('minecraftVersion' in value && value.minecraftVersion)
+  )
+    throw new DomainError('validation_failed');
   const hash = digest({ kind: 'operation', subject: context.subjectUserId, serverId, value });
   return db.transaction().execute(async (tx) => {
     await requestLock(tx, context, value.idempotencyKey);
@@ -1528,6 +1570,8 @@ export async function replaySatisfactoryContentOperation(
     return previousRequest(tx, current, value.idempotencyKey, hash);
   });
 }
+
+export const replaySatisfactoryContentOperation = replayManagedGameOperation;
 
 export async function createProject(db: Kysely<Database>, context: AuthContext, input: unknown) {
   assertPermission(context, 'server:manage', { ownerUserId: context.subjectUserId });

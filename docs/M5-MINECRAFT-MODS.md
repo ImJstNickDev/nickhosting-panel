@@ -29,6 +29,12 @@ Download requests use the effective Minecraft origin policy for `https://github.
 and `https://release-assets.githubusercontent.com`. Both are included in the
 platform defaults. Migration 064 adds GitHub provenance to mod source records.
 
+In Mods and Plugins, selecting an installed file opens its source details. Catalog
+receipts identify the project and version. A matching GitHub receipt identifies
+the repository, release tag and original asset, including after a managed rename.
+A file without a matching receipt shows its path and an unknown source. Readers
+with Files access can open that exact filename in its server directory.
+
 Automatic selection prefers the latest compatible stable version. Prefer beta
 allows a newer compatible beta; if no compatible stable release exists, a beta
 can be selected without another confirmation. Beta versions retain a badge in

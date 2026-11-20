@@ -963,6 +963,33 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     );
     await check(page.locator('.mods-dependency-row')).toContainText(italian['errors.rate_limited']);
   });
+  it('opens recorded release details and links to the exact installed JAR', async () => {
+    snapshot.packs = [
+      {
+        id: 'direct',
+        name: 'Direct + Tools.jar.disabled',
+        path: 'mods/Direct + Tools.jar.disabled',
+        size: 1024,
+        state: 'disabled',
+        metadata: null,
+        githubRelease: { repository: 'example/tools', tag: 'v1', asset: 'Direct + Tools.jar' },
+      },
+    ];
+    await page.goto(`${origin}mods-fixture`);
+    await page.getByRole('button', { name: 'Direct + Tools.jar.disabled', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await check(dialog.getByText('example/tools')).toBeVisible();
+    await check(dialog.getByText('v1', { exact: true })).toBeVisible();
+    await check(dialog.getByRole('link', { name: 'Open in Files' })).toHaveAttribute(
+      'href',
+      `/servers/${serverId}/files?directory=mods&file=Direct+%2B+Tools.jar.disabled`,
+    );
+    await page.goto(`${origin}mods-fixture?readonly`);
+    await page.getByRole('button', { name: 'Direct + Tools.jar.disabled', exact: true }).click();
+    await check(page.getByRole('dialog').getByRole('link')).toHaveCount(0);
+    expect(writes).toEqual([]);
+  });
+
   it('filters installed metadata, toggles immediately and only queues removal for review', async () => {
     installFixtures();
     const first = snapshot.packs[0]?.metadata;

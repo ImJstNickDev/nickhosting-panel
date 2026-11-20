@@ -881,6 +881,8 @@ describe('Minecraft backend API authorization and user projection', () => {
       ['GET', '/worlds'],
       ['GET', '/properties'],
       ['GET', '/wipe-preview'],
+      ['GET', '/versions'],
+      ['POST', '/versions'],
       ['POST', '/operations'],
     ] as const) {
       const response = await app.request(`/v1/servers/${serverId}/minecraft${suffix}`, {
@@ -894,6 +896,107 @@ describe('Minecraft backend API authorization and user projection', () => {
       expect(response.status).toBe(403);
     }
     expect(management).not.toHaveBeenCalled();
+  });
+  it('exposes eligible in-place versions and binds explicit file consent, current profile and replay to the job', async () => {
+    const serverId = await fixture.server();
+    const choiceId = await eligibleChoice();
+    const row = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', choiceId)
+      .executeTakeFirstOrThrow();
+    const sourceCombinationId = randomUUID();
+    await fixture.db
+      .insertInto('minecraft_combinations')
+      .values({
+        id: sourceCombinationId,
+        mapping_id: row.mapping_id,
+        identity_digest: '2'.repeat(64),
+        mapping_digest: row.mapping_digest,
+        enabled: false,
+        combination: JSON.stringify({
+          ...(row.combination as Record<string, unknown>),
+          release: '1.20.4',
+        }),
+        resolved_runtime: JSON.stringify(row.resolved_runtime),
+        binding: JSON.stringify(row.binding),
+      })
+      .execute();
+    await fixture.db
+      .insertInto('minecraft_server_profiles')
+      .values({
+        server_id: serverId,
+        combination_id: sourceCombinationId,
+        configuration: '{"eula":true}',
+        installed: true,
+      })
+      .execute();
+    const route = `/v1/servers/${serverId}/minecraft/versions`;
+    const catalog = await app.request(route);
+    expect(catalog.status).toBe(200);
+    expect(await catalog.json()).toMatchObject({
+      current: { combinationId: sourceCombinationId, version: '1.20.4' },
+      choices: expect.arrayContaining([{ id: choiceId, version: '1.21.1', runtime: 'vanilla' }]),
+    });
+    expect(management).not.toHaveBeenCalled();
+    const request = {
+      choiceId,
+      sourceCombinationId,
+      mode: 'keep',
+      confirm: true,
+      idempotencyKey: randomUUID(),
+    };
+    expect((await post(route, { ...request, mode: 'fresh', backupBefore: true })).status).toBe(400);
+    expect((await post(route, { ...request, confirm: false })).status).toBe(400);
+    expect((await post(route, { ...request, sourceCombinationId: randomUUID() })).status).toBe(409);
+    const retiredId = randomUUID();
+    await fixture.db
+      .insertInto('minecraft_combinations')
+      .values({
+        id: retiredId,
+        mapping_id: row.mapping_id,
+        identity_digest: '3'.repeat(64),
+        mapping_digest: row.mapping_digest,
+        enabled: false,
+        combination: JSON.stringify({
+          ...(row.combination as Record<string, unknown>),
+          profile: 'fabric',
+          loaderVersion: 'retired',
+        }),
+        resolved_runtime: JSON.stringify(row.resolved_runtime),
+        binding: JSON.stringify(row.binding),
+      })
+      .execute();
+    const retired = await post(route, {
+      ...request,
+      choiceId: retiredId,
+      idempotencyKey: randomUUID(),
+    });
+    expect(retired.status).toBe(409);
+    expect(await retired.json()).toMatchObject({ code: 'conflict' });
+    expect(management).not.toHaveBeenCalled();
+    const accepted = await post(route, request);
+    expect(accepted.status).toBe(202);
+    const result = await accepted.json();
+    await fixture.db
+      .updateTable('minecraft_combinations')
+      .set({ enabled: false })
+      .where('id', '=', choiceId)
+      .execute();
+    expect(await (await post(route, request)).json()).toEqual(result);
+    expect((await post(route, { ...request, mode: 'fresh' })).status).toBe(409);
+    const operation = await fixture.db
+      .selectFrom('server_operations')
+      .selectAll()
+      .where('job_id', '=', result.jobId)
+      .executeTakeFirstOrThrow();
+    expect(operation).toMatchObject({
+      action: 'reinstall',
+      plan: {
+        backupBefore: false,
+        minecraftVersion: { sourceCombinationId, target: { combinationId: choiceId } },
+      },
+    });
   });
   it('never accepts arbitrary wizard runtime or file path assertions', async () => {
     const response = await app.request('/v1/minecraft/wizard', {

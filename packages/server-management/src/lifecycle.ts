@@ -64,6 +64,23 @@ type Result =
   | 'inactive'
   | 'duplicate'
   | 'missing';
+// Internal transfer/backup metadata remains owned by the platform across game reinstalls.
+export function minecraftVersionWipeEntry(name: string): boolean {
+  if (
+    !name ||
+    name === '.' ||
+    name === '..' ||
+    /[/\\]/.test(name) ||
+    [...name].some((c) => c.charCodeAt(0) < 32)
+  )
+    throw new DomainError('validation_failed');
+  return (
+    !/^\.nickhosting-(?:import-[0-9a-f-]{36}|pack-[0-9a-f-]{36}-(?:stage|rollback))$/i.test(name) &&
+    !['.nickhosting', '.sftpgo', '.sftpgo.id', '.pterodactyl', '.wings'].includes(
+      name.toLowerCase(),
+    )
+  );
+}
 export interface GameLifecycleContext {
   /** Scoped Fileman host services for trusted integration file operations. */
   fileman?: FilemanJobServices;
@@ -163,6 +180,10 @@ export interface LifecycleOptions {
     context: GameLifecycleContext,
     logs?: readonly { at: string; text: string }[],
   ) => Promise<number>;
+  minecraftVersionChange?: (
+    context: GameLifecycleContext,
+    stage: 'prepare' | 'apply',
+  ) => Promise<void>;
   processGameContent?: (context: GameLifecycleContext) => Promise<boolean>;
   verifyGameRestore?: (context: GameLifecycleContext) => Promise<boolean>;
   env?: Environment;
@@ -3297,7 +3318,15 @@ export async function processServerOperation(
         if (matches(current)) return completeConfiguration();
         return wait('configuration_confirmation');
       }
+      const versionChange =
+        ['wipe', 'reinstall'].includes(operation.action) &&
+        operation.plan.minecraftVersion !== undefined;
+      if (versionChange) {
+        if (!options.minecraftVersionChange) throw new DomainError('configuration_invalid');
+        await options.minecraftVersionChange(gameContext(), 'prepare');
+      }
       if (
+        !versionChange &&
         ['wipe', 'reinstall'].includes(operation.action) &&
         operation.plan.minecraftConfigurationInvalidated !== true
       ) {
@@ -3316,19 +3345,21 @@ export async function processServerOperation(
             plan: { ...operation.plan, minecraftConfigurationInvalidated: true },
           });
       }
-      if (['wipe', 'reinstall', 'restore'].includes(operation.action))
+      if (!versionChange && ['wipe', 'reinstall', 'restore'].includes(operation.action))
         await db
           .updateTable('minecraft_server_profiles')
           .set({ installed: false, updated_at: nowOf(options) })
           .where('server_id', '=', server.id)
           .execute();
       if (operation.action === 'wipe' && operation.plan.wipeComplete !== true) {
+        const gameEntry = (entry: { name: string }) =>
+          !versionChange || minecraftVersionWipeEntry(entry.name);
         if (!Array.isArray(operation.plan.wipeFiles)) {
           const entries = await options.adapter.listFiles(server.pterodactyl_identifier ?? '');
           await update({
             plan: {
               ...operation.plan,
-              wipeFiles: entries.map((entry) => entry.name),
+              wipeFiles: entries.filter(gameEntry).map((entry) => entry.name),
               wipeIndex: 0,
             },
           });
@@ -3349,15 +3380,25 @@ export async function processServerOperation(
               effect_state: 'confirmed',
               plan: { ...operation.plan, wipeIndex: index + batch.length },
             });
-          } else
-            await effect(`wipe:${index}`, () =>
-              options.adapter.deleteFiles(server.pterodactyl_identifier ?? '', '', batch),
+          } else {
+            await effect(
+              `wipe:${index}`,
+              () => options.adapter.deleteFiles(server.pterodactyl_identifier ?? '', '', batch),
+              undefined,
+              undefined,
+              versionChange ? gameContext().assertStopped : undefined,
             );
+          }
           return wait('wipe_confirmation');
         }
         const remaining = await options.adapter.listFiles(server.pterodactyl_identifier ?? '');
-        if (remaining.length) return wait('wipe_unexpected_files');
+        if (remaining.some(gameEntry)) return wait('wipe_unexpected_files');
         await update({ phase: 'wipe_complete', plan: { ...operation.plan, wipeComplete: true } });
+      }
+      if (versionChange && options.minecraftVersionChange) {
+        await progress('installing');
+        await options.minecraftVersionChange(gameContext(), 'apply');
+        return finish(true);
       }
       if (operation.action === 'reinstall' || operation.action === 'wipe') {
         // Game configuration may add durable phases after the installer. Never

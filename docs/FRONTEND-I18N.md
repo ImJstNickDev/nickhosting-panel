@@ -1299,6 +1299,12 @@ Whitelist settings remain here until the separate Players pass. The running-serv
 MOTD and player idle-kick timeout explicitly distinguish themselves from Gateway
 messages and automatic server sleep.
 
+Server managers can change the installed Minecraft version in Settings after stopping
+the server. The catalog opens on demand. After choosing a runtime, version and any
+required loader, the manager explicitly chooses whether to keep files or start
+from scratch. The keep option offers a backup, initially unchecked. The fresh
+option requires an explicit deletion action. Activity tracks the accepted job.
+
 Minecraft's running-server description reuses the same `MinecraftMessageEditor`
 as Gateway messages, placed after the other settings and before Save: direct
 preview editing, legacy colors/styles, source view,
@@ -1332,6 +1338,13 @@ hash/upload progress, cancellation and a folder name. Existing-folder replacemen
 requires a separate destructive confirmation and an explicit verified-backup
 choice; selecting an imported world remains a separate action. Keep all labels,
 errors, tooltips and keyboard names in the integration's EN/IT catalog.
+
+Selecting a world name opens its details, including externally named directories.
+Show the configured selection, metadata version, compatibility and the last
+successful observation for that directory. A filesystem observation cannot
+establish whether a plugin has loaded a world. Links to Files and Datapacks
+respect their destination permissions and open the selected directory or world.
+A vanished Datapacks target requires a new choice.
 
 Distinguish no worlds, no search matches, unreadable metadata, unsupported
 compatibility and an unfinished installation. Disable deletion of the

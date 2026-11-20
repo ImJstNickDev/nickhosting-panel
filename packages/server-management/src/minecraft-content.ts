@@ -2544,7 +2544,7 @@ export interface MinecraftWorldSnapshot {
   selectedWorld: string | null;
   release: string;
   compatibility: 'available' | 'unavailable';
-  worlds: Awaited<ReturnType<typeof discoverMinecraftWorlds>>;
+  worlds: (Awaited<ReturnType<typeof discoverMinecraftWorlds>>[number] & { observedAt?: string })[];
 }
 export interface MinecraftWorldFileStamp {
   name: string;

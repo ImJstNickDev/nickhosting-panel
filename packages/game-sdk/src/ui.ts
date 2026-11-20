@@ -684,6 +684,8 @@ export interface TrustedGameUiModule {
   descriptor: GameUiDescriptor;
   catalogs: { en: Readonly<Record<string, string>>; it: Readonly<Record<string, string>> };
   handlers: Readonly<Record<string, GameUiHandler>>;
+  /** One named URL parameter per section can scope its initial observation and cache key. */
+  sectionQueryParameters?: Readonly<Record<string, string>>;
   /** Optional fast observations shown on section entry while the normal loader revalidates. */
   sectionPreviews?: Readonly<
     Record<string, (client: GameUiClient, context: GameUiContext) => Promise<UiSectionData | null>>
@@ -837,6 +839,9 @@ export function defineTrustedGameUiModule(module: TrustedGameUiModule): TrustedG
     descriptor: deepFreeze(descriptor),
     catalogs: deepFreeze({ en: { ...module.catalogs.en }, it: { ...module.catalogs.it } }),
     handlers: Object.freeze({ ...module.handlers }),
+    ...(module.sectionQueryParameters
+      ? { sectionQueryParameters: Object.freeze({ ...module.sectionQueryParameters }) }
+      : {}),
     ...(module.sectionPreviews
       ? { sectionPreviews: Object.freeze({ ...module.sectionPreviews }) }
       : {}),

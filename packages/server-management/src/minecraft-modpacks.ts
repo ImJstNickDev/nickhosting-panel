@@ -534,6 +534,53 @@ export function createMinecraftModpacksService(options: {
       await authorized(context, serverId);
       return snapshotValue(serverId);
     },
+    async reviewFiles(
+      context: AuthContext,
+      serverId: string,
+      id: string,
+      request: {
+        digest: string;
+        group: 'added' | 'replaced' | 'removed' | 'preserved';
+        offset: number;
+      },
+    ) {
+      await authorized(context, serverId);
+      // Keep paths and evidence in PostgreSQL. Review pages only transfer four counts
+      // and up to 100 paths, including for older plans already waiting for approval.
+      const row = await db
+        .selectFrom('minecraft_modpack_operations')
+        .select(
+          sql<{
+            counts: Record<'added' | 'replaced' | 'removed' | 'preserved', number>;
+            paths: string[];
+          }>`(
+          WITH writes AS (SELECT path FROM jsonb_to_recordset(plan->'write') AS w(path text)),
+          existing AS (SELECT path, entry->>'kind' AS kind FROM jsonb_to_recordset(plan->'expected') AS e(path text, entry jsonb)
+                        WHERE entry->>'kind' IS NOT NULL),
+          changes AS (
+            SELECT w.path, CASE WHEN e.path IS NULL THEN 'added' ELSE 'replaced' END AS category
+              FROM writes w LEFT JOIN existing e USING (path)
+            UNION ALL
+            SELECT r.path || CASE WHEN e.kind = 'directory' THEN '/' ELSE '' END, 'removed'
+              FROM jsonb_array_elements_text(plan->'remove') AS r(path)
+              LEFT JOIN existing e USING (path) WHERE NOT EXISTS (SELECT 1 FROM writes w WHERE w.path = r.path)
+            UNION ALL
+            SELECT path, 'preserved' FROM jsonb_array_elements_text(plan->'preserve') AS p(path)
+          )
+          SELECT jsonb_build_object('counts', jsonb_build_object(
+            'added', count(*) FILTER (WHERE category = 'added'), 'replaced', count(*) FILTER (WHERE category = 'replaced'),
+            'removed', count(*) FILTER (WHERE category = 'removed'), 'preserved', count(*) FILTER (WHERE category = 'preserved')),
+            'paths', ARRAY(SELECT path FROM changes WHERE category = ${request.group} ORDER BY path COLLATE "C" LIMIT 100 OFFSET ${request.offset}))
+            FROM changes
+        )`.as('files'),
+        )
+        .where('id', '=', id)
+        .where('server_id', '=', serverId)
+        .where('plan_digest', '=', request.digest)
+        .executeTakeFirst();
+      if (!row) throw new DomainError('not_found');
+      return row.files;
+    },
     async prepare(context: AuthContext, serverId: string, input: unknown) {
       const selection = parse(minecraftModpackPrepareSchema, input);
       await db.transaction().execute(async (tx) => {
@@ -544,6 +591,21 @@ export function createMinecraftModpacksService(options: {
           await authorizeServer(tx, current, serverId, 'game.minecraft.worlds.delete');
         if (selection.install?.backupBefore)
           await authorizeServer(tx, current, serverId, 'backups.create');
+        if (selection.provider === 'upload') {
+          const source = await tx
+            .selectFrom('minecraft_sources')
+            .select('id')
+            .where('id', '=', selection.projectId)
+            .where('game_id', '=', 'minecraft')
+            .where('server_id', '=', serverId)
+            .where('owner_user_id', '=', server.owner_id)
+            .where('origin', '=', 'upload')
+            .where('kind', '=', 'modpack')
+            .where('state', '=', 'ready')
+            .where('actual_sha256', '=', selection.versionId)
+            .executeTakeFirst();
+          if (!source) throw new DomainError('not_found');
+        }
         if (selection.install && server.active_operation_id)
           throw new DomainError('operation_busy');
         const prior = await tx

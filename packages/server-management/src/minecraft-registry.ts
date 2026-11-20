@@ -1059,6 +1059,48 @@ function minecraftChoiceImage(choice: ReturnType<typeof inspectLoadedCombination
   return typeof binding.image === 'string' ? binding.image : null;
 }
 
+/** Resolve a public creation or in-place version choice through the same catalog. */
+export async function resolveMinecraftPublicChoice(
+  db: Kysely<Database>,
+  adapter: () => Promise<PterodactylAdapter>,
+  actor: AuthContext,
+  input: { choiceId: string; loaderVersion?: string },
+  env: Environment,
+) {
+  const runtime = input.choiceId.split(':')[0];
+  const loaders = {
+    fabric: resolveFabricCreationChoice,
+    quilt: resolveQuiltCreationChoice,
+    forge: resolveForgeCreationChoice,
+    neoforge: resolveNeoForgeCreationChoice,
+  };
+  if (runtime && Object.hasOwn(loaders, runtime)) {
+    if (!input.loaderVersion) throw new DomainError('validation_failed');
+    return loaders[runtime as keyof typeof loaders](
+      db,
+      await adapter(),
+      actor,
+      { choiceId: input.choiceId, loaderVersion: input.loaderVersion },
+      env,
+    );
+  }
+  if (input.loaderVersion !== undefined) throw new DomainError('validation_failed');
+  const builds = {
+    paper: resolvePaperCreationChoice,
+    folia: resolveFoliaCreationChoice,
+    purpur: resolvePurpurCreationChoice,
+  };
+  if (runtime && Object.hasOwn(builds, runtime))
+    return builds[runtime as keyof typeof builds](
+      db,
+      await adapter(),
+      actor,
+      { choiceId: input.choiceId },
+      env,
+    );
+  return requireMinecraftChoice(db, actor, parse(z.uuid(), input.choiceId), env);
+}
+
 export async function minecraftCatalog(
   db: DB,
   context: AuthContext,

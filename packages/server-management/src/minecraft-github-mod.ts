@@ -5,7 +5,7 @@ import {
 } from '@nickhosting/content-providers';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
-import { minecraftGithubModUrlSchema } from '../../../games/minecraft/src/mod-contracts.js';
+import { githubReleaseSource } from '../../../games/minecraft/src/mod-contracts.js';
 
 const asset = z.object({
   id: z.number().int().positive().safe(),
@@ -22,11 +22,9 @@ export async function githubModArtifact(
   override?: ContentHttp,
   signal?: AbortSignal,
 ) {
-  minecraftGithubModUrlSchema.parse(url);
-  const [, owner, repo, , , tag, filename] = new URL(url).pathname
-    .split('/')
-    .map(decodeURIComponent);
-  if (!owner || !repo || !tag || !filename) throw new DomainError('validation_failed');
+  const releaseSource = githubReleaseSource(url);
+  if (!releaseSource) throw new DomainError('validation_failed');
+  const { repository, tag, asset: filename } = releaseSource;
   const allowedOrigins = [
     'https://github.com',
     'https://release-assets.githubusercontent.com',
@@ -49,7 +47,7 @@ export async function githubModArtifact(
     })
     .safeParse(
       await metadata.json(
-        `https://api.github.com/repos/${owner}/${repo}/releases/tags/${encodeURIComponent(tag)}`,
+        `https://api.github.com/repos/${repository}/releases/tags/${encodeURIComponent(tag)}`,
         { signal },
       ),
     );
@@ -66,7 +64,7 @@ export async function githubModArtifact(
   const artifact = {
     kind: 'mod',
     serverSide: 'unknown',
-    projectId: `${owner}/${repo}`,
+    projectId: repository,
     versionId: String(file.data.id),
     path: `mods/${filename}`,
     urls: [url],

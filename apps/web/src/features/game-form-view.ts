@@ -8,6 +8,11 @@ export interface GameFormViewProps {
   errors: Record<string, string>;
   data: UiSectionData;
   serverName: string;
+  serverId: string;
+  permissions: readonly string[];
+  runtimeState: string;
+  operationPending: boolean;
+  onAccepted(jobId: string): void;
   disabled: boolean;
   dirty: boolean;
   onChange(id: string, value: unknown): void;

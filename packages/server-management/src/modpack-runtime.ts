@@ -100,7 +100,10 @@ export function modpackMappingCompatible(
     )
   );
 }
-async function resourceOwner(db: Kysely<Database>, ownerId: string): Promise<AuthContext> {
+export async function minecraftRuntimeOwner(
+  db: Kysely<Database>,
+  ownerId: string,
+): Promise<AuthContext> {
   const user = await db
     .selectFrom('user')
     .select(['id', 'role'])
@@ -161,7 +164,7 @@ export async function resolveModpackRuntime(input: {
       .where('managed_nodes.enabled', '=', true)
       .orderBy('runtime_egg_mappings.id')
       .execute(),
-    resourceOwner(db, server.owner_id),
+    minecraftRuntimeOwner(db, server.owner_id),
   ]);
   const usable = mappings
     .filter((mapping) => modpackMappingCompatible(server, source, mapping, allocations))
@@ -283,6 +286,9 @@ export interface ConfigureModpackRuntimeOptions {
   adapter: PterodactylAdapter;
   serverId: string;
   operationId: string;
+  /** Distinguishes the permanent journal used to attest the first new process. */
+  journalSource?: 'server-operation';
+  reserve?: () => Promise<void>;
   context: AuthContext;
   binding: MinecraftModpackRuntimeBinding;
   env?: Environment;
@@ -292,6 +298,12 @@ export interface ConfigureModpackRuntimeOptions {
   assertStopped(): Promise<void>;
   authorize(): Promise<void>;
   contentOptions: Pick<MinecraftContentOptions, 'observedImageDigest' | 'env'>;
+}
+
+function reserveRuntimeInstallation(options: ConfigureModpackRuntimeOptions) {
+  return options.reserve
+    ? options.reserve()
+    : reserveInstallation(options.db, options.serverId, options.operationId, options.env ?? {});
 }
 
 type RuntimeInspectionOptions = Omit<
@@ -320,7 +332,7 @@ async function inspectRuntimeTransition(options: RuntimeInspectionOptions) {
   await timing.measure('choice', async () =>
     requireMinecraftChoice(
       db,
-      await timing.measure('owner', () => resourceOwner(db, server.owner_id)),
+      await timing.measure('owner', () => minecraftRuntimeOwner(db, server.owner_id)),
       binding.combinationId,
       env,
     ),
@@ -420,6 +432,31 @@ async function inspectRuntimeTransition(options: RuntimeInspectionOptions) {
   return { server, profile, choice, binding, startup, saved, journal, remote, matchesStartup };
 }
 
+/** Validate the target, provider identity, and reserve installer capacity before a fresh wipe. */
+export async function prepareMinecraftVersionInstallation(
+  options: ConfigureModpackRuntimeOptions,
+  sourceCombinationId: string,
+) {
+  const current = await inspectRuntimeTransition(options);
+  if (
+    current.journal.sourceCombinationId !== sourceCombinationId ||
+    (!current.saved && !current.profile.installed)
+  )
+    throw new DomainError('conflict');
+  if (!current.saved) {
+    await assertMinecraftRemoteLaunch(
+      options.db,
+      options.serverId,
+      await current.remote(),
+      options.env ?? {},
+      options.adapter,
+      false,
+    );
+    await reserveRuntimeInstallation(options);
+    await options.saveTransition(current.journal);
+  }
+}
+
 /** Read-only proof that startup changed exactly as requested and no installer was
  * dispatched. Repeating a possibly dispatched installation is never recovery. */
 export async function assertModpackRuntimeResumable(
@@ -465,6 +502,11 @@ export async function configureModpackRuntime(
   const { profile, choice, binding, startup, saved, remote, matchesStartup, ...mutable } =
     await inspectRuntimeTransition(options);
   let { server, journal } = mutable;
+  const verifyCommittedLaunch = async () =>
+    assertMinecraftRemoteLaunch(db, serverId, await remote(), env, adapter, true, {
+      operationId,
+      source: options.journalSource ?? 'modpack',
+    });
   const save = async (state: ModpackRuntimeTransition['state']) => {
     journal = { ...journal, state };
     await timing.measure('journalWrite', () => options.saveTransition(journal));
@@ -484,9 +526,7 @@ export async function configureModpackRuntime(
   }
   if (!saved) await save('planned');
   if (journal.state === 'verified') {
-    await timing.measure('launchVerify', async () =>
-      assertMinecraftRemoteLaunch(db, serverId, await remote(), env, adapter),
-    );
+    await timing.measure('launchVerify', verifyCommittedLaunch);
     if (
       server.mapping_id !== binding.mappingId ||
       profile.combination_id !== binding.combinationId ||
@@ -498,7 +538,7 @@ export async function configureModpackRuntime(
   let reserved = false;
   let startupProof: ApplicationServer | undefined;
   if (journal.state === 'planned') {
-    await timing.measure('admission', () => reserveInstallation(db, serverId, operationId, env));
+    await timing.measure('admission', () => reserveRuntimeInstallation(options));
     reserved = true;
     await remote();
     await save('startup-dispatched');
@@ -519,8 +559,7 @@ export async function configureModpackRuntime(
   if (journal.state === 'startup-confirmed') {
     // A fresh invocation already reserved before startup; recovery must renew
     // that reservation before it can dispatch the installer.
-    if (!reserved)
-      await timing.measure('admission', () => reserveInstallation(db, serverId, operationId, env));
+    if (!reserved) await timing.measure('admission', () => reserveRuntimeInstallation(options));
     await timing.measure('authorize', () => options.authorize());
     await db.transaction().execute(async (tx) => {
       const current = await tx
@@ -610,6 +649,23 @@ export async function configureModpackRuntime(
   } else if (journal.state === 'installation-dispatched')
     throw new DomainError('operation_uncertain');
   if (journal.state !== 'installation-confirmed') throw new DomainError('operation_uncertain');
+  // A process can stop between committing the transition and saving its final journal entry.
+  const committed = z
+    .object({ operationId: z.uuid(), combinationId: z.uuid() })
+    .safeParse(profile.runtime_image_transition);
+  if (
+    committed.success &&
+    committed.data.operationId === operationId &&
+    committed.data.combinationId === binding.combinationId &&
+    server.mapping_id === binding.mappingId &&
+    profile.combination_id === binding.combinationId &&
+    profile.installed &&
+    server.installation_state === 'installed'
+  ) {
+    await verifyCommittedLaunch();
+    await save('verified');
+    return;
+  }
   // Attestation owns its before/after stopped checks around reading artifacts.
   await timing.measure('attestation', () =>
     attestMinecraftRuntimeInstallation(
@@ -632,7 +688,9 @@ export async function configureModpackRuntime(
     await tx
       .updateTable('minecraft_server_profiles')
       .set({
+        runtime_image_digest: null,
         runtime_image_transition: JSON.stringify({
+          ...(options.journalSource ? { source: options.journalSource } : {}),
           operationId,
           combinationId: binding.combinationId,
           after: new Date().toISOString(),

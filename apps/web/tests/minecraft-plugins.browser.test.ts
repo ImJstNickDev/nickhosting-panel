@@ -306,6 +306,42 @@ describe('Minecraft Plugins shared catalog experience', () => {
       })),
     ).toEqual([]);
   }
+  it('shows verified plugin provenance and distinguishes unmanaged JARs on mobile', async () => {
+    snapshot.packs = [
+      {
+        id: 'catalog',
+        name: 'world-tools.jar',
+        path: 'plugins/world-tools.jar',
+        size: 1024,
+        state: 'enabled',
+        metadata: metadata('hangar'),
+      },
+      {
+        id: 'local',
+        name: 'local.jar',
+        path: 'plugins/local.jar',
+        size: 150,
+        state: 'enabled',
+        metadata: null,
+      },
+    ];
+    await page.setViewportSize({ width: 390, height: 844 });
+    await open();
+    await page.getByRole('button', { name: /^Installed/ }).click();
+    await page.getByRole('button', { name: 'World Tools', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await check(dialog.getByText('Hangar', { exact: true })).toBeVisible();
+    await check(dialog.getByText('world-tools', { exact: true })).toBeVisible();
+    await check(dialog.getByRole('link', { name: 'Open in Files' })).toHaveAttribute(
+      'href',
+      `/servers/${serverId}/files?directory=plugins&file=world-tools.jar`,
+    );
+    await capture('minecraft-plugin-source-mobile-en');
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'local.jar', exact: true }).click();
+    await check(dialog.getByText('Source not recorded')).toBeVisible();
+    expect(writes).toEqual([]);
+  });
   it('offers all requested catalogs and keeps future providers quiet, on desktop and mobile', async () => {
     await open();
     await page.getByRole('combobox', { name: /Catalog|Catalogo/, exact: true }).click();

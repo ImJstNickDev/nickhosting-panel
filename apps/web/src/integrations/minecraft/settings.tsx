@@ -4,6 +4,7 @@ import { useId, useMemo } from 'react';
 import { useLocale, useT } from '../../app/i18n.js';
 import type { GameFormViewProps } from '../../features/game-form-view.js';
 import { MinecraftMessageEditor } from './gateway-editor.js';
+import { MinecraftVersionSettings } from './version-settings.js';
 import './settings.css';
 
 const key = (name: string) => `games.minecraft.settings.${name}`;
@@ -79,6 +80,9 @@ export function MinecraftSettingsForm(props: GameFormViewProps) {
         ))}
       </fieldset>
       {props.actions && <div className="form-footer">{props.actions}</div>}
+      {props.permissions.includes('server:manage') && props.data.metadata?.installed === true && (
+        <MinecraftVersionSettings {...props} />
+      )}
     </div>
   );
 }

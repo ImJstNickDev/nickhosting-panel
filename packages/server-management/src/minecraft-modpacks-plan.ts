@@ -320,7 +320,10 @@ export function planMinecraftModpack(input: {
         )
           remove.push(entry.path);
   }
-  if (selection.worldPolicy === 'reset' && (selection.mode === 'replace' || selection.install))
+  if (
+    selection.worldPolicy === 'reset' &&
+    (selection.mode === 'replace' || selection.install || selection.review)
+  )
     for (const root of worldRoots) {
       if (protectedPath(root)) blockers.push({ reason: 'protected-path', path: root });
       else if (files.has(root)) remove.push(root);

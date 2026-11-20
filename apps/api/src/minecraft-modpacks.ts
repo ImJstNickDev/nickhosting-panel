@@ -8,6 +8,7 @@ import type { createDatabase } from '@nickhosting/database';
 import { authorizeServer, type ManagementRuntime, parse } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
+import { modpackReviewRequest } from '../../../games/minecraft/src/modpack-contracts.js';
 import {
   modpackCategoryIdsSchema,
   modpackProviderSchema,
@@ -84,6 +85,12 @@ export function registerMinecraftModpackRoutes(
   app.post(`${base}/apply`, async (c) => {
     const actor = await principal(c);
     return c.json(await (await service()).apply(actor, c.req.param('id'), await body(c)), 202);
+  });
+  app.get(`${base}/operations/:operationId/files`, async (c) => {
+    const actor = await principal(c);
+    const id = parse(z.uuid(), c.req.param('operationId'));
+    const request = parse(modpackReviewRequest, c.req.query());
+    return c.json(await (await service()).reviewFiles(actor, c.req.param('id'), id, request));
   });
   app.delete(`${base}/operations/:operationId`, async (c) => {
     const actor = await principal(c);

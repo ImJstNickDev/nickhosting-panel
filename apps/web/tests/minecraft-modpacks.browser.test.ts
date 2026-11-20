@@ -23,6 +23,7 @@ import type {
 
 const server = '10000000-0000-4000-8000-000000000001';
 const base = `/v1/servers/${server}/minecraft/modpacks`;
+const uploadId = '30000000-0000-4000-8000-000000000001';
 const op = '20000000-0000-4000-8000-000000000001';
 const target = { minecraftVersion: '1.21.1', loader: 'fabric' as const, loaderVersion: '0.16.14' };
 const providers: ModpackProvider[] = [
@@ -106,7 +107,7 @@ describe('Minecraft Modpacks full-page experience', () => {
               if (req.method !== 'GET') {
                 let raw = '';
                 for await (const part of req) raw += part;
-                body = raw ? JSON.parse(raw) : {};
+                body = req.method === 'PUT' ? { bytes: raw.length } : raw ? JSON.parse(raw) : {};
                 writes.push({ path: `${req.method} ${url.pathname}`, body });
               }
               if (url.pathname === `/v1/platform/servers/${server}`)
@@ -137,7 +138,26 @@ describe('Minecraft Modpacks full-page experience', () => {
                 res.statusCode = 204;
                 return res.end();
               }
+              if (url.pathname === '/v1/minecraft/sources')
+                return json({ id: uploadId, state: 'reserved' });
+              if (url.pathname === `/v1/minecraft/sources/${uploadId}/upload`)
+                return json({ id: uploadId, state: 'ready' });
               if (url.pathname === base) return json(snapshot);
+              if (
+                url.pathname.startsWith(`${base}/operations/`) &&
+                url.pathname.endsWith('/files')
+              ) {
+                const offset = Number(url.searchParams.get('offset') ?? 0);
+                const group = url.searchParams.get('group');
+                const length = group === 'added' ? 104 : 1;
+                return json({
+                  counts: { added: 104, replaced: 1, removed: 1, preserved: 1 },
+                  paths: Array.from(
+                    { length: Math.min(100, Math.max(0, length - offset)) },
+                    (_, i) => `mods/${group}-${offset + i}.jar`,
+                  ),
+                });
+              }
               if (url.pathname === `${base}/catalog`)
                 return json({
                   providers: providers.map((id) => ({ id, available: providerAvailable })),
@@ -199,7 +219,25 @@ describe('Minecraft Modpacks full-page experience', () => {
                     pending || prepareState === 'failed'
                       ? null
                       : {
-                          project: project(provider, selection.projectId),
+                          project:
+                            provider === 'upload'
+                              ? {
+                                  id: uploadId,
+                                  provider,
+                                  name: 'Uploaded instance',
+                                  summary: '',
+                                  authors: [],
+                                }
+                              : project(provider, selection.projectId),
+                          ...(provider === 'upload'
+                            ? {
+                                imported: {
+                                  format: 'launcher-instance',
+                                  excludedFiles: 1,
+                                  excludedPaths: ['options.txt'],
+                                },
+                              }
+                            : {}),
                           version: version(selection.versionId),
                         },
                   target:
@@ -302,6 +340,35 @@ describe('Minecraft Modpacks full-page experience', () => {
       page.getByRole('button', { name: 'About Copper Valley', exact: true }),
     ).toBeVisible();
   }
+  it('imports a local archive into review without applying it and shows excluded files on mobile', async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await open();
+    const chooser = page.waitForEvent('filechooser');
+    await page.getByRole('button', { name: 'Import file' }).click();
+    await (await chooser).setFiles({
+      name: 'fixture.zip',
+      mimeType: 'application/zip',
+      buffer: Buffer.from('fixture'),
+    });
+    await check(page.getByRole('heading', { name: 'Uploaded instance' })).toBeVisible();
+    await page.getByText('Excluded files (1)').click();
+    await check(page.getByText('options.txt')).toBeVisible();
+    expect(writes.map((item) => item.path)).toEqual([
+      'POST /v1/minecraft/sources',
+      `PUT /v1/minecraft/sources/${uploadId}/upload`,
+      `POST ${base}/prepare`,
+    ]);
+    expect(writes[2]?.body).toMatchObject({
+      provider: 'upload',
+      projectId: uploadId,
+      versionId: expect.stringMatching(/^[0-9a-f]{64}$/),
+      worldPolicy: 'preserve',
+    });
+    expect(writes[2]?.body).not.toHaveProperty('install');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+  });
   async function details() {
     await page.getByRole('button', { name: 'About Copper Valley', exact: true }).click();
     await check(page.getByRole('button', { name: 'Install', exact: true })).toBeVisible();
@@ -402,6 +469,39 @@ describe('Minecraft Modpacks full-page experience', () => {
       expect(writes).toEqual([]);
     },
   );
+  it('previews catalog file changes without starting the installer', async () => {
+    await open();
+    await details();
+    await page.getByRole('button', { name: 'Preview file changes' }).click();
+    const changes = page.getByRole('button', { name: /^Added / });
+    await changes.click();
+    await check(page.getByText('mods/added-0.jar', { exact: true })).toBeVisible();
+    expect(writes).toHaveLength(1);
+    await page.getByRole('button', { name: /^Replaced / }).click();
+    await check(page.getByText('mods/replaced-0.jar')).toBeVisible();
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/minecraft-modpack-file-review-desktop-en.png',
+    });
+    expect(writes[0]?.body).toMatchObject({ mode: 'install', review: { backupBefore: false } });
+    expect(writes[0]?.body).not.toHaveProperty('install');
+  });
+  it('expands each review category and pages large path lists', async () => {
+    await openPausedCore();
+    for (const [label, path] of [
+      ['Added', 'added'],
+      ['Replaced', 'replaced'],
+      ['Removed', 'removed'],
+      ['Kept', 'preserved'],
+    ]) {
+      await page.getByRole('button', { name: new RegExp(`^${label} `) }).click();
+      await check(page.getByText(`mods/${path}-0.jar`, { exact: true })).toBeVisible();
+      if (label === 'Added') {
+        await page.locator('.modpacks-file-review').getByRole('button', { name: 'Next' }).click();
+        await check(page.getByText('mods/added-100.jar', { exact: true })).toBeVisible();
+      }
+    }
+    expect(writes).toEqual([]);
+  });
   it('keeps paused Core recovery usable on Italian mobile', async () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.emulateMedia({ reducedMotion: 'reduce' });

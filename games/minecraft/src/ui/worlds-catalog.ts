@@ -1,5 +1,15 @@
 /** Minecraft Worlds owns its complete English/Italian vocabulary. */
 export const minecraftWorldsMessages: Record<string, [string, string]> = {
+  'worlds.viewDetails': ['View details for {name}', 'Vedi dettagli di {name}'],
+  'worlds.configuredWorld': ['Configured world', 'Mondo configurato'],
+  'worlds.detectedVersion': ['Detected version', 'Versione rilevata'],
+  'worlds.compatibility': ['Compatibility', 'Compatibilità'],
+  'worlds.runtimeStatus': ['Runtime status', 'Stato in esecuzione'],
+  'worlds.serverStopped': ['Server stopped', 'Server arrestato'],
+  'worlds.runtimeUnverified': ['Load status unverified', 'Caricamento non verificato'],
+  'worlds.lastObservation': ['Last observed', 'Ultima osservazione'],
+  'worlds.openFiles': ['Open in Files', 'Apri in File'],
+  'worlds.openDatapacks': ['View datapacks', 'Vedi datapack'],
   'worlds.caseCollision': [
     'A folder named {name} already exists. Use that exact name to replace it, or choose a different name.',
     'Esiste già una cartella chiamata {name}. Usa lo stesso nome per sostituirla oppure scegli un nome diverso.',

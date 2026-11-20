@@ -228,6 +228,85 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     }
   });
 
+  it('opens world details and scopes Files and Datapacks to the inspected external world', async () => {
+    const name = 'Città & piazza';
+    const files = await provider.files();
+    await provider.adapter.createDirectory(identifier, '', name);
+    files.set(`${name}/level.dat`, browserLevelDat());
+    const fileUrl = `${fixture.origin}/servers/${provider.ids.serverId}/files?directory=${encodeURIComponent(name)}`;
+    const packsUrl = `${fixture.origin}/servers/${provider.ids.serverId}/game/datapacks?world=${encodeURIComponent(name)}`;
+    const requests: string[] = [];
+    const onResponse = (response: import('@playwright/test').Response) => {
+      const url = new URL(response.url());
+      if (url.pathname === `${api()}/datapacks`) requests.push(url.searchParams.get('world') ?? '');
+    };
+    user.on('response', onResponse);
+    try {
+      await user.goto(route());
+      await user.getByRole('button', { name: `View details for ${name}`, exact: true }).click();
+      const dialog = user.getByRole('dialog', { name });
+      await browserExpect(dialog.getByText(`/${name}`, { exact: true })).toBeVisible();
+      await browserExpect(dialog.getByText('26.1', { exact: true })).toBeVisible();
+      await browserExpect(dialog.getByText('No', { exact: true })).toBeVisible();
+      await browserExpect(dialog.getByText('Server stopped', { exact: true })).toBeVisible();
+      await browserExpect(dialog.locator('time')).toHaveAttribute('datetime', /^\d{4}-/);
+      await browserExpect(dialog.getByRole('link', { name: 'View datapacks' })).toHaveAttribute(
+        'href',
+        new URL(packsUrl).pathname + new URL(packsUrl).search,
+      );
+      await accessible();
+      await screenshot(user, 'minecraft-world-detail-desktop-en');
+      await dialog.getByRole('link', { name: 'Open in Files' }).click();
+      await browserExpect(user).toHaveURL(fileUrl);
+      await browserExpect(
+        user.locator('.fm-breadcrumb').getByText(name, { exact: true }),
+      ).toBeVisible();
+      await user.goBack();
+      await user.getByRole('button', { name: `View details for ${name}`, exact: true }).click();
+      await dialog.getByRole('link', { name: 'View datapacks' }).click();
+      await browserExpect(user).toHaveURL(packsUrl);
+      await browserExpect(user.getByRole('combobox', { name: 'World', exact: true })).toHaveValue(
+        name,
+      );
+      expect(requests).toEqual([name]);
+      const observer = identities.peer;
+      await journeyRequest(
+        fixture,
+        user,
+        `/v1/platform/servers/${provider.ids.serverId}/subusers/${identities.peerId}`,
+        { permissionKeys: ['game.minecraft.worlds.read'] },
+        'PUT',
+      );
+      await observer.goto(route());
+      await observer.getByRole('button', { name: `View details for ${name}`, exact: true }).click();
+      const readOnly = observer.getByRole('dialog', { name });
+      await browserExpect(readOnly).toBeVisible();
+      await browserExpect(readOnly.getByRole('link')).toHaveCount(0);
+      await journeyRequest(
+        fixture,
+        user,
+        `/v1/platform/servers/${provider.ids.serverId}/subusers/${identities.peerId}`,
+        undefined,
+        'DELETE',
+      );
+      await provider.adapter.deleteFiles(identifier, '', [name]);
+      await user.reload();
+      await browserExpect(user.getByRole('combobox', { name: 'World', exact: true })).toHaveValue(
+        '',
+      );
+      await browserExpect(
+        user.getByText(`${name} is unavailable. Choose another world.`, { exact: true }),
+      ).toBeVisible();
+      await browserExpect(
+        user.getByRole('button', { name: 'Upload ZIP', exact: true }),
+      ).toHaveCount(0);
+    } finally {
+      user.off('response', onResponse);
+      if (files.has(`${name}/level.dat`))
+        await provider.adapter.deleteFiles(identifier, '', [name]);
+    }
+  });
+
   it('explains secondary-world removal on the affected row until the server stops', async () => {
     const arena = 'plugin-arena';
     const files = await provider.files();

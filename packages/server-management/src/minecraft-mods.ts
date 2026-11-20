@@ -16,6 +16,7 @@ import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import { minecraftContentCapabilities } from '../../../games/minecraft/src/content-capabilities.js';
 import {
+  githubReleaseSource,
   type MinecraftModAlternatives,
   type MinecraftModMetadata,
   type MinecraftModSelection,
@@ -1660,6 +1661,7 @@ export function createMinecraftModsService(options: {
                   state: entry.name.endsWith('.disabled')
                     ? ('disabled' as const)
                     : ('enabled' as const),
+                  githubRelease: githubReleaseSource(record?.githubUrl),
                   metadata: record?.metadata ?? null,
                   aliases: record?.aliases ?? [],
                 };

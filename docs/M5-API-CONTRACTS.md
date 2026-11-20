@@ -1536,7 +1536,21 @@ the shared lock, current authorization and durable actor/subject audit. There is
 no automatic replay. See [Players workspace](M5-MINECRAFT-PLAYERS.md) for identity,
 file bounds, recovery semantics and limitations.
 
+### Minecraft version changes
+
+Minecraft Properties exposes the current runtime and eligible version choices through
+`GET /v1/servers/:id/minecraft/versions`. A manager submits the chosen target to the
+same URL with an exact source combination, file policy, confirmation and idempotency key.
+The server must be stopped. The keep policy preserves user files and offers an
+optional backup, off by default. Fresh clears the server files before installing the
+selected target. Both modes retain the server ID and return a job visible in Activity.
+
 ### Minecraft Worlds inventory
+
+Worlds shows the configured world, observed version, compatibility and last observation.
+Each world links to its directory and its Datapacks inventory, subject to those
+permissions. Runtime load state remains unverified without an authoritative runtime
+observation.
 
 `GET /v1/servers/:id/minecraft/worlds?cached=1` returns the last observed inventory
 for the current managed server binding, or JSON `null` on a cold read. Opening

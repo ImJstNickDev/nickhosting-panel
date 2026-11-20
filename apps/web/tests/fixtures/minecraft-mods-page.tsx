@@ -34,9 +34,12 @@ function ModsFixture() {
           permissionKeys={
             new URLSearchParams(location.search).has('readonly')
               ? []
-              : ['read', 'write', 'delete'].map(
-                  (action) => `game.minecraft.${plugins ? 'plugins' : 'mods'}.${action}`,
-                )
+              : [
+                  'files.read',
+                  ...['read', 'write', 'delete'].map(
+                    (action) => `game.minecraft.${plugins ? 'plugins' : 'mods'}.${action}`,
+                  ),
+                ]
           }
           pending={false}
           onAccepted={() => {}}

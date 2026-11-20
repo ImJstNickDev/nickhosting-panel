@@ -16,6 +16,7 @@ import { ErrorNotice } from '../../components/ui.js';
 import { SearchField } from '../../components/workspace-controls.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { ViewerSelect } from '../../features/viewer-engine/viewer-select.js';
+import { AddonFileDetails } from './addon-file-details.js';
 import {
   type AddonCatalog,
   AddonsContext,
@@ -455,6 +456,7 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
           <div hidden={view !== 'installed'}>
             <InstalledMods
               {...common}
+              canOpenFiles={props.permissionKeys.includes('files.read')}
               githubAction={githubAction}
               deleteDisabled={disabled || !canDelete}
               onDiscover={() => setView('discover')}
@@ -856,6 +858,7 @@ function DiscoverMods(
 function InstalledMods(
   props: SharedProps & {
     githubAction: ReactNode;
+    canOpenFiles: boolean;
     deleteDisabled: boolean;
     onDiscover(): void;
     onReview(): void;
@@ -871,7 +874,9 @@ function InstalledMods(
   const [side, setSide] = useState('all');
   const [category, setCategory] = useState('');
   const [offset, setOffset] = useState(0);
+  const [detailsPath, setDetailsPath] = useState<string>();
   const packs = props.data?.packs ?? [];
+  const details = packs.find((pack) => pack.path === detailsPath);
   const hasCatalogPacks = packs.some((pack) => pack.metadata);
   const updates = useQuery({
     queryKey: [
@@ -931,6 +936,14 @@ function InstalledMods(
   const currentOffset = Math.min(offset, Math.max(0, Math.ceil(filtered.length / 20) - 1) * 20);
   return (
     <div className="mods-installed">
+      {details && (
+        <AddonFileDetails
+          pack={details}
+          serverId={props.serverId}
+          canOpenFiles={props.canOpenFiles}
+          onClose={() => setDetailsPath(undefined)}
+        />
+      )}
       {(kind !== 'mods' || packs.length > 0) && (
         <div className="mods-search-toolbar">
           <SearchField
@@ -1071,7 +1084,14 @@ function InstalledMods(
                   name={pack.metadata?.name ?? pack.name}
                 />
                 <div className="mods-installed-copy">
-                  <strong>{pack.metadata?.name ?? pack.name}</strong>
+                  <button
+                    type="button"
+                    className="addon-file-name"
+                    aria-haspopup="dialog"
+                    onClick={() => setDetailsPath(pack.path)}
+                  >
+                    {pack.metadata?.name ?? pack.name}
+                  </button>
                   <span className="mods-installed-version">
                     {pack.metadata?.version ?? t(modsKey('local'))}
                     {pack.metadata && <ModsChannel channel={pack.metadata.channel} />}

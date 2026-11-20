@@ -22,9 +22,19 @@ export const minecraftModpackPathSchema = z
       !/[\\\p{C}:]/u.test(path) &&
       path.split('/').every((part) => part !== '' && part !== '.' && part !== '..'),
   );
+export const modpackReviewGroup = z.enum(['added', 'replaced', 'removed', 'preserved']);
+export const modpackReviewRequest = z.strictObject({
+  digest: z.string().regex(/^[0-9a-f]{64}$/),
+  group: modpackReviewGroup,
+  offset: z.coerce.number().int().min(0).max(20000).default(0),
+});
+export const modpackReviewFiles = z.object({
+  counts: z.record(modpackReviewGroup, z.number().int().nonnegative()),
+  paths: z.array(z.string()).max(100),
+});
 export const minecraftModpackPrepareSchema = z
   .object({
-    provider: modpackProviderSchema,
+    provider: modpackProviderSchema.or(z.literal('upload')),
     projectId: identity,
     versionId: identity,
     mode: z.enum(['install', 'update', 'replace']),
@@ -32,13 +42,25 @@ export const minecraftModpackPrepareSchema = z
     fileDecisions: z
       .record(minecraftModpackPathSchema, z.enum(['keep-local', 'use-pack']))
       .default({}),
+    review: z.strictObject({ backupBefore: z.boolean().default(false) }).optional(),
     install: z.strictObject({ backupBefore: z.boolean().default(false) }).optional(),
     idempotencyKey: key,
   })
   .strict()
+  .refine((value) => !(value.review && (value.install || value.provider === 'upload')))
   .refine(
     (value) =>
-      value.mode === 'replace' || value.worldPolicy === 'preserve' || Boolean(value.install),
+      value.provider !== 'upload' ||
+      (z.uuid().safeParse(value.projectId).success &&
+        /^[0-9a-f]{64}$/.test(value.versionId) &&
+        !value.install),
+    { message: 'An upload requires a sealed source and a preview' },
+  )
+  .refine(
+    (value) =>
+      value.mode === 'replace' ||
+      value.worldPolicy === 'preserve' ||
+      Boolean(value.install || value.review),
     {
       path: ['worldPolicy'],
       message: 'World reset requires explicit replacement or an Install intent',
@@ -92,6 +114,8 @@ export const minecraftModpackBlockerSchema = z
       'loader-version',
       'unresolved',
       'server-pack',
+      'archive-format',
+      'archive-invalid',
       'distribution',
       'permission',
       'client-only',
@@ -107,7 +131,19 @@ export const minecraftModpackBlockerSchema = z
 export type MinecraftModpackBlocker = z.infer<typeof minecraftModpackBlockerSchema>;
 export const minecraftModpackPackSchema = z
   .object({
-    project: modpackCatalogProjectSchema,
+    project: modpackCatalogProjectSchema.or(
+      modpackCatalogProjectSchema.extend({
+        provider: z.literal('upload'),
+        websiteUrl: z.never().optional(),
+      }),
+    ),
+    imported: z
+      .strictObject({
+        format: z.enum(['modrinth-index', 'curseforge-manifest', 'launcher-instance']),
+        excludedFiles: z.number().int().nonnegative(),
+        excludedPaths: z.array(minecraftModpackPathSchema).max(100),
+      })
+      .optional(),
     version: modpackCatalogVersionSchema,
   })
   .strict();

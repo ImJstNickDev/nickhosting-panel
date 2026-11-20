@@ -226,14 +226,14 @@ async function reconcile(
         known.has(world.name) ||
         inspection.worldMarkerDirectories.has(world.name),
     );
+    const observationTime = new Date().toISOString();
     for (const world of snapshot.worlds) {
-      const validation = known.get(world.name)?.validation;
-      if (
-        world.status === 'unavailable' &&
-        validation &&
-        !inspection.forbiddenDirectories.has(world.name)
-      ) {
-        world.validation = validation;
+      if (world.status !== 'unavailable') {
+        world.observedAt = observationTime;
+      } else if (!inspection.forbiddenDirectories.has(world.name)) {
+        const prior = known.get(world.name);
+        if (prior?.validation) world.validation = prior.validation;
+        if (prior?.observedAt) world.observedAt = prior.observedAt;
       }
     }
     const { nonWorldDirectories, stamps } = inspection;

@@ -450,6 +450,20 @@ describe('Minecraft Mods durable preparation and publication', () => {
       .where('path', '=', 'mods/direct.jar.disabled')
       .executeTakeFirstOrThrow();
     expect(receipt.receipt).toMatchObject({ githubUrl: url, runtimeModId: 'fixture' });
+    const installed = (await svc.snapshot(f.context, f.serverId)).packs.find(
+      (pack) => pack.path === 'mods/direct.jar.disabled',
+    );
+    expect(installed?.githubRelease).toEqual({
+      repository: 'example/Test',
+      tag: 'v1',
+      asset: 'direct.jar',
+    });
+    f.files.set('mods/direct.jar.disabled', Buffer.from('replacement'));
+    expect(
+      (await svc.snapshot(f.context, f.serverId)).packs.find(
+        (pack) => pack.path === 'mods/direct.jar.disabled',
+      )?.githubRelease,
+    ).toBeUndefined();
     await svc.drain();
   });
 

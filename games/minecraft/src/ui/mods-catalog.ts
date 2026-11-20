@@ -1,5 +1,14 @@
 /** Minecraft owns the vocabulary; provider project titles and original category labels stay attributed. */
 export const minecraftModsMessages: Record<string, [string, string]> = {
+  'mods.fileSource': ['Source', 'Origine'],
+  'mods.filePath': ['File', 'File'],
+  'mods.fileUnknown': ['Source not recorded', 'Origine non registrata'],
+  'mods.fileRepository': ['Repository', 'Repository'],
+  'mods.fileTag': ['Release tag', 'Tag della release'],
+  'mods.fileAsset': ['Release asset', 'File della release'],
+  'mods.fileProject': ['Project ID', 'ID progetto'],
+  'mods.fileVersion': ['Version ID', 'ID versione'],
+  'mods.fileOpen': ['Open in Files', 'Apri in File'],
   'mods.tag.technology': ['Technology', 'Tecnologia'],
   'mods.tag.worldgen': ['World Generation', 'Generazione del mondo'],
   'mods.tag.optimization': ['Optimization', 'Ottimizzazione'],

@@ -821,3 +821,122 @@ describe('optional modpack staging diagnostics', () => {
     expect(labels.join(' ')).not.toContain('private-name');
   });
 });
+
+describe('uploaded modpack exports', () => {
+  async function uploaded(
+    entries: Record<string, string | Buffer>,
+    data: Record<string, Buffer> = {},
+  ) {
+    const f = await fixture(data);
+    const path = join(f.root, 'private-source');
+    await writeFile(path, await zip(entries));
+    return { ...f, stage: () => stageModpackRecipe({ kind: 'upload', path }, f.options) };
+  }
+  const components = [
+    { uid: 'net.minecraft', version: '1.21.1' },
+    { uid: 'org.lwjgl3', version: '3.3.3' },
+    { uid: 'net.fabricmc.intermediary', version: '1.21.1' },
+    { uid: 'net.fabricmc.fabric-loader', version: '0.16.10' },
+  ];
+  it.each(['.minecraft', 'minecraft'])(
+    'imports a wrapped Prism/MultiMC %s export and excludes launcher and client files',
+    async (game) => {
+      const entries = {
+        'My pack/mmc-pack.json': JSON.stringify({ formatVersion: 1, components }),
+        'My pack/instance.cfg': '[General]\nname=Island project\n',
+        [`My pack/${game}/mods/client.jar`]: await zip({
+          'fabric.mod.json': JSON.stringify({
+            schemaVersion: 1,
+            id: 'client',
+            version: '1.0',
+            environment: 'client',
+          }),
+        }),
+        [`My pack/${game}/config/server.toml`]: 'fixture',
+        [`My pack/${game}/kubejs/client_scripts/gui.js`]: 'fixture',
+        [`My pack/${game}/options.txt`]: 'fixture',
+        'My pack/pre-launch.sh': 'fixture',
+      };
+      const f = await uploaded(entries);
+      const staged = await f.stage();
+      expect(staged.target).toEqual(target);
+      expect(staged.files.map((file) => file.path)).toEqual(['config/server.toml']);
+      expect(staged.imported).toMatchObject({
+        format: 'launcher-instance',
+        name: 'Island project',
+      });
+      expect(staged.excludedFiles).toBe(4);
+      expect(f.download).not.toHaveBeenCalled();
+    },
+  );
+  it('identifies a wrapped mrpack, honors the server layer and omits optional/client pins', async () => {
+    const file = Buffer.from('data');
+    const f = await uploaded(
+      {
+        'Export/modrinth.index.json': JSON.stringify({
+          ...mr([
+            mrFile('config/one', 'pin', file),
+            mrFile('mods/client.jar', 'other', file, 'unsupported'),
+            mrFile('mods/optional.jar', 'other', file, 'optional'),
+          ]),
+          name: 'Sky',
+          versionId: '2',
+        }),
+        'Export/overrides/config/main': 'common',
+        'Export/server-overrides/config/main': 'server',
+        'Export/client-overrides/config/hud': 'client',
+      },
+      { pin: file },
+    );
+    const staged = await f.stage();
+    expect(staged.imported).toMatchObject({ format: 'modrinth-index', name: 'Sky', version: '2' });
+    expect(staged.excludedFiles).toBe(3);
+    expect(staged.files.map((item) => item.path)).toEqual(['config/main', 'config/one']);
+    expect(await readFile(join(staged.directory, 'config/main'), 'utf8')).toBe('server');
+    expect(f.download).toHaveBeenCalledTimes(1);
+  });
+  it('reads CurseForge export overrides and exact pinned file ids', async () => {
+    const f = await uploaded({
+      'manifest.json': JSON.stringify({
+        ...cf([{ projectID: 11, fileID: 22, required: true }]),
+        name: 'Pins',
+      }),
+      'overrides/config/main': 'cf',
+    });
+    f.options.resolveCurseForgeFiles = vi.fn(async () => []);
+    const staged = await f.stage();
+    expect(f.options.resolveCurseForgeFiles).toHaveBeenCalledWith(
+      [{ projectId: 11, fileId: 22 }],
+      undefined,
+    );
+    expect(staged.imported?.format).toBe('curseforge-manifest');
+    expect(staged.target).toEqual(target);
+  });
+  it.each([
+    { 'file.txt': 'x' },
+    { 'a/mmc-pack.json': '{}', 'b/mmc-pack.json': '{}' },
+    {
+      'mmc-pack.json': JSON.stringify({
+        formatVersion: 1,
+        components: [...components, { uid: 'net.neoforged', version: '1' }],
+      }),
+    },
+    {
+      'mmc-pack.json': JSON.stringify({ formatVersion: 1, components }),
+      'patches/net.minecraft.json': '{}',
+    },
+    {
+      'mmc-pack.json': JSON.stringify({
+        formatVersion: 1,
+        components: [{ uid: 'net.minecraft', version: '1.21.1' }, { uid: 'net.minecraftforge' }],
+      }),
+    },
+  ] as Record<string, string>[])(
+    'rejects an ambiguous or incomplete archive before fetching any files',
+    async (entries) => {
+      const f = await uploaded(entries);
+      await expect(f.stage()).rejects.toThrow();
+      expect(f.download).not.toHaveBeenCalled();
+    },
+  );
+});

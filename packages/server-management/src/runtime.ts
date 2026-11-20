@@ -59,6 +59,7 @@ import {
 import { minecraftContentAllowsOnline } from './minecraft-content-contracts.js';
 import { assertNoModpackPublication } from './minecraft-modpack-schema.js';
 import { createMinecraftModuleRuntime } from './minecraft-module.js';
+import { runMinecraftVersionChange } from './minecraft-version-change.js';
 import { createMinecraftWorldPreparation } from './minecraft-world-preparation.js';
 import type { OperationTiming } from './operation-timing.js';
 import { resolveProviderCredential } from './provider-accounts.js';
@@ -775,6 +776,18 @@ export async function createManagementRuntime(options: ManagementOptions) {
       context,
     );
   }
+  async function reserveManagedInstallation(
+    serverId: string,
+    jobId: string,
+    connection: Kysely<Database>,
+  ) {
+    const checks = await Promise.allSettled([
+      verifyObservationHost(serverId, connection),
+      refreshObservations(connection, serverId),
+    ]);
+    for (const result of checks) if (result.status === 'rejected') throw result.reason;
+    await reserveInstallation(connection, serverId, jobId, env);
+  }
   const lifecycle = {
     onInstallationAvailable: options.onInstallationAvailable,
     supportsManagedFileOperations: async (serverId: string, connection: Kysely<Database>) => {
@@ -884,6 +897,24 @@ export async function createManagementRuntime(options: ManagementOptions) {
       (await gameRuntime(context.db, context.server.id))?.finalizeStart?.(context) ?? true,
     configureGameProvision: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.configureProvision(context) ?? true,
+    minecraftVersionChange: async (
+      context: import('./lifecycle.js').GameLifecycleContext,
+      stage: 'prepare' | 'apply',
+    ) => {
+      const actor = await authorizeQueuedEffect(
+        context.db,
+        context.operation().job_id,
+        context.server.id,
+        env,
+        adapter,
+      );
+      await runMinecraftVersionChange(context, stage, actor, {
+        env,
+        observedImageDigest,
+        reserve: () =>
+          reserveManagedInstallation(context.server.id, context.operation().job_id, context.db),
+      });
+    },
     processGameContent: async (context: import('./lifecycle.js').GameLifecycleContext) => {
       const module = await traceOperation(context.timing, 'game.resolve', () =>
         gameRuntime(context.db, context.server.id),
@@ -1202,14 +1233,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
           );
       }
     },
-    reserveInstallation: async (serverId: string, jobId: string, connection: Kysely<Database>) => {
-      const checks = await Promise.allSettled([
-        verifyObservationHost(serverId, connection),
-        refreshObservations(connection, serverId),
-      ]);
-      for (const result of checks) if (result.status === 'rejected') throw result.reason;
-      await reserveInstallation(connection, serverId, jobId, env);
-    },
+    reserveInstallation: reserveManagedInstallation,
     prepareStartAdmission,
     reserveStart: async (
       serverId: string,

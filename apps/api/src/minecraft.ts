@@ -53,13 +53,7 @@ import {
   requestPurpurCatalogRefresh,
   requestQuiltCatalogRefresh,
   requireMinecraftChoice,
-  resolveFabricCreationChoice,
-  resolveFoliaCreationChoice,
-  resolveForgeCreationChoice,
-  resolveNeoForgeCreationChoice,
-  resolvePaperCreationChoice,
-  resolvePurpurCreationChoice,
-  resolveQuiltCreationChoice,
+  resolveMinecraftPublicChoice,
   setMinecraftAvailability,
   setMinecraftBulkAvailability,
   syncFabricRegisteredCatalog,
@@ -80,6 +74,7 @@ import { registerMinecraftDatapackRoutes } from './minecraft-datapacks.js';
 import { registerMinecraftModpackRoutes } from './minecraft-modpacks.js';
 import { registerMinecraftModRoutes } from './minecraft-mods.js';
 import { registerMinecraftPlayerRoutes } from './minecraft-players.js';
+import { registerMinecraftVersionRoutes } from './minecraft-versions.js';
 
 type C = Context<{ Variables: Variables }>;
 // Public choices carry all runtime-selection authority; an Owner-only mapping
@@ -102,6 +97,7 @@ export function registerMinecraftRoutes(
     contentHttp?: ContentHttp;
   },
 ) {
+  registerMinecraftVersionRoutes(app, options);
   registerMinecraftPlayerRoutes(app, options);
   registerMinecraftDatapackRoutes(app, options);
   registerMinecraftModRoutes(app, options);
@@ -520,15 +516,13 @@ export function registerMinecraftRoutes(
   app.post('/v1/minecraft/servers', async (c) => {
     const context = await principal(c);
     const input = parse(minecraftCreateSchema, await body(c));
-    const fabric = input.minecraft.choiceId.startsWith('fabric:');
-    const quilt = input.minecraft.choiceId.startsWith('quilt:');
-    const folia = input.minecraft.choiceId.startsWith('folia:');
-    const paper = input.minecraft.choiceId.startsWith('paper:');
-    const purpur = input.minecraft.choiceId.startsWith('purpur:');
-    const forge = input.minecraft.choiceId.startsWith('forge:');
-    const neoforge = input.minecraft.choiceId.startsWith('neoforge:');
-    const catalogChoice = fabric || quilt || paper || purpur || folia || forge || neoforge;
-    if ((fabric || quilt || forge || neoforge) !== (input.minecraft.loaderVersion !== undefined))
+    const catalogChoice = /^(fabric|quilt|forge|neoforge|paper|purpur|folia):/.test(
+      input.minecraft.choiceId,
+    );
+    if (
+      /^(fabric|quilt|forge|neoforge):/.test(input.minecraft.choiceId) !==
+      (input.minecraft.loaderVersion !== undefined)
+    )
       throw new DomainError('validation_failed');
     if (catalogChoice) {
       const previous = await findManagedCreationRequest(
@@ -540,37 +534,13 @@ export function registerMinecraftRoutes(
       );
       if (previous) return c.json(previous, 202);
     }
-    const choice =
-      fabric || quilt || forge || neoforge
-        ? await (neoforge
-            ? resolveNeoForgeCreationChoice
-            : forge
-              ? resolveForgeCreationChoice
-              : quilt
-                ? resolveQuiltCreationChoice
-                : resolveFabricCreationChoice)(
-            db,
-            (await management()).adapter,
-            context,
-            {
-              choiceId: input.minecraft.choiceId,
-              loaderVersion: input.minecraft.loaderVersion ?? '',
-            },
-            env,
-          )
-        : paper || purpur || folia
-          ? await (folia
-              ? resolveFoliaCreationChoice
-              : purpur
-                ? resolvePurpurCreationChoice
-                : resolvePaperCreationChoice)(
-              db,
-              (await management()).adapter,
-              context,
-              { choiceId: input.minecraft.choiceId },
-              env,
-            )
-          : await requireMinecraftChoice(db, context, input.minecraft.choiceId, env);
+    const choice = await resolveMinecraftPublicChoice(
+      db,
+      async () => (await management()).adapter,
+      context,
+      input.minecraft,
+      env,
+    );
     const { service, options: content } = await contentOptions(context);
     const prepared = await prepareMinecraftCreationConfig(
       db,

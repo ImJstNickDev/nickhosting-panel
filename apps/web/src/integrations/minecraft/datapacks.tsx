@@ -99,7 +99,14 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
   const t = useT();
   const initial = props.data.metadata?.datapacks as MinecraftDatapacks | undefined;
   // Undefined resolves the initial default. An empty choice waits for the user.
-  const [requestedWorld, setRequestedWorld] = useState<string | undefined>(initial?.world);
+  const [requestedWorld, setRequestedWorld] = useState<string | undefined>(
+    props.data.metadata?.missingWorld ? '' : initial?.world,
+  );
+  const [missingWorld, setMissingWorld] = useState<string | undefined>(
+    typeof props.data.metadata?.missingWorld === 'string'
+      ? props.data.metadata.missingWorld
+      : undefined,
+  );
   const [search, setSearch] = useState('');
   const [inspected, setInspected] = useState<string>();
   const [page, setPage] = useState(0);
@@ -130,7 +137,11 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
     queryFn: ({ signal }) =>
       controller.datapacks(props.serverId, requestedWorld || undefined, signal),
     initialData:
-      requestedWorld === undefined || requestedWorld === initial?.world ? initial : undefined,
+      requestedWorld === undefined ||
+      requestedWorld === initial?.world ||
+      (requestedWorld === '' && props.data.metadata?.missingWorld)
+        ? initial
+        : undefined,
     staleTime: 5_000,
   });
   const data = inventory.data;
@@ -141,6 +152,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
   const world = worldLost ? '' : (requestedWorld ?? '');
   const changeWorld = useCallback((value: string) => {
     setRequestedWorld(value);
+    setMissingWorld(undefined);
     setSearch('');
     setPage(0);
     setRemove(undefined);
@@ -158,6 +170,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
         exact: true,
       });
       changeWorld('');
+      setMissingWorld(requestedWorld);
       return;
     }
     if (requestedWorld !== undefined || !data) return;
@@ -580,6 +593,11 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
           onChange={(event) => void upload(event.target.files, true)}
         />
         {error || inventory.error ? <ErrorNotice error={error ?? inventory.error} /> : null}
+        {missingWorld && !world && (
+          <p className="datapack-note" role="status">
+            {t(key('worldUnavailable'), { name: missingWorld })}
+          </p>
+        )}
         {!props.canManage && <p className="datapack-note">{t(key('readonly'))}</p>}
         {inventory.isPending ? (
           <div

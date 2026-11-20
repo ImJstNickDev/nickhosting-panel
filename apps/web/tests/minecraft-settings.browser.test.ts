@@ -5,6 +5,7 @@ import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
+import { addMinecraftBrowserChoice } from './minecraft-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
 
 describe('Minecraft settings browser journeys', () => {
@@ -50,7 +51,7 @@ describe('Minecraft settings browser journeys', () => {
   const profilePath = () => `/v1/servers/${provider.ids.serverId}/minecraft`;
   const form = (current = page) => current.getByRole('form', { name: 'Server properties' });
   const save = () => form().getByRole('button', { name: 'Save changes', exact: true });
-  async function screenshot(name: string, current = page) {
+  async function screenshot(name: string, current = page, fullPage = true) {
     await current.evaluate(() => {
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
       window.scrollTo(0, 0);
@@ -58,7 +59,7 @@ describe('Minecraft settings browser journeys', () => {
     await current.mouse.move(700, 70);
     await current.screenshot({
       path: resolve('.codex/local/m5-browser/screenshots', `${name}.png`),
-      fullPage: true,
+      fullPage,
     });
   }
   async function accessible(current = page) {
@@ -79,6 +80,95 @@ describe('Minecraft settings browser journeys', () => {
         response.url().endsWith(`${profilePath()}/operations`),
     );
   }
+
+  it('changes versions with an explicit file choice and backup off by default', async () => {
+    const newRelease = '26.1.1';
+    const secondChoice = await addMinecraftBrowserChoice(
+      fixture.database,
+      provider.ids.mappingId,
+      fixture.env,
+      newRelease,
+    );
+    const files = await provider.files();
+    const originalProperties = files.get('server.properties');
+    files.set('custom-version-notes.txt', Buffer.from('keep across the first change'));
+    await page.goto(`${fixture.origin}${base()}/properties`);
+    async function select(choice: string) {
+      await page.getByRole('button', { name: 'Change version', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: 'Change version', exact: true });
+      await dialog
+        .getByRole('combobox', { name: 'Minecraft version', exact: true })
+        .selectOption(choice);
+      await dialog.getByRole('button', { name: 'Continue', exact: true }).click();
+      return dialog;
+    }
+    async function confirm(
+      name: string,
+      mode: 'keep' | 'fresh',
+      choiceId: string,
+      sourceCombinationId: string,
+    ) {
+      const response = page.waitForResponse(
+        (res) =>
+          res.request().method() === 'POST' &&
+          new URL(res.url()).pathname === `${profilePath()}/versions`,
+      );
+      await page.getByRole('dialog').getByRole('button', { name, exact: true }).click();
+      const accepted = await response;
+      expect(accepted.request().postDataJSON()).toMatchObject({
+        mode,
+        choiceId,
+        sourceCombinationId,
+        backupBefore: false,
+        confirm: true,
+      });
+      expect(accepted.status(), await accepted.text()).toBe(202);
+      const { jobId } = await accepted.json();
+      await provider.management.refreshObservations();
+      await provider.processPending();
+      const job = await fixture.database.db
+        .selectFrom('operation_jobs')
+        .select(['state', 'error_code'])
+        .where('id', '=', jobId)
+        .executeTakeFirstOrThrow();
+      const record = await fixture.database.db
+        .selectFrom('server_operations')
+        .select(['phase', 'effect_state'])
+        .where('job_id', '=', jobId)
+        .executeTakeFirst();
+      expect(job.state, JSON.stringify({ job, record })).toBe('succeeded');
+    }
+    const keep = await select(secondChoice);
+    await browserExpect(
+      keep.getByRole('button', { name: 'Change version', exact: true }),
+    ).toBeDisabled();
+    await keep.getByRole('radio', { name: /Keep existing files/ }).check();
+    await browserExpect(keep.getByRole('checkbox')).not.toBeChecked();
+    await accessible();
+    await screenshot('minecraft-version-keep-desktop-en', page, false);
+    await confirm('Change version', 'keep', secondChoice, provider.ids.choiceId);
+    expect(files.get('custom-version-notes.txt')?.toString()).toBe('keep across the first change');
+    await page.reload();
+    const fresh = await select(provider.ids.choiceId);
+    await fresh.getByRole('radio', { name: /Start from scratch/ }).check();
+    await browserExpect(fresh.getByRole('checkbox')).toHaveCount(0);
+    const priorViewport = page.viewportSize();
+    try {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await accessible();
+      await screenshot('minecraft-version-fresh-mobile-en', page, false);
+      await confirm(
+        'Delete files and change version',
+        'fresh',
+        provider.ids.choiceId,
+        secondChoice,
+      );
+      expect(files.has('custom-version-notes.txt')).toBe(false);
+    } finally {
+      if (priorViewport) await page.setViewportSize(priorViewport);
+      if (originalProperties) files.set('server.properties', originalProperties);
+    }
+  });
 
   it('loads the settings renderer during the properties read and transfers only editable settings', async () => {
     const { serverId, provisionJobId } = provider.ids;
@@ -138,17 +228,14 @@ describe('Minecraft settings browser journeys', () => {
 
   it('separates content navigation, preserves old links and does not load unavailable sections', async () => {
     await page.goto(`${fixture.origin}${base()}/datapacks`);
-    const tabs = page.getByRole('navigation', { name: 'Minecraft', exact: true });
-    await browserExpect(tabs.getByRole('link')).toHaveText([
-      'Settings',
-      'Players',
-      'Worlds',
-      'Datapacks',
-      'Modpacks',
-    ]);
-    await browserExpect(
-      page.getByRole('heading', { name: 'Datapacks', exact: true }),
-    ).toBeVisible();
+    const navigation = page.getByRole('navigation', { name: 'Navigation', exact: true });
+    for (const name of ['Players', 'Worlds', 'Datapacks', 'Modpacks', 'Settings']) {
+      await browserExpect(navigation.getByRole('link', { name, exact: true })).toBeVisible();
+    }
+    for (const name of ['Mods', 'Plugins']) {
+      await browserExpect(navigation.getByRole('link', { name, exact: true })).toHaveCount(0);
+    }
+    await browserExpect(page.getByRole('region', { name: 'Datapacks', exact: true })).toBeVisible();
     await screenshot('minecraft-content-tabs-desktop-en');
     await accessible();
     await page.goto(`${fixture.origin}${base()}/content?source=bookmark#inventory`);
@@ -156,7 +243,7 @@ describe('Minecraft settings browser journeys', () => {
       `${fixture.origin}${base()}/modpacks?source=bookmark#inventory`,
     );
     await browserExpect(
-      page.getByRole('heading', { name: 'Replace modpack', exact: true }),
+      page.getByRole('navigation', { name: 'Modpacks', exact: true }),
     ).toBeVisible();
     let profileReads = 0;
     const countRead = (request: import('@playwright/test').Request) => {
@@ -176,18 +263,18 @@ describe('Minecraft settings browser journeys', () => {
     await journeyRequest(fixture, page, '/api/auth/update-user', { locale: 'it' });
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(`${fixture.origin}${base()}/datapacks`);
-    await browserExpect(tabs.getByRole('link')).toHaveText([
-      'Impostazioni',
-      'Giocatori',
-      'Mondi',
-      'Datapack',
-      'Modpack',
-    ]);
-    await tabs.getByRole('link', { name: 'Modpack', exact: true }).focus();
+    const mobileNavigation = page.getByRole('navigation', { name: 'Navigazione', exact: true });
+    const menu = page.getByRole('button', { name: 'Menu', exact: true });
+    await menu.click();
+    for (const name of ['Impostazioni', 'Giocatori', 'Mondi', 'Datapack', 'Modpack']) {
+      await browserExpect(mobileNavigation.getByRole('link', { name, exact: true })).toBeVisible();
+    }
+    await mobileNavigation.getByRole('link', { name: 'Modpack', exact: true }).focus();
     await page.keyboard.press('Enter');
     await browserExpect(page).toHaveURL(`${fixture.origin}${base()}/modpacks`);
-    await tabs.getByRole('link', { name: 'Datapack', exact: true }).click();
-    await browserExpect(page.getByRole('heading', { name: 'Datapack', exact: true })).toBeVisible();
+    await menu.click();
+    await mobileNavigation.getByRole('link', { name: 'Datapack', exact: true }).click();
+    await browserExpect(page.getByRole('region', { name: 'Datapack', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       390,
     );
@@ -199,15 +286,13 @@ describe('Minecraft settings browser journeys', () => {
 
   it('groups Minecraft navigation and saves only changed supported fields through the real job', async () => {
     await page.goto(`${fixture.origin}/servers/${provider.ids.serverId}/settings`);
-    const top = page.getByRole('navigation', { name: 'Servers', exact: true });
-    await browserExpect(top.getByRole('link', { name: 'Minecraft', exact: true })).toHaveCount(1);
-    for (const legacy of ['Players', 'Worlds', 'Content'])
-      await browserExpect(top.getByRole('link', { name: legacy, exact: true })).toHaveCount(0);
-    await top.getByRole('link', { name: 'Minecraft', exact: true }).click();
+    const settings = page.getByRole('navigation', { name: 'Settings', exact: true });
+    await settings.getByRole('link', { name: 'Minecraft properties', exact: true }).click();
     await browserExpect(page).toHaveURL(`${fixture.origin}${base()}/properties`);
-    const tabs = page.getByRole('navigation', { name: 'Minecraft', exact: true });
-    await browserExpect(tabs.getByRole('link')).toHaveCount(5);
-    await tabs.getByRole('link', { name: 'Players', exact: true }).click();
+    await page
+      .getByRole('navigation', { name: 'Navigation', exact: true })
+      .getByRole('link', { name: 'Players', exact: true })
+      .click();
     await browserExpect(page).toHaveURL(`${fixture.origin}${base()}/players`);
     await page.goto(`${fixture.origin}${base()}/properties`);
     await browserExpect(form().getByRole('switch', { name: 'Player combat' })).toBeChecked();

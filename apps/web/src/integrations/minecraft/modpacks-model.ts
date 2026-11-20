@@ -14,7 +14,7 @@ export const modpackProviders: Record<ModpackProvider, string> = {
 export const modpackKey = (name: string) => `games.minecraft.modpacks.${name}`;
 export const modpackQueryKey = (serverId: string, suffix = '') =>
   [`minecraft-modpacks${suffix ? `-${suffix}` : ''}`, serverId] as const;
-export const modpackIdentity = (project: { provider: ModpackProvider; id: string }) =>
+export const modpackIdentity = (project: { provider: ModpackProvider | 'upload'; id: string }) =>
   `${project.provider}:${project.id}`;
 /** Provider order is the tie-breaker when a catalog does not publish release dates. */
 export function recommendedPackVersion(versions: readonly ModpackCatalogVersion[]) {

@@ -68,6 +68,10 @@ export const minecraftDatapacksMessages: Record<string, [string, string]> = {
   'datapacks.queued': ['Queued for preparation', 'Preparazione in coda'],
   'datapacks.nativeDisabled': ['Disabled in Minecraft', 'Disabilitato in Minecraft'],
   'datapacks.world': ['World', 'Mondo'],
+  'datapacks.worldUnavailable': [
+    '{name} is unavailable. Choose another world.',
+    '{name} non è disponibile. Scegli un altro mondo.',
+  ],
   'datapacks.chooseWorld': ['Choose a world', 'Scegli un mondo'],
   'datapacks.search': ['Search datapacks', 'Cerca datapack'],
   'datapacks.searchInstalled': ['Search installed datapacks', 'Cerca tra i datapack installati'],

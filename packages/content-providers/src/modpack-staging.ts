@@ -15,6 +15,13 @@ import {
 import { type ContentLimits, type ContentTarget, contentLimits, fail } from './contracts.js';
 import { targetFromMrpack } from './modpack.js';
 import { modpackTargetSchema } from './modpack-catalog.js';
+import {
+  type ImportedModpackFormat,
+  identifyModpackImport,
+  importMetadataNames,
+  importServerPath,
+  launcherImportTarget,
+} from './modpack-import.js';
 import { assertModpackPaths, modpackDataPath } from './modpack-paths.js';
 import type { ModpackDownload, ModpackRecipe, ModpackRecipeFile } from './modpack-recipes.js';
 import { contentStageDirectory } from './staging.js';
@@ -24,7 +31,17 @@ export interface ModpackStagedFile {
   size: number;
   sha256: string;
 }
+export interface UploadedModpackRecipe {
+  kind: 'upload';
+  path: string;
+}
 export interface ModpackStaged {
+  imported?: {
+    format: ImportedModpackFormat;
+    name?: string;
+    version?: string;
+    excludedPaths: string[];
+  };
   directory: string;
   target: ContentTarget;
   files: ModpackStagedFile[];
@@ -61,6 +78,8 @@ export interface ModpackStagingOptions {
   }): Promise<void>;
 }
 const mrpack = z.object({
+  name: z.string().trim().min(1).max(512).optional(),
+  versionId: z.string().trim().min(1).max(256).optional(),
   formatVersion: z.literal(1),
   game: z.literal('minecraft'),
   dependencies: z.record(z.string(), z.string()),
@@ -83,6 +102,8 @@ const mrpack = z.object({
     .max(20000),
 });
 const cursepack = z.object({
+  name: z.string().trim().min(1).max(512).optional(),
+  version: z.string().trim().min(1).max(256).optional(),
   manifestType: z.literal('minecraftModpack'),
   manifestVersion: z.literal(1),
   minecraft: z.object({
@@ -201,7 +222,7 @@ async function extract(file: ArchiveFile, target: string, signal?: AbortSignal) 
 
 /** Prepare immutable server data locally. This never executes scripts or touches a game server. */
 export async function stageModpackRecipe(
-  recipe: ModpackRecipe,
+  recipe: ModpackRecipe | UploadedModpackRecipe,
   options: ModpackStagingOptions,
 ): Promise<ModpackStaged> {
   const trace = <T>(name: string, work: () => Promise<T>) =>
@@ -227,13 +248,20 @@ export async function stageModpackRecipe(
     target = value;
     await trace('runtime', async () => options.checkTarget?.(value));
   };
-  if (recipe.target) await acceptTarget(recipe.target);
-  let downloads: ModpackRecipeFile[] = recipe.files ?? [];
+  let imported: ModpackStaged['imported'];
+  const exclude = (path: string) => {
+    excludedFiles++;
+    if (imported && imported.excludedPaths.length < 100 && !imported.excludedPaths.includes(path))
+      imported.excludedPaths.push(path);
+  };
+  if (recipe.kind !== 'upload' && recipe.target) await acceptTarget(recipe.target);
+  let downloads: ModpackRecipeFile[] = recipe.kind === 'upload' ? [] : (recipe.files ?? []);
   const overrides = new Map<
     string,
     { source: string; path: string; size: number; layer: number }
   >();
-  const archivePath = join(options.directory, 'source.zip');
+  const archivePath =
+    recipe.kind === 'upload' ? recipe.path : join(options.directory, 'source.zip');
   const acquireArchive = async (download: ModpackDownload, path: string) => {
     options.signal?.throwIfAborted();
     const maximum = download.size ?? limits.maxArchiveBytes;
@@ -247,8 +275,8 @@ export async function stageModpackRecipe(
     );
     archiveBytes += acquired.size;
   };
-  if (recipe.kind === 'archive') {
-    if (recipe.targetManifest) {
+  if (recipe.kind === 'archive' || recipe.kind === 'upload') {
+    if (recipe.kind === 'archive' && recipe.targetManifest) {
       const path = join(options.directory, 'target.zip');
       await acquireArchive(recipe.targetManifest.download, path);
       let raw: unknown;
@@ -267,7 +295,7 @@ export async function stageModpackRecipe(
       );
       await acceptTarget(curseTarget(cursepack.parse(raw)));
     }
-    await acquireArchive(recipe.download, archivePath);
+    if (recipe.kind === 'archive') await acquireArchive(recipe.download, archivePath);
     const members: { path: string; size: number }[] = [];
     const manifests = new Map<string, Buffer>();
     let metadataBytes = 0;
@@ -285,10 +313,15 @@ export async function stageModpackRecipe(
           // Only root or a single wrapper is meaningful; never scan arbitrary nested manifests.
           if (
             (parts.length === 1 ||
-              (recipe.format === 'server-archive' &&
+              (recipe.kind === 'upload' && parts.length === 2) ||
+              (recipe.kind === 'archive' &&
+                recipe.format === 'server-archive' &&
                 parts.length === 2 &&
                 serverRoot([file]) !== '')) &&
-            ['modrinth.index.json', 'manifest.json'].includes(parts.at(-1) ?? '')
+            (recipe.kind === 'upload'
+              ? importMetadataNames
+              : ['modrinth.index.json', 'manifest.json']
+            ).includes(parts.at(-1) ?? '')
           ) {
             metadataBytes += file.size;
             if (metadataBytes > limits.maxMetadataBytes) fail('metadata_size');
@@ -297,15 +330,36 @@ export async function stageModpackRecipe(
         },
         limits,
       ),
-    );
+    ).catch((error: unknown) => {
+      if (
+        recipe.kind === 'upload' &&
+        error instanceof Error &&
+        error.name === 'Error' &&
+        !('code' in error)
+      )
+        fail('archive_invalid');
+      throw error;
+    });
     let roots: string[];
-    if (recipe.format === 'modrinth-index') {
-      const manifest = mrpack.parse(manifestAt('modrinth.index.json'));
+    const detected = recipe.kind === 'upload' ? identifyModpackImport(manifests) : undefined;
+    const format = recipe.kind === 'archive' ? recipe.format : detected?.format;
+    const prefix = detected?.root ?? '';
+    if (detected) imported = { format: detected.format, excludedPaths: [] };
+    if (format === 'modrinth-index') {
+      const manifest = mrpack.parse(manifestAt(prefix + 'modrinth.index.json'));
+      if (imported) {
+        imported.name = manifest.name;
+        imported.version = manifest.versionId;
+      }
       await acceptTarget(targetFromMrpack(manifest.dependencies));
       downloads = manifest.files.flatMap((file) => {
         const path = modpackDataPath(file.path);
-        if (!path || file.env?.server === 'unsupported') {
-          excludedFiles++;
+        if (
+          !path ||
+          file.env?.server === 'unsupported' ||
+          (imported && (file.env?.server === 'optional' || !importServerPath(path, false)))
+        ) {
+          exclude(file.path);
           return [];
         }
         return [
@@ -324,22 +378,47 @@ export async function stageModpackRecipe(
           },
         ];
       });
-      roots = ['overrides/', 'server-overrides/'];
-    } else if (recipe.format === 'curseforge-manifest') {
-      const manifest = cursepack.parse(manifestAt('manifest.json'));
+      roots = [prefix + 'overrides/', prefix + 'server-overrides/'];
+    } else if (format === 'curseforge-manifest') {
+      const manifest = cursepack.parse(manifestAt(prefix + 'manifest.json'));
+      if (imported) {
+        imported.name = manifest.name;
+        imported.version = manifest.version;
+      }
       await acceptTarget(curseTarget(manifest));
       const resolveFiles = options.resolveCurseForgeFiles;
-      if (!resolveFiles) fail('curseforge_credentials');
       const pins = manifest.files
         .filter((file) => file.required)
         .map((file) => ({ projectId: file.projectID, fileId: file.fileID }));
       excludedFiles += manifest.files.length - pins.length;
-      downloads = await trace('resolveDependencies', async () =>
-        resolveFiles(pins, options.signal),
+      downloads = [];
+      if (pins.length) {
+        if (!resolveFiles) fail('curseforge_credentials');
+        downloads = await trace('resolveDependencies', async () =>
+          resolveFiles(pins, options.signal),
+        );
+      }
+      roots = [prefix + manifest.overrides + '/'];
+    } else if (format === 'launcher-instance') {
+      await acceptTarget(launcherImportTarget(manifestAt(prefix + 'mmc-pack.json')));
+      const candidates = [prefix + '.minecraft/', prefix + 'minecraft/'].filter((root) =>
+        members.some((file) => file.path.startsWith(root)),
       );
-      roots = [`${manifest.overrides}/`];
+      if (
+        candidates.length > 1 ||
+        members.some((file) => file.path.startsWith(prefix + 'patches/'))
+      )
+        fail('modpack_target_unresolved');
+      roots = candidates;
+      if (imported) {
+        const cfg = manifests.get(prefix + 'instance.cfg')?.toString('utf8');
+        imported.name =
+          /^name=([^\r\n]{1,512})$/m.exec(cfg ?? '')?.[1]?.trim() ||
+          prefix.slice(0, -1) ||
+          undefined;
+      }
     } else {
-      const root = recipe.preserveRoot ? '' : serverRoot(members);
+      const root = recipe.kind === 'archive' && recipe.preserveRoot ? '' : serverRoot(members);
       const mr = manifestAt(`${root}modrinth.index.json`);
       const cf = manifestAt(`${root}manifest.json`);
       if (mr !== undefined) await acceptTarget(targetFromMrpack(mrpack.parse(mr).dependencies));
@@ -357,18 +436,21 @@ export async function stageModpackRecipe(
     }
     for (const file of members) {
       const layer = roots.findIndex((root) => file.path.startsWith(root));
-      if (layer < 0) continue;
+      if (layer < 0) {
+        if (imported && !manifests.has(file.path)) exclude(file.path);
+        continue;
+      }
       const relative = file.path.slice((roots[layer] as string).length);
       if (
-        recipe.format === 'server-archive' &&
+        format === 'server-archive' &&
         ['manifest.json', 'modrinth.index.json'].includes(relative)
       ) {
         excludedFiles++;
         continue;
       }
       const path = modpackDataPath(relative);
-      if (!path) {
-        excludedFiles++;
+      if (!path || (imported && !importServerPath(path, format === 'launcher-instance'))) {
+        exclude(relative);
         continue;
       }
       const prior = overrides.get(path.toLowerCase());
@@ -381,7 +463,7 @@ export async function stageModpackRecipe(
   downloads = downloads.filter((file) => {
     const allowed =
       modpackDataPath(file.path) === file.path && !overrides.has(file.path.toLowerCase());
-    if (!allowed) excludedFiles++;
+    if (!allowed) exclude(file.path);
     return allowed;
   });
   const paths = [
@@ -460,7 +542,7 @@ export async function stageModpackRecipe(
           ) {
             await rm(destination);
             totalBytes -= saved.size;
-            excludedFiles++;
+            exclude(file.path);
             completedFiles++;
             await progress();
             continue;
@@ -511,7 +593,7 @@ export async function stageModpackRecipe(
         'client'
     ) {
       await rm(destination);
-      excludedFiles++;
+      exclude(file.path);
     } else {
       staged.push({ path: file.path, ...saved });
       completedBytes += saved.size;
@@ -542,7 +624,7 @@ export async function stageModpackRecipe(
             )) === 'client'
           ) {
             await rm(destination);
-            excludedFiles++;
+            exclude(item.path);
           } else {
             staged.push({ path: item.path, ...saved });
             completedBytes += saved.size;
@@ -562,5 +644,6 @@ export async function stageModpackRecipe(
     target,
     files: staged.sort((a, b) => a.path.localeCompare(b.path)),
     excludedFiles,
+    ...(imported ? { imported } : {}),
   };
 }

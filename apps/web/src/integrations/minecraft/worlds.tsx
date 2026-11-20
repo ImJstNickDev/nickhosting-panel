@@ -5,10 +5,19 @@ import {
   type MinecraftWorlds,
 } from '@nickhosting/minecraft/ui';
 import { useEffect, useId, useRef, useState } from 'react';
+import { Link } from 'react-router';
 import { ApiError, download, idempotencyKey } from '../../api/client.js';
 import { hashFile } from '../../api/hash.js';
 import { useFormat, useT } from '../../app/i18n.js';
-import { Check, ConfirmDialog, Dialog, ErrorNotice, Input } from '../../components/ui.js';
+import {
+  Check,
+  ConfirmDialog,
+  Details,
+  Dialog,
+  ErrorNotice,
+  Input,
+  Time,
+} from '../../components/ui.js';
 import { IconAction, Pagination, SearchField } from '../../components/workspace-controls.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { gameUiClient } from '../../features/integrations.js';
@@ -77,6 +86,8 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
   const supported = Boolean(snapshot?.installed && snapshot.supported);
   const offline = ['offline', 'stopped'].includes(props.runtimeState);
   const [search, setSearch] = useState('');
+  const [inspectedWorld, setInspectedWorld] = useState<string>();
+  const detail = snapshot?.worlds.find((world) => world.name === inspectedWorld);
   const [page, setPage] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -137,6 +148,9 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
     props.operation?.effectState !== 'uncertain' &&
     (importing || props.fileTransfer);
 
+  useEffect(() => {
+    if (snapshot && inspectedWorld && !detail) setInspectedWorld(undefined);
+  }, [snapshot, inspectedWorld, detail]);
   useEffect(() => () => transfer.current?.abort(), []);
   useEffect(() => {
     if (!props.pending) setImporting(false);
@@ -601,7 +615,15 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
                       <Icon name="world" />
                     </span>
                     <div className="minecraft-world-identity">
-                      <strong>{world.name}</strong>
+                      <button
+                        type="button"
+                        className="minecraft-world-name"
+                        aria-haspopup="dialog"
+                        aria-label={t(key('viewDetails'), { name: world.name })}
+                        onClick={() => setInspectedWorld(world.name)}
+                      >
+                        <strong>{world.name}</strong>
+                      </button>
                       <div className="minecraft-world-details">
                         {selected && (
                           <span className="minecraft-world-selected">{t(key('selected'))}</span>
@@ -719,6 +741,56 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
             />
           )}
         </>
+      )}
+      {detail && snapshot && (
+        <Dialog
+          open
+          closeIcon
+          title={detail.name}
+          className="minecraft-world-detail-dialog"
+          onClose={() => setInspectedWorld(undefined)}
+        >
+          <Details
+            values={[
+              [t(key('worldFolder')), <code key="folder">/{detail.name}</code>],
+              [
+                t(key('configuredWorld')),
+                t(
+                  snapshot.selectedWorld === null
+                    ? 'web.unknown'
+                    : detail.name === snapshot.selectedWorld
+                      ? 'gameUi.yes'
+                      : 'gameUi.no',
+                ),
+              ],
+              [
+                t(key('detectedVersion')),
+                detail.validation?.versionName ||
+                  detail.validation?.detectedRelease ||
+                  t(key('versionUnknown')),
+              ],
+              [t(key('compatibility')), t(key(`status.${detail.status}`))],
+              [t(key('runtimeStatus')), t(key(offline ? 'serverStopped' : 'runtimeUnverified'))],
+              [t(key('lastObservation')), <Time key="observed" value={detail.observedAt} />],
+            ]}
+          />
+          <div className="minecraft-world-detail-links">
+            {props.permissionKeys.includes('files.read') && (
+              <Link
+                to={`/servers/${props.serverId}/files?directory=${encodeURIComponent(detail.name)}`}
+              >
+                {t(key('openFiles'))}
+              </Link>
+            )}
+            {props.permissionKeys.includes('game.minecraft.datapacks.read') && (
+              <Link
+                to={`/servers/${props.serverId}/game/datapacks?world=${encodeURIComponent(detail.name)}`}
+              >
+                {t(key('openDatapacks'))}
+              </Link>
+            )}
+          </div>
+        </Dialog>
       )}
       {catalogOpen && (
         <MinecraftWorldCatalog

@@ -197,6 +197,12 @@ export function assertMinecraftVerifiedLaunch(
 }
 
 /** Provider configuration can drift independently of the immutable local mapping. */
+/** Only the installer may validate its own already committed, still-stopped launch
+ * before publishing completion. This proof never observes or pins a process image. */
+export interface MinecraftInstallerJournal {
+  operationId: string;
+  source: 'modpack' | 'server-operation';
+}
 export async function assertMinecraftRemoteLaunch(
   db: DB,
   serverId: string,
@@ -204,6 +210,7 @@ export async function assertMinecraftRemoteLaunch(
   env: Environment,
   adapter: Pick<PterodactylAdapter, 'getEgg'>,
   validateEggMetadata = true,
+  installer?: MinecraftInstallerJournal,
 ): Promise<void> {
   const profile = await db
     .selectFrom('minecraft_server_profiles')
@@ -292,7 +299,14 @@ export async function assertMinecraftRemoteLaunch(
     if (name && actual[name] !== undefined && String(actual[name]) !== launch[name])
       throw new DomainError('provenance_mismatch');
   }
-  const evidence = await requireMinecraftRuntimeImageEvidence(db, serverId, null, env);
+  const evidence = await requireMinecraftRuntimeImageEvidence(
+    db,
+    serverId,
+    null,
+    env,
+    undefined,
+    installer,
+  );
   assertMinecraftVerifiedLaunch(
     startup,
     launch,
@@ -315,6 +329,7 @@ export async function requireMinecraftRuntimeImageEvidence(
   observed: string | null,
   env: Environment = {},
   verifiedProcessEpoch?: string,
+  installer?: MinecraftInstallerJournal,
 ): Promise<{
   expected: string | null;
   observed: string | null;
@@ -363,7 +378,12 @@ export async function requireMinecraftRuntimeImageEvidence(
       profile.runtime_image_transition !== undefined
     ) {
       const transition = z
-        .object({ operationId: z.uuid(), combinationId: z.uuid(), after: z.iso.datetime() })
+        .object({
+          operationId: z.uuid(),
+          combinationId: z.uuid(),
+          after: z.iso.datetime(),
+          source: z.literal('server-operation').optional(),
+        })
         .strict()
         .safeParse(profile.runtime_image_transition);
       if (
@@ -372,22 +392,76 @@ export async function requireMinecraftRuntimeImageEvidence(
         profile.runtime_image_digest !== null
       )
         throw new DomainError('provenance_mismatch');
-      const operation = await db
-        .selectFrom('minecraft_modpack_operations')
-        .select(['state', 'resource_owner_id', 'runtime_transition'])
-        .where('id', '=', transition.data.operationId)
-        .where('server_id', '=', serverId)
-        .executeTakeFirst();
+      const operation =
+        transition.data.source === 'server-operation'
+          ? await db
+              .selectFrom('server_operations as operation')
+              .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+              .select(['job.resource_owner_id', 'job.state', 'operation.plan'])
+              .where('operation.job_id', '=', transition.data.operationId)
+              .where('operation.server_id', '=', serverId)
+              .where('operation.action', 'in', ['wipe', 'reinstall'])
+              .executeTakeFirst()
+              .then(
+                (row) =>
+                  row && {
+                    state: row.state === 'succeeded' ? 'applied' : row.state,
+                    ownsInstall:
+                      row.state === 'running' &&
+                      server.active_operation_id === transition.data.operationId,
+                    resource_owner_id: row.resource_owner_id,
+                    runtime_transition: row.plan.minecraftVersionTransition,
+                  },
+              )
+          : await db
+              .selectFrom('minecraft_modpack_operations')
+              .select([
+                'state',
+                'resource_owner_id',
+                'runtime_transition',
+                'lease_until',
+                'lease_token',
+              ])
+              .where('id', '=', transition.data.operationId)
+              .where('server_id', '=', serverId)
+              .executeTakeFirst()
+              .then(
+                (row) =>
+                  row && {
+                    ...row,
+                    ownsInstall:
+                      ['applying', 'preparing'].includes(row.state) &&
+                      !!row.lease_token &&
+                      !!row.lease_until &&
+                      row.lease_until > new Date(),
+                  },
+              );
       const journal = z
         .object({
-          state: z.literal('verified'),
+          state: z.enum(['verified', 'installation-confirmed']),
+          operationId: z.uuid().optional(),
+          serverId: z.uuid().optional(),
           mappingDigest: z.string(),
           target: z.object({ combinationId: z.uuid(), mappingId: z.uuid() }),
         })
         .safeParse(operation?.runtime_transition);
+      const completed =
+        operation?.state === 'applied' && journal.success && journal.data.state === 'verified';
+      const resuming =
+        !!installer &&
+        observed === null &&
+        verifiedProcessEpoch === undefined &&
+        profile.installed &&
+        server.installation_state === 'installed' &&
+        operation?.ownsInstall &&
+        installer.operationId === transition.data.operationId &&
+        installer.source === (transition.data.source ?? 'modpack') &&
+        journal.success &&
+        journal.data.operationId === installer.operationId &&
+        journal.data.serverId === serverId;
       if (
-        operation?.state !== 'applied' ||
-        operation.resource_owner_id !== server.owner_id ||
+        (!completed && !resuming) ||
+        operation?.resource_owner_id !== server.owner_id ||
         !journal.success ||
         journal.data.mappingDigest !== choice.mappingDigest ||
         journal.data.target.combinationId !== profile.combination_id ||

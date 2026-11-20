@@ -12,6 +12,16 @@ import {
   minecraftPlayerDetailActionSchema,
   minecraftPlayerDetailSchema,
 } from '../player-details-contracts.js';
+import {
+  type MinecraftVersionChangeRequest,
+  minecraftVersionCatalogSchema,
+  minecraftVersionChangeAcceptedSchema,
+  minecraftVersionChangeRequestSchema,
+  minecraftVersionChoiceSchema,
+} from '../version-change-contracts.js';
+
+export type { MinecraftVersionChangeRequest } from '../version-change-contracts.js';
+
 import { isMinecraftWorldDirectory } from '../world-names.js';
 import { minecraftRuntimeArtwork } from './runtime-artwork.js';
 
@@ -165,16 +175,7 @@ export const minecraftChoiceSchema = z
   .object({
     id: z.string().min(1).max(256),
     version: z.string().min(1).max(80),
-    runtime: z.enum([
-      'vanilla',
-      'paper',
-      'purpur',
-      'folia',
-      'fabric',
-      'quilt',
-      'forge',
-      'neoforge',
-    ]),
+    runtime: minecraftVersionChoiceSchema.shape.runtime,
     releaseTime: z.iso.datetime({ offset: true }).nullable().optional(),
     releaseType: z.enum(['release', 'snapshot', 'old_alpha', 'old_beta']).optional(),
     capabilities: z.record(z.string(), z.boolean()).optional(),
@@ -284,6 +285,7 @@ const worldSchema = z
   .object({
     name: z.string().refine(isMinecraftWorldDirectory),
     status: z.enum(['verified', 'incompatible', 'unknown', 'invalid', 'unavailable']),
+    observedAt: z.iso.datetime().optional(),
     validation: z
       .object({
         dataVersion: z.number().int().nonnegative().optional(),
@@ -738,6 +740,20 @@ export function createMinecraftUiController(client: GameUiClient) {
         .parse(
           await request(serverPath(serverId, '/datapacks/catalog/acquire'), 'POST', body, signal),
         );
+    },
+    async versionCatalog(serverId: string, signal?: AbortSignal) {
+      return minecraftVersionCatalogSchema.parse(
+        await request(serverPath(serverId, '/versions'), 'GET', undefined, signal),
+      );
+    },
+    async changeVersion(serverId: string, command: MinecraftVersionChangeRequest) {
+      return minecraftVersionChangeAcceptedSchema.parse(
+        await request(
+          serverPath(serverId, '/versions'),
+          'POST',
+          minecraftVersionChangeRequestSchema.parse(command),
+        ),
+      );
     },
     async datapacks(
       serverId: string,
