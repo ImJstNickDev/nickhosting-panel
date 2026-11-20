@@ -35,6 +35,7 @@ export * from './paper-catalog.js';
 export * from './platform-queries.js';
 export { ensureProviderAccounts, resolveProviderCredential } from './provider-accounts.js';
 export * from './provider-backup-events.js';
+export { readMinecraftCatalogSchedule } from './provider-catalog.js';
 export * from './provider-change-feed.js';
 export {
   ensureInstallationFeedLink,

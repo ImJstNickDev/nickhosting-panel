@@ -7,7 +7,11 @@ import {
   getGatewaySnapshot,
   type ManagementRuntime,
 } from '@nickhosting/server-management';
-import { assertManagedIdentity } from '../../../packages/server-management/src/managed-identity.js';
+import {
+  indexGatewayRemotes,
+  readGatewayClaims,
+  verifyGatewayClaims,
+} from './gateway-managed-inventory.js';
 
 /** One bounded, revision-bound read. The timestamp precedes every source read. */
 export async function gatewayEvidence(
@@ -57,7 +61,16 @@ export async function gatewayEvidence(
   const policyNodes = configuration.gatewayNetworkPolicy?.nodes ?? [];
   const [nodes, remotes, allocations] = await Promise.all([
     management.adapter.listNodes(),
-    expected.size ? management.adapter.getApplicationServers([...expected]) : Promise.resolve([]),
+    (async () => {
+      // The snapshot permits 10,000 routes; the adapter accepts 1,000 distinct IDs per lookup.
+      const ids = [...expected];
+      const found: ApplicationServer[] = [];
+      for (let offset = 0; offset < ids.length; offset += 1000)
+        found.push(
+          ...(await management.adapter.getApplicationServers(ids.slice(offset, offset + 1000))),
+        );
+      return found;
+    })(),
     (async () => {
       let next = 0;
       const results: {
@@ -81,14 +94,7 @@ export async function gatewayEvidence(
       return results;
     })(),
   ]);
-  const byUuid = new Map(remotes.map((remote) => [remote.uuid, remote]));
-  if (
-    byUuid.size !== expected.size ||
-    byUuid.size !== remotes.length ||
-    new Set(remotes.map((remote) => remote.id)).size !== remotes.length ||
-    remotes.some((remote) => !expected.has(remote.uuid))
-  )
-    throw new DomainError('provenance_mismatch');
+  const byUuid = indexGatewayRemotes(remotes, expected);
   // Build authority once, after external reads. getGatewaySnapshot acquires
   // the resource lock in this same transaction; contexts/proofs/claims below
   // describe that final snapshot, not a previously issued candidate lease.
@@ -98,33 +104,10 @@ export async function gatewayEvidence(
     if (!isDeepStrictEqual(finalConfiguration, configuration)) membershipChanged();
     if (snapshot.routes.some((route) => !selected.has(route.id))) membershipChanged();
     const ids = [...new Set(snapshot.routes.map((route) => route.serverId))];
-    const [rows, proofs, servers] = ids.length
-      ? await Promise.all([
-          tx
-            .selectFrom('managed_servers as s')
-            .innerJoin('managed_nodes as n', 'n.id', 's.node_id')
-            .innerJoin('runtime_egg_mappings as m', 'm.id', 's.mapping_id')
-            .innerJoin('server_allocations as a', 'a.server_id', 's.id')
-            .select([
-              's.id as serverId',
-              'a.id as allocationId',
-              's.pterodactyl_id',
-              's.pterodactyl_uuid',
-              's.external_id',
-              's.provider_user_id',
-              'n.pterodactyl_node_id',
-              'a.pterodactyl_allocation_id',
-              'a.is_primary',
-              'a.address',
-              'a.port',
-              'm.nest_id',
-              'm.egg_id',
-            ])
-            .where('s.id', 'in', ids)
-            .where('s.deleted_at', 'is', null)
-            .where('s.connection_mode', '=', 'gateway')
-            .execute(),
-          tx
+    const [{ indexed, claimsByServer }, proofs] = await Promise.all([
+      readGatewayClaims(tx, ids),
+      ids.length
+        ? tx
             .selectFrom('gateway_reachability_proofs')
             .select(['route_id', 'proof'])
             .where(
@@ -132,19 +115,10 @@ export async function gatewayEvidence(
               'in',
               snapshot.routes.map((route) => route.id),
             )
-            .execute(),
-          tx.selectFrom('managed_servers').selectAll().where('id', 'in', ids).execute(),
-        ])
-      : [[], [], []];
-    const indexed = new Map(rows.map((row) => [`${row.serverId}:${row.allocationId}`, row]));
-    const claimsByServer = new Map<string, typeof rows>();
-    for (const row of rows) {
-      const claims = claimsByServer.get(row.serverId) ?? [];
-      claims.push(row);
-      claimsByServer.set(row.serverId, claims);
-    }
-    if (indexed.size !== rows.length || servers.length !== ids.length)
-      throw new DomainError('provenance_mismatch');
+            .execute()
+        : [],
+    ]);
+    if (claimsByServer.size !== ids.length) throw new DomainError('provenance_mismatch');
     const proofIndex = new Map(proofs.map((row) => [row.route_id, row.proof]));
     const contexts = snapshot.routes.map((route) => {
       const row = indexed.get(`${route.serverId}:${route.allocationId}`);
@@ -172,18 +146,16 @@ export async function gatewayEvidence(
       )
     )
       membershipChanged();
-    for (const server of servers) {
-      const remote = server.pterodactyl_uuid && byUuid.get(server.pterodactyl_uuid);
-      if (!remote) throw new DomainError('provenance_mismatch');
-      const claims = claimsByServer.get(server.id) ?? [];
-      const nodeId = claims[0]?.pterodactyl_node_id;
-      if (!nodeId || claims.some((claim) => claim.pterodactyl_node_id !== nodeId))
-        throw new DomainError('provenance_mismatch');
-      assertManagedIdentity(server, remote, {
-        pterodactyl_node_id: nodeId,
-        allocations: claims,
-      });
-    }
+    // The final snapshot may have withdrawn candidates while the provider was being read.
+    const finalRemotes = new Map(
+      contexts.map(({ context }) => {
+        const uuid = context.providerServerUuid;
+        const remote = byUuid.get(uuid);
+        if (!remote) throw new DomainError('provenance_mismatch');
+        return [uuid, remote] as const;
+      }),
+    );
+    verifyGatewayClaims(claimsByServer, finalRemotes);
     return {
       observedAt,
       configuration: Object.fromEntries(
@@ -193,13 +165,7 @@ export async function gatewayEvidence(
       contexts,
       nodes: nodes.map(({ id, uuid }) => ({ id, uuid })),
       allocations,
-      servers: [...new Set(contexts.map((entry) => entry.context.providerServerUuid))].map(
-        (uuid) => {
-          const remote = byUuid.get(uuid);
-          if (!remote) throw new DomainError('provenance_mismatch');
-          return projectServer(remote);
-        },
-      ),
+      servers: [...finalRemotes.values()].map(projectServer),
     };
   });
 }

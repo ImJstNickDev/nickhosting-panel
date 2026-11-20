@@ -161,6 +161,69 @@ describe('typed Pterodactyl boundary', () => {
     ).toBe(true);
   });
 
+  function gatedServerInventory() {
+    const uuids = Array.from(
+      { length: 48 * 6 },
+      (_, index) => `f729c8a1-6773-467a-af3f-${String(index + 1).padStart(12, '0')}`,
+    );
+    const filters: string[][] = [];
+    const pending = Array.from({ length: 6 }, () => Promise.withResolvers<Response>());
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      expect(url.pathname).toBe('/api/application/servers');
+      const chunk = url.searchParams.get('filter[uuid]')?.split(',') ?? [];
+      const first = chunk[0];
+      if (!first || !uuids.includes(first)) throw new Error('Unexpected batch');
+      const index = uuids.indexOf(first) / 48;
+      filters[index] = chunk;
+      const request = pending[index];
+      if (!request) throw new Error('Unexpected batch');
+      return request.promise;
+    });
+    const complete = (batch: number, forcedId?: number) => {
+      const chunk = filters[batch];
+      const request = pending[batch];
+      if (!chunk || !request) throw new Error('Batch was not requested');
+      request.resolve(
+        list(
+          [...chunk].reverse().map((uuid, i) => ({
+            ...server,
+            uuid,
+            id: i === 0 && forcedId !== undefined ? forcedId : uuids.indexOf(uuid) + 1,
+          })),
+        ),
+      );
+    };
+    const selection = createPterodactylAdapter({ ...config, fetcher }).getApplicationServers(uuids);
+    return { fetcher, selection, filters, complete };
+  }
+
+  it('limits filtered inventory to four active requests and preserves batch and provider order', async () => {
+    const { fetcher, filters, selection, complete } = gatedServerInventory();
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(4));
+    complete(3);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(5));
+    complete(4);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(6));
+    for (const batch of [5, 2, 1, 0]) complete(batch);
+    expect((await selection).map((entry) => entry.uuid)).toEqual(
+      filters.flatMap((batch) => [...batch].reverse()),
+    );
+  });
+
+  it('rejects conflicting identities across concurrent batches and stops claiming queued work', async () => {
+    const { fetcher, selection, complete } = gatedServerInventory();
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(4));
+    complete(0);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(5));
+    complete(1, 1);
+    // Allow the failed batch's response to be consumed before settling concurrent readers.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    for (const batch of [4, 3, 2]) complete(batch);
+    await expect(selection).rejects.toMatchObject({ reason: 'invalid_response' });
+    expect(fetcher).toHaveBeenCalledTimes(5);
+  });
+
   it.each(['unexpected', 'duplicate-uuid', 'duplicate-id', 'malformed-allocations'] as const)(
     'rejects %s in a filtered server response without per-server fallback',
     async (failure) => {

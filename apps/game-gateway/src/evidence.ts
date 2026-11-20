@@ -38,11 +38,15 @@ export const gatewayEvidenceSchema = z
   })
   .strict();
 
+type Evidence = z.infer<typeof gatewayEvidenceSchema>;
+
 /** No sliding TTL: every consumer sees the original source-read timestamp. */
 export function createEvidenceCache(maximumAgeMs: number, now = Date.now) {
-  let value: z.infer<typeof gatewayEvidenceSchema> | undefined;
+  let value: Evidence | undefined;
   let routes = new Map<string, GatewayRoute>();
-  let contexts = new Map<string, z.infer<typeof gatewayEvidenceSchema>['contexts'][number]>();
+  let contexts = new Map<string, Evidence['contexts'][number]>();
+  let servers = new Map<number, Evidence['servers'][number]>();
+  let allocations = new Map<number, Evidence['allocations'][number]['allocations']>();
   const current = () =>
     value &&
     value.observedAt <= now() &&
@@ -57,22 +61,42 @@ export function createEvidenceCache(maximumAgeMs: number, now = Date.now) {
         ? contexts.get(route.id)
         : undefined;
     },
+    server(id: number) {
+      return current() && servers.get(id);
+    },
+    allocations(nodeId: number) {
+      return current() && allocations.get(nodeId);
+    },
+    serversForRoutes(routeIds: readonly string[]) {
+      const snapshot = current();
+      if (!snapshot) return undefined;
+      const ids = new Set<number>();
+      for (const routeId of routeIds) {
+        const entry = contexts.get(routeId);
+        if (!entry) return undefined;
+        ids.add(entry.context.providerServerId);
+      }
+      return snapshot.servers.filter((server) => ids.has(server.id));
+    },
     replace(input: unknown) {
       const next = gatewayEvidenceSchema.parse(input);
       const nextRoutes = new Map(next.snapshot.routes.map((route) => [route.id, route]));
       const nextContexts = new Map(next.contexts.map((entry) => [entry.routeId, entry]));
-      const serverIds = new Set(next.servers.map((server) => server.id));
+      const nextServers = new Map(next.servers.map((server) => [server.id, server]));
+      const nextAllocations = new Map(
+        next.allocations.map((node) => [node.nodeId, node.allocations]),
+      );
       if (
         nextRoutes.size !== next.snapshot.routes.length ||
         nextContexts.size !== next.contexts.length ||
         nextContexts.size !== nextRoutes.size ||
-        serverIds.size !== next.servers.length ||
+        nextServers.size !== next.servers.length ||
         new Set(next.nodes.map((node) => node.id)).size !== next.nodes.length ||
-        new Set(next.allocations.map((node) => node.nodeId)).size !== next.allocations.length ||
+        nextAllocations.size !== next.allocations.length ||
         next.contexts.some(
           (entry) =>
             nextRoutes.get(entry.routeId)?.revision !== entry.routeRevision ||
-            !serverIds.has(entry.context.providerServerId),
+            !nextServers.has(entry.context.providerServerId),
         ) ||
         next.observedAt > now() ||
         now() - next.observedAt > maximumAgeMs ||
@@ -82,6 +106,8 @@ export function createEvidenceCache(maximumAgeMs: number, now = Date.now) {
       value = next;
       routes = nextRoutes;
       contexts = nextContexts;
+      servers = nextServers;
+      allocations = nextAllocations;
       return next;
     },
   };

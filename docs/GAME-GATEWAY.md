@@ -146,6 +146,19 @@ Lost events, unavailable streams or missing committed start evidence use the leg
 protocol fallback; fallback can wait until the bounded startup stream closes.
 See [ADR 0016](decisions/0016-provider-readiness.md).
 
+## Snapshot renewal and worker recovery
+
+Core reads eligible routes, policy, Minecraft combinations and startup samples in batches.
+Each valid route renews its lease on every full snapshot. Route revisions advance when
+their published content changes. Scoped inventory validates the requested routes and
+their managed allocation claims again after the provider responds.
+
+Migration 068 records Gateway reconciliation work in PostgreSQL. State changes, terminal
+jobs and reservation changes schedule affected servers. Ready routes carry their next
+observation deadline in the same index. Stable states have no deadline. The worker
+resumes pending work after a restart and acknowledges the version it processed, so a
+concurrent state change remains eligible for the next pass.
+
 ## Idle deadline and stop dispatch (M5 optimization)
 
 The authoritative `sleepEligibleAt` schedules one fresh observation at the idle

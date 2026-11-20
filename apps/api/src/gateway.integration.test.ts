@@ -13,6 +13,7 @@ import {
   setGatewayPolicy,
   setGatewayRoute,
 } from '@nickhosting/server-management';
+import { sql } from 'kysely';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SatisfactoryApi } from '../../../games/satisfactory/src/api.js';
 import {
@@ -1383,6 +1384,86 @@ describe('M3 Core service authentication and managed control plane', () => {
     expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
   });
 
+  it('collects evidence for more than one provider batch and rejects incomplete inventory', async () => {
+    const prefixId = 20_000_000;
+    const rows = await sql<{
+      id: string;
+      uuid: string;
+      provider: number;
+      external: string;
+      port: number;
+      allocation_id: string;
+    }>`
+      WITH fleet AS MATERIALIZED (
+        SELECT gen_random_uuid() AS id, gen_random_uuid() AS uuid, gen_random_uuid()::text AS external,
+          gen_random_uuid() AS allocation_id, ${prefixId}::int + n AS provider, 35000 + n AS port
+        FROM generate_series(1,1000) AS n
+      ), servers AS (
+        INSERT INTO managed_servers (id,owner_id,mapping_id,node_id,name,external_id,limits,connection_mode,pterodactyl_id,
+          pterodactyl_uuid,pterodactyl_identifier,provider_user_id,installation_state,runtime_state)
+        SELECT id,${f.context.subjectUserId},${f.mappingId},${f.nodeId},'evidence fixture',external,
+          ${JSON.stringify(f.limits)}::jsonb,'gateway',provider,uuid,provider::text,${remote.user},'installed','offline' FROM fleet
+        RETURNING id
+      ), allocations AS (
+        INSERT INTO server_allocations (id,server_id,node_id,pterodactyl_allocation_id,address,backend_address,port,role,protocols,is_primary)
+        SELECT allocation_id, s.id,${f.nodeId},provider,'10.0.0.2','10.0.0.2',port,'game',ARRAY['tcp'],true
+        FROM fleet JOIN servers s USING(id) RETURNING id
+      ), routes AS (
+        INSERT INTO gateway_routes(id,gateway_id,server_id,allocation_id,public_address,public_port,transport)
+        SELECT gen_random_uuid(),${env.NH_GATEWAY_ID},f.id,a.id,'192.0.2.10',port,'tcp'
+        FROM fleet f JOIN allocations a ON a.id=f.allocation_id
+      ), policies AS (
+        INSERT INTO gateway_server_states(server_id,generation,enabled,protocol_id,game_version,state,readiness_timeout_seconds,
+          readiness_max_age_seconds,estimate_max_age_seconds,wake_retry_seconds)
+        SELECT id,gen_random_uuid(),true,'fixture','1','manually_stopped',60,15,86400,10 FROM servers
+      ) SELECT * FROM fleet`.execute(f.db);
+    const remotes = new Map([[remote.uuid, remote]]);
+    for (const row of rows.rows) {
+      remotes.set(row.uuid, {
+        ...remote,
+        id: row.provider,
+        uuid: row.uuid,
+        identifier: String(row.provider),
+        external_id: row.external,
+        allocation: row.provider,
+        relationships: {
+          allocations: {
+            object: 'list',
+            data: [
+              {
+                attributes: {
+                  id: row.provider,
+                  ip: '10.0.0.2',
+                  port: row.port,
+                  assigned: true,
+                  alias: null,
+                },
+              },
+            ],
+          },
+        },
+      });
+    }
+    const fetch = vi.mocked(f.adapter.getApplicationServers);
+    fetch.mockImplementation(async (ids) => {
+      if (ids.length > 1000) throw new Error('Provider batch limit');
+      return ids.map((id) => {
+        const server = remotes.get(id);
+        if (!server) throw new Error('Unknown scoped identity');
+        return server;
+      });
+    });
+    const response = await request(`${prefix()}/evidence`);
+    expect(response.status).toBe(200);
+    const evidence = await response.json();
+    expect(evidence.snapshot.routes).toHaveLength(1001);
+    expect(evidence.contexts).toHaveLength(1001);
+    expect(evidence.servers).toHaveLength(1001);
+    expect(fetch.mock.calls.map(([ids]) => ids.length)).toEqual([1000, 1]);
+    fetch.mockResolvedValueOnce([]);
+    expect((await request(`${prefix()}/evidence`)).status).toBe(409);
+  });
+
   it.each(['new route', 'withdrawn route', 'changed identity'] as const)(
     'fences %s during evidence provider reads using the final authoritative snapshot',
     async (change) => {
@@ -1540,6 +1621,33 @@ describe('M3 Core service authentication and managed control plane', () => {
     },
   );
 
+  it.each(['withdrawal', 'identity'] as const)(
+    'rechecks %s during batched provider reads',
+    async (change) => {
+      vi.mocked(f.adapter.getApplicationServers).mockImplementationOnce(async () => {
+        if (change === 'withdrawal')
+          await f.db
+            .updateTable('gateway_routes')
+            .set({ enabled: false })
+            .where('id', '=', route.id)
+            .execute();
+        else
+          await f.db
+            .updateTable('managed_servers')
+            .set({ pterodactyl_identifier: 'abcd1234' })
+            .where('id', '=', serverId)
+            .execute();
+        return [remote];
+      });
+      const response = await request(`${prefix()}/inventory`, {
+        operation: 'servers',
+        routeIds: [route.id],
+      });
+      expect(response.status).toBe(change === 'withdrawal' ? 412 : 409);
+      expect(f.adapter.getApplicationServers).toHaveBeenCalledOnce();
+    },
+  );
+
   it('requires current managed provider context before requesting batched inventory', async () => {
     await f.db
       .updateTable('managed_servers')
@@ -1559,9 +1667,9 @@ describe('M3 Core service authentication and managed control plane', () => {
   });
 
   it('does not classify a context provenance failure as retryable membership drift', async () => {
-    const management = await import('@nickhosting/server-management');
+    const inventory = await import('./gateway-managed-inventory.js');
     const context = vi
-      .spyOn(management, 'gatewaySafetyContext')
+      .spyOn(inventory, 'readGatewayClaims')
       .mockRejectedValueOnce(new DomainError('provenance_mismatch'));
     try {
       const response = await request(`${prefix()}/inventory`, {

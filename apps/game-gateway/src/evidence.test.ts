@@ -56,6 +56,10 @@ it('shares an exact revision-bound envelope without extending its source age or 
   const cache = createEvidenceCache(1000, () => now);
   cache.replace(input);
   expect(cache.route(route)?.context).toEqual(context);
+  expect(cache.server(1)).toEqual(input.servers[0]);
+  expect(cache.allocations(1)).toEqual([]);
+  expect(cache.serversForRoutes([route.id, route.id])).toEqual(input.servers);
+  expect(cache.serversForRoutes([route.id, randomUUID()])).toBeUndefined();
   expect(cache.route({ ...route, revision: 2 })).toBeUndefined();
   expect(cache.route({ ...route, generation: randomUUID() })).toBeUndefined();
   expect(() => cache.replace({ ...input, contexts: [] })).toThrow();
@@ -63,6 +67,9 @@ it('shares an exact revision-bound envelope without extending its source age or 
     cache.replace({ ...input, contexts: [...input.contexts, ...input.contexts] }),
   ).toThrow();
   now += 901;
+  expect(cache.server(1)).toBeUndefined();
+  expect(cache.allocations(1)).toBeUndefined();
+  expect(cache.serversForRoutes([route.id])).toBeUndefined();
   expect(cache.current()).toBeUndefined();
   expect(cache.route(route)).toBeUndefined();
   expect(() => cache.replace(input)).toThrow();

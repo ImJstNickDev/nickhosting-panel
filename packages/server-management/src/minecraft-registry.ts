@@ -920,11 +920,23 @@ export async function inspectMinecraftCombinations(
   diagnostics = true,
 ) {
   if (!rows.length) return [];
-  const mappings = await db
-    .selectFrom('runtime_egg_mappings')
-    .selectAll()
-    .where('id', 'in', [...new Set(rows.map((row) => row.mapping_id))])
-    .execute();
+  const inspect = await loadMinecraftCombinationInspector(db, rows, env, diagnostics);
+  return rows.map(inspect);
+}
+
+export async function loadMinecraftCombinationInspector(
+  db: DB,
+  rows: readonly CombinationRow[],
+  env: Environment = {},
+  diagnostics = true,
+) {
+  const mappings = rows.length
+    ? await db
+        .selectFrom('runtime_egg_mappings')
+        .selectAll()
+        .where('id', 'in', [...new Set(rows.map((row) => row.mapping_id))])
+        .execute()
+    : [];
   const byMapping = new Map(mappings.map((mapping) => [mapping.id, mapping]));
   const mappingDigests = new Map(
     mappings.map((mapping) => [mapping.id, minecraftMappingDigest(mapping)]),
@@ -950,7 +962,7 @@ export async function inspectMinecraftCombinations(
     entries.push(report);
     byChoice.set(report.combination_id, entries);
   }
-  return rows.map((row) => {
+  return (row: CombinationRow) => {
     const mapping = byMapping.get(row.mapping_id);
     if (!mapping) throw new DomainError('integration_unavailable');
     return inspectLoadedCombination(
@@ -960,7 +972,7 @@ export async function inspectMinecraftCombinations(
       env,
       mappingDigests.get(mapping.id),
     );
-  });
+  };
 }
 
 export async function requireMinecraftChoice(

@@ -295,7 +295,7 @@ export async function createGatewayRuntime(
             .max(1000)
             .parse(await client.requestJson('inventory', { operation: 'nodes' }, signal)),
         listAllocations: async (nodeId, signal) =>
-          evidence.current()?.allocations.find((entry) => entry.nodeId === nodeId)?.allocations ??
+          evidence.allocations(nodeId) ??
           z
             .array(safetyProviderAllocationSchema)
             .max(100000)
@@ -307,7 +307,7 @@ export async function createGatewayRuntime(
           if (!routeId) throw new DomainError('provenance_mismatch');
           const value = routeValues.get(routeId);
           if (value && evidence.route(value)) {
-            const cached = evidence.current()?.servers.find((entry) => entry.id === id);
+            const cached = evidence.server(id);
             if (cached) return cached;
           }
           return safetyProviderServerSchema.parse(
@@ -315,18 +315,8 @@ export async function createGatewayRuntime(
           );
         },
         getApplicationServers: async (routeIds, signal) => {
-          const cached = evidence.current();
-          if (
-            cached &&
-            routeIds.every((id) => cached.snapshot.routes.some((route) => route.id === id))
-          ) {
-            const ids = new Set(
-              cached.contexts
-                .filter((entry) => routeIds.includes(entry.routeId))
-                .map((entry) => entry.context.providerServerId),
-            );
-            return cached.servers.filter((entry) => ids.has(entry.id));
-          }
+          const cached = evidence.serversForRoutes(routeIds);
+          if (cached) return cached;
           const servers = new Map<number, z.infer<typeof safetyProviderServerSchema>>();
           // Keep each control request bounded without lowering the snapshot route
           // limit. Several roles may refer to the same server across chunks.

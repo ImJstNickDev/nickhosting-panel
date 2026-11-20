@@ -1,21 +1,32 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
-import type { Database } from '@nickhosting/database';
+import { type Database, notifyMinecraftCatalogRequest } from '@nickhosting/database';
 import {
   createRuntimeMetadataClient,
   type FabricCatalogResponse,
   type RuntimeMetadataClient,
 } from '@nickhosting/minecraft';
-import type { Kysely, Selectable } from 'kysely';
-import { minecraftMetadataRefreshMs } from './minecraft-metadata.js';
+import { type Kysely, type Selectable, sql } from 'kysely';
+import {
+  type MinecraftMetadataRefreshOptions,
+  minecraftMetadataRefreshMs,
+} from './minecraft-metadata.js';
 
 type DB = Kysely<Database>;
 type Provider = 'fabric' | 'quilt' | 'folia' | 'paper' | 'purpur' | 'forge' | 'neoforge';
 type SyncRow = Selectable<Database['minecraft_metadata_sync']>;
-export interface ProviderCatalogRefreshOptions {
-  client?: RuntimeMetadataClient;
-  userAgent?: string;
-  now?: () => Date;
+export type ProviderCatalogRefreshOptions = MinecraftMetadataRefreshOptions;
+// Older rolling deployments may have Fabric's row before the durable request column.
+const supportsRequests = sql<boolean>`EXISTS (
+  SELECT 1 FROM pg_attribute WHERE attrelid = 'minecraft_metadata_sync'::regclass
+    AND attname = 'requested_at' AND NOT attisdropped
+)`;
+export function readMinecraftCatalogSchedule(db: DB) {
+  return db
+    .selectFrom('minecraft_metadata_sync')
+    .select(['id', 'next_check_at', 'lease_until'])
+    .where((eb) => eb.or([eb('id', '=', 'mojang'), supportsRequests]))
+    .execute();
 }
 const leaseMs = 60_000;
 const heartbeatMs = 20_000;
@@ -53,14 +64,17 @@ export function providerCatalogStatus(
 /** Durably enqueue without provider I/O. Row locking coalesces requests across API processes. */
 export async function requestProviderCatalogRefresh(db: DB, provider: Provider, now: Date) {
   await db.transaction().execute(async (trx) => {
+    const schema = await trx
+      .selectNoFrom(supportsRequests.as('available'))
+      .executeTakeFirstOrThrow();
+    if (!schema.available) throw new DomainError('integration_unavailable');
     const row = await trx
       .selectFrom('minecraft_metadata_sync')
-      .selectAll()
+      .select(['last_checked_at', 'requested_at', 'lease_id', 'lease_until'])
       .where('id', '=', provider)
       .forUpdate()
       .executeTakeFirst();
-    // selectAll remains compatible with the pre-046 schema during rolling deployment.
-    if (!row || row.requested_at === undefined) throw new DomainError('integration_unavailable');
+    if (!row) throw new DomainError('integration_unavailable');
     if (row.requested_at || (row.lease_id && row.lease_until && row.lease_until > now)) return;
     const due = Math.max(now.getTime(), (row.last_checked_at?.getTime() ?? 0) + minimumAttemptMs);
     await trx
@@ -68,6 +82,7 @@ export async function requestProviderCatalogRefresh(db: DB, provider: Provider, 
       .set({ requested_at: now, next_check_at: new Date(due) })
       .where('id', '=', provider)
       .execute();
+    await notifyMinecraftCatalogRequest(trx);
   });
 }
 /** Worker-only. Requests survive process loss; only a live lease holder can publish or clear them. */
@@ -90,13 +105,6 @@ export async function refreshProviderCatalog<Snapshot>(
   const now = options.now ?? (() => new Date());
   const started = now();
   const leaseId = randomUUID();
-  const deployed = await db
-    .selectFrom('minecraft_metadata_sync')
-    .selectAll()
-    .where('id', '=', provider)
-    .executeTakeFirst();
-  if (!deployed || deployed.requested_at === undefined)
-    return { state: 'skipped' as const, changed: 0 };
   const claim = await db
     .updateTable('minecraft_metadata_sync')
     .set({
@@ -105,6 +113,7 @@ export async function refreshProviderCatalog<Snapshot>(
       last_checked_at: started,
     })
     .where('id', '=', provider)
+    .where(supportsRequests)
     .where('next_check_at', '<=', started)
     .where((eb) => eb.or([eb('lease_until', 'is', null), eb('lease_until', '<=', started)]))
     .returning(['manifest_hash', 'manifest_json'])
@@ -134,7 +143,7 @@ export async function refreshProviderCatalog<Snapshot>(
     const snapshot = await definition.fetch(
       options.client ??
         createRuntimeMetadataClient({
-          userAgent: options.userAgent ?? '',
+          userAgent: options.userAgent ?? (await options.loadUserAgent?.()) ?? '',
           timeoutMs: 10_000,
           fetch: (input, init) =>
             fetch(input, {

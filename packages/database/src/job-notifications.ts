@@ -5,7 +5,8 @@ import type { Database } from './index.js';
 export interface JobNotificationPool {
   connect(): Promise<PoolClient>;
 }
-const channelSql = (kind: 'jobs' | 'gateway') =>
+type ChangeChannel = 'jobs' | 'gateway' | 'catalogs';
+const channelSql = (kind: ChangeChannel) =>
   `'nh_${kind}_' || md5(current_database() || ':' || current_schema())`;
 
 /** PostgreSQL delivers this hint only on commit. The durable outbox remains authority. */
@@ -36,11 +37,23 @@ export async function listenForGatewayChanges(
   return listenForChanges(pool, wake, disconnected, 'gateway');
 }
 
+export async function notifyMinecraftCatalogRequest(db: Kysely<Database>) {
+  await sql`select pg_notify(${sql.raw(channelSql('catalogs'))}, '')`.execute(db);
+}
+
+export function listenForMinecraftCatalogRequests(
+  pool: JobNotificationPool,
+  wake: () => void,
+  disconnected: () => void,
+) {
+  return listenForChanges(pool, wake, disconnected, 'catalogs');
+}
+
 async function listenForChanges(
   pool: JobNotificationPool,
   wake: () => void,
   disconnected: () => void,
-  kind: 'jobs' | 'gateway',
+  kind: ChangeChannel,
 ): Promise<{ close(): void }> {
   let client: PoolClient | undefined;
   let closed = false;

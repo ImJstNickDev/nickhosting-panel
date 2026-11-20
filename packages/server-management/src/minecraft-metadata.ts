@@ -13,6 +13,12 @@ export const minecraftMetadataRefreshMs = 15 * 60 * 1000;
 const retryMs = 60_000;
 const leaseMs = 60_000;
 type DB = Kysely<Database>;
+export interface MinecraftMetadataRefreshOptions {
+  client?: RuntimeMetadataClient;
+  userAgent?: string;
+  loadUserAgent?: () => Promise<string>;
+  now?: () => Date;
+}
 
 export async function getMinecraftMetadataStatus(db: DB, now = new Date()) {
   const row = await db
@@ -55,14 +61,12 @@ export async function cachedMinecraftManifest(db: DB) {
 
 /** A durable lease elects one downloader, including across worker restarts. Network
  * work happens outside transactions; only the still-current lease may commit. */
-export async function refreshMinecraftMetadata(
-  db: DB,
-  options: { client?: RuntimeMetadataClient; userAgent?: string; now?: () => Date },
-) {
+export async function refreshMinecraftMetadata(db: DB, options: MinecraftMetadataRefreshOptions) {
   const now = options.now ?? (() => new Date());
   const started = now();
   const leaseId = randomUUID();
-  await db
+  const leaseUntil = new Date(started.getTime() + leaseMs);
+  const claim = await db
     .insertInto('minecraft_metadata_sync')
     .values({
       id: 'mojang',
@@ -72,27 +76,31 @@ export async function refreshMinecraftMetadata(
       last_success_at: null,
       next_check_at: started,
       last_error: null,
-      lease_id: null,
-      lease_until: null,
-    })
-    .onConflict((c) => c.column('id').doNothing())
-    .execute();
-  const claim = await db
-    .updateTable('minecraft_metadata_sync')
-    .set({
       lease_id: leaseId,
-      lease_until: new Date(started.getTime() + leaseMs),
+      lease_until: leaseUntil,
     })
-    .where('id', '=', 'mojang')
-    .where('next_check_at', '<=', started)
-    .where((eb) => eb.or([eb('lease_until', 'is', null), eb('lease_until', '<=', started)]))
-    .returning('manifest_hash')
+    .onConflict((c) =>
+      c
+        .column('id')
+        .doUpdateSet({ lease_id: leaseId, lease_until: leaseUntil })
+        .where('minecraft_metadata_sync.next_check_at', '<=', started)
+        .where((eb) =>
+          eb.or([
+            eb('minecraft_metadata_sync.lease_until', 'is', null),
+            eb('minecraft_metadata_sync.lease_until', '<=', started),
+          ]),
+        ),
+    )
+    .returning('id')
     .executeTakeFirst();
   if (!claim) return { state: 'skipped' as const, changed: 0 };
   try {
     const client =
       options.client ??
-      createRuntimeMetadataClient({ userAgent: options.userAgent ?? '', timeoutMs: 10_000 });
+      createRuntimeMetadataClient({
+        userAgent: options.userAgent ?? (await options.loadUserAgent?.()) ?? '',
+        timeoutMs: 10_000,
+      });
     const document = await client.read(minecraftManifestUrl);
     // Reuse the integration's strict parser, trusted-origin checks and entry bound.
     const releases = await minecraftReleaseCatalog({ read: async () => document }, true);
