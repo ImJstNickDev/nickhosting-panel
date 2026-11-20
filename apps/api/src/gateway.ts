@@ -445,7 +445,12 @@ export function registerGatewayRoutes(
           routes.length !== before.routes.length ||
           routes.some((route, index) => {
             const original = before.routes[index];
-            return route.id !== original?.id || route.revision !== original.revision;
+            return (
+              route.id !== original?.id ||
+              route.serverId !== original.serverId ||
+              route.allocationId !== original.allocationId ||
+              route.revision !== original.revision
+            );
           })
         )
           return false;

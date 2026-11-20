@@ -17,6 +17,14 @@ Metadata reads allow only the enumerated official HTTPS origins, omit credential
 
 [Minecraft 26.1 release notes](https://feedback.minecraft.net/hc/en-us/articles/44551668333837-Minecraft-Java-Edition-26-1) identify Java 25. [Paper's current Java table](https://docs.papermc.io/paper/getting-started/) also identifies Java 25 for 26.1. The resolver takes each exact release's runtime requirement from metadata rather than extending that table to hypothetical future releases. Current [Fabric installer source](https://github.com/FabricMC/fabric-installer/blob/master/build.gradle) and [Forge installer source](https://github.com/MinecraftForge/Installer/blob/2.0/build.gradle) target a Java 8 base; installing a loader does not lower the game's requirement. Exact installed output and launch tests are still required to establish runtime compatibility. These sources are references only; no upstream implementation was copied.
 
+## Catalog refresh scheduling
+
+The worker reads the deadlines and leases for all eight Minecraft metadata catalogs
+in one query. It loads provider settings and manifest data after winning the database
+lease for a due source. An Owner sync request wakes the worker after the transaction
+commits. While listening for notifications, the worker checks at the next deadline
+or within 60 seconds. It checks every five seconds while the listener is unavailable.
+
 ## Owner mapping and installation proof
 
 `MinecraftRuntimeMapping` requires:

@@ -424,33 +424,47 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       ),
     async getApplicationServers(uuids: string[]): Promise<ApplicationServer[]> {
       const selected = [...new Set(parseInput(z.array(z.uuid()).max(1000), uuids))];
-      const servers: ApplicationServer[] = [];
+      const pages: ApplicationServer[][] = [];
       const seen = new Set<string>();
       const seenIds = new Set<number>();
-      // Standard Panel UUID filtering accepts comma-separated exact values.
-      // Bound URL length and keep all pagination inside the existing transport.
-      for (let offset = 0; offset < selected.length; offset += 48) {
-        const chunk = new Set(selected.slice(offset, offset + 48));
-        const query = new URLSearchParams({
-          'filter[uuid]': [...chunk].join(','),
-          include: 'allocations',
-        });
-        const found = await transport.list(
-          'application',
-          `servers?${query}`,
-          applicationServerSchema,
-        );
-        for (const server of found) {
-          if (!chunk.has(server.uuid) || seen.has(server.uuid) || seenIds.has(server.id))
-            throw new PterodactylError('invalid_response', 'application', 'rejected');
-          seen.add(server.uuid);
-          seenIds.add(server.id);
-          servers.push(server);
+      const batchSize = 48;
+      let next = 0;
+      let failure: { error: unknown } | undefined;
+      // Panel supports exact, comma-separated UUIDs. Each reader follows its own
+      // pagination before claiming another batch; keep provider order in each batch.
+      async function readBatches() {
+        try {
+          while (!failure && next < selected.length) {
+            const offset = next;
+            next += batchSize;
+            const chunk = new Set(selected.slice(offset, offset + batchSize));
+            const query = new URLSearchParams({
+              'filter[uuid]': [...chunk].join(','),
+              include: 'allocations',
+            });
+            const found = await transport.list(
+              'application',
+              `servers?${query}`,
+              applicationServerSchema,
+            );
+            for (const server of found) {
+              if (!chunk.has(server.uuid) || seen.has(server.uuid) || seenIds.has(server.id))
+                throw new PterodactylError('invalid_response', 'application', 'rejected');
+              seen.add(server.uuid);
+              seenIds.add(server.id);
+            }
+            pages[offset / batchSize] = found;
+          }
+        } catch (error) {
+          failure ??= { error };
         }
       }
-      // Missing members remain visible to the caller's managed-identity check;
-      // never hide partial inventory behind per-server fallback requests.
-      return servers;
+      await Promise.all(
+        Array.from({ length: Math.min(4, Math.ceil(selected.length / batchSize)) }, readBatches),
+      );
+      if (failure) throw failure.error;
+      // Leave missing members visible to the caller's managed-identity check.
+      return pages.flat();
     },
     async findServerByExternalId(externalId: string) {
       const key = parseInput(

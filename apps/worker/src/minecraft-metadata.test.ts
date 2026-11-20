@@ -1,193 +1,133 @@
 import { createLogger } from '@nickhosting/core';
-import { getSettings } from '@nickhosting/database';
+import { getSettings, listenForMinecraftCatalogRequests } from '@nickhosting/database';
 import {
+  readMinecraftCatalogSchedule,
   refreshFabricCatalog,
-  refreshFoliaCatalog,
   refreshMinecraftMetadata,
-  refreshNeoForgeCatalog,
   refreshPaperCatalog,
-  refreshPurpurCatalog,
-  refreshQuiltCatalog,
 } from '@nickhosting/server-management';
-import { beforeEach, expect, it, vi } from 'vitest';
-import {
-  pollFabricMetadata,
-  pollFoliaMetadata,
-  pollMinecraftMetadata,
-  pollNeoForgeMetadata,
-  pollPaperMetadata,
-  pollPurpurMetadata,
-  pollQuiltMetadata,
-} from './minecraft-metadata.js';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { startMinecraftMetadataLoop } from './minecraft-metadata.js';
 
-vi.mock('@nickhosting/database', () => ({ getSettings: vi.fn() }));
+vi.mock('@nickhosting/database', () => ({
+  getSettings: vi.fn(),
+  listenForMinecraftCatalogRequests: vi.fn(),
+}));
 vi.mock('@nickhosting/server-management', () => ({
+  readMinecraftCatalogSchedule: vi.fn(),
   refreshMinecraftMetadata: vi.fn(),
   refreshFabricCatalog: vi.fn(),
   refreshQuiltCatalog: vi.fn(),
   refreshFoliaCatalog: vi.fn(),
   refreshPaperCatalog: vi.fn(),
   refreshPurpurCatalog: vi.fn(),
+  refreshForgeCatalog: vi.fn(),
   refreshNeoForgeCatalog: vi.fn(),
 }));
-const db = {} as Parameters<typeof pollMinecraftMetadata>[0];
-const get = vi.mocked(getSettings);
-const refresh = vi.mocked(refreshMinecraftMetadata);
-const records: unknown[] = [];
-const logger = createLogger((record) => {
-  records.push(record);
+const base = new Date('2026-01-01');
+const row = (
+  id: Awaited<ReturnType<typeof readMinecraftCatalogSchedule>>[number]['id'],
+  delay: number,
+  lease?: number,
+) => ({
+  id,
+  next_check_at: new Date(base.getTime() + delay),
+  lease_until: lease === undefined ? null : new Date(base.getTime() + lease),
 });
+const schedule = vi.mocked(readMinecraftCatalogSchedule);
+const listen = vi.mocked(listenForMinecraftCatalogRequests);
+const subscription = { close: vi.fn() };
+const records: unknown[] = [];
+const env = { NH_MINECRAFT_METADATA_USER_AGENT: 'Fixture https://example.test' };
+const start = () =>
+  startMinecraftMetadataLoop(
+    {} as Parameters<typeof startMinecraftMetadataLoop>[0],
+    {} as Parameters<typeof startMinecraftMetadataLoop>[1],
+    env,
+    createLogger((record) => records.push(record)),
+  );
 beforeEach(() => {
   records.length = 0;
-  vi.clearAllMocks();
-  vi.mocked(refreshFabricCatalog).mockResolvedValue({ state: 'skipped', changed: 0 });
-  vi.mocked(refreshPaperCatalog).mockResolvedValue({ state: 'skipped', changed: 0 });
-  get.mockResolvedValue({
-    values: { contentMetadataUserAgent: 'Fixture https://example.test' },
+  vi.resetAllMocks();
+  vi.useFakeTimers();
+  vi.setSystemTime(base);
+  listen.mockResolvedValue(subscription);
+  vi.mocked(getSettings).mockResolvedValue({
+    values: { contentMetadataUserAgent: env.NH_MINECRAFT_METADATA_USER_AGENT },
   } as Awaited<ReturnType<typeof getSettings>>);
 });
-it('uses resolved Owner/environment settings and does not log skipped checks', async () => {
-  refresh.mockResolvedValue({ state: 'skipped', changed: 0 });
-  const env = { NH_MINECRAFT_METADATA_USER_AGENT: 'Fixture https://example.test' };
-  await pollMinecraftMetadata(db, env, logger);
-  expect(get).toHaveBeenCalledWith(db, env);
-  expect(refresh).toHaveBeenCalledWith(db, { userAgent: 'Fixture https://example.test' });
-  expect(records).toHaveLength(0);
-});
-it('reports safe result counts for successful periodic refresh', async () => {
-  refresh.mockResolvedValue({ state: 'updated', changed: 2 });
-  await pollMinecraftMetadata(db, {}, logger);
-  expect(records).toHaveLength(1);
-  expect(JSON.stringify(records)).toContain('minecraft.metadata_refreshed');
-});
-it('contains failures without leaking request or database details into logs', async () => {
-  refresh.mockRejectedValue(new Error('secret://do-not-log'));
-  await pollMinecraftMetadata(db, {}, logger);
-  expect(JSON.stringify(records)).toContain('minecraft.metadata_refresh_unavailable');
-  expect(JSON.stringify(records)).not.toContain('secret');
+afterEach(() => vi.useRealTimers());
+
+it('checks only the schedule at rest, wakes at the earliest eligible deadline and drains notifications on close', async () => {
+  schedule.mockResolvedValue([row('mojang', 120000), row('fabric', 1000, 4000)]);
+  vi.mocked(refreshFabricCatalog).mockResolvedValue({ state: 'skipped', changed: 0 });
+  const loop = start();
+  await vi.advanceTimersByTimeAsync(3999);
+  expect(schedule).toHaveBeenCalledOnce();
+  expect(refreshFabricCatalog).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(refreshFabricCatalog).toHaveBeenCalledOnce();
+  expect(refreshMinecraftMetadata).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(59999);
+  expect(schedule).toHaveBeenCalledTimes(2);
+  expect(getSettings).not.toHaveBeenCalled();
+  expect(records).toEqual([]);
+  await loop.close();
+  listen.mock.calls[0]?.[1]();
+  await vi.advanceTimersByTimeAsync(60000);
+  expect(schedule).toHaveBeenCalledTimes(2);
+  expect(subscription.close).toHaveBeenCalledOnce();
 });
 
-it('refreshes Fabric independently even when Mojang fails', async () => {
-  refresh.mockRejectedValue(new Error('unavailable'));
-  vi.mocked(refreshFabricCatalog).mockResolvedValue({ state: 'updated', changed: 3 });
-  await Promise.all([pollMinecraftMetadata(db, {}, logger), pollFabricMetadata(db, {}, logger)]);
-  expect(refreshFabricCatalog).toHaveBeenCalledWith(db, {
-    userAgent: 'Fixture https://example.test',
-  });
+it('rechecks a committed manual request immediately and retries after a listener disconnect', async () => {
+  schedule.mockResolvedValue([row('mojang', 100000)]);
+  vi.mocked(refreshFabricCatalog).mockResolvedValue({ state: 'updated', changed: 2 });
+  const loop = start();
+  await vi.advanceTimersByTimeAsync(1);
+  schedule.mockResolvedValue([row('mojang', 100000), row('fabric', 1)]);
+  listen.mock.calls[0]?.[1]();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(refreshFabricCatalog).toHaveBeenCalledOnce();
   expect(JSON.stringify(records)).toContain('fabric.metadata_refreshed');
+  listen.mockRejectedValueOnce(new Error('listener unavailable'));
+  schedule.mockResolvedValue([row('mojang', 100000)]);
+  listen.mock.calls[0]?.[2]();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(listen).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(listen).toHaveBeenCalledTimes(3);
+  await loop.close();
 });
 
-it('lets Mojang poll again while Fabric remains in progress', async () => {
-  let finish: (() => void) | undefined;
-  vi.mocked(refreshFabricCatalog).mockImplementation(async () => {
-    await new Promise<void>((resolve) => {
-      finish = resolve;
-    });
-    return { state: 'updated', changed: 1 };
+it('bootstraps missing Mojang, shares settings among winners and continues other providers during a slow refresh', async () => {
+  const fabric = Promise.withResolvers<{ state: 'updated'; changed: number }>();
+  schedule
+    .mockResolvedValueOnce([row('fabric', 0)])
+    .mockResolvedValue([row('mojang', 100000), row('fabric', 0), row('paper', 0)]);
+  vi.mocked(refreshFabricCatalog).mockImplementation(async (_db, options) => {
+    expect(await options.loadUserAgent?.()).toBe(env.NH_MINECRAFT_METADATA_USER_AGENT);
+    return fabric.promise;
   });
-  refresh.mockResolvedValue({ state: 'skipped', changed: 0 });
-  const fabric = pollFabricMetadata(db, {}, logger);
-  await pollMinecraftMetadata(db, {}, logger);
-  await pollMinecraftMetadata(db, {}, logger);
-  expect(refresh).toHaveBeenCalledTimes(2);
-  expect(refreshFabricCatalog).toHaveBeenCalledTimes(1);
-  finish?.();
-  await fabric;
-});
-
-it('keeps Paper discovery independent and reports only safe refresh outcomes', async () => {
-  refresh.mockRejectedValue(new Error('unavailable'));
-  vi.mocked(refreshPaperCatalog).mockResolvedValue({ state: 'updated', changed: 72 });
-  await Promise.all([
-    pollMinecraftMetadata(db, {}, logger),
-    pollFabricMetadata(db, {}, logger),
-    pollPaperMetadata(db, {}, logger),
-  ]);
-  expect(refreshPaperCatalog).toHaveBeenCalledWith(db, {
-    userAgent: 'Fixture https://example.test',
+  vi.mocked(refreshMinecraftMetadata).mockImplementation(async (_db, options) => {
+    expect(await options.loadUserAgent?.()).toBe(env.NH_MINECRAFT_METADATA_USER_AGENT);
+    return { state: 'unchanged', changed: 0 };
   });
-  expect(JSON.stringify(records)).toContain('paper.metadata_refreshed');
-  records.length = 0;
-  vi.mocked(refreshPaperCatalog).mockRejectedValue(new Error('secret://provider-detail'));
-  await pollPaperMetadata(db, {}, logger);
-  expect(JSON.stringify(records)).toContain('paper.metadata_refresh_unavailable');
-  expect(JSON.stringify(records)).not.toContain('secret');
-});
-
-it('does not block Mojang or Fabric while Paper discovery is pending', async () => {
-  let finish: (() => void) | undefined;
-  vi.mocked(refreshPaperCatalog).mockImplementation(async () => {
-    await new Promise<void>((resolve) => {
-      finish = resolve;
-    });
-    return { state: 'updated', changed: 1 };
-  });
-  refresh.mockResolvedValue({ state: 'skipped', changed: 0 });
-  const paper = pollPaperMetadata(db, {}, logger);
-  await Promise.all([pollMinecraftMetadata(db, {}, logger), pollFabricMetadata(db, {}, logger)]);
-  expect(refresh).toHaveBeenCalledOnce();
+  vi.mocked(refreshPaperCatalog).mockRejectedValue(new Error('secret://fixture'));
+  const loop = start();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(getSettings).toHaveBeenCalledOnce();
+  listen.mock.calls[0]?.[1]();
+  await vi.advanceTimersByTimeAsync(0);
   expect(refreshFabricCatalog).toHaveBeenCalledOnce();
   expect(refreshPaperCatalog).toHaveBeenCalledOnce();
-  finish?.();
-  await paper;
-});
-
-it('refreshes NeoForge independently and contains provider failures', async () => {
-  refresh.mockRejectedValue(new Error('unavailable'));
-  vi.mocked(refreshNeoForgeCatalog).mockResolvedValue({ state: 'updated', changed: 2 });
-  await Promise.all([pollMinecraftMetadata(db, {}, logger), pollNeoForgeMetadata(db, {}, logger)]);
-  expect(refreshNeoForgeCatalog).toHaveBeenCalledWith(db, {
-    userAgent: 'Fixture https://example.test',
+  expect(JSON.stringify(records)).toContain('paper.metadata_refresh_unavailable');
+  expect(JSON.stringify(records)).not.toContain('secret://fixture');
+  let closed = false;
+  const closing = loop.close().then(() => {
+    closed = true;
   });
-  expect(JSON.stringify(records)).toContain('neoforge.metadata_refreshed');
-  records.length = 0;
-  vi.mocked(refreshNeoForgeCatalog).mockRejectedValue(new Error('secret://provider-detail'));
-  await pollNeoForgeMetadata(db, {}, logger);
-  expect(JSON.stringify(records)).toContain('neoforge.metadata_refresh_unavailable');
-  expect(JSON.stringify(records)).not.toContain('secret');
-});
-
-it('refreshes Purpur independently and contains provider failures', async () => {
-  refresh.mockRejectedValue(new Error('unavailable'));
-  vi.mocked(refreshPurpurCatalog).mockResolvedValue({ state: 'updated', changed: 2 });
-  await Promise.all([pollMinecraftMetadata(db, {}, logger), pollPurpurMetadata(db, {}, logger)]);
-  expect(refreshPurpurCatalog).toHaveBeenCalledWith(db, {
-    userAgent: 'Fixture https://example.test',
-  });
-  expect(JSON.stringify(records)).toContain('purpur.metadata_refreshed');
-  records.length = 0;
-  vi.mocked(refreshPurpurCatalog).mockRejectedValue(new Error('secret://provider-detail'));
-  await pollPurpurMetadata(db, {}, logger);
-  expect(JSON.stringify(records)).toContain('purpur.metadata_refresh_unavailable');
-  expect(JSON.stringify(records)).not.toContain('secret');
-});
-
-it('refreshes Folia independently and contains provider failures', async () => {
-  refresh.mockRejectedValue(new Error('unavailable'));
-  vi.mocked(refreshFoliaCatalog).mockResolvedValue({ state: 'updated', changed: 2 });
-  await Promise.all([pollMinecraftMetadata(db, {}, logger), pollFoliaMetadata(db, {}, logger)]);
-  expect(refreshFoliaCatalog).toHaveBeenCalledWith(db, {
-    userAgent: 'Fixture https://example.test',
-  });
-  expect(JSON.stringify(records)).toContain('folia.metadata_refreshed');
-  records.length = 0;
-  vi.mocked(refreshFoliaCatalog).mockRejectedValue(new Error('secret://provider-detail'));
-  await pollFoliaMetadata(db, {}, logger);
-  expect(JSON.stringify(records)).toContain('folia.metadata_refresh_unavailable');
-  expect(JSON.stringify(records)).not.toContain('secret');
-});
-
-it('refreshes Quilt independently and contains provider failures', async () => {
-  refresh.mockRejectedValue(new Error('unavailable'));
-  vi.mocked(refreshQuiltCatalog).mockResolvedValue({ state: 'updated', changed: 2 });
-  await Promise.all([pollMinecraftMetadata(db, {}, logger), pollQuiltMetadata(db, {}, logger)]);
-  expect(refreshQuiltCatalog).toHaveBeenCalledWith(db, {
-    userAgent: 'Fixture https://example.test',
-  });
-  expect(JSON.stringify(records)).toContain('quilt.metadata_refreshed');
-  records.length = 0;
-  vi.mocked(refreshQuiltCatalog).mockRejectedValue(new Error('secret://provider-detail'));
-  await pollQuiltMetadata(db, {}, logger);
-  expect(JSON.stringify(records)).toContain('quilt.metadata_refresh_unavailable');
-  expect(JSON.stringify(records)).not.toContain('secret');
+  await vi.advanceTimersByTimeAsync(100000);
+  expect(closed).toBe(false);
+  fabric.resolve({ state: 'updated', changed: 2 });
+  await closing;
 });

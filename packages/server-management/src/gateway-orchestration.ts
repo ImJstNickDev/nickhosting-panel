@@ -151,7 +151,17 @@ export interface GatewayState {
   startupEstimate: GatewayStartupEstimate | null;
 }
 
-function fingerprint(server: Server, state: State) {
+type PublicStateServer = Pick<
+  Server,
+  | 'id'
+  | 'mapping_id'
+  | 'limits'
+  | 'runtime_state'
+  | 'active_operation_id'
+  | 'intent'
+  | 'automatic_starts_paused'
+>;
+function fingerprint(server: PublicStateServer, state: State) {
   return createHash('sha256')
     .update(
       JSON.stringify({
@@ -197,7 +207,7 @@ async function rows(db: DB, serverId: string) {
   return { server, state };
 }
 
-function effectiveState(server: Server, state: State, now: Date): GatewayServerState {
+function effectiveState(server: PublicStateServer, state: State, now: Date): GatewayServerState {
   if (server.intent === 'manually_stopped') return 'manually_stopped';
   if (server.intent === 'maintenance') return 'maintenance';
   if (
@@ -220,27 +230,36 @@ function effectiveState(server: Server, state: State, now: Date): GatewayServerS
 
 async function publicState(
   db: DB,
-  server: Server,
+  server: PublicStateServer,
   state: State,
   now: Date,
   env: Environment = {},
   policyInputs?: GatewayPolicyContext,
-  includeStartupEstimate = true,
+  loadedEstimate?: GatewayStartupEstimate | null,
 ): Promise<GatewayState> {
   const inputs = policyInputs ?? (await loadGatewayPolicyContext(db, server.id, env));
   const idleTimeout = await resolveIdleTimeout(db, server.id, state, env, inputs);
-  const samples = includeStartupEstimate
-    ? await db
-        .selectFrom('gateway_startup_samples')
-        .select('duration_ms')
-        .where('server_id', '=', server.id)
-        .where('fingerprint', '=', fingerprint(server, state))
-        .where('ready_at', '>=', new Date(now.getTime() - state.estimate_max_age_seconds * 1000))
-        .where('ready_at', '<=', now)
-        .orderBy('ready_at', 'desc')
-        .limit(10)
-        .execute()
-    : [];
+  const estimate =
+    loadedEstimate === undefined
+      ? estimateGatewayStartup(
+          (
+            await db
+              .selectFrom('gateway_startup_samples')
+              .select('duration_ms')
+              .where('server_id', '=', server.id)
+              .where('fingerprint', '=', fingerprint(server, state))
+              .where(
+                'ready_at',
+                '>=',
+                new Date(now.getTime() - state.estimate_max_age_seconds * 1000),
+              )
+              .where('ready_at', '<=', now)
+              .orderBy('ready_at', 'desc')
+              .limit(10)
+              .execute()
+          ).map((sample) => sample.duration_ms),
+        )
+      : loadedEstimate;
   const actual = effectiveState(server, state, now);
   return {
     serverId: server.id,
@@ -267,7 +286,7 @@ async function publicState(
     errorCode:
       actual === 'blocked' ? (state.error_code ?? 'integration_unavailable') : state.error_code,
     messageKey: `gateway.states.${actual}`,
-    startupEstimate: estimateGatewayStartup(samples.map((sample) => sample.duration_ms)),
+    startupEstimate: estimate,
   };
 }
 
@@ -289,7 +308,7 @@ export async function getGatewayState(
   return publicState(db, server, state, nowOf(options), options.env);
 }
 
-/** Snapshot-local evidence: resolve protocol and policy once per server, not per role. */
+/** Resolve one server for callers that already loaded its policy inputs. */
 export async function getGatewaySnapshotState(
   db: DB,
   serverId: string,
@@ -317,10 +336,88 @@ export async function getGatewaySnapshotState(
       now,
       options.env,
       policyInputs,
-      effectiveState(server, state, now) === 'waking',
+      effectiveState(server, state, now) === 'waking' ? undefined : null,
     ),
     minecraft,
   };
+}
+
+type SnapshotServer = PublicStateServer & GatewayPolicyContext['mapping'];
+
+/** Snapshot-scoped reads under the registry's resource lock. Only waking servers need historical samples. */
+export async function getGatewaySnapshotStates(
+  db: DB,
+  servers: Map<string, SnapshotServer>,
+  values: GatewayPolicyContext['values'],
+  now: Date,
+) {
+  const result = new Map<string, { state: GatewayState; policy: State }>();
+  if (!servers.size) return result;
+  const policies = await db
+    .selectFrom('gateway_server_states')
+    .selectAll()
+    .where('server_id', 'in', [...servers.keys()])
+    .execute();
+  const waking = [];
+  for (const policy of policies) {
+    const server = servers.get(policy.server_id);
+    if (server && effectiveState(server, policy, now) === 'waking') {
+      waking.push({
+        id: server.id,
+        fingerprint: fingerprint(server, policy),
+        since: new Date(now.getTime() - policy.estimate_max_age_seconds * 1000).toISOString(),
+      });
+    }
+  }
+  const samplesByServer = new Map<string, number[]>();
+  if (waking.length) {
+    const samples = await db
+      .selectFrom(
+        sql<{
+          id: string;
+          fingerprint: string;
+          since: Date;
+        }>`(select * from jsonb_to_recordset(${JSON.stringify(waking)}::jsonb) as requested(id uuid, fingerprint text, since timestamptz))`.as(
+          'request_rows',
+        ),
+      )
+      .innerJoinLateral(
+        (eb) =>
+          eb
+            .selectFrom('gateway_startup_samples')
+            .select('duration_ms')
+            .whereRef('server_id', '=', 'request_rows.id')
+            .whereRef('fingerprint', '=', 'request_rows.fingerprint')
+            .whereRef('ready_at', '>=', 'request_rows.since')
+            .where('ready_at', '<=', now)
+            .orderBy('ready_at', 'desc')
+            .limit(10)
+            .as('recent'),
+        (join) => join.onTrue(),
+      )
+      .select(['request_rows.id', 'recent.duration_ms'])
+      .execute();
+    for (const sample of samples) {
+      const group = samplesByServer.get(sample.id) ?? [];
+      group.push(sample.duration_ms);
+      samplesByServer.set(sample.id, group);
+    }
+  }
+  for (const policy of policies) {
+    const server = servers.get(policy.server_id);
+    if (!server) continue;
+    const state = await publicState(
+      db,
+      server,
+      policy,
+      now,
+      {},
+      { mapping: server, values },
+      estimateGatewayStartup(samplesByServer.get(server.id) ?? []),
+    );
+    result.set(server.id, { state, policy });
+  }
+  return result;
 }
 
 export async function setGatewayPolicy(
@@ -1247,16 +1344,18 @@ async function reconcileLocked(
   const { server, state } = await rows(tx, serverId);
   const now = nowOf(options);
   if (['manually_stopped', 'maintenance'].includes(server.intent)) {
-    await tx
-      .updateTable('gateway_server_states')
-      .set({
-        state: server.intent as GatewayServerState,
-        readiness_observed_at: null,
-        idle_since: null,
-        updated_at: now,
-      })
-      .where('server_id', '=', serverId)
-      .execute();
+    if (state.state !== server.intent || state.readiness_observed_at || state.idle_since) {
+      await tx
+        .updateTable('gateway_server_states')
+        .set({
+          state: server.intent as GatewayServerState,
+          readiness_observed_at: null,
+          idle_since: null,
+          updated_at: now,
+        })
+        .where('server_id', '=', serverId)
+        .execute();
+    }
     return getGatewayState(tx, serverId, options);
   }
   if (state.sleep_job_id) {
@@ -1463,4 +1562,47 @@ export async function reconcileGatewayState(
     await lockResources(tx);
     return reconcileLocked(tx, serverId, options);
   });
+}
+
+/** Durable signals and deadlines share one due index. The global lock orders
+ * transitions; never hold a queue-row lock while waiting for that lock. */
+export async function reconcileDueGatewayStates(
+  db: Kysely<Database>,
+  options: GatewayOrchestrationOptions,
+  unavailable: (serverId: string) => void,
+) {
+  const due = await sql<{ server_id: string; revision: string }>`
+    SELECT server_id, revision FROM gateway_reconciliation WHERE due_at <= now()
+    ORDER BY due_at, server_id LIMIT 128
+  `.execute(db);
+  for (const { server_id: id, revision } of due.rows) {
+    try {
+      await db.transaction().execute(async (tx) => {
+        await lockResources(tx);
+        const current = await sql`
+          SELECT 1 FROM gateway_reconciliation WHERE server_id = ${id}
+            AND revision = ${revision} AND due_at <= now()
+        `.execute(tx);
+        if (!current.rows.length) return;
+        await reconcileLocked(tx, id, options);
+        // A concurrent producer can commit a signal while we recheck the job.
+        // Only retire the observed revision; deferred changes from this same
+        // transaction can also wake it again. A crash rolls the transition back.
+        await sql`
+          UPDATE gateway_reconciliation q SET pending=false, revision=q.revision+1,
+            due_at=gateway_reconcile_deadline(s)
+          FROM gateway_server_states s
+          WHERE s.server_id=q.server_id AND q.server_id=${id} AND q.revision=${revision}
+        `.execute(tx);
+      });
+    } catch {
+      unavailable(id);
+      // A corrupt record must not monopolize the front of the due index. If a
+      // repair already published a newer revision, leave its earlier turn intact.
+      await sql`
+        UPDATE gateway_reconciliation SET due_at=now()+interval '30 seconds', revision=revision+1
+        WHERE server_id=${id} AND revision=${revision}
+      `.execute(db);
+    }
+  }
 }

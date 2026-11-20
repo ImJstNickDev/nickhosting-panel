@@ -19,16 +19,7 @@ import { minecraftModpackSchemaAvailable } from '../../../packages/server-manage
 import { minecraftContentProviders } from '../../../packages/server-management/src/minecraft-world-catalog.js';
 import { createMinecraftModpackBridge } from '../../../packages/server-management/src/modpack-bridge.js';
 import { startHostObservationLoop } from './host-observations.js';
-import {
-  pollFabricMetadata,
-  pollFoliaMetadata,
-  pollForgeMetadata,
-  pollMinecraftMetadata,
-  pollNeoForgeMetadata,
-  pollPaperMetadata,
-  pollPurpurMetadata,
-  pollQuiltMetadata,
-} from './minecraft-metadata.js';
+import { startMinecraftMetadataLoop } from './minecraft-metadata.js';
 import { startMinecraftModpackLoop } from './minecraft-modpacks.js';
 import { startMinecraftWorldIndexLoop } from './minecraft-worlds.js';
 import { refreshProviderFeeds, startProviderFeedLoop } from './provider-feed.js';
@@ -241,86 +232,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         }, 1000);
     };
     schedulePoll = pollAutomation();
-    let metadataTimer: ReturnType<typeof setTimeout> | undefined;
-    let metadataPoll: Promise<void> | undefined;
-    const refreshMetadata = async () => {
-      await pollMinecraftMetadata(db, env, logger);
-      if (!stopping)
-        metadataTimer = setTimeout(() => {
-          metadataPoll = refreshMetadata();
-        }, 30_000);
-    };
-    metadataPoll = refreshMetadata();
-    let fabricTimer: ReturnType<typeof setTimeout> | undefined;
-    let fabricPoll: Promise<void> | undefined;
-    const refreshFabric = async () => {
-      await pollFabricMetadata(db, env, logger);
-      if (!stopping)
-        fabricTimer = setTimeout(() => {
-          fabricPoll = refreshFabric();
-        }, 5000);
-    };
-    fabricPoll = refreshFabric();
-    let quiltTimer: ReturnType<typeof setTimeout> | undefined;
-    let quiltPoll: Promise<void> | undefined;
-    const refreshQuilt = async () => {
-      await pollQuiltMetadata(db, env, logger);
-      if (!stopping)
-        quiltTimer = setTimeout(() => {
-          quiltPoll = refreshQuilt();
-        }, 5000);
-    };
-    quiltPoll = refreshQuilt();
-    let paperTimer: ReturnType<typeof setTimeout> | undefined;
-    let paperPoll: Promise<void> | undefined;
-    const refreshPaper = async () => {
-      await pollPaperMetadata(db, env, logger);
-      if (!stopping)
-        paperTimer = setTimeout(() => {
-          paperPoll = refreshPaper();
-        }, 5000);
-    };
-    paperPoll = refreshPaper();
-    let foliaTimer: ReturnType<typeof setTimeout> | undefined;
-    let foliaPoll: Promise<void> | undefined;
-    const refreshFolia = async () => {
-      await pollFoliaMetadata(db, env, logger);
-      if (!stopping)
-        foliaTimer = setTimeout(() => {
-          foliaPoll = refreshFolia();
-        }, 5000);
-    };
-    foliaPoll = refreshFolia();
-    let purpurTimer: ReturnType<typeof setTimeout> | undefined;
-    let purpurPoll: Promise<void> | undefined;
-    const refreshPurpur = async () => {
-      await pollPurpurMetadata(db, env, logger);
-      if (!stopping)
-        purpurTimer = setTimeout(() => {
-          purpurPoll = refreshPurpur();
-        }, 5000);
-    };
-    purpurPoll = refreshPurpur();
-    let forgeTimer: ReturnType<typeof setTimeout> | undefined;
-    let forgePoll: Promise<void> | undefined;
-    const refreshForge = async () => {
-      await pollForgeMetadata(db, env, logger);
-      if (!stopping)
-        forgeTimer = setTimeout(() => {
-          forgePoll = refreshForge();
-        }, 5000);
-    };
-    forgePoll = refreshForge();
-    let neoforgeTimer: ReturnType<typeof setTimeout> | undefined;
-    let neoforgePoll: Promise<void> | undefined;
-    const refreshNeoForge = async () => {
-      await pollNeoForgeMetadata(db, env, logger);
-      if (!stopping)
-        neoforgeTimer = setTimeout(() => {
-          neoforgePoll = refreshNeoForge();
-        }, 5000);
-    };
-    neoforgePoll = refreshNeoForge();
+    const catalogs = startMinecraftMetadataLoop(db, pool, env, logger);
     reconciliation = poll();
     logger.log('info', 'worker.started');
     let closed: Promise<void> | undefined;
@@ -328,25 +240,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       closed ??= (async () => {
         stopping = true;
         if (timer) clearTimeout(timer);
-        if (metadataTimer) clearTimeout(metadataTimer);
-        if (fabricTimer) clearTimeout(fabricTimer);
-        if (quiltTimer) clearTimeout(quiltTimer);
-        if (foliaTimer) clearTimeout(foliaTimer);
-        if (paperTimer) clearTimeout(paperTimer);
-        if (purpurTimer) clearTimeout(purpurTimer);
-        if (forgeTimer) clearTimeout(forgeTimer);
-        if (neoforgeTimer) clearTimeout(neoforgeTimer);
         if (scheduleTimer) clearTimeout(scheduleTimer);
         await Promise.all([
           reconciliation,
-          metadataPoll,
-          fabricPoll,
-          quiltPoll,
-          foliaPoll,
-          paperPoll,
-          purpurPoll,
-          forgePoll,
-          neoforgePoll,
+          catalogs.close(),
           schedulePoll,
           observations.close(),
           providerFeeds.close(),
