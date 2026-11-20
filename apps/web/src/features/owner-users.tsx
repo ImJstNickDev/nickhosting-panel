@@ -213,18 +213,26 @@ export function OwnerUserPage() {
   const user = useQuery({
     queryKey: ['owner-user', userId],
     refetchInterval: 15000,
-    queryFn: () =>
-      api<Result<typeof getPlatformUser>>(`/v1/platform/owner/users/${encodeURIComponent(userId)}`),
+    queryFn: ({ signal }) =>
+      api<Result<typeof getPlatformUser>>(
+        `/v1/platform/owner/users/${encodeURIComponent(userId)}`,
+        { signal },
+      ),
   });
   const storageUsage = useStorageUsage(
     user.data?.quota.storageUsage,
     user.data?.quota.observedAt,
     user.dataUpdatedAt,
   );
-  if (user.isPending) return <Loading />;
-  if (user.error) return <ErrorNotice error={user.error} />;
-  const value = user.data,
-    quota = value.quota;
+  if (user.error) return <ErrorNotice error={user.error} retry={() => void user.refetch()} />;
+  const value =
+    user.data ??
+    queryClient
+      .getQueriesData<Result<typeof listPlatformUsers>>({ queryKey: ['owner-users'] })
+      .map(([, page]) => page?.items.find((item) => item.id === userId))
+      .find((item) => item !== undefined);
+  if (!value) return <Loading />;
+  const quota = user.data?.quota;
   return (
     <div className="owner-user-detail" key={userId}>
       <Link to="/owner/users" className="owner-user-back">
@@ -298,130 +306,136 @@ export function OwnerUserPage() {
                 </ActionForm>
               )}
             </Section>
-            <Section
-              title={t('web.quota')}
-              actions={
-                <Link to={`/owner/servers?ownerId=${encodeURIComponent(userId)}`}>
-                  {t('web.servers')} →
-                </Link>
-              }
-            >
-              <Details
-                values={[
-                  [
-                    t('web.memory'),
-                    `${format.number(quota.committed.memoryMiB)} / ${format.number(quota.limits.memoryMiB)} MiB`,
-                  ],
-                  [
-                    t('web.cpu'),
-                    `${format.number(quota.committed.cpuPercent)} / ${format.number(quota.limits.cpuPercent)}%`,
-                  ],
-                  [
-                    quota.limits.storageMiB === null
-                      ? `${t('web.disk')} · ${t('web.usage')}`
-                      : t('web.disk'),
-                    quota.limits.storageMiB === null
-                      ? `${storageUsage === null ? t('web.unavailable') : format.bytes(storageUsage)} / ${t(quota.storageBudgetMiB === 0 ? 'platform.unlimited' : 'owner.globalPool')}`
-                      : `${format.number(quota.committed.storageMiB)} MiB / ${format.number(quota.limits.storageMiB)} MiB`,
-                  ],
-                  [
-                    t('web.servers'),
-                    `${format.number(quota.committed.serverCount)} / ${quota.limits.serverCount === null ? t('owner.noCountLimit') : format.number(quota.limits.serverCount)}`,
-                  ],
-                ]}
-              />
-              <details>
-                <summary>{t('owner.overrideQuota')}</summary>
-                <ActionForm
-                  onSubmit={async (data) => {
-                    await api('/v1/owner/user-limits', {
-                      method: 'PUT',
-                      body: {
-                        userId,
-                        memoryMiB: number(data, 'memory'),
-                        cpuPercent: number(data, 'cpu'),
-                        ...(quota.storageBudgetMiB === 0
-                          ? {}
-                          : { storageMiB: number(data, 'storage') }),
-                        reason: text(data, 'reason'),
-                        ...(text(data, 'expires')
-                          ? { expiresAt: new Date(text(data, 'expires')).toISOString() }
-                          : {}),
-                      },
-                    });
-                    await Promise.all([
-                      user.refetch(),
-                      queryClient.invalidateQueries({ queryKey: ['audit', userId] }),
-                    ]);
-                  }}
-                >
-                  <Input
-                    label={`${t('web.memory')} (MiB)`}
-                    name="memory"
-                    type="number"
-                    min={1}
-                    defaultValue={quota.limits.memoryMiB}
-                    required
-                  />
-                  <Input
-                    label={`${t('web.cpu')} (%)`}
-                    name="cpu"
-                    type="number"
-                    min={1}
-                    defaultValue={quota.limits.cpuPercent}
-                    required
-                  />
-                  {quota.storageBudgetMiB === 0 ? (
-                    <p>
-                      {t('web.disk')}: {t('platform.unlimited')}{' '}
-                      <Link to="/owner/settings">{t('web.settings')}</Link>
-                    </p>
-                  ) : (
+            {!quota ? (
+              <Section title={t('web.quota')}>
+                <Loading />
+              </Section>
+            ) : (
+              <Section
+                title={t('web.quota')}
+                actions={
+                  <Link to={`/owner/servers?ownerId=${encodeURIComponent(userId)}`}>
+                    {t('web.servers')} →
+                  </Link>
+                }
+              >
+                <Details
+                  values={[
+                    [
+                      t('web.memory'),
+                      `${format.number(quota.committed.memoryMiB)} / ${format.number(quota.limits.memoryMiB)} MiB`,
+                    ],
+                    [
+                      t('web.cpu'),
+                      `${format.number(quota.committed.cpuPercent)} / ${format.number(quota.limits.cpuPercent)}%`,
+                    ],
+                    [
+                      quota.limits.storageMiB === null
+                        ? `${t('web.disk')} · ${t('web.usage')}`
+                        : t('web.disk'),
+                      quota.limits.storageMiB === null
+                        ? `${storageUsage === null ? t('web.unavailable') : format.bytes(storageUsage)} / ${t(quota.storageBudgetMiB === 0 ? 'platform.unlimited' : 'owner.globalPool')}`
+                        : `${format.number(quota.committed.storageMiB)} MiB / ${format.number(quota.limits.storageMiB)} MiB`,
+                    ],
+                    [
+                      t('web.servers'),
+                      `${format.number(quota.committed.serverCount)} / ${quota.limits.serverCount === null ? t('owner.noCountLimit') : format.number(quota.limits.serverCount)}`,
+                    ],
+                  ]}
+                />
+                <details>
+                  <summary>{t('owner.overrideQuota')}</summary>
+                  <ActionForm
+                    onSubmit={async (data) => {
+                      await api('/v1/owner/user-limits', {
+                        method: 'PUT',
+                        body: {
+                          userId,
+                          memoryMiB: number(data, 'memory'),
+                          cpuPercent: number(data, 'cpu'),
+                          ...(quota.storageBudgetMiB === 0
+                            ? {}
+                            : { storageMiB: number(data, 'storage') }),
+                          reason: text(data, 'reason'),
+                          ...(text(data, 'expires')
+                            ? { expiresAt: new Date(text(data, 'expires')).toISOString() }
+                            : {}),
+                        },
+                      });
+                      await Promise.all([
+                        user.refetch(),
+                        queryClient.invalidateQueries({ queryKey: ['audit', userId] }),
+                      ]);
+                    }}
+                  >
                     <Input
-                      label={`${t('web.disk')} (MiB)`}
-                      name="storage"
+                      label={`${t('web.memory')} (MiB)`}
+                      name="memory"
                       type="number"
                       min={1}
-                      defaultValue={quota.storageBudgetMiB}
+                      defaultValue={quota.limits.memoryMiB}
                       required
                     />
-                  )}
-                  <Input
-                    label={t('web.expires')}
-                    name="expires"
-                    type="datetime-local"
-                    step={1}
-                    defaultValue={
-                      quota.override?.expiresAt
-                        ? new Date(
-                            Date.parse(quota.override.expiresAt) -
-                              new Date(quota.override.expiresAt).getTimezoneOffset() * 60000,
-                          )
-                            .toISOString()
-                            .slice(0, 19)
-                        : ''
-                    }
-                  />
-                  <Textarea
-                    label={t('web.reason')}
-                    name="reason"
-                    minLength={8}
-                    maxLength={300}
-                    required
-                  />
-                </ActionForm>
-              </details>
-              {quota.override && (
-                <Notice>
-                  {t(quota.override.active ? 'owner.overrideActive' : 'owner.overrideExpired')}{' '}
-                  {quota.override.expiresAt ? (
-                    <Time value={quota.override.expiresAt} />
-                  ) : (
-                    t('owner.noExpiry')
-                  )}
-                </Notice>
-              )}
-            </Section>
+                    <Input
+                      label={`${t('web.cpu')} (%)`}
+                      name="cpu"
+                      type="number"
+                      min={1}
+                      defaultValue={quota.limits.cpuPercent}
+                      required
+                    />
+                    {quota.storageBudgetMiB === 0 ? (
+                      <p>
+                        {t('web.disk')}: {t('platform.unlimited')}{' '}
+                        <Link to="/owner/settings">{t('web.settings')}</Link>
+                      </p>
+                    ) : (
+                      <Input
+                        label={`${t('web.disk')} (MiB)`}
+                        name="storage"
+                        type="number"
+                        min={1}
+                        defaultValue={quota.storageBudgetMiB}
+                        required
+                      />
+                    )}
+                    <Input
+                      label={t('web.expires')}
+                      name="expires"
+                      type="datetime-local"
+                      step={1}
+                      defaultValue={
+                        quota.override?.expiresAt
+                          ? new Date(
+                              Date.parse(quota.override.expiresAt) -
+                                new Date(quota.override.expiresAt).getTimezoneOffset() * 60000,
+                            )
+                              .toISOString()
+                              .slice(0, 19)
+                          : ''
+                      }
+                    />
+                    <Textarea
+                      label={t('web.reason')}
+                      name="reason"
+                      minLength={8}
+                      maxLength={300}
+                      required
+                    />
+                  </ActionForm>
+                </details>
+                {quota.override && (
+                  <Notice>
+                    {t(quota.override.active ? 'owner.overrideActive' : 'owner.overrideExpired')}{' '}
+                    {quota.override.expiresAt ? (
+                      <Time value={quota.override.expiresAt} />
+                    ) : (
+                      t('owner.noExpiry')
+                    )}
+                  </Notice>
+                )}
+              </Section>
+            )}
           </div>
         )}
         {history && (

@@ -279,6 +279,20 @@ describe('M5 platform browser queries and metadata', () => {
         })
         .execute();
     }
+    await f.db
+      .insertInto('server_metrics')
+      .values(
+        ids.map((server_id) => ({
+          server_id,
+          observed_at: new Date(at - 60000),
+          disk_bytes: '99',
+          memory_bytes: '0',
+          cpu_percent: 0,
+          network_rx_bytes: '0',
+          network_tx_bytes: '0',
+        })),
+      )
+      .execute();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(at + 5000);
     try {
       const quota = await getPlatformQuota(f.db, f.context, undefined, {
