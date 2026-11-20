@@ -384,6 +384,111 @@ describe('persistent Minecraft world inventory', () => {
     expect(names).not.toContain('survival');
     expect(f.files.listMany).toHaveBeenCalledTimes(2);
   });
+  it('waits on the committed lease notification across database clients and detaches an aborted caller', async () => {
+    const f = await fixture();
+    await f.dirty();
+    const release = Promise.withResolvers<void>(),
+      started = Promise.withResolvers<void>();
+    const list = f.files.list;
+    f.files.list = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        started.resolve();
+        await release.promise;
+        return list('');
+      })
+      .mockImplementation(list);
+    const worker = reconcileDueMinecraftWorldIndex(
+      f.db,
+      f.serverId,
+      f.runtime,
+      {},
+      new AbortController().signal,
+    );
+    await started.promise;
+    let leaseReads = 0;
+    const replica = f.db.withPlugin({
+      transformQuery({ node }) {
+        if (node.kind === 'SelectQueryNode' && JSON.stringify(node).includes('lease_active'))
+          leaseReads++;
+        return node;
+      },
+      async transformResult({ result }) {
+        return result;
+      },
+    });
+    const runtime = { ...f.runtime, worldNotificationPool: database.pool };
+    const stop = new AbortController();
+    const first = refreshMinecraftWorldIndex(replica, f.serverId, runtime, {}, stop.signal);
+    const second = refreshMinecraftWorldIndex(replica, f.serverId, runtime, {});
+    try {
+      await vi.waitFor(() => expect(leaseReads).toBe(2), { timeout: 5000 });
+      stop.abort(new Error('left the page'));
+      await expect(first).rejects.toThrow('left the page');
+      await new Promise((r) => setTimeout(r, 1050));
+      expect(leaseReads).toBe(2);
+      release.resolve();
+      await worker;
+      const before = performance.now();
+      expect((await second).snapshot.worlds.length).toBeGreaterThan(0);
+      expect(performance.now() - before).toBeLessThan(3000);
+      expect(leaseReads).toBe(3);
+    } finally {
+      release.resolve();
+      await Promise.allSettled([worker, first, second]);
+    }
+  });
+
+  it('observes a scan committed before its notification listener finishes connecting', async () => {
+    const f = await fixture();
+    await f.dirty();
+    const workerStarted = Promise.withResolvers<void>();
+    const releaseWorker = Promise.withResolvers<void>();
+    const listenerRequested = Promise.withResolvers<void>();
+    const connectListener = Promise.withResolvers<void>();
+    const list = f.files.list;
+    f.files.list = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        workerStarted.resolve();
+        await releaseWorker.promise;
+        return list('');
+      })
+      .mockImplementation(list);
+    const worker = reconcileDueMinecraftWorldIndex(
+      f.db,
+      f.serverId,
+      f.runtime,
+      {},
+      new AbortController().signal,
+    );
+    await workerStarted.promise;
+    const runtime = {
+      ...f.runtime,
+      worldNotificationPool: {
+        async connect() {
+          listenerRequested.resolve();
+          await connectListener.promise;
+          return database.pool.connect();
+        },
+      },
+    };
+    const replica = refreshMinecraftWorldIndex(f.db, f.serverId, runtime, {});
+    try {
+      await listenerRequested.promise;
+      releaseWorker.resolve();
+      await worker;
+      connectListener.resolve();
+      const before = performance.now();
+      expect((await replica).snapshot.worlds.length).toBeGreaterThan(0);
+      expect(performance.now() - before).toBeLessThan(3000);
+    } finally {
+      releaseWorker.resolve();
+      connectListener.resolve();
+      await Promise.allSettled([worker, replica]);
+    }
+  });
+
   it('fences an obsolete in-flight scan and coalesces a concurrent open with the worker', async () => {
     const f = await fixture();
     await f.dirty();

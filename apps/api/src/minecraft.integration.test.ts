@@ -934,7 +934,32 @@ describe('Minecraft backend API authorization and user projection', () => {
     const route = `/v1/servers/${serverId}/minecraft/versions`;
     const catalog = await app.request(route);
     expect(catalog.status).toBe(200);
-    expect(await catalog.json()).toMatchObject({
+    const full = await catalog.json();
+    const compact = await app.request(`${route}?view=choices`);
+    expect(compact.status).toBe(200);
+    expect(await compact.json()).toEqual({ current: full.current, choices: full.choices });
+    expect(full.loaders).toHaveProperty('forge');
+    const loaderQuery = await app.request(`${route}/loaders?runtime=forge&version=1.21.1`);
+    expect(loaderQuery.status).toBe(200);
+    expect(await loaderQuery.json()).toEqual(full.loaders.forge['1.21.1'] ?? []);
+    // A regular Owner managing another user's server sees the intersection of both audiences.
+    actor = fixture.owner;
+    expect((await (await app.request(`${route}?view=choices`)).json()).choices).toEqual(
+      full.choices,
+    );
+    await fixture.db
+      .updateTable('game_rollouts')
+      .set({ state: 'private-testing', allowlist: [] })
+      .where('integration_id', '=', 'minecraft')
+      .execute();
+    expect((await (await app.request(`${route}?view=choices`)).json()).choices).toEqual([]);
+    await fixture.db
+      .updateTable('game_rollouts')
+      .set({ state: 'public' })
+      .where('integration_id', '=', 'minecraft')
+      .execute();
+    actor = fixture.context;
+    expect(full).toMatchObject({
       current: { combinationId: sourceCombinationId, version: '1.20.4' },
       choices: expect.arrayContaining([{ id: choiceId, version: '1.21.1', runtime: 'vanilla' }]),
     });

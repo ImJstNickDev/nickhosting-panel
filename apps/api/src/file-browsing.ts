@@ -20,6 +20,8 @@ import type { Hono } from 'hono';
 import { ZipFile } from 'yazl';
 import { z } from 'zod';
 import type { Variables } from './app.js';
+import { archiveFileReader } from './file-archive-reader.js';
+import { inspectFilePath } from './file-path-inspection.js';
 import type { ServerRouteOptions } from './servers.js';
 
 export const editorMaxBytes = FILE_EDITOR_MAX_BYTES;
@@ -35,27 +37,8 @@ function path(value: string, root = false) {
   return relativePath(value, root).slice(1);
 }
 const join = (...parts: string[]) => parts.filter(Boolean).join('/');
-/** Check every component; the provider still owns the filesystem sandbox. */
-export async function inspectFilePath(
-  adapter: Pick<PterodactylAdapter, 'listFiles'>,
-  id: string,
-  value: string,
-) {
-  const parts = path(value).split('/');
-  let directory = '';
-  let entry: ServerFile | undefined;
-  for (let index = 0; index < parts.length; index++) {
-    entry = (await adapter.listFiles(id, directory)).find((file) => file.name === parts[index]);
-    if (!entry) {
-      if (index === parts.length - 1) return undefined;
-      throw new DomainError('not_found');
-    }
-    if (entry.is_symlink || (index < parts.length - 1 && entry.is_file))
-      throw new DomainError('forbidden');
-    directory = join(directory, parts[index] ?? '');
-  }
-  return entry;
-}
+
+export { inspectFilePath } from './file-path-inspection.js';
 export interface ArchiveEntry {
   path: string;
   name: string;
@@ -81,14 +64,16 @@ export async function collectArchiveEntries(
     if (depth > 64) throw new DomainError('validation_failed');
     await authorize();
     const listing = await adapter.listFiles(id, directory);
-    const files = selected
-      ? selected.map((name) => {
-          if (path(name).includes('/')) throw new DomainError('validation_failed');
-          const found = listing.find((entry) => entry.name === name);
-          if (!found) throw new DomainError('not_found');
-          return found;
-        })
-      : listing;
+    const byName = selected && new Map(listing.map((file) => [file.name, file]));
+    const files =
+      selected && byName
+        ? selected.map((name) => {
+            if (path(name).includes('/')) throw new DomainError('validation_failed');
+            const found = byName.get(name);
+            if (!found) throw new DomainError('not_found');
+            return found;
+          })
+        : listing;
     for (const file of files) {
       const safe = path(file.name);
       if (safe.includes('/') || file.is_symlink) throw new DomainError('forbidden');
@@ -104,7 +89,7 @@ export async function collectArchiveEntries(
   await visit(root, names);
   return entries;
 }
-/** Lazy upstream streams: one file at a time, ZIP64 and backpressure, no whole-body buffer. */
+/** ZIP members are emitted in order with backpressure and ZIP64 support. */
 export function streamFileZip<T extends { name: string; file: { is_file: boolean; size: number } }>(
   entries: T[],
   open: (entry: T, signal: AbortSignal) => Promise<ReadableStream<Uint8Array>>,
@@ -386,18 +371,7 @@ export async function downloadServerArchive(
 ) {
   const permission = selection.permission ?? 'files.read';
   const requestedAt = selection.requestedAt ?? new Date();
-  const authorize = () =>
-    service.authorizeTransfer(
-      context,
-      serverId,
-      false,
-      undefined,
-      undefined,
-      undefined,
-      false,
-      permission,
-    );
-  const { id, serverName, entries } = await service.access(
+  const { id, server, entries } = await service.access(
     context,
     serverId,
     false,
@@ -405,7 +379,7 @@ export async function downloadServerArchive(
       await selection.validate?.(id, connection, current, server);
       return {
         id,
-        serverName: server.name,
+        server,
         entries: await collectArchiveEntries(
           service.adapter,
           id,
@@ -418,7 +392,7 @@ export async function downloadServerArchive(
               false,
               connection,
               undefined,
-              undefined,
+              server,
               false,
               permission,
             ),
@@ -429,8 +403,19 @@ export async function downloadServerArchive(
     undefined,
     permission,
   );
+  const authorize = () =>
+    service.authorizeTransfer(
+      context,
+      serverId,
+      false,
+      undefined,
+      undefined,
+      server,
+      false,
+      permission,
+    );
   const name =
-    serverName
+    server.name
       .normalize('NFKD')
       .replace(/\p{M}/gu, '')
       .toLowerCase()
@@ -442,23 +427,7 @@ export async function downloadServerArchive(
   const filename = `nhpanel-${name}-${timestamp}.zip`;
   const stream = streamFileZip(
     entries,
-    async (entry, signal) => {
-      await authorize();
-      const current = await inspectFilePath(service.adapter, id, entry.path);
-      if (
-        !current?.is_file ||
-        current.size !== entry.file.size ||
-        current.modified_at !== entry.file.modified_at
-      )
-        throw new DomainError('conflict');
-      return (
-        await service.adapter.downloadFile(id, entry.path, {
-          signal,
-          authorize,
-          maxBytes: entry.file.size,
-        })
-      ).body;
-    },
+    archiveFileReader(service.adapter, id, entries, authorize),
     selection.signal,
   );
   return new Response(stream, {

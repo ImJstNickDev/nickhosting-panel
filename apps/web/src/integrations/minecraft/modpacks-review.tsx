@@ -123,11 +123,8 @@ export function ModpackReview(props: {
   const canSetWorldPolicy =
     operation.selection.mode === 'replace' || Boolean(operation.selection.review);
   const [blockerPage, setBlockerPage] = useState(0);
-  const [deletePage, setDeletePage] = useState(0);
   const blockerOffset =
     Math.min(blockerPage, Math.max(0, Math.ceil(operation.blockers.length / 100) - 1)) * 100;
-  const deleteOffset =
-    Math.min(deletePage, Math.max(0, Math.ceil(operation.deletePaths.length / 100) - 1)) * 100;
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     heading.current?.focus({ preventScroll: true });
@@ -271,6 +268,7 @@ export function ModpackReview(props: {
               serverId={props.serverId}
               id={operation.id}
               digest={operation.planDigest}
+              counts={operation.reviewCounts}
               size={format.bytes(operation.changes.bytes)}
             />
           )}
@@ -343,22 +341,13 @@ export function ModpackReview(props: {
               </button>
             </div>
           )}
-          {operation.deletePaths.length > 0 && (
-            <details className="modpacks-removals">
-              <summary>{t(k('removedPaths'), { count: operation.deletePaths.length })}</summary>
-              <ul>
-                {operation.deletePaths.slice(deleteOffset, deleteOffset + 100).map((path) => (
-                  <li key={path}>
-                    <code>{path}</code>
-                  </li>
-                ))}
-              </ul>
-              <ReviewPagination
-                page={deleteOffset / 100}
-                total={operation.deletePaths.length}
-                onChange={setDeletePage}
-              />
-            </details>
+          {Boolean(operation.changes?.remove) && operation.planDigest && (
+            <RemovalPaths
+              key={`removals-${operation.planDigest}`}
+              serverId={props.serverId}
+              operation={operation}
+              digest={operation.planDigest}
+            />
           )}
         </div>
         <aside className="modpacks-review-options" aria-label={t(k('reviewChoices'))}>
@@ -424,15 +413,63 @@ export function ModpackReview(props: {
 
 const reviewController = createMinecraftModpacksController(gameUiClient);
 const fileGroups = ['added', 'replaced', 'removed', 'preserved'] as const;
+function RemovalPaths({
+  serverId,
+  operation,
+  digest,
+}: {
+  serverId: string;
+  operation: MinecraftModpackOperation;
+  digest: string;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const [page, setPage] = useState(0);
+  const total = operation.changes?.remove ?? 0;
+  const list = useQuery({
+    queryKey: ['modpack-review-files', serverId, operation.id, digest, 'deletions', page],
+    queryFn: ({ signal }) =>
+      reviewController.reviewFiles(serverId, operation.id, digest, 'deletions', page * 100, signal),
+    enabled: open && Boolean(operation.removalsPaged),
+    staleTime: Infinity,
+  });
+  const paths = operation.removalsPaged
+    ? list.data?.paths
+    : operation.deletePaths?.slice(page * 100, page * 100 + 100);
+  return (
+    <details className="modpacks-removals" onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>{t(k('removedPaths'), { count: total })}</summary>
+      {open &&
+        (list.error ? (
+          <ErrorNotice error={list.error} retry={() => void list.refetch()} />
+        ) : !paths ? (
+          <Loading />
+        ) : (
+          <>
+            <ul>
+              {paths.map((path) => (
+                <li key={path}>
+                  <code>{path}</code>
+                </li>
+              ))}
+            </ul>
+            <ReviewPagination page={page} total={total} onChange={setPage} />
+          </>
+        ))}
+    </details>
+  );
+}
 function ReviewFiles({
   serverId,
   id,
   digest,
+  counts,
   size,
 }: {
   serverId: string;
   id: string;
   digest: string;
+  counts?: MinecraftModpackOperation['reviewCounts'];
   size: string;
 }) {
   const t = useT();
@@ -442,9 +479,11 @@ function ReviewFiles({
   const queryKey = ['modpack-review-files', serverId, id, digest] as const;
   const summary = useQuery({
     queryKey: [...queryKey, 'added', 0],
+    enabled: !counts,
     queryFn: ({ signal }) => reviewController.reviewFiles(serverId, id, digest, 'added', 0, signal),
     staleTime: Infinity,
   });
+  const totals = counts ?? summary.data?.counts;
   const details = useQuery({
     queryKey: [...queryKey, group, page],
     queryFn: ({ signal }) =>
@@ -455,9 +494,9 @@ function ReviewFiles({
   return (
     <section className="modpacks-file-review" aria-label={t(k('changes'))}>
       <h4>{t(k('changes'))}</h4>
-      {summary.isError ? (
+      {!counts && summary.isError ? (
         <ErrorNotice error={summary.error} retry={() => void summary.refetch()} />
-      ) : !summary.data ? (
+      ) : !totals ? (
         <Loading />
       ) : (
         fileGroups.map((item) => (
@@ -466,14 +505,14 @@ function ReviewFiles({
               className="secondary modpacks-file-group"
               type="button"
               aria-expanded={open === item}
-              disabled={!summary.data.counts[item]}
+              disabled={!totals[item]}
               onClick={() => {
                 setPage(0);
                 setOpen(open === item ? undefined : item);
               }}
             >
               <span>{t(k(`files.${item}`))}</span>
-              <strong>{summary.data.counts[item]}</strong>
+              <strong>{totals[item]}</strong>
               <ModsIcon name="chevron" />
             </button>
             {open === item &&

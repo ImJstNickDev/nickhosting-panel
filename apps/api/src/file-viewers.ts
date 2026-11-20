@@ -63,6 +63,7 @@ type Retained<T> = { value: T; signal: AbortSignal };
 const archiveCaches = new WeakMap<object, ViewerSessionCache<Retained<ViewerArchiveTree>>>();
 const sqliteCaches = new WeakMap<object, ViewerSessionCache<Retained<ViewerSqliteSession>>>();
 const subtitleCaches = new WeakMap<object, ViewerSessionCache<Retained<SubtitleViewerSession>>>();
+const closingChecks = new WeakMap<object, Set<Promise<void>>>();
 export async function closeViewerArchives(db: object) {
   const archive = archiveCaches.get(db),
     sqlite = sqliteCaches.get(db),
@@ -70,7 +71,9 @@ export async function closeViewerArchives(db: object) {
   archiveCaches.delete(db);
   sqliteCaches.delete(db);
   subtitleCaches.delete(db);
-  await Promise.all([archive?.close(), sqlite?.close(), subtitles?.close()]);
+  const checks = closingChecks.get(db);
+  closingChecks.delete(db);
+  await Promise.all([archive?.close(), sqlite?.close(), subtitles?.close(), ...(checks ?? [])]);
 }
 function disposition(name: string) {
   const filename = posix.basename(name);
@@ -98,6 +101,8 @@ export function registerFileViewerRoutes(
     return pending;
   };
   logSessions.set(db, registerLogViewerRoutes(app, options, viewer));
+  const pendingCloses = new Set<Promise<void>>();
+  closingChecks.set(db, pendingCloses);
   const archives = new ViewerSessionCache<Retained<ViewerArchiveTree>>();
   const databases = new ViewerSessionCache<Retained<ViewerSqliteSession>>({ maximum: 4 });
   const subtitles = new ViewerSessionCache<Retained<SubtitleViewerSession>>({ maximum: 8 });
@@ -174,6 +179,7 @@ export function registerFileViewerRoutes(
   ) => {
     const { opened, context } = await open(c, true);
     let adopted = false;
+    let verifiedHit = false;
     const key = JSON.stringify([
       context[authSessionId],
       context.actorUserId,
@@ -218,10 +224,27 @@ export function registerFileViewerRoutes(
           c.req.raw.signal,
         );
       const lease = timing ? await timing.measure('retainedAcquire', acquire) : await acquire();
-      timing?.cache(!adopted);
+      if (opened.signal.aborted || lease.session.signal.aborted) {
+        lease.release();
+        throw new DomainError('forbidden');
+      }
+      verifiedHit = !adopted;
+      timing?.cache(verifiedHit);
       return { session: lease.session.value, release: lease.release, signal: lease.session.signal };
     } finally {
-      if (!adopted) await opened.close();
+      if (!adopted) {
+        // OPEN/FSTAT and authorization completed for this request. On a cache hit
+        // the retained parser owns a separate handle. Release the check handle now
+        // and let SSH acknowledge CLOSE while the response is being delivered.
+        const close = opened.close();
+        if (verifiedHit && pendingCloses.size < 8) {
+          const done = close.catch(() => options.logger?.log('warn', 'viewer.check_close_failed'));
+          pendingCloses.add(done);
+          void done.then(() => pendingCloses.delete(done));
+        } else {
+          await close;
+        }
+      }
     }
   };
   const archive = async (c: C) => {

@@ -21,6 +21,15 @@ export interface SatisfactoryModTables {
     created_at: Generated<Date>;
     deleted_at: Date | null;
   };
+  satisfactory_mod_inventory_observations: {
+    server_id: string;
+    binding: string | null;
+    inventory: Json | null;
+    observed_at: Date | null;
+    lease_id: string | null;
+    lease_binding: string | null;
+    lease_until: Date | null;
+  };
   satisfactory_mod_states: {
     server_id: string;
     selection: Json;

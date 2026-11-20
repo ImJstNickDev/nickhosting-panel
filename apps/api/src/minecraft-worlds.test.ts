@@ -308,15 +308,17 @@ describe('dedicated world archive scope', () => {
       return { body };
     });
     Object.assign(f.service.adapter, { listFiles, downloadFile });
+    const server = {
+      id: 'server',
+      name: 'Fixture',
+      runtime_state: 'offline',
+      active_operation_id: null,
+      pterodactyl_identifier: 'provider',
+    };
     Object.assign(f.service, {
       access: vi.fn(async (_context, _serverId, _write, work, _timing, permission) => {
         expect(permission).toBe('game.minecraft.worlds.download');
-        return work('provider', db, actor, {
-          id: 'server',
-          name: 'Fixture',
-          runtime_state: 'offline',
-          active_operation_id: null,
-        });
+        return work('provider', db, actor, server);
       }),
       fileReadPhase: vi.fn(() => ({})),
     });
@@ -324,7 +326,7 @@ describe('dedicated world archive scope', () => {
       ...snapshot,
       worlds: [{ name: 'world', status: 'verified' }],
     } as never);
-    return { ...f, listFiles, downloadFile };
+    return { ...f, server, listFiles, downloadFile };
   }
   it('downloads only the discovered world and rechecks the domain permission throughout streaming', async () => {
     const f = archiveFixture();
@@ -344,6 +346,50 @@ describe('dedicated world archive scope', () => {
     expect(
       f.authorizeTransfer.mock.calls.every((args) => args[7] === 'game.minecraft.worlds.download'),
     ).toBe(true);
+  });
+  it('stops a prepared world ZIP when the bound download permission is revoked before streaming its files', async () => {
+    const f = archiveFixture();
+    const permission = 'game.minecraft.worlds.download';
+    const checking = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    let allowed = true;
+    f.authorizeTransfer.mockImplementation(async (...args) => {
+      if (args[3] !== undefined) return;
+      checking.resolve();
+      await resume.promise;
+      if (!allowed && args[7] === permission) throw new DomainError('forbidden');
+    });
+    const response = await f.app.request('/v1/servers/server/minecraft/worlds/world/archive');
+    expect(response.status).toBe(200);
+    const body = response.arrayBuffer();
+    try {
+      await checking.promise;
+      expect(f.authorizeTransfer).toHaveBeenCalledWith(
+        actor,
+        'server',
+        false,
+        db,
+        undefined,
+        f.server,
+        false,
+        permission,
+      );
+      expect(f.authorizeTransfer).toHaveBeenLastCalledWith(
+        actor,
+        'server',
+        false,
+        undefined,
+        undefined,
+        f.server,
+        false,
+        permission,
+      );
+    } finally {
+      allowed = false;
+      resume.resolve();
+    }
+    await expect(body).rejects.toThrow();
+    expect(f.downloadFile).not.toHaveBeenCalled();
   });
   it('rejects arbitrary folders, protected roots and traversal before downloading bytes', async () => {
     const f = archiveFixture();

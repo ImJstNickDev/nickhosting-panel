@@ -42,14 +42,15 @@ import {
 } from '../../../games/minecraft/src/runtime.js';
 import { type DB, type Environment, lockResources } from './admission.js';
 import { getFabricCatalog } from './fabric-catalog.js';
-import { getFoliaCatalog, getFoliaCatalogSnapshot } from './folia-catalog.js';
-import { getForgeCatalog, getForgeCatalogSnapshot } from './forge-catalog.js';
+import { getFoliaCatalogSnapshot } from './folia-catalog.js';
+import { getForgeCatalogSnapshot } from './forge-catalog.js';
 import { currentInteractiveContext } from './interactive-context.js';
+import { minecraftCatalogGames } from './minecraft-catalog-projections.js';
 import { cachedMinecraftManifest, getMinecraftMetadataStatus } from './minecraft-metadata.js';
-import { getNeoForgeCatalog, getNeoForgeCatalogSnapshot } from './neoforge-catalog.js';
-import { getPaperCatalog, getPaperCatalogSnapshot } from './paper-catalog.js';
-import { getPurpurCatalog, getPurpurCatalogSnapshot } from './purpur-catalog.js';
-import { getQuiltCatalog, getQuiltCatalogSnapshot } from './quilt-catalog.js';
+import { getNeoForgeCatalogSnapshot } from './neoforge-catalog.js';
+import { getPaperCatalogSnapshot } from './paper-catalog.js';
+import { getPurpurCatalogSnapshot } from './purpur-catalog.js';
+import { getQuiltCatalogSnapshot } from './quilt-catalog.js';
 import { ownerOnly, parse } from './registry.js';
 
 type Mapping = Selectable<Database['runtime_egg_mappings']>;
@@ -341,40 +342,11 @@ const catalogRuntimes = [
 ] as const;
 type CatalogRuntime = (typeof catalogRuntimes)[number];
 
-async function catalogGames(db: DB, runtime: CatalogRuntime, target?: ContentTarget) {
-  if (runtime === 'fabric' || runtime === 'quilt') {
-    const catalog = await (runtime === 'quilt' ? getQuiltCatalog : getFabricCatalog)(db);
-    if (
-      !catalog.synced ||
-      !catalog.latestInstallerVersion ||
-      !catalog.loaders.length ||
-      (target && !catalog.loaders.some((loader) => loader.version === target.loaderVersion))
-    )
-      return [];
-    return catalog.games;
-  }
-  if (runtime === 'forge' || runtime === 'neoforge') {
-    const catalog = await (runtime === 'forge' ? getForgeCatalog : getNeoForgeCatalog)(db);
-    if (!catalog.synced) return [];
-    return catalog.versions
-      .filter(
-        (game) =>
-          !target ||
-          (game.minecraftVersion === target.minecraftVersion &&
-            game.loaders.some((loader) => loader.version === target.loaderVersion)),
-      )
-      .map((game) => ({ version: game.minecraftVersion, stable: true }));
-  }
-  const catalog = await (runtime === 'paper'
-    ? getPaperCatalog
-    : runtime === 'folia'
-      ? getFoliaCatalog
-      : getPurpurCatalog)(db);
-  if (!catalog.synced || target?.loaderVersion) return [];
-  return catalog.versions.map((game) => ({ version: game.version, stable: undefined }));
-}
-
-async function runtimeCreationCatalog(db: DB, target?: ContentTarget) {
+async function runtimeCreationCatalog(
+  db: DB,
+  target?: ContentTarget,
+  mappingIds?: readonly string[],
+) {
   if (target?.loader === 'vanilla') return [];
   const mappings = await db
     .selectFrom('runtime_egg_mappings as mapping')
@@ -382,6 +354,7 @@ async function runtimeCreationCatalog(db: DB, target?: ContentTarget) {
     .select(['mapping.id', 'mapping.runtime_id'])
     .where('mapping.game_id', '=', 'minecraft')
     .where('mapping.runtime_id', 'in', target ? [target.loader] : catalogRuntimes)
+    .$if(mappingIds !== undefined, (q) => q.where('mapping.id', 'in', mappingIds ?? []))
     .where('mapping.enabled', '=', true)
     .where('node.enabled', '=', true)
     .orderBy('mapping.id')
@@ -405,7 +378,7 @@ async function runtimeCreationCatalog(db: DB, target?: ContentTarget) {
     Promise.all(
       Array.from(
         runtimes,
-        async (runtime) => [runtime, await catalogGames(db, runtime, target)] as const,
+        async (runtime) => [runtime, await minecraftCatalogGames(db, runtime, target)] as const,
       ),
     ),
     releaseQuery.execute(),
@@ -1118,7 +1091,10 @@ export async function minecraftCatalog(
   context: AuthContext,
   env: Environment = {},
   target?: ContentTarget,
+  scope?: { mappingIds: readonly string[]; owner?: AuthContext },
 ) {
+  if (scope?.mappingIds.length === 0) return [];
+  const audiences = scope?.owner ? [context, scope.owner] : [context];
   const rollout = await db
     .selectFrom('game_rollouts')
     .selectAll()
@@ -1126,13 +1102,17 @@ export async function minecraftCatalog(
     .executeTakeFirst();
   if (
     !rollout ||
-    !evaluateGameAccess(
-      { gameId: 'minecraft', state: rollout.state, allowedUserIds: rollout.allowlist },
-      { userId: context.subjectUserId, role: context.role },
-    ).canCreate
+    !audiences.every(
+      (audience) =>
+        evaluateGameAccess(
+          { gameId: 'minecraft', state: rollout.state, allowedUserIds: rollout.allowlist },
+          { userId: audience.subjectUserId, role: audience.role },
+        ).canCreate,
+    )
   )
     return [];
-  if (target && target.loader !== 'vanilla') return runtimeCreationCatalog(db, target);
+  if (target && target.loader !== 'vanilla')
+    return runtimeCreationCatalog(db, target, scope?.mappingIds);
   if (target?.loaderVersion) return [];
   let registered = db
     .selectFrom('minecraft_combinations as choice')
@@ -1143,6 +1123,7 @@ export async function minecraftCatalog(
     .select('release.release_time as releaseTime')
     .where('choice.enabled', '=', true)
     .where(sql<string>`choice.combination->>'profile'`, 'not in', catalogRuntimes);
+  if (scope) registered = registered.where('choice.mapping_id', 'in', scope.mappingIds);
   if (target)
     registered = registered.where(
       sql<string>`choice.combination->>'release'`,
@@ -1151,14 +1132,14 @@ export async function minecraftCatalog(
     );
   const [rows, runtimeChoices] = await Promise.all([
     registered.execute(),
-    runtimeCreationCatalog(db, target),
+    runtimeCreationCatalog(db, target, scope?.mappingIds),
   ]);
   const dates = new Map(rows.map((row) => [row.id, row.releaseTime?.toISOString() ?? null]));
   const loaded = await inspectMinecraftCombinations(db, rows, env, false);
   const choices = [];
   for (const choice of loaded) {
     try {
-      assertLoadedMinecraftChoice(choice, rollout, context);
+      for (const audience of audiences) assertLoadedMinecraftChoice(choice, rollout, audience);
       choices.push({
         ...publicMinecraftChoice(choice.row.id, choice.combination),
         releaseTime: dates.get(choice.row.id) ?? null,

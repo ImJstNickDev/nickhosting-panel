@@ -237,6 +237,97 @@ describe('Modpacks durable preparation and apply', () => {
     ).rejects.toMatchObject({ code: 'not_found' });
   });
 
+  it('returns constant-size polling data and pages the exact confirmed deletion plan for older records', async () => {
+    const f = await fixture();
+    const n = 4096;
+    f.prepared.files = Array.from({ length: n }, (_, i) => ({
+      path: `mods/${String(i).padStart(5, '0')}.jar`,
+      size: 20,
+      sha256: 'a'.repeat(64),
+    }));
+    const op = await f.ready();
+    const old = await f.db
+      .selectFrom('minecraft_modpack_operations')
+      .select(['prepared', 'plan'])
+      .where('id', '=', op.id)
+      .executeTakeFirstOrThrow();
+    const remove = Array.from(
+      { length: n },
+      (_, i) => `mods/old-${String(i).padStart(5, '0')}.jar`,
+    );
+    const plan = { ...(old.plan as object), remove };
+    const digest = modpackDigest({ prepared: old.prepared, plan });
+    await f.db
+      .updateTable('minecraft_modpack_operations')
+      .set({ plan: JSON.stringify(plan), plan_digest: digest })
+      .where('id', '=', op.id)
+      .execute();
+    await f.db.deleteFrom('minecraft_modpack_reviews').where('operation_id', '=', op.id).execute();
+    const service = createMinecraftModpacksService({
+      db: f.db,
+      hooks: f.hooks,
+      compactStatus: true,
+    });
+    const read = () => service.snapshot(f.context, f.serverId);
+    const page = () =>
+      service.reviewFiles(f.context, f.serverId, op.id, {
+        digest,
+        group: 'deletions',
+        offset: 3951,
+      });
+    const status = await read();
+    expect(status.operation?.changes).toMatchObject({ write: n, remove: n, bytes: 20 * n });
+    expect(status.operation?.reviewCounts).toEqual({
+      added: n,
+      replaced: 0,
+      preserved: 0,
+      removed: n,
+    });
+    expect(status.operation).not.toHaveProperty('deletePaths');
+    expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThan(3000);
+    expect((await page()).paths).toEqual(remove.slice(3951, 4051));
+    expect((await f.service.snapshot(f.context, f.serverId)).operation?.deletePaths).toEqual(
+      remove,
+    );
+    const request = {
+      operationId: op.id,
+      planDigest: digest,
+      confirm: true,
+      backupBefore: false,
+      idempotencyKey: randomUUID(),
+    };
+    await expect(
+      service.apply(f.context, f.serverId, { ...request, expectedDeleteCount: n - 1 }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    await expect(
+      service.apply(f.context, f.serverId, {
+        ...request,
+        expectedDeleteCount: n,
+        planDigest: '0'.repeat(64),
+      }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    // A stale publication that retains the same count and stored digest still needs
+    // to match the exact file plan the user reviewed before it can be enqueued.
+    const changed = { ...plan, remove: ['another-path', ...remove.slice(1)] };
+    const persistPlan = (value: typeof plan) =>
+      f.db
+        .updateTable('minecraft_modpack_operations')
+        .set({ plan: JSON.stringify(value) })
+        .where('id', '=', op.id)
+        .execute();
+    await persistPlan(changed);
+    await expect(
+      service.apply(f.context, f.serverId, { ...request, expectedDeleteCount: n }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    await persistPlan(plan);
+    const applied = await service.apply(f.context, f.serverId, {
+      ...request,
+      expectedDeleteCount: n,
+    });
+    expect(applied.operation?.state).toBe('apply_queued');
+    expect(applied.operation).not.toHaveProperty('deletePaths');
+  });
+
   it('previews a sealed server upload and persists its source receipt after explicit apply', async () => {
     const f = await fixture();
     const root = `./mountdata/test-assets/import-modpack-${randomUUID()}`;

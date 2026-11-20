@@ -12,12 +12,17 @@ import {
   type MinecraftWorldIndexInspection,
   type MinecraftWorldSnapshot,
 } from './minecraft-content.js';
+import { subscribeWorldScan } from './minecraft-world-notifications.js';
 import type { ManagementRuntime } from './runtime.js';
 
 type DB = Kysely<Database>;
 type Runtime = Pick<
   ManagementRuntime,
-  'adapter' | 'fileReadPhase' | 'consoleProviderBinding' | 'worldPreparation'
+  | 'adapter'
+  | 'fileReadPhase'
+  | 'consoleProviderBinding'
+  | 'worldPreparation'
+  | 'worldNotificationPool'
 >;
 export interface MinecraftWorldIndex {
   current: boolean;
@@ -382,49 +387,67 @@ async function refresh(
 ): Promise<MinecraftWorldIndex> {
   const stop = AbortSignal.timeout(60_000);
   let joined: string | null = null;
-  for (;;) {
-    stop.throwIfAborted();
-    const row = await db
-      .selectFrom('minecraft_world_indexes')
-      .innerJoin('managed_servers as server', 'server.id', 'minecraft_world_indexes.server_id')
-      .select([
-        'server.active_operation_id',
-        'denied_reason',
-        'lease_id',
-        'finished_id',
-        'generation',
-        'successful_generation',
-        sql<boolean>`lease_until > clock_timestamp()`.as('lease_active'),
-      ])
-      .where('server_id', '=', serverId)
-      .executeTakeFirst();
-    if (!row) throw new DomainError('not_found');
-    if (row.active_operation_id) {
-      const cached = await readMinecraftWorldIndex(db, serverId, runtime.consoleProviderBinding);
-      if (cached) return cached;
-      throw new DomainError('operation_busy');
-    }
-    if (joined && row.finished_id === joined) {
-      if (row.successful_generation === null)
-        throw new DomainError(row.denied_reason ?? 'integration_unavailable');
-      if (row.successful_generation === row.generation) {
-        const cached = await boundRow(db, serverId, runtime.consoleProviderBinding);
-        if (cached?.finished_id === joined && cached.successful_generation === cached.generation) {
-          const result = record(cached);
-          if (result) return result;
+  let subscription: ReturnType<typeof subscribeWorldScan> | undefined;
+  let backoff = 250;
+  try {
+    for (;;) {
+      stop.throwIfAborted();
+      const row = await db
+        .selectFrom('minecraft_world_indexes')
+        .innerJoin('managed_servers as server', 'server.id', 'minecraft_world_indexes.server_id')
+        .select([
+          'server.active_operation_id',
+          'denied_reason',
+          'lease_id',
+          'finished_id',
+          'generation',
+          'successful_generation',
+          sql<boolean>`lease_until > clock_timestamp()`.as('lease_active'),
+        ])
+        .where('server_id', '=', serverId)
+        .executeTakeFirst();
+      if (!row) throw new DomainError('not_found');
+      if (row.active_operation_id) {
+        const cached = await readMinecraftWorldIndex(db, serverId, runtime.consoleProviderBinding);
+        if (cached) return cached;
+        throw new DomainError('operation_busy');
+      }
+      if (joined && row.finished_id === joined) {
+        if (row.successful_generation === null)
+          throw new DomainError(row.denied_reason ?? 'integration_unavailable');
+        if (row.successful_generation === row.generation) {
+          const cached = await boundRow(db, serverId, runtime.consoleProviderBinding);
+          if (
+            cached?.finished_id === joined &&
+            cached.successful_generation === cached.generation
+          ) {
+            const result = record(cached);
+            if (result) return result;
+          }
         }
       }
+      if (row.lease_id && row.lease_active) {
+        if (row.lease_id !== joined) backoff = 250;
+        joined = row.lease_id;
+        if (!subscription && runtime.worldNotificationPool) {
+          subscription = subscribeWorldScan(runtime.worldNotificationPool, serverId);
+          await subscription.ready;
+          // Re-read the lease after LISTEN setup in case completion raced subscription.
+          continue;
+        }
+        if (subscription) await subscription.wait(subscription.connected() ? 5000 : backoff, stop);
+        else await delay(backoff, undefined, { signal: stop });
+        backoff = Math.min(backoff * 2, 4000);
+        continue;
+      }
+      const token = await claim(db, serverId, false);
+      if (token) {
+        const result = await reconcile(db, serverId, runtime, env, token, stop, false);
+        if (result) return result;
+      }
     }
-    if (row.lease_id && row.lease_active) {
-      joined = row.lease_id;
-      await delay(150, undefined, { signal: stop });
-      continue;
-    }
-    const token = await claim(db, serverId, false);
-    if (token) {
-      const result = await reconcile(db, serverId, runtime, env, token, stop, false);
-      if (result) return result;
-    }
+  } finally {
+    subscription?.close();
   }
 }
 

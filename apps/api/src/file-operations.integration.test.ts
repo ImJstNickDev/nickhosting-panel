@@ -132,6 +132,9 @@ beforeEach(async () => {
       return work('fixture', f.db, context, server);
     },
   } as unknown as ManagementRuntime;
+  service.fileReadAccess = (context, id, work, timing, permission) =>
+    service.access(context, id, false, work, timing, permission);
+  service.uploadBatchBinding = (server) => JSON.stringify([server.id, server.pterodactyl_uuid]);
   service.fileMutationAccess = (context, id, work, timing) =>
     service.access(context, id, true, work, timing);
   service.cleanupAccess = (context, id, work, timing) =>
@@ -522,6 +525,52 @@ describe('file operation handlers with isolated authoritative database', () => {
     await collected;
     return Buffer.concat(chunks);
   }
+
+  it.each(['root', 'nested'])(
+    'denies a revoked writer before creating the %s extraction directory',
+    async (phase) => {
+      files.set(
+        'source/data.zip',
+        await archiveBytes([{ path: 'nested/a.txt', content: Buffer.from('ok') }]),
+      );
+      let checkRoot = false,
+        revoked = false;
+      const original = vi.mocked(service.adapter.listFiles).getMockImplementation();
+      if (!original) throw Error('missing fixture');
+      vi.mocked(service.adapter.getResources).mockImplementationOnce(async () => {
+        checkRoot = true;
+        return { resources: { disk_bytes: 0 } } as Awaited<
+          ReturnType<typeof service.adapter.getResources>
+        >;
+      });
+      vi.mocked(service.adapter.listFiles).mockImplementation(async (...args) => {
+        const entries = await original(...args);
+        if (
+          phase === 'root'
+            ? checkRoot && args[1] === 'source'
+            : files.has('source/extracted') && args[1] === 'source'
+        )
+          revoked = true;
+        return entries;
+      });
+      const authorize = service.authorizeTransfer;
+      service.authorizeTransfer = async (...args) => {
+        if (revoked && args[2]) throw new DomainError('forbidden');
+        return authorize(...args);
+      };
+      const response = await post('extract', {
+        root: 'source',
+        file: 'data.zip',
+        destination: 'extracted',
+        confirm: true,
+      });
+      expect(revoked).toBe(true);
+      expect(response.status).toBe(phase === 'root' ? 403 : 409);
+      expect(files.has('source/extracted')).toBe(phase !== 'root');
+      expect(files.has('source/extracted/nested')).toBe(false);
+      expect(service.adapter.uploadFile).not.toHaveBeenCalled();
+    },
+  );
 
   it('extracts only selected nested members and records the completed selection count', async () => {
     const nested = await archiveBytes([

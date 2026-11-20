@@ -2,9 +2,11 @@ import {
   type ButtonHTMLAttributes,
   type HTMLAttributes,
   type MouseEvent,
+  memo,
   type ReactNode,
   type Ref,
   useCallback,
+  useEffect,
   useId,
   useLayoutEffect,
   useState,
@@ -371,6 +373,7 @@ export function FilemanParent(
 
 export interface FilemanListingProps<T extends FilemanEntry> {
   entries: readonly T[];
+  directoryKey?: string;
   hiddenEntries?: readonly T[];
   hiddenExpanded?: boolean;
   onHiddenToggle?: (expanded: boolean) => void;
@@ -396,8 +399,47 @@ export interface FilemanListingProps<T extends FilemanEntry> {
   empty?: ReactNode;
 }
 
+// Keep native rows and tab order. Yield between batches so the first files can
+// paint and accept input while a large directory finishes mounting.
+function FileRowContent<T>({ entry, render }: { entry: T; render: (entry: T) => ReactNode }) {
+  return render(entry);
+}
+const FileRow = memo(FileRowContent) as typeof FileRowContent;
+
+function FileRows<T extends FilemanEntry>({
+  entries,
+  render,
+  eager,
+}: {
+  entries: readonly T[];
+  render: (entry: T) => ReactNode;
+  eager: boolean;
+}) {
+  const [count, setCount] = useState(96);
+  const end = eager || entries.length <= 256 ? entries.length : Math.min(count, entries.length);
+  useEffect(() => {
+    if (count >= entries.length) return;
+    if (eager || entries.length <= 256) {
+      setCount(entries.length);
+      return;
+    }
+    let timer: number | undefined;
+    const frame = requestAnimationFrame(() => {
+      timer = window.setTimeout(() => setCount(count + 96), 0);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
+  }, [count, entries.length, eager]);
+  return entries
+    .slice(0, end)
+    .map((entry) => <FileRow key={entry.name} entry={entry} render={render} />);
+}
+
 export function FilemanListing<T extends FilemanEntry>({
   entries,
+  directoryKey,
   hiddenEntries = [],
   hiddenExpanded = false,
   onHiddenToggle,
@@ -578,7 +620,14 @@ export function FilemanListing<T extends FilemanEntry>({
           <span className="sr-only">{t('web.actions')}</span>
         </div>
         {parent}
-        <ul aria-label={t('file.entries')}>{entries.map(renderEntry)}</ul>
+        <ul aria-label={t('file.entries')}>
+          <FileRows
+            key={directoryKey}
+            entries={entries}
+            render={renderEntry}
+            eager={selected.size > 0 || Boolean(menuEntry)}
+          />
+        </ul>
         {hiddenEntries.length > 0 && (
           <section className="fm-hidden-group">
             <button
@@ -606,7 +655,12 @@ export function FilemanListing<T extends FilemanEntry>({
             <div id={hiddenId} hidden={!hiddenExpanded}>
               {hiddenExpanded && (
                 <ul className="fm-hidden-entries" aria-label={t('file.hiddenEntries')}>
-                  {hiddenEntries.map(renderEntry)}
+                  <FileRows
+                    key={directoryKey}
+                    entries={hiddenEntries}
+                    render={renderEntry}
+                    eager={selected.size > 0 || Boolean(menuEntry)}
+                  />
                 </ul>
               )}
             </div>

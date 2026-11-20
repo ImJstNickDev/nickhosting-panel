@@ -746,6 +746,26 @@ export function createMinecraftUiController(client: GameUiClient) {
         await request(serverPath(serverId, '/versions'), 'GET', undefined, signal),
       );
     },
+    async versionChoices(serverId: string, signal?: AbortSignal) {
+      return minecraftVersionCatalogSchema
+        .omit({ loaders: true })
+        .parse(
+          await request(serverPath(serverId, '/versions?view=choices'), 'GET', undefined, signal),
+        );
+    },
+    async versionLoaders(serverId: string, runtime: string, version: string, signal?: AbortSignal) {
+      const query = new URLSearchParams({ runtime, version });
+      return z
+        .array(z.string().min(1).max(128))
+        .parse(
+          await request(
+            serverPath(serverId, '/versions/loaders?' + query),
+            'GET',
+            undefined,
+            signal,
+          ),
+        );
+    },
     async changeVersion(serverId: string, command: MinecraftVersionChangeRequest) {
       return minecraftVersionChangeAcceptedSchema.parse(
         await request(

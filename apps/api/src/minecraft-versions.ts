@@ -21,6 +21,7 @@ import {
 import type { Context, Hono } from 'hono';
 import type { Kysely } from 'kysely';
 import { z } from 'zod';
+import { minecraftCatalogLoaders } from '../../../packages/server-management/src/minecraft-catalog-projections.js';
 import {
   minecraftRuntimeOwner,
   modpackMappingCompatible,
@@ -72,8 +73,7 @@ export function registerMinecraftVersionRoutes(
     source,
     allocations,
   }: Awaited<ReturnType<typeof scope>>) {
-    const [catalog, mappings, registered] = await Promise.all([
-      minecraftCatalog(db, actor, env),
+    const [mappings, owner] = await Promise.all([
       db
         .selectFrom('runtime_egg_mappings')
         .selectAll()
@@ -81,48 +81,39 @@ export function registerMinecraftVersionRoutes(
         .where('game_id', '=', 'minecraft')
         .where('enabled', '=', true)
         .execute(),
-      db
-        .selectFrom('minecraft_combinations as choice')
-        .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'choice.mapping_id')
-        .select(['choice.id', 'choice.mapping_id'])
-        .where('mapping.node_id', '=', server.node_id)
-        .where('choice.enabled', '=', true)
-        .execute(),
-    ]);
-    const ownerAllowed =
       actor.subjectUserId === server.owner_id
-        ? null
-        : new Set(
-            (await minecraftCatalog(db, await minecraftRuntimeOwner(db, server.owner_id), env)).map(
-              (c) => c.id,
-            ),
-          );
-    const eligible = new Set(
-      mappings
-        .filter((m) => modpackMappingCompatible(server, source, m, allocations))
-        .map((m) => m.id),
+        ? undefined
+        : minecraftRuntimeOwner(db, server.owner_id),
+    ]);
+    const eligible = mappings.filter((m) =>
+      modpackMappingCompatible(server, source, m, allocations),
     );
-    const mappingById = new Map(registered.map((r) => [r.id, r.mapping_id]));
+    const catalog = await minecraftCatalog(db, actor, env, undefined, {
+      mappingIds: eligible.map((m) => m.id),
+      owner,
+    });
     return catalog
       .filter(
         (v) =>
-          (!ownerAllowed || ownerAllowed.has(v.id)) &&
           v.capabilities.installation &&
-          (server.connection_mode !== 'gateway' || v.capabilities.gateway) &&
-          eligible.has(mappingById.get(v.id) ?? v.id.split(':')[1] ?? ''),
+          (server.connection_mode !== 'gateway' || v.capabilities.gateway),
       )
       .map(({ id, version, runtime }) => ({ id, version, runtime }));
   }
   app.get(base, async (c) => {
     const resource = await scope(c);
     const { profile } = resource;
-    const [choices, fabric, quilt, forge, neoforge] = await Promise.all([
-      visibleChoices(resource),
-      getFabricCatalog(db),
-      getQuiltCatalog(db),
-      getForgeCatalog(db),
-      getNeoForgeCatalog(db),
-    ]);
+    const light = c.req.query('view') === 'choices';
+    const catalog = visibleChoices(resource);
+    const loaderCatalogs = light
+      ? undefined
+      : Promise.all([
+          getFabricCatalog(db),
+          getQuiltCatalog(db),
+          getForgeCatalog(db),
+          getNeoForgeCatalog(db),
+        ]);
+    const [choices, catalogs] = await Promise.all([catalog, loaderCatalogs]);
     const choice = minecraftCombinationSchema.parse(profile.combination);
     const byGame = (versions: { minecraftVersion: string; loaders: { version: string }[] }[]) =>
       Object.fromEntries(
@@ -137,13 +128,27 @@ export function registerMinecraftVersionRoutes(
         loaderVersion: choice.loaderVersion ?? null,
       },
       choices,
-      loaders: {
-        fabric: fabric.loaders.map((v) => v.version),
-        quilt: quilt.loaders.map((v) => v.version),
-        forge: byGame(forge.versions),
-        neoforge: byGame(neoforge.versions),
-      },
+      ...(catalogs && {
+        loaders: {
+          fabric: catalogs[0].loaders.map((v) => v.version),
+          quilt: catalogs[1].loaders.map((v) => v.version),
+          forge: byGame(catalogs[2].versions),
+          neoforge: byGame(catalogs[3].versions),
+        },
+      }),
     });
+  });
+  app.get(`${base}/loaders`, async (c) => {
+    await scope(c);
+    const { runtime, version } = parse(
+      z.strictObject({
+        runtime: z.enum(['fabric', 'quilt', 'forge', 'neoforge']),
+        version: z.string().min(1).max(128),
+      }),
+      c.req.query(),
+    );
+    c.header('Cache-Control', 'no-store');
+    return c.json(await minecraftCatalogLoaders(db, runtime, version));
   });
   app.post(base, async (c) => {
     const resource = await scope(c);

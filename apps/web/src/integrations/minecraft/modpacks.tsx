@@ -42,7 +42,7 @@ import './mods.css';
 import './modpacks.css';
 
 type PackChoices = { keepWorlds: boolean; backupBefore: boolean; preview?: boolean };
-const controller = createMinecraftModpacksController(gameUiClient);
+const controller = createMinecraftModpacksController(gameUiClient, true);
 const Description = lazy(() =>
   import('./mods-description.js').then((module) => ({ default: module.ModsDescription })),
 );
@@ -271,7 +271,8 @@ function Modpacks(props: GameSectionViewProps) {
         planDigest: operation.planDigest ?? '',
         confirm: true,
         backupBefore,
-        expectedDeletePaths: operation.deletePaths,
+        expectedDeletePaths: operation.deletePaths ?? [],
+        ...(operation.removalsPaged ? { expectedDeleteCount: operation.changes?.remove ?? 0 } : {}),
         idempotencyKey: requestKey(`apply:${operation.id}:${operation.planDigest}:${backupBefore}`),
       });
       await queryClient.invalidateQueries({

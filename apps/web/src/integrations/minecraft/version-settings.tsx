@@ -2,7 +2,7 @@ import {
   createMinecraftUiController,
   type MinecraftVersionChangeRequest,
 } from '@nickhosting/minecraft/ui';
-import { useQuery } from '@tanstack/react-query';
+import { skipToken, useQuery } from '@tanstack/react-query';
 import { useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Link } from 'react-router';
@@ -14,16 +14,9 @@ import { gameUiClient } from '../../features/integrations.js';
 
 const controller = createMinecraftUiController(gameUiClient);
 const key = (id: string) => `games.minecraft.versionChange.${id}`;
-type Catalog = Awaited<ReturnType<typeof controller.versionCatalog>>;
+type Catalog = Awaited<ReturnType<typeof controller.versionChoices>>;
 type Target = Catalog['choices'][number];
 type Review = { target: Target; sourceCombinationId: string; loaderVersion?: string };
-function loaderChoices(catalog: Catalog, target: Target) {
-  const runtime = target.runtime;
-  if (runtime === 'forge' || runtime === 'neoforge')
-    return catalog.loaders[runtime][target.version] ?? [];
-  if (runtime === 'fabric' || runtime === 'quilt') return catalog.loaders[runtime];
-  return undefined;
-}
 
 export function MinecraftVersionSettings(props: GameFormViewProps) {
   const t = useT();
@@ -42,7 +35,7 @@ export function MinecraftVersionSettings(props: GameFormViewProps) {
   const lock = useRef(false);
   const catalog = useQuery({
     queryKey: ['minecraft-version-catalog', props.serverId],
-    queryFn: ({ signal }) => controller.versionCatalog(props.serverId, signal),
+    queryFn: ({ signal }) => controller.versionChoices(props.serverId, signal),
     enabled: open,
     staleTime: 0,
     refetchOnWindowFocus: false,
@@ -51,7 +44,21 @@ export function MinecraftVersionSettings(props: GameFormViewProps) {
   const selectedRuntime = runtime ?? data?.current.runtime;
   const choices = data?.choices.filter((entry) => entry.runtime === selectedRuntime) ?? [];
   const target = choices.find((entry) => entry.id === choice);
-  const loaders = target && data ? loaderChoices(data, target) : undefined;
+  const loaderRuntime =
+    target && ['fabric', 'quilt', 'forge', 'neoforge'].includes(target.runtime)
+      ? target.runtime
+      : undefined;
+  const loaderQuery = useQuery({
+    queryKey: ['minecraft-version-loaders', props.serverId, loaderRuntime, target?.version],
+    queryFn:
+      loaderRuntime && target
+        ? ({ signal }) =>
+            controller.versionLoaders(props.serverId, loaderRuntime, target.version, signal)
+        : skipToken,
+    enabled: open && Boolean(loaderRuntime),
+    refetchOnWindowFocus: false,
+  });
+  const loaders = loaderRuntime ? loaderQuery.data : undefined;
   const canBackup = props.permissions.includes('backups.create');
   const backupUnavailable = mode === 'keep' && backup && !canBackup;
   const stopped = props.runtimeState === 'offline' || props.runtimeState === 'stopped';
@@ -67,7 +74,8 @@ export function MinecraftVersionSettings(props: GameFormViewProps) {
     !catalog.isFetching &&
     !catalog.error &&
     changed &&
-    (!loaders || loaders.includes(loader));
+    (!loaderRuntime ||
+      (!loaderQuery.isFetching && !loaderQuery.error && loaders?.includes(loader)));
   const runtimeLabel = (value: string) => t(`games.minecraft.runtimes.${value}`);
   const currentRuntime = props.data.metadata?.runtime;
   const currentVersion = props.data.metadata?.version;
@@ -201,6 +209,13 @@ export function MinecraftVersionSettings(props: GameFormViewProps) {
                         </option>
                       ))}
                     </Select>
+                    {loaderRuntime && loaderQuery.isPending && <Loading />}
+                    {loaderRuntime && loaderQuery.error && (
+                      <ErrorNotice
+                        error={loaderQuery.error}
+                        retry={() => void loaderQuery.refetch()}
+                      />
+                    )}
                     {loaders && (
                       <Select
                         label={t('games.minecraft.fields.loaderVersion')}

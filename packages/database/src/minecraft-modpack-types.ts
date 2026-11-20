@@ -2,6 +2,14 @@ import type { ColumnType, Generated } from 'kysely';
 
 type Json = ColumnType<unknown, string, string>;
 export interface MinecraftModpackTables {
+  minecraft_modpack_reviews: { operation_id: string; digest: string; summary: Json };
+  minecraft_modpack_review_pages: {
+    operation_id: string;
+    digest: string;
+    category: string;
+    page: number;
+    paths: Json;
+  };
   minecraft_modpack_operations: {
     id: string;
     server_id: string;

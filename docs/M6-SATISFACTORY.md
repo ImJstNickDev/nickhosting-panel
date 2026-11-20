@@ -150,9 +150,14 @@ Do not delete certificates or drop durable mod-operation tables as routine rollb
 The Satisfactory Mods workspace shares the Minecraft addon layout and visual
 components: Installed, Discover and Review changes. SMR discovery includes project
 artwork, authors, description, version details, published build compatibility and
-Linux server targets. Installed inventory reads the real mod directories, including
-`FactoryGame/Mods/GameFeatures`, and distinguishes selected roots, dependencies,
-unmanaged content and discrepancies from the last committed file hashes.
+Linux server targets. Installed shows the last saved directory observation and its
+timestamp, including mod descriptors in `FactoryGame/Mods/GameFeatures`, selected
+roots, dependencies and unmanaged content. On opening, observations over 60 seconds old
+refresh in the background. Manual refresh reads immediately. Concurrent refreshes
+share a bounded metadata scan, and a failed refresh leaves the last observation available.
+Migration 069 stores one observation per server. Its first visit builds the observation
+from the current installation. Preview, Apply and external reconciliation still read
+and verify current file contents against the reviewed fingerprint.
 
 Profiles retain enabled/disabled roots, exact versions or supported semver constraints,
 required client/server targets and reversible disabling of all managed mods. Update checks can

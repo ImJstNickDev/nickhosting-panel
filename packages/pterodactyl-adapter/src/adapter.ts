@@ -377,10 +377,13 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     path: string,
     read: (url: string) => Promise<T>,
     timing?: FileReadTiming,
+    refill = true,
   ): Promise<T> {
     const url = timing
-      ? await timing.measure('file.signedUrl', () => fileDownloads.take(identifier, path, timing))
-      : await fileDownloads.take(identifier, path);
+      ? await timing.measure('file.signedUrl', () =>
+          fileDownloads.take(identifier, path, timing, refill),
+        )
+      : await fileDownloads.take(identifier, path, undefined, refill);
     try {
       return await read(url);
     } catch (error) {
@@ -974,10 +977,20 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       );
       return download(result.url, input);
     },
-    async downloadFile(identifier: string, path: string, input: DownloadProxyOptions) {
+    async downloadFile(
+      identifier: string,
+      path: string,
+      input: DownloadProxyOptions & { refillGrant?: boolean },
+    ) {
       if (input.signal?.aborted) throw new PterodactylError('unavailable', 'client', 'rejected');
       await input.authorize?.();
-      return readWithFreshGrant(identifier, path, (url) => download(url, input));
+      return readWithFreshGrant(
+        identifier,
+        path,
+        (url) => download(url, input),
+        undefined,
+        input.refillGrant,
+      );
     },
     /** Private, single-use upload handoff. URL lookup may overlap read-only
      * preflight; no Wings mutation occurs until the returned function is called. */
