@@ -28,6 +28,27 @@ import {
 } from './minecraft-fixture.js';
 
 type Database = Awaited<ReturnType<typeof createTestDatabase>>;
+
+export async function recordBrowserDiskUsage(
+  database: Database,
+  serverId: string,
+  bytes: number,
+  observedAt = new Date(),
+) {
+  await database.db
+    .insertInto('server_metrics')
+    .values({
+      server_id: serverId,
+      observed_at: observedAt,
+      memory_bytes: '0',
+      cpu_percent: 0,
+      disk_bytes: String(bytes),
+      network_rx_bytes: '0',
+      network_tx_bytes: '0',
+    })
+    .execute();
+}
+
 type Remote = {
   server: ApplicationServer;
   state: Resources['current_state'];

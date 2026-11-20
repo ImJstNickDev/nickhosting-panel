@@ -583,9 +583,13 @@ a positive disk value. Existing finite servers are converted only by an explicit
 guided application. Finite/unlimited crossings cannot use ordinary server resize.
 `GET /v1/platform/quotas` returns `creationStorage.defaultDiskMiB=0` for shared
 storage, `storageBudgetOverrideMiB`, and `storageUsage.bytes` (30-second display freshness, null when any current
-measurement is missing, invalid or stale). Home cards use the same resources
-endpoint and `resources.disk_bytes` as Console, with a 30-second freshness window;
-they never present an allowance as occupied space or unavailable data as zero.
+measurement is missing, invalid or stale). The server list returns a response-level
+`observedAt` timestamp. Each configured server exposes `diskUsage` with `bytes`, `observedAt` and
+`expiresAt` from the latest worker measurement when the viewer has `console.read`.
+Pending provider binding, missing permission and missing, invalid, future or expired measurements yield
+`diskUsage: null`. Home, project and inventory cards use the list response and
+display the sample until 30 seconds after observation. A fresh measured zero is
+valid. The Console continues to use its live resources transport.
 
 For unbounded storage, quotas also return `sharedStorageAvailableBytes`: actual
 filesystem free space from the worker's cached host observations. Enabled managed

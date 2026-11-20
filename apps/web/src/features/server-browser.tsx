@@ -1,16 +1,14 @@
 import { useQuery } from '@tanstack/react-query';
 import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import type { listPlatformServers } from '../../../../packages/server-management/src/platform-queries.js';
-import { api, queryClient } from '../api/client.js';
-import type { Result } from '../api/contracts.js';
+import { queryClient } from '../api/client.js';
 import { useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
 import { Empty, ErrorNotice, Loading, Page, Select } from '../components/ui.js';
 import { creationGamesQuery } from './creation-catalog.js';
 import { ServerOwnerFilter } from './server-owner-filter.js';
-import { ServerCards } from './servers.js';
+import { fetchServerCardPage, ServerCards } from './servers.js';
 import './server-browser.css';
 
 type Filters = {
@@ -167,8 +165,7 @@ export function ServersPage() {
   if (scope) params.set('scope', scope);
   const servers = useQuery({
     queryKey: ['servers', 'browse', scope, params.toString(), identity],
-    queryFn: ({ signal }) =>
-      api<Result<typeof listPlatformServers>>(`/v1/platform/servers?${params}`, { signal }),
+    queryFn: ({ signal }) => fetchServerCardPage(params, signal),
     enabled: Boolean(identity && size.width && size.height),
     placeholderData: (previous, previousQuery) =>
       previousQuery?.queryKey[2] === scope && previousQuery.queryKey[4] === identity

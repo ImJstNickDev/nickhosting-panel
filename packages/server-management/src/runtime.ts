@@ -1425,10 +1425,10 @@ export async function createManagementRuntime(options: ManagementOptions) {
           );
       }
     };
-    // Directory reads hold no lifecycle lock. Do not pin a pool connection while
-    // waiting for a background renewal that itself needs that pool (even max=1).
-    if (!timing || identityMode === 'directory')
-      return identityMode === 'directory' ? run(db) : db.connection().execute(run);
+    // Reads take no session-level lock. Release each query's connection before
+    // waiting on provider I/O or resolving a server-scoped Client credential.
+    if (!write) return run(db);
+    if (!timing) return db.connection().execute(run);
     const acquired = timing.start('access.connectionAcquire');
     let released: (() => void) | undefined;
     try {

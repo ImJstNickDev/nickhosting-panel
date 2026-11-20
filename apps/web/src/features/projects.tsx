@@ -4,7 +4,6 @@ import { Link, useNavigate, useParams } from 'react-router';
 import type {
   getPlatformProject,
   listPlatformProjects,
-  listPlatformServers,
   lookupProjectCollaborator,
 } from '../../../../packages/server-management/src/platform-queries.js';
 import { api, queryClient } from '../api/client.js';
@@ -25,11 +24,10 @@ import {
   Time,
   text,
 } from '../components/ui.js';
-import { CursorControls, ServerCards, TableRegion } from './servers.js';
+import { CursorControls, fetchServerCardPage, ServerCards, TableRegion } from './servers.js';
 
 type Projects = Result<typeof listPlatformProjects>;
 type Project = Result<typeof getPlatformProject>;
-type Servers = Result<typeof listPlatformServers>;
 type Collaborator = Result<typeof lookupProjectCollaborator>;
 export function ProjectsPage() {
   const t = useT(),
@@ -142,7 +140,8 @@ export function ProjectPage({ projectId: explicitId }: { projectId?: string } = 
   });
   const servers = useQuery({
     queryKey: ['servers', 'project', projectId, query.toString()],
-    queryFn: () => api<Servers>(`/v1/platform/servers?${query}`),
+    queryFn: ({ signal }) => fetchServerCardPage(query, signal),
+    refetchInterval: (query) => (query.state.data?.items.length ? 15000 : false),
   });
   async function refresh() {
     await Promise.all([

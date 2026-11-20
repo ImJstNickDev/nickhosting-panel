@@ -4,7 +4,7 @@ import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
-import { installBrowserFixtures } from './provider-fixture.js';
+import { installBrowserFixtures, recordBrowserDiskUsage } from './provider-fixture.js';
 
 describe('M5 real browser platform and Owner journeys', () => {
   let fixture: Awaited<ReturnType<typeof browserHarness>>;
@@ -113,8 +113,7 @@ describe('M5 real browser platform and Owner journeys', () => {
     await provider.management.refreshObservations();
   });
   it('shows scoped server artwork, resource units, useful empty filters and accessible Home', async () => {
-    const files = await provider.files();
-    files.set('home-usage.bin', Buffer.alloc(4 * 1024 * 1024));
+    await recordBrowserDiskUsage(fixture.database, provider.ids.serverId, 4 * 1024 ** 2);
     await user.goto(fixture.origin);
     await browserExpect(user.getByRole('heading', { name: 'Home', exact: true })).toBeVisible();
     await browserExpect(
@@ -134,6 +133,7 @@ describe('M5 real browser platform and Owner journeys', () => {
     await browserExpect(user).toHaveURL(
       new RegExp(`/servers/${provider.ids.serverId}/(console|status)$`),
     );
+    await recordBrowserDiskUsage(fixture.database, provider.ids.serverId, 4 * 1024 ** 2);
     await user.goto(fixture.origin);
     const serverLink = user.locator('.server-card-link');
     await serverLink.focus();
@@ -157,7 +157,6 @@ describe('M5 real browser platform and Owner journeys', () => {
     await fixture.screenshot(user, 'servers-desktop-en');
     await peer.goto(`${fixture.origin}/servers`);
     await browserExpect(peer.getByRole('link', { name: 'Survival', exact: true })).toHaveCount(0);
-    files.delete('home-usage.bin');
   });
 
   it('creates a verified-choice Vanilla server through the installer pages and reports admission-denied first start', async () => {
