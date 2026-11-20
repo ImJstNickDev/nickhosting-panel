@@ -19,6 +19,7 @@ import {
   authorizeServer,
   gatewayConfiguration,
   gatewaySafetyContext,
+  getGatewayRoutesById,
   getGatewaySnapshot,
   getGatewayState,
   listGatewayRoutes,
@@ -39,6 +40,11 @@ import { z } from 'zod';
 import { resolveSatisfactoryApi } from '../../../packages/server-management/src/satisfactory-api.js';
 import type { Variables } from './app.js';
 import { gatewayEvidence } from './gateway-evidence.js';
+import {
+  indexGatewayRemotes,
+  readGatewayClaims,
+  verifyGatewayClaims,
+} from './gateway-managed-inventory.js';
 import { gatewayClientFeatures, gatewayPresentationForClient } from './gateway-presentation.js';
 import { registerSatisfactoryConsoleApi } from './gateway-satisfactory-console.js';
 import {
@@ -401,9 +407,6 @@ export function registerGatewayRoutes(
     if (value.operation === 'servers') {
       // Resolve every selector through the current enabled Gateway membership;
       // the service cannot use this facade to enumerate unrelated provider servers.
-      const snapshot = await getGatewaySnapshot(db, env);
-      const current = new Map(snapshot.routes.map((route) => [route.id, route]));
-      const identities = new Map<string, Awaited<ReturnType<typeof gatewaySafetyContext>>>();
       const membershipChanged = () =>
         c.json(
           {
@@ -416,54 +419,46 @@ export function registerGatewayRoutes(
           },
           412,
         );
-      for (const routeId of value.routeIds) {
-        const selected = current.get(routeId);
-        if (!selected) return membershipChanged();
-        let context: Awaited<ReturnType<typeof gatewaySafetyContext>>;
-        try {
-          context = await gatewaySafetyContext(db, selected);
-        } catch (error) {
-          // Membership can change after the snapshot read and before its route
-          // context is resolved. Only absence permits the bounded snapshot retry.
-          if (error instanceof DomainError && error.code === 'not_found')
-            return membershipChanged();
-          throw error;
+      const selectMembers = (tx: typeof db) => getGatewayRoutesById(tx, value.routeIds, env);
+      const before = await db.transaction().execute(async (tx) => {
+        const routes = await selectMembers(tx);
+        if (routes.length !== value.routeIds.length) return;
+        const ids = [...new Set(routes.map((route) => route.serverId))];
+        const claims = await readGatewayClaims(tx, ids);
+        const expected = new Set<string>();
+        for (const route of routes) {
+          const row = claims.indexed.get(`${route.serverId}:${route.allocationId}`);
+          if (!row?.pterodactyl_id || !row.pterodactyl_uuid || !row.provider_user_id) return;
+          expected.add(row.pterodactyl_uuid);
         }
-        const previous = identities.get(selected.serverId);
+        if (expected.size !== ids.length) throw new DomainError('provenance_mismatch');
+        return { routes, ids, expected, claims };
+      });
+      if (!before) return membershipChanged();
+      const remotes = await management.adapter.getApplicationServers([...before.expected]);
+      const byUuid = indexGatewayRemotes(remotes, before.expected);
+      const current = await db.transaction().execute(async (tx) => {
+        const routes = await selectMembers(tx);
+        // Both route sets are ordered by id. An external read cannot confer authority
+        // on a replacement route, a new revision, or a different managed identity.
         if (
-          previous &&
-          (previous.providerServerId !== context.providerServerId ||
-            previous.providerServerUuid !== context.providerServerUuid)
+          routes.length !== before.routes.length ||
+          routes.some((route, index) => {
+            const original = before.routes[index];
+            return route.id !== original?.id || route.revision !== original.revision;
+          })
         )
-          throw new DomainError('provenance_mismatch');
-        identities.set(selected.serverId, context);
-      }
-      const servers = await db
-        .selectFrom('managed_servers')
-        .selectAll()
-        .where('id', 'in', [...identities.keys()])
-        .execute();
-      const expected = new Set(
-        [...identities.values()].map((context) => context.providerServerUuid),
-      );
-      if (servers.length !== identities.size || expected.size !== identities.size)
-        throw new DomainError('provenance_mismatch');
-      const remotes = await management.adapter.getApplicationServers([...expected]);
-      const byUuid = new Map<string, ApplicationServer>();
-      const providerIds = new Set<number>();
-      for (const remote of remotes) {
-        if (!expected.has(remote.uuid) || byUuid.has(remote.uuid) || providerIds.has(remote.id))
-          throw new DomainError('provenance_mismatch');
-        byUuid.set(remote.uuid, remote);
-        providerIds.add(remote.id);
-      }
-      if (byUuid.size !== expected.size) throw new DomainError('provenance_mismatch');
-      for (const server of servers) {
-        const context = identities.get(server.id);
-        const remote = context && byUuid.get(context.providerServerUuid);
-        if (!remote) throw new DomainError('provenance_mismatch');
-        await verifyManagedIdentity(db, server, remote);
-      }
+          return false;
+        const after = await readGatewayClaims(tx, before.ids);
+        for (const route of routes) {
+          const key = `${route.serverId}:${route.allocationId}`;
+          if (!isDeepStrictEqual(before.claims.indexed.get(key), after.indexed.get(key)))
+            throw new DomainError('provenance_mismatch');
+        }
+        verifyGatewayClaims(after.claimsByServer, byUuid);
+        return true;
+      });
+      if (!current) return membershipChanged();
       return c.json(remotes.map(safetyServer));
     }
     const selected = await requireGatewayRoute(db, value.routeId, undefined, env);

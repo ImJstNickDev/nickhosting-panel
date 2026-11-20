@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { minecraftDigest, minecraftVerificationChecks } from '@nickhosting/minecraft';
+import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { lockResources } from './admission.js';
 import { getServerGatewayMessages } from './gateway-messages.js';
@@ -169,6 +170,131 @@ async function register() {
   );
 }
 describe('Minecraft declared-capability Gateway registration', () => {
+  it('renews 1 to 100 routes with a constant statement budget and isolates malformed concurrent choices', async () => {
+    await register();
+    const gatewayId = env.NH_GATEWAY_ID;
+    if (!gatewayId) throw new Error('Missing fixture Gateway');
+    let statements = 0;
+    const measured = f.db.withPlugin({
+      transformQuery({ node }) {
+        return node;
+      },
+      async transformResult({ result }) {
+        statements++;
+        return result;
+      },
+    });
+    const stableSnapshot = async (size: number) => {
+      const before = await getGatewaySnapshot(f.db, env);
+      statements = 0;
+      const after = await getGatewaySnapshot(measured, env);
+      expect(after.routes).toHaveLength(size);
+      expect(after.routes).toEqual(before.routes);
+      expect(after.revision).toBe(before.revision);
+      return statements;
+    };
+    const one = await stableSnapshot(1);
+    const many = Array.from({ length: 99 }, (_, i) => ({
+      id: randomUUID(),
+      allocation: randomUUID(),
+      n: i + 1,
+    }));
+    await f.db.transaction().execute(async (tx) => {
+      await tx
+        .insertInto('managed_servers')
+        .values(
+          many.map(({ id, n }) => ({
+            id,
+            owner_id: f.context.subjectUserId,
+            mapping_id: f.mappingId,
+            node_id: f.nodeId,
+            name: `Snapshot fixture ${n}`,
+            external_id: id,
+            limits: JSON.stringify(f.limits),
+            pterodactyl_id: 3_000_000 + n,
+            pterodactyl_identifier: id,
+            pterodactyl_uuid: id,
+            installation_state: 'installed' as const,
+            runtime_state: 'offline' as const,
+            intent: 'sleeping' as const,
+          })),
+        )
+        .execute();
+      await tx
+        .insertInto('server_allocations')
+        .values(
+          many.map(({ id, n, allocation }) => ({
+            id: allocation,
+            server_id: id,
+            node_id: f.nodeId,
+            pterodactyl_allocation_id: 3_000_000 + n,
+            role: 'game',
+            address: '127.0.0.1',
+            backend_address: '127.0.0.1',
+            port: 30000 + n,
+            protocols: ['tcp'],
+            is_primary: true,
+          })),
+        )
+        .execute();
+      await tx
+        .insertInto('minecraft_server_profiles')
+        .values(
+          many.map(({ id }) => ({
+            server_id: id,
+            combination_id: choiceId,
+            configuration: '{}',
+            installed: true,
+          })),
+        )
+        .execute();
+      await sql`insert into gateway_server_states
+        (server_id,generation,enabled,protocol_id,game_version,state,idle_timeout_seconds,readiness_timeout_seconds,readiness_max_age_seconds,estimate_max_age_seconds,wake_retry_seconds)
+        select id,gen_random_uuid(),true,'minecraft-java','26.1','sleeping',10,60,15,86400,10
+        from unnest(${many.map((x) => x.id)}::uuid[]) as ids(id)`.execute(tx);
+      await tx
+        .insertInto('gateway_routes')
+        .values(
+          many.map(({ id, n, allocation }) => ({
+            id: randomUUID(),
+            gateway_id: gatewayId,
+            server_id: id,
+            allocation_id: allocation,
+            public_address: '192.0.2.10',
+            public_port: 31000 + n,
+            transport: 'tcp' as const,
+            enabled: true,
+          })),
+        )
+        .execute();
+    });
+    expect(await stableSnapshot(100)).toBe(one);
+    expect(one).toBeLessThanOrEqual(15);
+
+    const rejected = many[0];
+    if (!rejected) throw new Error('Missing fixture');
+    const invalid = randomUUID();
+    await sql`insert into minecraft_combinations(id,mapping_id,identity_digest,mapping_digest,combination,resolved_runtime,binding)
+      select ${invalid},mapping_id,${'c'.repeat(64)},mapping_digest,'{}',resolved_runtime,binding from minecraft_combinations where id=${choiceId}`.execute(
+      f.db,
+    );
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({ combination_id: invalid })
+      .where('server_id', '=', rejected.id)
+      .execute();
+    const stored = () =>
+      f.db
+        .selectFrom('gateway_routes')
+        .select(['revision', 'lease_expires_at', 'payload_hash'])
+        .where('server_id', '=', rejected.id)
+        .executeTakeFirstOrThrow();
+    const prior = await stored();
+    const current = await getGatewaySnapshot(f.db, env);
+    expect(current.routes).toHaveLength(99);
+    expect(current.routes.some((r) => r.serverId === rejected.id)).toBe(false);
+    expect(await stored()).toEqual(prior);
+  });
   it.each(['fabric', 'paper'])(
     'activates %s routes and automation without reports while retaining mapping identity checks',
     async (profile) => {

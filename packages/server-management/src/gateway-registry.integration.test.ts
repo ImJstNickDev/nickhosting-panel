@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { authSessionId } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
@@ -263,6 +263,77 @@ describe('durable explicit Gateway route registry', () => {
     const snapshot = await getGatewaySnapshot(f.db, env);
     expect(snapshot.routes[0]?.presentation?.startupBeganAt).toBe(began.toISOString());
     expect(snapshot.routes[0]?.presentation?.estimatedStartupSeconds).toBeUndefined();
+  });
+  it('publishes the same startup estimate as the server view using only its ten most recent eligible samples', async () => {
+    await setGatewayRoute(f.db, f.owner, input(), env);
+    const now = Date.now();
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ state: 'waking', startup_deadline_at: new Date(now + 60000) })
+      .where('server_id', '=', serverId)
+      .execute();
+    const { limits } = await f.db
+      .selectFrom('managed_servers')
+      .select('limits')
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const fingerprint = createHash('sha256')
+      .update(
+        JSON.stringify({
+          mapping: f.mappingId,
+          limits,
+          protocol: policy.protocolId,
+          version: policy.gameVersion,
+        }),
+      )
+      .digest('hex');
+    const sample = (age: number, duration: number, compatible = true) => ({
+      server_id: serverId,
+      job_id: randomUUID(),
+      fingerprint: compatible ? fingerprint : 'different configuration',
+      process_started_at: new Date(now - age - duration).toISOString(),
+      ready_at: new Date(now - age),
+      duration_ms: duration,
+    });
+    const samples = [
+      ...Array.from({ length: 10 }, (_, i) => sample(90000 + i, 5000)),
+      sample(120000, 60000),
+      sample(120001, 60000),
+      sample(-60000, 60000),
+      sample(-60001, 60000),
+      sample(1000, 60000, false),
+      sample(1001, 60000, false),
+    ];
+    await f.db
+      .insertInto('operation_jobs')
+      .values(
+        samples.map(({ job_id }) => ({
+          id: job_id,
+          actor_id: f.context.subjectUserId,
+          subject_id: f.context.subjectUserId,
+          resource_owner_id: f.context.subjectUserId,
+          idempotency_key: job_id,
+          command_hash: '0'.repeat(64),
+          command: '{}',
+          policy_snapshot: '{}',
+          max_attempts: 1,
+        })),
+      )
+      .execute();
+    await f.db.insertInto('gateway_startup_samples').values(samples).execute();
+    const standalone = await getGatewayState(f.db, serverId, { env });
+    expect(standalone.startupEstimate).toEqual({ sampleCount: 10, p50Ms: 5000, p90Ms: 5000 });
+    expect(
+      (await getGatewaySnapshot(f.db, env)).routes[0]?.presentation?.estimatedStartupSeconds,
+    ).toBe(5);
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ estimate_max_age_seconds: 60 })
+      .where('server_id', '=', serverId)
+      .execute();
+    expect(
+      (await getGatewaySnapshot(f.db, env)).routes[0]?.presentation?.estimatedStartupSeconds,
+    ).toBeUndefined();
   });
   it('allows direct and Gateway on one IP at different ports, including same-number backend ports', async () => {
     await withDirectPin(27000);
