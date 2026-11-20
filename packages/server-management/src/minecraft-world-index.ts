@@ -156,7 +156,7 @@ async function reconcile(
       stamps: [],
       nonWorldDirectories: [],
       presentDirectories: new Set(),
-      levelDirectories: new Set(),
+      worldMarkerDirectories: new Set(),
     };
     const snapshot = await inspectMinecraftWorlds(
       db,
@@ -178,7 +178,7 @@ async function reconcile(
       (world) =>
         world.status !== 'unavailable' ||
         known.has(world.name) ||
-        inspection.levelDirectories.has(world.name),
+        inspection.worldMarkerDirectories.has(world.name),
     );
     for (const world of snapshot.worlds) {
       const validation = known.get(world.name)?.validation;
@@ -194,6 +194,11 @@ async function reconcile(
         snapshot.worlds.push({ ...world, status: 'unavailable' });
     }
     signal.throwIfAborted();
+    // A split dimension or interrupted save can be recognized before its first readable level.dat.
+    for (const name of inspection.worldMarkerDirectories) {
+      if (!observed.has(name) && !known.has(name))
+        snapshot.worlds.push({ name, status: 'unavailable' });
+    }
     const update = await sql<{ observed_at: Date }>`UPDATE minecraft_world_indexes
       SET snapshot=${JSON.stringify(snapshot)}::jsonb, level_stamps=${JSON.stringify(stamps)}::jsonb, non_world_directories=${nonWorldDirectories}::text[],
         observed_at=clock_timestamp(), successful_generation=generation, finished_id=${token.id}, denied_reason=NULL,

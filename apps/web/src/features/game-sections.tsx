@@ -484,7 +484,6 @@ export function GameSections({
       availableGameSections(server.data, module).some((candidate) => candidate.id === sectionId),
   );
   const preview = module?.sectionPreviews?.[sectionId];
-  const previewedSection = useRef<string | undefined>(undefined);
   const loaded = useQuery({
     queryKey: ['game-section', serverId, gameId, sectionId],
     enabled: Boolean(module && section && canReadSection),
@@ -492,11 +491,8 @@ export function GameSections({
     refetchOnMount: 'always',
     ...(preview ? { staleTime: 0 } : {}),
     queryFn: async ({ signal, queryKey }) => {
-      const scope = JSON.stringify(queryKey);
-      const opening = previewedSection.current !== scope;
-      previewedSection.current = scope;
       const context = { serverId, values: { sectionId: section?.id }, signal };
-      if (opening && preview) {
+      if (preview) {
         const observation = await preview(gameUiClient, context);
         signal.throwIfAborted();
         // A cold or rebound index also supersedes an older tab-local observation.

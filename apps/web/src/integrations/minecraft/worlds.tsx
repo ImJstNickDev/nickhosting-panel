@@ -437,7 +437,9 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
       if (
         !snapshot?.selectedWorld ||
         activeWorld(selection.name) ||
-        !rows.some((row) => row.name === selection.name && row.validation)
+        !rows.some(
+          (row) => row.name === selection.name && row.status !== 'unavailable' && row.validation,
+        )
       )
         return;
       await submit({
@@ -588,6 +590,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
             <ul className="minecraft-worlds-list">
               {pageRows.map((world) => {
                 const selected = world.name === snapshot.selectedWorld;
+                const observed = world.status !== 'unavailable';
                 const actionName = (action: string) =>
                   t(key('actionFor'), { action: t(key(action)), name: world.name });
                 return (
@@ -640,6 +643,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
                           label={actionName('download')}
                           disabled={
                             !can('download') ||
+                            !observed ||
                             !offline ||
                             props.pending ||
                             busy ||
@@ -662,7 +666,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
                             tooltip={
                               activeWorld(world.name)
                                 ? t(key('selectedCannotDelete'))
-                                : !world.validation
+                                : !observed || !world.validation
                                   ? t(key('cannotDelete'))
                                   : actionName('delete')
                             }
@@ -671,6 +675,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
                             disabled={
                               removeDisabled ||
                               activeWorld(world.name) ||
+                              !observed ||
                               !world.validation ||
                               snapshot.selectedWorld === null
                             }

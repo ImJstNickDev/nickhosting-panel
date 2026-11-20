@@ -11,7 +11,11 @@ import { closeFileViewers, closeViewerArchives } from '../../api/src/file-viewer
 import { ViewerCache } from '../../api/src/viewer-cache.js';
 import { FileViewerService } from '../../api/src/viewer-service.js';
 import { browserHarness } from './harness.js';
-import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
+import {
+  journeyRequest,
+  prepareJourneyIdentities,
+  showRootFixtureFiles,
+} from './journey-fixture.js';
 import { pdfFixture } from './pdf-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
 
@@ -133,6 +137,7 @@ describe('Folio read-only PDF journey', () => {
     await page.goto(base);
     await page.evaluate(() => sessionStorage.removeItem('nh.folio.positions.v1'));
     await page.locator('.fm-breadcrumb').getByRole('button', { name: 'root', exact: true }).click();
+    await showRootFixtureFiles(page);
     await page.locator('.fm-filename').getByText(name, { exact: true }).click();
     await browserExpect(page.locator('.folio')).toBeVisible();
     if (loaded) {
@@ -181,6 +186,7 @@ describe('Folio read-only PDF journey', () => {
         .locator('.fm-breadcrumb')
         .getByRole('button', { name: 'root', exact: true })
         .click();
+      await showRootFixtureFiles(page);
       const before = await shellStyles();
       // The application currently deliberately uses a light palette, regardless of OS preference.
       expect(before.root.colorScheme).toBe('light');
@@ -394,6 +400,7 @@ describe('Folio read-only PDF journey', () => {
   it('opens a PDF inside a real ZIP through the read-only archive content route', async () => {
     await page.goto(base);
     await page.locator('.fm-breadcrumb').getByRole('button', { name: 'root', exact: true }).click();
+    await showRootFixtureFiles(page);
     await page.locator('.fm-filename').getByText('folio.zip', { exact: true }).click();
     await page.locator('.ve-archive .fm-filename').getByText('inside.pdf', { exact: true }).click();
     await browserExpect(page.locator('.folio .textLayer').first()).toContainText(

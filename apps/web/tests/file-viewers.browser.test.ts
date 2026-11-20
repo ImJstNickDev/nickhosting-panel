@@ -5,7 +5,11 @@ import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { waveformLimits } from '../src/features/viewer-engine/builtin-viewers/audio-waveform-model.js';
 import { browserHarness } from './harness.js';
-import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
+import {
+  journeyRequest,
+  prepareJourneyIdentities,
+  showRootFixtureFiles,
+} from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
 
 /** UI/protocol fixtures only. SFTP authorization, archive parsing and Range live in backend tests. */
@@ -498,10 +502,12 @@ describe('M5 builtin file viewers', () => {
   }
   async function root() {
     await page.getByRole('button', { name: 'root', exact: true }).click();
+    await showRootFixtureFiles(page);
   }
 
   it('opens SVG safely, zooms, switches iconset entries, and does not prefetch file contents', async () => {
     await page.goto(base);
+    await showRootFixtureFiles(page);
     await browserExpect(
       page.locator('.fm-filename').getByText('viewer.svg', { exact: true }),
     ).toBeVisible();

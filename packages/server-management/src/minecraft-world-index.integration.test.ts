@@ -148,6 +148,24 @@ async function fixture() {
   };
 }
 describe('persistent Minecraft world inventory', () => {
+  it('shows a newly discovered partial world with recognizable save data', async () => {
+    const f = await fixture();
+    f.dirs.add('Adventure');
+    const list = f.files.listMany;
+    f.files.listMany = async (...args) =>
+      (await list(...args)).map((entry) =>
+        entry.directory === 'Adventure'
+          ? {
+              directory: entry.directory,
+              files: [{ name: 'level.dat_old', kind: 'file', size: 48 }],
+            }
+          : entry,
+      );
+    const { snapshot, nonWorldDirectories } = await f.refresh();
+    expect(snapshot.worlds).toContainEqual({ name: 'Adventure', status: 'unavailable' });
+    expect(snapshot.worlds.map((world) => world.name)).not.toContain('newworld');
+    expect(nonWorldDirectories).not.toContain('Adventure');
+  });
   it('serves warm data locally, preserves partial observations, forgets confirmed external deletions and refuses contradicted identities', async () => {
     const f = await fixture();
     expect(await f.cached()).toBeUndefined();
@@ -281,7 +299,9 @@ describe('persistent Minecraft world inventory', () => {
         result.directory === 'survival' || result.directory === 'scratch'
           ? {
               directory: result.directory,
-              files: rotated ? [{ name: rotated, kind: 'file', size: 10 }] : [],
+              files: rotated
+                ? [{ name: rotated, kind: rotated === 'region' ? 'directory' : 'file', size: 10 }]
+                : [],
             }
           : result,
       );
@@ -292,7 +312,10 @@ describe('persistent Minecraft world inventory', () => {
         status: 'unavailable',
         validation: { dataVersion: 169 },
       });
-      expect(current.snapshot.worlds.some((w) => w.name === 'scratch')).toBe(false);
+      expect(current.snapshot.worlds.find((w) => w.name === 'scratch')).toEqual({
+        name: 'scratch',
+        status: 'unavailable',
+      });
       expect(current.nonWorldDirectories).not.toContain('survival');
     }
     rotated = 'ordinary.txt';

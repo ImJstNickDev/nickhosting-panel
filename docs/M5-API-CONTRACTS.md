@@ -1544,7 +1544,9 @@ The snapshot contains `installed`, `supported`, `selectedWorld`, `release`,
 to `world` when omitted. Each world has a name, a status and optional bounded
 version metadata. An externally created world can have a name with spaces or
 Unicode. The stricter existing name rules still apply to managed operations.
-A failed refresh leaves the previous inventory available under the same binding.
+A previously unseen directory with a save marker, such as `level.dat_old` or a
+`region` directory, appears as unavailable until its metadata can be read.
+A transient refresh failure preserves the previous inventory under the same binding.
 
 Each installed Minecraft server has a stable offset in a 60-second reconciliation
 cycle. Successful world operations update a prepared inventory from their

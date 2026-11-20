@@ -5,7 +5,11 @@ import { AxeBuilder } from '@axe-core/playwright';
 import { expect as browserExpect, type Locator, type Page } from '@playwright/test';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { browserHarness } from './harness.js';
-import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
+import {
+  journeyRequest,
+  prepareJourneyIdentities,
+  showRootFixtureFiles,
+} from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
 
 describe('M5 file manager interactions with isolated real API handlers', () => {
@@ -68,7 +72,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await user.evaluate(() => localStorage.setItem('nh.locale', 'en'));
     await user.setViewportSize({ width: 1440, height: 1000 });
   });
-  async function openRoot(page: Page) {
+  async function openRoot(page: Page, includeFixtureFiles = true) {
     // goto preserves tab navigation by design. These scenario setups request root;
     // reload assertions below still exercise the real persisted navigation state.
     if (new URL(page.url()).origin === harness.origin)
@@ -89,6 +93,8 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
         }
       }, provider.ids.serverId);
     await page.goto(base);
+    // The Minecraft root groups arbitrary fixture files with the other hidden entries.
+    if (includeFixtureFiles) await showRootFixtureFiles(page);
   }
   const row = (name: string) =>
     user.locator('.fm-entry').filter({ has: user.getByRole('button', { name, exact: true }) });
@@ -212,7 +218,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
         await route.continue();
       });
       try {
-        await openRoot(user);
+        await openRoot(user, false);
         const list = user.locator('.fm-list');
         const manager = user.locator('.file-manager');
         await browserExpect(list).toHaveAttribute('aria-busy', 'true');
@@ -283,7 +289,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     expect(errors).toEqual([]);
   });
   it('does not force sidebar link focus after click or reload, while keeping keyboard navigation visible', async () => {
-    await openRoot(user);
+    await openRoot(user, false);
     const tabs = user.locator('.sidebar .nav');
     const filesTab = tabs.getByRole('link', { name: 'Files', exact: true });
     await tabs.getByRole('link', { name: 'Network', exact: true }).click();
@@ -709,7 +715,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     }
   });
   it('extracts a ZIP into a new folder and moves files by folder and breadcrumb drops', async () => {
-    await user.reload();
+    await openRoot(user);
     await menu('selection.zip');
     await user.getByRole('menuitem', { name: 'Extract', exact: true }).click();
     await dialog().getByLabel('New destination folder', { exact: true }).fill('extracted');
@@ -2085,7 +2091,6 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     remote.set(paths[1], Buffer.from('Another file'));
     try {
       await openRoot(user);
-      await user.locator('.fm-hidden-toggle').click();
       await browserExpect(row('libraries')).toBeVisible();
       await user.keyboard.press('Alt+g');
       const path = user.getByRole('combobox', { name: 'Path', exact: true });

@@ -3,6 +3,13 @@ import { type browserHarness, browserPassword } from './harness.js';
 
 export type BrowserHarness = Awaited<ReturnType<typeof browserHarness>>;
 
+/** These browser journeys operate on arbitrary fixtures in the Minecraft root. */
+export async function showRootFixtureFiles(page: Page) {
+  const group = page.locator('.fm-hidden-toggle');
+  await group.waitFor({ state: 'visible' });
+  if ((await group.getAttribute('aria-expanded')) === 'false') await group.click();
+}
+
 /** Preparation uses actual HTTP handlers and browser-context cookies. No users,
  * sessions or invitations are seeded; account.browser.test proves their UI. */
 export async function journeyRequest<T>(

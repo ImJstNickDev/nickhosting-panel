@@ -4,7 +4,11 @@ import { AxeBuilder } from '@axe-core/playwright';
 import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { browserHarness } from './harness.js';
-import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
+import {
+  journeyRequest,
+  prepareJourneyIdentities,
+  showRootFixtureFiles,
+} from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
 
 type RenameRequest = {
@@ -95,6 +99,8 @@ describe('M5 file move tree and conflict decisions with isolated real API handle
   }
   async function openMove(names: string[], source = '', italian = false) {
     await user.goto(base);
+    await user.getByRole('button', { name: 'root', exact: true }).click();
+    await showRootFixtureFiles(user);
     for (const part of source.split('/').filter(Boolean))
       await row(part).getByRole('button', { name: part, exact: true }).click();
     for (const name of names)
@@ -219,6 +225,9 @@ describe('M5 file move tree and conflict decisions with isolated real API handle
 
   it('loads expanded branches only and preserves the bounded panel through skeleton, failure and retry', async () => {
     await locale('en');
+    // Keep the branch cold for this skeleton test even when root rows prefetch.
+    const noPrefetch = (url: URL) => url.pathname.endsWith('/files/directories');
+    await user.route(noPrefetch, (request) => request.fulfill({ status: 503 }));
     await mkdir('deferred');
     await mkdir('deferred/child');
     await mkdir('deferred/child/grandchild');
@@ -272,6 +281,7 @@ describe('M5 file move tree and conflict decisions with isolated real API handle
     } finally {
       release();
       await user.unroute(routePattern);
+      await user.unroute(noPrefetch);
     }
   });
 

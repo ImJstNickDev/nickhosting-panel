@@ -191,6 +191,43 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     return dialog;
   }
 
+  it('renders the server index before a fresh request returns and reconciles an external world', async () => {
+    const files = await provider.files();
+    const path = `${fixture.origin}${api()}/worlds`;
+    const seeded = await user.request.get(path);
+    expect(seeded.status()).toBe(200);
+    const cached = await user.request.get(`${path}?cached=1`);
+    expect((await cached.json()).worlds.map((entry: { name: string }) => entry.name)).toContain(
+      'world',
+    );
+    const world = 'Vecchia città';
+    await provider.adapter.createDirectory(identifier, '', world);
+    files.set(`${world}/level.dat`, browserLevelDat());
+    const started = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    await user.route(path, async (request) => {
+      started.resolve();
+      await resume.promise;
+      await request.continue().catch(() => {});
+    });
+    try {
+      await user.goto(route());
+      await started.promise;
+      const list = user.locator('.minecraft-worlds-list');
+      await browserExpect(list.getByText('world', { exact: true })).toBeVisible();
+      await browserExpect(list.getByText(world, { exact: true })).toHaveCount(0);
+      resume.resolve();
+      await browserExpect(list.getByText(world, { exact: true })).toBeVisible();
+      await browserExpect(
+        user.getByRole('button', { name: `Select world: ${world}`, exact: true }),
+      ).toHaveCount(0);
+    } finally {
+      resume.resolve();
+      await user.unroute(path);
+      await provider.adapter.deleteFiles(identifier, '', [world]);
+    }
+  });
+
   it('removes an inactive world while running and updates immediately before slow inventory refreshes finish', async () => {
     const world = 'online-remove';
     const files = await provider.files();
@@ -361,7 +398,7 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
         .getByRole('link', { name: 'Players', exact: true })
         .click();
       await browserExpect(
-        user.getByText('No players in the saved lists.', { exact: true }),
+        user.getByText('No known players on this server.', { exact: true }),
       ).toBeVisible();
       files.set(
         'ops.json',
@@ -807,15 +844,15 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     await accessible(identities.peer);
   });
 
-  it('distinguishes loading and provider failure and uses version metadata without verification reports', async () => {
+  it('shows indexed worlds while discovery is blocked, retains rows on failure, and uses observed version metadata', async () => {
     let release = () => {};
     readGate = new Promise<void>((resolve) => {
       release = resolve;
     });
     try {
       await user.goto(route());
-      await browserExpect(user.getByText('Loading…', { exact: true }).first()).toBeVisible();
-      await screenshot(user, 'minecraft-worlds-loading-desktop-en');
+      await browserExpect(user.getByText('replacement', { exact: true }).first()).toBeVisible();
+      await browserExpect(user.locator('.minecraft-worlds-list')).toBeVisible();
     } finally {
       release();
       readGate = undefined;
@@ -858,17 +895,33 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
   });
 
   it('shows an empty inventory honestly and cancels an upload without importing', async () => {
-    const files = await provider.files();
-    const levels = [...files].filter(([path]) => path.endsWith('/level.dat'));
-    for (const [path] of levels) files.delete(path);
+    const snapshot = await journeyRequest<{ worlds: { name: string }[] }>(
+      fixture,
+      user,
+      `${api()}/worlds`,
+    );
+    const moves = snapshot.worlds.map(({ name }) => ({ from: name, to: `backups/${name}` }));
+    await provider.adapter.renameFiles(identifier, '', moves);
     try {
       await user.goto(route());
       await browserExpect(user.getByText('No saved worlds found.', { exact: true })).toBeVisible();
       await screenshot(user, 'minecraft-worlds-empty-desktop-en');
       await accessible();
     } finally {
-      for (const [path, bytes] of levels) files.set(path, bytes);
+      await provider.adapter.renameFiles(
+        identifier,
+        '',
+        moves.map(({ from, to }) => ({ from: to, to: from })),
+      );
     }
+    const restored = await journeyRequest<{ worlds: { name: string }[] }>(
+      fixture,
+      user,
+      `${api()}/worlds`,
+    );
+    expect(restored.worlds.map((world) => world.name).sort()).toEqual(
+      moves.map((move) => move.from).sort(),
+    );
     await user.goto(route());
     let release = () => {};
     const gate = new Promise<void>((resolve) => {
@@ -880,7 +933,14 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
       await request.abort();
     });
     try {
-      await user.getByRole('button', { name: 'Import world', exact: true }).click();
+      await user
+        .getByRole('button', { name: 'Import world', exact: true })
+        .click()
+        .catch(async (error) => {
+          throw new Error(`Import panel unavailable: ${await user.locator('main').innerText()}`, {
+            cause: error,
+          });
+        });
       const dialog = user.getByRole('dialog', { name: 'Import world', exact: true });
       const uploadStarted = user.waitForRequest((request) =>
         /\/v1\/minecraft\/sources\/[^/]+\/upload$/.test(request.url()),
@@ -905,7 +965,7 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
       await browserExpect(
         dialog.getByRole('button', { name: 'Import world', exact: true }),
       ).toBeDisabled();
-      expect(files.has('cancel/level.dat')).toBe(false);
+      expect((await provider.files()).has('cancel/level.dat')).toBe(false);
       await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
     } finally {
       release();

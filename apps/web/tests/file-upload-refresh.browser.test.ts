@@ -4,7 +4,11 @@ import { resolve } from 'node:path';
 import { expect as browserExpect, type Page, type Route } from '@playwright/test';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { browserHarness } from './harness.js';
-import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
+import {
+  journeyRequest,
+  prepareJourneyIdentities,
+  showRootFixtureFiles,
+} from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
 
 describe('M5 uploads coalesce display refreshes without delaying file writes', () => {
@@ -69,6 +73,7 @@ describe('M5 uploads coalesce display refreshes without delaying file writes', (
   const isListing = (url: URL) => url.pathname === endpoint;
   async function open() {
     await user.goto(base);
+    await showRootFixtureFiles(user);
     await browserExpect(entry('world')).toBeVisible();
     await browserExpect(user.getByRole('button', { name: 'Upload', exact: true })).toHaveAttribute(
       'aria-disabled',
@@ -345,6 +350,7 @@ describe('M5 uploads coalesce display refreshes without delaying file writes', (
         .locator('.fm-breadcrumb')
         .getByRole('button', { name: 'root', exact: true })
         .click();
+      await showRootFixtureFiles(user);
       await browserExpect(entry('navigation-04.txt')).toHaveCount(1);
       await browserExpect(entry('inside.txt')).toHaveCount(0);
       expect(uploads).toHaveLength(4);
@@ -374,6 +380,7 @@ describe('M5 uploads coalesce display refreshes without delaying file writes', (
       expect(listings).toEqual(['']);
       // Browser Back remounts the workspace with the same QueryClient/cache.
       await user.goBack();
+      await showRootFixtureFiles(user);
       await browserExpect(entry('unmounted-03.txt')).toHaveCount(1);
       expect(listings.length).toBeLessThanOrEqual(3);
       expect(listings.every((path) => path === '')).toBe(true);

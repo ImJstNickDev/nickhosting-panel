@@ -2544,7 +2544,7 @@ export interface MinecraftWorldIndexInspection {
   previous: ReadonlyMap<string, MinecraftWorldFileStamp & { validation: MinecraftWorldValidation }>;
   stamps: MinecraftWorldFileStamp[];
   presentDirectories: Set<string>;
-  levelDirectories: Set<string>;
+  worldMarkerDirectories: Set<string>;
   nonWorldDirectories: string[];
 }
 /** Caller establishes authorization and managed identity through ManagementRuntime.fileReadAccess. */
@@ -2624,8 +2624,19 @@ export async function inspectMinecraftWorlds(
             directories.set(result.directory, result);
             if (!('files' in result)) continue;
             const level = result.files.find((entry) => entry.name === 'level.dat');
+            if (
+              indexInspection &&
+              (level?.kind === 'file' ||
+                result.files.some(
+                  (entry) =>
+                    (entry.kind === 'file' &&
+                      /^(?:level[.]dat_old|session[.]lock)$/i.test(entry.name)) ||
+                    (entry.kind === 'directory' &&
+                      /^(?:region|DIM-?1|dimensions)$/i.test(entry.name)),
+                ))
+            )
+              indexInspection.worldMarkerDirectories.add(result.directory);
             if (level?.kind !== 'file') continue;
-            indexInspection?.levelDirectories.add(result.directory);
             if (level.size > 8 * 1024 ** 2) continue;
             if (
               indexInspection &&
