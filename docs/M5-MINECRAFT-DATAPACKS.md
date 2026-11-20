@@ -15,7 +15,8 @@ and are never disguised as an empty inventory.
 
 ## Task flow
 
-1. Choose packs from Modrinth/CurseForge, or upload a ZIP/folder. Folder uploads use
+1. Search the installed packs for the selected world. Open **Browse catalog** to
+   find packs on Modrinth or CurseForge, or upload a ZIP/folder. Folder uploads use
    the existing Fileman archive worker with `pack.mcmeta` as the root marker.
 2. Acquisition, archive metadata inspection and transfer happen during preparation.
    A prepared ZIP ends in `.pending`; Minecraft cannot discover it yet. Other

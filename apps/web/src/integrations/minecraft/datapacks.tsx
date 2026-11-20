@@ -44,7 +44,6 @@ export function DatapackIcon({
     | 'pack'
     | 'upload'
     | 'folder'
-    | 'search'
     | 'refresh'
     | 'close'
     | 'delete'
@@ -83,12 +82,6 @@ export function DatapackIcon({
       )}
       {name === 'upload' && <path d="M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5" />}
       {name === 'folder' && <path d="M3 7V5h7l2 3h9v13H3V7m9 10V11m-3 3 3-3 3 3" />}
-      {name === 'search' && (
-        <>
-          <circle cx="10.5" cy="10.5" r="6.5" />
-          <path d="m16 16 4 4" />
-        </>
-      )}
       {name === 'refresh' && (
         <path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1" />
       )}
@@ -435,19 +428,13 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
     }
   }
   function action(
-    name: 'upload' | 'folder' | 'browse' | 'refresh',
+    name: 'upload' | 'folder' | 'refresh',
     icon: Parameters<typeof DatapackIcon>[0]['name'],
     onClick: () => void,
     blocked = disabled || !canWrite || nativePending,
   ) {
     return (
-      <IconAction
-        tooltip={t(key(name))}
-        ref={name === 'browse' ? browseButton : undefined}
-        label={t(key(name))}
-        onClick={onClick}
-        disabled={blocked}
-      >
+      <IconAction tooltip={t(key(name))} label={t(key(name))} onClick={onClick} disabled={blocked}>
         <DatapackIcon name={icon} />
       </IconAction>
     );
@@ -493,15 +480,23 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
           </label>
           <SearchField
             value={search}
-            placeholder={t(key('search'))}
-            label={t(key('search'))}
+            placeholder={t(key('searchInstalled'))}
+            label={t(key('searchInstalled'))}
             onChange={(event) => {
               setSearch(event.target.value);
               setPage(0);
             }}
           />
           <div className="datapack-tools">
-            {action('browse', 'search', () => setCatalog(true))}
+            <button
+              ref={browseButton}
+              type="button"
+              className="secondary datapack-browse"
+              onClick={() => setCatalog(true)}
+              disabled={disabled || !canWrite || nativePending}
+            >
+              {t(key('browse'))}
+            </button>
             {action(
               'upload',
               'upload',

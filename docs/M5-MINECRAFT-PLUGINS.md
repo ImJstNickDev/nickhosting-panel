@@ -13,7 +13,7 @@ that every listed plugin works on it.
 | Hangar | PaperMC's public project/version API and platform-specific artifacts. |
 | SpigotMC | Third-party SpiGet catalog, with exact-version downloads where available. |
 | CurseForge | The dynamically discovered Minecraft **Bukkit Plugins** class; uses the existing protected API key. |
-| Voxel, builtbybit | Owner-requested placeholders: centered “Coming soon”, with no catalog or download requests. |
+| Voxel, BuiltByBit | The provider menu marks both as “Coming soon”. Selecting either shows the centered status without requesting catalog content. |
 
 Catalog descriptions are untrusted content and reuse the existing sanitized
 Markdown/HTML presentation. Premium, external-only or otherwise unavailable files

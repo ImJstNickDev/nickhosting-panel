@@ -310,8 +310,9 @@ describe('Minecraft Plugins shared catalog experience', () => {
     await open();
     await page.getByRole('combobox', { name: /Catalog|Catalogo/, exact: true }).click();
     await check(page.getByRole('option')).toHaveCount(6);
+    await check(page.getByRole('option', { name: 'BuiltByBit · Coming soon' })).toBeVisible();
     await capture('minecraft-plugins-providers');
-    await page.getByRole('option', { name: 'Voxel', exact: true }).click();
+    await page.getByRole('option', { name: 'Voxel · Coming soon', exact: true }).click();
     await check(page.getByText('Coming soon', { exact: true })).toBeVisible();
     await capture('minecraft-plugins-coming-soon');
     const count = requests.length;
@@ -319,7 +320,7 @@ describe('Minecraft Plugins shared catalog experience', () => {
     expect(requests.length).toBe(count);
     expect(writes).toHaveLength(0);
     await page.setViewportSize({ width: 390, height: 844 });
-    await chooseProvider('builtbybit');
+    await chooseProvider('BuiltByBit · Coming soon');
     await check(page.getByText('Coming soon', { exact: true })).toBeVisible();
     await capture('minecraft-plugins-coming-soon-mobile');
     expect(
@@ -396,7 +397,7 @@ describe('Minecraft Plugins shared catalog experience', () => {
     await page.evaluate(() => localStorage.setItem('nh.locale', 'it'));
     await page.reload();
     await check(page.getByRole('searchbox', { name: 'Cerca plugin', exact: true })).toBeVisible();
-    await chooseProvider('Voxel');
+    await chooseProvider('Voxel · In arrivo');
     await check(page.getByText('In arrivo', { exact: true })).toBeVisible();
   });
 });

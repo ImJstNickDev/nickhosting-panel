@@ -23,3 +23,21 @@ dialog.mods-github-dialog {
 .minecraft-mods[data-kind="mods"] .mods-header-actions {
   flex-wrap: wrap;
 }
+
+.mods-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+@container (max-width: 420px) {
+  .mods-empty-actions {
+    display: grid;
+  }
+  .mods-empty-actions > button {
+    min-height: 40px;
+    font-size: 0.875rem;
+  }
+}

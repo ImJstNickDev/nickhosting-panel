@@ -6,6 +6,9 @@ CurseForge discovery share typed catalog, version and dependency contracts.
 
 ## Selection and publication
 
+Mods opens on Installed the first time. The browser remembers the last tab
+(Installed or Discover) separately for each server.
+
 Discover stays inside the Mods page. Clicking a result opens its description in
 the right pane; the separate checkbox selects it. Selection starts preparation
 without opening an installation dialog. Install opens a full-page review within

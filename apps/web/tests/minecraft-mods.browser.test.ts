@@ -567,6 +567,7 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
   }
   async function open() {
     await page.goto(`${origin}mods-fixture`);
+    await page.getByRole('button', { name: 'Discover', exact: true }).click();
     await check(page.getByRole('button', { name: 'About Evergreen' })).toBeVisible({
       timeout: 15000,
     });
@@ -647,6 +648,9 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
         });
       });
       await page.goto(`${origin}mods-fixture`);
+      await page
+        .getByRole('button', { name: locale === 'it' ? 'Scopri' : 'Discover', exact: true })
+        .click();
       await page
         .getByRole('combobox', { name: locale === 'it' ? 'Catalogo' : 'Catalog', exact: true })
         .click();
@@ -736,6 +740,7 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
       const text = (key: string) =>
         minecraftModsMessages[`mods.${key}`]?.[locale === 'it' ? 1 : 0] ?? key;
       await page.goto(`${origin}mods-fixture`);
+      await page.getByRole('button', { name: text('discover'), exact: true }).click();
       await page
         .getByRole('checkbox', { name: text('select').replace('{name}', 'Evergreen'), exact: true })
         .check();
@@ -1201,11 +1206,22 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
       const label = (key: string) => minecraftModsMessages[`mods.${key}`]?.[local ? 1 : 0] ?? key;
       await page.goto(`${origin}mods-fixture`);
       const install = page.getByRole('button', { name: label('githubInstall'), exact: true });
+      const installed = page.getByRole('button', { name: label('installed'), exact: true });
+      const discover = page.getByRole('button', { name: label('discover'), exact: true });
+      await check(installed).toHaveAttribute('aria-pressed', 'true');
       await check(
-        page.getByRole('button', { name: label('discover'), exact: true }),
-      ).toHaveAttribute('aria-pressed', 'true');
+        page.locator('.mods-empty').getByRole('button', { name: label('githubInstall') }),
+      ).toBeVisible();
+      await check(page.getByRole('searchbox')).toHaveCount(0);
+      await capture(`mods-empty-${local ? 'mobile-it' : 'desktop-en'}`);
+      await page.getByRole('button', { name: label('emptyAction'), exact: true }).click();
+      await check(discover).toHaveAttribute('aria-pressed', 'true');
       await check(install).toHaveCount(0);
-      await page.getByRole('button', { name: label('installed'), exact: true }).click();
+      await page.reload();
+      await check(discover).toHaveAttribute('aria-pressed', 'true');
+      await installed.click();
+      await page.reload();
+      await check(installed).toHaveAttribute('aria-pressed', 'true');
       await install.click();
       const dialog = page.getByRole('dialog', { name: label('githubInstall') });
       const url = dialog.getByRole('textbox', { name: label('githubUrl') });
@@ -1230,6 +1246,9 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
       });
       await page.getByRole('button', { name: label('apply'), exact: true }).click();
       await check(installedRow(name)).toBeVisible();
+      await check(
+        page.locator('.mods-header').getByRole('button', { name: label('githubInstall') }),
+      ).toBeVisible();
     },
   );
   it('retains the GitHub import request after a lost response and a draft refresh', async () => {
@@ -1271,6 +1290,7 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     await page.setViewportSize({ width: 390, height: 844 });
     await page.addInitScript(() => localStorage.setItem('nh.locale', 'it'));
     await page.goto(`${origin}mods-fixture`);
+    await page.getByRole('button', { name: 'Scopri', exact: true }).click();
     await check(page.getByRole('button', { name: 'Informazioni su Evergreen' })).toBeVisible({
       timeout: 15000,
     });
@@ -1287,6 +1307,7 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
   it('shows catalog failures with retry and keeps read-only actions disabled', async () => {
     failedProvider = true;
     await page.goto(`${origin}mods-fixture?readonly`);
+    await page.getByRole('button', { name: 'Discover', exact: true }).click();
     await check(page.getByRole('alert')).toBeVisible({ timeout: 15000 });
     await capture('mods-unavailable-en');
     failedProvider = false;
