@@ -12,6 +12,7 @@ import {
 import {
   type MinecraftModSelection,
   type MinecraftModsSnapshot,
+  minecraftGithubModRequestSchema,
   minecraftModAlternativesSchema,
   minecraftModApplySchema,
   minecraftModBlockerSchema,
@@ -246,6 +247,14 @@ export function createMinecraftModsController(
         await client.request(path(serverId, '/selection'), {
           method: 'PUT',
           body: selectionSchema.parse(input),
+        }),
+      );
+    },
+    async stageGithubMod(serverId: string, input: z.infer<typeof minecraftGithubModRequestSchema>) {
+      return z.object({ changeId: z.uuid() }).parse(
+        await client.request(`/v1/servers/${z.uuid().parse(serverId)}/minecraft/mods/github`, {
+          method: 'POST',
+          body: minecraftGithubModRequestSchema.parse(input),
         }),
       );
     },

@@ -11,6 +11,15 @@ the right pane; the separate checkbox selects it. Selection starts preparation
 without opening an installation dialog. Install opens a full-page review within
 the same tab. Returning to Discover preserves the selection and preparation.
 
+Installed also accepts a direct HTTPS link to a JAR attached to a public GitHub
+release with a published SHA-256 digest. Open the GitHub install action in Installed, paste the asset link, then
+review and apply the change. For these imports the administrator supplies a
+release appropriate to the server and installs any required dependencies separately.
+The import verifies the asset size and SHA-256 against GitHub's release metadata.
+Download requests use the effective Minecraft origin policy for `https://github.com`
+and `https://release-assets.githubusercontent.com`. Both are included in the
+platform defaults. Migration 064 adds GitHub provenance to mod source records.
+
 Automatic selection prefers the latest compatible stable version. Prefer beta
 allows a newer compatible beta; if no compatible stable release exists, a beta
 can be selected without another confirmation. Beta versions retain a badge in
@@ -189,6 +198,7 @@ All paths are under `/v1/servers/:id/minecraft/mods`:
 | `GET /updates?preferBeta=false` | Cached, read-only installed update advice and partial results |
 | `GET /alternatives/:provider/:projectId?revision=N` | Bounded dependency-resolved suggestion for a selected root |
 | `PUT /selection` | Replace the selected roots and start background preparation |
+| `POST /github` | Stage a GitHub release JAR for review using `url`, `revision` and `idempotencyKey` |
 | `POST /changes` | Prepare enable, disable or removal of an installed file |
 | `POST /toggle` | Publish one installed-file enable/disable without applying the draft |
 | `DELETE /changes/:changeId` | Cancel an unpublished installed-file change |

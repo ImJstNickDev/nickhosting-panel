@@ -289,6 +289,8 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
     'https://cdn.modrinth.com',
     'https://edge.forgecdn.net',
     'https://mediafilez.forgecdn.net',
+    'https://github.com',
+    'https://release-assets.githubusercontent.com',
   ],
 });
 

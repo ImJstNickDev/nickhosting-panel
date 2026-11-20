@@ -387,6 +387,25 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
                 snapshot.restart = { required: true };
                 return json({ state: 'published', restartRequired: true });
               }
+              if (url.pathname === `${base}/github`) {
+                const name = new URL(String(body.url)).pathname.split('/').pop() ?? '';
+                const changeId = generated();
+                snapshot.changes.push({
+                  id: changeId,
+                  action: 'install',
+                  state: 'ready',
+                  name,
+                  path: `mods/${name}`,
+                  size: 1024,
+                  dependency: false,
+                  requiredBy: [],
+                  metadata: null,
+                  forceIncompatible: false,
+                  incompatibilities: [],
+                });
+                snapshot.revision++;
+                return json({ changeId });
+              }
               if (url.pathname === `${base}/changes`) {
                 const pack = snapshot.packs.find((item) => item.path === body.path);
                 if (!pack) return json({ code: 'not_found' }, 404);
@@ -1171,12 +1190,81 @@ describe('Minecraft Mods discovery, durable preparation and inline review', () =
     expect(toggleWrites()).toHaveLength(1);
     expect(snapshot.packs[0]?.state).toBe('disabled');
   });
+  it.each(['en', 'it'] as const)(
+    'reviews a direct GitHub release from Installed (%s)',
+    async (locale) => {
+      const local = locale === 'it';
+      if (local) {
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.addInitScript(() => localStorage.setItem('nh.locale', 'it'));
+      }
+      const label = (key: string) => minecraftModsMessages[`mods.${key}`]?.[local ? 1 : 0] ?? key;
+      await page.goto(`${origin}mods-fixture`);
+      const install = page.getByRole('button', { name: label('githubInstall'), exact: true });
+      await check(
+        page.getByRole('button', { name: label('discover'), exact: true }),
+      ).toHaveAttribute('aria-pressed', 'true');
+      await check(install).toHaveCount(0);
+      await page.getByRole('button', { name: label('installed'), exact: true }).click();
+      await install.click();
+      const dialog = page.getByRole('dialog', { name: label('githubInstall') });
+      const url = dialog.getByRole('textbox', { name: label('githubUrl') });
+      await check(url).toBeFocused();
+      await capture(`mods-github-${local ? 'mobile-it' : 'desktop-en'}`);
+      await url.fill('https://github.com/ImJstNickDev/RebornStorage');
+      await dialog.getByRole('button', { name: label('githubPrepare') }).click();
+      await check(dialog.getByRole('alert')).toContainText(label('githubInvalid'));
+      expect(writes).toHaveLength(0);
+      const name = 'rebornstorage-1.16.5-0.1.4.jar';
+      const asset = `https://github.com/ImJstNickDev/RebornStorage/releases/download/RebornStorage-1.16.5-0.1.4/${name}`;
+      await url.fill(asset);
+      await dialog.getByRole('button', { name: label('githubPrepare') }).click();
+      await check(page.getByRole('heading', { name: new RegExp(label('review')) })).toBeVisible();
+      await check(page.locator('.mods-review-row')).toContainText(name);
+      await check(install).toHaveCount(0);
+      expect(writes).toHaveLength(1);
+      expect(writes[0]).toMatchObject({
+        path: `${base}/github`,
+        method: 'POST',
+        body: { url: asset, revision: 0, idempotencyKey: expect.any(String) },
+      });
+      await page.getByRole('button', { name: label('apply'), exact: true }).click();
+      await check(installedRow(name)).toBeVisible();
+    },
+  );
+  it('retains the GitHub import request after a lost response and a draft refresh', async () => {
+    await open();
+    await page.getByRole('button', { name: 'Installed', exact: true }).click();
+    await page.getByRole('button', { name: 'Install from GitHub' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Install from GitHub' });
+    await dialog
+      .getByRole('textbox')
+      .fill('https://github.com/example/project/releases/download/v1/example.jar');
+    const attempts: unknown[] = [];
+    await page.route(`**${base}/github`, async (route) => {
+      attempts.push(route.request().postDataJSON());
+      if (attempts.length === 1) {
+        snapshot.revision++;
+        await route.abort();
+      } else {
+        await route.continue();
+      }
+    });
+    const submit = dialog.getByRole('button', { name: 'Prepare mod' });
+    await submit.click();
+    await check(dialog.getByRole('alert')).toBeVisible();
+    await submit.click();
+    await check(page.locator('.mods-review-row')).toContainText('example.jar');
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]).toEqual(attempts[0]);
+  });
   it('does not allow read-only users to toggle installed mods', async () => {
     installFixtures();
     await page.goto(`${origin}mods-fixture?readonly`);
     await page.getByRole('button', { name: 'Installed', exact: false }).first().click();
     await check(page.getByRole('button', { name: 'Disable Evergreen' })).toBeDisabled();
     await check(page.getByRole('button', { name: 'Remove Evergreen' })).toBeDisabled();
+    await check(page.getByRole('button', { name: 'Install from GitHub' })).toHaveCount(0);
     expect(toggleWrites()).toHaveLength(0);
   });
   it('keeps mobile details/review inline and preserves beta preference without overwriting a selected version', async () => {

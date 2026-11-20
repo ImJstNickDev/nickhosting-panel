@@ -656,15 +656,26 @@ export function createMinecraftSourceStore(
         clearInterval(timer);
         controller.abort(error);
         await checking;
-        // Even when the provider removed its partial file, keep the claim. A
-        // crashed process cannot assert filesystem cleanup on a future retry.
+        // A failed GitHub acquisition is retryable when this still-locked writer
+        // confirms no bytes were left at its private destination. Keep its budget.
+        const retryable =
+          row.origin === 'github' &&
+          (await lstat(sourcePath(row)).then(
+            () => false,
+            (err: NodeJS.ErrnoException) => err.code === 'ENOENT',
+          ));
         await connection
           .updateTable('minecraft_sources')
-          .set({ state: 'uncertain', updated_at: new Date() })
+          .set({ state: retryable ? 'reserved' : 'uncertain', updated_at: new Date() })
           .where('id', '=', row.id)
           .where('state', '=', 'receiving')
           .execute();
-        await recordAudit(connection, actor, 'minecraft.source.uncertain', { sourceId: row.id });
+        await recordAudit(
+          connection,
+          actor,
+          retryable ? 'minecraft.source.download_failed' : 'minecraft.source.uncertain',
+          { sourceId: row.id },
+        );
         throw error;
       } finally {
         clearInterval(timer);
@@ -926,7 +937,7 @@ export function createMinecraftSourceStore(
     async acquireMod(
       input: {
         kind?: 'mod' | 'plugin';
-        provider: 'modrinth' | 'curseforge' | 'hangar' | 'spiget';
+        provider: 'modrinth' | 'curseforge' | 'hangar' | 'spiget' | 'github';
         projectId: string;
         versionId: string;
         serverId: string;
@@ -940,7 +951,7 @@ export function createMinecraftSourceStore(
       const kind = input.kind ?? 'mod';
       const directory = kind === 'plugin' ? 'plugins' : 'mods';
       if (
-        (kind === 'mod' && !['modrinth', 'curseforge'].includes(input.provider)) ||
+        (kind === 'mod' && !['modrinth', 'curseforge', 'github'].includes(input.provider)) ||
         artifact.kind !== kind ||
         artifact.projectId !== input.projectId ||
         artifact.versionId !== input.versionId ||

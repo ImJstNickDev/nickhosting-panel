@@ -8,7 +8,7 @@ import {
   type CurseForgeProvider,
   inspectJarMetadata,
 } from '@nickhosting/content-providers';
-import { type AuthContext, DomainError } from '@nickhosting/core';
+import { type AuthContext, contentPolicyValues, DomainError } from '@nickhosting/core';
 import { type Database, getSettings, recordAudit } from '@nickhosting/database';
 import type { FilemanEntry, FilemanReadService } from '@nickhosting/game-sdk';
 import { isUploadNotDispatched, isUploadNotPublished } from '@nickhosting/pterodactyl-adapter';
@@ -21,6 +21,7 @@ import {
   type MinecraftModSelection,
   type MinecraftModsSnapshot,
   type MinecraftModUpdates,
+  minecraftGithubModRequestSchema,
   minecraftModApplySchema,
   minecraftModBlockerSchema,
   minecraftModInstalledChangeSchema,
@@ -40,6 +41,7 @@ import type { Environment } from './admission.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { minecraftAddonProviders } from './minecraft-addon-providers.js';
 import { datapackReceipts, datapackStateRows } from './minecraft-datapack-dependencies.js';
+import { githubModArtifact, matchesGithubModLoader } from './minecraft-github-mod.js';
 import { modAlternativeAdvice, modUpdateAdvice } from './minecraft-mod-advice.js';
 import { resolveModsAutomatically } from './minecraft-mod-auto-resolution.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
@@ -86,6 +88,7 @@ const meta = z.object({
 const planSchema = z.object({
   // Immediate installed-mod toggles never consume the installation draft.
   isolated: z.boolean().optional(),
+  githubUrl: z.string().optional(),
   from: z.string(),
   to: z.string(),
   size: z.number().nonnegative(),
@@ -216,6 +219,7 @@ export function createMinecraftModsService(options: {
   runtime: ManagementRuntime;
   env?: Environment;
   http?: ContentHttp;
+  githubHttp?: ContentHttp;
   curseforge?: CurseForgeProvider;
   kind?: 'mod' | 'plugin';
 }) {
@@ -530,7 +534,7 @@ export function createMinecraftModsService(options: {
     const enabled = [...final]
       .filter(([path]) => path.endsWith('.jar'))
       .map(([, plan]) => plan)
-      .filter((plan) => plan.metadata);
+      .filter((plan) => plan.metadata || plan.githubUrl);
     const matches = (reference: z.infer<typeof ref>) =>
       enabled.some((plan) =>
         identities(plan).some(
@@ -810,7 +814,8 @@ export function createMinecraftModsService(options: {
     const optional = [...optionalByProject.values()];
     const planned: { item: ModResolutionItem; artifact: ContentArtifact; id: string }[] = [];
     const prior = (await rows(db, serverId)).filter(
-      (row) => row.action === 'install' && row.state === 'ready',
+      (row) =>
+        row.action === 'install' && row.state === 'ready' && !parse(planSchema, row.plan).githubUrl,
     );
     const reused = new Set<string>();
     for (const result of resolved)
@@ -962,7 +967,7 @@ export function createMinecraftModsService(options: {
     // Downloads use the existing bounded source store outside the short publication lock.
     // Two independent preparations avoid serial provider latency without flooding Wings.
     let cursor = 0;
-    let modsDirectoryReady = false;
+    const directoryState = { ready: false };
     let uploadTail: Promise<unknown> = Promise.resolve();
     const uploadSerial = <T>(work: () => Promise<T>): Promise<T> => {
       const next = uploadTail.catch(() => {}).then(work);
@@ -974,199 +979,277 @@ export function createMinecraftModsService(options: {
         const value = planned[cursor++];
         if (!value) return;
         signal.throwIfAborted();
-        await prepareItem(value);
-      }
-    }
-    async function prepareItem({
-      item,
-      artifact,
-      id,
-    }: {
-      item: ModResolutionItem;
-      artifact: ContentArtifact;
-      id: string;
-    }) {
-      let dispatched = false;
-      try {
-        await db
-          .updateTable(tables.changes)
-          .set({ state: 'preparing', updated_at: new Date() })
-          .where('id', '=', id)
-          .execute();
-        const store = createMinecraftSourceStore(db, context, env, {
-          http: provider(item.project.provider).http,
-          curseforge: options.curseforge,
-        });
-        const source = await store.acquireMod(
+        await prepareItem(
+          context,
+          serverId,
+          revision,
+          info.target,
+          signal,
+          uploadSerial,
+          directoryState,
           {
-            kind,
-            provider: item.project.provider,
-            projectId: item.project.id,
-            versionId: item.version.id,
-            serverId,
-            idempotencyKey: digest([serverId, revision, id]),
+            id: value.id,
+            artifact: value.artifact,
+            http: provider(value.item.project.provider).http,
+            provider: value.item.project.provider,
+            projectId: value.item.project.id,
+            versionId: value.item.version.id,
+            forced: value.item.forced,
           },
-          artifact,
         );
-        const archive = await store.jarArchiveResolver(source.id, serverId, kind);
-        // The source store has sealed exact bytes, including providers with rounded sizes.
-        artifact = {
-          ...artifact,
-          size: source.bytes,
-          hashes: { sha256: archive.sha256 },
-          integrity: undefined,
-        };
-        const jar = await inspectJarMetadata(archive.path);
-        const side = kind === 'plugin' ? 'server' : jar.environment;
-        if (side === 'client' && !item.forced) {
-          const row = await db
-            .selectFrom(tables.changes)
-            .select('plan')
-            .where('id', '=', id)
-            .executeTakeFirstOrThrow();
-          const plan = parse(planSchema, row.plan);
-          plan.incompatibilities = [
-            ...new Set([...plan.incompatibilities, 'client-only' as const]),
-          ];
-          if (plan.metadata) {
-            plan.metadata.side = 'client';
-            plan.metadata.environment = { kind: 'client', source: 'archive', original: [] };
-          }
-          await db
-            .updateTable(tables.changes)
-            .set({ plan: JSON.stringify(plan), error: 'client_only' })
-            .where('id', '=', id)
-            .execute();
-          throw new DomainError('validation_failed', 400, { contentReason: 'client_only' });
-        }
-        signal.throwIfAborted();
-        await uploadSerial(() =>
-          runtime.fileMutationAccess(
-            context,
-            serverId,
-            async (identifier, connection, current, server) => {
-              await checkRevision(connection, serverId, revision);
-              if (digest((await profile(connection, serverId)).target) !== digest(info.target))
-                throw new DomainError('content_plan_expired');
-              signal.throwIfAborted();
-              const row = await connection
-                .selectFrom(tables.changes)
-                .selectAll()
-                .where('id', '=', id)
-                .executeTakeFirstOrThrow();
-              if (row.state !== 'preparing') throw new DomainError('conflict');
-              const plan = parse(planSchema, row.plan);
-              plan.sourceId = source.id;
-              plan.size = artifact.size;
-              plan.sha256 = archive.sha256;
-              plan.runtimeModId = kind === 'mod' ? jar.fabric?.id : undefined;
-              plan.runtimeModVersion = kind === 'mod' ? jar.fabric?.version : undefined;
-              if (side !== 'unknown' && plan.metadata && plan.metadata.side !== side) {
-                plan.metadata.side = side;
-                plan.metadata.environment = { kind: side, source: 'archive', original: [] };
-              }
-              const files = runtime.fileReadPhase(identifier, server);
-              if (!modsDirectoryReady) {
-                const root = await files.list('');
-                const mods = root.find((entry) => entry.name === directory);
-                if (mods && mods.kind !== 'directory') throw new DomainError('conflict');
-                if (!mods) await runtime.adapter.createDirectory(identifier, '', directory);
-                modsDirectoryReady = true;
-              }
-              if (serverStorageLimitBytes(server.limits.disk) !== null)
-                assertServerStorageCapacity(
-                  server.limits.disk,
-                  (await runtime.fileDiskUsage(server, identifier)) + artifact.size,
-                );
-              const claim = await reserveUploadIngestion(
-                connection,
-                current,
-                serverId,
-                artifact.size,
-                env,
-              );
-              try {
-                plan.claimId = claim.id;
-                plan.claimScope = (
-                  await connection
-                    .selectFrom('upload_ingestion_claims')
-                    .select('scope_hash')
-                    .where('id', '=', claim.id)
-                    .executeTakeFirstOrThrow()
-                ).scope_hash;
-                await connection
-                  .updateTable(tables.changes)
-                  .set({ plan: JSON.stringify(plan) })
-                  .where('id', '=', id)
-                  .execute();
-                await runtime.authorizeTransfer(
-                  current,
-                  serverId,
-                  true,
-                  connection,
-                  undefined,
-                  server,
-                );
-                signal.throwIfAborted();
-                dispatched = true;
-                await runtime.adapter.uploadFile(identifier, plan.from, {
-                  body: Readable.toWeb(
-                    createReadStream(archive.path),
-                  ) as ReadableStream<Uint8Array>,
-                  contentLength: artifact.size,
-                  maxBytes: artifact.size,
-                  authorize: () =>
-                    runtime.authorizeTransfer(
-                      current,
-                      serverId,
-                      true,
-                      connection,
-                      undefined,
-                      server,
-                    ),
-                });
-                await claim.complete();
-                await connection
-                  .updateTable(tables.changes)
-                  .set({ state: 'ready', updated_at: new Date() })
-                  .where('id', '=', id)
-                  .where('state', '=', 'preparing')
-                  .execute();
-              } catch (error) {
-                if (!dispatched || isUploadNotDispatched(error)) {
-                  await claim.rejectBeforeDispatch();
-                  dispatched = false;
-                } else if (isUploadNotPublished(error)) {
-                  await claim.rejectBeforePublication();
-                  dispatched = false;
-                }
-                throw error;
-              } finally {
-                await claim.unlock();
-              }
-            },
-          ),
-        );
-      } catch (error) {
-        await db
-          .updateTable(tables.changes)
-          .set({
-            state: dispatched ? 'uncertain' : 'failed',
-            error:
-              error instanceof DomainError && error.details?.contentReason === 'client_only'
-                ? 'client_only'
-                : code(error),
-            updated_at: new Date(),
-          })
-          .where('id', '=', id)
-          .where('state', 'in', ['preparing', 'queued'])
-          .execute();
-        if (signal.aborted) throw error;
       }
     }
     await Promise.all([next(), next()]);
     await coalesce(context, serverId, revision);
     await refreshGraph(context, serverId, revision);
+  }
+  function markReady(connection: Kysely<Database>, id: string) {
+    return connection
+      .updateTable(tables.changes)
+      .set({ state: 'ready', error: null, updated_at: new Date() })
+      .where('id', '=', id)
+      .where('state', 'in', ['preparing', 'uncertain'])
+      .execute();
+  }
+  // Direct imports are appended independently of catalog selection. A pending
+  // Review in another browser must refresh before it can publish their bytes.
+  async function advanceDirectRevision(tx: Kysely<Database>, serverId: string, revision: number) {
+    await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${directory}:${serverId}`},0))`.execute(
+      tx,
+    );
+    await checkRevision(tx, serverId, revision);
+    await tx
+      .updateTable(tables.changes)
+      .set({ revision: revision + 1 })
+      .where('server_id', '=', serverId)
+      .where('revision', '=', revision)
+      .where('state', 'in', active)
+      .execute();
+    await tx
+      .updateTable(tables.drafts)
+      .set({ revision: revision + 1, updated_at: new Date() })
+      .where('server_id', '=', serverId)
+      .execute();
+  }
+  async function prepareItem(
+    context: AuthContext,
+    serverId: string,
+    revision: number,
+    target: ContentTarget,
+    signal: AbortSignal,
+    uploadSerial: <T>(work: () => Promise<T>) => Promise<T>,
+    directoryState: { ready: boolean },
+    {
+      id,
+      artifact,
+      http,
+      provider: sourceProvider,
+      projectId,
+      versionId,
+      forced,
+    }: {
+      id: string;
+      artifact: ContentArtifact;
+      http: ContentHttp;
+      provider: ContentCatalogProvider | 'github';
+      projectId: string;
+      versionId: string;
+      forced: boolean;
+    },
+    startDirect?: (connection: Kysely<Database>) => Promise<string>,
+  ) {
+    let result = id;
+    let dispatched = false;
+    try {
+      if (!startDirect) {
+        const started = await db
+          .updateTable(tables.changes)
+          .set({ state: 'preparing', updated_at: new Date() })
+          .where('id', '=', id)
+          .where('state', '=', 'queued')
+          .executeTakeFirst();
+        if (!started.numUpdatedRows) throw new DomainError('conflict');
+      }
+      const store = createMinecraftSourceStore(db, context, env, {
+        http,
+        curseforge: options.curseforge,
+      });
+      const source = await store.acquireMod(
+        {
+          kind,
+          provider: sourceProvider,
+          projectId,
+          versionId,
+          serverId,
+          idempotencyKey: digest([serverId, revision, id]),
+        },
+        artifact,
+        sourceProvider === 'github' ? signal : undefined,
+      );
+      const archive = await store.jarArchiveResolver(source.id, serverId, kind);
+      // The source store has sealed exact bytes, including providers with rounded sizes.
+      artifact = {
+        ...artifact,
+        size: source.bytes,
+        hashes: { sha256: archive.sha256 },
+        integrity: undefined,
+      };
+      const jar = await inspectJarMetadata(archive.path, {}, sourceProvider === 'github');
+      if (
+        sourceProvider === 'github' &&
+        !matchesGithubModLoader(target.loader, jar.descriptors ?? [])
+      )
+        throw new DomainError('validation_failed', 400, { contentReason: 'loader' });
+      const side = kind === 'plugin' ? 'server' : jar.environment;
+      if (side === 'client' && !forced) {
+        if (startDirect)
+          throw new DomainError('validation_failed', 400, { contentReason: 'client_only' });
+        const row = await db
+          .selectFrom(tables.changes)
+          .select('plan')
+          .where('id', '=', id)
+          .executeTakeFirstOrThrow();
+        const plan = parse(planSchema, row.plan);
+        plan.incompatibilities = [...new Set([...plan.incompatibilities, 'client-only' as const])];
+        if (plan.metadata) {
+          plan.metadata.side = 'client';
+          plan.metadata.environment = { kind: 'client', source: 'archive', original: [] };
+        }
+        await db
+          .updateTable(tables.changes)
+          .set({ plan: JSON.stringify(plan), error: 'client_only' })
+          .where('id', '=', id)
+          .execute();
+        throw new DomainError('validation_failed', 400, { contentReason: 'client_only' });
+      }
+      signal.throwIfAborted();
+      await uploadSerial(() =>
+        runtime.fileMutationAccess(
+          context,
+          serverId,
+          async (identifier, connection, current, server) => {
+            if (startDirect) {
+              result = await startDirect(connection);
+              if (result !== id) return;
+            }
+            await checkRevision(connection, serverId, revision);
+            if (digest((await profile(connection, serverId)).target) !== digest(target))
+              throw new DomainError('content_plan_expired');
+            signal.throwIfAborted();
+            const row = await connection
+              .selectFrom(tables.changes)
+              .selectAll()
+              .where('id', '=', id)
+              .executeTakeFirstOrThrow();
+            if (row.state !== 'preparing') throw new DomainError('conflict');
+            const plan = parse(planSchema, row.plan);
+            plan.sourceId = source.id;
+            plan.size = artifact.size;
+            plan.sha256 = archive.sha256;
+            plan.runtimeModId = kind === 'mod' ? jar.fabric?.id : undefined;
+            plan.runtimeModVersion = kind === 'mod' ? jar.fabric?.version : undefined;
+            if (side !== 'unknown' && plan.metadata && plan.metadata.side !== side) {
+              plan.metadata.side = side;
+              plan.metadata.environment = { kind: side, source: 'archive', original: [] };
+            }
+            const files = runtime.fileReadPhase(identifier, server);
+            if (!directoryState.ready) {
+              const root = await files.list('');
+              const mods = root.find((entry) => entry.name === directory);
+              if (mods && mods.kind !== 'directory') throw new DomainError('conflict');
+              if (!mods) await runtime.adapter.createDirectory(identifier, '', directory);
+              directoryState.ready = true;
+            }
+            if (
+              sourceProvider === 'github' &&
+              (await list(files)).some(
+                (entry) =>
+                  entry.name === leaf(plan.to) || entry.name === `${leaf(plan.to)}.disabled`,
+              )
+            )
+              throw new DomainError('conflict');
+            if (serverStorageLimitBytes(server.limits.disk) !== null)
+              assertServerStorageCapacity(
+                server.limits.disk,
+                (await runtime.fileDiskUsage(server, identifier)) + artifact.size,
+              );
+            const claim = await reserveUploadIngestion(
+              connection,
+              current,
+              serverId,
+              artifact.size,
+              env,
+            );
+            try {
+              plan.claimId = claim.id;
+              plan.claimScope = (
+                await connection
+                  .selectFrom('upload_ingestion_claims')
+                  .select('scope_hash')
+                  .where('id', '=', claim.id)
+                  .executeTakeFirstOrThrow()
+              ).scope_hash;
+              await connection
+                .updateTable(tables.changes)
+                .set({ plan: JSON.stringify(plan) })
+                .where('id', '=', id)
+                .execute();
+              await runtime.authorizeTransfer(
+                current,
+                serverId,
+                true,
+                connection,
+                undefined,
+                server,
+              );
+              signal.throwIfAborted();
+              dispatched = true;
+              await runtime.adapter.uploadFile(identifier, plan.from, {
+                body: Readable.toWeb(createReadStream(archive.path)) as ReadableStream<Uint8Array>,
+                contentLength: artifact.size,
+                maxBytes: artifact.size,
+                authorize: () =>
+                  runtime.authorizeTransfer(current, serverId, true, connection, undefined, server),
+              });
+              await claim.complete();
+              if (startDirect) {
+                await connection.transaction().execute(async (tx) => {
+                  await advanceDirectRevision(tx, serverId, revision);
+                  await markReady(tx, id);
+                });
+              } else await markReady(connection, id);
+            } catch (error) {
+              if (!dispatched || isUploadNotDispatched(error)) {
+                await claim.rejectBeforeDispatch();
+                dispatched = false;
+              } else if (isUploadNotPublished(error)) {
+                await claim.rejectBeforePublication();
+                dispatched = false;
+              }
+              throw error;
+            } finally {
+              await claim.unlock();
+            }
+          },
+        ),
+      );
+    } catch (error) {
+      await db
+        .updateTable(tables.changes)
+        .set({
+          state: dispatched ? 'uncertain' : 'failed',
+          error:
+            error instanceof DomainError && error.details?.contentReason === 'client_only'
+              ? 'client_only'
+              : code(error),
+          updated_at: new Date(),
+        })
+        .where('id', '=', id)
+        .where('state', 'in', ['preparing', 'queued'])
+        .execute();
+      if (signal.aborted || sourceProvider === 'github') throw error;
+    }
+    return result;
   }
   function launch(
     context: AuthContext,
@@ -1484,7 +1567,26 @@ export function createMinecraftModsService(options: {
             rows(connection, serverId),
           ]);
           const cached = inventoryCache.get(taskKey(serverId));
-          const preparing = current?.state === 'preparing' && !!runningTasks.get(taskKey(serverId));
+          // A direct change row is inserted only once its writer holds the server
+          // mutation lock. A free lock with a preparing row means an interrupted upload.
+          const directPending = changes.some(
+            (row) =>
+              row.action === 'install' &&
+              row.state === 'preparing' &&
+              parse(planSchema, row.plan).githubUrl,
+          );
+          const directRunning =
+            directPending &&
+            !(
+              await sql<{
+                available: boolean;
+              }>`select pg_try_advisory_xact_lock_shared(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0)) as available`.execute(
+                connection,
+              )
+            ).rows[0]?.available;
+          const preparing =
+            directRunning ||
+            (current?.state === 'preparing' && !!runningTasks.get(taskKey(serverId)));
           const entries =
             info.installed && info.supported
               ? preparing && cached && cached.expires > Date.now()
@@ -1599,6 +1701,21 @@ export function createMinecraftModsService(options: {
         )
           throw new DomainError('operation_uncertain');
         const next = (previous?.revision ?? 0) + 1;
+        const direct = (await rows(tx, serverId)).filter(
+          (row) => row.action === 'install' && parse(planSchema, row.plan).githubUrl,
+        );
+        if (direct.some((row) => row.state === 'queued' || row.state === 'preparing'))
+          throw new DomainError('conflict');
+        if (direct.length)
+          await tx
+            .updateTable(tables.changes)
+            .set({ revision: next })
+            .where(
+              'id',
+              'in',
+              direct.map((row) => row.id),
+            )
+            .execute();
         await tx
           .insertInto(tables.drafts)
           .values({
@@ -1630,6 +1747,7 @@ export function createMinecraftModsService(options: {
           .where('server_id', '=', serverId)
           .where('action', '=', 'install')
           .where('state', 'in', ['queued', 'failed'])
+          .where(sql<boolean>`plan->>'githubUrl' IS NULL`)
           .execute();
         return { revision: next, fresh: true };
       });
@@ -1641,6 +1759,142 @@ export function createMinecraftModsService(options: {
       )
         launch(actor, serverId, revision, value);
       return { revision };
+    },
+    async github(context: AuthContext, serverId: string, input: unknown, signal: AbortSignal) {
+      const value = parse(minecraftGithubModRequestSchema, input);
+      const { actor } = await authorized(context, serverId, true);
+      const info = await profile(db, serverId);
+      if (kind !== 'mod' || !info.supported || !info.installed)
+        throw new DomainError('integration_unavailable');
+      async function replay(connection: Kysely<Database>) {
+        const previous = await connection
+          .selectFrom(tables.changes)
+          .selectAll()
+          .where('server_id', '=', serverId)
+          .where('actor_user_id', '=', actor.actorUserId)
+          .where('idempotency_key', '=', value.idempotencyKey)
+          .executeTakeFirst();
+        if (!previous) return;
+        if (
+          previous.action !== 'install' ||
+          parse(planSchema, previous.plan).githubUrl !== value.url
+        )
+          throw new DomainError('conflict');
+        if (previous.state === 'ready' || previous.state === 'applied') return previous.id;
+        if (previous.state === 'cancelled') throw new DomainError('conflict');
+        if (previous.state !== 'failed') throw new DomainError('operation_uncertain');
+      }
+      const replayId = await replay(db);
+      if (replayId) return { changeId: replayId };
+      const initialDraft = await draft(db, serverId);
+      if ((initialDraft?.revision ?? 0) !== value.revision || initialDraft?.state === 'preparing')
+        throw new DomainError('conflict');
+      const settings = await getSettings(db, env);
+      const { artifact, http } = await githubModArtifact(
+        value.url,
+        settings.values.contentMetadataUserAgent ?? '',
+        contentPolicyValues(settings.values, 'minecraft').downloadOrigins,
+        options.githubHttp,
+        signal,
+      );
+      const id = randomUUID();
+      const startDirect = (connection: Kysely<Database>) =>
+        connection.transaction().execute(async (tx) => {
+          await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${directory}:${serverId}`},0))`.execute(
+            tx,
+          );
+          const already = await replay(tx);
+          if (already) return already;
+          // Reattempts may replace only failed reservations. Their
+          // generated pending filenames remain owned by the cleanup journal.
+          await tx
+            .updateTable(tables.changes)
+            .set({
+              state: 'cancelled',
+              idempotency_key: sql<string>`'retired:' || id::text`,
+            })
+            .where('server_id', '=', serverId)
+            .where('actor_user_id', '=', actor.actorUserId)
+            .where('idempotency_key', '=', value.idempotencyKey)
+            .where('state', '=', 'failed')
+            .execute();
+          const current = await draft(tx, serverId);
+          if ((current?.revision ?? 0) !== value.revision || current?.state === 'preparing')
+            throw new DomainError('conflict');
+          const activeRows = await rows(tx, serverId);
+          if (activeRows.some((row) => ['uncertain', 'dispatched'].includes(row.state)))
+            throw new DomainError('operation_uncertain');
+          if (activeRows.some((row) => parse(planSchema, row.plan).to === artifact.path))
+            throw new DomainError('conflict');
+          if (!current)
+            await tx
+              .insertInto(tables.drafts)
+              .values({
+                server_id: serverId,
+                revision: value.revision,
+                state: 'ready',
+                blockers: '[]',
+                optional: '[]',
+                error: null,
+                actor_user_id: actor.actorUserId,
+                selection: JSON.stringify({ roots: [], preferBeta: false, idempotencyKey: id }),
+              })
+              .execute();
+          const plan: Plan = {
+            githubUrl: value.url,
+            from: `mods/.nh-${id}.jar.pending`,
+            to: artifact.path,
+            size: artifact.size,
+            metadata: null,
+            target: info.target,
+            dependency: false,
+            requiredBy: [],
+            forceIncompatible: false,
+            incompatibilities: [],
+            aliases: [],
+            reuse: false,
+            dependencies: [],
+            conflicts: [],
+            retired: [],
+          };
+          await tx
+            .insertInto(tables.changes)
+            .values({
+              id,
+              server_id: serverId,
+              actor_user_id: actor.actorUserId,
+              revision: value.revision,
+              action: 'install',
+              state: 'preparing',
+              idempotency_key: value.idempotencyKey,
+              plan: JSON.stringify(plan),
+              error: null,
+            })
+            .execute();
+          return id;
+        });
+      const changeId = await prepareItem(
+        actor,
+        serverId,
+        value.revision,
+        info.target,
+        signal,
+        (work) => work(),
+        { ready: false },
+        {
+          id,
+          artifact,
+          http,
+          provider: 'github',
+          projectId: artifact.projectId,
+          versionId: artifact.versionId,
+          forced: false,
+        },
+        startDirect,
+      );
+      if (changeId === id) await refreshGraph(actor, serverId, value.revision + 1);
+      queueCleanup(actor, serverId);
+      return { changeId };
     },
     async change(context: AuthContext, serverId: string, input: unknown) {
       const value = parse(installedChangeSchema, input);
@@ -1719,8 +1973,11 @@ export function createMinecraftModsService(options: {
             size: entry.size,
             modifiedAt: entry.modifiedAt,
             metadata: old?.metadata ?? null,
+            githubUrl: old?.githubUrl,
             sha256: old?.sha256,
             aliases: old?.aliases ?? [],
+            runtimeModId: old?.runtimeModId,
+            runtimeModVersion: old?.runtimeModVersion,
             reuse: false,
             dependencies: old?.dependencies ?? [],
             conflicts: old?.conflicts ?? [],
@@ -1852,6 +2109,7 @@ export function createMinecraftModsService(options: {
                 size: entry.size,
                 modifiedAt: entry.modifiedAt,
                 metadata: old?.metadata ?? null,
+                githubUrl: old?.githubUrl,
                 sha256: old?.sha256,
                 aliases: old?.aliases ?? [],
                 dependencies: old?.dependencies ?? [],
@@ -1944,13 +2202,15 @@ export function createMinecraftModsService(options: {
         if (!row) throw new DomainError('not_found');
         if (['dispatched', 'uncertain', 'applied'].includes(row.state))
           throw new DomainError('operation_uncertain');
-        if (row.action === 'install') throw new DomainError('validation_failed');
+        if (row.action === 'install' && !parse(planSchema, row.plan).githubUrl)
+          throw new DomainError('validation_failed');
         await connection
           .updateTable(tables.changes)
           .set({ state: 'cancelled', updated_at: new Date() })
           .where('id', '=', changeId)
           .execute();
       });
+      queueCleanup(context, serverId);
       await refreshGraph(context, serverId, (await draft(db, serverId))?.revision ?? 0);
     },
     async apply(context: AuthContext, serverId: string, input: unknown) {
@@ -2218,11 +2478,8 @@ export function createMinecraftModsService(options: {
                   .where('server_id', '=', serverId)
                   .where('scope_hash', '=', plan.claimScope as string)
                   .execute();
-                await tx
-                  .updateTable(tables.changes)
-                  .set({ state: 'ready', error: null, updated_at: new Date() })
-                  .where('id', '=', row.id)
-                  .execute();
+                if (plan.githubUrl) await advanceDirectRevision(tx, serverId, row.revision);
+                await markReady(tx, row.id);
                 await recordAudit(tx, current, `minecraft.${directory}.preparation_reconciled`, {
                   serverId,
                   changeId: row.id,

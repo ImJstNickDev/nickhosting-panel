@@ -9,6 +9,18 @@ export const minecraftModsMessages: Record<string, [string, string]> = {
   'mods.alreadyInstalled': ['Already installed', 'Già installata'],
   'mods.blocked': ['Needs attention', 'Da verificare'],
   'mods.installed': ['Installed', 'Installate'],
+  'mods.githubInstall': ['Install from GitHub', 'Installa da GitHub'],
+  'mods.githubUrl': ['Release .jar URL', 'Link al file .jar della release'],
+  'mods.githubHint': [
+    'Choose the file for your Minecraft version and mod loader.',
+    'Scegli il file per la versione di Minecraft e il mod loader del server.',
+  ],
+  'mods.githubInvalid': [
+    'Enter a direct GitHub release link ending in .jar.',
+    'Inserisci il link diretto a una release GitHub che termina con .jar.',
+  ],
+  'mods.githubPrepare': ['Prepare mod', 'Prepara mod'],
+  'mods.backInstalled': ['Back to Installed', 'Torna a Installate'],
   'mods.discover': ['Discover', 'Scopri'],
   'mods.install': ['Install ({count})', 'Installa ({count})'],
   'mods.review': ['Review changes', 'Rivedi modifiche'],

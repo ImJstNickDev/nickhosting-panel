@@ -380,6 +380,104 @@ describe('Minecraft Mods durable preparation and publication', () => {
       });
     return { ...f, service, http, bytes, artifact, project, version, resolution, resolve, select };
   }
+  it('stages a verified release asset, replays without GitHub, and applies via the journal', async () => {
+    const f = await catalogFixture();
+    const url = 'https://github.com/example/Test/releases/download/v1/direct.jar';
+    const githubHttp = {
+      download: f.http.download,
+      json: vi.fn(async () => ({
+        tag_name: 'v1',
+        draft: false,
+        assets: [
+          {
+            id: 400,
+            state: 'uploaded',
+            name: 'direct.jar',
+            size: f.bytes.length,
+            digest: `sha256:${f.artifact.hashes.sha256}`,
+            browser_download_url: url,
+          },
+        ],
+      })),
+    };
+    const svc = createMinecraftModsService({
+      db: f.db,
+      env: f.env,
+      runtime: f.runtime,
+      githubHttp,
+    });
+    const request = { url, revision: 0, idempotencyKey: randomUUID() };
+    const signal = new AbortController().signal;
+    const stage = () => svc.github(f.context, f.serverId, request, signal);
+    vi.mocked(githubHttp.download).mockRejectedValueOnce(new Error('temporary outage'));
+    await expect(stage()).rejects.toThrow('temporary outage');
+    const change = await stage();
+    expect(githubHttp.json).toHaveBeenCalledWith(
+      'https://api.github.com/repos/example/Test/releases/tags/v1',
+      { signal },
+    );
+    expect((await svc.snapshot(f.context, f.serverId)).changes).toMatchObject([
+      { id: change.changeId, state: 'ready', metadata: null, path: 'mods/direct.jar' },
+    ]);
+    expect(f.files.has('mods/direct.jar')).toBe(false);
+    await expect(
+      svc.apply(f.context, f.serverId, { revision: 0, idempotencyKey: randomUUID() }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    githubHttp.json.mockClear();
+    expect(await stage()).toEqual(change);
+    expect(githubHttp.json).not.toHaveBeenCalled();
+    const updated = await f.select([]);
+    await f.service.drain();
+    expect((await svc.snapshot(f.context, f.serverId)).changes).toMatchObject([
+      { id: change.changeId, state: 'ready' },
+    ]);
+    await svc.apply(f.context, f.serverId, {
+      revision: updated.revision,
+      idempotencyKey: randomUUID(),
+    });
+    expect(f.files.get('mods/direct.jar')).toEqual(f.bytes);
+    expect(await stage()).toEqual(change);
+    expect((await svc.snapshot(f.context, f.serverId)).restart.required).toBe(true);
+    await svc.toggle(f.context, f.serverId, {
+      action: 'disable',
+      path: 'mods/direct.jar',
+      idempotencyKey: randomUUID(),
+    });
+    const receipt = await f.db
+      .selectFrom('minecraft_mod_receipts')
+      .select('receipt')
+      .where('server_id', '=', f.serverId)
+      .where('path', '=', 'mods/direct.jar.disabled')
+      .executeTakeFirstOrThrow();
+    expect(receipt.receipt).toMatchObject({ githubUrl: url, runtimeModId: 'fixture' });
+    await svc.drain();
+  });
+
+  it('enforces the effective GitHub origin policy before metadata lookup', async () => {
+    const f = await fixture();
+    const githubHttp = { json: vi.fn(), download: vi.fn() };
+    const svc = createMinecraftModsService({
+      db: f.db,
+      env: { ...f.env, NH_CONTENT_DOWNLOAD_ORIGINS: '[]' },
+      runtime: f.runtime,
+      githubHttp,
+    });
+    await expect(
+      svc.github(
+        f.context,
+        f.serverId,
+        {
+          url: 'https://github.com/example/Test/releases/download/v1/direct.jar',
+          idempotencyKey: randomUUID(),
+          revision: 0,
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+    expect(githubHttp.json).not.toHaveBeenCalled();
+    expect(f.uploadFile).not.toHaveBeenCalled();
+  });
+
   it('publishes plugins with the shared lifecycle, creates the missing directory and isolates mod state', async () => {
     const f = await catalogFixture('*', 'plugin');
     f.files.set('mods/keep.jar', Buffer.from('unrelated mod'));
