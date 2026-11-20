@@ -263,6 +263,28 @@ describe('Modpack preparation policy', () => {
     expect(plan.remove).toEqual(['config/remove.toml']);
     expect(plan.preserve).toEqual(['config/keep.toml']);
   });
+  it('collapses nested removals and rechecks descendants on path boundaries', () => {
+    const f = fixture();
+    f.selection.mode = 'replace';
+    f.observation.replacePaths = ['mods', 'mods/nested'];
+    f.observation.entries = [
+      { path: 'mods', kind: 'directory', size: 0 },
+      { path: 'mods/nested', kind: 'directory', size: 0 },
+      observed(file('mods/nested/a.jar')),
+      observed(file('mods-extra/retained.jar')),
+    ];
+    const plan = planMinecraftModpack(f);
+    expect(plan.remove).toEqual(['mods']);
+    expect(plan.expected.map((entry) => entry.path)).toEqual([
+      'mods',
+      'mods/nested',
+      'mods/nested/a.jar',
+    ]);
+    f.observation.entries.push(observed(file('mods-extra/late.jar')));
+    expect(() => assertMinecraftModpackPlanCurrent(plan, f.observation)).not.toThrow();
+    f.observation.entries.push(observed(file('mods/nested/late.jar')));
+    expect(() => assertMinecraftModpackPlanCurrent(plan, f.observation)).toThrow('conflict');
+  });
   it('rejects changed candidates or runtime after preparation without reading artifact bytes again', () => {
     const f = fixture();
     f.prepared.files = [file('mods/new.jar')];

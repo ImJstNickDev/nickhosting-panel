@@ -1,15 +1,13 @@
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import { recordAudit } from '@nickhosting/database';
+import type { FilemanReadService } from '@nickhosting/game-sdk';
 import { verifyMinecraftPlayer } from '@nickhosting/minecraft';
 import { type ConsoleRelayOptions, PterodactylError } from '@nickhosting/pterodactyl-adapter';
-import {
-  createFilemanReadService,
-  inspectMinecraftCombination,
-  type ManagementRuntime,
-} from '@nickhosting/server-management';
+import { createFilemanReadService, type ManagementRuntime } from '@nickhosting/server-management';
 import { Hono } from 'hono';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { planMinecraftPlayerList } from '../../../games/minecraft/src/management.js';
+import { minecraftPlayerCombinationFixture } from '../../../games/minecraft/src/player-data-fixture.js';
 import { resolveMinecraftStoredPlayers } from '../../../packages/server-management/src/minecraft-content.js';
 import {
   minecraftConfigurationSchema,
@@ -32,17 +30,11 @@ vi.mock('@nickhosting/minecraft', async (original) => ({
     verifiedAt: new Date().toISOString(),
   })),
 }));
-vi.mock('@nickhosting/server-management', async (original) => ({
-  ...(await original<typeof import('@nickhosting/server-management')>()),
-  inspectMinecraftCombination: vi.fn(async () => ({
-    combination: { release: '26.1', profile: 'vanilla' },
-    capabilities: { playerManagement: true },
-  })),
-}));
 const player = { name: 'PlayerOne', uuid: '11111111-1111-1111-1111-111111111111' };
 function fixture() {
   const profile = {
     installed: true,
+    combination: { ...minecraftPlayerCombinationFixture, profile: 'vanilla', release: '26.1' },
     combination_id: 'choice',
     configuration: { eula: true, properties: {}, operators: [], whitelist: [] } as Record<
       string,
@@ -55,8 +47,14 @@ function fixture() {
     'banned-players.json': '[]',
     'server.properties': 'white-list=false\nenforce-whitelist=false',
   };
+  const directories = new Set<string>();
+  const symlinks = new Set<string>();
+  const readBatches = vi.fn<FilemanReadService['readMany']>();
+  const directoryBatches = vi.fn<FilemanReadService['listMany']>();
   const select = {
-    selectAll: () => select,
+    innerJoin: () => select,
+    select: () => select,
+    executeTakeFirstOrThrow: async () => profile,
     where: () => select,
     executeTakeFirst: async () => profile,
   };
@@ -106,6 +104,17 @@ function fixture() {
   const service = {
     adapter: {
       prefetchDownloads: vi.fn(async () => {}),
+      listFiles: vi.fn(async (_id: string, directory: string) => {
+        const prefix = directory ? `${directory}/` : '';
+        return [...directories, ...Object.keys(files)]
+          .filter((path) => path.startsWith(prefix) && !path.slice(prefix.length).includes('/'))
+          .map((path) => ({
+            name: path.slice(prefix.length),
+            is_file: !directories.has(path),
+            is_symlink: symlinks.has(path),
+            size: Buffer.byteLength(files[path] ?? ''),
+          }));
+      }),
       readFileForEditor: vi.fn(async (_id, path): Promise<Buffer> => {
         if (!(path in files)) throw new DomainError('integration_unavailable');
         return Buffer.from(files[path] ?? '');
@@ -144,7 +153,15 @@ function fixture() {
         identifier: 'identifier',
         authorize: async () => {},
       });
-      const result = await callback(files, 'identifier', db, context, server);
+      readBatches.mockImplementation(files.readMany);
+      directoryBatches.mockImplementation(files.listMany);
+      const result = await callback(
+        { ...files, readMany: readBatches, listMany: directoryBatches },
+        'identifier',
+        db,
+        context,
+        server,
+      );
       await service.authorizeTransfer();
       return result;
     }),
@@ -180,6 +197,10 @@ function fixture() {
     service,
     profile,
     files,
+    directories,
+    symlinks,
+    readBatches,
+    directoryBatches,
     server,
     db,
     stored: () => stored,
@@ -234,13 +255,116 @@ describe('Minecraft player HTTP handlers with isolated boundaries', () => {
     ]);
     expect(f.service.fileReadScope).toHaveBeenCalledOnce();
     expect(f.service.authorizeTransfer).toHaveBeenCalledOnce();
-    expect(f.service.prepareFileWrites).toHaveBeenCalledExactlyOnceWith(
-      expect.anything(),
-      'server',
-      ['ops.json', 'whitelist.json', 'server.properties'],
-    );
+    expect(f.service.prepareFileWrites).not.toHaveBeenCalled();
     expect(f.service.access).not.toHaveBeenCalled();
+    expect(f.db.selectFrom).toHaveBeenCalledExactlyOnceWith('minecraft_server_profiles as p');
     expect(f.db.updateTable).not.toHaveBeenCalled();
+  });
+  it('shares each root file once and batches discovery while retaining stats-only players', async () => {
+    const f = fixture();
+    const statsOnly = '22222222-2222-2222-2222-222222222222';
+    f.files['usercache.json'] = JSON.stringify([player]);
+    f.files['ops.json'] = JSON.stringify([{ ...player, level: 1, bypassesPlayerLimit: false }]);
+    for (const directory of [
+      'world',
+      'world/players',
+      'world/players/data',
+      'world/players/stats',
+      'world/players/advancements',
+    ])
+      f.directories.add(directory);
+    f.files[`world/players/data/${player.uuid}.dat`] = 'not downloaded';
+    f.files[`world/players/stats/${statsOnly}.json`] = 'not downloaded';
+    const events: string[] = [];
+    let activeReads = 0;
+    let peakReads = 0;
+    const read = f.service.adapter.readFileForEditor.getMockImplementation();
+    f.service.adapter.readFileForEditor.mockImplementation(async (...args) => {
+      events.push(`read:${args[1]}`);
+      peakReads = Math.max(peakReads, ++activeReads);
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        return (await read?.(...args)) ?? Buffer.from('');
+      } finally {
+        activeReads--;
+      }
+    });
+    const list = f.service.adapter.listFiles.getMockImplementation();
+    f.service.adapter.listFiles.mockImplementation(async (...args) => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      events.push(`listed:${args[1]}`);
+      return (await list?.(...args)) ?? [];
+    });
+    const response = await f.app.request('/v1/servers/server/minecraft/players');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      operators: [{ ...player, level: 1 }],
+      knownPlayersState: 'available',
+      knownPlayers: expect.arrayContaining([
+        { ...player, sources: ['usercache', 'operators', 'playerdata'] },
+        { uuid: statsOnly, name: null, sources: ['stats'] },
+      ]),
+    });
+    expect(f.service.adapter.readFileForEditor.mock.calls.map((call) => call[1]).sort()).toEqual([
+      'banned-players.json',
+      'ops.json',
+      'server.properties',
+      'usercache.json',
+      'whitelist.json',
+    ]);
+    expect(peakReads).toBe(4);
+    expect(events.indexOf('read:ops.json')).toBeLessThan(events.indexOf('listed:'));
+    expect(events.indexOf('read:usercache.json')).toBeLessThan(events.indexOf('listed:world'));
+    expect(f.readBatches).toHaveBeenCalledOnce();
+    expect(f.readBatches.mock.calls[0]?.[0]).toHaveLength(4);
+    expect(f.directoryBatches).toHaveBeenCalledExactlyOnceWith([
+      'world/players/data',
+      'world/players/stats',
+      'world/players/advancements',
+    ]);
+    expect(f.service.adapter.listFiles).toHaveBeenCalledTimes(6);
+    expect(f.service.prepareFileWrites).not.toHaveBeenCalled();
+  });
+  it.each(['root', 'usercache', 'directory', 'symlink'] as const)(
+    'keeps authoritative membership available when %s discovery fails',
+    async (failure) => {
+      const f = fixture();
+      f.files['ops.json'] = JSON.stringify([{ ...player, level: 1, bypassesPlayerLimit: false }]);
+      if (failure === 'root')
+        f.service.adapter.listFiles.mockRejectedValueOnce(
+          new DomainError('integration_unavailable'),
+        );
+      if (failure === 'usercache') f.files['usercache.json'] = '{invalid';
+      if (failure === 'directory' || failure === 'symlink') {
+        f.directories.add('world');
+        f.directories.add('world/stats');
+        f.files[`world/stats/${player.uuid}.json`] = '{}';
+        if (failure === 'symlink') f.symlinks.add(`world/stats/${player.uuid}.json`);
+        else {
+          const list = f.service.adapter.listFiles.getMockImplementation();
+          f.service.adapter.listFiles.mockImplementation(async (...args) => {
+            if (args[1] === 'world/stats') throw new DomainError('integration_unavailable');
+            return (await list?.(...args)) ?? [];
+          });
+        }
+      }
+      const response = await f.app.request('/v1/servers/server/minecraft/players');
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        operators: [{ ...player, level: 1 }],
+        knownPlayers: [],
+        knownPlayersState: 'unavailable',
+      });
+    },
+  );
+  it('preserves conflicting-name discovery checks with shared root files', async () => {
+    const f = fixture();
+    f.files['usercache.json'] = JSON.stringify([player, { ...player, name: 'OtherName' }]);
+    const response = await f.app.request('/v1/servers/server/minecraft/players');
+    expect(await response.json()).toMatchObject({
+      knownPlayersState: 'available',
+      knownPlayers: [{ uuid: player.uuid, name: null, sources: ['usercache'] }],
+    });
   });
   it('does not turn missing/malformed files into empty lists', async () => {
     const f = fixture();
@@ -272,14 +396,12 @@ describe('Minecraft player HTTP handlers with isolated boundaries', () => {
   });
   it('gates JSON lists/actions on exact supported installed releases', async () => {
     const f = fixture();
-    vi.mocked(inspectMinecraftCombination).mockResolvedValueOnce({
-      combination: { release: '1.7.5' },
-      capabilities: { playerManagement: false },
-    } as never);
+    f.profile.combination.release = '1.7.5';
     expect(
       await (await f.app.request('/v1/servers/server/minecraft/players')).json(),
     ).toMatchObject({ supported: false });
     expect(f.service.adapter.readFileForEditor).not.toHaveBeenCalled();
+    f.profile.combination.release = '26.1';
     f.profile.installed = false;
     expect((await f.action({ action: 'op', name: 'PlayerOne' })).status).toBe(409);
   });
@@ -387,10 +509,11 @@ describe('Minecraft player HTTP handlers with isolated boundaries', () => {
     expect(f.service.fileMutationAccess).toHaveBeenCalledOnce();
     expect(f.service.access).not.toHaveBeenCalled();
   });
-  it('keeps optional private write preparation independent from readable players', async () => {
+  it('does not prepare write capabilities on a read-only list request', async () => {
     const f = fixture();
-    f.service.prepareFileWrites.mockRejectedValueOnce(new DomainError('forbidden'));
+    f.writeDenied();
     expect((await f.app.request('/v1/servers/server/minecraft/players')).status).toBe(200);
+    expect(f.service.prepareFileWrites).not.toHaveBeenCalled();
   });
   it('rejects revoked access after a saved-list read instead of returning stale authority', async () => {
     const f = fixture();
@@ -552,10 +675,7 @@ describe('Minecraft player HTTP handlers with isolated boundaries', () => {
   });
   it('uses the inspected Folia runtime to parse its terminal roster', async () => {
     const f = fixture();
-    vi.mocked(inspectMinecraftCombination).mockResolvedValueOnce({
-      combination: { release: '26.1', profile: 'folia' },
-      capabilities: { playerManagement: true },
-    } as Awaited<ReturnType<typeof inspectMinecraftCombination>>);
+    f.profile.combination.profile = 'folia';
     f.receipt('[12:34:56 INFO]: There are 1 of a max of 20 players online: PlayerOne');
     expect(
       await (await f.app.request('/v1/servers/server/minecraft/players/online')).json(),

@@ -7,20 +7,10 @@ import type { GameLifecycleContext } from './lifecycle.js';
 const receipt = (message: string) =>
   new RegExp(`^\\[\\d{2}:\\d{2}:\\d{2}\\] \\[Server thread/INFO\\]: (?:${message})$`);
 
-async function command(
+async function confirmedCommands(
   context: GameLifecycleContext,
-  text: string,
-  expected: RegExp,
+  commands: readonly (readonly [string, RegExp])[],
 ): Promise<void> {
-  let armed = false;
-  let settle: (error?: Error) => void = () => {};
-  const completion = new Promise<void>((resolve, reject) => {
-    settle = (error) => (error ? reject(error) : resolve());
-  });
-  // Attach a rejection handler before the socket can close during authorization.
-  void completion.catch(() => {});
-  const timer = setTimeout(() => settle(new DomainError('operation_uncertain')), 30_000);
-  let relay: Awaited<ReturnType<typeof context.adapter.relayConsole>> | undefined;
   const authorize = async () => {
     try {
       await context.authorize();
@@ -29,25 +19,41 @@ async function command(
       return false;
     }
   };
+  let pending: { expected: RegExp; resolve(): void; reject(error: Error): void } | undefined;
+  let closed = false;
+  const relay = await context.adapter.relayConsole(context.server.pterodactyl_identifier ?? '', {
+    authorize,
+    authorizeCommand: authorize,
+    canSendCommands: true,
+    maxDurationMs: 30_000 * commands.length,
+    onEvent(event) {
+      if (event.type === 'closed' || event.type === 'error') {
+        closed = true;
+        pending?.reject(new DomainError('integration_unavailable'));
+      } else if (event.type === 'console' && pending?.expected.test(event.data.trim())) {
+        pending.resolve();
+      }
+    },
+  });
   try {
-    relay = await context.adapter.relayConsole(context.server.pterodactyl_identifier ?? '', {
-      authorize,
-      authorizeCommand: authorize,
-      canSendCommands: true,
-      maxDurationMs: 30_000,
-      onEvent(event) {
-        if (event.type === 'closed' || event.type === 'error')
-          settle(new DomainError('integration_unavailable'));
-        if (armed && event.type === 'console' && expected.test(event.data.trim())) settle();
-      },
-    });
-    await context.authorize();
-    armed = true;
-    await relay.sendCommand(text);
-    await completion;
+    for (const [text, expected] of commands) {
+      await context.authorize();
+      if (closed) throw new DomainError('integration_unavailable');
+      const completion = Promise.withResolvers<void>();
+      pending = { expected, resolve: completion.resolve, reject: completion.reject };
+      const timer = setTimeout(
+        () => completion.reject(new DomainError('operation_uncertain')),
+        30_000,
+      );
+      try {
+        await Promise.all([completion.promise, relay.sendCommand(text)]);
+      } finally {
+        clearTimeout(timer);
+        pending = undefined;
+      }
+    }
   } finally {
-    clearTimeout(timer);
-    relay?.close();
+    relay.close();
   }
 }
 
@@ -67,12 +73,10 @@ export async function prepareMinecraftBackup(
   await context.update({
     plan: { ...context.operation().plan, minecraftBackupSavingMayBeDisabled: true },
   });
-  await command(
-    context,
-    'save-off',
-    receipt('Automatic saving is now disabled|Saving is already turned off'),
-  );
-  await command(context, 'save-all flush', receipt('Saved the game'));
+  await confirmedCommands(context, [
+    ['save-off', receipt('Automatic saving is now disabled|Saving is already turned off')],
+    ['save-all flush', receipt('Saved the game')],
+  ]);
 }
 
 export async function cleanupMinecraftBackup(
@@ -92,11 +96,9 @@ export async function cleanupMinecraftBackup(
   } catch (error) {
     if (!(error instanceof DomainError && error.code === 'operation_uncertain')) throw error;
   }
-  await command(
-    context,
-    'save-on',
-    receipt('Automatic saving is now enabled|Saving is already turned on'),
-  );
+  await confirmedCommands(context, [
+    ['save-on', receipt('Automatic saving is now enabled|Saving is already turned on')],
+  ]);
   await context.update({
     plan: { ...context.operation().plan, minecraftBackupSavingMayBeDisabled: false },
   });

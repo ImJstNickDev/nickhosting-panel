@@ -33,7 +33,9 @@ unverified combinations stay hidden. See [protocol evidence](M4-PROTOCOL.md).
 - `GET /v1/minecraft/wizard`: four-step translated descriptor.
 - `POST /v1/minecraft/wizard` with `{sourceId}`: inspect an authorized, verified
   archive and derive its exact release/loader. Returns only compatible eligible
-  choices and removes redundant version/loader questions. No arbitrary path,
+  choices and removes redundant version/loader questions. For a loader-specific
+  archive, `derived.loaderVersion` carries the verified loader for submission.
+  Matching uses the local catalog for the archive runtime and release. No arbitrary path,
   caller-declared compatibility or silent runtime substitution is accepted.
 - `GET /v1/minecraft/modpacks/search` and
   `GET /v1/minecraft/modpacks/:projectId/versions`: select a pack before choosing

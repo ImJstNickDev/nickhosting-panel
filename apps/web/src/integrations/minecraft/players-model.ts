@@ -56,3 +56,34 @@ export function mergeMinecraftPlayers(
     (a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name),
   );
 }
+
+export type MinecraftPlayerFilter = 'all' | 'online' | 'operators' | 'whitelist' | 'banned';
+
+export function matchesMinecraftPlayerFilter(
+  row: MinecraftPlayerRow,
+  filter: MinecraftPlayerFilter,
+) {
+  switch (filter) {
+    case 'all':
+      return true;
+    case 'online':
+      return row.online;
+    case 'operators':
+      return Boolean(row.operator);
+    case 'whitelist':
+      return row.whitelisted;
+    case 'banned':
+      return Boolean(row.banned);
+  }
+}
+
+export function countMinecraftPlayerFilters(rows: readonly MinecraftPlayerRow[]) {
+  const counts = { all: rows.length, online: 0, operators: 0, whitelist: 0, banned: 0 };
+  for (const row of rows) {
+    if (row.online) counts.online++;
+    if (row.operator) counts.operators++;
+    if (row.whitelisted) counts.whitelist++;
+    if (row.banned) counts.banned++;
+  }
+  return counts;
+}

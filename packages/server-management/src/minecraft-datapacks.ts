@@ -5,7 +5,12 @@ import { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import { type Database, recordAudit } from '@nickhosting/database';
-import type { FilemanEntry, FilemanReadService } from '@nickhosting/game-sdk';
+import type {
+  FilemanDirectoryResult,
+  FilemanEntry,
+  FilemanReadRequest,
+  FilemanReadService,
+} from '@nickhosting/game-sdk';
 import {
   inspectMinecraftDatapackSelection,
   parseMinecraftProperties,
@@ -25,6 +30,7 @@ import {
   minecraftSupportsDatapacks,
 } from '../../../games/minecraft/src/datapacks.js';
 import type { Environment } from './admission.js';
+import { getMinecraftContentProfile } from './minecraft-content-profile.js';
 import {
   assertDatapackDependencyGraph,
   type DatapackProvenance,
@@ -33,9 +39,11 @@ import {
   datapackStateRows,
 } from './minecraft-datapack-dependencies.js';
 import { minecraftModContentReceipts } from './minecraft-mod-receipts.js';
-import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
-import { readMinecraftWorldIndex, refreshMinecraftWorldIndex } from './minecraft-world-index.js';
+import {
+  currentMinecraftDatapackWorldNames,
+  refreshMinecraftWorldIndex,
+} from './minecraft-world-index.js';
 import { permissionRuntime } from './permission-runtime.js';
 import { authorizeServer, parse } from './registry.js';
 import type { ManagementRuntime } from './runtime.js';
@@ -72,6 +80,24 @@ const leaf = (path: string) => path.slice(path.lastIndexOf('/') + 1);
 const failureCode = (error: unknown) =>
   error instanceof DomainError ? error.code : 'integration_unavailable';
 export const datapacksSupported = minecraftSupportsDatapacks;
+function datapackDirectoryEntries(
+  listings: readonly FilemanDirectoryResult[],
+  ambiguous: 'conflict' | 'operation_uncertain',
+) {
+  const readable = new Set<string>();
+  const entries = new Map<string, FilemanEntry>();
+  for (const listing of listings) {
+    if (!('files' in listing)) continue;
+    readable.add(listing.directory);
+    for (const file of listing.files) {
+      const path = `${listing.directory}/${file.name}`;
+      // A directory result can prove only one entry per immediate child.
+      if (file.name.includes('/') || entries.has(path)) throw new DomainError(ambiguous);
+      entries.set(path, file);
+    }
+  }
+  return { readable, entries };
+}
 /** A single bounded snapshot after a batch, not a directory request per file.
  * Wings rename can return 204 for a missing source: response status alone is not a receipt. */
 export async function verifyDatapackMoves(
@@ -79,19 +105,17 @@ export async function verifyDatapackMoves(
   moves: readonly { from: string; to: string; size: number; kind: 'zip' | 'directory' }[],
 ) {
   const dirs = [...new Set(moves.flatMap((move) => [parent(move.from), parent(move.to)]))];
-  const listings = new Map(
-    (await files.listMany(dirs)).map((result) => [result.directory, result]),
+  const { readable, entries } = datapackDirectoryEntries(
+    await files.listMany(dirs),
+    'operation_uncertain',
   );
+  if (dirs.some((dir) => !readable.has(dir))) throw new DomainError('operation_uncertain');
+  const destinations = new Set(moves.map((move) => move.to));
   const receipts = new Map<string, FilemanEntry>();
   for (const move of moves) {
-    const before = listings.get(parent(move.from));
-    const after = listings.get(parent(move.to));
-    if (!before || !after || !('files' in before) || !('files' in after))
-      throw new DomainError('operation_uncertain');
-    const target = after.files.find((file) => file.name === leaf(move.to));
+    const target = entries.get(move.to);
     if (
-      (!moves.some((other) => other.to === move.from) &&
-        before.files.some((file) => file.name === leaf(move.from))) ||
+      (!destinations.has(move.from) && entries.has(move.from)) ||
       !target ||
       target.kind !== (move.kind === 'zip' ? 'file' : 'directory') ||
       (move.kind === 'zip' && target.size !== move.size)
@@ -109,14 +133,8 @@ export function createMinecraftDatapackService(options: {
   const { db, env = {} } = options;
   const runtime = permissionRuntime(options.runtime, 'game.minecraft.datapacks');
   async function profile(connection: Kysely<Database>, serverId: string) {
-    const value = await connection
-      .selectFrom('minecraft_server_profiles')
-      .selectAll()
-      .where('server_id', '=', serverId)
-      .executeTakeFirst();
-    if (!value) throw new DomainError('not_found');
-    const choice = await inspectMinecraftCombination(connection, value.combination_id, env);
-    return { installed: value.installed, version: choice.combination.release };
+    const { installed, combination } = await getMinecraftContentProfile(connection, serverId);
+    return { installed, version: combination.release };
   }
   async function worldSelection(
     files: FilemanReadService,
@@ -128,11 +146,18 @@ export function createMinecraftDatapackService(options: {
       requestedWorld === undefined
         ? undefined
         : parse(minecraftDatapackWorldSchema, requestedWorld);
-    const cached = await readMinecraftWorldIndex(db, serverId, runtime.consoleProviderBinding);
-    const { snapshot } = cached?.current
-      ? cached
-      : await refreshMinecraftWorldIndex(db, serverId, runtime, env, signal);
-    // The roster is indexed; the configured world can change independently between scans.
+    const cached = await currentMinecraftDatapackWorldNames(
+      db,
+      serverId,
+      runtime.consoleProviderBinding,
+    );
+    const names =
+      cached ??
+      (await refreshMinecraftWorldIndex(db, serverId, runtime, env, signal)).snapshot.worlds
+        .filter((world) => world.status !== 'unavailable')
+        .map((world) => world.name);
+    // A cold reconciliation can take time. Read the live selection and its root
+    // after it completes, before this visit pins its first target.
     const [properties, root] = await Promise.all([
       files.read({ path: 'server.properties', maxBytes: 1048576, missing: 'allow' }),
       files.list(''),
@@ -144,11 +169,7 @@ export function createMinecraftDatapackService(options: {
     const directories = new Set(
       root.filter((entry) => entry.kind === 'directory').map((entry) => entry.name),
     );
-    const available = new Set(
-      snapshot.worlds
-        .filter((world) => world.status !== 'unavailable' && directories.has(world.name))
-        .map((world) => world.name),
-    );
+    const available = new Set(names.filter((name) => directories.has(name)));
     // A direct observation covers a newly uploaded world between index passes and
     // prevents a stale entry from selecting a directory whose level.dat has gone.
     let world = '';
@@ -201,10 +222,20 @@ export function createMinecraftDatapackService(options: {
     files: FilemanReadService,
     world: string,
     version: string,
-    changes: Awaited<ReturnType<typeof changeRows>>,
+    pendingChanges: ReturnType<typeof changeRows>,
   ) {
     const roots = [directory(world), disabledRoot(world)];
-    const results = await Promise.all(roots.map((root) => listOptional(files, root)));
+    const [results, changes] = await Promise.all([
+      Promise.all(roots.map((root) => listOptional(files, root))),
+      pendingChanges,
+    ]);
+    const receipts = new Map<string, Plan>();
+    for (const change of changes) {
+      if (change.state !== 'applied') continue;
+      const plan = parse(planSchema, change.plan);
+      if (plan.to && plan.modifiedAt && plan.metadataRelease === version)
+        receipts.set(plan.to, plan);
+    }
     const packs: MinecraftDatapackSnapshot['packs'] = [];
     for (let i = 0; i < roots.length; i++)
       for (const entry of results[i] ?? []) {
@@ -220,21 +251,11 @@ export function createMinecraftDatapackService(options: {
         const path = `${roots[i]}/${entry.name}`;
         // ZIP metadata is inspected on demand. A prior installation receipt
         // cannot prove the bytes are unchanged after Fileman/SFTP edits.
-        const receipt = changes.find((change) => {
-          const plan = parse(planSchema, change.plan);
-          return (
-            change.state === 'applied' &&
-            plan.to === path &&
-            plan.size === entry.size &&
-            !!entry.modifiedAt &&
-            plan.modifiedAt === entry.modifiedAt &&
-            plan.metadataRelease === version
-          );
-        });
-        const metadata = receipt
-          ? (parse(planSchema, receipt.plan)
-              .metadata as MinecraftDatapackSnapshot['packs'][number]['metadata'])
-          : null;
+        const receipt = receipts.get(path);
+        const metadata =
+          receipt && receipt.size === entry.size && receipt.modifiedAt === entry.modifiedAt
+            ? (receipt.metadata as MinecraftDatapackSnapshot['packs'][number]['metadata'])
+            : null;
         packs.push({
           id: path,
           path,
@@ -249,49 +270,50 @@ export function createMinecraftDatapackService(options: {
           compatibility: metadata?.compatibility ?? 'unknown',
         });
       }
-    // Only small pack.mcmeta files for folders, in the shared four-reader Fileman scope.
+    if (!packs.length) return packs;
     const folders = packs.filter((pack) => pack.kind === 'directory');
     if (folders.length > 128 || packs.length > 1000) throw new DomainError('validation_failed');
-    if (folders.length) {
-      const values = await files.readMany(
-        folders.map((pack) => ({
-          path: `${pack.path}/pack.mcmeta`,
-          maxBytes: 65536,
-          missing: 'allow',
-        })),
-      );
-      for (const pack of folders) {
-        const bytes = values.get(`${pack.path}/pack.mcmeta`);
-        if (!bytes) continue;
-        try {
-          pack.metadata = inspectMinecraftDatapackMetadata(
-            JSON.parse(Buffer.from(bytes).toString('utf8')),
-            version,
-          );
-          pack.compatibility = pack.metadata.compatibility;
-        } catch {
-          pack.compatibility = 'invalid';
-        }
+    const levelPath = `${world}/level.dat`;
+    const requests: FilemanReadRequest[] = [
+      { path: levelPath, maxBytes: 8 * 1024 ** 2, missing: 'allow' },
+      ...folders.map((pack) => ({
+        path: `${pack.path}/pack.mcmeta`,
+        maxBytes: 65536,
+        missing: 'allow' as const,
+      })),
+    ];
+    // Fileman prepares a single set of grants and admits four downloads at a time.
+    // Its 128-file limit can span two batches with a full inventory of folders.
+    const metadataFiles = new Map<string, Uint8Array | undefined>();
+    for (let offset = 0; offset < requests.length; offset += 128) {
+      const batch = await files.readMany(requests.slice(offset, offset + 128));
+      for (const [path, bytes] of batch) metadataFiles.set(path, bytes);
+    }
+    for (const pack of folders) {
+      const bytes = metadataFiles.get(`${pack.path}/pack.mcmeta`);
+      if (!bytes) continue;
+      try {
+        pack.metadata = inspectMinecraftDatapackMetadata(
+          JSON.parse(Buffer.from(bytes).toString('utf8')),
+          version,
+        );
+        pack.compatibility = pack.metadata.compatibility;
+      } catch {
+        pack.compatibility = 'invalid';
       }
     }
-    const level = await files.read({
-      path: `${world}/level.dat`,
-      maxBytes: 8 * 1024 ** 2,
-      missing: 'allow',
-    });
+    const level = metadataFiles.get(levelPath);
     let selection: ReturnType<typeof inspectMinecraftDatapackSelection>;
     try {
       selection = level ? inspectMinecraftDatapackSelection(level) : undefined;
     } catch {
       selection = undefined;
     }
+    const disabled = new Set(selection?.disabled);
+    const enabled = new Set(selection?.enabled);
     for (const pack of packs) {
       const id = `file/${pack.name}`;
-      pack.nativeState = selection?.disabled.includes(id)
-        ? 'disabled'
-        : selection?.enabled.includes(id)
-          ? 'enabled'
-          : 'unknown';
+      pack.nativeState = disabled.has(id) ? 'disabled' : enabled.has(id) ? 'enabled' : 'unknown';
     }
     return packs;
   }
@@ -445,25 +467,43 @@ export function createMinecraftDatapackService(options: {
               changes: [],
               reload: { state: 'not_required' },
             };
-          const [changes, applies] = await Promise.all([
-            changeRows(connection, serverId, world),
-            connection
-              .selectFrom('minecraft_datapack_applies')
-              .selectAll()
-              .where('server_id', '=', serverId)
-              .where('world', '=', world)
-              .orderBy('created_at', 'desc')
-              .execute(),
+          const currentChanges = changeRows(connection, serverId, world);
+          const [changes, packs, applySummary] = await Promise.all([
+            currentChanges,
+            inventory(files, world, info.version, currentChanges),
+            currentChanges.then((rows) => {
+              const ids = rows
+                .filter((row) => ['preparing', 'ready', 'failed', 'uncertain'].includes(row.state))
+                .map((row) => row.id);
+              // Match exactly the displayed candidates, even if a change is dispatched
+              // between these reads. Completed history never leaves the database.
+              const fenced = ids.length
+                ? sql`ARRAY(
+                    WITH candidates AS (SELECT ${ids}::text[] AS ids)
+                    SELECT DISTINCT matched.id FROM candidates, minecraft_datapack_applies fence
+                    CROSS JOIN LATERAL jsonb_array_elements_text(fence.changes) AS matched(id)
+                    WHERE fence.server_id=a.server_id AND fence.world=a.world
+                      AND fence.changes ?| candidates.ids AND matched.id=ANY(candidates.ids))`
+                : sql`ARRAY[]::text[]`;
+              return sql<{
+                state: string;
+                reload: MinecraftDatapackSnapshot['reload']['state'];
+                fenced: string[];
+              }>`
+                SELECT a.state,a.reload,${fenced} AS fenced
+                FROM minecraft_datapack_applies a WHERE a.server_id=${serverId} AND a.world=${world}
+                ORDER BY a.created_at DESC, a.id DESC LIMIT 1`.execute(connection);
+            }),
           ]);
-          const apply = applies[0];
-          const fenced = new Set(applies.flatMap((item) => item.changes));
+          const apply = applySummary.rows[0];
+          const fenced = new Set(apply?.fenced);
           return {
             ...selection,
             running: server.runtime_state === 'running',
             version: info.version,
             supported: datapacksSupported(info.version),
             installed: info.installed,
-            packs: await inventory(files, world, info.version, changes),
+            packs,
             changes: changes
               .filter((change) =>
                 activeStates.includes(change.state as (typeof activeStates)[number]),
@@ -1135,28 +1175,18 @@ export function createMinecraftDatapackService(options: {
             ]),
           ];
           const before = directories.length ? await files.listMany(directories) : [];
-          const graphEntries = new Map<string, FilemanEntry>();
-          for (const listing of before)
-            if ('files' in listing)
-              for (const entry of listing.files)
-                graphEntries.set(`${listing.directory}/${entry.name}`, entry);
+          const { readable, entries: graphEntries } = datapackDirectoryEntries(before, 'conflict');
+          const retiring = new Set(retirements.map((move) => move.from));
           assertDatapackDependencyGraph(receipts, changes, graphEntries, mods);
           for (const move of moves) {
-            const from = before.find((result) => result.directory === parent(move.from));
-            const to = before.find((result) => result.directory === parent(move.to));
-            const source =
-              from && 'files' in from
-                ? from.files.find((entry) => entry.name === leaf(move.from))
-                : undefined;
+            const source = graphEntries.get(move.from);
             if (
               !source ||
               source.kind === 'symlink' ||
               (move.kind === 'zip' && source.size !== move.size) ||
               ('modifiedAt' in move && move.modifiedAt && source.modifiedAt !== move.modifiedAt) ||
-              !to ||
-              !('files' in to) ||
-              (to.files.some((entry) => entry.name === leaf(move.to)) &&
-                !retirements.some((retirement) => retirement.from === move.to))
+              !readable.has(parent(move.to)) ||
+              (graphEntries.has(move.to) && !retiring.has(move.to))
             )
               throw new DomainError('conflict');
           }

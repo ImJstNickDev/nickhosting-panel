@@ -14,6 +14,7 @@ import {
   importMinecraftEvidence,
   inspectMinecraftCombination,
   type ManagementRuntime,
+  minecraftCatalog,
   minecraftMappingDigest,
   refreshStorageObservations,
   type StorageObservationScope,
@@ -878,6 +879,7 @@ describe('Minecraft backend API authorization and user projection', () => {
     for (const [method, suffix] of [
       ['GET', ''],
       ['GET', '/worlds'],
+      ['GET', '/properties'],
       ['GET', '/wipe-preview'],
       ['POST', '/operations'],
     ] as const) {
@@ -1036,6 +1038,31 @@ describe('Minecraft backend API authorization and user projection', () => {
       .where('id', '=', 'fabric')
       .execute();
     const choiceId = `fabric:${fixture.mappingId}:1.21.1`;
+    let targetQueries = 0;
+    const measured = fixture.db.withPlugin({
+      transformQuery(args) {
+        targetQueries++;
+        return args.node;
+      },
+      async transformResult(args) {
+        return args.result;
+      },
+    });
+    const packTarget = {
+      loader: 'fabric',
+      minecraftVersion: '1.21.1',
+      loaderVersion: '0.16.10',
+    } as const;
+    expect(
+      (await minecraftCatalog(measured, actor, routeEnv, packTarget)).map((entry) => entry.id),
+    ).toContain(choiceId);
+    expect(targetQueries).toBe(5);
+    expect(
+      await minecraftCatalog(measured, actor, routeEnv, {
+        ...packTarget,
+        loaderVersion: 'missing',
+      }),
+    ).toEqual([]);
     const choices = await (await app.request('/v1/minecraft/choices')).json();
     expect(choices.find((choice: { id: string }) => choice.id === choiceId)).toMatchObject({
       capabilities: { gateway: true, sleepWake: true },

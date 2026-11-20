@@ -1,6 +1,17 @@
 /** Isolated test fixture only; no provider/server state is read or changed. */
 import { gzipSync } from 'node:zlib';
 import { type NBT, writeUncompressed } from 'prismarine-nbt';
+export const minecraftPlayerCombinationFixture = {
+  release: '26.3',
+  releaseType: 'release',
+  protocolId: 800,
+  family: 'netty',
+  profile: 'vanilla',
+  javaMajor: 21,
+  runtimeDigest: 'a'.repeat(64),
+  protocolSource: { url: 'https://example.test/protocols', sha256: 'b'.repeat(64) },
+} as const;
+
 export function minecraftPlayerDataFixture(modern = false): Buffer {
   const item = (slot: number, id: string, count = 1): NBT['value'] => ({
     Slot: { type: 'byte', value: slot },

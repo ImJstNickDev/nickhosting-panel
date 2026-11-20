@@ -5,7 +5,10 @@ import type { ConsoleRelayOptions } from '@nickhosting/pterodactyl-adapter';
 import type { ManagementRuntime } from '@nickhosting/server-management';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { minecraftPlayerDataFixture } from '../../../games/minecraft/src/player-data-fixture.js';
+import {
+  minecraftPlayerCombinationFixture,
+  minecraftPlayerDataFixture,
+} from '../../../games/minecraft/src/player-data-fixture.js';
 import { minecraftPlayerDetailSchema } from '../../../games/minecraft/src/player-details-contracts.js';
 import { discoverMinecraftPlayers } from '../../../packages/server-management/src/minecraft-player-details.js';
 import type { Variables } from './app.js';
@@ -20,10 +23,6 @@ vi.mock('@nickhosting/database', async (original) => ({
 }));
 vi.mock('@nickhosting/server-management', async (original) => ({
   ...(await original<typeof import('@nickhosting/server-management')>()),
-  inspectMinecraftCombination: vi.fn(async () => ({
-    combination: { release: '26.3' },
-    capabilities: { playerManagement: true },
-  })),
   getServerPermissionKeys: vi.fn(
     async (_db, context) => (context as { permissions: string[] }).permissions,
   ),
@@ -116,14 +115,21 @@ function fixture(modern = true, world = 'world') {
   });
   const db = {
     selectFrom: () => ({
-      selectAll() {
+      innerJoin() {
+        return this;
+      },
+      select() {
         return this;
       },
       where() {
         return this;
       },
       async executeTakeFirst() {
-        return { installed: true, combination_id: 'choice' };
+        return {
+          installed: true,
+          combination_id: 'choice',
+          combination: minecraftPlayerCombinationFixture,
+        };
       },
     }),
   };
@@ -249,6 +255,32 @@ describe('scoped player detail HTTP contract', () => {
       expect(f.permissions).not.toContain('files.read');
     },
   );
+  it('retains only the selected UUID’s file metadata and accepts uppercase file names', async () => {
+    const f = fixture();
+    const selected = 'aaaaaaaa-1111-1111-1111-111111111111';
+    const path = `world/players/data/${selected.toUpperCase()}.dat`;
+    f.contents.set(path, minecraftPlayerDataFixture(true));
+    f.contents.set('world/players/data/00000000-0000-0000-0000-000000000000.dat', Buffer.from(''));
+    const roster = await discoverMinecraftPlayers(f.readService());
+    expect(roster.knownPlayers.map((player) => player.uuid)).toEqual(
+      expect.arrayContaining([uuid, other, selected]),
+    );
+    expect(roster.knownPlayers).toHaveLength(3);
+    expect(roster.references).toEqual([]);
+    const detail = await discoverMinecraftPlayers(f.readService(), undefined, selected);
+    expect(detail.knownPlayers.map((player) => player.uuid)).toEqual([selected]);
+    expect(detail.references.map((ref) => ref.path)).toEqual([path]);
+  });
+  it('still enforces the total unique-player limit when looking up one UUID', async () => {
+    const f = fixture(false);
+    for (let id = 1; id <= 10000; id++) {
+      const suffix = String(id).padStart(12, '0');
+      f.contents.set(`world/playerdata/cccccccc-cccc-cccc-cccc-${suffix}.dat`, Buffer.alloc(0));
+    }
+    await expect(discoverMinecraftPlayers(f.readService(), undefined, uuid)).rejects.toMatchObject({
+      code: 'resources_unavailable',
+    });
+  });
   it('reads the known players and saved card from a configured external world', async () => {
     const world = 'Piazza città';
     const f = fixture(true, world);

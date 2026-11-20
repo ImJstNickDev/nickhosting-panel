@@ -80,6 +80,62 @@ describe('Minecraft settings browser journeys', () => {
     );
   }
 
+  it('loads the settings renderer during the properties read and transfers only editable settings', async () => {
+    const { serverId, provisionJobId } = provider.ids;
+    const items = Array.from({ length: 500 }, (_, index) => ({
+      server_id: serverId,
+      path: `mods/settings-size-fixture-${index}.jar`,
+      installed_by: provisionJobId,
+      artifact: JSON.stringify({ name: `Fixture ${index}`, sha512: 'a'.repeat(128) }),
+    }));
+    await fixture.database.db.insertInto('minecraft_content_items').values(items).execute();
+    const endpoint = `${profilePath()}/properties`;
+    const held = Promise.withResolvers<void>();
+    const chunk = page.waitForRequest(
+      (request) => new URL(request.url()).pathname.endsWith('/integrations/minecraft/settings.tsx'),
+      { timeout: 15000 },
+    );
+    try {
+      const full = await page.request.get(`${fixture.origin}${profilePath()}`);
+      const slim = await page.request.get(`${fixture.origin}${endpoint}`);
+      const fullBody = await full.json();
+      const slimBody = await slim.json();
+      expect(full.status()).toBe(200);
+      expect(slim.status()).toBe(200);
+      expect(fullBody.content.length).toBeGreaterThanOrEqual(items.length);
+      expect(slimBody).toEqual({
+        runtime: fullBody.runtime,
+        version: fullBody.version,
+        installed: fullBody.installed,
+        effectiveProperties: fullBody.effectiveProperties,
+        supportedProperties: fullBody.supportedProperties,
+      });
+      expect((await slim.body()).length).toBeLessThan((await full.body()).length / 20);
+      await page.route(`**${endpoint}`, async (route) => {
+        await held.promise;
+        await route.continue();
+      });
+      await page.goto(`${fixture.origin}${base()}/properties`, { waitUntil: 'commit' });
+      await chunk;
+      held.resolve();
+      await browserExpect(form().getByLabel('Player limit', { exact: true })).toHaveValue('20', {
+        timeout: 15000,
+      });
+    } finally {
+      held.resolve();
+      await page.unroute(`**${endpoint}`);
+      await fixture.database.db
+        .deleteFrom('minecraft_content_items')
+        .where('server_id', '=', serverId)
+        .where(
+          'path',
+          'in',
+          items.map((item) => item.path),
+        )
+        .execute();
+    }
+  });
+
   it('separates content navigation, preserves old links and does not load unavailable sections', async () => {
     await page.goto(`${fixture.origin}${base()}/datapacks`);
     const tabs = page.getByRole('navigation', { name: 'Minecraft', exact: true });
@@ -104,7 +160,10 @@ describe('Minecraft settings browser journeys', () => {
     ).toBeVisible();
     let profileReads = 0;
     const countRead = (request: import('@playwright/test').Request) => {
-      if (request.method() === 'GET' && new URL(request.url()).pathname === profilePath())
+      if (
+        request.method() === 'GET' &&
+        [profilePath(), `${profilePath()}/properties`].includes(new URL(request.url()).pathname)
+      )
         profileReads++;
     };
     page.on('request', countRead);
@@ -176,7 +235,10 @@ describe('Minecraft settings browser journeys', () => {
     await form().getByLabel('Player limit', { exact: true }).fill('8');
     let saveProfileReads = 0;
     const countSaveRead = (request: import('@playwright/test').Request) => {
-      if (request.method() === 'GET' && new URL(request.url()).pathname === profilePath())
+      if (
+        request.method() === 'GET' &&
+        [profilePath(), `${profilePath()}/properties`].includes(new URL(request.url()).pathname)
+      )
         saveProfileReads++;
     };
     page.on('request', countSaveRead);
@@ -417,7 +479,7 @@ describe('Minecraft settings browser journeys', () => {
         'view-distance': '10',
       },
     };
-    await page.route(`**${profilePath()}`, (route) => route.fulfill({ json: older }));
+    await page.route(`**${profilePath()}/properties`, (route) => route.fulfill({ json: older }));
     try {
       await page.goto(`${fixture.origin}${base()}/properties`);
       await browserExpect(
@@ -439,7 +501,7 @@ describe('Minecraft settings browser journeys', () => {
       await screenshot('minecraft-settings-legacy-desktop-en');
       await accessible();
     } finally {
-      await page.unroute(`**${profilePath()}`);
+      await page.unroute(`**${profilePath()}/properties`);
     }
   });
 

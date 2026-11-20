@@ -89,6 +89,7 @@ import type { Environment } from './admission.js';
 import { createFilemanReadService } from './fileman-read.js';
 import { filemanTransferDigest, filemanTransferReceiptStep } from './fileman-transfers.js';
 import type { GameLifecycleContext } from './lifecycle.js';
+import { getMinecraftContentProfile } from './minecraft-content-profile.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 import {
   assertMinecraftRemoteLaunch,
@@ -2613,7 +2614,7 @@ export async function inspectMinecraftWorlds(
   adapter: PterodactylAdapter,
   serverId: string,
   authorize: () => Promise<void>,
-  env: Environment = {},
+  _env: Environment = {},
   signal?: AbortSignal,
   fileman?: FilemanReadService,
   preparation?: MinecraftContentOptions['worldPreparation'],
@@ -2621,38 +2622,38 @@ export async function inspectMinecraftWorlds(
     indexInspection,
     preparationRevision,
     targetWorld,
+    verifiedServer,
   }: {
     indexInspection?: MinecraftWorldIndexInspection;
     preparationRevision?: string;
     targetWorld?: string;
+    verifiedServer?: GameLifecycleContext['server'];
   } = {},
 ): Promise<MinecraftWorldSnapshot> {
-  const profile = await db
-    .selectFrom('minecraft_server_profiles')
-    .selectAll()
-    .where('server_id', '=', serverId)
-    .executeTakeFirst();
-  const server = await db
-    .selectFrom('managed_servers')
-    .selectAll()
-    .where('id', '=', serverId)
-    .where('deleted_at', 'is', null)
-    .executeTakeFirst();
-  if (!profile || !server) throw new DomainError('not_found');
+  const [profile, server] = await Promise.all([
+    getMinecraftContentProfile(db, serverId),
+    verifiedServer ??
+      db
+        .selectFrom('managed_servers')
+        .selectAll()
+        .where('id', '=', serverId)
+        .where('deleted_at', 'is', null)
+        .executeTakeFirst(),
+  ]);
+  if (!server || server.id !== serverId || server.deleted_at) throw new DomainError('not_found');
   const revision = preparationRevision ?? (await preparation?.revisionFor(server));
-  const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
-  const expectedDataVersion = minecraftWorldDataVersion(choice.combination.release);
+  const expectedDataVersion = minecraftWorldDataVersion(profile.combination.release);
   const snapshot: MinecraftWorldSnapshot = {
-    allowOnlineRemoval: choice.combination.profile === 'vanilla',
+    allowOnlineRemoval: profile.combination.profile === 'vanilla',
     installed: profile.installed,
     supported: minecraftManifest.capabilities.worlds,
     selectedWorld: null,
-    release: choice.combination.release,
+    release: profile.combination.release,
     compatibility: expectedDataVersion === undefined ? 'unavailable' : 'available',
     worlds: [],
   };
   if (!snapshot.installed || !snapshot.supported) {
-    await preparation?.invalidate(server, profile.combination_id, revision);
+    await preparation?.invalidate(server, profile.combinationId, revision);
     return snapshot;
   }
   if (!server.pterodactyl_identifier) throw new DomainError('conflict');
@@ -2777,7 +2778,7 @@ export async function inspectMinecraftWorlds(
           }
         },
       },
-      { expectedDataVersion, release: choice.combination.release, signal },
+      { expectedDataVersion, release: profile.combination.release, signal },
     );
     snapshot.worlds.push(...discovered);
   }
@@ -2811,7 +2812,7 @@ export async function inspectMinecraftWorlds(
   ) {
     await preparation?.save(
       server,
-      profile.combination_id,
+      profile.combinationId,
       {
         worlds: snapshot.worlds,
         properties: {
@@ -2821,7 +2822,7 @@ export async function inspectMinecraftWorlds(
       },
       revision,
     );
-  } else await preparation?.invalidate(server, profile.combination_id, revision);
+  } else await preparation?.invalidate(server, profile.combinationId, revision);
   return snapshot;
 }
 /** Array contract retained for trusted integration scripts. */

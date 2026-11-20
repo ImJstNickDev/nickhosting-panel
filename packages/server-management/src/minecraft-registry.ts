@@ -1,4 +1,5 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import type { ContentTarget } from '@nickhosting/content-providers';
 import { type AuthContext, assertPermission, DomainError } from '@nickhosting/core';
 import { type Database, getSettings, recordAudit } from '@nickhosting/database';
 import { evaluateGameAccess } from '@nickhosting/game-sdk';
@@ -329,123 +330,126 @@ async function assertCatalogCreationAccess(
   return identity;
 }
 
-async function runtimeCreationCatalog(db: DB) {
-  const [catalog, quilt, paper, purpur, folia, forge, neoforge, mappings, releases, protocols] =
-    await Promise.all([
-      getFabricCatalog(db),
-      getQuiltCatalog(db),
-      getPaperCatalog(db),
-      getPurpurCatalog(db),
-      getFoliaCatalog(db),
-      getForgeCatalog(db),
-      getNeoForgeCatalog(db),
-      db
-        .selectFrom('runtime_egg_mappings as mapping')
-        .innerJoin('managed_nodes as node', 'node.id', 'mapping.node_id')
-        .select(['mapping.id', 'mapping.runtime_id'])
-        .where('mapping.game_id', '=', 'minecraft')
-        .where('mapping.runtime_id', 'in', [
-          'fabric',
-          'quilt',
-          'paper',
-          'purpur',
-          'folia',
-          'forge',
-          'neoforge',
-        ])
-        .where('mapping.enabled', '=', true)
-        .where('node.enabled', '=', true)
-        .orderBy('mapping.id')
-        .execute(),
-      db
-        .selectFrom('minecraft_release_metadata')
-        .select(['id', 'release_time', 'release_type'])
-        .execute(),
-      // Reuse protocol facts already resolved locally, across runtimes. This is one
-      // bulk read, never a metadata request (or a query) for every catalog version.
-      db
-        .selectFrom('minecraft_combinations')
-        .select('combination')
-        .distinctOn(sql<string>`combination->>'release'`)
-        .where(sql<string>`combination->>'family'`, '=', 'netty')
-        .where(sql<string>`combination->>'protocolId'`, 'is not', null)
-        .orderBy(sql<string>`combination->>'release'`)
-        .orderBy('created_at', 'desc')
-        .execute(),
-    ]);
+const catalogRuntimes = [
+  'fabric',
+  'quilt',
+  'paper',
+  'purpur',
+  'folia',
+  'forge',
+  'neoforge',
+] as const;
+type CatalogRuntime = (typeof catalogRuntimes)[number];
 
-  const dates = new Map(
-    releases.map((release) => [release.id, release.release_time?.toISOString() ?? null]),
-  );
-  const releaseTypes = new Map(releases.map((release) => [release.id, release.release_type]));
+async function catalogGames(db: DB, runtime: CatalogRuntime, target?: ContentTarget) {
+  if (runtime === 'fabric' || runtime === 'quilt') {
+    const catalog = await (runtime === 'quilt' ? getQuiltCatalog : getFabricCatalog)(db);
+    if (
+      !catalog.synced ||
+      !catalog.latestInstallerVersion ||
+      !catalog.loaders.length ||
+      (target && !catalog.loaders.some((loader) => loader.version === target.loaderVersion))
+    )
+      return [];
+    return catalog.games;
+  }
+  if (runtime === 'forge' || runtime === 'neoforge') {
+    const catalog = await (runtime === 'forge' ? getForgeCatalog : getNeoForgeCatalog)(db);
+    if (!catalog.synced) return [];
+    return catalog.versions
+      .filter(
+        (game) =>
+          !target ||
+          (game.minecraftVersion === target.minecraftVersion &&
+            game.loaders.some((loader) => loader.version === target.loaderVersion)),
+      )
+      .map((game) => ({ version: game.minecraftVersion, stable: true }));
+  }
+  const catalog = await (runtime === 'paper'
+    ? getPaperCatalog
+    : runtime === 'folia'
+      ? getFoliaCatalog
+      : getPurpurCatalog)(db);
+  if (!catalog.synced || target?.loaderVersion) return [];
+  return catalog.versions.map((game) => ({ version: game.version, stable: undefined }));
+}
+
+async function runtimeCreationCatalog(db: DB, target?: ContentTarget) {
+  if (target?.loader === 'vanilla') return [];
+  const mappings = await db
+    .selectFrom('runtime_egg_mappings as mapping')
+    .innerJoin('managed_nodes as node', 'node.id', 'mapping.node_id')
+    .select(['mapping.id', 'mapping.runtime_id'])
+    .where('mapping.game_id', '=', 'minecraft')
+    .where('mapping.runtime_id', 'in', target ? [target.loader] : catalogRuntimes)
+    .where('mapping.enabled', '=', true)
+    .where('node.enabled', '=', true)
+    .orderBy('mapping.id')
+    .execute();
+  if (!mappings.length) return [];
+  const runtimes = new Set(mappings.map((mapping) => mapping.runtime_id as CatalogRuntime));
+  const releaseFilter = target?.minecraftVersion;
+  let releaseQuery = db
+    .selectFrom('minecraft_release_metadata')
+    .select(['id', 'release_time', 'release_type']);
+  if (releaseFilter) releaseQuery = releaseQuery.where('id', '=', releaseFilter);
+  let protocolQuery = db
+    .selectFrom('minecraft_combinations')
+    .select('combination')
+    .distinctOn(sql<string>`combination->>'release'`)
+    .where(sql<string>`combination->>'family'`, '=', 'netty')
+    .where(sql<string>`combination->>'protocolId'`, 'is not', null);
+  if (releaseFilter)
+    protocolQuery = protocolQuery.where(sql<string>`combination->>'release'`, '=', releaseFilter);
+  const [catalogs, releases, protocols] = await Promise.all([
+    Promise.all(
+      Array.from(
+        runtimes,
+        async (runtime) => [runtime, await catalogGames(db, runtime, target)] as const,
+      ),
+    ),
+    releaseQuery.execute(),
+    protocolQuery
+      .orderBy(sql<string>`combination->>'release'`)
+      .orderBy('created_at', 'desc')
+      .execute(),
+  ]);
+  const byRuntime = new Map(catalogs);
+  const metadata = new Map(releases.map((release) => [release.id, release]));
   const knownProtocols = new Map(
     protocols.map(({ combination }) => {
       const known = minecraftCombinationSchema.parse(combination);
       return [known.release, known] as const;
     }),
   );
-  return mappings.flatMap((mapping) =>
-    (['fabric', 'quilt'].includes(mapping.runtime_id)
-      ? (mapping.runtime_id === 'quilt' ? quilt : catalog).synced &&
-        (mapping.runtime_id === 'quilt' ? quilt : catalog).latestInstallerVersion &&
-        (mapping.runtime_id === 'quilt' ? quilt : catalog).loaders.length
-        ? (mapping.runtime_id === 'quilt' ? quilt : catalog).games
-        : []
-      : ['forge', 'neoforge'].includes(mapping.runtime_id)
-        ? (mapping.runtime_id === 'neoforge' ? neoforge : forge).synced
-          ? (mapping.runtime_id === 'neoforge' ? neoforge : forge).versions.map((entry) => ({
-              version: entry.minecraftVersion,
-              stable: true,
-            }))
-          : []
-        : (mapping.runtime_id === 'folia'
-              ? folia
-              : mapping.runtime_id === 'purpur'
-                ? purpur
-                : paper
-            ).synced
-          ? (mapping.runtime_id === 'folia'
-              ? folia
-              : mapping.runtime_id === 'purpur'
-                ? purpur
-                : paper
-            ).versions.map((entry) => ({
-              version: entry.version,
-              stable:
-                (releaseTypes.get(entry.version) ??
-                  (/^\d+\.\d+(?:\.\d+)?$/.test(entry.version) ? 'release' : 'snapshot')) ===
-                'release',
-            }))
-          : []
-    ).map((game) => ({
-      id: `${mapping.runtime_id}:${mapping.id}:${game.version}`,
-      version: game.version,
-      runtime: mapping.runtime_id as
-        | 'fabric'
-        | 'quilt'
-        | 'paper'
-        | 'purpur'
-        | 'folia'
-        | 'forge'
-        | 'neoforge',
-      releaseType: game.stable ? ('release' as const) : ('snapshot' as const),
-      releaseTime: dates.get(game.version) ?? null,
-      capabilities: minecraftDeclaredCapabilities({
-        profile: mapping.runtime_id as
-          | 'fabric'
-          | 'quilt'
-          | 'paper'
-          | 'purpur'
-          | 'folia'
-          | 'forge'
-          | 'neoforge',
-        release: game.version,
-        releaseType: game.stable ? 'release' : 'snapshot',
-        family: knownProtocols.get(game.version)?.family ?? 'unknown',
-        protocolId: knownProtocols.get(game.version)?.protocolId ?? null,
-      }),
-    })),
-  );
+  return mappings.flatMap((mapping) => {
+    const runtime = mapping.runtime_id as CatalogRuntime;
+    return (byRuntime.get(runtime) ?? [])
+      .filter((game) => !target || game.version === target.minecraftVersion)
+      .map((game) => {
+        const release = metadata.get(game.version);
+        const stable =
+          game.stable ??
+          (release?.release_type ??
+            (/^\d+\.\d+(?:\.\d+)?$/.test(game.version) ? 'release' : 'snapshot')) === 'release';
+        const releaseType = stable ? ('release' as const) : ('snapshot' as const);
+        const protocol = knownProtocols.get(game.version);
+        return {
+          id: `${runtime}:${mapping.id}:${game.version}`,
+          version: game.version,
+          runtime,
+          releaseType,
+          releaseTime: release?.release_time?.toISOString() ?? null,
+          capabilities: minecraftDeclaredCapabilities({
+            profile: runtime,
+            release: game.version,
+            releaseType,
+            family: protocol?.family ?? 'unknown',
+            protocolId: protocol?.protocolId ?? null,
+          }),
+        };
+      });
+  });
 }
 
 /** Called only by creation, using the caller's real authority. No Owner impersonation.
@@ -1055,7 +1059,12 @@ function minecraftChoiceImage(choice: ReturnType<typeof inspectLoadedCombination
   return typeof binding.image === 'string' ? binding.image : null;
 }
 
-export async function minecraftCatalog(db: DB, context: AuthContext, env: Environment = {}) {
+export async function minecraftCatalog(
+  db: DB,
+  context: AuthContext,
+  env: Environment = {},
+  target?: ContentTarget,
+) {
   const rollout = await db
     .selectFrom('game_rollouts')
     .selectAll()
@@ -1069,7 +1078,9 @@ export async function minecraftCatalog(db: DB, context: AuthContext, env: Enviro
     ).canCreate
   )
     return [];
-  const rows = await db
+  if (target && target.loader !== 'vanilla') return runtimeCreationCatalog(db, target);
+  if (target?.loaderVersion) return [];
+  let registered = db
     .selectFrom('minecraft_combinations as choice')
     .leftJoin('minecraft_release_metadata as release', (join) =>
       join.on('release.id', '=', sql<string>`choice.combination->>'release'`),
@@ -1077,17 +1088,21 @@ export async function minecraftCatalog(db: DB, context: AuthContext, env: Enviro
     .selectAll('choice')
     .select('release.release_time as releaseTime')
     .where('choice.enabled', '=', true)
-    .execute();
+    .where(sql<string>`choice.combination->>'profile'`, 'not in', catalogRuntimes);
+  if (target)
+    registered = registered.where(
+      sql<string>`choice.combination->>'release'`,
+      '=',
+      target.minecraftVersion,
+    );
+  const [rows, runtimeChoices] = await Promise.all([
+    registered.execute(),
+    runtimeCreationCatalog(db, target),
+  ]);
   const dates = new Map(rows.map((row) => [row.id, row.releaseTime?.toISOString() ?? null]));
   const loaded = await inspectMinecraftCombinations(db, rows, env, false);
   const choices = [];
   for (const choice of loaded) {
-    if (
-      ['fabric', 'quilt', 'paper', 'purpur', 'folia', 'forge', 'neoforge'].includes(
-        choice.combination.profile,
-      )
-    )
-      continue;
     try {
       assertLoadedMinecraftChoice(choice, rollout, context);
       choices.push({
@@ -1102,7 +1117,7 @@ export async function minecraftCatalog(db: DB, context: AuthContext, env: Enviro
         throw error;
     }
   }
-  choices.push(...(await runtimeCreationCatalog(db)));
+  choices.push(...runtimeChoices);
   const compare = new Intl.Collator('en', { numeric: true }).compare;
   return choices.sort(
     (left, right) =>

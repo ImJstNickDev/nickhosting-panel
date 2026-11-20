@@ -8,9 +8,13 @@ import {
   modProviderSchema,
   pluginProviderSchema,
 } from '../../../packages/content-providers/src/mod-catalog.js';
+import { ModpackMetadataCache } from '../../../packages/content-providers/src/modpack-catalog-common.js';
 import { minecraftAddonProviders } from '../../../packages/server-management/src/minecraft-addon-providers.js';
 import { minecraftModSchemaAvailable } from '../../../packages/server-management/src/minecraft-mod-schema.js';
-import { createMinecraftModsService } from '../../../packages/server-management/src/minecraft-mods.js';
+import {
+  createMinecraftModsService,
+  minecraftAddonProfile,
+} from '../../../packages/server-management/src/minecraft-mods.js';
 import { minecraftContentProviders } from '../../../packages/server-management/src/minecraft-world-catalog.js';
 import type { Variables } from './app.js';
 
@@ -137,6 +141,7 @@ function registerMinecraftAddonRoutes(
   app.post(`${base}/recover`, async (c) =>
     c.json(await (await service()).recover(await principal(c), c.req.param('id'))),
   );
+  const catalogCaches = new WeakMap<object, ModpackMetadataCache>();
   const catalog = async (c: C) => {
     const context = await principal(c);
     await authorizeServer(
@@ -145,17 +150,22 @@ function registerMinecraftAddonRoutes(
       c.req.param('id') ?? '',
       `game.minecraft.${kind === 'plugin' ? 'plugins' : 'mods'}.read`,
     );
-    const runtime = await management();
-    const content: { http?: ContentHttp; curseforge?: CurseForgeProvider } = options.codec
-      ? ((await minecraftContentProviders(db, options.codec, env, options.contentHttp)).providers ??
-        {})
-      : await runtime.minecraftOptions();
-    const profile = await createMinecraftModsService({ db, env, runtime, kind }).profile(
-      c.req.param('id') ?? '',
-    );
+    const [content, profile] = await Promise.all([
+      options.codec
+        ? minecraftContentProviders(db, options.codec, env, options.contentHttp).then(
+            (result) => result.providers ?? {},
+          )
+        : management().then((runtime) => runtime.minecraftOptions()),
+      minecraftAddonProfile(db, c.req.param('id') ?? '', kind === 'plugin' ? 'plugins' : 'mods'),
+    ]);
     if (!profile.supported) throw new DomainError('integration_unavailable');
+    // The provider configuration object changes on credential/policy rotation.
+    // All callers re-enter server authorization and current target resolution.
+    const cache = catalogCaches.get(content) ?? new ModpackMetadataCache(60_000, 4 * 1024 ** 2);
+    catalogCaches.set(content, cache);
     return {
-      content,
+      cached: <T>(key: unknown[], read: () => Promise<T>) =>
+        cache.get(JSON.stringify(key), read, c.req.raw.signal),
       target: profile.target,
       providers: minecraftAddonProviders({ ...content, kind }),
     };
@@ -178,18 +188,24 @@ function registerMinecraftAddonRoutes(
   });
   app.get(`${base}/catalog/search`, async (c) => {
     const query = parse(search.extend({ provider: providerId }), c.req.query()),
-      { providers, target } = await catalog(c);
+      { providers, target, cached } = await catalog(c);
     const provider = providers[query.provider];
     if (!provider) throw new DomainError('integration_unavailable');
-    return c.json(await provider.searchMods({ ...query, target, signal: c.req.raw.signal }));
+    return c.json(
+      await cached(['search', query, target], () =>
+        provider.searchMods({ ...query, target, signal: c.req.raw.signal }),
+      ),
+    );
   });
   app.get(`${base}/catalog/:provider/:projectId`, async (c) => {
     const name = parse(providerId, c.req.param('provider')),
       id = parse(projectId, c.req.param('projectId')),
-      { providers } = await catalog(c);
+      { providers, cached } = await catalog(c);
     const provider = providers[name];
     if (!provider) throw new DomainError('integration_unavailable');
-    return c.json(await provider.modDetails(id, c.req.raw.signal));
+    return c.json(
+      await cached(['details', name, id], () => provider.modDetails(id, c.req.raw.signal)),
+    );
   });
   app.get(`${base}/catalog/:provider/:projectId/versions`, async (c) => {
     const name = parse(providerId, c.req.param('provider')),
@@ -202,9 +218,13 @@ function registerMinecraftAddonRoutes(
         }),
         c.req.query(),
       ),
-      { providers, target } = await catalog(c);
+      { providers, target, cached } = await catalog(c);
     const provider = providers[name];
     if (!provider) throw new DomainError('integration_unavailable');
-    return c.json(await provider.modVersions(id, { ...query, target, signal: c.req.raw.signal }));
+    return c.json(
+      await cached(['versions', name, id, query, target], () =>
+        provider.modVersions(id, { ...query, target, signal: c.req.raw.signal }),
+      ),
+    );
   });
 }

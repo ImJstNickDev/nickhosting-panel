@@ -23,6 +23,7 @@ import {
   getFabricCatalog,
   getFoliaCatalog,
   getForgeCatalog,
+  getMinecraftContentProfile,
   getNeoForgeCatalog,
   getPaperCatalog,
   getPurpurCatalog,
@@ -68,6 +69,7 @@ import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import { minecraftStoredConfigurationSchema } from '../../../packages/server-management/src/minecraft-content-contracts.js';
 import {
+  readMinecraftWorldFilemanIndex,
   readMinecraftWorldIndex,
   refreshMinecraftWorldIndex,
 } from '../../../packages/server-management/src/minecraft-world-index.js';
@@ -492,17 +494,7 @@ export function registerMinecraftRoutes(
     const { options: content, store } = await contentOptions(context);
     const source = await store.resolveForCreation(input.sourceId);
     const plan = await inspectModpack(source.path, { curseforge: content.curseforge });
-    const choices = await minecraftCatalog(db, context, env);
-    const matching = [];
-    for (const choice of choices) {
-      const detail = await inspectMinecraftCombination(db, choice.id, env);
-      if (
-        choice.version === plan.target.minecraftVersion &&
-        choice.runtime === plan.target.loader &&
-        detail.combination.loaderVersion === plan.target.loaderVersion
-      )
-        matching.push(choice);
-    }
+    const matching = await minecraftCatalog(db, context, env, plan.target);
     const first = matching[0];
     if (!first) throw new DomainError('integration_unavailable');
     return c.json(
@@ -714,15 +706,16 @@ export function registerMinecraftRoutes(
       },
     });
   });
-  async function cachedWorldIndex(
+  async function cachedWorldIndex<T>(
     c: C,
     serverId: string,
     permission: 'files.read' | 'game.minecraft.worlds.read',
+    read: (database: typeof db, id: string, binding: string) => Promise<T>,
   ) {
     const context = await principal(c);
     const server = await authorizeServer(db, context, serverId, permission);
     const service = await management();
-    const index = await readMinecraftWorldIndex(db, serverId, service.consoleProviderBinding);
+    const index = await read(db, serverId, service.consoleProviderBinding);
     await service.authorizeTransfer(
       context,
       serverId,
@@ -737,16 +730,19 @@ export function registerMinecraftRoutes(
     return index;
   }
   app.get('/v1/servers/:id/minecraft/worlds/fileman', async (c) => {
-    const index = await cachedWorldIndex(c, c.req.param('id'), 'files.read');
-    return c.json({
-      worlds: index?.snapshot.worlds.map((world) => world.name) ?? [],
-      selectedWorld: index?.snapshot.selectedWorld ?? null,
-      nonWorldDirectories: index?.nonWorldDirectories ?? [],
-    });
+    return c.json(
+      await cachedWorldIndex(c, c.req.param('id'), 'files.read', readMinecraftWorldFilemanIndex),
+    );
   });
+  const preparingWorldSelections = new Set<string>();
   app.get('/v1/servers/:id/minecraft/worlds', async (c) => {
     if (c.req.query('cached') === '1') {
-      const index = await cachedWorldIndex(c, c.req.param('id'), 'game.minecraft.worlds.read');
+      const index = await cachedWorldIndex(
+        c,
+        c.req.param('id'),
+        'game.minecraft.worlds.read',
+        readMinecraftWorldIndex,
+      );
       return c.json(index?.snapshot ?? null);
     }
     const context = await principal(c);
@@ -755,11 +751,16 @@ export function registerMinecraftRoutes(
     const server = await authorizeServer(db, context, serverId, permission);
     const service = await management();
     c.header('Cache-Control', 'no-store');
-    // The shared reconciler owns the provider identity check and records upstream denials.
-    // Optional selection preparation keeps its own interactive access boundary.
-    const [index] = await Promise.all([
-      refreshMinecraftWorldIndex(db, serverId, service, env, c.req.raw.signal),
-      service
+    // Preparation only warms private selection grants. Keep a bounded number of
+    // independent, authorized read scopes so a slow observer cannot delay the inventory.
+    if (
+      server.runtime_state !== 'running' &&
+      !server.active_operation_id &&
+      !preparingWorldSelections.has(serverId) &&
+      preparingWorldSelections.size < 4
+    ) {
+      preparingWorldSelections.add(serverId);
+      void service
         .fileReadScope(
           context,
           serverId,
@@ -768,8 +769,10 @@ export function registerMinecraftRoutes(
           c.req.raw.signal,
           permission,
         )
-        .catch(() => {}),
-    ]);
+        .catch(() => {})
+        .finally(() => preparingWorldSelections.delete(serverId));
+    }
+    const index = await refreshMinecraftWorldIndex(db, serverId, service, env, c.req.raw.signal);
     await service.authorizeTransfer(
       context,
       serverId,
@@ -782,6 +785,43 @@ export function registerMinecraftRoutes(
     );
     return c.json(index.snapshot);
   });
+  async function readEffectiveProperties(
+    context: AuthContext,
+    serverId: string,
+    signal: AbortSignal,
+  ) {
+    const service = permissionRuntime(await management(), 'game.minecraft.properties');
+    return service.fileReadScope(
+      context,
+      serverId,
+      async (files, _identifier, _connection, current) => {
+        // Optional grants remain private and do not delay showing the current file.
+        void service.prepareFileWrites(current, serverId, ['server.properties']).catch(() => {});
+        const bytes = await files.read({ path: 'server.properties', maxBytes: 1048576 });
+        if (!bytes) throw new DomainError('not_found');
+        const properties = parseMinecraftProperties(Buffer.from(bytes).toString('utf8'));
+        return Object.fromEntries(
+          Object.entries(properties).filter(([key]) => minecraftEditablePropertyKeys.includes(key)),
+        );
+      },
+      signal,
+    );
+  }
+  app.get('/v1/servers/:id/minecraft/properties', async (c) => {
+    const serverId = c.req.param('id');
+    const context = await principal(c);
+    await authorizeServer(db, context, serverId, 'game.minecraft.properties.read');
+    const { installed, combination } = await getMinecraftContentProfile(db, serverId);
+    const effectiveProperties = await readEffectiveProperties(context, serverId, c.req.raw.signal);
+    c.header('Cache-Control', 'no-store');
+    return c.json({
+      version: combination.release,
+      runtime: combination.profile,
+      installed,
+      supportedProperties: Object.keys(effectiveProperties),
+      effectiveProperties,
+    });
+  });
   app.get('/v1/servers/:id/minecraft', async (c) => {
     const serverId = c.req.param('id');
     const context = await principal(c);
@@ -793,26 +833,9 @@ export function registerMinecraftRoutes(
       .where('server_id', '=', serverId)
       .executeTakeFirst();
     if (!profile) throw new DomainError('not_found');
-    const service = permissionRuntime(await management(), 'game.minecraft.properties');
     c.header('Cache-Control', 'no-store');
     const [effectiveProperties, choice, content] = await Promise.all([
-      service.fileReadScope(
-        context,
-        serverId,
-        async (files, _identifier, _connection, current) => {
-          // Optional grants remain private and do not delay showing the current file.
-          void service.prepareFileWrites(current, serverId, ['server.properties']).catch(() => {});
-          const bytes = await files.read({ path: 'server.properties', maxBytes: 1048576 });
-          if (!bytes) throw new DomainError('not_found');
-          const properties = parseMinecraftProperties(Buffer.from(bytes).toString('utf8'));
-          return Object.fromEntries(
-            Object.entries(properties).filter(([key]) =>
-              minecraftEditablePropertyKeys.includes(key),
-            ),
-          );
-        },
-        c.req.raw.signal,
-      ),
+      readEffectiveProperties(context, serverId, c.req.raw.signal),
       inspectMinecraftCombination(db, profile.combination_id, env),
       db
         .selectFrom('minecraft_content_items')

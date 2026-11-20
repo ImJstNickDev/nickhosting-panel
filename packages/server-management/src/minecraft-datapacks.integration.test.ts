@@ -586,6 +586,24 @@ describe('Minecraft datapack durable preparation and publication', () => {
       });
     },
   );
+  it('resolves the latest configured world when level-name changes during cold discovery', async () => {
+    const f = await fixture(false);
+    f.directories.add('new lobby');
+    f.files.set('new lobby/level.dat', f.files.get('world/level.dat') as Buffer);
+    const batch = f.adapter.listDirectoriesBatch.bind(f.adapter);
+    let changed = false;
+    f.adapter.listDirectoriesBatch = async (...args) => {
+      const result = await batch(...args);
+      if (!changed && args[1].includes('world')) {
+        changed = true;
+        f.files.set('server.properties', Buffer.from('level-name=new lobby'));
+      }
+      return result;
+    };
+    const snapshot = await f.service.snapshot(f.context, f.serverId);
+    expect(changed).toBe(true);
+    expect(snapshot).toMatchObject({ selectedWorld: 'new lobby', world: 'new lobby' });
+  });
   it('offers discovered worlds when the configured world is gone and confines edits to the explicit choice', async () => {
     const f = await fixture();
     const name = 'Piazza città';
@@ -649,6 +667,30 @@ describe('Minecraft datapack durable preparation and publication', () => {
     await expect(f.service.snapshot(f.context, f.serverId)).rejects.toMatchObject({
       code: 'integration_unavailable',
     });
+  });
+  it('skips level bytes for an empty warm inventory and reads the maximum folder batch including its native selection', async () => {
+    const f = await fixture();
+    await f.service.snapshot(f.context, f.serverId);
+    const downloads = vi.spyOn(f.adapter, 'downloadFile');
+    await expect(f.service.snapshot(f.context, f.serverId)).resolves.toMatchObject({ packs: [] });
+    expect(downloads).not.toHaveBeenCalled();
+    const prefetch = vi.spyOn(f.adapter, 'prefetchDownloads');
+    for (let i = 0; i < 128; i++) {
+      const path = `world/datapacks/pack${i}`;
+      f.directories.add(path);
+      f.files.set(
+        `${path}/pack.mcmeta`,
+        Buffer.from('{"pack":{"pack_format":48,"description":"Fixture"}}'),
+      );
+    }
+    const snapshot = await f.service.snapshot(f.context, f.serverId);
+    expect(snapshot.packs).toHaveLength(128);
+    expect(snapshot.packs.every((pack) => pack.compatibility === 'compatible')).toBe(true);
+    expect(downloads).toHaveBeenCalledTimes(1);
+    expect(prefetch).toHaveBeenCalledTimes(1);
+    const batch = prefetch.mock.calls[0]?.[1];
+    expect(batch).toHaveLength(128);
+    expect(batch).toContain('world/level.dat');
   });
   it('does not probe absent optional inventory directories and preserves failures for existing directories', async () => {
     const f = await fixture();

@@ -494,6 +494,13 @@ report-backed runtime paths retain their diagnostic property evidence. The form 
 old provisioning configuration; writes still use existing durable verification.
 Unavailable/malformed provider files produce real errors, not invented defaults.
 
+`GET /v1/servers/:id/minecraft/properties` serves the settings form. It requires
+`game.minecraft.properties.read` and reads the same managed file under the
+same size limit. Its response contains `installed`, `runtime`, `version`,
+`supportedProperties` and `effectiveProperties`. Content inventories and the
+original provisioning configuration remain available through the full profile
+under their respective permissions.
+
 Vanilla remains the only M4 real-server-verified runtime. Minecraft UI exposes
 eligible choices and safe world/player/content operations; it does not present
 ordinary mod/plugin installation on Vanilla. Owner evidence administration is

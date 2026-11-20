@@ -7,7 +7,9 @@ switches or that world disappears. Browsing another world leaves `level-name` in
 The inventory reads
 the actual server directories, including packs uploaded through Fileman/SFTP or
 included with an imported world. Filesystem presence and Minecraft's loaded pack
-selection are distinct observations.
+selection are distinct observations. An empty inventory skips the native selection
+download. For a populated inventory, Fileman batches the folder metadata files
+and the selected world's `level.dat` within its existing request and byte limits.
 
 Before the first world exists, the default inventory read returns an empty
 `worlds` list, empty packs/changes and `world: ''`. The tab shows a centered,

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FilemanReadService } from '../../game-sdk/src/fileman-read.js';
 import {
   dueMinecraftWorldIndexes,
+  readMinecraftWorldFilemanIndex,
   readMinecraftWorldIndex,
   reconcileDueMinecraftWorldIndex,
   refreshMinecraftWorldIndex,
@@ -178,6 +179,16 @@ describe('persistent Minecraft world inventory', () => {
       snapshot: fresh.snapshot,
       nonWorldDirectories: ['scratch'],
     });
+    expect(await readMinecraftWorldFilemanIndex(f.db, f.serverId, 'isolated')).toEqual({
+      worlds: ['survival', 'Multiverse Lobby'],
+      selectedWorld: 'survival',
+      nonWorldDirectories: ['scratch'],
+    });
+    expect(await readMinecraftWorldFilemanIndex(f.db, f.serverId, 'another-provider')).toEqual({
+      worlds: [],
+      selectedWorld: null,
+      nonWorldDirectories: [],
+    });
     expect(f.provider).toHaveBeenCalledTimes(1);
     expect(await readMinecraftWorldIndex(f.db, f.serverId, 'another-provider')).toBeUndefined();
     f.dirs.delete('survival');
@@ -241,6 +252,9 @@ describe('persistent Minecraft world inventory', () => {
         await sql`UPDATE minecraft_world_indexes SET snapshot=jsonb_set(snapshot,'{negativeUntil,00-notes}','0')
           WHERE server_id=${f.serverId}`.execute(f.db);
         expect((await f.cached())?.nonWorldDirectories).not.toContain('00-notes');
+        expect(
+          (await readMinecraftWorldFilemanIndex(f.db, f.serverId, 'isolated')).nonWorldDirectories,
+        ).not.toContain('00-notes');
       }
       for (const name of batch) scanned.add(name);
       for (const [name, world] of previous) {

@@ -33,6 +33,7 @@ import {
   Textarea,
   Time,
 } from '../components/ui.js';
+import { readSectionWithPreview } from './game-section-observation.js';
 import type { GameSectionAcceptedOptions, GameSectionViewProps } from './game-section-view.js';
 import {
   availableGameSections,
@@ -483,6 +484,15 @@ export function GameSections({
       module &&
       availableGameSections(server.data, module).some((candidate) => candidate.id === sectionId),
   );
+  useEffect(() => {
+    if (!canReadSection || !section) return;
+    const view = getGameSectionView(section.renderer);
+    if (view) view.preload();
+    else
+      for (const form of section.forms) {
+        if (!form.action?.destructive) getGameFormView(form.renderer)?.preload();
+      }
+  }, [canReadSection, section]);
   const preview = module?.sectionPreviews?.[sectionId];
   const loaded = useQuery({
     queryKey: ['game-section', serverId, gameId, sectionId],
@@ -491,17 +501,19 @@ export function GameSections({
     refetchOnMount: 'always',
     ...(preview ? { staleTime: 0 } : {}),
     queryFn: async ({ signal, queryKey }) => {
-      const context = { serverId, values: { sectionId: section?.id }, signal };
-      if (preview) {
-        const observation = await preview(gameUiClient, context);
-        signal.throwIfAborted();
-        // A cold or rebound index also supersedes an older tab-local observation.
-        queryClient.setQueryData(queryKey, observation);
-      }
-      return module?.handlers[section?.loader ?? '']?.(
-        gameUiClient,
-        context,
-      ) as Promise<UiSectionData>;
+      const context = { serverId, values: { sectionId: section?.id } };
+      const read = (signal: AbortSignal) =>
+        module?.handlers[section?.loader ?? '']?.(gameUiClient, {
+          ...context,
+          signal,
+        }) as Promise<UiSectionData>;
+      if (!preview) return read(signal);
+      return readSectionWithPreview(
+        signal,
+        read,
+        (signal) => preview(gameUiClient, { ...context, signal }),
+        (observation) => queryClient.setQueryData(queryKey, observation),
+      );
     },
   });
   const [trackedOperation, setTrackedOperation] = useState<{

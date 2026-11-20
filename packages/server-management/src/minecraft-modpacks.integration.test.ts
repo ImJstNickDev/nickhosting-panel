@@ -170,6 +170,53 @@ describe('Modpacks durable preparation and apply', () => {
     };
   }
 
+  it('reads only the latest operation and keeps file manifests out of polling results', async () => {
+    const f = await fixture();
+    const first = await f.service.prepare(f.context, f.serverId, {
+      ...f.selection,
+      idempotencyKey: randomUUID(),
+    });
+    if (!first.operation) throw new Error('Expected a queued operation');
+    await f.service.cancel(f.context, f.serverId, first.operation.id);
+    f.prepared.files = Array.from({ length: 500 }, (_, index) => ({
+      path: `mods/publication-file-${index}.jar`,
+      size: 1200,
+      sha256: 'a'.repeat(64),
+    }));
+    const latest = await f.ready();
+    await f.db
+      .insertInto('minecraft_modpack_receipts')
+      .values({
+        server_id: f.serverId,
+        operation_id: latest.id,
+        receipt: JSON.stringify({
+          pack: f.prepared.pack,
+          target: f.prepared.target,
+          files: f.prepared.files,
+        }),
+      })
+      .execute();
+    const reads: Record<string, unknown>[] = [];
+    const db = f.db.withPlugin({
+      transformQuery: ({ node }) => node,
+      transformResult: async ({ result }) => {
+        reads.push(...result.rows.filter((row) => 'phase' in row || 'operation_id' in row));
+        return result;
+      },
+    });
+    const snapshot = await createMinecraftModpacksService({ db, hooks: f.hooks }).snapshot(
+      f.context,
+      f.serverId,
+    );
+    expect(snapshot.operation).toMatchObject({
+      id: latest.id,
+      changes: { write: 500, remove: 0, preserve: 0, bytes: 600_000 },
+    });
+    expect(snapshot.installed?.operationId).toBe(latest.id);
+    expect(reads.filter((row) => 'phase' in row)).toHaveLength(1);
+    expect(JSON.stringify(reads)).not.toContain('publication-file-');
+  });
+
   it('requires Worlds delete for Modpacks reset and rechecks it at apply, recovery and worker authorization', async () => {
     const f = await fixture();
     const peer = await minecraftManagementFixture(f.db, { interactive: true });

@@ -51,17 +51,53 @@ function record(row?: Stored): MinecraftWorldIndex | undefined {
       : [],
   };
 }
-async function boundRow(db: DB, serverId: string, binding: string) {
-  const result = await sql<Stored>`
+function worldIndexScope(serverId: string, binding: string) {
+  return sql`server_id=${serverId} AND binding=${binding}
+    AND local_binding=minecraft_world_local_binding(server_id)`;
+}
+async function boundRow(db: DB, serverId: string, binding: string, lease?: string) {
+  const result = await sql<Stored & { level_stamps: MinecraftWorldFileStamp[] }>`
     SELECT snapshot - 'scanAfter' - 'negativeUntil' AS snapshot,
       snapshot->>'scanAfter' AS scan_after, snapshot->'negativeUntil' AS negative_until, non_world_directories, observed_at, generation, finished_id, successful_generation
-    FROM minecraft_world_indexes WHERE server_id=${serverId} AND binding=${binding}
-      AND local_binding=minecraft_world_local_binding(server_id)`.execute(db);
+      ${lease ? sql`, CASE WHEN lease_id=${lease} AND generation=successful_generation THEN level_stamps END AS level_stamps` : sql` `}
+    FROM minecraft_world_indexes WHERE ${worldIndexScope(serverId, binding)}`.execute(db);
   return result.rows[0];
 }
 /** Purely local read. The HTTP caller authorizes the current user before exposing any result. */
 export async function readMinecraftWorldIndex(db: DB, serverId: string, providerBinding: string) {
   return record(await boundRow(db, serverId, providerBinding));
+}
+export async function currentMinecraftDatapackWorldNames(
+  db: DB,
+  serverId: string,
+  binding: string,
+) {
+  const result = await sql<{ worlds: string[] }>`
+    SELECT jsonb_path_query_array(snapshot, '$.worlds[*] ? (@.status != "unavailable").name') AS worlds
+    FROM minecraft_world_indexes WHERE ${worldIndexScope(serverId, binding)} AND snapshot IS NOT NULL
+      AND generation=successful_generation AND observed_at > now()-interval '60 seconds'`.execute(
+    db,
+  );
+  return result.rows[0]?.worlds;
+}
+/** Fileman only needs root names. Keep the world's parsed metadata and the
+ * reconciler's cursor/expiry map inside PostgreSQL for this projection. */
+export async function readMinecraftWorldFilemanIndex(db: DB, serverId: string, binding: string) {
+  const result = await sql<{
+    worlds: string[];
+    selectedWorld: string | null;
+    nonWorldDirectories: string[];
+  }>`
+    SELECT jsonb_path_query_array(snapshot, '$.worlds[*].name') AS worlds,
+      snapshot->>'selectedWorld' AS "selectedWorld",
+      CASE WHEN generation=successful_generation AND observed_at > now()-interval '60 seconds' THEN
+        ARRAY(SELECT name FROM unnest(non_world_directories) AS name
+          WHERE snapshot->'negativeUntil' IS NULL OR
+            (snapshot->'negativeUntil'->>name)::bigint > extract(epoch from now())*1000)
+        ELSE ARRAY[]::text[] END AS "nonWorldDirectories"
+    FROM minecraft_world_indexes WHERE ${worldIndexScope(serverId, binding)}
+      AND snapshot IS NOT NULL AND observed_at IS NOT NULL`.execute(db);
+  return result.rows[0] ?? { worlds: [], selectedWorld: null, nonWorldDirectories: [] };
 }
 type Claim = {
   id: string;
@@ -138,7 +174,7 @@ async function reconcile(
       }
       await check();
     }
-    const cached = await boundRow(db, serverId, runtime.consoleProviderBinding);
+    const cached = await boundRow(db, serverId, runtime.consoleProviderBinding, token.id);
     const known = new Map(cached?.snapshot?.worlds.map((entry) => [entry.name, entry]));
     const previous: Map<
       string,
@@ -147,13 +183,7 @@ async function reconcile(
       }
     > = new Map();
     if (cached?.successful_generation === token.generation) {
-      const revisions = await db
-        .selectFrom('minecraft_world_indexes')
-        .select('level_stamps')
-        .where('server_id', '=', serverId)
-        .where('lease_id', '=', token.id)
-        .executeTakeFirst();
-      for (const stamp of (revisions?.level_stamps ?? []) as MinecraftWorldFileStamp[]) {
+      for (const stamp of cached.level_stamps ?? []) {
         const world = known.get(stamp.name);
         if (world?.validation && world.status !== 'unavailable')
           previous.set(stamp.name, { ...stamp, validation: world.validation });
@@ -182,7 +212,11 @@ async function reconcile(
         ? runtime.fileReadPhase(server.pterodactyl_identifier, server, signal)
         : undefined,
       scheduled ? undefined : runtime.worldPreparation,
-      { indexInspection: inspection, preparationRevision: `${token.generation}:${token.id}` },
+      {
+        indexInspection: inspection,
+        preparationRevision: `${token.generation}:${token.id}`,
+        verifiedServer: server,
+      },
     );
     // A listing timeout cannot turn a previously observed world into a deleted world.
     // Retain the earlier metadata, but make its unavailable status explicit.

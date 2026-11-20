@@ -2,13 +2,10 @@ import { DomainError } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createFilemanReadService } from './fileman-read.js';
 import { inspectMinecraftWorlds } from './minecraft-content.js';
-import { inspectMinecraftCombination } from './minecraft-registry.js';
 
-vi.mock('./minecraft-registry.js', () => ({ inspectMinecraftCombination: vi.fn() }));
-const inspect = vi.mocked(inspectMinecraftCombination);
 function named(type: number, name: string, value: Buffer) {
   const length = Buffer.alloc(2);
   length.writeUInt16BE(Buffer.byteLength(name));
@@ -38,22 +35,40 @@ const level = Buffer.concat([
 ]);
 
 function fixture(
-  options: { installed?: boolean; missing?: boolean; properties?: string; level?: Buffer } = {},
+  options: {
+    installed?: boolean;
+    missing?: boolean;
+    properties?: string;
+    level?: Buffer;
+    release?: string;
+  } = {},
 ) {
   const worldLevel = options.level ?? level;
   const profile = options.missing
     ? undefined
     : {
         combination_id: 'choice',
+        combination: {
+          release: options.release ?? '26.1',
+          releaseType: 'release',
+          protocolId: 106,
+          family: 'netty',
+          profile: 'vanilla',
+          javaMajor: 21,
+          runtimeDigest: '3'.repeat(64),
+          protocolSource: { url: 'https://example.invalid/protocol', sha256: '4'.repeat(64) },
+        },
         installed: options.installed ?? true,
       };
   const db = {
     selectFrom: (table: string) => {
       const query = {
         selectAll: () => query,
+        innerJoin: () => query,
+        select: () => query,
         where: () => query,
         executeTakeFirst: async () =>
-          table === 'minecraft_server_profiles'
+          table === 'minecraft_server_profiles as p'
             ? profile
             : { pterodactyl_identifier: 'provider', id: 'server' },
       };
@@ -79,14 +94,6 @@ function fixture(
   const authorize = vi.fn(async () => {});
   return { db, adapter, authorize, readFile, listFiles, downloadFile };
 }
-
-beforeEach(() => {
-  inspect.mockResolvedValue({
-    combination: { release: '26.1' },
-    evidence: [],
-    row: { identity_digest: 'choice' },
-  } as unknown as Awaited<ReturnType<typeof inspectMinecraftCombination>>);
-});
 
 describe('Minecraft world inventory snapshot', () => {
   it('reads live selection once, preserves legacy names and exposes metadata without compatibility evidence', async () => {
@@ -166,11 +173,7 @@ describe('Minecraft world inventory snapshot', () => {
   });
 
   it('uses release metadata with no per-server evidence', async () => {
-    inspect.mockResolvedValue({
-      combination: { release: '1.9' },
-      evidence: [],
-    } as unknown as Awaited<ReturnType<typeof inspectMinecraftCombination>>);
-    const f = fixture();
+    const f = fixture({ release: '1.9' });
     expect(await inspectMinecraftWorlds(f.db, f.adapter, 'server', f.authorize)).toMatchObject({
       compatibility: 'available',
       worlds: [{ status: 'verified', validation: { dataVersion: 169, versionName: '1.9' } }],
@@ -178,11 +181,7 @@ describe('Minecraft world inventory snapshot', () => {
   });
 
   it('does not let a report redefine an unknown release or trust the uploaded world', async () => {
-    inspect.mockResolvedValue({
-      combination: { release: 'future-unknown' },
-      evidence: [{ server: { worldDataVersion: 169 }, checks: { installation: true } }],
-    } as unknown as Awaited<ReturnType<typeof inspectMinecraftCombination>>);
-    const f = fixture();
+    const f = fixture({ release: 'future-unknown' });
     expect(await inspectMinecraftWorlds(f.db, f.adapter, 'server', f.authorize)).toMatchObject({
       compatibility: 'unavailable',
       worlds: [{ status: 'unknown', validation: { dataVersion: 169 } }],

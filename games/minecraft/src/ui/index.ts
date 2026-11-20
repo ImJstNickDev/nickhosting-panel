@@ -645,7 +645,12 @@ export const minecraftUiModule = defineTrustedGameUiModule({
         );
         if (!result.derived) throw new MinecraftUiError('integration_unavailable');
         return {
-          values: { ...context.values, choiceId: result.derived.choiceId },
+          values: {
+            ...context.values,
+            choiceId: result.derived.choiceId,
+            runtime: result.derived.runtime,
+            loaderVersion: result.derived.loaderVersion,
+          },
           summary: [
             {
               labelKey: k('fields.choiceId'),
@@ -736,10 +741,8 @@ export const minecraftUiModule = defineTrustedGameUiModule({
     create: async (client, context) => {
       const controller = createMinecraftUiController(client),
         v = context.values;
-      let choiceId = v.choiceId;
-      if (v.sourceMode === 'modpack')
-        choiceId = (await controller.inspectModpack(z.uuid().parse(v.sourceId), context.signal))
-          .derived?.choiceId;
+      // The host runs prepare-create immediately before submission. The API
+      // checks the archive against the selected immutable runtime again at admission.
       return controller.create(
         {
           idempotencyKey: intent(context),
@@ -749,7 +752,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
           autoStart: v.autoStart ?? true,
           connection: v.connection,
           minecraft: {
-            choiceId,
+            choiceId: v.choiceId,
             ...(['fabric', 'quilt', 'forge', 'neoforge'].includes(String(v.runtime))
               ? { loaderVersion: v.loaderVersion }
               : {}),
@@ -767,7 +770,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
       );
     },
     properties: async (client, context): Promise<UiSectionData> => {
-      const profile = await createMinecraftUiController(client).profile(
+      const profile = await createMinecraftUiController(client).properties(
         server(context),
         context.signal,
       );

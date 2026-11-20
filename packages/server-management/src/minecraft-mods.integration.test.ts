@@ -704,6 +704,69 @@ describe('Minecraft Mods durable preparation and publication', () => {
     return plan;
   }
 
+  it('checks retained datapacks across worlds before disabling a mod', async () => {
+    const f = await fixture();
+    const receipt = await installedMod(f, 'mods/local.jar', 'local');
+    const worlds = Array.from({ length: 105 }, (_, i) => `World ${i}`);
+    const changes = worlds.map((world, index) => {
+      const directory = `${world}/datapacks`;
+      const path = `${directory}/fixture.zip`;
+      f.directories.add(directory);
+      if (index === 103) f.files.set(path, Buffer.from('pack'));
+      return {
+        id: randomUUID(),
+        server_id: f.serverId,
+        actor_user_id: f.context.actorUserId,
+        world,
+        name: 'fixture.zip',
+        action: 'install' as const,
+        state: 'applied' as const,
+        idempotency_key: randomUUID(),
+        source_id: null,
+        error: null,
+        plan: JSON.stringify({
+          from: `${path}.pending`,
+          to: path,
+          size: 4,
+          modifiedAt: receipt.modifiedAt,
+          catalog: {
+            provider: 'modrinth',
+            projectId: 'pack',
+            versionId: '1',
+            required: [],
+            conflicts: [],
+            mods:
+              index > 0
+                ? [
+                    {
+                      projectId: 'local',
+                      versionId: 'v1',
+                      path: 'mods/local.jar',
+                      size: receipt.size,
+                      modifiedAt: receipt.modifiedAt,
+                    },
+                  ]
+                : [],
+          },
+        }),
+      };
+    });
+    await f.db.insertInto('minecraft_datapack_changes').values(changes).execute();
+    const disable = () =>
+      f.service.toggle(f.context, f.serverId, {
+        path: 'mods/local.jar',
+        action: 'disable',
+        idempotencyKey: randomUUID(),
+      });
+    await expect(disable()).rejects.toMatchObject({ code: 'content_dependency_missing' });
+    expect(f.renameFiles).not.toHaveBeenCalled();
+    expect(f.listFiles.mock.calls.some(([, directory]) => directory === 'World 0/datapacks')).toBe(
+      false,
+    );
+    f.files.delete('World 103/datapacks/fixture.zip');
+    await expect(disable()).resolves.toMatchObject({ state: 'published' });
+  });
+
   it('toggles in both directions without a draft, preserves receipts and confirms idempotent replay', async () => {
     const f = await fixture();
     const receipt = await installedMod(f, 'mods/local.jar', 'local');

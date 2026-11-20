@@ -6,18 +6,23 @@ import { z } from 'zod';
 
 /** Current graph only: retain the latest applied writer of each path, plus live drafts.
  * Audit history may grow indefinitely without truncating active dependency receipts. */
-export async function datapackStateRows(db: Kysely<Database>, serverId: string, world: string) {
+export async function datapackStateRows(db: Kysely<Database>, serverId: string, world?: string) {
+  const scope = world === undefined ? sql`` : sql`AND c.world=${world}`;
+  const includeDrafts =
+    world === undefined
+      ? sql``
+      : sql`c.state IN ('preparing','ready','dispatched','uncertain','failed') OR`;
   const result = await sql<Selectable<Database['minecraft_datapack_changes']>>`
     WITH latest_touches AS (
-      SELECT DISTINCT ON (t.path) c.id, t.path
+      SELECT DISTINCT ON (c.world, t.path) c.id, t.path
       FROM minecraft_datapack_changes c
       CROSS JOIN LATERAL (VALUES (c.plan->>'from'),(c.plan->>'to')) AS t(path)
-      WHERE c.server_id=${serverId} AND c.world=${world} AND c.state='applied' AND t.path IS NOT NULL
-      ORDER BY t.path,c.created_at DESC,c.id DESC
+      WHERE c.server_id=${serverId} ${scope} AND c.state='applied' AND t.path IS NOT NULL
+      ORDER BY c.world,t.path,c.created_at DESC,c.id DESC
     )
     SELECT c.* FROM minecraft_datapack_changes c
-    WHERE c.server_id=${serverId} AND c.world=${world} AND (
-      c.state IN ('preparing','ready','dispatched','uncertain','failed') OR
+    WHERE c.server_id=${serverId} ${scope} AND (
+      ${includeDrafts}
       (c.state='applied' AND c.action<>'delete' AND EXISTS (
         SELECT 1 FROM latest_touches t WHERE t.id=c.id AND t.path=c.plan->>'to'
       ))

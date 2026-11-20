@@ -205,6 +205,13 @@ const profileSchema = z
     supportedProperties: z.array(z.string()).max(1000).optional(),
   })
   .strip();
+const propertiesViewSchema = profileSchema.pick({
+  version: true,
+  runtime: true,
+  installed: true,
+  supportedProperties: true,
+  effectiveProperties: true,
+});
 export type MinecraftUiProfile = z.infer<typeof profileSchema>;
 const managedPlayer = z.object({ name: player, uuid: z.string().max(36) }).strip();
 export const minecraftPlayersSchema = z
@@ -315,7 +322,7 @@ const wizardSchema = z
     choices: z.array(
       z
         .object({
-          id: uuid,
+          id: minecraftChoiceSchema.shape.id,
           release: z.string(),
           runtime: minecraftChoiceSchema.shape.runtime,
           nameKey: z.string(),
@@ -323,7 +330,12 @@ const wizardSchema = z
         .strip(),
     ),
     derived: z
-      .object({ release: z.string(), runtime: minecraftChoiceSchema.shape.runtime, choiceId: uuid })
+      .object({
+        release: z.string(),
+        runtime: minecraftChoiceSchema.shape.runtime,
+        choiceId: minecraftChoiceSchema.shape.id,
+        loaderVersion: z.string().min(1).max(80).optional(),
+      })
       .strip()
       .optional(),
   })
@@ -548,6 +560,11 @@ export function createMinecraftUiController(client: GameUiClient) {
       return minecraftCatalogOptions(await choices(signal), 'choices', { runtime });
     },
     profile,
+    async properties(serverId: string, signal?: AbortSignal) {
+      return propertiesViewSchema.parse(
+        await request(serverPath(serverId, '/properties'), 'GET', undefined, signal),
+      );
+    },
     async players(serverId: string, signal?: AbortSignal): Promise<MinecraftPlayers> {
       return minecraftPlayersSchema.parse(
         await request(serverPath(serverId, '/players'), 'GET', undefined, signal),

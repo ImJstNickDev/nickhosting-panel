@@ -4,6 +4,12 @@ Mods uses the runtime capability declaration already used by Minecraft navigatio
 It does not enable a new loader or change a server's runtime. Modrinth and
 CurseForge discovery share typed catalog, version and dependency contracts.
 
+Mods and Plugins reuse successful catalog search, detail and version responses for
+up to one minute. Each request checks current server access and runtime support.
+Search and version keys include filters and the current target. Changing provider
+credentials or policy replaces the cache. Preparation and publication perform
+their own acquisition and file checks.
+
 ## Selection and publication
 
 Mods opens on Installed the first time. The browser remembers the last tab

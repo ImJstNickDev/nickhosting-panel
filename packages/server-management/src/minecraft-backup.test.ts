@@ -55,7 +55,8 @@ describe('Minecraft backup hooks', () => {
     await cleanupMinecraftBackup(f.context, 'live');
     expect(f.sendCommand).toHaveBeenLastCalledWith('save-on');
     expect(f.context.operation().plan.minecraftBackupSavingMayBeDisabled).toBe(false);
-    expect(f.close).toHaveBeenCalledTimes(3);
+    expect(f.context.adapter.relayConsole).toHaveBeenCalledTimes(2);
+    expect(f.close).toHaveBeenCalledTimes(2);
   });
   it('rejects missing receipts despite successful command sends and still cleans up', async () => {
     vi.useFakeTimers();
@@ -72,6 +73,18 @@ describe('Minecraft backup hooks', () => {
     expect(f.context.operation().plan.minecraftBackupSavingMayBeDisabled).toBe(true);
     await cleanupMinecraftBackup(f.context, 'live');
     expect(f.sendCommand).toHaveBeenLastCalledWith('save-on');
+  });
+  it('rechecks authority before flushing on the existing connection', async () => {
+    const f = fixture();
+    vi.mocked(f.context.authorize)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new DomainError('forbidden'));
+    await expect(prepareMinecraftBackup(f.context, 'live')).rejects.toMatchObject({
+      code: 'forbidden',
+    });
+    expect(f.sendCommand.mock.calls.flat()).toEqual(['save-off']);
+    expect(f.close).toHaveBeenCalledOnce();
+    expect(f.context.operation().plan.minecraftBackupSavingMayBeDisabled).toBe(true);
   });
   it('does not send live save commands for a confirmed offline backup', async () => {
     const f = fixture();
