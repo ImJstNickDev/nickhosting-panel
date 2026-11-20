@@ -89,7 +89,12 @@ A replacement belongs to one group even when publication first removes the old f
 A trailing slash identifies an entire directory scheduled for removal. The read-only
 `GET /v1/servers/:id/minecraft/modpacks/operations/:operationId/files` endpoint
 requires Modpacks read access and the matching plan digest. It returns four totals
-and up to 100 paths for the requested group and offset.
+and up to 100 paths for the requested group and offset. The `deletions` group covers
+every path removed during publication, including files replaced in the same plan.
+The panel requests `?view=status` on snapshot and mutation responses to receive
+counts and fetches paths when the user opens a group. Compact clients can confirm
+the reviewed plan with `planDigest` and `expectedDeleteCount`. Existing clients
+receive `deletePaths` by default and can confirm the explicit list as before.
 
 ## Updates and replacement
 

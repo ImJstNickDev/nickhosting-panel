@@ -47,7 +47,8 @@ export const minecraftModpackCatalogSchema = z.object({
   ),
 });
 /** Metadata requests never start preparation; every mutation is an explicit, idempotent intent. */
-export function createMinecraftModpacksController(client: GameUiClient) {
+export function createMinecraftModpacksController(client: GameUiClient, compactStatus = false) {
+  const view = compactStatus ? '?view=status' : '';
   const path = (serverId: string, suffix = '') =>
     `/v1/servers/${z.uuid().parse(serverId)}/minecraft/modpacks${suffix}`;
   const projectPath = (serverId: string, provider: ModpackProvider, projectId: string) =>
@@ -57,7 +58,7 @@ export function createMinecraftModpacksController(client: GameUiClient) {
     );
   const prepare = (serverId: string, input: MinecraftModpackSelection) =>
     client
-      .request(path(serverId, '/prepare'), {
+      .request(path(serverId, `/prepare${view}`), {
         method: 'POST',
         body: minecraftModpackPrepareSchema.parse(input),
       })
@@ -65,14 +66,14 @@ export function createMinecraftModpacksController(client: GameUiClient) {
   return {
     async snapshot(serverId: string, signal?: AbortSignal) {
       return minecraftModpacksSnapshotSchema.parse(
-        await client.request(path(serverId), { signal }),
+        await client.request(path(serverId, view), { signal }),
       );
     },
     async reviewFiles(
       serverId: string,
       id: string,
       digest: string,
-      group: z.infer<typeof modpackReviewGroup>,
+      group: z.infer<typeof modpackReviewGroup> | 'deletions',
       offset: number,
       signal?: AbortSignal,
     ) {
@@ -156,7 +157,7 @@ export function createMinecraftModpacksController(client: GameUiClient) {
     },
     apply(serverId: string, input: MinecraftModpackApply) {
       return client
-        .request(path(serverId, '/apply'), {
+        .request(path(serverId, `/apply${view}`), {
           method: 'POST',
           body: minecraftModpackApplySchema.parse(input),
         })
@@ -164,12 +165,14 @@ export function createMinecraftModpacksController(client: GameUiClient) {
     },
     discard(serverId: string, operationId: string) {
       return client
-        .request(path(serverId, `/operations/${z.uuid().parse(operationId)}`), { method: 'DELETE' })
+        .request(path(serverId, `/operations/${z.uuid().parse(operationId)}${view}`), {
+          method: 'DELETE',
+        })
         .then((value) => minecraftModpacksSnapshotSchema.parse(value));
     },
     recover(serverId: string, operationId: string) {
       return client
-        .request(path(serverId, `/operations/${z.uuid().parse(operationId)}/recover`), {
+        .request(path(serverId, `/operations/${z.uuid().parse(operationId)}/recover${view}`), {
           method: 'POST',
           body: {},
         })

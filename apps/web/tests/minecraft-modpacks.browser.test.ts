@@ -73,6 +73,7 @@ describe('Minecraft Modpacks full-page experience', () => {
   let errors: string[];
   let providerAvailable = true;
   let pending = false;
+  let compactReview = false;
   let prepareState: 'ready' | 'blocked' | 'uncertain' | 'failed' | 'error' = 'ready';
   let count = 0;
   let core: { activeOperationId: string; manage: boolean; state: string };
@@ -149,7 +150,7 @@ describe('Minecraft Modpacks full-page experience', () => {
               ) {
                 const offset = Number(url.searchParams.get('offset') ?? 0);
                 const group = url.searchParams.get('group');
-                const length = group === 'added' ? 104 : 1;
+                const length = group === 'added' ? 104 : group === 'deletions' ? 102 : 1;
                 return json({
                   counts: { added: 104, replaced: 1, removed: 1, preserved: 1 },
                   paths: Array.from(
@@ -248,11 +249,16 @@ describe('Minecraft Modpacks full-page experience', () => {
                   planDigest: 'a'.repeat(64),
                   changes: {
                     write: 104,
-                    remove: selection.mode === 'replace' ? 12 : 0,
+                    remove: compactReview ? 102 : selection.mode === 'replace' ? 12 : 0,
                     preserve: 8,
                     bytes: 123456789,
                   },
-                  deletePaths: selection.mode === 'replace' ? ['mods/old.jar'] : [],
+                  ...(compactReview && url.searchParams.get('view') === 'status'
+                    ? {
+                        removalsPaged: true as const,
+                        reviewCounts: { added: 104, replaced: 1, removed: 1, preserved: 1 },
+                      }
+                    : { deletePaths: selection.mode === 'replace' ? ['mods/old.jar'] : [] }),
                   blockers: prepareState === 'blocked' ? [{ reason: 'runtime' }] : [],
                   error: null,
                   backupId: null,
@@ -314,6 +320,7 @@ describe('Minecraft Modpacks full-page experience', () => {
     errors = [];
     providerAvailable = true;
     pending = false;
+    compactReview = false;
     prepareState = 'ready';
     count = 0;
     core = { activeOperationId: op, manage: true, state: 'uncertain' };
@@ -484,6 +491,41 @@ describe('Minecraft Modpacks full-page experience', () => {
     });
     expect(writes[0]?.body).toMatchObject({ mode: 'install', review: { backupBefore: false } });
     expect(writes[0]?.body).not.toHaveProperty('install');
+  });
+  it('loads compact review paths only when opened and confirms the count for the reviewed digest', async () => {
+    compactReview = true;
+    const requests: URL[] = [];
+    page.on('request', (request) => {
+      const url = new URL(request.url());
+      if (url.pathname.endsWith('/files')) requests.push(url);
+    });
+    await open();
+    await details();
+    await page.getByRole('button', { name: 'Preview file changes' }).click();
+    await check(page.getByRole('button', { name: /^Added 104/ })).toBeVisible();
+    expect(requests).toHaveLength(0);
+    const removals = page.locator('.modpacks-removals');
+    await removals.getByText('Files to remove (102)').click();
+    await check(removals.getByText('mods/deletions-0.jar', { exact: true })).toBeVisible();
+    await removals.getByRole('button', { name: 'Next' }).click();
+    await check(removals.getByText('mods/deletions-101.jar', { exact: true })).toBeVisible();
+    expect(
+      requests.map((url) => [
+        url.searchParams.get('group'),
+        url.searchParams.get('offset'),
+        url.searchParams.get('digest'),
+      ]),
+    ).toEqual([
+      ['deletions', '0', 'a'.repeat(64)],
+      ['deletions', '100', 'a'.repeat(64)],
+    ]);
+    await page.locator('.modpacks-review-options').getByRole('button', { name: 'Install' }).click();
+    await check.poll(() => writes.at(-1)?.path).toBe(`POST ${base}/apply`);
+    expect(writes.at(-1)?.body).toMatchObject({
+      expectedDeleteCount: 102,
+      planDigest: 'a'.repeat(64),
+    });
+    expect(writes.at(-1)?.body.expectedDeletePaths).toEqual([]);
   });
   it('expands each review category and pages large path lists', async () => {
     await openPausedCore();

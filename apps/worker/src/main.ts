@@ -56,6 +56,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       directoryIdentityCache ??= createDirectoryIdentityCache(undefined, transferCache);
       return createManagementRuntime({
         db,
+        worldNotificationPool: pool.options.max === 1 ? undefined : pool,
         env,
         logger,
         transportCoordinator,

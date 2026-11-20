@@ -291,6 +291,7 @@ function verifiedFiles(plan: MinecraftModpackPlan, verified: MinecraftModpackFil
 export function createMinecraftModpacksService(options: {
   db: Kysely<Database>;
   hooks: MinecraftModpackHooks;
+  compactStatus?: boolean;
   logger?: ReturnType<typeof createLogger>;
   env?: Environment;
 }) {
@@ -344,7 +345,10 @@ export function createMinecraftModpacksService(options: {
       connection,
     );
   }
-  async function snapshotValue(serverId: string): Promise<MinecraftModpacksSnapshot> {
+  async function snapshotValue(
+    serverId: string,
+    populateLegacy = true,
+  ): Promise<MinecraftModpacksSnapshot> {
     // Polling needs display fields and counts. Keep historical manifests and recovery
     // checkpoints in PostgreSQL until an operation actually needs them.
     const [installed, row] = await Promise.all([
@@ -360,6 +364,11 @@ export function createMinecraftModpacksService(options: {
         .executeTakeFirst(),
       db
         .selectFrom('minecraft_modpack_operations')
+        .leftJoin('minecraft_modpack_reviews as review', (join) =>
+          join
+            .onRef('review.operation_id', '=', 'minecraft_modpack_operations.id')
+            .onRef('review.digest', '=', 'minecraft_modpack_operations.plan_digest'),
+        )
         .select([
           'id',
           'selection',
@@ -382,20 +391,17 @@ export function createMinecraftModpacksService(options: {
           sql<unknown>`CASE WHEN nullif(runtime_transition,'null'::jsonb) IS NOT NULL THEN true END`.as(
             'runtime_transition',
           ),
-          sql<unknown>`prepared->'pack'`.as('pack'),
-          sql<unknown>`prepared->'target'`.as('target'),
-          sql<boolean>`coalesce(plan->'runtime' <> 'null'::jsonb
-            AND NOT (plan->'blockers' @> '[{"reason":"runtime"}]'::jsonb OR
-                     plan->'blockers' @> '[{"reason":"loader-version"}]'::jsonb), false)`.as(
+          'review.digest as projected_digest',
+          sql<unknown>`review.summary->'counts'`.as('counts'),
+          sql<unknown>`coalesce(review.summary->'pack', prepared->'pack')`.as('pack'),
+          sql<unknown>`coalesce(review.summary->'target', prepared->'target')`.as('target'),
+          sql<boolean>`coalesce((review.summary->>'runtimeSupported')::boolean,false)`.as(
             'runtime_supported',
           ),
-          sql<unknown>`plan->'remove'`.as('delete_paths'),
-          sql<unknown>`CASE WHEN nullif(plan,'null'::jsonb) IS NOT NULL THEN jsonb_build_object(
-            'write',jsonb_array_length(plan->'write'),
-            'remove',jsonb_array_length(plan->'remove'),
-            'preserve',jsonb_array_length(plan->'preserve'),
-            'bytes',(SELECT coalesce(sum(f.size),0) FROM jsonb_to_recordset(plan->'write') AS f(size bigint))
-          ) END`.as('changes'),
+          (options.compactStatus ? sql<unknown>`NULL` : sql<unknown>`plan->'remove'`).as(
+            'delete_paths',
+          ),
+          sql<unknown>`review.summary->'changes'`.as('changes'),
         ])
         .where('server_id', '=', serverId)
         .orderBy('created_at', 'desc')
@@ -403,6 +409,11 @@ export function createMinecraftModpacksService(options: {
         .limit(1)
         .executeTakeFirst(),
     ]);
+    if (populateLegacy && row?.plan_digest && !row.projected_digest) {
+      // Operations prepared before the projection migration are populated once.
+      await sql`select minecraft_project_modpack_review(${row.id},${row.plan_digest})`.execute(db);
+      return snapshotValue(serverId, false);
+    }
     const display = minecraftModpackOperationSchema.shape;
     const abandon = row ? canAbandonPreparedRuntime(row) : false;
     return {
@@ -432,7 +443,12 @@ export function createMinecraftModpacksService(options: {
             runtimeSupported: row.runtime_supported,
             planDigest: row.plan_digest,
             changes: display.changes.parse(row.changes),
-            deletePaths: display.deletePaths.parse(row.delete_paths ?? []),
+            ...(options.compactStatus
+              ? {
+                  removalsPaged: true as const,
+                  reviewCounts: display.reviewCounts.parse(row.counts ?? undefined),
+                }
+              : { deletePaths: display.deletePaths.parse(row.delete_paths ?? []) }),
             blockers: z.array(minecraftModpackBlockerSchema).parse(row.blockers),
             error: row.error,
             backupId: row.backup_id,
@@ -540,46 +556,45 @@ export function createMinecraftModpacksService(options: {
       id: string,
       request: {
         digest: string;
-        group: 'added' | 'replaced' | 'removed' | 'preserved';
+        group: 'added' | 'replaced' | 'removed' | 'preserved' | 'deletions';
         offset: number;
       },
     ) {
       await authorized(context, serverId);
-      // Keep paths and evidence in PostgreSQL. Review pages only transfer four counts
-      // and up to 100 paths, including for older plans already waiting for approval.
-      const row = await db
-        .selectFrom('minecraft_modpack_operations')
-        .select(
-          sql<{
-            counts: Record<'added' | 'replaced' | 'removed' | 'preserved', number>;
-            paths: string[];
-          }>`(
-          WITH writes AS (SELECT path FROM jsonb_to_recordset(plan->'write') AS w(path text)),
-          existing AS (SELECT path, entry->>'kind' AS kind FROM jsonb_to_recordset(plan->'expected') AS e(path text, entry jsonb)
-                        WHERE entry->>'kind' IS NOT NULL),
-          changes AS (
-            SELECT w.path, CASE WHEN e.path IS NULL THEN 'added' ELSE 'replaced' END AS category
-              FROM writes w LEFT JOIN existing e USING (path)
-            UNION ALL
-            SELECT r.path || CASE WHEN e.kind = 'directory' THEN '/' ELSE '' END, 'removed'
-              FROM jsonb_array_elements_text(plan->'remove') AS r(path)
-              LEFT JOIN existing e USING (path) WHERE NOT EXISTS (SELECT 1 FROM writes w WHERE w.path = r.path)
-            UNION ALL
-            SELECT path, 'preserved' FROM jsonb_array_elements_text(plan->'preserve') AS p(path)
+      const page = Math.floor(request.offset / 100);
+      const skip = request.offset % 100;
+      const paths = (number: number) => sql<string[]>`coalesce((
+        select paths from minecraft_modpack_review_pages
+        where operation_id=review.operation_id and digest=review.digest
+          and category=${request.group} and page=${number}
+      ),'[]'::jsonb)`;
+      const read = () =>
+        db
+          .selectFrom('minecraft_modpack_operations as op')
+          .leftJoin('minecraft_modpack_reviews as review', (join) =>
+            join
+              .onRef('review.operation_id', '=', 'op.id')
+              .onRef('review.digest', '=', 'op.plan_digest'),
           )
-          SELECT jsonb_build_object('counts', jsonb_build_object(
-            'added', count(*) FILTER (WHERE category = 'added'), 'replaced', count(*) FILTER (WHERE category = 'replaced'),
-            'removed', count(*) FILTER (WHERE category = 'removed'), 'preserved', count(*) FILTER (WHERE category = 'preserved')),
-            'paths', ARRAY(SELECT path FROM changes WHERE category = ${request.group} ORDER BY path COLLATE "C" LIMIT 100 OFFSET ${request.offset}))
-            FROM changes
-        )`.as('files'),
-        )
-        .where('id', '=', id)
-        .where('server_id', '=', serverId)
-        .where('plan_digest', '=', request.digest)
-        .executeTakeFirst();
-      if (!row) throw new DomainError('not_found');
-      return row.files;
+          .select([
+            'review.digest',
+            sql<
+              Record<'added' | 'replaced' | 'removed' | 'preserved', number>
+            >`summary->'counts'`.as('counts'),
+            paths(page).as('first'),
+            (skip ? paths(page + 1) : sql<string[]>`'[]'::jsonb`).as('next'),
+          ])
+          .where('op.id', '=', id)
+          .where('op.server_id', '=', serverId)
+          .where('op.plan_digest', '=', request.digest)
+          .executeTakeFirst();
+      let row = await read();
+      if (row && !row.digest) {
+        await sql`select minecraft_project_modpack_review(${id},${request.digest})`.execute(db);
+        row = await read();
+      }
+      if (!row?.digest) throw new DomainError('not_found');
+      return { counts: row.counts, paths: [...row.first, ...row.next].slice(skip, skip + 100) };
     },
     async prepare(context: AuthContext, serverId: string, input: unknown) {
       const selection = parse(minecraftModpackPrepareSchema, input);
@@ -755,8 +770,16 @@ export function createMinecraftModpacksService(options: {
         const plan = modpackPlanSchema.parse(row.plan);
         if (plan.blockers.length || !plan.runtime) throw new DomainError('integration_unavailable');
         if (
-          modpackDigest([...new Set(request.expectedDeletePaths)].sort()) !==
-          modpackDigest([...plan.remove].sort())
+          request.planDigest !==
+          modpackDigest({ prepared: preparedModpackSchema.parse(row.prepared), plan })
+        )
+          throw new DomainError('conflict');
+        if (
+          request.expectedDeleteCount !== undefined
+            ? request.expectedDeletePaths.length > 0 ||
+              request.expectedDeleteCount !== plan.remove.length
+            : modpackDigest([...new Set(request.expectedDeletePaths)].sort()) !==
+              modpackDigest([...plan.remove].sort())
         )
           throw new DomainError('conflict');
         await tx

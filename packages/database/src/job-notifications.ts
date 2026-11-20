@@ -5,7 +5,7 @@ import type { Database } from './index.js';
 export interface JobNotificationPool {
   connect(): Promise<PoolClient>;
 }
-type ChangeChannel = 'jobs' | 'gateway' | 'catalogs';
+type ChangeChannel = 'jobs' | 'gateway' | 'catalogs' | 'worlds';
 const channelSql = (kind: ChangeChannel) =>
   `'nh_${kind}_' || md5(current_database() || ':' || current_schema())`;
 
@@ -49,9 +49,17 @@ export function listenForMinecraftCatalogRequests(
   return listenForChanges(pool, wake, disconnected, 'catalogs');
 }
 
+export function listenForMinecraftWorldScans(
+  pool: JobNotificationPool,
+  wake: (serverId: string) => void,
+  disconnected: () => void,
+) {
+  return listenForChanges(pool, wake, disconnected, 'worlds');
+}
+
 async function listenForChanges(
   pool: JobNotificationPool,
-  wake: () => void,
+  wake: (payload: string) => void,
   disconnected: () => void,
   kind: ChangeChannel,
 ): Promise<{ close(): void }> {
@@ -73,8 +81,8 @@ async function listenForChanges(
     close();
     disconnected();
   };
-  const notification = (message: { channel: string }) => {
-    if (!closed && message.channel === channel) wake();
+  const notification = (message: { channel: string; payload?: string }) => {
+    if (!closed && message.channel === channel) wake(message.payload ?? '');
   };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const setup = async () => {

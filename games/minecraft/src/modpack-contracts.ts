@@ -25,7 +25,7 @@ export const minecraftModpackPathSchema = z
 export const modpackReviewGroup = z.enum(['added', 'replaced', 'removed', 'preserved']);
 export const modpackReviewRequest = z.strictObject({
   digest: z.string().regex(/^[0-9a-f]{64}$/),
-  group: modpackReviewGroup,
+  group: modpackReviewGroup.or(z.literal('deletions')),
   offset: z.coerce.number().int().min(0).max(20000).default(0),
 });
 export const modpackReviewFiles = z.object({
@@ -73,6 +73,7 @@ export const minecraftModpackApplySchema = z
     planDigest: z.string().regex(/^[a-f0-9]{64}$/),
     confirm: z.literal(true),
     backupBefore: z.boolean().default(true),
+    expectedDeleteCount: z.number().int().min(0).max(20000).optional(),
     expectedDeletePaths: z.array(minecraftModpackPathSchema).max(20000).default([]),
     idempotencyKey: key,
   })
@@ -178,7 +179,9 @@ export const minecraftModpackOperationSchema = z
         bytes: z.number().int().nonnegative().safe(),
       })
       .nullable(),
-    deletePaths: z.array(minecraftModpackPathSchema).max(20000),
+    deletePaths: z.array(minecraftModpackPathSchema).max(20000).optional(),
+    removalsPaged: z.literal(true).optional(),
+    reviewCounts: modpackReviewFiles.shape.counts.optional(),
     blockers: z.array(minecraftModpackBlockerSchema).max(20000),
     error: z.string().nullable(),
     backupId: z.string().nullable(),

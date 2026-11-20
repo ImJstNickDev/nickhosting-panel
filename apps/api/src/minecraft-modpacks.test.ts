@@ -38,6 +38,7 @@ function fixture() {
   const snapshot = { installed: null, operation: { id: operationId, state: 'queued' } };
   const service = {
     snapshot: vi.fn(async () => snapshot),
+    reviewFiles: vi.fn(async () => ({ paths: [] })),
     prepare: vi.fn(async () => snapshot),
     apply: vi.fn(async () => snapshot),
     cancel: vi.fn(async () => snapshot),
@@ -111,6 +112,27 @@ describe('Modpack API boundaries', () => {
         { id: 'voidswrath', available: true },
         { id: 'atlauncher', available: true },
       ],
+    });
+  });
+  it('opts into compact status and routes exact deletion pages for the current actor', async () => {
+    const f = fixture();
+    await f.app.request(base);
+    expect(createMinecraftModpackBridge).toHaveBeenLastCalledWith(
+      expect.objectContaining({ compactStatus: false }),
+    );
+    await f.app.request(`${base}?view=status`);
+    expect(createMinecraftModpackBridge).toHaveBeenLastCalledWith(
+      expect.objectContaining({ compactStatus: true }),
+    );
+    const digest = 'a'.repeat(64);
+    const review = await f.app.request(
+      `${base}/operations/${operationId}/files?digest=${digest}&group=deletions&offset=100`,
+    );
+    expect(review.status).toBe(200);
+    expect(f.service.reviewFiles).toHaveBeenCalledWith(actor, serverId, operationId, {
+      digest,
+      group: 'deletions',
+      offset: 100,
     });
   });
   it('browses metadata without preparation, resolution or publication', async () => {

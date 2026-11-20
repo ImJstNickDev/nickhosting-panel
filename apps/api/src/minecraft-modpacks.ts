@@ -56,10 +56,11 @@ export function registerMinecraftModpackRoutes(
     if (!(await minecraftModpackSchemaAvailable(db)))
       throw new DomainError('integration_unavailable');
   };
-  const service = async (providers = false) => {
+  const service = async (c: C, providers = false) => {
     await ready();
     const runtime = await management();
     return createMinecraftModpackBridge({
+      compactStatus: c.req.query('view') === 'status',
       db,
       runtime,
       env,
@@ -73,34 +74,34 @@ export function registerMinecraftModpackRoutes(
   app.get(base, async (c) => {
     c.header('cache-control', 'no-store');
     const actor = await principal(c);
-    return c.json(await (await service()).snapshot(actor, c.req.param('id')));
+    return c.json(await (await service(c)).snapshot(actor, c.req.param('id')));
   });
   app.post(`${base}/prepare`, async (c) => {
     const actor = await principal(c);
     return c.json(
-      await (await service(true)).prepare(actor, c.req.param('id'), await body(c)),
+      await (await service(c, true)).prepare(actor, c.req.param('id'), await body(c)),
       202,
     );
   });
   app.post(`${base}/apply`, async (c) => {
     const actor = await principal(c);
-    return c.json(await (await service()).apply(actor, c.req.param('id'), await body(c)), 202);
+    return c.json(await (await service(c)).apply(actor, c.req.param('id'), await body(c)), 202);
   });
   app.get(`${base}/operations/:operationId/files`, async (c) => {
     const actor = await principal(c);
     const id = parse(z.uuid(), c.req.param('operationId'));
     const request = parse(modpackReviewRequest, c.req.query());
-    return c.json(await (await service()).reviewFiles(actor, c.req.param('id'), id, request));
+    return c.json(await (await service(c)).reviewFiles(actor, c.req.param('id'), id, request));
   });
   app.delete(`${base}/operations/:operationId`, async (c) => {
     const actor = await principal(c);
     const id = parse(z.uuid(), c.req.param('operationId'));
-    return c.json(await (await service()).cancel(actor, c.req.param('id'), id));
+    return c.json(await (await service(c)).cancel(actor, c.req.param('id'), id));
   });
   app.post(`${base}/operations/:operationId/recover`, async (c) => {
     const actor = await principal(c);
     const id = parse(z.uuid(), c.req.param('operationId'));
-    return c.json(await (await service()).recover(actor, c.req.param('id'), id));
+    return c.json(await (await service(c)).recover(actor, c.req.param('id'), id));
   });
   const catalog = async (c: C) => {
     const actor = await principal(c);

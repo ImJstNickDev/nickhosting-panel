@@ -134,6 +134,7 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
       management: () =>
         createManagementRuntime({
           db: database.db,
+          worldNotificationPool: database.pool.options.max === 1 ? undefined : database.pool,
           codec,
           env,
           logger,

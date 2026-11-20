@@ -112,6 +112,7 @@ export async function modpackActor(
 }
 
 export function createMinecraftModpackBridge(options: {
+  compactStatus?: boolean;
   db: Kysely<Database>;
   runtime: ManagementRuntime;
   env?: Environment;
@@ -190,6 +191,7 @@ export function createMinecraftModpackBridge(options: {
       env,
     });
   return createMinecraftModpacksService({
+    compactStatus: options.compactStatus,
     logger: runtime.lifecycle.logger,
     db,
     env,

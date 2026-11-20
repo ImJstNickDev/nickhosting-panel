@@ -11,6 +11,7 @@ import {
   type Database,
   getSecret,
   getSettings,
+  type JobNotificationPool,
 } from '@nickhosting/database';
 import { evaluateGameAccess, type FilemanReadService } from '@nickhosting/game-sdk';
 import { minecraftContentPermissionKeys } from '@nickhosting/minecraft';
@@ -365,6 +366,7 @@ export async function authorizeQueuedEffect(
 }
 
 export interface ManagementOptions {
+  worldNotificationPool?: JobNotificationPool;
   onInstallationAvailable?: (jobId: string, serverId: string) => void;
   logger?: ReturnType<typeof createLogger>;
   db: Kysely<Database>;
@@ -1819,6 +1821,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     lifecycle,
     externalOptions,
     minecraftOptions,
+    ...(options.worldNotificationPool && { worldNotificationPool: options.worldNotificationPool }),
     worldPreparation,
     prepareWorldSelection,
     assertMinecraftRuntimeImage,
