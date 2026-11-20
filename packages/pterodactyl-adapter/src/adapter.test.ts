@@ -186,13 +186,11 @@ describe('typed Pterodactyl boundary', () => {
       if (!chunk || !request) throw new Error('Batch was not requested');
       request.resolve(
         list(
-          [...chunk]
-            .reverse()
-            .map((uuid, i) => ({
-              ...server,
-              uuid,
-              id: i === 0 && forcedId !== undefined ? forcedId : uuids.indexOf(uuid) + 1,
-            })),
+          [...chunk].reverse().map((uuid, i) => ({
+            ...server,
+            uuid,
+            id: i === 0 && forcedId !== undefined ? forcedId : uuids.indexOf(uuid) + 1,
+          })),
         ),
       );
     };
