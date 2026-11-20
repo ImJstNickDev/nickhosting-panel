@@ -853,11 +853,14 @@ Folder entries request the API's no-overwrite preflight rather than fetching
 their parent directory separately before each file. Errors and uncertain outcomes
 retain the existing admission/recovery rules above.
 
-Minecraft contributes a presentation-only Fileman entry grouping rule through its
-trusted UI module. In the real server root only, dot-prefixed directories and the
-exact names `libraries`, `versions`, `eula.txt` and `usercache.json` appear in a
-collapsed Hidden section below the ordinary entries. Dotfiles with other names,
-nested directories, other games and virtual archive listings are unchanged.
+The Minecraft Fileman root highlights server settings and artwork, `server.jar`,
+worlds, logs, crash reports, plugin/mod configuration, scripts and backup
+directories. Other files and observed non-world directories appear in the
+collapsed Hidden section. The configured world's root and legacy dimension
+siblings stay visible, along with other known worlds. Unclassified folders that
+could contain a custom world stay visible until the shared world inventory has
+evidence about them. Dot-prefixed and runtime housekeeping directories default
+to Hidden. Grouping applies only to direct entries of the real Minecraft root.
 Expanding reuses the same list/grid rows, menus, navigation and operations.
 Search automatically exposes matching hidden entries; the user may collapse the
 section again. Select-all and range selection follow the displayed order, and

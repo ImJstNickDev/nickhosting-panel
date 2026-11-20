@@ -13,12 +13,13 @@ import { minecraftViewerMessages } from '../viewers/catalog.js';
 import {
   createMinecraftUiController,
   MinecraftUiError,
+  type MinecraftWorlds,
   minecraftCatalogOptions,
   minecraftContentCapabilities,
 } from './controller.js';
 import { minecraftDatapacksMessages } from './datapacks-catalog.js';
 import { minecraftFileDirectoryIcon } from './file-directory-icon.js';
-import { minecraftFileEntryGroup } from './file-entry-group.js';
+import { minecraftFileEntryGroup, minecraftFileRootGroups } from './file-entry-group.js';
 import { minecraftModpacksMessages } from './modpacks-catalog.js';
 import { createMinecraftModpacksController } from './modpacks-controller.js';
 import { minecraftModsMessages } from './mods-catalog.js';
@@ -581,10 +582,24 @@ export function minecraftPropertyValues(
     }),
   );
 }
+function worldSectionData(worlds: MinecraftWorlds): UiSectionData {
+  return { values: {}, rows: [], metadata: { worlds, installed: worlds.installed } };
+}
+
 export const minecraftUiModule = defineTrustedGameUiModule({
   descriptor: minecraftUiDescriptor,
   runtimeArtwork: minecraftRuntimeArtwork,
   fileEntryGroup: minecraftFileEntryGroup,
+  fileRootGroups: minecraftFileRootGroups,
+  sectionPreviews: {
+    worlds: async (client, context) => {
+      const worlds = await createMinecraftUiController(client).cachedWorlds(
+        server(context),
+        context.signal,
+      );
+      return worlds ? worldSectionData(worlds) : null;
+    },
+  },
   fileDirectoryIcon: minecraftFileDirectoryIcon,
   gatewayMessageEditor: 'minecraft-26.1',
   catalogs: minecraftUiCatalogs,
@@ -832,7 +847,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
         server(context),
         context.signal,
       );
-      return { values: {}, rows: [], metadata: { worlds, installed: worlds.installed } };
+      return worldSectionData(worlds);
     },
     select: async (client, context) =>
       createMinecraftUiController(client).operate(
@@ -972,3 +987,5 @@ export type {
 export type { ForgeCatalogResponse } from '../forge-catalog.js';
 
 export type { NeoForgeCatalogResponse } from '../neoforge-catalog.js';
+export { isManagedMinecraftWorldName } from '../world-names.js';
+export { configuredMinecraftWorldRoots } from './file-entry-group.js';

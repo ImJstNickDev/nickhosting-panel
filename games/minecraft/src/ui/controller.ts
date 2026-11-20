@@ -12,6 +12,7 @@ import {
   minecraftPlayerDetailActionSchema,
   minecraftPlayerDetailSchema,
 } from '../player-details-contracts.js';
+import { isMinecraftWorldDirectory } from '../world-names.js';
 import { minecraftRuntimeArtwork } from './runtime-artwork.js';
 
 export type {
@@ -274,7 +275,7 @@ export const minecraftPlayerActionSchema = z
 export type MinecraftPlayerAction = z.infer<typeof minecraftPlayerActionSchema>;
 const worldSchema = z
   .object({
-    name: world,
+    name: z.string().refine(isMinecraftWorldDirectory),
     status: z.enum(['verified', 'incompatible', 'unknown', 'invalid', 'unavailable']),
     validation: z
       .object({
@@ -768,6 +769,11 @@ export function createMinecraftUiController(client: GameUiClient) {
             signal,
           ),
         );
+    },
+    async cachedWorlds(serverId: string, signal?: AbortSignal) {
+      return minecraftWorldsSchema
+        .nullable()
+        .parse(await request(serverPath(serverId, '/worlds?cached=1'), 'GET', undefined, signal));
     },
     async worlds(serverId: string, signal?: AbortSignal) {
       return minecraftWorldsSchema.parse(
