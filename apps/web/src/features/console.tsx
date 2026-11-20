@@ -1,5 +1,5 @@
-import { useQuery } from '@tanstack/react-query';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { skipToken, useQuery } from '@tanstack/react-query';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { ApiError, api, apiError, consumeEvents, queryClient } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
@@ -14,6 +14,7 @@ import {
   Section,
   Time,
 } from '../components/ui.js';
+import { type ConsoleBuffer, consoleBufferWriter } from './console-buffer.js';
 import {
   type DisplayResources,
   parseConsoleResources,
@@ -42,28 +43,54 @@ const terminalEscapes = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: controls must not render inside plain console output.
 const terminalControls = /[\x00-\x08\x0b-\x1f\x7f]/g;
 
-function ConsoleOutput({
-  output,
-  lines,
-  onScroll,
+const ConsoleOutput = memo(function ConsoleOutput({
+  serverId,
+  identity,
+  setup,
   emptyLabel,
 }: {
-  output: React.RefObject<HTMLElement | null>;
-  lines: string[];
-  onScroll: React.UIEventHandler<HTMLElement>;
+  serverId: string;
+  identity?: string;
+  setup?: Parameters<typeof provisioningLogLines>[0];
   emptyLabel?: string;
 }) {
-  const t = useT(),
-    label = t('service.consoleOutput');
+  const t = useT();
+  const buffer = useQuery<ConsoleBuffer>({
+    queryKey: ['console-buffer', identity, serverId],
+    queryFn: skipToken,
+    structuralSharing: false,
+  });
+  const text = useMemo(() => {
+    const lines = provisioningLogLines(setup);
+    if (identity && buffer.data)
+      for (const line of buffer.data.lines)
+        lines.push(line.type === 'status' ? t(`service.consoleStatus.${line.data}`) : line.data);
+    return lines.length ? lines.join('\n') : (emptyLabel ?? t('service.noConsoleOutput'));
+  }, [setup, identity, buffer.data, emptyLabel, t]);
+  const output = useRef<HTMLElement>(null);
+  const follow = useRef(true);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: follow only committed changes to the displayed output.
+  useLayoutEffect(() => {
+    if (follow.current && output.current) output.current.scrollTop = output.current.scrollHeight;
+  }, [text]);
   return (
-    // biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard users must scroll the bounded console region.
-    <section ref={output} className="console" tabIndex={0} aria-label={label} onScroll={onScroll}>
+    <section
+      ref={output}
+      className="console"
+      // biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard users must scroll the bounded console region.
+      tabIndex={0}
+      aria-label={t('service.consoleOutput')}
+      onScroll={({ currentTarget }) => {
+        follow.current =
+          currentTarget.scrollHeight - currentTarget.clientHeight - currentTarget.scrollTop <= 2;
+      }}
+    >
       <pre role="log" aria-live="off">
-        {lines.length ? lines.join('\n') : (emptyLabel ?? t('service.noConsoleOutput'))}
+        {text}
       </pre>
     </section>
   );
-}
+});
 
 function ConsoleCommand({ serverId }: { serverId: string }) {
   const t = useT();
@@ -120,8 +147,6 @@ function ConsoleCommand({ serverId }: { serverId: string }) {
   );
 }
 
-type ConsoleLine = { type: 'console' | 'status'; data: string };
-type ConsoleBuffer = { lines: ConsoleLine[]; lastStatus?: string };
 function transientFailure(error: unknown) {
   const failure = apiError(error);
   return (
@@ -180,15 +205,9 @@ export function ConsolePage({ serverId }: { serverId: string }) {
       (!setup && expectedSetup),
   );
   const installing = showSetup && setup?.stage !== 'starting';
-  const installLines = provisioningLogLines(setup);
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     heading.current?.focus({ preventScroll: true });
-  }, []);
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
   }, []);
   const [stats, setStats] = useState<{
     scope: string;
@@ -198,9 +217,13 @@ export function ConsolePage({ serverId }: { serverId: string }) {
   const [disk, setDisk] = useState<{ scope: string; bytes: number; at: number }>();
   const [state, setState] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const session = useSession();
+  const consoleDenied = Boolean(
+    (server.data && !server.data.permissionKeys.includes('console.read')) ||
+      (server.error && !transientFailure(server.error)),
+  );
   const consoleAvailable = Boolean(
-    server.data?.capabilities?.console &&
-      server.data.permissionKeys.includes('console.read') &&
+    !consoleDenied &&
+      server.data?.capabilities?.console &&
       server.data.availableActions.console &&
       !installing,
   );
@@ -236,39 +259,27 @@ export function ConsolePage({ serverId }: { serverId: string }) {
           context.support?.id,
         ])
       : undefined;
-  const [buffer, setBuffer] = useState<{ scope: string; lines: ConsoleLine[] }>({
-    scope: '',
-    lines: [],
-  });
   const scope = `${identity}:${serverId}`;
+  const statsStale = useResourceStaleness(stats?.at ?? 0);
+  const diskStale = useResourceStaleness(disk?.at ?? 0);
   const live = useLiveResources(
     serverId,
-    state === 'connected' && Boolean(stats?.scope === scope && now - stats.at < 30000),
+    state === 'connected' && stats?.scope === scope && !statsStale,
     !installing && Boolean(server.data?.availableActions.console),
   );
   const resourceStale = useResourceStaleness(live.dataUpdatedAt);
-  const runtimeLines =
-    buffer.scope === scope && identity
-      ? buffer.lines.map((line) =>
-          line.type === 'status' ? t(`service.consoleStatus.${line.data}`) : line.data,
-        )
-      : [];
-  const lines = showSetup ? [...installLines, ...(!installing ? runtimeLines : [])] : runtimeLines;
   const [error, setError] = useState<unknown>();
   const [runtime, setRuntime] = useState<{
     scope: string;
     value: Resources['current_state'];
-    at: number;
     changedAt?: number;
   }>();
   const [connection, setConnection] = useState(0);
-  const follow = useRef(true);
-  const output = useRef<HTMLElement>(null);
   const resourceState = !live.error && !resourceStale ? live.data?.current_state : undefined;
   const streamState = runtime?.scope === scope && state === 'connected' ? runtime : undefined;
   const powerState = streamState?.value ?? resourceState ?? server.data?.runtimeState;
   const freshStats =
-    stats?.scope === scope && state === 'connected' && now - stats.at < 30000 ? stats : undefined;
+    stats?.scope === scope && state === 'connected' && !statsStale ? stats : undefined;
   // REST resources can be provider-cached. A later HTTP response cannot prove a
   // new process baseline after a stream transition, even if its state matches.
   const transitionAt = runtime?.scope === scope ? runtime.changedAt : undefined;
@@ -283,7 +294,7 @@ export function ConsolePage({ serverId }: { serverId: string }) {
     freshStats ??
     (freshRest ? { resources: freshRest.resources, at: live.dataUpdatedAt } : undefined);
   const diskBytes =
-    disk?.scope === scope && now - disk.at < 30000
+    disk?.scope === scope && !diskStale
       ? disk.bytes
       : !live.error && !resourceStale
         ? live.data?.resources.disk_bytes
@@ -296,10 +307,7 @@ export function ConsolePage({ serverId }: { serverId: string }) {
           resources: {
             ...measured.resources,
             disk_bytes: diskBytes,
-            uptime:
-              confirmedState === 'running' && measured.resources.uptime !== undefined
-                ? measured.resources.uptime + Math.max(0, now - measured.at)
-                : undefined,
+            uptime: confirmedState === 'running' ? measured.resources.uptime : undefined,
           },
         }
       : powerState && streamState
@@ -313,22 +321,27 @@ export function ConsolePage({ serverId }: { serverId: string }) {
   }, [powerState, server.data?.activeOperationId, killTarget]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: explicit reconnect and authenticated identity delimit the stream.
   useEffect(() => {
-    if (!identity || !consoleAvailable) return;
+    if (!identity) return;
     const key = ['console-buffer', identity, serverId];
-    // These inactive query entries are erased by the existing sign-out/support identity reset.
-    // Keep at most five server buffers in this tab, never persistent browser storage.
-    const caches = queryClient.getQueryCache().findAll({ queryKey: ['console-buffer'] });
-    for (const cache of caches
-      .sort((a, b) => a.state.dataUpdatedAt - b.state.dataUpdatedAt)
-      .slice(0, Math.max(0, caches.length - 4))) {
-      if (JSON.stringify(cache.queryKey) !== JSON.stringify(key))
-        queryClient.removeQueries({ queryKey: cache.queryKey, exact: true });
+    if (!consoleAvailable) {
+      if (consoleDenied) queryClient.removeQueries({ queryKey: key, exact: true });
+      return;
     }
-    const cached = queryClient.getQueryData<ConsoleBuffer>(key);
-    let current = cached?.lines ?? [];
-    let lastStatus = cached?.lastStatus;
+    const cache = queryClient.getQueryCache();
+    const retained = cache.build<ConsoleBuffer>(queryClient, { queryKey: key });
+    // Keep at most five server buffers in this tab, never persistent browser storage.
+    const others = cache
+      .findAll({ queryKey: ['console-buffer'] })
+      .filter((entry) => entry !== retained);
+    for (const entry of others
+      .sort((a, b) => b.state.dataUpdatedAt - a.state.dataUpdatedAt)
+      .slice(4))
+      cache.remove(entry);
+    const writer = consoleBufferWriter(retained.state.data, (snapshot) => {
+      // An identity reset may erase the cache before React tears down the old stream.
+      if (cache.get(retained.queryHash) === retained) retained.setData(snapshot, { manual: true });
+    });
     let observedStatus: string | undefined;
-    setBuffer({ scope, lines: current });
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let attempts = 0;
@@ -339,6 +352,7 @@ export function ConsolePage({ serverId }: { serverId: string }) {
       );
     };
     async function connect() {
+      let connected = false;
       setRuntime(undefined);
       setStats(undefined);
       observedStatus = undefined;
@@ -346,10 +360,11 @@ export function ConsolePage({ serverId }: { serverId: string }) {
       setError(undefined);
       try {
         await consumeEvents(
-          `${serverPath(serverId)}/console${current.length ? '?history=0' : ''}`,
+          `${serverPath(serverId)}/console${writer.hasHistory() ? '?history=0' : ''}`,
           {
             signal: controller.signal,
             onEvent: (event) => {
+              if (controller.signal.aborted) return;
               const payload = JSON.parse(event.data) as {
                 type?: string;
                 data?: unknown;
@@ -362,12 +377,17 @@ export function ConsolePage({ serverId }: { serverId: string }) {
                   payload.code === 'forbidden' ? 'errors.forbidden' : 'service.consoleUnavailable',
                 );
               if (type === 'closed') {
+                writer.flush();
+                connected = false;
                 setStats(undefined);
                 setState('disconnected');
                 return;
               }
-              setState('connected');
-              attempts = 0;
+              if (!connected) {
+                connected = true;
+                setState('connected');
+                attempts = 0;
+              }
               if (type === 'stats') {
                 const resources = parseConsoleResources(payload.data);
                 if (resources) {
@@ -385,40 +405,28 @@ export function ConsolePage({ serverId }: { serverId: string }) {
                   return;
                 // Status snapshots recur on provider stats/reconnects. Preserve transitions,
                 // including across navigation or after the original status scrolls out.
-                if (type === 'status') {
-                  const at = Date.now();
-                  const changedAt =
-                    observedStatus !== undefined && payload.data !== observedStatus
-                      ? at
-                      : undefined;
-                  setRuntime((previous) => ({
+                if (type === 'status' && payload.data !== observedStatus) {
+                  const changedAt = observedStatus !== undefined ? Date.now() : undefined;
+                  setRuntime({
                     scope,
                     value: payload.data as Resources['current_state'],
-                    at,
-                    changedAt:
-                      changedAt ?? (previous?.scope === scope ? previous.changedAt : undefined),
-                  }));
-                  if (payload.data !== observedStatus) {
-                    setStats(undefined);
-                    observedStatus = payload.data;
-                    void queryClient.invalidateQueries({ queryKey: ['server', serverId] });
-                  }
-                  if (payload.data === lastStatus) return;
-                  lastStatus = payload.data;
+                    changedAt,
+                  });
+                  setStats(undefined);
+                  observedStatus = payload.data;
+                  void queryClient.invalidateQueries({ queryKey: ['server', serverId] });
                 }
                 // React escapes text. Strip terminal control sequences, never render HTML.
                 const value = payload.data
                   .replace(terminalEscapes, '')
                   .replace(terminalControls, '');
-                const line: ConsoleLine = { type, data: value.slice(-8192) };
-                current = [...current, line].slice(-300);
-                queryClient.setQueryData<ConsoleBuffer>(key, { lines: current, lastStatus });
-                setBuffer({ scope, lines: current });
+                writer.append({ type, data: value.slice(-8192) });
               }
             },
           },
         );
         if (!controller.signal.aborted) {
+          writer.flush();
           setState('disconnected');
           retry();
         }
@@ -427,11 +435,14 @@ export function ConsolePage({ serverId }: { serverId: string }) {
           setError(failure);
           setState('disconnected');
           if (transientFailure(failure)) {
+            writer.flush();
             retry();
           } else {
-            current = [];
-            queryClient.removeQueries({ queryKey: key, exact: true });
-            setBuffer({ scope, lines: [] });
+            writer.discard();
+            if (cache.get(retained.queryHash) === retained) {
+              retained.setData({ lines: [] }, { manual: true });
+              cache.remove(retained);
+            }
           }
         }
       }
@@ -440,16 +451,9 @@ export function ConsolePage({ serverId }: { serverId: string }) {
     return () => {
       controller.abort();
       clearTimeout(timer);
+      writer.flush();
     };
-  }, [serverId, identity, scope, connection, consoleAvailable]);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: a different server/session starts at the end of its own output.
-  useLayoutEffect(() => {
-    follow.current = true;
-  }, [scope]);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: follow appended output only while the user remains at the bottom.
-  useLayoutEffect(() => {
-    if (follow.current && output.current) output.current.scrollTop = output.current.scrollHeight;
-  }, [lines]);
+  }, [serverId, identity, scope, connection, consoleAvailable, consoleDenied]);
   return (
     <>
       {Boolean(powerError) && <ErrorNotice error={powerError} />}
@@ -526,8 +530,10 @@ export function ConsolePage({ serverId }: { serverId: string }) {
                 </div>
               )}
               <ConsoleOutput
-                output={output}
-                lines={lines}
+                key={`output:${scope}`}
+                serverId={serverId}
+                identity={consoleAvailable ? identity : undefined}
+                setup={showSetup ? setup : undefined}
                 emptyLabel={
                   showSetup
                     ? t(
@@ -537,11 +543,6 @@ export function ConsolePage({ serverId }: { serverId: string }) {
                       )
                     : undefined
                 }
-                onScroll={(event) => {
-                  const element = event.currentTarget;
-                  follow.current =
-                    element.scrollHeight - element.clientHeight - element.scrollTop <= 2;
-                }}
               />
               {!showSetup &&
                 server.data?.permissionKeys.includes('console.command') &&
@@ -563,6 +564,7 @@ export function ConsolePage({ serverId }: { serverId: string }) {
           <ConsoleSummary
             serverId={serverId}
             resources={resources}
+            observedAt={sampleAt}
             availability={resources ? 'ready' : live.isPending ? 'loading' : 'unavailable'}
           />
         )}
@@ -690,6 +692,7 @@ function Chart({
             direction: item.direction,
           }));
         });
+  const lines = segments.filter((segment) => segment.points.length > 1);
   return (
     <figure className={`metric-chart${network ? ' network-chart' : ''}`}>
       <figcaption>
@@ -740,7 +743,7 @@ function Chart({
             strokeWidth="2"
           />
         )}
-        {segments.map(({ key, points, color, direction }) => (
+        {lines.map(({ key, points, color, direction }) => (
           <polygon
             key={key}
             data-series={direction}
@@ -749,7 +752,7 @@ function Chart({
             fillOpacity="0.12"
           />
         ))}
-        {segments.map(({ key, points, color, direction }) => (
+        {lines.map(({ key, points, color, direction }) => (
           <polyline
             key={key}
             data-series={direction}
@@ -759,6 +762,18 @@ function Chart({
             strokeWidth="2"
           />
         ))}
+        {segments.map(({ key, points, color, direction }) =>
+          points.length === 1 && points[0] ? (
+            <circle
+              key={key}
+              data-series={direction}
+              cx={points[0][0]}
+              cy={points[0][1]}
+              r="2"
+              fill={color}
+            />
+          ) : null,
+        )}
         <text x="16" y="22" fill="#536372" fontSize="10">
           {format.number(maximum)} {unit}
         </text>

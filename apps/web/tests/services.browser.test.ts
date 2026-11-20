@@ -722,6 +722,7 @@ describe('M5 browser files, backups, console and automation', () => {
       await browserExpect(user.locator('.console pre')).toContainText('Reconnected marker');
       expect(await offlineCount()).toBe(1);
       await user.getByRole('link', { name: 'Files', exact: true }).click();
+      await browserExpect(user.locator('.file-manager')).toBeVisible();
       await user.getByRole('link', { name: 'Console', exact: true }).click();
       await browserExpect.poll(() => connections).toBeGreaterThan(previousConnections);
       await connected();
@@ -812,7 +813,7 @@ describe('M5 browser files, backups, console and automation', () => {
     await user.getByLabel('Command', { exact: true }).fill('private-session-marker');
     await user.getByLabel('Command', { exact: true }).press('Enter');
     await browserExpect(user.locator('.console pre')).toContainText('private-session-marker');
-    await user.getByRole('link', { name: 'Settings', exact: true }).first().click();
+    await user.getByRole('button', { name: /^Profile:/ }).click();
     await user.getByRole('button', { name: 'Sign out', exact: true }).click();
     await browserExpect(user).toHaveURL(`${harness.origin}/login`);
     await user.waitForLoadState('networkidle');
