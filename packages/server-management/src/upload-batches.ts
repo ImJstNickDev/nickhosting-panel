@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { type AuthContext, authSessionId, DomainError } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
+import { affectsMinecraftWorldIndex } from '@nickhosting/minecraft';
 import { type Kysely, type Selectable, sql, type Transaction } from 'kysely';
 import { z } from 'zod';
 import { lockResources } from './admission.js';
@@ -229,7 +230,13 @@ async function mutate(
                 : [
                     {
                       action: 'server.files.uploaded',
-                      metadata: { ...metadata, bytes: uploadedBytes },
+                      metadata: {
+                        ...metadata,
+                        bytes: uploadedBytes,
+                        worldIndexChanged: Boolean(
+                          metadata.path && affectsMinecraftWorldIndex(metadata.path),
+                        ),
+                      },
                     },
                   ]),
             ]);

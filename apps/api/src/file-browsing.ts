@@ -8,6 +8,7 @@ import {
   fileEditorAvailability,
 } from '@nickhosting/core';
 import { recordAudit } from '@nickhosting/database';
+import { affectsMinecraftWorldIndex } from '@nickhosting/minecraft';
 import {
   type PterodactylAdapter,
   PterodactylError,
@@ -275,6 +276,7 @@ export function registerFileBrowsingRoutes(
           operationId: randomUUID(),
           source: 'panel',
           action: 'edit',
+          worldIndexChanged: affectsMinecraftWorldIndex(target),
           path: target,
           count: 1,
         };

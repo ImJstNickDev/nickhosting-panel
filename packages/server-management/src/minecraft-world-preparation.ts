@@ -31,6 +31,7 @@ const properties = z
 const prepared = z
   .object({
     observedAt: z.number().int().nonnegative().safe(),
+    revision: z.string().optional(),
     worlds: z
       .array(world)
       .max(100)
@@ -55,14 +56,16 @@ type Snapshot = {
 export function createMinecraftWorldPreparation(
   cache: PrivateTransferCache,
   providerBinding: string,
+  currentRevision?: (serverId: string) => Promise<string | undefined>,
 ) {
-  const key = (server: Server, combinationId: string) =>
-    `minecraft.world-preparation.v1:${digest(
+  const key = (server: Server, combinationId: string, revision?: string) =>
+    `minecraft.world-preparation.v2:${digest(
       JSON.stringify([
         providerBinding,
         directoryServerIdentity(server),
         server.mapping_id,
         combinationId,
+        revision,
       ]),
     )}`;
   const validAge = (observedAt: number) => {
@@ -74,30 +77,52 @@ export function createMinecraftWorldPreparation(
     if (Buffer.byteLength(encoded) > maxBytes || !validAge(value.observedAt)) return;
     await cache.put(storageKey, encoded, ttlMs - (Date.now() - value.observedAt));
   };
+  async function revisionFor(server: Server) {
+    try {
+      return await currentRevision?.(server.id);
+    } catch {
+      // If the journal is unavailable a fresh provider read can still validate a selection.
+      return undefined;
+    }
+  }
   async function read(
     server: Server,
     combinationId: string,
   ): Promise<MinecraftWorldPreparation | undefined> {
     try {
-      const value = await cache.get(key(server, combinationId));
+      const revision = await revisionFor(server);
+      if (currentRevision && !revision) return;
+      const value = await cache.get(key(server, combinationId, revision));
       if (!value || Buffer.byteLength(value) > maxBytes) return;
       const result = prepared.safeParse(JSON.parse(value));
-      if (result.success && validAge(result.data.observedAt)) return result.data;
+      if (result.success && validAge(result.data.observedAt) && result.data.revision === revision)
+        return result.data;
     } catch {
       // Cold, unavailable and corrupt preparation all use the regular read path.
     }
   }
   return {
     read,
-    async invalidate(server: Server, combinationId: string): Promise<void> {
+    revisionFor,
+    async isCurrent(server: Server, revision?: string): Promise<boolean> {
+      if (!currentRevision) return revision === undefined;
+      return Boolean(revision && (await revisionFor(server)) === revision);
+    },
+    async invalidate(server: Server, combinationId: string, revision?: string): Promise<void> {
       try {
-        await cache.delete(key(server, combinationId));
+        await cache.delete(key(server, combinationId, revision));
       } catch {
         // Cache availability never changes the result of the fresh inspection.
       }
     },
-    async save(server: Server, combinationId: string, snapshot: Snapshot): Promise<void> {
+    async save(
+      server: Server,
+      combinationId: string,
+      snapshot: Snapshot,
+      revision?: string,
+    ): Promise<void> {
       try {
+        if (currentRevision && !revision) return;
         const worlds = snapshot.worlds
           .flatMap((value) => {
             if (value.status !== 'verified' || !value.validation) return [];
@@ -109,8 +134,9 @@ export function createMinecraftWorldPreparation(
             return result.success ? [result.data] : [];
           })
           .slice(0, 100);
-        await write(key(server, combinationId), {
+        await write(key(server, combinationId, revision), {
           observedAt: Date.now(),
+          revision,
           worlds,
           properties: snapshot.properties,
         });
@@ -129,7 +155,7 @@ export function createMinecraftWorldPreparation(
         if (!current) return;
         const afterHash = digest(content);
         if (current.properties.hash !== beforeHash && current.properties.hash !== afterHash) return;
-        await write(key(server, combinationId), {
+        await write(key(server, combinationId, current.revision), {
           ...current,
           properties: { content, hash: afterHash },
         });

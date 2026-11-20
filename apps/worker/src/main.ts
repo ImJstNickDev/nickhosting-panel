@@ -30,6 +30,7 @@ import {
   pollQuiltMetadata,
 } from './minecraft-metadata.js';
 import { startMinecraftModpackLoop } from './minecraft-modpacks.js';
+import { startMinecraftWorldIndexLoop } from './minecraft-worlds.js';
 import { refreshProviderFeeds, startProviderFeedLoop } from './provider-feed.js';
 import { reconcileServers } from './reconcile.js';
 import { pollSchedules } from './schedules.js';
@@ -176,6 +177,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         await refreshProviderFeeds(db, codec, env, transportCoordinator);
       },
       () => logger.log('warn', 'provider.feed_unavailable'),
+    );
+    const worldIndexes = startMinecraftWorldIndexLoop(db, management, env, (serverId) =>
+      logger.log('warn', 'minecraft.world_index_unavailable', { serverId }),
     );
     const modpacks = startMinecraftModpackLoop({
       notificationPool: pool,
@@ -348,6 +352,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           providerFeeds.close(),
           providerAccounts.close(),
           modpacks.close(),
+          worldIndexes.close(),
         ]);
         try {
           await installations?.close();

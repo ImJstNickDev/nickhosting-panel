@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { minecraftPropertyEnumValue } from './property-enums.js';
+import { isManagedMinecraftWorldName } from './world-names.js';
 
 function invalid(reason: string): never {
   throw new DomainError('validation_failed', 400, { reason });
@@ -351,13 +352,7 @@ export interface MinecraftWorldArchiveEntry {
   readonly type: 'file' | 'directory' | 'symlink';
 }
 export function minecraftWorldName(value: string): string {
-  if (
-    !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value) ||
-    ['logs', 'libraries', 'plugins', 'mods', 'config', 'versions', 'crash-reports'].includes(
-      value.toLowerCase(),
-    )
-  )
-    return invalid('minecraft_world_name');
+  if (!isManagedMinecraftWorldName(value)) return invalid('minecraft_world_name');
   return value;
 }
 export function planMinecraftWorldImport(

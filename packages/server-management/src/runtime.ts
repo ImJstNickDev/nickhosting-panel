@@ -685,7 +685,19 @@ export async function createManagementRuntime(options: ManagementOptions) {
     return digest;
   }
   const worldPreparation = options.transferCache
-    ? createMinecraftWorldPreparation(options.transferCache, consoleProviderBinding)
+    ? createMinecraftWorldPreparation(options.transferCache, consoleProviderBinding, async (id) => {
+        // A display scan publishes its preparation only when this exact lease and
+        // file generation wins. Any later receipt or inspection retires the proof.
+        const row = await db
+          .selectFrom('minecraft_world_indexes')
+          .select(['generation', 'finished_id'])
+          .where('server_id', '=', id)
+          .where('binding', '=', consoleProviderBinding)
+          .whereRef('successful_generation', '=', 'generation')
+          .where('local_binding', '=', sql<string>`minecraft_world_local_binding(${id})`)
+          .executeTakeFirst();
+        return row?.finished_id ? `${row.generation}:${row.finished_id}` : undefined;
+      })
     : undefined;
   const worldSelectionAccess = options.transferCache
     ? createWorldSelectionAccess(

@@ -24,6 +24,7 @@ import {
   type PterodactylAdapter,
   PterodactylError,
 } from '@nickhosting/pterodactyl-adapter';
+import { sql } from 'kysely';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ZipFile } from 'yazl';
 import { canonicalMinecraftJarSha256 } from '../../../games/minecraft/src/generated-launcher.js';
@@ -468,7 +469,8 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       update: async (patch) => {
         Object.assign(operation, patch);
       },
-      effect: async (phase, perform) => {
+      effect: async (phase, perform, _patch, beforeDispatch) => {
+        await beforeDispatch?.();
         operation.phase = phase;
         operation.effect_state = 'prepared';
         await perform();
@@ -487,6 +489,166 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     };
     return { f, serverId, operation, combinationId, files, context, options };
   }
+
+  it('projects Fileman and SFTP root moves once and ignores stale, failed or partial deltas', async () => {
+    const { f, serverId } = await minecraftFixture();
+    const world = {
+      name: 'world',
+      status: 'verified',
+      validation: { sha256: 'a'.repeat(64), uncompressedBytes: 72 },
+    };
+    await sql`update minecraft_world_indexes set snapshot=${JSON.stringify({ worlds: [world] })}::jsonb,
+      local_binding=minecraft_world_local_binding(${serverId}),
+      observed_at=now()-interval '1 hour',next_scan_at=now()+interval '1 hour'
+      where server_id=${serverId}`.execute(f.db);
+    const index = () =>
+      f.db
+        .selectFrom('minecraft_world_indexes')
+        .selectAll()
+        .where('server_id', '=', serverId)
+        .executeTakeFirstOrThrow();
+    const audit = async (
+      action: string,
+      outcome: string,
+      from: string,
+      to?: string,
+      date = new Date(),
+      id = randomUUID(),
+    ) =>
+      f.db
+        .insertInto('audit_events')
+        .values({
+          id,
+          actor_user_id: f.context.actorUserId,
+          subject_user_id: f.context.subjectUserId,
+          correlation_id: id,
+          action,
+          created_at: date,
+          metadata: {
+            serverId,
+            outcome,
+            worldIndexChanged: true,
+            worldMoves: minecraftWorld.minecraftWorldDirectoryMove(from, to),
+          },
+        })
+        .onConflict((c) => c.column('id').doNothing())
+        .execute();
+    const seen = new Date(Date.now() - 10_000);
+    const eventId = randomUUID();
+    await audit('server.sftp.file.rename', 'succeeded', '/world', '/Old Save è', seen, eventId);
+    const moved = await index();
+    expect(moved.snapshot).toMatchObject({ worlds: [{ ...world, name: 'Old Save è' }] });
+    expect(moved.next_scan_at.getTime()).toBeLessThanOrEqual(Date.now());
+    await audit('server.sftp.file.rename', 'succeeded', '/world', '/Old Save è', seen, eventId);
+    expect((await index()).generation).toBe(moved.generation);
+
+    await audit(
+      'server.sftp.file.rmdir',
+      'succeeded',
+      '/Old Save è',
+      undefined,
+      new Date(seen.getTime() - 1),
+    );
+    await audit('server.sftp.file.rmdir', 'failed', '/Old Save è');
+    await audit('server.files.incomplete', 'partial', 'Old Save è');
+    expect((await index()).snapshot).toEqual(moved.snapshot);
+    await audit('server.files.completed', 'succeeded', 'Old Save è', 'lobby');
+    expect((await index()).snapshot).toMatchObject({ worlds: [{ ...world, name: 'lobby' }] });
+    await audit('server.files.completed', 'succeeded', 'lobby/level.dat');
+    expect((await index()).snapshot).toMatchObject({ worlds: [] });
+  });
+
+  it('projects confirmed world mutations atomically and fences a superseded server binding', async () => {
+    const { f, serverId, operation } = await minecraftFixture();
+    const index = () =>
+      f.db
+        .selectFrom('minecraft_world_indexes')
+        .selectAll()
+        .where('server_id', '=', serverId)
+        .executeTakeFirstOrThrow();
+    await sql`update minecraft_world_indexes set snapshot=${JSON.stringify({
+      installed: true,
+      supported: true,
+      selectedWorld: 'world',
+      release: '1.21.1',
+      compatibility: 'available',
+      worlds: [{ name: 'world', status: 'verified' }],
+    })}::jsonb, local_binding=minecraft_world_local_binding(${serverId}),
+       non_world_directories=ARRAY['survival'] where server_id=${serverId}`.execute(f.db);
+    async function complete(
+      command: Record<string, unknown>,
+      importedWorld?: unknown,
+      failed = false,
+    ) {
+      await f.db
+        .updateTable('server_operations')
+        .set({
+          action: 'minecraft-content',
+          plan: JSON.stringify({
+            minecraftContent: { command },
+            minecraftImportedWorld: importedWorld,
+          }),
+        })
+        .where('job_id', '=', operation.job_id)
+        .execute();
+      await f.db
+        .updateTable('operation_jobs')
+        .set({ state: 'running', completed_at: null })
+        .where('id', '=', operation.job_id)
+        .execute();
+      await f.db
+        .updateTable('managed_servers')
+        .set({ active_operation_id: operation.job_id })
+        .where('id', '=', serverId)
+        .execute();
+      const running = await index();
+      await f.db
+        .updateTable('operation_jobs')
+        .set({ state: failed ? 'failed' : 'succeeded', completed_at: new Date() })
+        .where('id', '=', operation.job_id)
+        .execute();
+      await f.db
+        .updateTable('managed_servers')
+        .set({ active_operation_id: null })
+        .where('id', '=', serverId)
+        .execute();
+      return running;
+    }
+    const imported = {
+      name: 'survival',
+      status: 'incompatible',
+      validation: { sha256: 'a'.repeat(64), uncompressedBytes: 72, dataVersion: 169 },
+    };
+    await complete({ kind: 'world-import', targetWorld: 'survival' }, imported);
+    expect((await index()).snapshot).toMatchObject({ worlds: [{ name: 'world' }, imported] });
+    expect((await index()).non_world_directories).toEqual([]);
+    const beforeSelection = await index();
+    const selecting = await complete({ kind: 'world-select', world: 'survival' });
+    expect(selecting.generation).toBe(beforeSelection.generation);
+    expect((await index()).snapshot).toMatchObject({ selectedWorld: 'survival' });
+    await complete({ kind: 'world-remove', world: 'world' });
+    expect((await index()).snapshot).toMatchObject({ worlds: [imported] });
+    const beforePartial = await index();
+    const importing = await complete(
+      { kind: 'world-import', targetWorld: 'partial' },
+      undefined,
+      true,
+    );
+    expect(Number(importing.generation)).toBeGreaterThan(Number(beforePartial.generation));
+    const failed = await index();
+    expect(Number(failed.generation)).toBeGreaterThan(Number(importing.generation));
+    expect(failed.snapshot).toEqual(beforePartial.snapshot);
+
+    await f.db
+      .updateTable('managed_servers')
+      .set({ pterodactyl_uuid: randomUUID() })
+      .where('id', '=', serverId)
+      .execute();
+    const before = await index();
+    await complete({ kind: 'world-select', world: 'new-server-world' });
+    expect((await index()).snapshot).toEqual(before.snapshot);
+    expect(Number((await index()).generation)).toBe(Number(before.generation) + 1);
+  });
 
   async function forgeFixture(release = '1.20.1', loaderVersion = '47.4.0', javaMajor = 17) {
     const f = await minecraftFixture();
@@ -837,6 +999,37 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       spy.mockClear();
     return { ...f, entries, options };
   }
+  it('revalidates a superseded prepared selection and never writes a world removed in the meantime', async () => {
+    const f = await observedWorldSelectionFixture();
+    vi.spyOn(f.options.worldPreparation, 'isCurrent').mockResolvedValue(false);
+    f.files.delete('selected/level.dat');
+    await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
+      code: 'not_found',
+    });
+    expect(f.write).not.toHaveBeenCalled();
+  });
+  it('admits a newly discovered name on a preparation miss and leaves compatibility to live validation', async () => {
+    const f = await observedWorldSelectionFixture();
+    const prepared = await prepareMinecraftContentPlan(
+      f.f.db,
+      f.serverId,
+      { kind: 'world-select', world: 'new_name' },
+      f.options,
+    );
+    expect(prepared.world?.observation).toBeUndefined();
+    expect(prepared.world?.existing).toBe(true);
+  });
+  it('checks preparation freshness after the properties read and before dispatch', async () => {
+    const f = await observedWorldSelectionFixture();
+    vi.spyOn(f.options.worldPreparation, 'isCurrent')
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    expect(f.write).not.toHaveBeenCalled();
+    expect(f.operation.effect_state).toBe('none');
+  });
   it('selects an inspected world with one properties comparison and no world reinspection', async () => {
     const f = await observedWorldSelectionFixture();
     const queries = vi.spyOn(f.context.db, 'selectFrom');
@@ -1652,6 +1845,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
           env,
           authorize: async () => f.f.context,
         });
+        const event = vi.spyOn(f.context, 'event');
         const bulk = collision.startsWith('archive');
         let published = false;
         if (bulk) {
@@ -1884,6 +2078,16 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
           await importing;
         }
         expect(await importing).toBe(true);
+        expect(f.operation.plan.minecraftImportedWorld).toMatchObject({
+          name: 'new_world',
+          status,
+          validation: { sha256: createHash('sha256').update(level).digest('hex') },
+        });
+        expect(event).toHaveBeenCalledWith('minecraft.world.imported', {
+          world: 'new_world',
+          files: 2,
+          levelDatSha256: createHash('sha256').update(level).digest('hex'),
+        });
         expect(f.context.adapter.listFiles).toHaveBeenCalledTimes(2);
         expect(f.context.adapter.listFiles).toHaveBeenCalledWith(
           f.context.server.pterodactyl_identifier,

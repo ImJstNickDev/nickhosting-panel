@@ -99,12 +99,30 @@ describe('private Minecraft world preparation', () => {
       properties: snapshot.properties,
     });
     const call = vi.mocked(f.cache.put).mock.calls[0];
-    expect(call?.[0]).toMatch(/^minecraft\.world-preparation\.v1:[a-f0-9]{64}$/);
+    expect(call?.[0]).toMatch(/^minecraft\.world-preparation\.v2:[a-f0-9]{64}$/);
     expect(call?.[0]).not.toMatch(/owner-private|private-provider-binding|private-value|world\n/);
     expect(call?.[2]).toBe(ttlMs);
     expect(f.cache.take).not.toHaveBeenCalled();
   });
 
+  it('only exposes the winning scan at its committed file generation, including after a late cache write', async () => {
+    const { cache } = fixture();
+    let current: string | undefined;
+    const helper = createMinecraftWorldPreparation(cache, 'provider', async () => current);
+    await helper.save(server, 'combination', snapshot, '3:first');
+    expect(await helper.read(server, 'combination')).toBeUndefined();
+    current = '3:first';
+    expect((await helper.read(server, 'combination'))?.revision).toBe(current);
+    expect(await helper.isCurrent(server, current)).toBe(true);
+    current = '4:second';
+    await helper.save(server, 'combination', snapshot, '3:first');
+    expect(await helper.isCurrent(server, '3:first')).toBe(false);
+    expect(await helper.read(server, 'combination')).toBeUndefined();
+    await helper.save(server, 'combination', snapshot, '4:second');
+    expect((await helper.read(server, 'combination'))?.worlds).toHaveLength(1);
+    current = undefined;
+    expect(await helper.isCurrent(server, undefined)).toBe(false);
+  });
   it('expires independently of the cache transport and rejects future observations', async () => {
     const f = fixture();
     await f.helper.save(server, 'combination', snapshot);

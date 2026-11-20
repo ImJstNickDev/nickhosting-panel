@@ -1529,33 +1529,35 @@ the shared lock, current authorization and durable actor/subject audit. There is
 no automatic replay. See [Players workspace](M5-MINECRAFT-PLAYERS.md) for identity,
 file bounds, recovery semantics and limitations.
 
-### Minecraft Worlds inventory — 2026-10-17
+### Minecraft Worlds inventory
 
-`GET /v1/servers/:id/minecraft/worlds` now returns an object instead of the old
-array: `{ installed, supported, selectedWorld, release, compatibility, worlds }`.
-`selectedWorld` is the observed `server.properties` value (default `world` when
-omitted); it can refer to a world not generated yet. `compatibility` is `available`
-or `unavailable`; a missing expected DataVersion does not erase the inventory.
-Each world retains `{ name, status, validation? }`, with `status` equal to
-`verified`, `incompatible` or `unavailable`, and bounded version metadata when
-readable. No arbitrary NBT or file content is exposed. The trusted script helper
-`listMinecraftWorlds` keeps its array return contract.
+`GET /v1/servers/:id/minecraft/worlds?cached=1` returns the last observed inventory
+for the current managed server binding, or JSON `null` on a cold read. Opening
+Worlds shows that observation immediately and revalidates with
+`GET /v1/servers/:id/minecraft/worlds`. The fresh read joins an ongoing scan for
+the same server. Both routes require `game.minecraft.worlds.read` and use
+`Cache-Control: no-store`. The archive and mutation routes continue to verify their
+own permissions, current server identity and operation preconditions.
 
-Inventory uses `server:read`, current session/managed identity through the shared
-Fileman access helper, no-store responses and reauthorization during/following
-reads. At most two candidate readers run concurrently. Existing `world-import`,
-`world-select` and `world-remove` durable command contracts are unchanged and
-remain `server:manage` operations. As of 2026-10-18, additive world import may
-run while running into a new folder other than the configured active world.
-Selection/removal/replacement still require offline state. World DataVersion now
-comes from the integration's bundled exact-release catalog, not signed installation
-reports; unknown and historical pre-DataVersion releases remain unavailable. The frontend checks expected
-eligibility but authoritative validation remains in the worker.
+The snapshot contains `installed`, `supported`, `selectedWorld`, `release`,
+`compatibility` and `worlds`. The selection comes from `level-name` and defaults
+to `world` when omitted. Each world has a name, a status and optional bounded
+version metadata. An externally created world can have a name with spaces or
+Unicode. The stricter existing name rules still apply to managed operations.
+A failed refresh leaves the previous inventory available under the same binding.
 
-Downloads use the existing `/v1/servers/:id/files/archive` endpoint with root `''`
-and the selected world directory; they retain file-transfer authorization and
-streaming bounds. This is not a new backup or consistency guarantee. No new
-settings, migrations, credentials or external API are required.
+Each installed Minecraft server has a stable offset in a 60-second reconciliation
+cycle. Successful world operations update a prepared inventory from their
+receipts. Relevant Fileman and SFTPGo changes request reconciliation when their
+receipts commit. The worker also reconciles external filesystem changes, including
+worlds added or removed by plugins. Overlapping reads and mutations are fenced
+so an older scan cannot undo a newer change.
+
+`GET /v1/servers/:id/minecraft/worlds/fileman` requires `files.read` and returns
+only `worlds` (directory names), `selectedWorld`, and `nonWorldDirectories`.
+Fileman uses the projection only at the Minecraft server root. Unclassified
+directories that could be worlds stay visible. A cold read returns empty arrays
+and a null selection. Neither cached endpoint starts a provider scan.
 
 World directory selection (2026-10-18) is a browser input alternative, not a new
 API contract: the worker prepares a ZIP source and uses the same authenticated
