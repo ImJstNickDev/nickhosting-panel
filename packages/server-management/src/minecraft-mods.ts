@@ -16,6 +16,7 @@ import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import { minecraftContentCapabilities } from '../../../games/minecraft/src/content-capabilities.js';
 import {
+  githubReleaseSource,
   type MinecraftModAlternatives,
   type MinecraftModMetadata,
   type MinecraftModSelection,
@@ -40,11 +41,11 @@ import type {
 import type { Environment } from './admission.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { minecraftAddonProviders } from './minecraft-addon-providers.js';
+import { getMinecraftContentProfile } from './minecraft-content-profile.js';
 import { datapackReceipts, datapackStateRows } from './minecraft-datapack-dependencies.js';
 import { githubModArtifact, matchesGithubModLoader } from './minecraft-github-mod.js';
 import { modAlternativeAdvice, modUpdateAdvice } from './minecraft-mod-advice.js';
 import { resolveModsAutomatically } from './minecraft-mod-auto-resolution.js';
-import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
 import { permissionRuntime } from './permission-runtime.js';
 import { authorizeServer, parse } from './registry.js';
@@ -139,6 +140,16 @@ const identities = (plan: Plan) => [
     : []),
   ...plan.aliases,
 ];
+function projectVersions(references: z.infer<typeof ref>[]) {
+  const projects = new Map<string, Set<string | undefined>>();
+  for (const reference of references) {
+    const key = `${reference.provider}:${reference.projectId}`;
+    const versions = projects.get(key) ?? new Set<string | undefined>();
+    versions.add(reference.versionId || undefined);
+    projects.set(key, versions);
+  }
+  return projects;
+}
 const uniqueRefs = (values: z.infer<typeof ref>[]) => [
   ...new Map(values.map((value) => [JSON.stringify(value), value])).values(),
 ];
@@ -214,6 +225,25 @@ function metadata(item: ModResolutionItem): MinecraftModMetadata {
     loaders: item.version.loaders,
   };
 }
+export async function minecraftAddonProfile(
+  db: Kysely<Database>,
+  serverId: string,
+  directory: 'mods' | 'plugins',
+) {
+  const value = await getMinecraftContentProfile(db, serverId);
+  const { release, profile: loader, loaderVersion } = value.combination;
+  const target: ContentTarget = {
+    minecraftVersion: release,
+    loader,
+    ...(loaderVersion ? { loaderVersion } : {}),
+  };
+  return {
+    installed: value.installed,
+    target,
+    supported: minecraftContentCapabilities(target.loader)[directory],
+  };
+}
+
 export function createMinecraftModsService(options: {
   db: Kysely<Database>;
   runtime: ManagementRuntime;
@@ -379,27 +409,6 @@ export function createMinecraftModsService(options: {
     );
     return { actor, server };
   }
-  async function profile(connection: Kysely<Database>, serverId: string) {
-    const value = await connection
-      .selectFrom('minecraft_server_profiles')
-      .selectAll()
-      .where('server_id', '=', serverId)
-      .executeTakeFirst();
-    if (!value) throw new DomainError('not_found');
-    const choice = await inspectMinecraftCombination(connection, value.combination_id, env);
-    const target: ContentTarget = {
-      minecraftVersion: choice.combination.release,
-      loader: choice.combination.profile as ContentTarget['loader'],
-      ...(choice.combination.loaderVersion
-        ? { loaderVersion: choice.combination.loaderVersion }
-        : {}),
-    };
-    return {
-      installed: value.installed,
-      target,
-      supported: minecraftContentCapabilities(target.loader)[directory],
-    };
-  }
   async function draft(connection: Kysely<Database>, serverId: string) {
     return connection
       .selectFrom(tables.drafts)
@@ -437,14 +446,16 @@ export function createMinecraftModsService(options: {
     serverId: string,
     entries: readonly FilemanEntry[],
   ) {
+    if (!entries.length) return [];
+    const byName = new Map(entries.map((entry) => [entry.name, entry]));
     const stored = await connection
       .selectFrom(tables.receipts)
-      .selectAll()
+      .select(['path', 'receipt'])
       .where('server_id', '=', serverId)
       .execute();
     return stored.flatMap((row) => {
       const parsed = recordSchema.safeParse(row.receipt),
-        entry = entries.find((file) => file.name === leaf(row.path));
+        entry = byName.get(leaf(row.path));
       return parsed.success &&
         entry?.kind === 'file' &&
         entry.size === parsed.data.size &&
@@ -457,16 +468,16 @@ export function createMinecraftModsService(options: {
     if (!alreadyAuthorized) await authorized(context, serverId);
     const marker = await db
       .selectFrom(tables.restart)
-      .selectAll()
-      .where('server_id', '=', serverId)
+      .leftJoin(
+        'gateway_server_states as gateway',
+        'gateway.server_id',
+        `${tables.restart}.server_id`,
+      )
+      .select(['changed_at', 'gateway.process_started_at'])
+      .where(`${tables.restart}.server_id`, '=', serverId)
       .executeTakeFirst();
     if (!marker) return { required: false };
-    const gateway = await db
-      .selectFrom('gateway_server_states')
-      .select('process_started_at')
-      .where('server_id', '=', serverId)
-      .executeTakeFirst();
-    let started = gateway?.process_started_at;
+    let started = marker.process_started_at;
     if (!started || Date.parse(started) <= marker.changed_at.getTime())
       try {
         started = await runtime.lifecycle.observeProviderProcessStart?.(serverId, db);
@@ -535,15 +546,11 @@ export function createMinecraftModsService(options: {
       .filter(([path]) => path.endsWith('.jar'))
       .map(([, plan]) => plan)
       .filter((plan) => plan.metadata || plan.githubUrl);
-    const matches = (reference: z.infer<typeof ref>) =>
-      enabled.some((plan) =>
-        identities(plan).some(
-          (identity) =>
-            identity.provider === reference.provider &&
-            identity.projectId === reference.projectId &&
-            (!reference.versionId || identity.versionId === reference.versionId),
-        ),
-      );
+    const projects = projectVersions(enabled.flatMap(identities));
+    const matches = (reference: z.infer<typeof ref>) => {
+      const versions = projects.get(`${reference.provider}:${reference.projectId}`);
+      return versions !== undefined && (!reference.versionId || versions.has(reference.versionId));
+    };
     const runtimeIds = new Set<string>();
     for (const plan of enabled) {
       if (plan.runtimeModId) {
@@ -566,58 +573,64 @@ export function createMinecraftModsService(options: {
         });
     }
     if (kind === 'plugin') return;
-    // Retained catalog datapacks share this graph. One directory batch, no per-file requests.
-    const worlds = await connection
-      .selectFrom('minecraft_datapack_changes')
-      .select('world')
-      .distinct()
-      .where('server_id', '=', serverId)
-      .execute();
-    const packs = (
-      await Promise.all(
-        worlds.map(async ({ world }) =>
-          datapackReceipts(await datapackStateRows(connection, serverId, world)),
-        ),
-      )
-    )
-      .flat()
-      .filter((pack) => pack.enabled);
-    const dirs = [...new Set(packs.map((pack) => pack.path.slice(0, pack.path.lastIndexOf('/'))))];
-    const found = dirs.length ? await files.listMany(dirs) : [];
+    // Retained catalog datapacks share this graph. Only a potential blocker needs live file evidence.
+    const currentPacks = await datapackStateRows(connection, serverId);
+    const byWorld = new Map<string, typeof currentPacks>();
+    for (const row of currentPacks) {
+      const rows = byWorld.get(row.world);
+      if (rows) rows.push(row);
+      else byWorld.set(row.world, [row]);
+    }
+    const packs = [...byWorld.values()].flatMap(datapackReceipts).filter((pack) => pack.enabled);
+    if (!packs.length) return;
+    const conflicts = projectVersions(enabled.flatMap((plan) => plan.conflicts));
+    const candidates = new Map<
+      string,
+      {
+        pack: (typeof packs)[number];
+        reason: 'content_dependency_missing' | 'content_dependency_conflict';
+      }[]
+    >();
     for (const pack of packs) {
-      const dir = found.find(
-        (item) => item.directory === pack.path.slice(0, pack.path.lastIndexOf('/')),
-      );
-      if (!dir || !('files' in dir)) {
-        if (dir && 'error' in dir && dir.error === 'not_found') continue;
-        throw new DomainError('integration_unavailable');
-      }
-      const entry = dir.files.find((item) => item.name === leaf(pack.path));
-      if (!entry || entry.size !== pack.size || entry.modifiedAt !== pack.modifiedAt) continue;
-      for (const mod of pack.catalog.mods)
-        if (
+      const missing = pack.catalog.mods.some(
+        (mod) =>
           !matches({
             provider: pack.catalog.provider,
             projectId: mod.projectId,
             versionId: mod.versionId,
-          })
-        )
-          throw new DomainError('content_dependency_missing');
-      if (
-        pack.catalog.conflicts.some((item) => matches({ provider: pack.catalog.provider, ...item }))
-      )
-        throw new DomainError('content_dependency_conflict');
-      if (
-        enabled.some((plan) =>
-          plan.conflicts.some(
-            (item) =>
-              item.provider === pack.catalog.provider &&
-              item.projectId === pack.catalog.projectId &&
-              (!item.versionId || item.versionId === pack.catalog.versionId),
-          ),
-        )
-      )
-        throw new DomainError('content_dependency_conflict');
+          }),
+      );
+      const exclusions = conflicts.get(`${pack.catalog.provider}:${pack.catalog.projectId}`);
+      const conflict =
+        exclusions?.has(undefined) ||
+        exclusions?.has(pack.catalog.versionId) ||
+        pack.catalog.conflicts.some((item) =>
+          matches({ provider: pack.catalog.provider, ...item }),
+        );
+      if (!missing && !conflict) continue;
+      const directory = pack.path.slice(0, pack.path.lastIndexOf('/'));
+      const group = candidates.get(directory) ?? [];
+      group.push({
+        pack,
+        reason: missing ? 'content_dependency_missing' : 'content_dependency_conflict',
+      });
+      candidates.set(directory, group);
+    }
+    const dirs = [...candidates.keys()];
+    for (let i = 0; i < dirs.length; i += 100) {
+      const batch = dirs.slice(i, i + 100);
+      const found = new Map((await files.listMany(batch)).map((dir) => [dir.directory, dir]));
+      for (const path of batch) {
+        const dir = found.get(path);
+        if (dir && 'error' in dir && dir.error === 'not_found') continue;
+        if (!dir || !('files' in dir)) throw new DomainError('integration_unavailable');
+        const entries = new Map(dir.files.map((file) => [file.name, file]));
+        for (const { pack, reason } of candidates.get(path) ?? []) {
+          const entry = entries.get(leaf(pack.path));
+          if (entry && entry.size === pack.size && entry.modifiedAt === pack.modifiedAt)
+            throw new DomainError(reason);
+        }
+      }
     }
   }
   async function refreshDraftGraph(
@@ -743,7 +756,10 @@ export function createMinecraftModsService(options: {
     signal: AbortSignal,
   ) {
     await cleanupTasks.get(taskKey(serverId));
-    const [info, config] = await Promise.all([profile(db, serverId), getSettings(db, env)]);
+    const [info, config] = await Promise.all([
+      minecraftAddonProfile(db, serverId, directory),
+      getSettings(db, env),
+    ]);
     if (!info.supported || !info.installed) throw new DomainError('integration_unavailable');
     const observed = await runtime.fileReadScope(
       context,
@@ -1133,7 +1149,10 @@ export function createMinecraftModsService(options: {
               if (result !== id) return;
             }
             await checkRevision(connection, serverId, revision);
-            if (digest((await profile(connection, serverId)).target) !== digest(target))
+            if (
+              digest((await minecraftAddonProfile(connection, serverId, directory)).target) !==
+              digest(target)
+            )
               throw new DomainError('content_plan_expired');
             signal.throwIfAborted();
             const row = await connection
@@ -1451,7 +1470,7 @@ export function createMinecraftModsService(options: {
     }
   }
   return {
-    profile: (serverId: string) => profile(db, serverId),
+    profile: (serverId: string) => minecraftAddonProfile(db, serverId, directory),
     restartStatus,
     async updates(
       context: AuthContext,
@@ -1460,7 +1479,7 @@ export function createMinecraftModsService(options: {
     ): Promise<MinecraftModUpdates> {
       await authorized(context, serverId);
       const [info, stored] = await Promise.all([
-        profile(db, serverId),
+        minecraftAddonProfile(db, serverId, directory),
         db
           .selectFrom(tables.receipts)
           .select(['path', 'receipt'])
@@ -1511,7 +1530,7 @@ export function createMinecraftModsService(options: {
     ): Promise<MinecraftModAlternatives> {
       await authorized(context, serverId);
       const [info, current, config] = await Promise.all([
-        profile(db, serverId),
+        minecraftAddonProfile(db, serverId, directory),
         draft(db, serverId),
         getSettings(db, env),
       ]);
@@ -1559,12 +1578,12 @@ export function createMinecraftModsService(options: {
         context,
         serverId,
         async (files, _identifier, connection, _actor, server) => {
-          const restart = await restartStatus(context, serverId, true);
           queueCleanup(context, serverId);
-          const [info, current, changes] = await Promise.all([
-            profile(connection, serverId),
+          const [info, current, changes, restart] = await Promise.all([
+            minecraftAddonProfile(connection, serverId, directory),
             draft(connection, serverId),
             rows(connection, serverId),
+            restartStatus(context, serverId, true),
           ]);
           const cached = inventoryCache.get(taskKey(serverId));
           // A direct change row is inserted only once its writer holds the server
@@ -1600,7 +1619,9 @@ export function createMinecraftModsService(options: {
             if (entries.length <= 2000 && JSON.stringify(entries).length <= 1024 ** 2)
               inventoryCache.set(taskKey(serverId), { expires: Date.now() + 30_000, entries });
           }
-          const existing = await receipts(connection, serverId, entries);
+          const existing = new Map(
+            (await receipts(connection, serverId, entries)).map(({ path, plan }) => [path, plan]),
+          );
           const selected = current
             ? parse(selectionSchema, current.selection)
             : { roots: [], preferBeta: false };
@@ -1629,21 +1650,22 @@ export function createMinecraftModsService(options: {
                   /\.jar(?:\.disabled)?$/.test(entry.name) &&
                   !entry.name.startsWith('.'),
               )
-              .map((entry) => ({
-                id: `${directory}/${entry.name}`,
-                path: `${directory}/${entry.name}`,
-                name: entry.name,
-                size: entry.size,
-                state: entry.name.endsWith('.disabled')
-                  ? ('disabled' as const)
-                  : ('enabled' as const),
-                metadata:
-                  existing.find((item) => item.path === `${directory}/${entry.name}`)?.plan
-                    .metadata ?? null,
-                aliases:
-                  existing.find((item) => item.path === `${directory}/${entry.name}`)?.plan
-                    .aliases ?? [],
-              })),
+              .map((entry) => {
+                const path = `${directory}/${entry.name}`;
+                const record = existing.get(path);
+                return {
+                  id: path,
+                  path,
+                  name: entry.name,
+                  size: entry.size,
+                  state: entry.name.endsWith('.disabled')
+                    ? ('disabled' as const)
+                    : ('enabled' as const),
+                  githubRelease: githubReleaseSource(record?.githubUrl),
+                  metadata: record?.metadata ?? null,
+                  aliases: record?.aliases ?? [],
+                };
+              }),
             changes: own.map((row) => {
               const plan = parse(planSchema, row.plan);
               return {
@@ -1677,7 +1699,7 @@ export function createMinecraftModsService(options: {
     async select(context: AuthContext, serverId: string, input: unknown) {
       const value = parse(selectionSchema, input);
       const { actor } = await authorized(context, serverId, true);
-      const info = await profile(db, serverId);
+      const info = await minecraftAddonProfile(db, serverId, directory);
       if (!info.supported || !info.installed) throw new DomainError('integration_unavailable');
       if (
         new Set(value.roots.map((root) => `${root.provider}:${root.projectId}`)).size !==
@@ -1696,12 +1718,11 @@ export function createMinecraftModsService(options: {
             return { revision: previous.revision, fresh: false };
           }
         }
-        if (
-          (await rows(tx, serverId)).some((row) => ['dispatched', 'uncertain'].includes(row.state))
-        )
+        const activeChanges = await rows(tx, serverId);
+        if (activeChanges.some((row) => ['dispatched', 'uncertain'].includes(row.state)))
           throw new DomainError('operation_uncertain');
         const next = (previous?.revision ?? 0) + 1;
-        const direct = (await rows(tx, serverId)).filter(
+        const direct = activeChanges.filter(
           (row) => row.action === 'install' && parse(planSchema, row.plan).githubUrl,
         );
         if (direct.some((row) => row.state === 'queued' || row.state === 'preparing'))
@@ -1763,7 +1784,7 @@ export function createMinecraftModsService(options: {
     async github(context: AuthContext, serverId: string, input: unknown, signal: AbortSignal) {
       const value = parse(minecraftGithubModRequestSchema, input);
       const { actor } = await authorized(context, serverId, true);
-      const info = await profile(db, serverId);
+      const info = await minecraftAddonProfile(db, serverId, directory);
       if (kind !== 'mod' || !info.supported || !info.installed)
         throw new DomainError('integration_unavailable');
       async function replay(connection: Kysely<Database>) {
@@ -1928,7 +1949,7 @@ export function createMinecraftModsService(options: {
               throw new DomainError('conflict');
             return { changeId: previous.id };
           }
-          const info = await profile(connection, serverId);
+          const info = await minecraftAddonProfile(connection, serverId, directory);
           if (!info.supported) throw new DomainError('integration_unavailable');
           const entries = await list(runtime.fileReadPhase(identifier, server)),
             entry = entries.find((entry) => entry.name === leaf(value.path));
@@ -2073,7 +2094,7 @@ export function createMinecraftModsService(options: {
                   },
                 };
               }
-              const info = await profile(tx, serverId);
+              const info = await minecraftAddonProfile(tx, serverId, directory);
               if (!info.supported || !info.installed)
                 throw new DomainError('integration_unavailable');
               const to =
@@ -2262,7 +2283,7 @@ export function createMinecraftModsService(options: {
             await authorizeChanges(tx, current, serverId, changes);
             if (!changes.length || changes.some((row) => row.state !== 'ready'))
               throw new DomainError('conflict');
-            const currentTarget = (await profile(tx, serverId)).target;
+            const currentTarget = (await minecraftAddonProfile(tx, serverId, directory)).target;
             if (
               changes.some(
                 (row) =>

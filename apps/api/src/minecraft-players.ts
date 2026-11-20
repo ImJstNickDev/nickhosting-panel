@@ -6,13 +6,13 @@ import type { FilemanReadService } from '@nickhosting/game-sdk';
 import {
   createMinecraftIdentityProvider,
   type MinecraftCombination,
+  minecraftDeclaredCapabilities,
   minecraftPlayerPermission,
   verifyMinecraftPlayer,
 } from '@nickhosting/minecraft';
 import type { ConsoleRelay } from '@nickhosting/pterodactyl-adapter';
 import {
   createFilemanReadService,
-  inspectMinecraftCombination,
   type ManagementRuntime,
   parse,
 } from '@nickhosting/server-management';
@@ -30,6 +30,7 @@ import {
   parseMinecraftWhitelistProperties,
 } from '../../../games/minecraft/src/player-management.js';
 import { minecraftStoredConfigurationSchema } from '../../../packages/server-management/src/minecraft-content-contracts.js';
+import { getMinecraftContentProfile } from '../../../packages/server-management/src/minecraft-content-profile.js';
 import { discoverMinecraftPlayers } from '../../../packages/server-management/src/minecraft-player-details.js';
 import { permissionRuntime } from '../../../packages/server-management/src/permission-runtime.js';
 import type { Variables } from './app.js';
@@ -62,12 +63,15 @@ async function readPlayerFiles(files: FilemanReadService) {
     const bytes = values.get(path);
     return bytes === undefined ? '[]' : Buffer.from(bytes).toString('utf8');
   };
-  return parseMinecraftPlayerFiles({
-    operators: text('ops.json'),
-    whitelist: text('whitelist.json'),
-    banned: text('banned-players.json'),
-    properties: text('server.properties'),
-  });
+  return {
+    values,
+    parsed: parseMinecraftPlayerFiles({
+      operators: text('ops.json'),
+      whitelist: text('whitelist.json'),
+      banned: text('banned-players.json'),
+      properties: text('server.properties'),
+    }),
+  };
 }
 /** Each confirmation opens a fresh read scope: a previous observation never
  * confirms a later command, and unrelated lists are not fetched or reconciled. */
@@ -169,17 +173,11 @@ export function registerMinecraftPlayerRoutes(
   const { db, env, principal, body, management } = options;
   const online = new Map<string, { expires: number; result: Promise<Online> }>();
   async function profile(connection: typeof db, serverId: string) {
-    const value = await connection
-      .selectFrom('minecraft_server_profiles')
-      .selectAll()
-      .where('server_id', '=', serverId)
-      .executeTakeFirst();
-    if (!value) throw new DomainError('not_found');
-    const choice = await inspectMinecraftCombination(connection, value.combination_id, env);
+    const { installed, combination } = await getMinecraftContentProfile(connection, serverId);
     return {
-      value,
-      supported: choice.capabilities.playerManagement,
-      runtime: choice.combination.profile,
+      installed,
+      supported: minecraftDeclaredCapabilities(combination).playerManagement,
+      runtime: combination.profile,
     };
   }
   app.get('/v1/servers/:id/minecraft/players', async (c) => {
@@ -188,26 +186,30 @@ export function registerMinecraftPlayerRoutes(
     const result = await service.fileReadScope(
       context,
       c.req.param('id'),
-      async (files, _id, connection, current) => {
+      async (files, _id, connection) => {
         const state = await profile(connection, c.req.param('id'));
-        if (!state.supported || !state.value.installed)
+        if (!state.supported || !state.installed)
           return {
             supported: state.supported,
-            installed: state.value.installed,
+            installed: state.installed,
             operators: [],
             whitelist: [],
             banned: [],
             whitelistEnabled: false,
             enforceWhitelist: false,
           };
-        void service
-          .prepareFileWrites(current, c.req.param('id'), [
-            'ops.json',
-            'whitelist.json',
-            'server.properties',
-          ])
-          .catch(() => {});
-        const known = await discoverMinecraftPlayers(files)
+        const [membership, root] = await Promise.allSettled([
+          readPlayerFiles(files),
+          files.list(''),
+        ]);
+        if (membership.status === 'rejected') throw membership.reason;
+        const known = await (root.status === 'fulfilled'
+          ? discoverMinecraftPlayers(files, {
+              root: root.value,
+              rootFiles: membership.value.values,
+            })
+          : Promise.reject(root.reason)
+        )
           .then((result) => ({
             knownPlayers: result.knownPlayers,
             knownPlayersState: 'available' as const,
@@ -217,7 +219,7 @@ export function registerMinecraftPlayerRoutes(
           supported: true,
           installed: true,
           ...known,
-          ...(await readPlayerFiles(files)),
+          ...membership.value.parsed,
         };
       },
       c.req.raw.signal,
@@ -241,7 +243,7 @@ export function registerMinecraftPlayerRoutes(
       }),
     );
     let result: Online = unavailable();
-    if (state.supported && state.value.installed) {
+    if (state.supported && state.installed) {
       const binding = await service.consoleBindingForServer(serverId);
       const key = JSON.stringify([
         serverId,
@@ -304,7 +306,7 @@ export function registerMinecraftPlayerRoutes(
         : undefined;
     await service.fileMutationAccess(context, serverId, async (id, connection, current) => {
       const state = await profile(connection, serverId);
-      if (!state.supported || !state.value.installed) throw new DomainError('conflict');
+      if (!state.supported || !state.installed) throw new DomainError('conflict');
       if ((await service.adapter.getResources(id)).current_state !== 'running')
         throw new DomainError('conflict');
       if ('expectedUuid' in input && input.expectedUuid && identityProvider) {
@@ -368,10 +370,12 @@ export function registerMinecraftPlayerRoutes(
             // Merge only the confirmed list/property into the latest stored object.
             // A command touching one list must not overwrite unrelated settings.
             if (snapshot.kind === 'operators' || snapshot.kind === 'whitelist') {
-              const configuration = parse(
-                minecraftStoredConfigurationSchema,
-                state.value.configuration,
-              );
+              const stored = await connection
+                .selectFrom('minecraft_server_profiles')
+                .select('configuration')
+                .where('server_id', '=', serverId)
+                .executeTakeFirstOrThrow();
+              const configuration = parse(minecraftStoredConfigurationSchema, stored.configuration);
               const observedAt = new Date().toISOString();
               const observe = <T extends { name: string; uuid: string }>(players: T[]) =>
                 players.map((player) => ({

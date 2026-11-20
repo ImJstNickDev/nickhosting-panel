@@ -231,3 +231,65 @@
     transition: none;
   }
 }
+
+.minecraft-version-dialog {
+  width: min(480px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+}
+.minecraft-version-fields,
+.minecraft-version-modes {
+  display: grid;
+  gap: 14px;
+  margin-block: 20px;
+}
+.minecraft-version-dialog .dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 20px;
+}
+.minecraft-version-target {
+  margin-block: 6px 16px;
+  color: var(--muted);
+}
+.minecraft-version-modes legend {
+  margin-bottom: 10px;
+  font-weight: 600;
+}
+.minecraft-version-modes > label:not(.check) {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.minecraft-version-modes > label:has(input:checked):not(.check) {
+  border-color: var(--blue);
+}
+.minecraft-version-modes input[type="radio"] {
+  flex: 0 0 18px;
+  width: 18px;
+  min-height: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  padding: 0;
+  accent-color: var(--blue);
+}
+.minecraft-version-dialog .dialog-close-icon {
+  width: 36px;
+  min-height: 36px;
+  padding: 6px;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+}
+.minecraft-version-modes small {
+  display: block;
+  color: var(--muted);
+  margin-top: 4px;
+}

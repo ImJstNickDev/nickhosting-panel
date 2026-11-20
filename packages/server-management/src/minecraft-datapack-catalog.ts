@@ -13,6 +13,7 @@ import type { Kysely } from 'kysely';
 import { z } from 'zod';
 import type { MinecraftDatapackCatalogPlan } from '../../../games/minecraft/src/datapack-contracts.js';
 import type { Environment } from './admission.js';
+import { getMinecraftContentProfile } from './minecraft-content-profile.js';
 import {
   type DatapackProvenance,
   type DatapackReceipt,
@@ -23,7 +24,6 @@ import {
 } from './minecraft-datapack-dependencies.js';
 import { createMinecraftDatapackService } from './minecraft-datapacks.js';
 import { minecraftModContentReceipts } from './minecraft-mod-receipts.js';
-import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { createMinecraftSourceStore } from './minecraft-sources.js';
 import { permissionRuntime } from './permission-runtime.js';
 import type { ManagementRuntime } from './runtime.js';
@@ -95,18 +95,16 @@ export function createMinecraftDatapackCatalogService(options: {
     modProjects: ReadonlySet<string>,
   ) {
     return runtime.fileReadScope(context, serverId, async (files, _identifier, connection) => {
-      const profile = await connection
-        .selectFrom('minecraft_server_profiles')
-        .selectAll()
-        .where('server_id', '=', serverId)
-        .executeTakeFirst();
-      if (!profile?.installed) throw new DomainError('integration_unavailable');
-      const combination = await inspectMinecraftCombination(
-        connection,
-        profile.combination_id,
-        env,
-      );
-      const rows = await datapackStateRows(connection, serverId, world);
+      const profile = await getMinecraftContentProfile(connection, serverId).catch((error) => {
+        if (error instanceof DomainError && error.code === 'not_found')
+          throw new DomainError('integration_unavailable');
+        throw error;
+      });
+      if (!profile.installed) throw new DomainError('integration_unavailable');
+      const [rows, modRows] = await Promise.all([
+        datapackStateRows(connection, serverId, world),
+        minecraftModContentReceipts(connection, serverId, db),
+      ]);
       const candidates = datapackReceipts(rows);
       const draftSchema = z.object({
         from: z.string(),
@@ -120,7 +118,6 @@ export function createMinecraftDatapackCatalogService(options: {
           const parsed = draftSchema.safeParse(row.plan);
           return parsed.success ? [parsed.data] : [];
         });
-      const modRows = await minecraftModContentReceipts(connection, serverId, db);
       const mods = modRows.flatMap((row) => {
         const parsed = modSchema.safeParse(row.artifact);
         return parsed.success &&
@@ -171,7 +168,7 @@ export function createMinecraftDatapackCatalogService(options: {
       const verifiedMods: DatapackProvenance['mods'] = [];
       // Only explicit, previously installed provider identities may satisfy a mod requirement.
       // Hash once during preparation, then retain the observed size/mtime for the Apply fence.
-      if (['fabric', 'forge', 'neoforge', 'quilt'].includes(combination.combination.profile)) {
+      if (['fabric', 'forge', 'neoforge', 'quilt'].includes(profile.combination.profile)) {
         for (const mod of mods.filter((mod) => modProjects.has(mod.projectId))) {
           const entry = entries.get(mod.path);
           if (
@@ -197,7 +194,7 @@ export function createMinecraftDatapackCatalogService(options: {
         }
       }
       return {
-        version: combination.combination.release,
+        version: profile.combination.release,
         receipts,
         mods: verifiedMods,
         modCatalog: mods.filter((mod) => entries.get(mod.path)?.kind === 'file'),

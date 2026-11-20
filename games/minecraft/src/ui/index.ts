@@ -28,6 +28,7 @@ import { minecraftPermissionMessages } from './permissions-catalog.js';
 import { minecraftPlayersMessages } from './players-catalog.js';
 import { minecraftPluginsMessages } from './plugins-catalog.js';
 import { minecraftRuntimeArtwork, minecraftRuntimeLogos } from './runtime-artwork.js';
+import { minecraftVersionChangeMessages } from './version-change-catalog.js';
 import { minecraftWorldsMessages } from './worlds-catalog.js';
 
 export { minecraftFormattingTokens } from '../message-formatting.js';
@@ -46,6 +47,7 @@ const translated: Record<string, [string, string]> = {
   ...minecraftModpacksMessages,
   ...minecraftPluginsMessages,
   ...minecraftWorldsMessages,
+  ...minecraftVersionChangeMessages,
   'messages.disconnected': ['Failed to connect to the server', 'Connessione al server fallita'],
   'messages.back': ['Back to Server List', 'Torna alla lista dei server'],
   'messages.source': ['Text codes', 'Codici di testo'],
@@ -591,6 +593,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
   runtimeArtwork: minecraftRuntimeArtwork,
   fileEntryGroup: minecraftFileEntryGroup,
   fileRootGroups: minecraftFileRootGroups,
+  sectionQueryParameters: { datapacks: 'world' },
   sectionPreviews: {
     worlds: async (client, context) => {
       const worlds = await createMinecraftUiController(client).cachedWorlds(
@@ -645,7 +648,12 @@ export const minecraftUiModule = defineTrustedGameUiModule({
         );
         if (!result.derived) throw new MinecraftUiError('integration_unavailable');
         return {
-          values: { ...context.values, choiceId: result.derived.choiceId },
+          values: {
+            ...context.values,
+            choiceId: result.derived.choiceId,
+            runtime: result.derived.runtime,
+            loaderVersion: result.derived.loaderVersion,
+          },
           summary: [
             {
               labelKey: k('fields.choiceId'),
@@ -736,10 +744,8 @@ export const minecraftUiModule = defineTrustedGameUiModule({
     create: async (client, context) => {
       const controller = createMinecraftUiController(client),
         v = context.values;
-      let choiceId = v.choiceId;
-      if (v.sourceMode === 'modpack')
-        choiceId = (await controller.inspectModpack(z.uuid().parse(v.sourceId), context.signal))
-          .derived?.choiceId;
+      // The host runs prepare-create immediately before submission. The API
+      // checks the archive against the selected immutable runtime again at admission.
       return controller.create(
         {
           idempotencyKey: intent(context),
@@ -749,7 +755,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
           autoStart: v.autoStart ?? true,
           connection: v.connection,
           minecraft: {
-            choiceId,
+            choiceId: v.choiceId,
             ...(['fabric', 'quilt', 'forge', 'neoforge'].includes(String(v.runtime))
               ? { loaderVersion: v.loaderVersion }
               : {}),
@@ -767,7 +773,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
       );
     },
     properties: async (client, context): Promise<UiSectionData> => {
-      const profile = await createMinecraftUiController(client).profile(
+      const profile = await createMinecraftUiController(client).properties(
         server(context),
         context.signal,
       );
@@ -835,11 +841,31 @@ export const minecraftUiModule = defineTrustedGameUiModule({
       return { values: {}, rows: [], metadata: { mods, installed: mods.installed } };
     },
     datapacks: async (client, context): Promise<UiSectionData> => {
-      const datapacks = await createMinecraftUiController(client).datapacks(
-        server(context),
-        undefined,
-        context.signal,
-      );
+      const world = context.values.world;
+      const inventory = createMinecraftUiController(client);
+      let datapacks: Awaited<ReturnType<typeof inventory.datapacks>>;
+      try {
+        datapacks = await inventory.datapacks(
+          server(context),
+          typeof world === 'string' ? world : undefined,
+          context.signal,
+        );
+      } catch (error) {
+        // The linked world disappeared. Load the chooser without selecting another target.
+        if (
+          typeof world !== 'string' ||
+          !(error instanceof Error) ||
+          !('code' in error) ||
+          error.code !== 'not_found'
+        )
+          throw error;
+        datapacks = await inventory.datapacks(server(context), undefined, context.signal);
+        return {
+          values: {},
+          rows: [],
+          metadata: { datapacks, missingWorld: world, installed: datapacks.installed },
+        };
+      }
       return { values: {}, rows: [], metadata: { datapacks, installed: datapacks.installed } };
     },
     worlds: async (client, context): Promise<UiSectionData> => {

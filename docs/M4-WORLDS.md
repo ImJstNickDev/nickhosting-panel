@@ -9,7 +9,7 @@ World imports are authorized durable jobs. The public request identifies an uplo
 
 ## Implementation boundary
 
-`stageMinecraftWorld(archivePath, options)` stages one world under `mountdata/world-staging/<jobId>/files/<targetWorld>`. Its result contains a hash manifest, source archive digest, stable plan digest and validated `level.dat` evidence. Staging performs no Pterodactyl calls, writes no server files, starts no server and changes no production resource. The durable content job applies the verified manifest through the single Pterodactyl adapter after authorization, storage admission and operation-specific consent. Selection and replacement require a stopped server; an additive import into a new non-active world folder and removal of an inactive world may run while the server is running (see the M5 deletion amendment below).
+`stageMinecraftWorld(archivePath, options)` stages one world under `mountdata/world-staging/<jobId>/files/<targetWorld>`. Its result contains a hash manifest, source archive digest, stable plan digest and validated `level.dat` evidence. Staging performs no Pterodactyl calls, writes no server files, starts no server and changes no production resource. The durable content job applies the verified manifest through the single Pterodactyl adapter after authorization, storage admission and operation-specific consent. Selection and replacement require a stopped server; an additive import into a new non-active world folder may run while the server is running. Runtime-specific removal rules are described below.
 
 The source path is internal, absolute, contained by the configured `mountdata` root and free of symlink aliases. The recorded archive digest is checked before processing and again after extraction. A changed upload cannot silently reuse a job plan. Output ancestors are checked for symlinks and each file is created privately with exclusive flags before promotion into the job's staging directory.
 
@@ -163,15 +163,14 @@ file counts during import, survives remount once counters exist, and refreshes
 world inventory after actual completion. See the generic
 [Fileman host contract](GAME-INTEGRATIONS.md#fileman-host-services--m5-2026-10-18).
 
-### Inactive-world deletion amendment — M5, 2026-10-18
+### Removing a world
 
-Deleting an inactive world no longer waits for the process to stop or for the old
-21-second offline stability interval. The integration checks the current
-`server.properties` and one root listing, protects the configured world and its
-containing/dimension folders, and performs one recursive delete through the
-Pterodactyl adapter. It does not need to parse the world's metadata again or
-invalidate installation state. Authorization, managed identity, exclusive job
-ownership and acknowledged/uncertain effect recovery remain enforced. A requested
-backup retains its previous offline requirements; selection and replacement are
-unchanged. The previous stopped-only deletion behavior is historical, not the
-current default.
+On Vanilla, an inactive root world can be removed while the server is running.
+The configured world, its containing directory and its dimension folders are
+protected. On plugin and mod runtimes another root world may be loaded. Worlds
+requires a confirmed stop for those removals and shows this on the affected row.
+The worker checks the runtime and removal preconditions before dispatching the
+recursive delete. Requested backups also require a stopped server.
+
+The operation retains managed identity and authorization checks, exclusive job
+ownership and recovery of acknowledged or uncertain effects.

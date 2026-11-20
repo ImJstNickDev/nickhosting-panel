@@ -2,11 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { posix } from 'node:path';
 import { DomainError } from '@nickhosting/core';
 import { recordAudit } from '@nickhosting/database';
-import {
-  getServerPermissionKeys,
-  inspectMinecraftCombination,
-  parse,
-} from '@nickhosting/server-management';
+import { minecraftDeclaredCapabilities } from '@nickhosting/minecraft';
+import { getServerPermissionKeys, parse } from '@nickhosting/server-management';
 import type { Hono } from 'hono';
 import { minecraftUuid } from '../../../games/minecraft/src/management.js';
 import {
@@ -15,6 +12,7 @@ import {
   minecraftPlayerDetailActionNames,
   minecraftPlayerDetailActionSchema,
 } from '../../../games/minecraft/src/player-details-contracts.js';
+import { getMinecraftContentProfile } from '../../../packages/server-management/src/minecraft-content-profile.js';
 import { readMinecraftPlayerDetail } from '../../../packages/server-management/src/minecraft-player-details.js';
 import { permissionRuntime } from '../../../packages/server-management/src/permission-runtime.js';
 import type { Variables } from './app.js';
@@ -70,17 +68,17 @@ export function registerMinecraftPlayerDetailRoutes(
   app: Hono<{ Variables: Variables }>,
   options: MinecraftPlayerRouteOptions,
 ) {
-  const { db, env, principal, management, body } = options;
+  const { db, principal, management, body } = options;
   const profile = async (connection: typeof db, serverId: string) => {
-    const row = await connection
-      .selectFrom('minecraft_server_profiles')
-      .selectAll()
-      .where('server_id', '=', serverId)
-      .executeTakeFirst();
-    if (!row?.installed) throw new DomainError('conflict');
-    const choice = await inspectMinecraftCombination(connection, row.combination_id, env);
-    if (!choice.capabilities.playerManagement) throw new DomainError('integration_unavailable');
-    return choice;
+    const current = await getMinecraftContentProfile(connection, serverId).catch((error) => {
+      if (error instanceof DomainError && error.code === 'not_found')
+        throw new DomainError('conflict');
+      throw error;
+    });
+    if (!current.installed) throw new DomainError('conflict');
+    if (!minecraftDeclaredCapabilities(current.combination).playerManagement)
+      throw new DomainError('integration_unavailable');
+    return current;
   };
   app.get('/v1/servers/:id/minecraft/players/:uuid', async (c) => {
     const context = await principal(c),
@@ -90,13 +88,14 @@ export function registerMinecraftPlayerDetailRoutes(
     const result = await service.fileReadScope(
       context,
       serverId,
-      async (files, identifier, connection, current, server) => ({
-        ...(await readMinecraftPlayerDetail(files, uuid)),
-        identifier,
-        server,
-        choice: await profile(connection, serverId),
-        permissions: await getServerPermissionKeys(connection, current, server),
-      }),
+      async (files, identifier, connection, current, server) => {
+        const choice = await profile(connection, serverId);
+        const [snapshot, permissions] = await Promise.all([
+          readMinecraftPlayerDetail(files, uuid),
+          getServerPermissionKeys(connection, current, server),
+        ]);
+        return { ...snapshot, identifier, server, choice, permissions };
+      },
       c.req.raw.signal,
     );
     const state = (await service.adapter.getResources(result.identifier)).current_state;

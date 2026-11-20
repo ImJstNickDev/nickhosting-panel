@@ -1,6 +1,7 @@
 @import "../../components/addon-workspace.css";
 
-dialog.mods-github-dialog {
+dialog.mods-github-dialog,
+dialog.addon-file-dialog {
   box-sizing: border-box;
   width: min(29rem, calc(100vw - 2rem));
   padding: 1.25rem;
@@ -8,7 +9,8 @@ dialog.mods-github-dialog {
 .mods-github-dialog .section-heading {
   margin-bottom: 1rem;
 }
-.mods-github-dialog .dialog-close-icon {
+.mods-github-dialog .dialog-close-icon,
+.addon-file-dialog .dialog-close-icon {
   width: 36px;
   height: 36px;
   min-height: 36px;
@@ -22,4 +24,57 @@ dialog.mods-github-dialog {
 }
 .minecraft-mods[data-kind="mods"] .mods-header-actions {
   flex-wrap: wrap;
+}
+
+.mods-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+@container (max-width: 420px) {
+  .mods-empty-actions {
+    display: grid;
+  }
+  .mods-empty-actions > button {
+    min-height: 40px;
+    font-size: 0.875rem;
+  }
+}
+
+.mods-installed-copy > .addon-file-name {
+  justify-self: start;
+  height: auto;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 650;
+  text-align: start;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.addon-file-name:hover,
+.addon-file-name:focus-visible {
+  text-decoration: underline;
+}
+.addon-file-facts {
+  margin: 0;
+}
+.addon-file-facts > div {
+  display: grid;
+  grid-template-columns: minmax(6rem, 1fr) 2fr;
+  gap: 1rem;
+  padding-block: 0.45rem;
+}
+.addon-file-facts dt {
+  color: var(--muted);
+}
+.addon-file-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }

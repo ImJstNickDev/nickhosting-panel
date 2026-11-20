@@ -124,12 +124,26 @@ export const modpackDigest = (value: unknown) =>
     )
     .digest('hex');
 const under = (path: string, root: string) => path === root || path.startsWith(`${root}/`);
-const overlaps = (left: string, right: string) => under(left, right) || under(right, left);
 const unique = (values: string[]) => [...new Set(values)].sort();
 const parents = (path: string) => {
-  const parts = path.split('/');
-  return parts.slice(0, -1).map((_part, index) => parts.slice(0, index + 1).join('/'));
+  const prefixes: string[] = [];
+  for (let i = path.indexOf('/'); i >= 0; i = path.indexOf('/', i + 1))
+    prefixes.push(path.slice(0, i));
+  return prefixes;
 };
+function hasParent(path: string, roots: ReadonlySet<string>) {
+  for (let i = path.indexOf('/'); i >= 0; i = path.indexOf('/', i + 1))
+    if (roots.has(path.slice(0, i))) return true;
+  return false;
+}
+const underRoot = (path: string, roots: ReadonlySet<string>) =>
+  roots.has(path) || hasParent(path, roots);
+// A protected child also protects a candidate operation on its parent directory.
+function overlapLookup(paths: string[]) {
+  const roots = new Set(paths);
+  const ancestors = new Set(paths.flatMap(parents));
+  return (path: string) => ancestors.has(path) || underRoot(path, roots);
+}
 const alwaysProtected = [
   'server.properties',
   'eula.txt',
@@ -207,21 +221,15 @@ export function planMinecraftModpack(input: {
   const remove: string[] = [];
   const preserve: string[] = [];
   const retained: MinecraftModpackFile[] = [];
+  const protectedPath = overlapLookup(protectedPaths);
+  const worldPath = overlapLookup(worldRoots);
   const guarded = (path: string) =>
-    protectedPaths.some((root) => overlaps(path, root)) ||
-    (selection.worldPolicy === 'preserve' && worldRoots.some((root) => overlaps(path, root)));
+    protectedPath(path) || (selection.worldPolicy === 'preserve' && worldPath(path));
   const candidatePaths = new Set(prepared.files.map((file) => file.path));
   for (const file of prepared.files) {
-    if (protectedPaths.some((root) => overlaps(file.path, root))) {
-      // Pack-provided security/settings files never replace the managed server configuration.
+    if (guarded(file.path)) {
       preserve.push(file.path);
       continue;
-    }
-    if (worldRoots.some((root) => overlaps(file.path, root))) {
-      if (selection.worldPolicy === 'preserve') {
-        preserve.push(file.path);
-        continue;
-      }
     }
     const current = files.get(file.path);
     if (file.path === 'server.properties' && prepared.propertiesMerged) {
@@ -290,6 +298,9 @@ export function planMinecraftModpack(input: {
     } else remove.push(old.path);
   }
   if (selection.mode === 'replace') {
+    const preserved = new Set(preserve);
+    const retainedRoots = new Set([...preserve, ...preserve.flatMap(parents)]);
+    const partialRoots = new Set<string>();
     for (const root of observation.replacePaths) {
       minecraftModpackPathSchema.parse(root);
       if (guarded(root)) {
@@ -297,29 +308,34 @@ export function planMinecraftModpack(input: {
         continue;
       }
       // A root containing a locally retained configuration cannot be removed as a whole.
-      if (preserve.some((path) => under(path, root))) {
-        for (const entry of files.values()) {
-          if (entry.kind === 'file' && under(entry.path, root) && !preserve.includes(entry.path))
-            remove.push(entry.path);
-        }
-      } else if (files.has(root)) remove.push(root);
-    }
-  }
-  if (selection.worldPolicy === 'reset' && (selection.mode === 'replace' || selection.install))
-    for (const root of worldRoots) {
-      if (protectedPaths.some((path) => overlaps(root, path)))
-        blockers.push({ reason: 'protected-path', path: root });
+      if (retainedRoots.has(root)) partialRoots.add(root);
       else if (files.has(root)) remove.push(root);
     }
-  const removals = unique(remove).filter(
-    (path, _index, values) => !values.some((parent) => parent !== path && under(path, parent)),
-  );
+    if (partialRoots.size)
+      for (const entry of files.values())
+        if (
+          entry.kind === 'file' &&
+          underRoot(entry.path, partialRoots) &&
+          !preserved.has(entry.path)
+        )
+          remove.push(entry.path);
+  }
+  if (
+    selection.worldPolicy === 'reset' &&
+    (selection.mode === 'replace' || selection.install || selection.review)
+  )
+    for (const root of worldRoots) {
+      if (protectedPath(root)) blockers.push({ reason: 'protected-path', path: root });
+      else if (files.has(root)) remove.push(root);
+    }
+  const candidates = new Set(remove);
+  const removals = [...candidates].filter((path) => !hasParent(path, candidates)).sort();
   const touched = unique([...write.map((file) => file.path), ...removals]);
   if (write.length > 10000) blockers.push({ reason: 'publication-limit' });
   const watched = unique([
     ...touched,
     ...touched.flatMap(parents),
-    ...[...files.keys()].filter((path) => removals.some((root) => under(path, root))),
+    ...[...files.keys()].filter((path) => underRoot(path, candidates)),
   ]);
   return modpackPlanSchema.parse({
     sourceCombinationId: observation.combinationId,
@@ -344,7 +360,7 @@ export function planMinecraftModpack(input: {
 const protectedRoots = (paths: string[]) => {
   const normalized = unique(paths.map((path) => minecraftModpackPathSchema.parse(path)));
   const roots = new Set(normalized);
-  return normalized.filter((path) => !parents(path).some((parent) => roots.has(parent)));
+  return normalized.filter((path) => !hasParent(path, roots));
 };
 
 /** Revalidation uses one new scoped inventory, never downloads or hashes provider artifacts again. */
@@ -363,10 +379,10 @@ export function assertMinecraftModpackPlanCurrent(
     throw new DomainError('conflict');
   const entries = new Map(observation.entries.map((entry) => [entry.path, entry]));
   const expectedPaths = new Set(plan.expected.map((entry) => entry.path));
+  const removed = new Set(plan.remove);
   if (
     observation.entries.some(
-      (entry) =>
-        plan.remove.some((root) => under(entry.path, root)) && !expectedPaths.has(entry.path),
+      (entry) => underRoot(entry.path, removed) && !expectedPaths.has(entry.path),
     )
   )
     throw new DomainError('conflict');

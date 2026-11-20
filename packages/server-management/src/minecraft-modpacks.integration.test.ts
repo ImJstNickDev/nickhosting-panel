@@ -1,14 +1,19 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { rm } from 'node:fs/promises';
 import { authSessionId, createLogger, DomainError, type LogRecord } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ZipFile } from 'yazl';
 import {
   createMinecraftModpacksService,
   type MinecraftModpackHooks,
 } from './minecraft-modpacks.js';
 import { modpackDigest, type PreparedMinecraftModpack } from './minecraft-modpacks-plan.js';
-import { modpackActor } from './modpack-bridge.js';
+import { createMinecraftSourceStore } from './minecraft-sources.js';
+import { createMinecraftModpackBridge, modpackActor } from './modpack-bridge.js';
+import * as runtimeResolution from './modpack-runtime.js';
 import { enqueueServerOperation } from './registry.js';
+import type { ManagementRuntime } from './runtime.js';
 import { minecraftManagementFixture } from './test-fixtures.js';
 
 describe('Modpacks durable preparation and apply', () => {
@@ -170,6 +175,226 @@ describe('Modpacks durable preparation and apply', () => {
     };
   }
 
+  it('pages the four file groups from the reviewed plan and rejects a stale digest', async () => {
+    const f = await fixture();
+    const files = ['new', 'old', 'local'].map((name) => ({
+      path: `mods/${name}.jar`,
+      size: 12,
+      sha256: 'b'.repeat(64),
+    }));
+    f.prepared.files = files;
+    f.hooks.inspect = async () => ({
+      ...f.observation,
+      entries: ['mods/old.jar', 'mods/local.jar', 'mods/deleted.jar'].map((path) => ({
+        path,
+        kind: 'file' as const,
+        size: 5,
+        modifiedAt: '2026-01-01T00:00:00Z',
+      })),
+      replacePaths: ['mods/deleted.jar'],
+    });
+    const { operation } = await f.service.prepare(f.context, f.serverId, {
+      ...f.selection,
+      mode: 'replace',
+      fileDecisions: { 'mods/local.jar': 'keep-local' },
+    });
+    if (!operation) throw new Error('missing operation');
+    await f.service.process(operation.id);
+    const digest = (await f.service.snapshot(f.context, f.serverId)).operation?.planDigest;
+    if (!digest) throw new Error('missing plan');
+    for (const [group, path] of [
+      ['added', 'mods/new.jar'],
+      ['replaced', 'mods/old.jar'],
+      ['removed', 'mods/deleted.jar'],
+      ['preserved', 'mods/local.jar'],
+    ] as const) {
+      expect(
+        await f.service.reviewFiles(f.context, f.serverId, operation.id, {
+          group,
+          digest,
+          offset: 0,
+        }),
+      ).toEqual({
+        counts: { added: 1, replaced: 1, removed: 1, preserved: 1 },
+        paths: [path],
+      });
+    }
+    expect(
+      (
+        await f.service.reviewFiles(f.context, f.serverId, operation.id, {
+          group: 'added',
+          digest,
+          offset: 100,
+        })
+      ).paths,
+    ).toEqual([]);
+    await expect(
+      f.service.reviewFiles(f.context, f.serverId, operation.id, {
+        group: 'added',
+        digest: '0'.repeat(64),
+        offset: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it('previews a sealed server upload and persists its source receipt after explicit apply', async () => {
+    const f = await fixture();
+    const root = `./mountdata/test-assets/import-modpack-${randomUUID()}`;
+    const env = {
+      NH_MINECRAFT_SOURCE_ROOT: root,
+      NH_MINECRAFT_CONTENT_ROOT: `${root}/stage`,
+      NH_MINECRAFT_SOURCE_FREE_BYTES: '0',
+      NH_MINECRAFT_SOURCE_FREE_PERCENT: '0',
+    };
+    const zip = new ZipFile();
+    zip.addBuffer(
+      Buffer.from(
+        JSON.stringify({
+          formatVersion: 1,
+          components: [
+            { uid: 'net.minecraft', version: '1.21.1' },
+            { uid: 'net.fabricmc.fabric-loader', version: '0.16.10' },
+          ],
+        }),
+      ),
+      'mmc-pack.json',
+    );
+    zip.addBuffer(Buffer.from('enabled=true'), '.minecraft/config/pack.toml');
+    zip.addBuffer(Buffer.from('client'), '.minecraft/options.txt');
+    zip.end();
+    const chunks: Buffer[] = [];
+    for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
+    const bytes = Buffer.concat(chunks);
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    const sourceStore = createMinecraftSourceStore(f.db, f.context, env);
+    const target = vi.spyOn(runtimeResolution, 'resolveModpackRuntime').mockResolvedValue({
+      combinationId: f.combinationId,
+      mappingId: f.mappingId,
+      target: f.prepared.target,
+    });
+    const runtime = {
+      lifecycle: {},
+      adapter: f.adapter,
+      fileReadScope: (_actor: unknown, _id: string, work: (files: unknown) => unknown) =>
+        work({ list: async () => [] }),
+    } as unknown as ManagementRuntime;
+    const bridge = createMinecraftModpackBridge({ db: f.db, env, runtime });
+    try {
+      const input = { kind: 'modpack', bytes: bytes.length, sha256, idempotencyKey: randomUUID() };
+      const unbound = await sourceStore.reserveUpload(input);
+      const source = await sourceStore.reserveUpload({
+        ...input,
+        idempotencyKey: randomUUID(),
+        serverId: f.serverId,
+      });
+      const selection = {
+        ...f.selection,
+        provider: 'upload',
+        projectId: source.id,
+        versionId: sha256,
+      };
+      await expect(bridge.prepare(f.context, f.serverId, selection)).rejects.toThrow('not_found');
+      await sourceStore.upload(source.id, new Blob([new Uint8Array(bytes)]).stream(), bytes.length);
+      await expect(
+        bridge.prepare(f.context, f.serverId, { ...selection, projectId: unbound.id }),
+      ).rejects.toThrow('not_found');
+      await expect(
+        bridge.prepare(f.context, f.serverId, { ...selection, versionId: '0'.repeat(64) }),
+      ).rejects.toThrow('not_found');
+      await expect(
+        bridge.prepare(f.context, f.serverId, { ...selection, install: {} }),
+      ).rejects.toThrow('validation_failed');
+      const queued = await bridge.prepare(f.context, f.serverId, selection);
+      const id = queued.operation?.id;
+      if (!id) throw new Error('missing queued operation');
+      await bridge.process(id);
+      const ready = (await f.service.snapshot(f.context, f.serverId)).operation;
+      expect(ready).toMatchObject({
+        state: 'ready',
+        changes: { write: 1, remove: 0 },
+        pack: {
+          project: { provider: 'upload', id: source.id },
+          imported: {
+            format: 'launcher-instance',
+            excludedFiles: 1,
+            excludedPaths: ['options.txt'],
+          },
+        },
+        target: f.prepared.target,
+      });
+      expect(f.calls).toEqual([]);
+      f.observation.protectedPaths.push('libraries', 'versions');
+      f.observation.worldRoots = [];
+      f.prepared.files = [
+        {
+          path: 'config/pack.toml',
+          size: 12,
+          sha256: createHash('sha256').update('enabled=true').digest('hex'),
+        },
+      ];
+      await f.service.apply(f.context, f.serverId, {
+        operationId: id,
+        planDigest: ready?.planDigest,
+        confirm: true,
+        backupBefore: false,
+        idempotencyKey: randomUUID(),
+      });
+      await f.service.process(id);
+      expect((await bridge.snapshot(f.context, f.serverId)).installed?.pack).toEqual(ready?.pack);
+      expect(f.scope.publish).toHaveBeenCalledOnce();
+      expect(f.scope.backup).not.toHaveBeenCalled();
+    } finally {
+      target.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('reads only the latest operation and keeps file manifests out of polling results', async () => {
+    const f = await fixture();
+    const first = await f.service.prepare(f.context, f.serverId, {
+      ...f.selection,
+      idempotencyKey: randomUUID(),
+    });
+    if (!first.operation) throw new Error('Expected a queued operation');
+    await f.service.cancel(f.context, f.serverId, first.operation.id);
+    f.prepared.files = Array.from({ length: 500 }, (_, index) => ({
+      path: `mods/publication-file-${index}.jar`,
+      size: 1200,
+      sha256: 'a'.repeat(64),
+    }));
+    const latest = await f.ready();
+    await f.db
+      .insertInto('minecraft_modpack_receipts')
+      .values({
+        server_id: f.serverId,
+        operation_id: latest.id,
+        receipt: JSON.stringify({
+          pack: f.prepared.pack,
+          target: f.prepared.target,
+          files: f.prepared.files,
+        }),
+      })
+      .execute();
+    const reads: Record<string, unknown>[] = [];
+    const db = f.db.withPlugin({
+      transformQuery: ({ node }) => node,
+      transformResult: async ({ result }) => {
+        reads.push(...result.rows.filter((row) => 'phase' in row || 'operation_id' in row));
+        return result;
+      },
+    });
+    const snapshot = await createMinecraftModpacksService({ db, hooks: f.hooks }).snapshot(
+      f.context,
+      f.serverId,
+    );
+    expect(snapshot.operation).toMatchObject({
+      id: latest.id,
+      changes: { write: 500, remove: 0, preserve: 0, bytes: 600_000 },
+    });
+    expect(snapshot.installed?.operationId).toBe(latest.id);
+    expect(reads.filter((row) => 'phase' in row)).toHaveLength(1);
+    expect(JSON.stringify(reads)).not.toContain('publication-file-');
+  });
+
   it('requires Worlds delete for Modpacks reset and rechecks it at apply, recovery and worker authorization', async () => {
     const f = await fixture();
     const peer = await minecraftManagementFixture(f.db, { interactive: true });
@@ -269,6 +494,30 @@ describe('Modpacks durable preparation and apply', () => {
     expect((await f.ready()).state).toBe('ready');
   });
 
+  it('keeps an explicitly reviewed catalog plan offline until Apply, even with world reset and backup selected', async () => {
+    const f = await fixture();
+    f.hooks.inspect = async () => ({
+      ...f.observation,
+      entries: [
+        { path: 'world', kind: 'directory' as const, size: 0, modifiedAt: '2026-01-01T00:00:00Z' },
+      ],
+    });
+    const { operation } = await f.service.prepare(f.context, f.serverId, {
+      ...f.selection,
+      worldPolicy: 'reset',
+      review: { backupBefore: true },
+    });
+    if (!operation) throw new Error('Missing review');
+    await f.service.process(operation.id);
+    const ready = (await f.service.snapshot(f.context, f.serverId)).operation;
+    expect(ready).toMatchObject({
+      id: operation.id,
+      state: 'ready',
+      deletePaths: ['world'],
+      selection: { review: { backupBefore: true } },
+    });
+    expect(f.calls).toEqual([]);
+  });
   it('durably installs without a browser apply request and defaults to no backup', async () => {
     const f = await fixture();
     const queued = await f.service.prepare(f.context, f.serverId, {

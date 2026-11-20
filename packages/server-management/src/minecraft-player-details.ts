@@ -3,7 +3,6 @@ import { DomainError } from '@nickhosting/core';
 import type { FilemanEntry, FilemanReadService } from '@nickhosting/game-sdk';
 import {
   minecraftUuid,
-  minecraftWorldName,
   parseMinecraftProperties,
 } from '../../../games/minecraft/src/management.js';
 import {
@@ -14,6 +13,7 @@ import type {
   MinecraftKnownPlayer,
   MinecraftPlayerDetail,
 } from '../../../games/minecraft/src/player-details-contracts.js';
+import { isMinecraftWorldDirectory } from '../../../games/minecraft/src/world-names.js';
 
 type Source = MinecraftKnownPlayer['sources'][number];
 type Ref = {
@@ -35,25 +35,110 @@ function jsonArray(bytes: Uint8Array | undefined) {
     throw new DomainError('integration_unavailable');
   }
 }
+const sources = [
+  ['usercache.json', 'usercache'],
+  ['ops.json', 'operators'],
+  ['whitelist.json', 'whitelist'],
+  ['banned-players.json', 'banned'],
+] as const;
+
+function* identities(bytes: Uint8Array | undefined) {
+  for (const raw of jsonArray(bytes)) {
+    if (!raw || typeof raw !== 'object' || !('uuid' in raw) || typeof raw.uuid !== 'string')
+      continue;
+    let uuid: string;
+    try {
+      uuid = minecraftUuid(raw.uuid);
+    } catch {
+      continue;
+    }
+    const name =
+      'name' in raw && typeof raw.name === 'string' && playerName.test(raw.name) ? raw.name : null;
+    yield { uuid, name };
+  }
+}
+
+// Only a unique name in the server's own cache can bind a console observation to a UUID.
+function usercacheIdentities(bytes: Uint8Array | undefined) {
+  const display = new Map<string, string | null>();
+  const bindings = new Map<string, string>();
+  const conflicts = new Set<string>();
+  for (const { uuid, name } of identities(bytes)) {
+    display.set(uuid, name);
+    if (bindings.has(uuid) && bindings.get(uuid) !== name) conflicts.add(uuid);
+    else if (name) bindings.set(uuid, name);
+  }
+  for (const uuid of conflicts) {
+    bindings.delete(uuid);
+    display.set(uuid, null);
+  }
+  const byName = new Map<string, string>();
+  for (const [uuid, name] of bindings) {
+    const key = name.toLowerCase();
+    const earlier = byName.get(key);
+    if (earlier) {
+      bindings.delete(uuid);
+      bindings.delete(earlier);
+    } else byName.set(key, uuid);
+  }
+  return { display, bindings };
+}
+
+function validRootFile(root: readonly FilemanEntry[], path: string) {
+  const entry = root.find((candidate) => candidate.name === path);
+  if (entry && (entry.kind !== 'file' || entry.size > 1048576))
+    throw new DomainError('integration_unavailable');
+  return !!entry;
+}
+
 /** Exact supported roots only; user-provided paths never enter the read contract. */
-export async function discoverMinecraftPlayers(files: FilemanReadService) {
-  const root = await files.list('');
-  const properties = await files.read({ path: 'server.properties', maxBytes: 1048576 });
+export async function discoverMinecraftPlayers(
+  files: FilemanReadService,
+  listSnapshot?: {
+    root: readonly FilemanEntry[];
+    rootFiles: ReadonlyMap<string, Uint8Array | undefined>;
+  },
+  requestedUuid?: string,
+) {
+  const [root, properties] = listSnapshot
+    ? ([listSnapshot.root, listSnapshot.rootFiles.get('server.properties')] as const)
+    : await Promise.all([
+        files.list(''),
+        files.read({ path: 'server.properties', maxBytes: 1048576 }),
+      ]);
   if (!properties) throw new DomainError('integration_unavailable');
-  const world = minecraftWorldName(
-    parseMinecraftProperties(Buffer.from(properties).toString('utf8'))['level-name'] ?? 'world',
-  );
+  const world =
+    parseMinecraftProperties(Buffer.from(properties).toString('utf8'))['level-name'] ?? 'world';
+  if (!isMinecraftWorldDirectory(world)) throw new DomainError('validation_failed');
   const worldEntry = root.find((entry) => entry.name === world);
   if (worldEntry && worldEntry.kind !== 'directory') throw new DomainError('conflict');
-  const worldEntries = worldEntry ? await files.list(world) : [];
+  const present = sources.filter(([path]) => validRootFile(root, path));
+  const needed = present.filter(([path]) => !listSnapshot?.rootFiles.has(path));
+  async function readRootFiles() {
+    const requests = needed.map(([path]) => ({ path, maxBytes: 1048576 }));
+    if (requests.length > 1) return files.readMany(requests);
+    const values = new Map<string, Uint8Array | undefined>();
+    if (requests[0]) values.set(requests[0].path, await files.read(requests[0]));
+    return values;
+  }
+  const [worldEntries, rootBytes] = await Promise.all([
+    worldEntry ? files.list(world) : [],
+    readRootFiles(),
+  ]);
   const playersEntry = worldEntries.find((entry) => entry.name === 'players');
   if (playersEntry && playersEntry.kind !== 'directory') throw new DomainError('conflict');
   const modernEntries = playersEntry ? await files.list(`${world}/players`) : [];
-  const references = new Map<string, Ref[]>();
+  const references: Ref[] = [];
+  // Enforce the same unique-player limit on detail reads without retaining
+  // unrelated rows, source arrays or file paths for every other UUID.
+  const seen = requestedUuid ? new Set<string>() : undefined;
   const known = new Map<string, MinecraftKnownPlayer>();
-  const usercache = new Map<string, string>();
-  const conflictingNames = new Set<string>();
   const add = (uuid: string, source: Source, name: string | null = null) => {
+    if (seen) {
+      seen.add(uuid);
+      if (seen.size > 10000) throw new DomainError('resources_unavailable');
+      if (uuid !== requestedUuid) return;
+    }
     let item = known.get(uuid);
     if (!item) {
       item = { uuid, name, sources: [] };
@@ -61,49 +146,24 @@ export async function discoverMinecraftPlayers(files: FilemanReadService) {
     }
     if (known.size > 10000) throw new DomainError('resources_unavailable');
     if (!item.sources.includes(source)) item.sources.push(source);
-    if (source === 'usercache') {
-      if (usercache.has(uuid) && usercache.get(uuid) !== name) conflictingNames.add(uuid);
-      else if (name) usercache.set(uuid, name);
-      item.name = name;
-    } else if (!item.name && !item.sources.includes('usercache')) item.name = name;
+    if (!item.name && !item.sources.includes('usercache')) item.name = name;
   };
-  for (const [path, source] of [
-    ['usercache.json', 'usercache'],
-    ['ops.json', 'operators'],
-    ['whitelist.json', 'whitelist'],
-    ['banned-players.json', 'banned'],
-  ] as const) {
-    const entry = root.find((entry) => entry.name === path);
-    if (!entry) continue;
-    if (entry.kind !== 'file' || entry.size > 1048576)
-      throw new DomainError('integration_unavailable');
-    for (const raw of jsonArray(await files.read({ path, maxBytes: 1048576 }))) {
-      if (!raw || typeof raw !== 'object' || !('uuid' in raw) || typeof raw.uuid !== 'string')
-        continue;
-      let uuid: string;
-      try {
-        uuid = minecraftUuid(raw.uuid);
-      } catch {
-        continue;
-      }
-      const name =
-        'name' in raw && typeof raw.name === 'string' && playerName.test(raw.name)
-          ? raw.name
-          : null;
-      add(uuid, source, name);
+  let usercache = new Map<string, string>();
+  for (const [path, source] of present) {
+    const bytes = listSnapshot?.rootFiles.has(path)
+      ? listSnapshot.rootFiles.get(path)
+      : rootBytes.get(path);
+    if (!bytes) throw new DomainError('integration_unavailable');
+    if (source === 'usercache') {
+      const { display, bindings } = usercacheIdentities(bytes);
+      usercache = bindings;
+      for (const [uuid, name] of display) add(uuid, source, name);
+    } else {
+      for (const { uuid, name } of identities(bytes)) add(uuid, source, name);
     }
   }
-  for (const uuid of conflictingNames) {
-    usercache.delete(uuid);
-    const item = known.get(uuid);
-    if (item) item.name = null;
-  }
-  // Conflicting server name records cannot establish current player presence.
-  const byName = new Map<string, string[]>();
-  for (const [uuid, name] of usercache)
-    byName.set(name.toLowerCase(), [...(byName.get(name.toLowerCase()) ?? []), uuid]);
-  for (const ids of byName.values()) if (ids.length > 1) for (const id of ids) usercache.delete(id);
   const layouts = new Set<'legacy' | 'modern'>();
+  const directoriesToRead: { path: string; scope: Ref['scope']; layout: Ref['layout'] }[] = [];
   for (const [layout, parents, prefix, directories] of [
     ['legacy', worldEntries, world, ['playerdata', 'stats', 'advancements']],
     ['modern', modernEntries, `${world}/players`, ['data', 'stats', 'advancements']],
@@ -114,29 +174,37 @@ export async function discoverMinecraftPlayers(files: FilemanReadService) {
       if (parent.kind !== 'directory') throw new DomainError('conflict');
       layouts.add(layout);
       const scope = directory === 'data' ? 'playerdata' : directory;
-      const entries = await files.list(`${prefix}/${directory}`);
-      if (entries.length > 20000) throw new DomainError('resources_unavailable');
-      for (const entry of entries) {
-        const match = uuidFile.exec(entry.name);
-        if (match && entry.kind === 'symlink') throw new DomainError('conflict');
-        if (
-          !match ||
-          entry.kind !== 'file' ||
-          (scope === 'playerdata' ? !match[2]?.startsWith('dat') : match[2] !== 'json')
-        )
-          continue;
-        let uuid: string;
-        try {
-          uuid = minecraftUuid(match[1] ?? '');
-        } catch {
-          continue;
-        }
-        add(uuid, scope);
-        const refs = references.get(uuid) ?? [];
-        refs.push({ path: `${prefix}/${directory}/${entry.name}`, scope, layout, entry });
-        references.set(uuid, refs);
-      }
+      directoriesToRead.push({ path: `${prefix}/${directory}`, scope, layout });
     }
+  const batch = directoriesToRead.length
+    ? await files.listMany(directoriesToRead.map(({ path }) => path))
+    : [];
+  for (const { path, scope, layout } of directoriesToRead) {
+    const result = batch.find((entry) => entry.directory === path);
+    if (!result || 'error' in result) {
+      if (result && result.error === 'forbidden') throw new DomainError('forbidden');
+      throw new DomainError('integration_unavailable');
+    }
+    const entries = result.files;
+    if (entries.length > 20000) throw new DomainError('resources_unavailable');
+    for (const entry of entries) {
+      const match = uuidFile.exec(entry.name);
+      if (match && entry.kind === 'symlink') throw new DomainError('conflict');
+      if (
+        !match ||
+        entry.kind !== 'file' ||
+        (scope === 'playerdata' ? !match[2]?.startsWith('dat') : match[2] !== 'json')
+      )
+        continue;
+      // uuidFile already accepted a dashed UUID. Keep the same nil-UUID rejection
+      // as minecraftUuid without rebuilding each string from five substrings.
+      const uuid = match[1]?.toLowerCase();
+      if (!uuid || uuid === '00000000-0000-0000-0000-000000000000') continue;
+      add(uuid, scope);
+      if (uuid === requestedUuid)
+        references.push({ path: `${path}/${entry.name}`, scope, layout, entry });
+    }
+  }
   const layout =
     layouts.size === 2
       ? 'mixed'
@@ -158,21 +226,28 @@ export async function discoverMinecraftPlayers(files: FilemanReadService) {
 }
 
 export async function readMinecraftPlayerDetail(files: FilemanReadService, uuid: string) {
-  const discovered = await discoverMinecraftPlayers(files);
+  const discovered = await discoverMinecraftPlayers(files, undefined, uuid);
   const player = discovered.knownPlayers.find((entry) => entry.uuid === uuid);
   if (!player) throw new DomainError('not_found');
-  const refs = discovered.references.get(uuid) ?? [];
+  const refs = discovered.references;
   const bytes = new Map<string, Uint8Array>();
   const content = (path: string) => {
     const value = bytes.get(path);
     if (!value) throw new DomainError('conflict');
     return value;
   };
-  for (const ref of refs) {
-    if (ref.entry.size > 4 * 1024 ** 2) throw new DomainError('resources_unavailable');
-    const value = await files.read({ path: ref.path, maxBytes: 4 * 1024 ** 2 });
-    if (!value) throw new DomainError('conflict');
-    bytes.set(ref.path, value);
+  const fileLimit = 4 * 1024 ** 2;
+  if (refs.some((ref) => ref.entry.size > fileLimit))
+    throw new DomainError('resources_unavailable');
+  // readMany bounds parallel downloads and accepts at most 16 MiB per batch.
+  for (let start = 0; start < refs.length; start += 4) {
+    const group = refs.slice(start, start + 4);
+    const values = await files.readMany(group.map(({ path }) => ({ path, maxBytes: fileLimit })));
+    for (const { path } of group) {
+      const value = values.get(path);
+      if (!value) throw new DomainError('conflict');
+      bytes.set(path, value);
+    }
   }
   const revision = digest(
     JSON.stringify({

@@ -5,8 +5,11 @@ export const joinFilePath = (directory: string, name: string) =>
   [directory, name].filter(Boolean).join('/');
 
 /** Canonical server-relative paths. Never resolve traversal on the user's behalf. */
-export function normalizeFilePath(value: string): string | undefined {
-  const result = value.trim().replace(/^\/+|\/+$/g, '');
+export function normalizeFilePath(
+  value: string,
+  options: { preserveSpaces?: boolean } = {},
+): string | undefined {
+  const result = (options.preserveSpaces ? value : value.trim()).replace(/^\/+|\/+$/g, '');
   if (result.includes('\\') || [...result].some((character) => character.charCodeAt(0) < 32))
     return undefined;
   if (result.split('/').some((part) => part === '..' || part === '.')) return undefined;

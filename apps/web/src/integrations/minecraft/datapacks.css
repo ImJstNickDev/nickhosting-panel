@@ -35,6 +35,13 @@
   gap: 3px;
 }
 
+.datapack-tools {
+  flex-wrap: wrap;
+}
+.datapack-browse {
+  margin-inline-end: 5px;
+}
+
 .datapack-list {
   list-style: none;
   padding: 0;
@@ -187,6 +194,7 @@
   white-space: nowrap;
 }
 @container (max-width: 620px) {
+  .datapack-toolbar .workspace-search,
   .datapack-world {
     flex-basis: 100%;
   }

@@ -5,7 +5,7 @@ import {
   type WorldCatalogFile,
 } from '@nickhosting/minecraft/ui';
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { ApiError, idempotencyKey, queryClient } from '../../api/client.js';
 import { hashFile } from '../../api/hash.js';
@@ -44,7 +44,6 @@ export function DatapackIcon({
     | 'pack'
     | 'upload'
     | 'folder'
-    | 'search'
     | 'refresh'
     | 'close'
     | 'delete'
@@ -83,12 +82,6 @@ export function DatapackIcon({
       )}
       {name === 'upload' && <path d="M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5" />}
       {name === 'folder' && <path d="M3 7V5h7l2 3h9v13H3V7m9 10V11m-3 3 3-3 3 3" />}
-      {name === 'search' && (
-        <>
-          <circle cx="10.5" cy="10.5" r="6.5" />
-          <path d="m16 16 4 4" />
-        </>
-      )}
       {name === 'refresh' && (
         <path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1" />
       )}
@@ -105,7 +98,15 @@ export function DatapackIcon({
 export function MinecraftDatapacksSection(props: GameSectionViewProps) {
   const t = useT();
   const initial = props.data.metadata?.datapacks as MinecraftDatapacks | undefined;
-  const [world, setWorld] = useState(initial?.world ?? '');
+  // Undefined resolves the initial default. An empty choice waits for the user.
+  const [requestedWorld, setRequestedWorld] = useState<string | undefined>(
+    props.data.metadata?.missingWorld ? '' : initial?.world,
+  );
+  const [missingWorld, setMissingWorld] = useState<string | undefined>(
+    typeof props.data.metadata?.missingWorld === 'string'
+      ? props.data.metadata.missingWorld
+      : undefined,
+  );
   const [search, setSearch] = useState('');
   const [inspected, setInspected] = useState<string>();
   const [page, setPage] = useState(0);
@@ -130,26 +131,68 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
   const transfer = useRef<AbortController | undefined>(undefined);
   const lock = useRef(false);
   const requestKeys = useRef(new Map<string, string>());
-  const queryKey = ['minecraft-datapacks', props.serverId, world];
+  const queryKey = ['minecraft-datapacks', props.serverId, requestedWorld ?? ''];
   const inventory = useQuery({
     queryKey,
-    queryFn: ({ signal }) => controller.datapacks(props.serverId, world || undefined, signal),
-    initialData: initial?.world === world ? initial : undefined,
+    queryFn: ({ signal }) =>
+      controller.datapacks(props.serverId, requestedWorld || undefined, signal),
+    initialData:
+      requestedWorld === undefined ||
+      requestedWorld === initial?.world ||
+      (requestedWorld === '' && props.data.metadata?.missingWorld)
+        ? initial
+        : undefined,
     staleTime: 5_000,
   });
+  const data = inventory.data;
+  const worldLost =
+    Boolean(requestedWorld) &&
+    inventory.error instanceof ApiError &&
+    inventory.error.code === 'not_found';
+  const world = worldLost ? '' : (requestedWorld ?? '');
+  const changeWorld = useCallback((value: string) => {
+    setRequestedWorld(value);
+    setMissingWorld(undefined);
+    setSearch('');
+    setPage(0);
+    setRemove(undefined);
+    setInspected(undefined);
+    setDependencyDetails(undefined);
+    setError(undefined);
+    setCatalog(false);
+    replacement.current = undefined;
+  }, []);
+  useEffect(() => {
+    if (worldLost) {
+      transfer.current?.abort();
+      void queryClient.invalidateQueries({
+        queryKey: ['minecraft-datapacks', props.serverId, ''],
+        exact: true,
+      });
+      changeWorld('');
+      setMissingWorld(requestedWorld);
+      return;
+    }
+    if (requestedWorld !== undefined || !data) return;
+    if (data.world) {
+      const targetKey = ['minecraft-datapacks', props.serverId, data.world];
+      if ((queryClient.getQueryState(targetKey)?.dataUpdatedAt ?? 0) < inventory.dataUpdatedAt)
+        queryClient.setQueryData(targetKey, data, { updatedAt: inventory.dataUpdatedAt });
+    }
+    setRequestedWorld(data.world);
+  }, [changeWorld, data, inventory.dataUpdatedAt, props.serverId, requestedWorld, worldLost]);
   const inspection = useQuery({
     queryKey: ['minecraft-datapack-inspection', props.serverId, world, inspected],
     queryFn: ({ signal }) =>
       controller.inspectDatapack(props.serverId, world, inspected ?? '', signal),
-    enabled: Boolean(inspected),
+    enabled: Boolean(inspected && world),
     staleTime: 0,
   });
-  const data = inventory.data;
   const supported = data?.installed && data.supported;
   const canWrite = props.permissionKeys.includes('game.minecraft.datapacks.write');
   const canDelete = props.permissionKeys.includes('game.minecraft.datapacks.delete');
   const browseButton = useRef<HTMLButtonElement>(null);
-  const disabled = !supported || props.pending || Boolean(busy);
+  const disabled = !world || !supported || props.pending || Boolean(busy || inventory.error);
   const canApply = changesPermit();
   function changesPermit() {
     return (
@@ -256,7 +299,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
         }
         publishPreparations();
         void queryClient.invalidateQueries({
-          queryKey: ['minecraft-datapacks', props.serverId, next.world],
+          queryKey: ['minecraft-datapacks', props.serverId],
         });
       }
     } finally {
@@ -426,7 +469,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
       if (!abort.signal.aborted) setError(failure);
     } finally {
       void queryClient.invalidateQueries({
-        queryKey: ['minecraft-datapacks', props.serverId, selectedWorld],
+        queryKey: ['minecraft-datapacks', props.serverId],
       });
       transfer.current = undefined;
       setProgress(undefined);
@@ -435,19 +478,13 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
     }
   }
   function action(
-    name: 'upload' | 'folder' | 'browse' | 'refresh',
+    name: 'upload' | 'folder' | 'refresh',
     icon: Parameters<typeof DatapackIcon>[0]['name'],
     onClick: () => void,
     blocked = disabled || !canWrite || nativePending,
   ) {
     return (
-      <IconAction
-        tooltip={t(key(name))}
-        ref={name === 'browse' ? browseButton : undefined}
-        label={t(key(name))}
-        onClick={onClick}
-        disabled={blocked}
-      >
+      <IconAction tooltip={t(key(name))} label={t(key(name))} onClick={onClick} disabled={blocked}>
         <DatapackIcon name={icon} />
       </IconAction>
     );
@@ -464,12 +501,13 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
         </div>
       </section>
     );
+  const showCatalog = catalog && Boolean(world);
   return (
     <section
       className="workspace-surface minecraft-datapacks"
       aria-label={t('games.minecraft.sections.datapacks')}
     >
-      <div hidden={catalog}>
+      <div hidden={showCatalog}>
         <div className="datapack-toolbar">
           <label className="datapack-world">
             <span>{t(key('world'))}</span>
@@ -477,13 +515,13 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
               value={world}
               aria-label={t(key('world'))}
               disabled={Boolean(busy || progress || preparing)}
-              onChange={(event) => {
-                setWorld(event.target.value);
-                setPage(0);
-                setInspected(undefined);
-                setError(undefined);
-              }}
+              onChange={(event) => changeWorld(event.target.value)}
             >
+              {!world && (
+                <option value="" disabled>
+                  {t(key('chooseWorld'))}
+                </option>
+              )}
               {(data?.worlds ?? initial?.worlds ?? []).map((item) => (
                 <option key={item.name} value={item.name}>
                   {item.name}
@@ -491,41 +529,54 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
               ))}
             </select>
           </label>
-          <SearchField
-            value={search}
-            placeholder={t(key('search'))}
-            label={t(key('search'))}
-            onChange={(event) => {
-              setSearch(event.target.value);
-              setPage(0);
-            }}
-          />
-          <div className="datapack-tools">
-            {action('browse', 'search', () => setCatalog(true))}
-            {action(
-              'upload',
-              'upload',
-              () => {
-                replacement.current = undefined;
-                picker.current?.click();
-              },
-              disabled || !canWrite || nativePending || Boolean(progress) || preparing,
-            )}
-            {action(
-              'folder',
-              'folder',
-              () => folderPicker.current?.click(),
-              disabled || !canWrite || nativePending || Boolean(progress) || preparing,
-            )}
-            {action(
-              'refresh',
-              'refresh',
-              () => void refresh(),
-              inventory.isFetching || Boolean(busy),
-            )}
-          </div>
+          {world && (
+            <>
+              <SearchField
+                value={search}
+                placeholder={t(key('searchInstalled'))}
+                label={t(key('searchInstalled'))}
+                onChange={(event) => {
+                  setSearch(event.target.value);
+                  setPage(0);
+                }}
+              />
+              <div className="datapack-tools">
+                <button
+                  ref={browseButton}
+                  type="button"
+                  className="secondary datapack-browse"
+                  onClick={() => setCatalog(true)}
+                  disabled={disabled || !canWrite || nativePending}
+                >
+                  {t(key('browse'))}
+                </button>
+                {action(
+                  'upload',
+                  'upload',
+                  () => {
+                    replacement.current = undefined;
+                    picker.current?.click();
+                  },
+                  disabled || !canWrite || nativePending || Boolean(progress) || preparing,
+                )}
+                {action(
+                  'folder',
+                  'folder',
+                  () => folderPicker.current?.click(),
+                  disabled || !canWrite || nativePending || Boolean(progress) || preparing,
+                )}
+                {action(
+                  'refresh',
+                  'refresh',
+                  () => void refresh(),
+                  inventory.isFetching || Boolean(busy),
+                )}
+              </div>
+            </>
+          )}
         </div>
         <input
+          key={`zip-${world}`}
           hidden
           type="file"
           accept=".zip,application/zip"
@@ -533,6 +584,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
           onChange={(event) => void upload(event.target.files)}
         />
         <input
+          key={`folder-${world}`}
           hidden
           type="file"
           multiple
@@ -541,6 +593,11 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
           onChange={(event) => void upload(event.target.files, true)}
         />
         {error || inventory.error ? <ErrorNotice error={error ?? inventory.error} /> : null}
+        {missingWorld && !world && (
+          <p className="datapack-note" role="status">
+            {t(key('worldUnavailable'), { name: missingWorld })}
+          </p>
+        )}
         {!props.canManage && <p className="datapack-note">{t(key('readonly'))}</p>}
         {inventory.isPending ? (
           <div
@@ -555,7 +612,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
           </div>
         ) : data && !data.supported ? (
           <p className="datapack-empty">{t(key('unsupported'))}</p>
-        ) : !data?.worlds.length ? null : (
+        ) : !world || !data?.world ? null : (
           <>
             {data.world !== data.selectedWorld && (
               <p className="datapack-note">{t(key('inactive'))}</p>
@@ -959,7 +1016,7 @@ export function MinecraftDatapacksSection(props: GameSectionViewProps) {
           <p>{t(key('deleteBody'))}</p>
         </ConfirmDialog>
       </div>
-      {catalog && (
+      {showCatalog && (
         <MinecraftDatapackCatalog
           serverId={props.serverId}
           release={data?.version}

@@ -31,6 +31,7 @@ export const modpackSourceSchema = z.enum([
   'modrinth-index',
   'curseforge-manifest',
   'server-archive',
+  'launcher-instance',
   'ftb-manifest',
   'technic-solder',
   'atlauncher-recipe',

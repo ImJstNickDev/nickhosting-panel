@@ -39,6 +39,7 @@ import {
   verifyMinecraftRestore,
 } from './minecraft-content.js';
 import { minecraftStoredConfigurationSchema } from './minecraft-content-contracts.js';
+import { modpackRuntimeBindingSchema } from './minecraft-modpacks-plan.js';
 import {
   inspectMinecraftCombination,
   minecraftCatalog,
@@ -57,6 +58,32 @@ import { minecraftContentProviders } from './minecraft-world-catalog.js';
 async function authorizeOperation(input: GameOperationAuthorization) {
   const { db, server, operation, mapping, env, adapter, resourceOwner: owner } = input;
   const serverId = server.id;
+  if (operation.plan.minecraftVersion !== undefined) {
+    if (
+      !['wipe', 'reinstall'].includes(operation.action) ||
+      server.active_operation_id !== operation.job_id
+    )
+      throw new DomainError('forbidden');
+    const { target } = operation.plan.minecraftVersion as { target?: unknown };
+    const binding = modpackRuntimeBindingSchema.safeParse(target);
+    if (!binding.success) throw new DomainError('configuration_invalid');
+    const ownerContext: AuthContext = {
+      actorUserId: owner.id,
+      subjectUserId: owner.id,
+      role: owner.role,
+      sessionType: 'regular',
+      ownerElevation: false,
+    };
+    const choice = await requireMinecraftChoice(db, ownerContext, binding.data.combinationId, env);
+    if (input.context.subjectUserId !== owner.id || input.context.role !== owner.role)
+      await requireMinecraftChoice(db, input.context, binding.data.combinationId, env);
+    if (
+      choice.mapping.id !== binding.data.mappingId ||
+      !choice.capabilities.installation ||
+      (server.connection_mode === 'gateway' && !choice.capabilities.gateway)
+    )
+      throw new DomainError('integration_unavailable');
+  }
   if (['start', 'restart'].includes(operation.action)) {
     const minecraft = await db
       .selectFrom('minecraft_server_profiles')

@@ -91,6 +91,9 @@ export const minecraftModsSnapshotSchema: z.ZodType<MinecraftModsSnapshot> = z.o
       name: z.string(),
       size: z.number().nonnegative(),
       state: z.enum(['enabled', 'disabled']),
+      githubRelease: z
+        .object({ repository: z.string(), tag: z.string(), asset: z.string() })
+        .optional(),
       metadata: metadata.nullable(),
       aliases,
     }),

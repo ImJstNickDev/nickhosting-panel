@@ -26,6 +26,7 @@ import {
 } from './minecraft-content.js';
 import {
   minecraftContentChangesOnlyMetadata,
+  minecraftContentRemovesInactiveWorld,
   minecraftStoredConfigurationSchema,
 } from './minecraft-content-contracts.js';
 
@@ -120,7 +121,13 @@ function fixture(initial: Record<string, string> = {}) {
     operation: () => operation,
     authorize,
     assertStopped,
-    effect: async (phase: string, action: () => Promise<void>) => {
+    effect: async (
+      phase: string,
+      action: () => Promise<void>,
+      _patch: unknown,
+      beforeDispatch?: () => Promise<void>,
+    ) => {
+      await beforeDispatch?.();
       operation.phase = phase;
       operation.effect_state = 'prepared';
       await action();
@@ -637,14 +644,41 @@ describe('UUID-bound existing Minecraft player changes', () => {
     expect(lookup.lookupName).toHaveBeenCalledOnce();
     expect(lookup.lookupUuid).toHaveBeenCalledOnce();
   });
+  const onlineRemoval = { allowOnlineRemoval: true, backupBefore: false };
+
+  it('requires explicit runtime proof in prepared online-removal plans', () => {
+    const prepared = {
+      command: { kind: 'world-remove', world: 'spare', confirm: true, backupBefore: false },
+      backupBefore: false,
+      world: { existing: true },
+    };
+    expect(minecraftContentRemovesInactiveWorld(prepared)).toBe(false);
+    expect(
+      minecraftContentRemovesInactiveWorld({
+        ...prepared,
+        world: { existing: true, allowOnlineRemoval: true },
+      }),
+    ).toBe(true);
+  });
+
+  it('checks the physical stop before legacy removal of a secondary world on an extensible runtime', async () => {
+    const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'arena' });
+    f.assertStopped.mockRejectedValueOnce(new DomainError('operation_uncertain'));
+    const options = { allowOnlineRemoval: false, backupBefore: false };
+    await expect(applyMinecraftWorldRemoval(f.context, 'spare', options)).rejects.toThrow(
+      'operation_uncertain',
+    );
+    expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', options)).toBe(true);
+    expect(f.files.has('spare/a')).toBe(false);
+  });
+
   it('removes an inactive world with one root snapshot, one properties read and one recursive delete', async () => {
     const f = fixture({
       'server.properties': 'level-name=world\n',
       'spare/region/r.0.0.mca': 'region',
     });
-    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
-      true,
-    );
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval)).toBe(true);
     expect(f.adapter.listFiles).toHaveBeenCalledTimes(1);
     expect(f.adapter.readFileForEditor).toHaveBeenCalledExactlyOnceWith(
       'fixture',
@@ -658,12 +692,11 @@ describe('UUID-bound existing Minecraft player changes', () => {
   });
   it('delegates a supported removal to Fileman without legacy metadata or delete requests', async () => {
     const f = guardedRemovalFixture();
-    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
-      true,
-    );
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval)).toBe(true);
     expect(f.removeDirectory).toHaveBeenCalledExactlyOnceWith({
       target: 'spare',
       guardFile: 'server.properties',
+      beforeWrite: undefined,
       validateGuard: expect.any(Function),
     });
     expect(f.capabilities).toHaveBeenCalledExactlyOnceWith('fixture');
@@ -671,9 +704,7 @@ describe('UUID-bound existing Minecraft player changes', () => {
     expect(f.adapter.readFileForEditor).not.toHaveBeenCalled();
     expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
     expect(f.assertStopped).not.toHaveBeenCalled();
-    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
-      true,
-    );
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval)).toBe(true);
     expect(f.removeDirectory).toHaveBeenCalledOnce();
   });
   it.each([
@@ -687,7 +718,7 @@ describe('UUID-bound existing Minecraft player changes', () => {
     async (configured, code) => {
       const f = guardedRemovalFixture(configured);
       await expect(
-        applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+        applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval),
       ).rejects.toMatchObject({ code });
       expect(f.steps.size).toBe(0);
       expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
@@ -698,9 +729,7 @@ describe('UUID-bound existing Minecraft player changes', () => {
     f.capabilities.mockRejectedValueOnce(
       new PterodactylError('not_found', 'client', 'rejected', 404),
     );
-    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
-      true,
-    );
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval)).toBe(true);
     expect(f.removeDirectory).not.toHaveBeenCalled();
     expect(f.adapter.listFiles).toHaveBeenCalledOnce();
     expect(f.adapter.readFileForEditor).toHaveBeenCalledOnce();
@@ -712,7 +741,7 @@ describe('UUID-bound existing Minecraft player changes', () => {
       new PterodactylError('permission_denied', 'client', 'rejected', 403),
     );
     await expect(
-      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+      applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval),
     ).rejects.toMatchObject({ upstreamStatus: 403 });
     expect(f.removeDirectory).not.toHaveBeenCalled();
     expect(f.adapter.listFiles).not.toHaveBeenCalled();
@@ -728,7 +757,7 @@ describe('UUID-bound existing Minecraft player changes', () => {
       new PterodactylError('not_found', 'client', 'rejected', 404),
     );
     await expect(
-      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+      applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval),
     ).rejects.toMatchObject({ upstreamStatus: 404 });
     expect(f.capabilities).not.toHaveBeenCalled();
     expect(f.removeDirectory).toHaveBeenCalledOnce();
@@ -743,7 +772,7 @@ describe('UUID-bound existing Minecraft player changes', () => {
     };
     f.context.fileman = undefined;
     await expect(
-      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+      applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval),
     ).rejects.toMatchObject({ code: 'operation_uncertain' });
     expect(f.adapter.listFiles).not.toHaveBeenCalled();
     expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
@@ -751,9 +780,12 @@ describe('UUID-bound existing Minecraft player changes', () => {
   it('retains the backup and offline workflow even when the guarded bridge is available', async () => {
     const f = guardedRemovalFixture();
     f.context.backup = vi.fn(async () => false);
-    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: true })).toBe(
-      false,
-    );
+    expect(
+      await applyMinecraftWorldRemoval(f.context, 'spare', {
+        ...onlineRemoval,
+        backupBefore: true,
+      }),
+    ).toBe(false);
     expect(f.assertStopped).toHaveBeenCalledOnce();
     expect(f.context.backup).toHaveBeenCalledOnce();
     expect(f.removeDirectory).not.toHaveBeenCalled();
@@ -774,7 +806,7 @@ describe('UUID-bound existing Minecraft player changes', () => {
     f.adapter.prefetchDownloads.mockImplementation(async () => {
       prepared.resolve();
     });
-    const removing = applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false });
+    const removing = applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval);
     const rejected = expect(removing).rejects.toMatchObject({ code: 'conflict' });
     await prepared.promise;
     expect(f.adapter.readFileForEditor).not.toHaveBeenCalled();
@@ -791,7 +823,7 @@ describe('UUID-bound existing Minecraft player changes', () => {
         [`${target}/region/r.0.0.mca`]: 'region',
       });
       await expect(
-        applyMinecraftWorldRemoval(f.context, target, { backupBefore: false }),
+        applyMinecraftWorldRemoval(f.context, target, onlineRemoval),
       ).rejects.toMatchObject({ code: 'validation_failed' });
       expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
       expect(f.operation.effect_state).toBe('none');
@@ -811,7 +843,7 @@ describe('UUID-bound existing Minecraft player changes', () => {
         [`${target}/a`]: 'bytes',
       });
       await expect(
-        applyMinecraftWorldRemoval(f.context, target, { backupBefore: false }),
+        applyMinecraftWorldRemoval(f.context, target, onlineRemoval),
       ).rejects.toMatchObject({ code });
       expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
       expect(f.operation.effect_state).toBe('none');
@@ -821,10 +853,10 @@ describe('UUID-bound existing Minecraft player changes', () => {
     const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
     f.symlinks.add('spare');
     await expect(
-      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+      applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval),
     ).rejects.toMatchObject({ code: 'conflict' });
     await expect(
-      applyMinecraftWorldRemoval(f.context, 'missing', { backupBefore: false }),
+      applyMinecraftWorldRemoval(f.context, 'missing', onlineRemoval),
     ).rejects.toMatchObject({ code: 'not_found' });
     expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
     expect(f.operation.effect_state).toBe('none');
@@ -838,15 +870,13 @@ describe('UUID-bound existing Minecraft player changes', () => {
       f.operation.effect_state = 'confirmed';
       throw new Error('crash after acknowledgement');
     };
-    await expect(
-      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
-    ).rejects.toThrow('crash after acknowledgement');
+    await expect(applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval)).rejects.toThrow(
+      'crash after acknowledgement',
+    );
     f.files.set('spare/recreated', 'new data');
     f.adapter.listFiles.mockClear();
     f.adapter.readFileForEditor.mockClear();
-    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
-      true,
-    );
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval)).toBe(true);
     expect(f.files.get('spare/recreated')).toBe('new data');
     expect(f.adapter.deleteFiles).toHaveBeenCalledOnce();
     expect(f.adapter.listFiles).not.toHaveBeenCalled();
@@ -858,31 +888,27 @@ describe('UUID-bound existing Minecraft player changes', () => {
       f.files.delete('spare/a');
       throw new Error('lost response');
     });
-    await expect(
-      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
-    ).rejects.toThrow('lost response');
+    await expect(applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval)).rejects.toThrow(
+      'lost response',
+    );
     f.adapter.listFiles.mockClear();
     f.adapter.readFileForEditor.mockClear();
-    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
-      true,
-    );
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval)).toBe(true);
     expect(f.adapter.listFiles).toHaveBeenCalledTimes(1);
     expect(f.adapter.readFileForEditor).not.toHaveBeenCalled();
     expect(f.adapter.deleteFiles).toHaveBeenCalledOnce();
     f.files.set('spare/recreated', 'new data');
-    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false })).toBe(
-      true,
-    );
+    expect(await applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval)).toBe(true);
     expect(f.files.get('spare/recreated')).toBe('new data');
   });
   it('keeps an ambiguous removal blocked when the folder still exists', async () => {
     const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
     f.adapter.deleteFiles.mockRejectedValueOnce(new Error('lost response'));
+    await expect(applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval)).rejects.toThrow(
+      'lost response',
+    );
     await expect(
-      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
-    ).rejects.toThrow('lost response');
-    await expect(
-      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+      applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval),
     ).rejects.toMatchObject({ code: 'operation_uncertain' });
     expect(f.adapter.deleteFiles).toHaveBeenCalledOnce();
   });
@@ -890,14 +916,22 @@ describe('UUID-bound existing Minecraft player changes', () => {
     const f = fixture({ 'server.properties': 'level-name=world\n', 'spare/a': 'bytes' });
     const backup = vi.fn(async () => false);
     f.context.backup = backup;
-    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: true })).toBe(
-      false,
-    );
+    expect(
+      await applyMinecraftWorldRemoval(f.context, 'spare', {
+        ...onlineRemoval,
+        backupBefore: true,
+      }),
+    ).toBe(false);
     expect(f.assertStopped).toHaveBeenCalledOnce();
     expect(backup).toHaveBeenCalledOnce();
     expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
     f.operation.plan = { backupComplete: true };
-    expect(await applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: true })).toBe(true);
+    expect(
+      await applyMinecraftWorldRemoval(f.context, 'spare', {
+        ...onlineRemoval,
+        backupBefore: true,
+      }),
+    ).toBe(true);
     expect(f.assertStopped).toHaveBeenCalledTimes(2);
     expect(f.adapter.deleteFiles).toHaveBeenCalledOnce();
   });
@@ -907,7 +941,7 @@ describe('UUID-bound existing Minecraft player changes', () => {
       throw new DomainError('forbidden');
     };
     await expect(
-      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: false }),
+      applyMinecraftWorldRemoval(f.context, 'spare', onlineRemoval),
     ).rejects.toMatchObject({ code: 'forbidden' });
     expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
   });
@@ -919,7 +953,7 @@ describe('UUID-bound existing Minecraft player changes', () => {
       return true;
     });
     await expect(
-      applyMinecraftWorldRemoval(f.context, 'spare', { backupBefore: true }),
+      applyMinecraftWorldRemoval(f.context, 'spare', { ...onlineRemoval, backupBefore: true }),
     ).rejects.toMatchObject({ details: { reason: 'minecraft_world_selected' } });
     expect(f.adapter.listFiles).toHaveBeenCalledTimes(2);
     expect(f.adapter.readFileForEditor).toHaveBeenCalledTimes(2);

@@ -87,6 +87,8 @@ export interface FilemanJobServices {
     target: string;
     guardFile: string;
     validateGuard(contents: string): void;
+    /** Recheck game-specific write authority immediately before dispatch, including retries. */
+    beforeWrite?: () => Promise<void>;
   }): Promise<void>;
   /** Bulk tree transfer. Core owns staging, provider transport and recovery;
    * the compiled integration owns file selection and its final content guard. */

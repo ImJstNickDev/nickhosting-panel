@@ -225,6 +225,34 @@ describe('Mods HTTP catalog and mutation boundaries', () => {
     expect(providerRead).not.toHaveBeenCalled();
   });
 
+  it('reuses completed catalog reads while rechecking access, filters and provider configuration', async () => {
+    const browse = (suffix: string) => app.request(`${base()}/catalog/${suffix}`);
+    for (const suffix of [
+      'search?provider=modrinth',
+      'modrinth/testmod',
+      'modrinth/testmod/versions',
+    ]) {
+      json.mockClear();
+      const first = await browse(suffix);
+      expect(first.status).toBe(200);
+      const upstream = json.mock.calls.length;
+      expect(upstream).toBeGreaterThan(0);
+      expect(await (await browse(suffix)).json()).toEqual(await first.json());
+      expect(json).toHaveBeenCalledTimes(upstream);
+    }
+    json.mockClear();
+    expect((await browse('search?provider=modrinth&query=other')).status).toBe(200);
+    expect(json).toHaveBeenCalledTimes(1);
+    const owner = actor;
+    actor = (await managementFixture(database.db, { interactive: true })).context;
+    expect((await browse('search?provider=modrinth')).status).toBe(403);
+    expect(json).toHaveBeenCalledTimes(1);
+    actor = owner;
+    await storeSecret(database.db, fixture.owner, codec, 'curseforgeApiKey', 'rotated-fixture-key');
+    expect((await browse('search?provider=modrinth')).status).toBe(200);
+    expect(json).toHaveBeenCalledTimes(2);
+  });
+
   it('rejects unknown inputs and bounded pagination before provider work', async () => {
     for (const suffix of [
       '/catalog/search?provider=other',

@@ -865,6 +865,8 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     ).toHaveValue('Browser');
   });
   it('distinguishes pending and failed detail reads and lets blocked actions be cancelled', async () => {
+    await running(false);
+    await savedPlayer();
     let release = () => {};
     const gate = new Promise<void>((resolve) => {
       release = resolve;

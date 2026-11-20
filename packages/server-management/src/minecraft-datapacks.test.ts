@@ -45,6 +45,8 @@ describe('datapack batch publication receipts', () => {
     for (const entries of [
       [file('one.zip.pending'), file('one.zip')],
       [file('one.zip', 11)],
+      [file('one.zip', 11), file('one.zip')],
+      [file('unexpected/nested.zip'), file('one.zip')],
       [{ ...file('one.zip'), kind: 'symlink' }],
     ]) {
       const files = {

@@ -82,6 +82,15 @@ because an HTTP 204 alone does not prove that Wings moved every source. Rollback
 files are retained during uncertainty and cleaned only after a durable applied
 receipt. There is no recursive cleanup of unrelated server data.
 
+Catalog projects and available updates offer **Preview file changes** alongside Install.
+A preview stages the selected release and waits for an explicit apply.
+The review groups the immutable plan into added, replaced, removed and kept paths.
+A replacement belongs to one group even when publication first removes the old file.
+A trailing slash identifies an entire directory scheduled for removal. The read-only
+`GET /v1/servers/:id/minecraft/modpacks/operations/:operationId/files` endpoint
+requires Modpacks read access and the matching plan digest. It returns four totals
+and up to 100 paths for the requested group and offset.
+
 ## Updates and replacement
 
 - Check for Updates compares the installed version with the provider’s latest
@@ -105,9 +114,16 @@ receipt. There is no recursive cleanup of unrelated server data.
   transport retries reuse its idempotency key. Project names/descriptions resolve
   independently from preparation, including after a page reload.
 
-Manual archive upload remains on the pre-existing backend contract; the new UI
-currently exposes the six provider catalogs rather than routing uploaded archives
-through the old destructive replacement flow.
+Modpacks also accepts local `.mrpack` and `.zip` exports. The browser uploads
+to a server-scoped source and queues a preview using its UUID and SHA-256.
+Preparation recognizes one Modrinth index, CurseForge manifest or Prism/MultiMC
+`mmc-pack.json` at the root or under one wrapper. Native instances supply exact
+Minecraft and loader components and server data from `.minecraft/` or `minecraft/`.
+Unknown components and custom runtime patches block preparation. Imports omit
+client files and optional pins, and the review shows the excluded count and up
+to 100 paths. Apply is explicit, preserves worlds by default, and uses the
+same publication and recovery workflow as catalog packs. The installed receipt
+retains the upload identity, archive format and exact runtime.
 
 ## Persistence and APIs
 

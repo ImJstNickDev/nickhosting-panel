@@ -11,6 +11,7 @@ import {
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  readMinecraftWorldFilemanIndex,
   readMinecraftWorldIndex,
   refreshMinecraftWorldIndex,
 } from '../../../packages/server-management/src/minecraft-world-index.js';
@@ -25,6 +26,7 @@ vi.mock('@nickhosting/server-management', async (original) => ({
   inspectMinecraftCombination: vi.fn(),
 }));
 vi.mock('../../../packages/server-management/src/minecraft-world-index.js', () => ({
+  readMinecraftWorldFilemanIndex: vi.fn(),
   readMinecraftWorldIndex: vi.fn(),
   refreshMinecraftWorldIndex: vi.fn(),
 }));
@@ -39,7 +41,12 @@ const snapshot = {
   worlds: [],
 };
 
-const inventory = { snapshot, nonWorldDirectories: ['cache'], observedAt: new Date() };
+const inventory = {
+  current: true,
+  snapshot,
+  nonWorldDirectories: ['cache'],
+  observedAt: new Date(),
+};
 
 function fixture(connection = db) {
   const app = new Hono<{ Variables: Variables }>();
@@ -95,6 +102,13 @@ beforeEach(() => {
   vi.mocked(authorizeServer)
     .mockReset()
     .mockResolvedValue({} as Awaited<ReturnType<typeof authorizeServer>>);
+  vi.mocked(readMinecraftWorldFilemanIndex)
+    .mockReset()
+    .mockResolvedValue({
+      worlds: [],
+      selectedWorld: 'world',
+      nonWorldDirectories: ['cache'],
+    });
   vi.mocked(readMinecraftWorldIndex).mockReset().mockResolvedValue(inventory);
   vi.mocked(refreshMinecraftWorldIndex).mockReset().mockResolvedValue(inventory);
   vi.mocked(inspectMinecraftWorlds).mockReset().mockResolvedValue(snapshot);
@@ -134,7 +148,7 @@ describe('world snapshot HTTP access contract', () => {
       'game.minecraft.worlds.read',
     );
   });
-  it('overlaps opening preparation with inventory and tolerates unavailable preparation', async () => {
+  it('returns the authorized inventory while a shared optional preparation is still pending', async () => {
     const f = fixture();
     const preparation = Promise.withResolvers<void>();
     f.prepareWorldSelection.mockReturnValueOnce(preparation.promise);
@@ -146,8 +160,20 @@ describe('world snapshot HTTP access contract', () => {
     const response = f.app.request('/v1/servers/server/minecraft/worlds');
     await inspected.promise;
     expect(f.prepareWorldSelection).toHaveBeenCalledOnce();
-    preparation.reject(new Error('optional preparation unavailable'));
     expect((await response).status).toBe(200);
+    expect((await f.app.request('/v1/servers/server/minecraft/worlds')).status).toBe(200);
+    expect(f.prepareWorldSelection).toHaveBeenCalledOnce();
+    preparation.reject(new Error('optional preparation unavailable'));
+  });
+  it('skips selection warmup on a running server while still checking world inventory', async () => {
+    const f = fixture();
+    vi.mocked(authorizeServer).mockResolvedValueOnce({ runtime_state: 'running' } as Awaited<
+      ReturnType<typeof authorizeServer>
+    >);
+    expect((await f.app.request('/v1/servers/server/minecraft/worlds')).status).toBe(200);
+    expect(refreshMinecraftWorldIndex).toHaveBeenCalledOnce();
+    expect(f.access).not.toHaveBeenCalled();
+    expect(f.authorizeTransfer).toHaveBeenCalledOnce();
   });
   it('publishes a prepared inventory without waiting for provider files', async () => {
     const f = fixture();

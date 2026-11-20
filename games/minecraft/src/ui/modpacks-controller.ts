@@ -15,6 +15,8 @@ import {
   minecraftModpackApplySchema,
   minecraftModpackPrepareSchema,
   minecraftModpacksSnapshotSchema,
+  modpackReviewFiles,
+  type modpackReviewGroup,
 } from '../modpack-contracts.js';
 
 export type {
@@ -64,6 +66,21 @@ export function createMinecraftModpacksController(client: GameUiClient) {
     async snapshot(serverId: string, signal?: AbortSignal) {
       return minecraftModpacksSnapshotSchema.parse(
         await client.request(path(serverId), { signal }),
+      );
+    },
+    async reviewFiles(
+      serverId: string,
+      id: string,
+      digest: string,
+      group: z.infer<typeof modpackReviewGroup>,
+      offset: number,
+      signal?: AbortSignal,
+    ) {
+      const params = new URLSearchParams({ digest, group, offset: String(offset) });
+      return modpackReviewFiles.parse(
+        await client.request(path(serverId, `/operations/${z.uuid().parse(id)}/files?${params}`), {
+          signal,
+        }),
       );
     },
     async catalog(serverId: string, signal?: AbortSignal) {

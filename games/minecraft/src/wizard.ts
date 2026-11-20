@@ -34,6 +34,7 @@ export interface MinecraftWizardDescriptor {
     readonly release: string;
     readonly runtime: MinecraftRuntimeProfile;
     readonly choiceId: string;
+    readonly loaderVersion?: string;
   };
 }
 export function minecraftWizard(
@@ -107,6 +108,7 @@ export function minecraftWizard(
             release: modpack.release,
             runtime: modpack.runtime,
             choiceId: modpack.choiceId,
+            ...(modpack.loaderVersion ? { loaderVersion: modpack.loaderVersion } : {}),
           },
         }
       : {}),

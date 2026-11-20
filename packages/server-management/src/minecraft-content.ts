@@ -89,6 +89,7 @@ import type { Environment } from './admission.js';
 import { createFilemanReadService } from './fileman-read.js';
 import { filemanTransferDigest, filemanTransferReceiptStep } from './fileman-transfers.js';
 import type { GameLifecycleContext } from './lifecycle.js';
+import { getMinecraftContentProfile } from './minecraft-content-profile.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 import {
   assertMinecraftRemoteLaunch,
@@ -114,6 +115,7 @@ import {
   minecraftConfigurationSchema,
   minecraftContentAllowsOnline,
   minecraftContentCommandSchema,
+  minecraftContentRemovesInactiveWorld,
   minecraftContentSelectsWorld,
   minecraftStoredConfigurationSchema,
   minecraftStoredPlayerSchema,
@@ -340,6 +342,11 @@ export async function prepareMinecraftContentPlan(
           : minecraftWorldDataVersion(choice.combination.release),
       existing: command.kind !== 'world-import' || actual?.length === 1,
     };
+    if (command.kind === 'world-remove') {
+      if (choice.combination.profile === 'vanilla') result.world.allowOnlineRemoval = true;
+      else if (server.runtime_state !== 'offline')
+        throw new DomainError('conflict', 409, { reason: 'minecraft_world_requires_stopped' });
+    }
     if (command.kind === 'world-select') {
       const inspected = await options.worldPreparation?.read(server, profile.combination_id);
       if (inspected) {
@@ -1702,7 +1709,7 @@ function worldDirectoryEntry(entries: readonly FilemanEntry[], target: string) {
 export async function applyMinecraftWorldRemoval(
   context: GameLifecycleContext,
   target: string,
-  options: { backupBefore: boolean },
+  options: { backupBefore: boolean; allowOnlineRemoval: boolean },
 ): Promise<boolean> {
   minecraftWorldName(target);
   const step = stepId('remove', target);
@@ -1721,6 +1728,8 @@ export async function applyMinecraftWorldRemoval(
     await complete(context, step);
     return true;
   }
+  const beforeRemove =
+    options.backupBefore || !options.allowOnlineRemoval ? context.assertStopped : undefined;
   const pinnedRemoval = context.operation().plan.fileDirectoryRemoval !== undefined;
   if (pinnedRemoval && !context.fileman?.removeDirectory)
     throw new DomainError('operation_uncertain');
@@ -1736,6 +1745,7 @@ export async function applyMinecraftWorldRemoval(
     await context.fileman.removeDirectory({
       target,
       guardFile: 'server.properties',
+      beforeWrite: beforeRemove,
       validateGuard(contents) {
         const configured = parseMinecraftProperties(contents)['level-name'] ?? 'world';
         if (targetsConfiguredMinecraftWorld(configured, target)) fail('minecraft_world_selected');
@@ -1767,12 +1777,12 @@ export async function applyMinecraftWorldRemoval(
     if (!(await context.backup())) return false;
   }
   await assertInactiveTarget();
-  await context.effect(step, async () => {
-    if (options.backupBefore) await context.assertStopped();
-    // The enclosing durable effect performs the final authorization and managed
-    // identity check after preparation, before dispatching this single mutation.
-    await context.adapter.deleteFiles(context.server.pterodactyl_identifier ?? '', '', [target]);
-  });
+  await context.effect(
+    step,
+    () => context.adapter.deleteFiles(context.server.pterodactyl_identifier ?? '', '', [target]),
+    undefined,
+    beforeRemove,
+  );
   await complete(context, step);
   return true;
 }
@@ -2527,12 +2537,14 @@ export async function processMinecraftContent(
 }
 
 export interface MinecraftWorldSnapshot {
+  /** Older cached snapshots predate the runtime policy. */
+  allowOnlineRemoval?: boolean;
   installed: boolean;
   supported: boolean;
   selectedWorld: string | null;
   release: string;
   compatibility: 'available' | 'unavailable';
-  worlds: Awaited<ReturnType<typeof discoverMinecraftWorlds>>;
+  worlds: (Awaited<ReturnType<typeof discoverMinecraftWorlds>>[number] & { observedAt?: string })[];
 }
 export interface MinecraftWorldFileStamp {
   name: string;
@@ -2540,12 +2552,61 @@ export interface MinecraftWorldFileStamp {
   modifiedAt: string;
   validatedAt: number;
 }
+const worldScanBatchSize = 100;
+const knownWorldBudget = worldScanBatchSize / 4;
 export interface MinecraftWorldIndexInspection {
+  knownWorlds: ReadonlySet<string>;
+  scanAfter: string | null;
+  rotationMilliseconds: number;
+  scannedDirectories: Set<string>;
+  forbiddenDirectories: Set<string>;
   previous: ReadonlyMap<string, MinecraftWorldFileStamp & { validation: MinecraftWorldValidation }>;
   stamps: MinecraftWorldFileStamp[];
   presentDirectories: Set<string>;
   worldMarkerDirectories: Set<string>;
   nonWorldDirectories: string[];
+}
+/** Reserve part of each oversized pass for previously unseen directories. The
+ * cursor is a path component so insertion, deletion or a change in provider order
+ * cannot make a fixed offset skip the same tail indefinitely. */
+function worldScanBatch(
+  names: string[],
+  configured: string,
+  inspection: MinecraftWorldIndexInspection,
+) {
+  inspection.presentDirectories = new Set(names);
+  if (names.length <= worldScanBatchSize) {
+    inspection.scanAfter = null;
+    inspection.scannedDirectories = new Set(names);
+    return names;
+  }
+  // Retain proven Fileman classifications until their normal turn for reinspection.
+  // Keep a fixed upper bound even when a very large root needs many minutes.
+  const passes = Math.ceil(names.length / (worldScanBatchSize - knownWorldBudget));
+  inspection.rotationMilliseconds = Math.min(passes + 1, 15) * 60_000;
+  const ordered = [...names].sort();
+  const after = inspection.scanAfter;
+  const start =
+    after === null
+      ? 0
+      : Math.max(
+          0,
+          ordered.findIndex((name) => name > after),
+        );
+  const cycle = [...ordered.slice(start), ...ordered.slice(0, start)];
+  const batch = new Set<string>();
+  if (inspection.presentDirectories.has(configured)) batch.add(configured);
+  for (const name of cycle) {
+    if (inspection.knownWorlds.has(name)) batch.add(name);
+    if (batch.size >= knownWorldBudget) break;
+  }
+  for (const name of cycle) {
+    batch.add(name);
+    inspection.scanAfter = name;
+    if (batch.size === worldScanBatchSize) break;
+  }
+  inspection.scannedDirectories = batch;
+  return [...batch];
 }
 /** Caller establishes authorization and managed identity through ManagementRuntime.fileReadAccess. */
 export async function inspectMinecraftWorlds(
@@ -2553,38 +2614,46 @@ export async function inspectMinecraftWorlds(
   adapter: PterodactylAdapter,
   serverId: string,
   authorize: () => Promise<void>,
-  env: Environment = {},
+  _env: Environment = {},
   signal?: AbortSignal,
   fileman?: FilemanReadService,
   preparation?: MinecraftContentOptions['worldPreparation'],
-  indexInspection?: MinecraftWorldIndexInspection,
-  preparationRevision?: string,
+  {
+    indexInspection,
+    preparationRevision,
+    targetWorld,
+    verifiedServer,
+  }: {
+    indexInspection?: MinecraftWorldIndexInspection;
+    preparationRevision?: string;
+    targetWorld?: string;
+    verifiedServer?: GameLifecycleContext['server'];
+  } = {},
 ): Promise<MinecraftWorldSnapshot> {
-  const profile = await db
-    .selectFrom('minecraft_server_profiles')
-    .selectAll()
-    .where('server_id', '=', serverId)
-    .executeTakeFirst();
-  const server = await db
-    .selectFrom('managed_servers')
-    .selectAll()
-    .where('id', '=', serverId)
-    .where('deleted_at', 'is', null)
-    .executeTakeFirst();
-  if (!profile || !server) throw new DomainError('not_found');
+  const [profile, server] = await Promise.all([
+    getMinecraftContentProfile(db, serverId),
+    verifiedServer ??
+      db
+        .selectFrom('managed_servers')
+        .selectAll()
+        .where('id', '=', serverId)
+        .where('deleted_at', 'is', null)
+        .executeTakeFirst(),
+  ]);
+  if (!server || server.id !== serverId || server.deleted_at) throw new DomainError('not_found');
   const revision = preparationRevision ?? (await preparation?.revisionFor(server));
-  const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
-  const expectedDataVersion = minecraftWorldDataVersion(choice.combination.release);
+  const expectedDataVersion = minecraftWorldDataVersion(profile.combination.release);
   const snapshot: MinecraftWorldSnapshot = {
+    allowOnlineRemoval: profile.combination.profile === 'vanilla',
     installed: profile.installed,
     supported: minecraftManifest.capabilities.worlds,
     selectedWorld: null,
-    release: choice.combination.release,
+    release: profile.combination.release,
     compatibility: expectedDataVersion === undefined ? 'unavailable' : 'available',
     worlds: [],
   };
   if (!snapshot.installed || !snapshot.supported) {
-    await preparation?.invalidate(server, profile.combination_id, revision);
+    await preparation?.invalidate(server, profile.combinationId, revision);
     return snapshot;
   }
   if (!server.pterodactyl_identifier) throw new DomainError('conflict');
@@ -2598,27 +2667,35 @@ export async function inspectMinecraftWorlds(
       signal,
     });
   const [propertiesBytes, root] = await Promise.all([
-    files.read({ path: 'server.properties', maxBytes: 1048576 }),
+    files.read({ path: 'server.properties', maxBytes: 1048576, missing: 'allow' }),
     files.list(''),
   ]);
-  if (!propertiesBytes) throw new DomainError('not_found');
-  const properties = parseMinecraftProperties(Buffer.from(propertiesBytes).toString('utf8'));
+  const properties = propertiesBytes
+    ? parseMinecraftProperties(Buffer.from(propertiesBytes).toString('utf8'))
+    : {};
   // Preserve the observed value, including legacy names that managed mutations cannot accept.
   snapshot.selectedWorld = properties['level-name'] ?? 'world';
   const directories = new Map<string, FilemanDirectoryResult>();
   const reusable = new Map<string, MinecraftWorldValidation>();
-  snapshot.worlds = await discoverMinecraftWorlds(
-    {
-      listRoot: async () => {
-        // The same candidates as discovery, bounded before any remote fan-out.
-        const candidates = root.filter(
-          (entry) => entry.kind === 'directory' && isMinecraftWorldDirectory(entry.name),
-        );
-        if (indexInspection)
-          indexInspection.presentDirectories = new Set(candidates.map((entry) => entry.name));
-        if (candidates.length > 100) throw new DomainError('validation_failed');
-        if (candidates.length) {
-          const results = await files.listMany(candidates.map(({ name }) => name));
+  if (root.length > 10_000) throw new DomainError('validation_failed');
+  const names = root
+    .filter((entry) => entry.kind === 'directory' && isMinecraftWorldDirectory(entry.name))
+    .map((entry) => entry.name);
+  if (new Set(names.map((name) => name.toLowerCase())).size !== names.length)
+    throw new DomainError('validation_failed', 400, {
+      reason: 'minecraft_world_discovery_duplicate',
+    });
+  const candidates = indexInspection
+    ? worldScanBatch(names, snapshot.selectedWorld, indexInspection)
+    : targetWorld === undefined
+      ? names
+      : names.filter((name) => name === targetWorld);
+  for (let offset = 0; offset < candidates.length; offset += worldScanBatchSize) {
+    const batch = candidates.slice(offset, offset + worldScanBatchSize);
+    const discovered = await discoverMinecraftWorlds(
+      {
+        listRoot: async () => {
+          const results = await files.listMany(batch);
           const paths: string[] = [];
           for (const result of results) {
             directories.set(result.directory, result);
@@ -2665,45 +2742,46 @@ export async function inspectMinecraftWorlds(
             paths.push(`${result.directory}/level.dat`);
           }
           if (paths.length) await files.prepare(paths);
-        }
-        return root.map((entry) => ({
-          name: entry.name,
-          isDirectory: entry.kind === 'directory',
-          isSymlink: entry.kind === 'symlink',
-        }));
-      },
-      observedValidation: (world) => reusable.get(world),
-      readLevelDat: async (world, maxBytes) => {
-        const directory = directories.get(world);
-        if (!directory || 'error' in directory) {
-          if (
-            !indexInspection &&
-            directory &&
-            'error' in directory &&
-            directory.error === 'not_found'
-          )
-            return undefined;
-          throw new DomainError(
-            directory && 'error' in directory && directory.error === 'forbidden'
-              ? 'forbidden'
-              : 'integration_unavailable',
-          );
-        }
-        const level = directory.files.find((entry) => entry.name === 'level.dat');
-        if (!level) return undefined;
-        if (level.kind !== 'file' || level.size > maxBytes) throw new DomainError('conflict');
-        try {
-          return await files.read({ path: `${world}/level.dat`, maxBytes });
-        } catch (error) {
-          if (error instanceof PterodactylError && [401, 403].includes(error.upstreamStatus ?? 0)) {
-            throw new DomainError('forbidden');
+          return batch.map((name) => ({ name, isDirectory: true }));
+        },
+        observedValidation: (world) => reusable.get(world),
+        readLevelDat: async (world, maxBytes) => {
+          const directory = directories.get(world);
+          if (!directory || 'error' in directory) {
+            if (
+              !indexInspection &&
+              directory &&
+              'error' in directory &&
+              directory.error === 'not_found'
+            )
+              return undefined;
+            if (directory && 'error' in directory && directory.error === 'forbidden') {
+              if (!indexInspection) throw new DomainError('forbidden');
+              // The batch and its root listing succeeded. This result denies this path only.
+              indexInspection.forbiddenDirectories.add(world);
+            }
+            throw new DomainError('integration_unavailable');
           }
-          throw error;
-        }
+          const level = directory.files.find((entry) => entry.name === 'level.dat');
+          if (!level) return undefined;
+          if (level.kind !== 'file' || level.size > maxBytes) throw new DomainError('conflict');
+          try {
+            return await files.read({ path: `${world}/level.dat`, maxBytes });
+          } catch (error) {
+            if (
+              error instanceof PterodactylError &&
+              [401, 403].includes(error.upstreamStatus ?? 0)
+            ) {
+              throw new DomainError('forbidden');
+            }
+            throw error;
+          }
+        },
       },
-    },
-    { expectedDataVersion, release: choice.combination.release, signal },
-  );
+      { expectedDataVersion, release: profile.combination.release, signal },
+    );
+    snapshot.worlds.push(...discovered);
+  }
   await authorize();
   // These are direct children of root whose own listing was conclusive.
   // Empty directories, dimension layouts and interrupted saves may still be worlds.
@@ -2725,6 +2803,7 @@ export async function inspectMinecraftWorlds(
     (entry) => entry.name.toLowerCase() === 'server.properties',
   );
   if (
+    propertiesBytes &&
     reusable.size === 0 &&
     propertiesEntries.length === 1 &&
     propertiesEntries[0]?.name === 'server.properties' &&
@@ -2733,7 +2812,7 @@ export async function inspectMinecraftWorlds(
   ) {
     await preparation?.save(
       server,
-      profile.combination_id,
+      profile.combinationId,
       {
         worlds: snapshot.worlds,
         properties: {
@@ -2743,7 +2822,7 @@ export async function inspectMinecraftWorlds(
       },
       revision,
     );
-  } else await preparation?.invalidate(server, profile.combination_id, revision);
+  } else await preparation?.invalidate(server, profile.combinationId, revision);
   return snapshot;
 }
 /** Array contract retained for trusted integration scripts. */
@@ -2928,7 +3007,12 @@ async function applyWorldContent(
   }
   if (command.kind === 'world-remove') {
     if (
-      !(await applyMinecraftWorldRemoval(context, target, { backupBefore: prepared.backupBefore }))
+      !(await applyMinecraftWorldRemoval(context, target, {
+        backupBefore: prepared.backupBefore,
+        allowOnlineRemoval:
+          choice.combination.profile === 'vanilla' &&
+          minecraftContentRemovesInactiveWorld(prepared),
+      }))
     )
       return false;
     // Upgrade compatibility: a job started by the previous implementation may

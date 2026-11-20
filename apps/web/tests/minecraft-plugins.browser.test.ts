@@ -306,12 +306,49 @@ describe('Minecraft Plugins shared catalog experience', () => {
       })),
     ).toEqual([]);
   }
+  it('shows verified plugin provenance and distinguishes unmanaged JARs on mobile', async () => {
+    snapshot.packs = [
+      {
+        id: 'catalog',
+        name: 'world-tools.jar',
+        path: 'plugins/world-tools.jar',
+        size: 1024,
+        state: 'enabled',
+        metadata: metadata('hangar'),
+      },
+      {
+        id: 'local',
+        name: 'local.jar',
+        path: 'plugins/local.jar',
+        size: 150,
+        state: 'enabled',
+        metadata: null,
+      },
+    ];
+    await page.setViewportSize({ width: 390, height: 844 });
+    await open();
+    await page.getByRole('button', { name: /^Installed/ }).click();
+    await page.getByRole('button', { name: 'World Tools', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await check(dialog.getByText('Hangar', { exact: true })).toBeVisible();
+    await check(dialog.getByText('world-tools', { exact: true })).toBeVisible();
+    await check(dialog.getByRole('link', { name: 'Open in Files' })).toHaveAttribute(
+      'href',
+      `/servers/${serverId}/files?directory=plugins&file=world-tools.jar`,
+    );
+    await capture('minecraft-plugin-source-mobile-en');
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'local.jar', exact: true }).click();
+    await check(dialog.getByText('Source not recorded')).toBeVisible();
+    expect(writes).toEqual([]);
+  });
   it('offers all requested catalogs and keeps future providers quiet, on desktop and mobile', async () => {
     await open();
     await page.getByRole('combobox', { name: /Catalog|Catalogo/, exact: true }).click();
     await check(page.getByRole('option')).toHaveCount(6);
+    await check(page.getByRole('option', { name: 'BuiltByBit · Coming soon' })).toBeVisible();
     await capture('minecraft-plugins-providers');
-    await page.getByRole('option', { name: 'Voxel', exact: true }).click();
+    await page.getByRole('option', { name: 'Voxel · Coming soon', exact: true }).click();
     await check(page.getByText('Coming soon', { exact: true })).toBeVisible();
     await capture('minecraft-plugins-coming-soon');
     const count = requests.length;
@@ -319,7 +356,7 @@ describe('Minecraft Plugins shared catalog experience', () => {
     expect(requests.length).toBe(count);
     expect(writes).toHaveLength(0);
     await page.setViewportSize({ width: 390, height: 844 });
-    await chooseProvider('builtbybit');
+    await chooseProvider('BuiltByBit · Coming soon');
     await check(page.getByText('Coming soon', { exact: true })).toBeVisible();
     await capture('minecraft-plugins-coming-soon-mobile');
     expect(
@@ -352,7 +389,19 @@ describe('Minecraft Plugins shared catalog experience', () => {
     await check(page.getByRole('button', { name: 'Apply', exact: true })).toBeEnabled();
     await capture('minecraft-plugins-review');
     await page.getByRole('button', { name: 'Back to Discover', exact: true }).click();
-    await check(page.getByRole('button', { name: 'Install (1)', exact: true })).toBeVisible();
+    await check(
+      page.getByRole('checkbox', { name: 'Select World Tools', exact: true }).first(),
+    ).toBeChecked();
+    await page.getByRole('button', { name: 'Installed', exact: true }).click();
+    const installedSearch = page.getByRole('searchbox', { name: 'Search installed plugins' });
+    await installedSearch.fill('tools');
+    await page.getByRole('button', { name: 'Install (1)', exact: true }).click();
+    await page.getByRole('button', { name: 'Back to Installed', exact: true }).click();
+    await check(installedSearch).toHaveValue('tools');
+    await check(page.getByRole('button', { name: 'Installed', exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
     await page.getByRole('button', { name: 'Install (1)', exact: true }).click();
     await page.getByRole('button', { name: 'Apply', exact: true }).click();
     await check(
@@ -396,7 +445,7 @@ describe('Minecraft Plugins shared catalog experience', () => {
     await page.evaluate(() => localStorage.setItem('nh.locale', 'it'));
     await page.reload();
     await check(page.getByRole('searchbox', { name: 'Cerca plugin', exact: true })).toBeVisible();
-    await chooseProvider('Voxel');
+    await chooseProvider('Voxel · In arrivo');
     await check(page.getByText('In arrivo', { exact: true })).toBeVisible();
   });
 });

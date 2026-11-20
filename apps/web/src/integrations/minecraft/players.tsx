@@ -19,7 +19,13 @@ import { PlayerCard } from './player-card.js';
 import { MinecraftPlayerDetailView } from './player-detail.js';
 import { type PlayerActionSelection, PlayerGameplayActionDialog } from './player-detail-actions.js';
 import { PlayerIcon as Icon } from './player-icons.js';
-import { type MinecraftPlayerRow, mergeMinecraftPlayers } from './players-model.js';
+import {
+  countMinecraftPlayerFilters,
+  type MinecraftPlayerFilter,
+  type MinecraftPlayerRow,
+  matchesMinecraftPlayerFilter,
+  mergeMinecraftPlayers,
+} from './players-model.js';
 import './players.css';
 
 const controller = createMinecraftUiController(gameUiClient);
@@ -38,7 +44,7 @@ type Action =
   | 'kick'
   | 'edit-operator';
 type DispatchReceipt = { action: Action; name?: string; uuid?: string };
-type Filter = 'all' | 'online' | 'operators' | 'whitelist' | 'banned';
+type Filter = MinecraftPlayerFilter;
 const filters: Filter[] = ['all', 'online', 'operators', 'whitelist', 'banned'];
 
 export function MinecraftPlayersSection(props: GameSectionViewProps) {
@@ -104,7 +110,7 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
   const online = useQuery({
     queryKey: ['minecraft-online-players', props.serverId],
     queryFn: ({ signal }) => controller.onlinePlayers(props.serverId, signal),
-    enabled: supported && running,
+    enabled: supported && running && !detailUuid,
     refetchInterval: 15_000,
     refetchIntervalInBackground: false,
     retry: false,
@@ -117,18 +123,16 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
         : [],
     [snapshot, onlineAvailable, online.data],
   );
-  const matches = (row: MinecraftPlayerRow, selected: Filter) =>
-    selected === 'all' ||
-    (selected === 'online'
-      ? row.online
-      : selected === 'operators'
-        ? Boolean(row.operator)
-        : selected === 'whitelist'
-          ? row.whitelisted
-          : Boolean(row.banned));
-  const visible = rows.filter(
-    (row) => matches(row, filter) && row.name.toLowerCase().includes(search.trim().toLowerCase()),
-  );
+  const counts = useMemo(() => countMinecraftPlayerFilters(rows), [rows]);
+  const visible = useMemo(() => {
+    const keyword = search.trim().toLowerCase();
+    if (filter === 'all' && !keyword) return rows;
+    return rows.filter(
+      (row) =>
+        matchesMinecraftPlayerFilter(row, filter) &&
+        (!keyword || row.name.toLowerCase().includes(keyword)),
+    );
+  }, [rows, filter, search]);
 
   const lastPage = Math.max(0, Math.ceil(visible.length / 50) - 1);
   const currentPage = Math.min(page, lastPage);
@@ -561,9 +565,7 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
                 />
                 <span>
                   {t(key(item))}
-                  {(item !== 'online' || onlineAvailable) && (
-                    <small>{rows.filter((row) => matches(row, item)).length}</small>
-                  )}
+                  {(item !== 'online' || onlineAvailable) && <small>{counts[item]}</small>}
                 </span>
               </label>
             ))}

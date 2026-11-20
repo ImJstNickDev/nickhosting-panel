@@ -1,12 +1,15 @@
+import { useQuery } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import type {
   MinecraftModpackOperation,
   MinecraftModpacksSnapshot,
-  ModpackCatalogProject,
   ModpackCatalogVersion,
 } from '../../../../../games/minecraft/src/ui/modpacks-controller.js';
+import { createMinecraftModpacksController } from '../../../../../games/minecraft/src/ui/modpacks-controller.js';
 import { useFormat, useT } from '../../app/i18n.js';
+import { ErrorNotice, Loading } from '../../components/ui.js';
 import { Pagination, Switch } from '../../components/workspace-controls.js';
+import { gameUiClient } from '../../features/integrations.js';
 import {
   modpackKey as k,
   modpackProviders,
@@ -93,8 +96,9 @@ function Choice({
   );
 }
 export function ModpackReview(props: {
+  serverId: string;
   operation: MinecraftModpackOperation;
-  project?: ModpackCatalogProject;
+  project?: NonNullable<MinecraftModpackOperation['pack']>['project'];
   version?: ModpackCatalogVersion;
   installed?: MinecraftModpacksSnapshot['installed'];
   canManage: boolean;
@@ -113,7 +117,11 @@ export function ModpackReview(props: {
   const t = useT();
   const format = useFormat();
   const operation = props.operation;
-  const [backup, setBackup] = useState(false);
+  const [backup, setBackup] = useState(
+    Boolean(operation.selection.review?.backupBefore && props.canBackup),
+  );
+  const canSetWorldPolicy =
+    operation.selection.mode === 'replace' || Boolean(operation.selection.review);
   const [blockerPage, setBlockerPage] = useState(0);
   const [deletePage, setDeletePage] = useState(0);
   const blockerOffset =
@@ -166,16 +174,29 @@ export function ModpackReview(props: {
           <div className="modpacks-pack-heading">
             <ModsArtwork
               image={project?.imageUrl}
-              name={project?.name ?? operation.selection.projectId}
+              name={
+                project?.name ??
+                (operation.selection.provider === 'upload'
+                  ? t(k('uploaded'))
+                  : operation.selection.projectId)
+              }
             />
             <div>
               <span className="modpacks-provider">
-                {modpackProviders[operation.selection.provider]}
+                {operation.selection.provider === 'upload'
+                  ? t(k('uploaded'))
+                  : modpackProviders[operation.selection.provider]}
               </span>
               <h3 ref={heading} tabIndex={-1}>
-                {project?.name ?? operation.selection.projectId}
+                {project?.name ??
+                  (operation.selection.provider === 'upload'
+                    ? t(k('uploaded'))
+                    : operation.selection.projectId)}
               </h3>
-              <p>{version?.version ?? operation.selection.versionId}</p>
+              <p>
+                {version?.version ??
+                  (operation.selection.provider === 'upload' ? '' : operation.selection.versionId)}
+              </p>
               {project?.summary && <p>{project.summary}</p>}
             </div>
           </div>
@@ -186,6 +207,39 @@ export function ModpackReview(props: {
                 {props.installed.pack.project.name} · {props.installed.pack.version.version}
               </dd>
             </dl>
+          )}
+          {operation.pack?.imported && (
+            <div className="modpacks-import-summary">
+              <p>
+                {t(k('archiveFormat'))} · {t(k(`format.${operation.pack.imported.format}`))}
+              </p>
+              {operation.pack.imported.excludedFiles > 0 && (
+                <details>
+                  <summary>
+                    {t(k('excludedFiles'), {
+                      count: format.number(operation.pack.imported.excludedFiles, 0),
+                    })}
+                  </summary>
+                  <ul>
+                    {operation.pack.imported.excludedPaths.map((path) => (
+                      <li key={path}>
+                        <code>{path}</code>
+                      </li>
+                    ))}
+                  </ul>
+                  {operation.pack.imported.excludedFiles >
+                    operation.pack.imported.excludedPaths.length && (
+                    <p>
+                      {t(k('morePaths'), {
+                        count:
+                          operation.pack.imported.excludedFiles -
+                          operation.pack.imported.excludedPaths.length,
+                      })}
+                    </p>
+                  )}
+                </details>
+              )}
+            </div>
           )}
           <ModpackProgress operation={operation} />
           {operation.target && (
@@ -211,25 +265,14 @@ export function ModpackReview(props: {
                 {t(k('runtimeUnavailable'), { runtime: packLoaderLabel(operation.target.loader) })}
               </p>
             )}
-          {operation.changes && (
-            <section className="modpacks-change-summary" aria-label={t(k('changes'))}>
-              <span>
-                <strong>{format.number(operation.changes.write, 0)}</strong>
-                {t(k('updated'))}
-              </span>
-              <span>
-                <strong>{format.number(operation.changes.remove, 0)}</strong>
-                {t(k('removed'))}
-              </span>
-              <span>
-                <strong>{format.number(operation.changes.preserve, 0)}</strong>
-                {t(k('retained'))}
-              </span>
-              <span>
-                <strong>{format.bytes(operation.changes.bytes)}</strong>
-                {t(k('downloadSize'))}
-              </span>
-            </section>
+          {operation.changes && operation.planDigest && (
+            <ReviewFiles
+              key={operation.planDigest}
+              serverId={props.serverId}
+              id={operation.id}
+              digest={operation.planDigest}
+              size={format.bytes(operation.changes.bytes)}
+            />
           )}
           {operation.blockers.length > 0 && (
             <div className="modpacks-blockers">
@@ -323,7 +366,7 @@ export function ModpackReview(props: {
           {operation.selection.mode === 'replace' && (
             <p className="modpacks-replace-warning">{t(k('replaceWarning'))}</p>
           )}
-          {operation.selection.mode === 'replace' ? (
+          {canSetWorldPolicy ? (
             <Choice
               title={t(k('preserveWorlds'))}
               hint={t(k(props.canDeleteWorlds ? 'preserveWorldsHint' : 'worldsPermission'))}
@@ -340,13 +383,12 @@ export function ModpackReview(props: {
               {t(k('worldsPreserved'))}
             </p>
           )}
-          {operation.selection.mode === 'replace' &&
-            operation.selection.worldPolicy === 'reset' && (
-              <p className="modpacks-reset-warning">
-                <ModsIcon name="warning" />
-                {t(k('worldsReset'))}
-              </p>
-            )}
+          {operation.selection.worldPolicy === 'reset' && (
+            <p className="modpacks-reset-warning">
+              <ModsIcon name="warning" />
+              {t(k('worldsReset'))}
+            </p>
+          )}
           <Choice
             title={t(k('backup'))}
             hint={t(k('backupHint'))}
@@ -377,6 +419,91 @@ export function ModpackReview(props: {
         </aside>
       </div>
     </div>
+  );
+}
+
+const reviewController = createMinecraftModpacksController(gameUiClient);
+const fileGroups = ['added', 'replaced', 'removed', 'preserved'] as const;
+function ReviewFiles({
+  serverId,
+  id,
+  digest,
+  size,
+}: {
+  serverId: string;
+  id: string;
+  digest: string;
+  size: string;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState<(typeof fileGroups)[number]>();
+  const [page, setPage] = useState(0);
+  const group = open ?? 'added';
+  const queryKey = ['modpack-review-files', serverId, id, digest] as const;
+  const summary = useQuery({
+    queryKey: [...queryKey, 'added', 0],
+    queryFn: ({ signal }) => reviewController.reviewFiles(serverId, id, digest, 'added', 0, signal),
+    staleTime: Infinity,
+  });
+  const details = useQuery({
+    queryKey: [...queryKey, group, page],
+    queryFn: ({ signal }) =>
+      reviewController.reviewFiles(serverId, id, digest, group, page * 100, signal),
+    enabled: Boolean(open),
+    staleTime: Infinity,
+  });
+  return (
+    <section className="modpacks-file-review" aria-label={t(k('changes'))}>
+      <h4>{t(k('changes'))}</h4>
+      {summary.isError ? (
+        <ErrorNotice error={summary.error} retry={() => void summary.refetch()} />
+      ) : !summary.data ? (
+        <Loading />
+      ) : (
+        fileGroups.map((item) => (
+          <div key={item}>
+            <button
+              className="secondary modpacks-file-group"
+              type="button"
+              aria-expanded={open === item}
+              disabled={!summary.data.counts[item]}
+              onClick={() => {
+                setPage(0);
+                setOpen(open === item ? undefined : item);
+              }}
+            >
+              <span>{t(k(`files.${item}`))}</span>
+              <strong>{summary.data.counts[item]}</strong>
+              <ModsIcon name="chevron" />
+            </button>
+            {open === item &&
+              (details.isError ? (
+                <ErrorNotice error={details.error} retry={() => void details.refetch()} />
+              ) : !details.data ? (
+                <Loading />
+              ) : (
+                <>
+                  <ul>
+                    {details.data.paths.map((path) => (
+                      <li key={path}>
+                        <code>{path}</code>
+                      </li>
+                    ))}
+                  </ul>
+                  <ReviewPagination
+                    page={page}
+                    total={details.data.counts[item]}
+                    onChange={setPage}
+                  />
+                </>
+              ))}
+          </div>
+        ))
+      )}
+      <small>
+        {t(k('downloadSize'))} · {size}
+      </small>
+    </section>
   );
 }
 

@@ -83,6 +83,16 @@ export async function installMinecraftBrowserChoice(
     })
     .where('id', '=', mappingId)
     .execute();
+  return addMinecraftBrowserChoice(database, mappingId, env, browserMinecraft.release);
+}
+
+export async function addMinecraftBrowserChoice(
+  database: Awaited<ReturnType<typeof createTestDatabase>>,
+  mappingId: string,
+  env: Record<string, string | undefined>,
+  release: string,
+) {
+  const { db } = database;
   const mapping = await db
     .selectFrom('runtime_egg_mappings')
     .selectAll()
@@ -90,7 +100,7 @@ export async function installMinecraftBrowserChoice(
     .executeTakeFirstOrThrow();
   const sha256 = createHash('sha256').update(browserMinecraft.serverJar).digest('hex');
   const combination = {
-    release: browserMinecraft.release,
+    release,
     releaseType: 'release',
     protocolId: browserMinecraft.protocolId,
     family: 'netty',
@@ -113,7 +123,7 @@ export async function installMinecraftBrowserChoice(
   );
   const binding = {
     profile: 'vanilla',
-    release: browserMinecraft.release,
+    release,
     image: browserMinecraft.image,
     imageJavaMajor: browserMinecraft.javaMajor,
     declaredEggVariables: ['VERSION'],
@@ -124,7 +134,7 @@ export async function installMinecraftBrowserChoice(
     supportedProperties: properties,
   };
   const runtime = {
-    release: browserMinecraft.release,
+    release,
     releaseType: 'release',
     profile: 'vanilla',
     javaMajor: browserMinecraft.javaMajor,

@@ -4,7 +4,16 @@ Mods uses the runtime capability declaration already used by Minecraft navigatio
 It does not enable a new loader or change a server's runtime. Modrinth and
 CurseForge discovery share typed catalog, version and dependency contracts.
 
+Mods and Plugins reuse successful catalog search, detail and version responses for
+up to one minute. Each request checks current server access and runtime support.
+Search and version keys include filters and the current target. Changing provider
+credentials or policy replaces the cache. Preparation and publication perform
+their own acquisition and file checks.
+
 ## Selection and publication
+
+Mods opens on Installed the first time. The browser remembers the last tab
+(Installed or Discover) separately for each server.
 
 Discover stays inside the Mods page. Clicking a result opens its description in
 the right pane; the separate checkbox selects it. Selection starts preparation
@@ -19,6 +28,12 @@ The import verifies the asset size and SHA-256 against GitHub's release metadata
 Download requests use the effective Minecraft origin policy for `https://github.com`
 and `https://release-assets.githubusercontent.com`. Both are included in the
 platform defaults. Migration 064 adds GitHub provenance to mod source records.
+
+In Mods and Plugins, selecting an installed file opens its source details. Catalog
+receipts identify the project and version. A matching GitHub receipt identifies
+the repository, release tag and original asset, including after a managed rename.
+A file without a matching receipt shows its path and an unknown source. Readers
+with Files access can open that exact filename in its server directory.
 
 Automatic selection prefers the latest compatible stable version. Prefer beta
 allows a newer compatible beta; if no compatible stable release exists, a beta

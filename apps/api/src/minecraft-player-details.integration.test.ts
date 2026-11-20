@@ -8,7 +8,10 @@ import type {
 } from '@nickhosting/pterodactyl-adapter';
 import { Hono } from 'hono';
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
-import { minecraftPlayerDataFixture } from '../../../games/minecraft/src/player-data-fixture.js';
+import {
+  minecraftPlayerCombinationFixture,
+  minecraftPlayerDataFixture,
+} from '../../../games/minecraft/src/player-data-fixture.js';
 import { createManagementRuntime } from '../../../packages/server-management/src/runtime.js';
 import { setServerSubuser } from '../../../packages/server-management/src/subusers.js';
 import {
@@ -18,15 +21,6 @@ import {
 import type { Variables } from './app.js';
 import { registerMinecraftPlayerDetailRoutes } from './minecraft-player-details.js';
 
-// Only the release capability lookup is synthetic. Access/session/identity,
-// advisory locks, direct grants and all audit writes use the real SQL/runtime.
-vi.mock('@nickhosting/server-management', async (original) => ({
-  ...(await original<typeof import('@nickhosting/server-management')>()),
-  inspectMinecraftCombination: vi.fn(async () => ({
-    combination: { release: '26.3' },
-    capabilities: { playerManagement: true },
-  })),
-}));
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
 beforeAll(async () => {
   database = await createTestDatabase();
@@ -47,7 +41,7 @@ it('enforces real direct action grants and serializes recoverable reset with pow
       mapping_id: f.mappingId,
       identity_digest: '1'.repeat(64),
       mapping_digest: '2'.repeat(64),
-      combination: '{}',
+      combination: JSON.stringify(minecraftPlayerCombinationFixture),
       resolved_runtime: '{}',
       binding: '{}',
     })

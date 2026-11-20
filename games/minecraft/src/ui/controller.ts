@@ -12,6 +12,16 @@ import {
   minecraftPlayerDetailActionSchema,
   minecraftPlayerDetailSchema,
 } from '../player-details-contracts.js';
+import {
+  type MinecraftVersionChangeRequest,
+  minecraftVersionCatalogSchema,
+  minecraftVersionChangeAcceptedSchema,
+  minecraftVersionChangeRequestSchema,
+  minecraftVersionChoiceSchema,
+} from '../version-change-contracts.js';
+
+export type { MinecraftVersionChangeRequest } from '../version-change-contracts.js';
+
 import { isMinecraftWorldDirectory } from '../world-names.js';
 import { minecraftRuntimeArtwork } from './runtime-artwork.js';
 
@@ -165,16 +175,7 @@ export const minecraftChoiceSchema = z
   .object({
     id: z.string().min(1).max(256),
     version: z.string().min(1).max(80),
-    runtime: z.enum([
-      'vanilla',
-      'paper',
-      'purpur',
-      'folia',
-      'fabric',
-      'quilt',
-      'forge',
-      'neoforge',
-    ]),
+    runtime: minecraftVersionChoiceSchema.shape.runtime,
     releaseTime: z.iso.datetime({ offset: true }).nullable().optional(),
     releaseType: z.enum(['release', 'snapshot', 'old_alpha', 'old_beta']).optional(),
     capabilities: z.record(z.string(), z.boolean()).optional(),
@@ -205,6 +206,13 @@ const profileSchema = z
     supportedProperties: z.array(z.string()).max(1000).optional(),
   })
   .strip();
+const propertiesViewSchema = profileSchema.pick({
+  version: true,
+  runtime: true,
+  installed: true,
+  supportedProperties: true,
+  effectiveProperties: true,
+});
 export type MinecraftUiProfile = z.infer<typeof profileSchema>;
 const managedPlayer = z.object({ name: player, uuid: z.string().max(36) }).strip();
 export const minecraftPlayersSchema = z
@@ -277,6 +285,7 @@ const worldSchema = z
   .object({
     name: z.string().refine(isMinecraftWorldDirectory),
     status: z.enum(['verified', 'incompatible', 'unknown', 'invalid', 'unavailable']),
+    observedAt: z.iso.datetime().optional(),
     validation: z
       .object({
         dataVersion: z.number().int().nonnegative().optional(),
@@ -295,12 +304,13 @@ const worldSchema = z
   .strip();
 export const minecraftWorldsSchema = z
   .object({
+    allowOnlineRemoval: z.boolean().optional(),
     installed: z.boolean(),
     supported: z.boolean(),
     selectedWorld: z.string().max(1024).nullable(),
     release: z.string().max(128),
     compatibility: z.enum(['available', 'unavailable']),
-    worlds: z.array(worldSchema).max(1000),
+    worlds: z.array(worldSchema).max(10_000),
   })
   .strip();
 export type MinecraftWorlds = z.infer<typeof minecraftWorldsSchema>;
@@ -314,7 +324,7 @@ const wizardSchema = z
     choices: z.array(
       z
         .object({
-          id: uuid,
+          id: minecraftChoiceSchema.shape.id,
           release: z.string(),
           runtime: minecraftChoiceSchema.shape.runtime,
           nameKey: z.string(),
@@ -322,7 +332,12 @@ const wizardSchema = z
         .strip(),
     ),
     derived: z
-      .object({ release: z.string(), runtime: minecraftChoiceSchema.shape.runtime, choiceId: uuid })
+      .object({
+        release: z.string(),
+        runtime: minecraftChoiceSchema.shape.runtime,
+        choiceId: minecraftChoiceSchema.shape.id,
+        loaderVersion: z.string().min(1).max(80).optional(),
+      })
       .strip()
       .optional(),
   })
@@ -547,6 +562,11 @@ export function createMinecraftUiController(client: GameUiClient) {
       return minecraftCatalogOptions(await choices(signal), 'choices', { runtime });
     },
     profile,
+    async properties(serverId: string, signal?: AbortSignal) {
+      return propertiesViewSchema.parse(
+        await request(serverPath(serverId, '/properties'), 'GET', undefined, signal),
+      );
+    },
     async players(serverId: string, signal?: AbortSignal): Promise<MinecraftPlayers> {
       return minecraftPlayersSchema.parse(
         await request(serverPath(serverId, '/players'), 'GET', undefined, signal),
@@ -720,6 +740,20 @@ export function createMinecraftUiController(client: GameUiClient) {
         .parse(
           await request(serverPath(serverId, '/datapacks/catalog/acquire'), 'POST', body, signal),
         );
+    },
+    async versionCatalog(serverId: string, signal?: AbortSignal) {
+      return minecraftVersionCatalogSchema.parse(
+        await request(serverPath(serverId, '/versions'), 'GET', undefined, signal),
+      );
+    },
+    async changeVersion(serverId: string, command: MinecraftVersionChangeRequest) {
+      return minecraftVersionChangeAcceptedSchema.parse(
+        await request(
+          serverPath(serverId, '/versions'),
+          'POST',
+          minecraftVersionChangeRequestSchema.parse(command),
+        ),
+      );
     },
     async datapacks(
       serverId: string,

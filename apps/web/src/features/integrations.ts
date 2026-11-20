@@ -96,12 +96,16 @@ import type { GameFormViewProps } from './game-form-view.js';
 import type { GameSectionViewProps } from './game-section-view.js';
 import { MinecraftModSettings, MinecraftResponseSettings } from './integration-game-settings.js';
 
-const MinecraftSettingsForm = lazy(() =>
-  import('../integrations/minecraft/settings.js').then((module) => ({
-    default: module.MinecraftSettingsForm,
-  })),
-);
-const formViews = new Map<string, ComponentType<GameFormViewProps>>([
+/** Start the requested view's module while its authorized section data is loading. */
+function sectionView<P extends object>(load: () => Promise<{ default: ComponentType<P> }>) {
+  const Component = lazy(load);
+  return Object.assign(Component, { preload: () => void load().catch(() => {}) });
+}
+
+const MinecraftSettingsForm = sectionView(async () => ({
+  default: (await import('../integrations/minecraft/settings.js')).MinecraftSettingsForm,
+}));
+const formViews = new Map<string, ComponentType<GameFormViewProps> & { preload(): void }>([
   ['minecraft-properties', MinecraftSettingsForm],
 ]);
 /** Form views replace presentation only, never the shared authorization or mutation path. */
@@ -176,57 +180,37 @@ export function getGameContentAdmin(gameId: string) {
   return ownerContentComponents.get(gameId);
 }
 
-const MinecraftPlayersSection = lazy(() =>
-  import('../integrations/minecraft/players.js').then((module) => ({
-    default: module.MinecraftPlayersSection,
-  })),
-);
-const MinecraftWorldsSection = lazy(() =>
-  import('../integrations/minecraft/worlds.js').then((module) => ({
-    default: module.MinecraftWorldsSection,
-  })),
-);
-const MinecraftDatapacksSection = lazy(() =>
-  import('../integrations/minecraft/datapacks.js').then((module) => ({
-    default: module.MinecraftDatapacksSection,
-  })),
-);
-const MinecraftModsSection = lazy(() =>
-  import('../integrations/minecraft/mods.js').then((module) => ({
-    default: module.MinecraftModsSection,
-  })),
-);
-const MinecraftPluginsSection = lazy(() =>
-  import('../integrations/minecraft/mods.js').then((module) => ({
-    default: module.MinecraftPluginsSection,
-  })),
-);
-const MinecraftModpacksSection = lazy(() =>
-  import('../integrations/minecraft/modpacks.js').then((module) => ({
-    default: module.MinecraftModpacksSection,
-  })),
-);
-const SatisfactorySettingsSection = lazy(() =>
-  import('../integrations/satisfactory/settings.js').then((module) => ({
-    default: module.SatisfactorySettingsSection,
-  })),
-);
-const SatisfactoryModsSection = lazy(() =>
-  import('../integrations/satisfactory/mods.js').then((module) => ({
-    default: module.SatisfactoryModsSection,
-  })),
-);
-const SatisfactoryOverviewSection = lazy(() =>
-  import('../integrations/satisfactory/overview.js').then((module) => ({
-    default: module.SatisfactoryOverviewSection,
-  })),
-);
-const SatisfactoryWorldsSection = lazy(() =>
-  import('../integrations/satisfactory/worlds.js').then((module) => ({
-    default: module.SatisfactoryWorldsSection,
-  })),
-);
-const sectionViews = new Map<string, ComponentType<GameSectionViewProps>>([
+const MinecraftPlayersSection = sectionView(async () => ({
+  default: (await import('../integrations/minecraft/players.js')).MinecraftPlayersSection,
+}));
+const MinecraftWorldsSection = sectionView(async () => ({
+  default: (await import('../integrations/minecraft/worlds.js')).MinecraftWorldsSection,
+}));
+const MinecraftDatapacksSection = sectionView(async () => ({
+  default: (await import('../integrations/minecraft/datapacks.js')).MinecraftDatapacksSection,
+}));
+const MinecraftModsSection = sectionView(async () => ({
+  default: (await import('../integrations/minecraft/mods.js')).MinecraftModsSection,
+}));
+const MinecraftPluginsSection = sectionView(async () => ({
+  default: (await import('../integrations/minecraft/mods.js')).MinecraftPluginsSection,
+}));
+const MinecraftModpacksSection = sectionView(async () => ({
+  default: (await import('../integrations/minecraft/modpacks.js')).MinecraftModpacksSection,
+}));
+const SatisfactorySettingsSection = sectionView(async () => ({
+  default: (await import('../integrations/satisfactory/settings.js')).SatisfactorySettingsSection,
+}));
+const SatisfactoryModsSection = sectionView(async () => ({
+  default: (await import('../integrations/satisfactory/mods.js')).SatisfactoryModsSection,
+}));
+const SatisfactoryOverviewSection = sectionView(async () => ({
+  default: (await import('../integrations/satisfactory/overview.js')).SatisfactoryOverviewSection,
+}));
+const SatisfactoryWorldsSection = sectionView(async () => ({
+  default: (await import('../integrations/satisfactory/worlds.js')).SatisfactoryWorldsSection,
+}));
+const sectionViews = new Map<string, ComponentType<GameSectionViewProps> & { preload(): void }>([
   ['satisfactory-overview', SatisfactoryOverviewSection],
   ['satisfactory-worlds', SatisfactoryWorldsSection],
   ['satisfactory-mods', SatisfactoryModsSection],

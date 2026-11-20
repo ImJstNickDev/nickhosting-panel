@@ -43,7 +43,11 @@ function clientFixture() {
           capabilities: { playerManagement: true, gateway: true, sleepWake: true },
         },
       ];
-    if (path === `/v1/servers/${serverId}/minecraft`) return profile;
+    if (
+      path === `/v1/servers/${serverId}/minecraft` ||
+      path === `/v1/servers/${serverId}/minecraft/properties`
+    )
+      return profile;
     return { serverId, jobId };
   });
   return { request };
@@ -1114,6 +1118,56 @@ describe('Minecraft browser module and exact API contracts', () => {
       derived: { choiceId, release: '26.1', runtime: 'vanilla' },
     });
     await expect(controller.inspectModpack(sourceId)).rejects.toThrow('integration_unavailable');
+  });
+  it('submits a prepared archive with its exact catalog loader without another inspection', async () => {
+    const client = clientFixture();
+    const selection = { id: `fabric:${choiceId}:1.21.1`, runtime: 'fabric', version: '1.21.1' };
+    client.request.mockImplementation(async (path) => {
+      if (path === '/v1/minecraft/wizard')
+        return {
+          choices: [
+            {
+              ...selection,
+              release: selection.version,
+              nameKey: 'games.minecraft.runtimes.fabric',
+            },
+          ],
+          derived: {
+            choiceId: selection.id,
+            runtime: selection.runtime,
+            release: selection.version,
+            loaderVersion: '0.16.10',
+          },
+        };
+      if (path === '/v1/minecraft/choices') return [selection];
+      if (path === '/v1/minecraft/fabric/catalog')
+        return { loaders: [{ version: '0.16.10', stable: true }], latestInstallerVersion: '1.1.2' };
+      return { jobId, serverId };
+    });
+    const prepared = (await minecraftUiModule.handlers['prepare-create']?.(client, {
+      values: {
+        sourceMode: 'modpack',
+        sourceId,
+        name: 'Survival',
+        eula: true,
+        limits: { memory: 1024, cpu: 100 },
+      },
+    })) as { values: Record<string, unknown> };
+    await minecraftUiModule.handlers.create?.(client, {
+      values: prepared.values,
+      idempotencyKey: 'archive-create',
+    });
+    expect(
+      client.request.mock.calls.filter(([path]) => path === '/v1/minecraft/wizard'),
+    ).toHaveLength(1);
+    expect(client.request).toHaveBeenLastCalledWith(
+      '/v1/minecraft/servers',
+      expect.objectContaining({
+        body: expect.objectContaining({
+          minecraft: expect.objectContaining({ choiceId: selection.id, loaderVersion: '0.16.10' }),
+        }),
+      }),
+    );
   });
   it('uses the acknowledged upload response without buffering the Blob or requesting source state again', async () => {
     const client = clientFixture();

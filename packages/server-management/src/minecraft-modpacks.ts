@@ -11,6 +11,7 @@ import {
   type MinecraftModpacksSnapshot,
   minecraftModpackApplySchema,
   minecraftModpackBlockerSchema,
+  minecraftModpackOperationSchema,
   minecraftModpackPhaseSchema,
   minecraftModpackPrepareSchema,
   minecraftModpackProgressSchema,
@@ -160,7 +161,11 @@ const runtimePreparationSchema = z
     state: z.enum(['preparing', 'ready']),
   })
   .strict();
-function canAbandonPreparedRuntime(row: MinecraftModpackOperationRow): boolean {
+type CancellationState = Pick<
+  MinecraftModpackOperationRow,
+  'state' | 'lease_token' | 'publication' | 'runtime_preparation' | 'runtime_transition' | 'journal'
+>;
+function canAbandonPreparedRuntime(row: CancellationState): boolean {
   const checkpoint = runtimePreparationSchema.safeParse(row.runtime_preparation);
   const journal = journalSchema.safeParse(row.journal);
   return (
@@ -179,7 +184,7 @@ function canAbandonPreparedRuntime(row: MinecraftModpackOperationRow): boolean {
     )
   );
 }
-function canCancelUnstartedRuntime(row: MinecraftModpackOperationRow): boolean {
+function canCancelUnstartedRuntime(row: CancellationState): boolean {
   return (
     runtimePreparationSchema.safeParse(row.runtime_preparation).success &&
     row.state === 'uncertain' &&
@@ -340,60 +345,94 @@ export function createMinecraftModpacksService(options: {
     );
   }
   async function snapshotValue(serverId: string): Promise<MinecraftModpacksSnapshot> {
+    // Polling needs display fields and counts. Keep historical manifests and recovery
+    // checkpoints in PostgreSQL until an operation actually needs them.
     const [installed, row] = await Promise.all([
-      receipt(serverId),
+      db
+        .selectFrom('minecraft_modpack_receipts')
+        .select([
+          'operation_id',
+          'installed_at',
+          sql<unknown>`receipt->'pack'`.as('pack'),
+          sql<unknown>`receipt->'target'`.as('target'),
+        ])
+        .where('server_id', '=', serverId)
+        .executeTakeFirst(),
       db
         .selectFrom('minecraft_modpack_operations')
-        .selectAll()
+        .select([
+          'id',
+          'selection',
+          'state',
+          'phase',
+          'progress',
+          'plan_digest',
+          'blockers',
+          'error',
+          'backup_id',
+          'restart_required',
+          'created_at',
+          'updated_at',
+          'lease_token',
+          'journal',
+          'runtime_preparation',
+          sql<unknown>`CASE WHEN nullif(publication,'null'::jsonb) IS NOT NULL THEN true END`.as(
+            'publication',
+          ),
+          sql<unknown>`CASE WHEN nullif(runtime_transition,'null'::jsonb) IS NOT NULL THEN true END`.as(
+            'runtime_transition',
+          ),
+          sql<unknown>`prepared->'pack'`.as('pack'),
+          sql<unknown>`prepared->'target'`.as('target'),
+          sql<boolean>`coalesce(plan->'runtime' <> 'null'::jsonb
+            AND NOT (plan->'blockers' @> '[{"reason":"runtime"}]'::jsonb OR
+                     plan->'blockers' @> '[{"reason":"loader-version"}]'::jsonb), false)`.as(
+            'runtime_supported',
+          ),
+          sql<unknown>`plan->'remove'`.as('delete_paths'),
+          sql<unknown>`CASE WHEN nullif(plan,'null'::jsonb) IS NOT NULL THEN jsonb_build_object(
+            'write',jsonb_array_length(plan->'write'),
+            'remove',jsonb_array_length(plan->'remove'),
+            'preserve',jsonb_array_length(plan->'preserve'),
+            'bytes',(SELECT coalesce(sum(f.size),0) FROM jsonb_to_recordset(plan->'write') AS f(size bigint))
+          ) END`.as('changes'),
+        ])
         .where('server_id', '=', serverId)
         .orderBy('created_at', 'desc')
         .orderBy('id', 'desc')
+        .limit(1)
         .executeTakeFirst(),
     ]);
-    const prepared = row?.prepared ? preparedModpackSchema.parse(row.prepared) : null;
-    const plan = row?.plan ? modpackPlanSchema.parse(row.plan) : null;
+    const display = minecraftModpackOperationSchema.shape;
+    const abandon = row ? canAbandonPreparedRuntime(row) : false;
     return {
       installed: installed
         ? {
-            pack: installed.receipt.pack,
-            target: installed.receipt.target,
-            installedAt: installed.installedAt.toISOString(),
-            operationId: installed.operationId,
+            pack: modpackReceiptSchema.shape.pack.parse(installed.pack),
+            target: modpackReceiptSchema.shape.target.parse(installed.target),
+            installedAt: installed.installed_at.toISOString(),
+            operationId: installed.operation_id,
           }
         : null,
       operation: row
         ? {
             id: row.id,
             canCancel:
-              canAbandonPreparedRuntime(row) ||
+              abandon ||
               canCancelUnstartedRuntime(row) ||
               (row.runtime_preparation === null &&
                 cancellable.includes(row.state as (typeof cancellable)[number])),
-            ...(canAbandonPreparedRuntime(row)
-              ? { cancellationEffect: 'runtime-retained' as const }
-              : {}),
+            ...(abandon ? { cancellationEffect: 'runtime-retained' as const } : {}),
             selection: minecraftModpackPrepareSchema.parse(row.selection),
             state: row.state,
             phase: minecraftModpackPhaseSchema.parse(row.phase),
             progress: row.progress ? minecraftModpackProgressSchema.parse(row.progress) : null,
-            pack: prepared?.pack ?? null,
-            target: prepared?.target ?? null,
-            runtimeSupported: Boolean(
-              plan?.runtime &&
-                !plan.blockers.some(
-                  (item) => item.reason === 'runtime' || item.reason === 'loader-version',
-                ),
-            ),
+            pack: display.pack.parse(row.pack),
+            target: display.target.parse(row.target),
+            runtimeSupported: row.runtime_supported,
             planDigest: row.plan_digest,
-            changes: plan
-              ? {
-                  write: plan.write.length,
-                  remove: plan.remove.length,
-                  preserve: plan.preserve.length,
-                  bytes: plan.write.reduce((sum, file) => sum + file.size, 0),
-                }
-              : null,
-            deletePaths: plan?.remove ?? [],
+            changes: display.changes.parse(row.changes),
+            deletePaths: display.deletePaths.parse(row.delete_paths ?? []),
             blockers: z.array(minecraftModpackBlockerSchema).parse(row.blockers),
             error: row.error,
             backupId: row.backup_id,
@@ -432,7 +471,12 @@ export function createMinecraftModpacksService(options: {
     const files = verifiedFiles(plan, verified);
     await db.transaction().execute(async (tx) => {
       await lock(tx, row.server_id);
-      const current = await get(row.id, tx);
+      const current = await tx
+        .selectFrom('minecraft_modpack_operations')
+        .select(['state', 'lease_token'])
+        .where('id', '=', row.id)
+        .executeTakeFirst();
+      if (!current) throw new DomainError('not_found');
       const server = await tx
         .selectFrom('managed_servers')
         .select('owner_id')
@@ -448,8 +492,12 @@ export function createMinecraftModpacksService(options: {
           : current.state !== 'uncertain'
       )
         throw new DomainError('conflict');
-      const existing = await receipt(row.server_id, tx);
-      if ((existing?.operationId ?? null) !== plan.previousOperationId)
+      const existing = await tx
+        .selectFrom('minecraft_modpack_receipts')
+        .select('operation_id')
+        .where('server_id', '=', row.server_id)
+        .executeTakeFirst();
+      if ((existing?.operation_id ?? null) !== plan.previousOperationId)
         throw new DomainError('conflict');
       const value = JSON.stringify({
         pack: prepared.pack,
@@ -486,6 +534,53 @@ export function createMinecraftModpacksService(options: {
       await authorized(context, serverId);
       return snapshotValue(serverId);
     },
+    async reviewFiles(
+      context: AuthContext,
+      serverId: string,
+      id: string,
+      request: {
+        digest: string;
+        group: 'added' | 'replaced' | 'removed' | 'preserved';
+        offset: number;
+      },
+    ) {
+      await authorized(context, serverId);
+      // Keep paths and evidence in PostgreSQL. Review pages only transfer four counts
+      // and up to 100 paths, including for older plans already waiting for approval.
+      const row = await db
+        .selectFrom('minecraft_modpack_operations')
+        .select(
+          sql<{
+            counts: Record<'added' | 'replaced' | 'removed' | 'preserved', number>;
+            paths: string[];
+          }>`(
+          WITH writes AS (SELECT path FROM jsonb_to_recordset(plan->'write') AS w(path text)),
+          existing AS (SELECT path, entry->>'kind' AS kind FROM jsonb_to_recordset(plan->'expected') AS e(path text, entry jsonb)
+                        WHERE entry->>'kind' IS NOT NULL),
+          changes AS (
+            SELECT w.path, CASE WHEN e.path IS NULL THEN 'added' ELSE 'replaced' END AS category
+              FROM writes w LEFT JOIN existing e USING (path)
+            UNION ALL
+            SELECT r.path || CASE WHEN e.kind = 'directory' THEN '/' ELSE '' END, 'removed'
+              FROM jsonb_array_elements_text(plan->'remove') AS r(path)
+              LEFT JOIN existing e USING (path) WHERE NOT EXISTS (SELECT 1 FROM writes w WHERE w.path = r.path)
+            UNION ALL
+            SELECT path, 'preserved' FROM jsonb_array_elements_text(plan->'preserve') AS p(path)
+          )
+          SELECT jsonb_build_object('counts', jsonb_build_object(
+            'added', count(*) FILTER (WHERE category = 'added'), 'replaced', count(*) FILTER (WHERE category = 'replaced'),
+            'removed', count(*) FILTER (WHERE category = 'removed'), 'preserved', count(*) FILTER (WHERE category = 'preserved')),
+            'paths', ARRAY(SELECT path FROM changes WHERE category = ${request.group} ORDER BY path COLLATE "C" LIMIT 100 OFFSET ${request.offset}))
+            FROM changes
+        )`.as('files'),
+        )
+        .where('id', '=', id)
+        .where('server_id', '=', serverId)
+        .where('plan_digest', '=', request.digest)
+        .executeTakeFirst();
+      if (!row) throw new DomainError('not_found');
+      return row.files;
+    },
     async prepare(context: AuthContext, serverId: string, input: unknown) {
       const selection = parse(minecraftModpackPrepareSchema, input);
       await db.transaction().execute(async (tx) => {
@@ -496,11 +591,26 @@ export function createMinecraftModpacksService(options: {
           await authorizeServer(tx, current, serverId, 'game.minecraft.worlds.delete');
         if (selection.install?.backupBefore)
           await authorizeServer(tx, current, serverId, 'backups.create');
+        if (selection.provider === 'upload') {
+          const source = await tx
+            .selectFrom('minecraft_sources')
+            .select('id')
+            .where('id', '=', selection.projectId)
+            .where('game_id', '=', 'minecraft')
+            .where('server_id', '=', serverId)
+            .where('owner_user_id', '=', server.owner_id)
+            .where('origin', '=', 'upload')
+            .where('kind', '=', 'modpack')
+            .where('state', '=', 'ready')
+            .where('actual_sha256', '=', selection.versionId)
+            .executeTakeFirst();
+          if (!source) throw new DomainError('not_found');
+        }
         if (selection.install && server.active_operation_id)
           throw new DomainError('operation_busy');
         const prior = await tx
           .selectFrom('minecraft_modpack_operations')
-          .selectAll()
+          .select('selection')
           .where('server_id', '=', serverId)
           .where('actor_user_id', '=', current.actorUserId)
           .where('idempotency_key', '=', selection.idempotencyKey)
@@ -1022,23 +1132,28 @@ export function createMinecraftModpacksService(options: {
               await check();
               await awaitRuntime();
               const previous = await receipt(claimed.server_id);
-              const [observation, runtime] = await Promise.all([
+              const [observation, resolved] = await Promise.all([
                 timing.measure('inventory', () =>
                   hooks.inspect(claimed.server_id, prepared, previous?.receipt ?? null),
                 ),
-                timing.measure('resolveRuntime', async () =>
-                  earlyScope
-                    ? Promise.resolve(
-                        runtimePreparationSchema.parse((await get(operationId)).runtime_preparation)
-                          .binding,
-                      )
-                    : hooks.resolveRuntime(claimed.server_id, prepared),
-                ),
+                timing.measure('resolveRuntime', async () => {
+                  if (!earlyScope)
+                    return {
+                      runtime: await hooks.resolveRuntime(claimed.server_id, prepared),
+                      checkpoint: null,
+                    };
+                  const checkpoint = await db
+                    .selectFrom('minecraft_modpack_operations')
+                    .select('runtime_preparation')
+                    .where('id', '=', operationId)
+                    .executeTakeFirst();
+                  if (!checkpoint) throw new DomainError('not_found');
+                  const value = runtimePreparationSchema.parse(checkpoint.runtime_preparation);
+                  return { runtime: value.binding, checkpoint: value };
+                }),
               ]);
               if (earlyScope) preparedObservation = observation;
-              const runtimeCheckpoint = earlyScope
-                ? runtimePreparationSchema.parse((await get(operationId)).runtime_preparation)
-                : null;
+              const { runtime, checkpoint: runtimeCheckpoint } = resolved;
               const plan = timing.measureSync('plan', () =>
                 planMinecraftModpack({
                   selection,

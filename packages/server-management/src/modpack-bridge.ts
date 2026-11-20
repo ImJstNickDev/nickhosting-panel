@@ -15,6 +15,7 @@ import {
 import { type Database, getSettings, notifyGatewayChange } from '@nickhosting/database';
 import type { Kysely } from 'kysely';
 import { z } from 'zod';
+import type { MinecraftModpackPack } from '../../../games/minecraft/src/modpack-contracts.js';
 import { resolvePinnedCurseForgeFiles } from '../../content-providers/src/modpack-catalog-curseforge.js';
 import { createModpackCatalog } from '../../content-providers/src/modpack-catalog-providers.js';
 import { stageModpackRecipe } from '../../content-providers/src/modpack-staging.js';
@@ -36,6 +37,7 @@ import {
   type PreparedMinecraftModpack,
   preparedModpackSchema,
 } from './minecraft-modpacks-plan.js';
+import { createMinecraftSourceStore } from './minecraft-sources.js';
 import {
   completeModpackJob,
   createModpackContext,
@@ -201,8 +203,6 @@ export function createMinecraftModpackBridge(options: {
         let outcome = 'failed';
         try {
           const { http, curseforge } = options;
-          if (!http?.downloadModpack) throw new DomainError('integration_unavailable');
-          const download = http.downloadModpack.bind(http);
           const { values } = await timing.measure('settings', () => getSettings(db, env));
           const policy = contentPolicyValues(values, 'minecraft');
           const root = join(contentStorageRoot(values.contentWorkRoot, env), 'modpacks');
@@ -244,12 +244,24 @@ export function createMinecraftModpackBridge(options: {
             });
           };
           await input.progress('resolving', null);
-          const recipe = await timing.measure('resolve', () =>
-            createModpackCatalog(input.selection.provider, {
-              http,
-              curseforge,
-            }).resolve(input.selection.projectId, input.selection.versionId, input.signal),
-          );
+          const recipe = await timing.measure('resolve', async () => {
+            const { selection } = input;
+            if (selection.provider === 'upload') {
+              const actor = await modpackActor(db, input.operation, false, env);
+              const source = await createMinecraftSourceStore(db, actor, env).resolveForServer(
+                selection.projectId,
+                input.operation.server_id,
+              );
+              if (source.sha256 !== selection.versionId) throw new DomainError('conflict');
+              return { kind: 'upload' as const, path: source.path };
+            }
+            if (!http?.downloadModpack) throw new DomainError('integration_unavailable');
+            return createModpackCatalog(selection.provider, { http, curseforge }).resolve(
+              selection.projectId,
+              selection.versionId,
+              input.signal,
+            );
+          });
           if (recipe.kind === 'unavailable')
             throw new MinecraftModpackBlockedError([{ reason: recipe.reason }]);
           await reserve(0);
@@ -270,8 +282,10 @@ export function createMinecraftModpackBridge(options: {
                 maxExpandedBytes: stagingBudget,
                 maxFileBytes: stagingBudget,
               },
-              download: (artifact, destination, signal, options) =>
-                download(artifact, destination, { ...options, signal }),
+              download: (artifact, destination, signal, options) => {
+                if (!http?.downloadModpack) throw new DomainError('integration_unavailable');
+                return http.downloadModpack(artifact, destination, { ...options, signal });
+              },
               ...(curseforge
                 ? {
                     resolveCurseForgeFiles: (
@@ -298,6 +312,28 @@ export function createMinecraftModpackBridge(options: {
                 error.details?.contentReason === 'modpack_target_unresolved'
               )
                 throw new MinecraftModpackBlockedError([{ reason: 'unresolved' }]);
+              if (recipe.kind === 'upload') {
+                const reason =
+                  error instanceof DomainError ? error.details?.contentReason : undefined;
+                if (reason === 'modpack_archive_format')
+                  throw new MinecraftModpackBlockedError([{ reason: 'archive-format' }]);
+                if (reason === 'modpack_pinned_file_unavailable' || reason === 'download_origin')
+                  throw new MinecraftModpackBlockedError([{ reason: 'distribution' }]);
+                if (reason === 'curseforge_credentials')
+                  throw new MinecraftModpackBlockedError([{ reason: 'permission' }]);
+                if (
+                  reason === 'modpack_loader' ||
+                  reason === 'modpack_dependency' ||
+                  reason === 'modpack_loader_conflict'
+                )
+                  throw new MinecraftModpackBlockedError([{ reason: 'unresolved' }]);
+                if (
+                  error instanceof SyntaxError ||
+                  error instanceof z.ZodError ||
+                  (typeof reason === 'string' && /^(archive_|metadata_|override_)/.test(reason))
+                )
+                  throw new MinecraftModpackBlockedError([{ reason: 'archive-invalid' }]);
+              }
               throw error;
             }),
           );
@@ -319,14 +355,55 @@ export function createMinecraftModpackBridge(options: {
                 ),
               )
             : staged;
-          const {
-            description: _description,
-            descriptionFormat: _format,
-            ...project
-          } = recipe.project;
+          let pack: MinecraftModpackPack;
+          if (recipe.kind === 'upload') {
+            const meta = staged.imported;
+            if (!meta) throw new DomainError('integration_unavailable');
+            const name =
+              meta.name ??
+              (meta.format === 'launcher-instance'
+                ? 'Prism / MultiMC'
+                : meta.format === 'modrinth-index'
+                  ? 'Modrinth'
+                  : 'CurseForge');
+            const version = meta.version ?? staged.target.minecraftVersion;
+            pack = {
+              project: {
+                id: input.selection.projectId,
+                provider: 'upload',
+                name,
+                summary: '',
+                authors: [],
+              },
+              version: {
+                id: input.selection.versionId,
+                projectId: input.selection.projectId,
+                name: version,
+                version,
+                channel: 'unknown',
+                available: true,
+                source: meta.format,
+                target: staged.target,
+                minecraftVersions: [staged.target.minecraftVersion],
+                loaders: [staged.target.loader],
+              },
+              imported: {
+                format: meta.format,
+                excludedPaths: meta.excludedPaths,
+                excludedFiles: staged.excludedFiles,
+              },
+            };
+          } else {
+            const {
+              description: _description,
+              descriptionFormat: _format,
+              ...project
+            } = recipe.project;
+            pack = { project, version: recipe.version };
+          }
           outcome = 'prepared';
           return {
-            pack: { project, version: recipe.version },
+            pack,
             target: staged.target,
             stagingKey: sanitized.directory,
             files: sanitized.files,

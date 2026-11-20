@@ -1,6 +1,7 @@
 import { keepPreviousData, useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { lazy, Suspense, useEffect, useId, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
+import { createMinecraftUiController } from '../../../../../games/minecraft/src/ui/controller.js';
 import {
   createMinecraftModpacksController,
   type MinecraftModpackOperation,
@@ -11,6 +12,7 @@ import {
   type ModpackProvider,
 } from '../../../../../games/minecraft/src/ui/modpacks-controller.js';
 import { idempotencyKey, queryClient } from '../../api/client.js';
+import { hashFile } from '../../api/hash.js';
 import { useFormat, useT } from '../../app/i18n.js';
 import { ConfirmDialog, ErrorNotice } from '../../components/ui.js';
 import { Pagination, SearchField } from '../../components/workspace-controls.js';
@@ -39,6 +41,7 @@ import {
 import './mods.css';
 import './modpacks.css';
 
+type PackChoices = { keepWorlds: boolean; backupBefore: boolean; preview?: boolean };
 const controller = createMinecraftModpacksController(gameUiClient);
 const Description = lazy(() =>
   import('./mods-description.js').then((module) => ({ default: module.ModsDescription })),
@@ -85,6 +88,13 @@ function Modpacks(props: GameSectionViewProps) {
     version: ModpackCatalogVersion;
   }>();
   const [busy, setBusy] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const uploadAbort = useRef<AbortController | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<{
+    phase: 'hashing' | 'uploading';
+    percent: number;
+  }>();
+  useEffect(() => () => uploadAbort.current?.abort(), []);
   const [confirmation, setConfirmation] = useState<{
     action: () => void;
     reprepare: boolean;
@@ -101,12 +111,12 @@ function Modpacks(props: GameSectionViewProps) {
     queryFn: ({ signal }) =>
       controller.details(
         props.serverId,
-        selection?.provider ?? 'modrinth',
+        selection?.provider && selection.provider !== 'upload' ? selection.provider : 'modrinth',
         selection?.projectId ?? '',
         signal,
       ),
     staleTime: 300_000,
-    enabled: Boolean(operation && !operation.pack),
+    enabled: Boolean(operation && !operation.pack && selection?.provider !== 'upload'),
   });
   const operationProject =
     operation?.pack?.project ??
@@ -170,10 +180,53 @@ function Modpacks(props: GameSectionViewProps) {
       setBusy(false);
     }
   }
+  function importFile(file: File) {
+    if (locked || operation) return;
+    void mutate(async () => {
+      const abort = new AbortController();
+      uploadAbort.current = abort;
+      const progress = (phase: 'hashing' | 'uploading', bytes: number) =>
+        setUploadProgress({ phase, percent: Math.round((100 * bytes) / Math.max(1, file.size)) });
+      try {
+        progress('hashing', 0);
+        const sha256 = await hashFile(file, {
+          signal: abort.signal,
+          onProgress: (bytes) => progress('hashing', bytes),
+        });
+        progress('uploading', 0);
+        const source = await createMinecraftUiController(gameUiClient).uploadSource({
+          serverId: props.serverId,
+          kind: 'modpack',
+          file,
+          sha256,
+          signal: abort.signal,
+          idempotencyKey: requestKey(`upload:${sha256}`),
+          onProgress: (bytes) => progress('uploading', bytes),
+        });
+        abort.signal.throwIfAborted();
+        const key = `import:${source.id}`;
+        const result = await controller.prepare(props.serverId, {
+          provider: 'upload',
+          projectId: source.id,
+          versionId: sha256,
+          mode: data?.installed ? 'replace' : 'install',
+          worldPolicy: 'preserve',
+          fileDecisions: {},
+          idempotencyKey: requestKey(key),
+        });
+        intent.current.delete(key);
+        setView('review');
+        return result;
+      } finally {
+        uploadAbort.current = null;
+        setUploadProgress(undefined);
+      }
+    });
+  }
   function choose(
     selected: ModpackCatalogProject,
     version: ModpackCatalogVersion,
-    options: { keepWorlds: boolean; backupBefore: boolean },
+    options: PackChoices,
   ) {
     if ((options.backupBefore && !canBackup) || (!options.keepWorlds && !canDeleteWorlds)) return;
     setProject(selected);
@@ -183,21 +236,25 @@ function Modpacks(props: GameSectionViewProps) {
     const mode = data?.installed ? (same ? 'update' : 'replace') : 'install';
     void mutate(async () => {
       if (operation) await controller.discard(props.serverId, operation.id);
-      const result = await controller.install(props.serverId, {
+      const result = await controller.prepare(props.serverId, {
         provider: selected.provider,
         projectId: selected.id,
         versionId: version.id,
         mode,
         worldPolicy: options.keepWorlds ? 'preserve' : 'reset',
         fileDecisions: {},
-        install: { backupBefore: options.backupBefore },
+        ...(options.preview
+          ? { review: { backupBefore: options.backupBefore } }
+          : { install: { backupBefore: options.backupBefore } }),
         idempotencyKey: requestKey(
-          `prepare:${operation?.id ?? 'new'}:${selected.provider}:${selected.id}:${version.id}:${options.keepWorlds}:${options.backupBefore}`,
+          `prepare:${operation?.id ?? 'new'}:${selected.provider}:${selected.id}:${version.id}:${options.keepWorlds}:${options.backupBefore}:${options.preview ? 'review' : 'install'}`,
         ),
       });
-      navigate(`/servers/${props.serverId}/console`, {
-        state: { provisioningJobId: result.operation?.id },
-      });
+      if (options.preview) setView('review');
+      else
+        navigate(`/servers/${props.serverId}/console`, {
+          state: { provisioningJobId: result.operation?.id },
+        });
       return result;
     });
   }
@@ -259,6 +316,7 @@ function Modpacks(props: GameSectionViewProps) {
     setError(undefined);
     try {
       const current = data.installed.pack;
+      if (current.project.provider === 'upload') return;
       const versions = await controller.versions(
         props.serverId,
         current.project.provider,
@@ -309,6 +367,32 @@ function Modpacks(props: GameSectionViewProps) {
             {t(k('discover'))}
           </button>
         </nav>
+        {!operation &&
+          view !== 'review' &&
+          props.permissionKeys.includes('game.minecraft.modpacks.write') && (
+            <>
+              <button
+                type="button"
+                className="modpacks-quiet"
+                disabled={locked || !data}
+                onClick={() => fileInput.current?.click()}
+              >
+                {t(k('importFile'))}
+              </button>
+              <input
+                ref={fileInput}
+                hidden
+                type="file"
+                accept=".mrpack,.zip"
+                aria-label={t(k('importFile'))}
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = '';
+                  if (file) importFile(file);
+                }}
+              />
+            </>
+          )}
         {operation && view !== 'review' && (
           <button
             type="button"
@@ -321,6 +405,9 @@ function Modpacks(props: GameSectionViewProps) {
           </button>
         )}
       </header>
+      {uploadProgress && (
+        <p role="status">{t(k(uploadProgress.phase), { percent: uploadProgress.percent })}</p>
+      )}
       {(error || snapshot.error) && (
         <ErrorNotice
           error={error ?? snapshot.error}
@@ -354,7 +441,9 @@ function Modpacks(props: GameSectionViewProps) {
               canDeleteWorlds={canDeleteWorlds}
               onChoose={choose}
               operation={operation}
-              operationProject={operationProject}
+              operationProject={
+                operationProject?.provider === 'upload' ? undefined : operationProject
+              }
             />
           </div>
           {view === 'installed' &&
@@ -367,7 +456,9 @@ function Modpacks(props: GameSectionViewProps) {
                   />
                   <div>
                     <span className="modpacks-provider">
-                      {modpackProviders[installed.pack.project.provider]}
+                      {installed.pack.project.provider === 'upload'
+                        ? t(k('uploaded'))
+                        : modpackProviders[installed.pack.project.provider]}
                     </span>
                     <h3>{installed.pack.project.name}</h3>
                     <p>{installed.pack.version.version}</p>
@@ -390,15 +481,17 @@ function Modpacks(props: GameSectionViewProps) {
                   </p>
                 )}
                 <div className="modpacks-installed-actions">
-                  <button
-                    type="button"
-                    className="mods-primary"
-                    disabled={checkingUpdates}
-                    onClick={() => void checkUpdates()}
-                  >
-                    <ModsIcon name="refresh" />
-                    {t(k(checkingUpdates ? 'checkingUpdates' : 'checkUpdates'))}
-                  </button>
+                  {installed.pack.project.provider !== 'upload' && (
+                    <button
+                      type="button"
+                      className="mods-primary"
+                      disabled={checkingUpdates}
+                      onClick={() => void checkUpdates()}
+                    >
+                      <ModsIcon name="refresh" />
+                      {t(k(checkingUpdates ? 'checkingUpdates' : 'checkUpdates'))}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="modpacks-quiet"
@@ -435,6 +528,7 @@ function Modpacks(props: GameSectionViewProps) {
           {view === 'review' &&
             (operation ? (
               <ModpackReview
+                serverId={props.serverId}
                 operation={operation}
                 project={operationProject}
                 version={operationVersion}
@@ -519,7 +613,7 @@ function ModpackDiscover(props: {
   onChoose: (
     project: ModpackCatalogProject,
     version: ModpackCatalogVersion,
-    options: { keepWorlds: boolean; backupBefore: boolean },
+    options: PackChoices,
   ) => void;
   operation?: MinecraftModpackOperation;
   operationProject?: ModpackCatalogProject;
@@ -628,7 +722,7 @@ function ModpackDiscover(props: {
           }}
         />
       </div>
-      {props.operation && (
+      {props.operation && props.operation.selection.provider !== 'upload' && (
         <button
           type="button"
           className="modpacks-selection-strip"
@@ -871,7 +965,7 @@ function PackVersions(props: {
   onChoose: (
     project: ModpackCatalogProject,
     version: ModpackCatalogVersion,
-    options: { keepWorlds: boolean; backupBefore: boolean },
+    options: PackChoices,
   ) => void;
 }) {
   const t = useT();
@@ -907,6 +1001,16 @@ function PackVersions(props: {
     props.operation?.selection.provider === props.project.provider &&
     props.operation.selection.projectId === props.project.id &&
     props.operation.selection.versionId === chosen?.id;
+  const disabled =
+    props.disabled || !chosen?.available || same || (backupBefore && !props.canBackup);
+  function submit(preview: boolean) {
+    if (chosen && !disabled)
+      props.onChoose(props.project, chosen, {
+        keepWorlds: keepWorlds || !props.canDeleteWorlds,
+        backupBefore,
+        preview,
+      });
+  }
   return (
     <div className="modpacks-version-picker">
       {versions.error && (
@@ -1000,16 +1104,8 @@ function PackVersions(props: {
             <button
               type="button"
               className="mods-primary"
-              disabled={
-                props.disabled || !chosen?.available || same || (backupBefore && !props.canBackup)
-              }
-              onClick={() =>
-                chosen &&
-                props.onChoose(props.project, chosen, {
-                  keepWorlds: keepWorlds || !props.canDeleteWorlds,
-                  backupBefore,
-                })
-              }
+              disabled={disabled}
+              onClick={() => submit(false)}
             >
               <ModsIcon name="download" />
               {t(k('install'))}
@@ -1023,6 +1119,14 @@ function PackVersions(props: {
               {!selected && chosen.channel === 'release' && <span>{t(k('latestStable'))}</span>}
             </div>
           )}
+          <button
+            type="button"
+            className="modpacks-quiet"
+            disabled={disabled}
+            onClick={() => submit(true)}
+          >
+            {t(k('previewFiles'))}
+          </button>
           <div className="modpacks-install-options">
             <ModsCheckbox
               label={t(k('preserveWorlds'))}

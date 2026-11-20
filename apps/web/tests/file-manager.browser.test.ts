@@ -149,6 +149,20 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       .getByRole('button', { name: `Actions for ${name}`, exact: true })
       .click();
   }
+  it('opens the exact linked file and ignores a saved viewer on an explicit directory link', async () => {
+    const files = await provider.files();
+    files.set(' Realm /linked + file.txt', Buffer.from('Linked contents'));
+    files.set('Realm/different.txt', Buffer.from('Different directory'));
+    await user.goto(`${base}?directory=+Realm+&file=linked+%2B+file.txt`);
+    await browserExpect(
+      editorView().getByRole('textbox', { name: 'Contents', exact: true }),
+    ).toBeVisible();
+    await user.goto(`${base}?directory=+Realm+`);
+    await browserExpect(row('linked + file.txt')).toBeVisible();
+    await browserExpect(editorView()).toHaveCount(0);
+    await user.goto(`${base}?directory=+Realm+&file=missing.jar`);
+    await browserExpect(user.getByText('The requested item was not found.')).toBeVisible();
+  });
   it('navigates breadcrumbs and direct paths, searches/sorts folders first, and switches grid without changing inventory', async () => {
     await openRoot(user);
     await browserExpect.poll(() => editorRequests).toBe(1);

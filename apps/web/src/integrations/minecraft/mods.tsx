@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { lazy, type ReactNode, Suspense, useEffect, useRef, useState } from 'react';
 import type {
   ContentCatalogProvider,
   MinecraftModMetadata,
@@ -16,6 +16,7 @@ import { ErrorNotice } from '../../components/ui.js';
 import { SearchField } from '../../components/workspace-controls.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { ViewerSelect } from '../../features/viewer-engine/viewer-select.js';
+import { AddonFileDetails } from './addon-file-details.js';
 import {
   type AddonCatalog,
   AddonsContext,
@@ -57,6 +58,9 @@ import './mods.css';
 const ModsDescription = lazy(() =>
   import('./mods-description.js').then((module) => ({ default: module.ModsDescription })),
 );
+type AddonView = 'installed' | 'discover' | 'review';
+const isUpcomingProvider = (provider: AddonCatalog) =>
+  provider === 'voxel' || provider === 'builtbybit';
 type Selection = ReturnType<typeof useModsSelection>;
 type Snapshot = MinecraftModsSnapshot;
 const rootIdentity = (root: Pick<MinecraftModRoot, 'provider' | 'projectId'>) =>
@@ -114,9 +118,23 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
   const toggles = useModsToggles(props.serverId, inventory.data);
   const data = toggles.data;
   const selection = useModsSelection(props.serverId, data);
-  const [view, setView] = useState<'installed' | 'discover' | 'review'>(
-    initial?.packs.length ? 'installed' : 'discover',
-  );
+  const tabKey = `nh.minecraft.mods.view.${props.serverId}`;
+  const [view, setView] = useState<AddonView>(() => {
+    if (kind !== 'mods') return initial?.packs.length ? 'installed' : 'discover';
+    try {
+      return localStorage.getItem(tabKey) === 'discover' ? 'discover' : 'installed';
+    } catch {
+      return 'installed';
+    }
+  });
+  useEffect(() => {
+    if (kind !== 'mods' || view === 'review') return;
+    try {
+      localStorage.setItem(tabKey, view);
+    } catch {
+      // The tabs still work when browser storage is unavailable.
+    }
+  }, [kind, tabKey, view]);
   const [githubOpen, setGithubOpen] = useState(false);
   const [reviewOrigin, setReviewOrigin] = useState<'installed' | 'discover'>('discover');
   const [project, setProject] = useState<ModCatalogProject>();
@@ -292,6 +310,17 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
       data?.packs.find((item) => matchesMod(item, root));
     return item ? versionForMod(item, root) : undefined;
   };
+  const githubAction =
+    view === 'installed' && kind === 'mods' && canWrite && data?.supported && data.installed ? (
+      <button
+        type="button"
+        className="secondary"
+        disabled={githubDisabled}
+        onClick={() => setGithubOpen(true)}
+      >
+        {t(modsKey('githubInstall'))}
+      </button>
+    ) : null;
   const common = {
     serverId: props.serverId,
     selection,
@@ -348,20 +377,7 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
               {t(modsKey('applied'))}
             </span>
           )}
-          {view === 'installed' &&
-            kind === 'mods' &&
-            canWrite &&
-            data?.supported &&
-            data.installed && (
-              <button
-                type="button"
-                className="secondary"
-                disabled={githubDisabled}
-                onClick={() => setGithubOpen(true)}
-              >
-                {t(modsKey('githubInstall'))}
-              </button>
-            )}
+          {Boolean(data?.packs.length) && githubAction}
           {view !== 'review' && (
             <>
               <ModsAction
@@ -371,11 +387,7 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
                 onClick={() => void inventory.refetch()}
               />
               {count > 0 && (
-                <button
-                  type="button"
-                  className="mods-primary"
-                  onClick={() => openReview(kind === 'mods' ? view : 'discover')}
-                >
+                <button type="button" className="mods-primary" onClick={() => openReview(view)}>
                   <ModsIcon name="queue" />
                   {t(modsKey('install'), { count })}
                 </button>
@@ -444,9 +456,11 @@ function MinecraftAddonsSection(props: GameSectionViewProps) {
           <div hidden={view !== 'installed'}>
             <InstalledMods
               {...common}
+              canOpenFiles={props.permissionKeys.includes('files.read')}
+              githubAction={githubAction}
               deleteDisabled={disabled || !canDelete}
               onDiscover={() => setView('discover')}
-              onReview={() => openReview(kind === 'mods' ? 'installed' : 'discover')}
+              onReview={() => openReview('installed')}
               onProject={(value) => {
                 openProject(value);
                 setView('discover');
@@ -571,7 +585,7 @@ function DiscoverMods(
     staleTime: 60_000,
     enabled: props.visible,
   });
-  const comingSoon = provider === 'voxel' || provider === 'builtbybit';
+  const comingSoon = isUpcomingProvider(provider);
   const available =
     !comingSoon &&
     config.data?.providers.some((item) => item.id === provider && item.available) === true;
@@ -625,7 +639,13 @@ function DiscoverMods(
           label={t(modsKey('provider'))}
           value={provider}
           className="mods-select"
-          options={providers.map((value) => ({ value, label: addonProviderLabel[value] }))}
+          triggerContent={comingSoon ? <span>{addonProviderLabel[provider]}</span> : undefined}
+          options={providers.map((value) => ({
+            value,
+            label: isUpcomingProvider(value)
+              ? `${addonProviderLabel[value]} · ${t(modsKey('comingSoon'))}`
+              : addonProviderLabel[value],
+          }))}
           onChange={(value) => {
             setProvider(value as AddonCatalog);
             props.onCloseProject();
@@ -837,6 +857,8 @@ function DiscoverMods(
 
 function InstalledMods(
   props: SharedProps & {
+    githubAction: ReactNode;
+    canOpenFiles: boolean;
     deleteDisabled: boolean;
     onDiscover(): void;
     onReview(): void;
@@ -852,7 +874,9 @@ function InstalledMods(
   const [side, setSide] = useState('all');
   const [category, setCategory] = useState('');
   const [offset, setOffset] = useState(0);
+  const [detailsPath, setDetailsPath] = useState<string>();
   const packs = props.data?.packs ?? [];
+  const details = packs.find((pack) => pack.path === detailsPath);
   const hasCatalogPacks = packs.some((pack) => pack.metadata);
   const updates = useQuery({
     queryKey: [
@@ -912,49 +936,59 @@ function InstalledMods(
   const currentOffset = Math.min(offset, Math.max(0, Math.ceil(filtered.length / 20) - 1) * 20);
   return (
     <div className="mods-installed">
-      <div className="mods-search-toolbar">
-        <SearchField
-          label={t(modsKey('searchInstalled'))}
-          placeholder={t(modsKey('searchInstalled'))}
-          value={search}
-          onChange={(event) => {
-            setSearch(event.target.value);
-            setOffset(0);
-          }}
+      {details && (
+        <AddonFileDetails
+          pack={details}
+          serverId={props.serverId}
+          canOpenFiles={props.canOpenFiles}
+          onClose={() => setDetailsPath(undefined)}
         />
-        {kind === 'mods' && (
-          <ViewerSelect
-            label={t(modsKey('environment'))}
-            value={side}
-            className="mods-select"
-            options={['all', 'server', 'client', 'both', 'unknown'].map((value) => ({
-              value,
-              label: t(modsKey(`side.${value}`)),
-            }))}
-            onChange={(value) => {
-              setSide(value);
+      )}
+      {(kind !== 'mods' || packs.length > 0) && (
+        <div className="mods-search-toolbar">
+          <SearchField
+            label={t(modsKey('searchInstalled'))}
+            placeholder={t(modsKey('searchInstalled'))}
+            value={search}
+            onChange={(event) => {
+              setSearch(event.target.value);
               setOffset(0);
             }}
           />
-        )}
-        {categories.size > 0 && (
-          <ViewerSelect
-            label={t(modsKey('categories'))}
-            value={category}
-            className="mods-select"
-            options={[
-              { value: '', label: t(modsKey('allCategories')) },
-              ...Array.from(categories, ([value, label]) => ({ value, label })).sort((a, b) =>
-                a.label.localeCompare(b.label),
-              ),
-            ]}
-            onChange={(value) => {
-              setCategory(value);
-              setOffset(0);
-            }}
-          />
-        )}
-      </div>
+          {kind === 'mods' && (
+            <ViewerSelect
+              label={t(modsKey('environment'))}
+              value={side}
+              className="mods-select"
+              options={['all', 'server', 'client', 'both', 'unknown'].map((value) => ({
+                value,
+                label: t(modsKey(`side.${value}`)),
+              }))}
+              onChange={(value) => {
+                setSide(value);
+                setOffset(0);
+              }}
+            />
+          )}
+          {categories.size > 0 && (
+            <ViewerSelect
+              label={t(modsKey('categories'))}
+              value={category}
+              className="mods-select"
+              options={[
+                { value: '', label: t(modsKey('allCategories')) },
+                ...Array.from(categories, ([value, label]) => ({ value, label })).sort((a, b) =>
+                  a.label.localeCompare(b.label),
+                ),
+              ]}
+              onChange={(value) => {
+                setCategory(value);
+                setOffset(0);
+              }}
+            />
+          )}
+        </div>
+      )}
       {hasCatalogPacks && (
         <div className="mods-updates-bar">
           <div className="mods-updates-summary" aria-live="polite">
@@ -1014,9 +1048,16 @@ function InstalledMods(
       {packs.length === 0 ? (
         <ModsEmpty
           action={
-            <button type="button" className="secondary" onClick={props.onDiscover}>
-              {t(modsKey('emptyAction'))}
-            </button>
+            <div className="mods-empty-actions">
+              <button
+                type="button"
+                className={kind === 'mods' ? 'mods-primary' : 'secondary'}
+                onClick={props.onDiscover}
+              >
+                {t(modsKey('emptyAction'))}
+              </button>
+              {props.githubAction}
+            </div>
           }
         >
           {t(modsKey('empty'))}
@@ -1043,7 +1084,14 @@ function InstalledMods(
                   name={pack.metadata?.name ?? pack.name}
                 />
                 <div className="mods-installed-copy">
-                  <strong>{pack.metadata?.name ?? pack.name}</strong>
+                  <button
+                    type="button"
+                    className="addon-file-name"
+                    aria-haspopup="dialog"
+                    onClick={() => setDetailsPath(pack.path)}
+                  >
+                    {pack.metadata?.name ?? pack.name}
+                  </button>
                   <span className="mods-installed-version">
                     {pack.metadata?.version ?? t(modsKey('local'))}
                     {pack.metadata && <ModsChannel channel={pack.metadata.channel} />}

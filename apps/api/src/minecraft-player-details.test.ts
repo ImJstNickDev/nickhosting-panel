@@ -5,7 +5,10 @@ import type { ConsoleRelayOptions } from '@nickhosting/pterodactyl-adapter';
 import type { ManagementRuntime } from '@nickhosting/server-management';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { minecraftPlayerDataFixture } from '../../../games/minecraft/src/player-data-fixture.js';
+import {
+  minecraftPlayerCombinationFixture,
+  minecraftPlayerDataFixture,
+} from '../../../games/minecraft/src/player-data-fixture.js';
 import { minecraftPlayerDetailSchema } from '../../../games/minecraft/src/player-details-contracts.js';
 import { discoverMinecraftPlayers } from '../../../packages/server-management/src/minecraft-player-details.js';
 import type { Variables } from './app.js';
@@ -20,10 +23,6 @@ vi.mock('@nickhosting/database', async (original) => ({
 }));
 vi.mock('@nickhosting/server-management', async (original) => ({
   ...(await original<typeof import('@nickhosting/server-management')>()),
-  inspectMinecraftCombination: vi.fn(async () => ({
-    combination: { release: '26.3' },
-    capabilities: { playerManagement: true },
-  })),
   getServerPermissionKeys: vi.fn(
     async (_db, context) => (context as { permissions: string[] }).permissions,
   ),
@@ -33,13 +32,18 @@ const other = '22222222-2222-2222-2222-222222222222';
 const permission = (action: string) => `game.minecraft.players.${action}`;
 beforeEach(() => vi.clearAllMocks());
 
-function fixture(modern = true) {
-  const prefix = modern ? 'world/players/data' : 'world/playerdata';
-  const statsPrefix = modern ? 'world/players/stats' : 'world/stats';
-  const directories = new Set(['world', prefix, statsPrefix, ...(modern ? ['world/players'] : [])]);
+function fixture(modern = true, world = 'world') {
+  const prefix = modern ? `${world}/players/data` : `${world}/playerdata`;
+  const statsPrefix = modern ? `${world}/players/stats` : `${world}/stats`;
+  const directories = new Set([
+    world,
+    prefix,
+    statsPrefix,
+    ...(modern ? [`${world}/players`] : []),
+  ]);
   const data = minecraftPlayerDataFixture(modern);
   const contents = new Map<string, Buffer>([
-    ['server.properties', Buffer.from('level-name=world\nwhite-list=false')],
+    ['server.properties', Buffer.from(`level-name=${world}\nwhite-list=false`)],
     ['usercache.json', Buffer.from(JSON.stringify([{ uuid, name: 'PlayerOne' }]))],
     [`${prefix}/${uuid}.dat`, data],
     [`${prefix}/${uuid}.dat_old`, data],
@@ -111,14 +115,21 @@ function fixture(modern = true) {
   });
   const db = {
     selectFrom: () => ({
-      selectAll() {
+      innerJoin() {
+        return this;
+      },
+      select() {
         return this;
       },
       where() {
         return this;
       },
       async executeTakeFirst() {
-        return { installed: true, combination_id: 'choice' };
+        return {
+          installed: true,
+          combination_id: 'choice',
+          combination: minecraftPlayerCombinationFixture,
+        };
       },
     }),
   };
@@ -242,6 +253,56 @@ describe('scoped player detail HTTP contract', () => {
       expect(known.knownPlayers.find((player) => player.uuid === other)?.name).toBeNull();
       expect(f.requested.some((path) => path.endsWith(`${other}.dat`))).toBe(false);
       expect(f.permissions).not.toContain('files.read');
+    },
+  );
+  it('retains only the selected UUID’s file metadata and accepts uppercase file names', async () => {
+    const f = fixture();
+    const selected = 'aaaaaaaa-1111-1111-1111-111111111111';
+    const path = `world/players/data/${selected.toUpperCase()}.dat`;
+    f.contents.set(path, minecraftPlayerDataFixture(true));
+    f.contents.set('world/players/data/00000000-0000-0000-0000-000000000000.dat', Buffer.from(''));
+    const roster = await discoverMinecraftPlayers(f.readService());
+    expect(roster.knownPlayers.map((player) => player.uuid)).toEqual(
+      expect.arrayContaining([uuid, other, selected]),
+    );
+    expect(roster.knownPlayers).toHaveLength(3);
+    expect(roster.references).toEqual([]);
+    const detail = await discoverMinecraftPlayers(f.readService(), undefined, selected);
+    expect(detail.knownPlayers.map((player) => player.uuid)).toEqual([selected]);
+    expect(detail.references.map((ref) => ref.path)).toEqual([path]);
+  });
+  it('still enforces the total unique-player limit when looking up one UUID', async () => {
+    const f = fixture(false);
+    for (let id = 1; id <= 10000; id++) {
+      const suffix = String(id).padStart(12, '0');
+      f.contents.set(`world/playerdata/cccccccc-cccc-cccc-cccc-${suffix}.dat`, Buffer.alloc(0));
+    }
+    await expect(discoverMinecraftPlayers(f.readService(), undefined, uuid)).rejects.toMatchObject({
+      code: 'resources_unavailable',
+    });
+  });
+  it('reads the known players and saved card from a configured external world', async () => {
+    const world = 'Piazza città';
+    const f = fixture(true, world);
+    expect((await discoverMinecraftPlayers(f.readService())).knownPlayers).toContainEqual(
+      expect.objectContaining({ uuid, name: 'PlayerOne' }),
+    );
+    const response = await f.app.request(url);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ world, snapshot: { state: 'available' } });
+    expect(f.requested).toContain(`${world}/players/data/${uuid}.dat`);
+    expect(f.requested).not.toContain('world');
+  });
+  it.each(['../archive', 'sub/world', '.internal', 'plugins', '%2F', 'world\\backup'])(
+    'rejects the unsafe configured player directory %s before listing its contents',
+    async (name) => {
+      const f = fixture();
+      f.contents.set(
+        'server.properties',
+        Buffer.from(`level-name=${name.replaceAll('\\', '\\\\')}\n`),
+      );
+      expect((await f.app.request(url)).status).toBe(400);
+      expect(f.requested).toEqual(['', 'server.properties']);
     },
   );
   it('does not present unreadable or absent player data as empty inventory', async () => {

@@ -173,7 +173,7 @@ describe('management runtime execution-time authorization', () => {
                 kind === 'remove'
                   ? { kind: 'world-remove', world: 'spare', confirm: true, backupBefore: false }
                   : { kind: 'world-import', archiveRef: randomUUID(), targetWorld: 'spare' },
-              world: { existing: kind === 'remove' },
+              world: { existing: kind === 'remove', allowOnlineRemoval: kind === 'remove' },
               deletePaths: [],
               backupBefore: false,
             },

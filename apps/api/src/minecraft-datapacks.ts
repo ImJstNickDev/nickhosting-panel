@@ -42,7 +42,12 @@ export function registerMinecraftDatapackRoutes(
   app.get(base, async (c) => {
     c.header('cache-control', 'no-store');
     return c.json(
-      await (await service()).snapshot(await principal(c), c.req.param('id'), c.req.query('world')),
+      await (await service()).snapshot(
+        await principal(c),
+        c.req.param('id'),
+        c.req.query('world'),
+        c.req.raw.signal,
+      ),
     );
   });
   app.post(`${base}/changes`, async (c) =>

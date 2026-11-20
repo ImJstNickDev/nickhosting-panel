@@ -14,7 +14,7 @@ export const addonProviderLabel: Record<AddonCatalog, string> = {
   hangar: 'Hangar',
   spiget: 'SpigotMC',
   voxel: 'Voxel',
-  builtbybit: 'builtbybit',
+  builtbybit: 'BuiltByBit',
 };
 function scope(kind: AddonKind) {
   return {

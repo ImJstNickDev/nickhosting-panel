@@ -220,12 +220,23 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const reloadViewer = useMemo(() => readViewerBookmark(viewerKey), [viewerKey]);
   const restoreAttempt = useRef<string | undefined>(undefined);
   const [restoredViewerKey, setRestoredViewerKey] = useState<string>();
-  const requestedDirectory = new URLSearchParams(location.search).get('directory');
+  const params = new URLSearchParams(location.search);
+  const requestedDirectory = params.get('directory');
+  const requestedFile = params.get('file');
+  const normalizedDirectory =
+    requestedDirectory === null
+      ? undefined
+      : normalizeFilePath(requestedDirectory, { preserveSpaces: true });
+  const explicitPath =
+    normalizedDirectory !== undefined &&
+    requestedFile &&
+    requestedFile !== '.' &&
+    requestedFile !== '..' &&
+    !/[/\\\p{C}]/u.test(requestedFile)
+      ? join(normalizedDirectory, requestedFile)
+      : undefined;
   const readDirectory = (key: string | undefined) => {
-    if (requestedDirectory !== null) {
-      const normalized = normalizeFilePath(requestedDirectory);
-      if (normalized !== undefined) return normalized;
-    }
+    if (requestedDirectory !== null) return normalizedDirectory ?? '';
     try {
       const path = key ? sessionStorage.getItem(key) : null;
       return path !== null && normalizeFilePath(path) !== undefined ? path : '';
@@ -1071,13 +1082,15 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   useEffect(() => {
     if (!viewerKey || restoreAttempt.current === viewerKey) return;
     // Explicit save recovery/navigation wins over a reload bookmark.
-    if (!reloadViewer || mode || location.state?.fileSaveId) {
+    const path = requestedDirectory === null ? reloadViewer?.path : explicitPath;
+    const bookmark = requestedDirectory === null ? reloadViewer : undefined;
+    if (!path || mode || location.state?.fileSaveId) {
       restoreAttempt.current = viewerKey;
       setRestoredViewerKey(viewerKey);
       return;
     }
-    const separator = reloadViewer.path.lastIndexOf('/');
-    const folder = separator < 0 ? '' : reloadViewer.path.slice(0, separator);
+    const separator = path.lastIndexOf('/');
+    const folder = separator < 0 ? '' : path.slice(0, separator);
     if (folder !== directory) {
       restoreAttempt.current = viewerKey;
       setRestoredViewerKey(viewerKey);
@@ -1086,28 +1099,31 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     if (!server.data || (!files.data && !files.error) || files.isPlaceholderData) return;
     restoreAttempt.current = viewerKey;
     const entry = files.data?.find(
-      (item) =>
-        item.is_file && !item.is_symlink && join(directory, item.name) === reloadViewer.path,
+      (item) => item.is_file && !item.is_symlink && join(directory, item.name) === path,
     );
     if (!entry) {
+      if (explicitPath && files.data) setError({ messageKey: 'errors.not_found' });
       setRestoredViewerKey(viewerKey);
       return;
     }
     const source = {
-      path: reloadViewer.path,
+      path,
       name: entry.name,
       size: entry.size,
       gameId: server.data.gameId,
     };
-    const choice = selectableViewers(source).some((item) => item.id === reloadViewer.viewerId)
-      ? reloadViewer.viewerId
-      : undefined;
-    void reopenViewer(entry, directory, choice, reloadViewer.autoDecodeCompressed).finally(() => {
+    const choice =
+      bookmark && selectableViewers(source).some((item) => item.id === bookmark.viewerId)
+        ? bookmark.viewerId
+        : undefined;
+    void reopenViewer(entry, directory, choice, bookmark?.autoDecodeCompressed).finally(() => {
       if (mounted.current) setRestoredViewerKey(viewerKey);
     });
   }, [
     viewerKey,
     reloadViewer,
+    requestedDirectory,
+    explicitPath,
     directory,
     files.data,
     files.error,

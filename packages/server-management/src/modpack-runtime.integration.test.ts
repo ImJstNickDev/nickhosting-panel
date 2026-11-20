@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { DomainError } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { type LifecycleOptions, processServerOperation } from './lifecycle.js';
 import { attestMinecraftRuntimeInstallation } from './minecraft-content.js';
 import {
   requireMinecraftChoice,
@@ -10,6 +12,7 @@ import {
   resolveNeoForgeCreationChoice,
   resolveQuiltCreationChoice,
 } from './minecraft-registry.js';
+import { runMinecraftVersionChange } from './minecraft-version-change.js';
 import {
   assertModpackRuntimeResumable,
   assertModpackRuntimeVerified,
@@ -19,6 +22,8 @@ import {
   modpackMappingCompatible,
   resolveModpackRuntime,
 } from './modpack-runtime.js';
+import { enqueueServerOperation, replayManagedGameOperation } from './registry.js';
+import { authorizeQueuedEffect } from './runtime.js';
 import { managementFixture } from './test-fixtures.js';
 
 vi.mock('./minecraft-registry.js', async (original) => ({
@@ -528,6 +533,254 @@ describe('Modpacks exact supported runtime transition', () => {
       ),
     ).toBe(false);
   });
+  it.each([
+    ['keep', false],
+    ['keep', true],
+    ['fresh', false],
+  ] as const)(
+    'changes the version in place through the lifecycle with %s files and backup %s',
+    async (mode, backupBefore) => {
+      const f = await fixture();
+      const files = new Map([
+        ['world', 'save'],
+        ['server.properties', 'level-name=world'],
+        ['.nickhosting', 'platform'],
+        ['.nickhosting-datapacks', 'world/disabled/example.zip'],
+        ['.nickhosting-mods', 'retired'],
+        ['.nickhosting-plugins', 'pending'],
+        ['.nickhosting-local', 'unrelated game content'],
+        [`.nickhosting-import-${f.serverId}`, 'transfer staging'],
+      ]);
+      await f.db
+        .insertInto('minecraft_plugin_drafts')
+        .values({
+          server_id: f.serverId,
+          revision: 1,
+          actor_user_id: f.context.actorUserId,
+          state: 'ready',
+          selection: '{}',
+          optional: '[]',
+          blockers: '[]',
+        })
+        .execute();
+      await f.db
+        .insertInto('minecraft_datapack_changes')
+        .values({
+          id: randomUUID(),
+          server_id: f.serverId,
+          actor_user_id: f.context.actorUserId,
+          world: 'world',
+          name: 'broken.zip',
+          action: 'enable',
+          state: 'failed',
+          idempotency_key: randomUUID(),
+          plan: '{}',
+        })
+        .execute();
+      const request = {
+        action: mode === 'keep' ? 'reinstall' : 'wipe',
+        confirm: true,
+        backupBefore,
+        idempotencyKey: randomUUID(),
+        minecraftVersion: {
+          sourceCombinationId: f.sourceCombinationId,
+          choiceId: f.binding.combinationId,
+        },
+      };
+      await expect(
+        enqueueServerOperation(f.db, f.context, f.serverId, request),
+      ).rejects.toMatchObject({ code: 'forbidden' });
+      const accepted = await enqueueServerOperation(
+        f.db,
+        f.context,
+        f.serverId,
+        request,
+        {},
+        { minecraftVersionTarget: f.binding },
+      );
+      expect(await replayManagedGameOperation(f.db, f.context, f.serverId, request)).toEqual(
+        accepted,
+      );
+      const resources = {
+        current_state: 'offline' as const,
+        is_suspended: false,
+        resources: {
+          memory_bytes: 0,
+          cpu_absolute: 0,
+          disk_bytes: 10,
+          network_rx_bytes: 0,
+          network_tx_bytes: 0,
+        },
+      };
+      const backupId = randomUUID();
+      let completedBackup = false;
+      const adapter = {
+        ...f.adapter,
+        createBackup: vi.fn(async () => ({ uuid: backupId })),
+        getBackup: vi.fn(async () => {
+          expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+          if (!completedBackup) {
+            completedBackup = true;
+            return { completed_at: null };
+          }
+          return {
+            completed_at: new Date().toISOString(),
+            is_successful: true,
+            checksum: 'a'.repeat(64),
+          };
+        }),
+        getResources: vi.fn(async () => resources),
+        listFiles: vi.fn(async () =>
+          Array.from(files.keys(), (name) => ({
+            name,
+            is_file: !['world', '.nickhosting'].includes(name),
+            is_symlink: false,
+          })),
+        ),
+        deleteFiles: vi.fn(async (_id: string, _root: string, names: string[]) => {
+          for (const name of names) files.delete(name);
+        }),
+        readFile: vi.fn(async (_id: string, name: string) => Buffer.from(files.get(name) ?? '')),
+        writeFile: vi.fn(async (_id: string, name: string, content: string) => {
+          files.set(name, content);
+        }),
+      } as unknown as typeof f.adapter;
+      let clock = Date.now();
+      const options: LifecycleOptions = {
+        adapter,
+        settleMs: 0,
+        now: () => new Date(clock),
+        authorizeEffect: async (jobId, serverId, db) => {
+          await authorizeQueuedEffect(db, jobId, serverId, {}, adapter);
+        },
+        confirmAlreadyStopped: async () => true,
+        minecraftVersionChange: async (ctx, stage) =>
+          runMinecraftVersionChange(ctx, stage, f.context, {
+            env: {},
+            observedImageDigest: undefined,
+          }),
+      };
+      let outcome: string = '';
+      for (let attempt = 0; attempt < 10; attempt++) {
+        outcome = await processServerOperation(f.db, accepted.jobId, options);
+        if (outcome !== 'waiting' && outcome !== 'deferred') break;
+        clock += 90_000;
+      }
+      const saved = await f.db
+        .selectFrom('server_operations')
+        .selectAll()
+        .where('job_id', '=', accepted.jobId)
+        .executeTakeFirstOrThrow();
+      expect({ outcome, phase: saved.phase, reason: saved.plan.waitReason }).toMatchObject({
+        outcome: 'succeeded',
+      });
+      expect(await processServerOperation(f.db, accepted.jobId, options)).toBe('duplicate');
+      expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(1);
+      expect(adapter.createBackup).toHaveBeenCalledTimes(backupBefore ? 1 : 0);
+      expect(adapter.getBackup).toHaveBeenCalledTimes(backupBefore ? 2 : 0);
+      expect(
+        !!(await f.db
+          .selectFrom('minecraft_plugin_drafts')
+          .select('revision')
+          .where('server_id', '=', f.serverId)
+          .executeTakeFirst()),
+      ).toBe(mode === 'keep');
+      expect(
+        await f.db
+          .selectFrom('minecraft_datapack_changes')
+          .select('state')
+          .where('server_id', '=', f.serverId)
+          .executeTakeFirst(),
+      ).toEqual({ state: mode === 'fresh' ? 'cancelled' : 'failed' });
+      expect(files.get('.nickhosting')).toBe('platform');
+      expect(files.get(`.nickhosting-import-${f.serverId}`)).toBe('transfer staging');
+      for (const path of [
+        '.nickhosting-datapacks',
+        '.nickhosting-mods',
+        '.nickhosting-plugins',
+        '.nickhosting-local',
+      ])
+        expect(files.has(path)).toBe(mode === 'keep');
+      expect(files.has('world')).toBe(mode === 'keep');
+      expect(files.has('server.properties')).toBe(mode === 'keep');
+      expect(files.get('eula.txt')).toBe(mode === 'fresh' ? 'eula=true\n' : undefined);
+      const server = await f.db
+        .selectFrom('managed_servers')
+        .selectAll()
+        .where('id', '=', f.serverId)
+        .executeTakeFirstOrThrow();
+      expect(server.mapping_id).toBe(f.binding.mappingId);
+      const profile = await f.db
+        .selectFrom('minecraft_server_profiles')
+        .selectAll()
+        .where('server_id', '=', f.serverId)
+        .executeTakeFirstOrThrow();
+      expect(profile).toMatchObject({
+        installed: true,
+        combination_id: f.binding.combinationId,
+        runtime_image_transition: { source: 'server-operation', operationId: accepted.jobId },
+      });
+      expect(profile.configuration).toMatchObject({
+        properties: mode === 'fresh' ? {} : f.configuration.properties,
+      });
+    },
+  );
+
+  it('rechecks the target rollout after enqueue and refuses pending changes before admission', async () => {
+    const f = await fixture();
+    const request = {
+      action: 'wipe',
+      confirm: true,
+      idempotencyKey: randomUUID(),
+      minecraftVersion: {
+        choiceId: f.binding.combinationId,
+        sourceCombinationId: f.sourceCombinationId,
+      },
+    };
+    await f.db
+      .insertInto('minecraft_datapack_changes')
+      .values({
+        id: randomUUID(),
+        server_id: f.serverId,
+        actor_user_id: f.context.actorUserId,
+        world: 'world',
+        name: 'example.zip',
+        action: 'install',
+        state: 'ready',
+        idempotency_key: randomUUID(),
+        plan: '{}',
+      })
+      .execute();
+    await expect(
+      enqueueServerOperation(
+        f.db,
+        f.context,
+        f.serverId,
+        request,
+        {},
+        { minecraftVersionTarget: f.binding },
+      ),
+    ).rejects.toMatchObject({ code: 'operation_busy' });
+    await f.db
+      .updateTable('minecraft_datapack_changes')
+      .set({ state: 'cancelled' })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    const accepted = await enqueueServerOperation(
+      f.db,
+      f.context,
+      f.serverId,
+      request,
+      {},
+      { minecraftVersionTarget: f.binding },
+    );
+    vi.mocked(requireMinecraftChoice).mockRejectedValueOnce(new DomainError('forbidden'));
+    await expect(
+      authorizeQueuedEffect(f.db, accepted.jobId, f.serverId, {}, f.adapter),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    expect(f.adapter.updateStartup).not.toHaveBeenCalled();
+    expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+  });
   it('journals one installer and preserves settings, player ACLs, node and owned ports', async () => {
     const f = await fixture();
     await configureModpackRuntime(f.options);
@@ -615,6 +868,33 @@ describe('Modpacks exact supported runtime transition', () => {
     },
   );
 
+  it.each([false, true])(
+    'resumes the same installation when interrupted on the final journal write (persisted=%s)',
+    async (persisted) => {
+      const f = await fixture();
+      let interrupted = false;
+      const options: ConfigureModpackRuntimeOptions = {
+        ...f.options,
+        journalSource: 'server-operation',
+        saveTransition: async (value) => {
+          if (value.state === 'verified' && !interrupted) {
+            interrupted = true;
+            if (persisted) await f.options.saveTransition(value);
+            throw new Error('simulated process interruption');
+          }
+          await f.options.saveTransition(value);
+        },
+      };
+      await expect(configureModpackRuntime(options)).rejects.toThrow(
+        'simulated process interruption',
+      );
+      expect(f.journal()?.state).toBe(persisted ? 'verified' : 'installation-confirmed');
+      await configureModpackRuntime(options);
+      expect(f.journal()?.state).toBe('verified');
+      expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(1);
+      expect(attestMinecraftRuntimeInstallation).toHaveBeenCalledTimes(1);
+    },
+  );
   it('reauthorizes the installation channel locally without repeated provider identity reads', async () => {
     const f = await fixture();
     vi.mocked(f.adapter.reinstallWithConfirmation).mockImplementation(

@@ -111,8 +111,11 @@ export function MinecraftPlayerBody({
     };
   }, []);
 
+  // A cached still can be displayed immediately on remount. Fetch and decode
+  // the skin again only if a visible card actually needs interactive animation.
+  const needsTexture = !image || (active && motionAllowed);
   useEffect(() => {
-    if (!visible || !skin) return;
+    if (!visible || !skin || prepared?.skin === skin || !needsTexture) return;
     const abort = new AbortController();
     let objectUrl: string | undefined;
     void (async () => {
@@ -144,7 +147,7 @@ export function MinecraftPlayerBody({
       abort.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [visible, skin]);
+  }, [visible, skin, prepared?.skin, needsTexture]);
 
   useEffect(() => {
     if (!visible || !skin || prepared?.skin !== skin || image) return;

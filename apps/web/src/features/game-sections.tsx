@@ -13,7 +13,7 @@ import {
 } from '@nickhosting/game-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import { type FormEvent, Suspense, useEffect, useId, useRef, useState } from 'react';
-import { Link } from 'react-router';
+import { Link, useSearchParams } from 'react-router';
 import { z } from 'zod';
 import { ApiError, api, idempotencyKey, queryClient } from '../api/client.js';
 import { hashFile } from '../api/hash.js';
@@ -33,6 +33,7 @@ import {
   Textarea,
   Time,
 } from '../components/ui.js';
+import { readSectionWithPreview } from './game-section-observation.js';
 import type { GameSectionAcceptedOptions, GameSectionViewProps } from './game-section-view.js';
 import {
   availableGameSections,
@@ -483,25 +484,42 @@ export function GameSections({
       module &&
       availableGameSections(server.data, module).some((candidate) => candidate.id === sectionId),
   );
+  useEffect(() => {
+    if (!canReadSection || !section) return;
+    const view = getGameSectionView(section.renderer);
+    if (view) view.preload();
+    else
+      for (const form of section.forms) {
+        if (!form.action?.destructive) getGameFormView(form.renderer)?.preload();
+      }
+  }, [canReadSection, section]);
   const preview = module?.sectionPreviews?.[sectionId];
+  const [searchParams] = useSearchParams();
+  const parameter = module?.sectionQueryParameters?.[sectionId];
+  const scope = parameter ? searchParams.get(parameter) : null;
   const loaded = useQuery({
-    queryKey: ['game-section', serverId, gameId, sectionId],
+    queryKey: ['game-section', serverId, gameId, sectionId, ...(scope ? [scope] : [])],
     enabled: Boolean(module && section && canReadSection),
     // A completed operation may clear its active ID while this section is unmounted.
     refetchOnMount: 'always',
     ...(preview ? { staleTime: 0 } : {}),
     queryFn: async ({ signal, queryKey }) => {
-      const context = { serverId, values: { sectionId: section?.id }, signal };
-      if (preview) {
-        const observation = await preview(gameUiClient, context);
-        signal.throwIfAborted();
-        // A cold or rebound index also supersedes an older tab-local observation.
-        queryClient.setQueryData(queryKey, observation);
-      }
-      return module?.handlers[section?.loader ?? '']?.(
-        gameUiClient,
-        context,
-      ) as Promise<UiSectionData>;
+      const context = {
+        serverId,
+        values: { sectionId: section?.id, ...(parameter && scope ? { [parameter]: scope } : {}) },
+      };
+      const read = (signal: AbortSignal) =>
+        module?.handlers[section?.loader ?? '']?.(gameUiClient, {
+          ...context,
+          signal,
+        }) as Promise<UiSectionData>;
+      if (!preview) return read(signal);
+      return readSectionWithPreview(
+        signal,
+        read,
+        (signal) => preview(gameUiClient, { ...context, signal }),
+        (observation) => queryClient.setQueryData(queryKey, observation),
+      );
     },
   });
   const [trackedOperation, setTrackedOperation] = useState<{
@@ -509,6 +527,7 @@ export function GameSections({
     id: string;
     gameId?: string;
     sectionId?: string;
+    scope?: string | null;
     confirmedUpdate?: GameSectionAcceptedOptions['confirmedUpdate'];
     refetchSectionOnSuccess?: boolean;
     quickUntil?: number;
@@ -526,6 +545,7 @@ export function GameSections({
       id,
       gameId,
       sectionId,
+      scope,
       confirmedUpdate: options?.confirmedUpdate,
       refetchSectionOnSuccess: options?.refetchSectionOnSuccess,
       quickUntil: options?.quickCompletion ? Date.now() + 5000 : undefined,
@@ -627,6 +647,7 @@ export function GameSections({
       setOperationEventsConnected(false);
     };
   }, [canReadSection, operationId, operationTerminal, serverId]);
+  const patchKey = JSON.stringify([serverId, gameId, sectionId, scope, operationId]);
   useEffect(() => {
     if (
       !canReadSection ||
@@ -644,17 +665,17 @@ export function GameSections({
         trackedOperation?.serverId === serverId &&
         trackedOperation.id === operationId &&
         trackedOperation.gameId === gameId &&
-        trackedOperation.sectionId === sectionId
+        trackedOperation.sectionId === sectionId &&
+        trackedOperation.scope === scope
           ? trackedOperation.confirmedUpdate
           : undefined;
-      const patchKey = `${serverId}:${gameId}:${sectionId}:${operationId}`;
       if (
         operationState === 'succeeded' &&
         effectState === 'confirmed' &&
         update &&
         patchedOperation.current !== patchKey
       ) {
-        const queryKey = ['game-section', serverId, gameId, sectionId];
+        const queryKey = ['game-section', serverId, gameId, sectionId, ...(scope ? [scope] : [])];
         // An older inventory response must not undo a confirmed change.
         await queryClient.cancelQueries({ queryKey, exact: true });
         if (cancelled) return;
@@ -694,11 +715,13 @@ export function GameSections({
     serverId,
     gameId,
     sectionId,
+    scope,
+    patchKey,
   ]);
   const patchedCompletion =
     operationState === 'succeeded' &&
     effectState === 'confirmed' &&
-    patchedOperation.current === `${serverId}:${gameId}:${sectionId}:${operationId}`;
+    patchedOperation.current === patchKey;
   const pendingOperation = Boolean(
     operationId &&
       (!operation.data ||
@@ -770,7 +793,7 @@ export function GameSections({
       {SectionView && (
         <Suspense fallback={<Loading />}>
           <SectionView
-            key={`${serverId}-${section.id}`}
+            key={JSON.stringify([serverId, section.id, scope])}
             data={loaded.data}
             serverId={serverId}
             serverName={server.data.name}
@@ -847,6 +870,7 @@ export function GameSections({
               key={`${serverId}-${form.id}`}
               {...{ module, form, serverId }}
               serverName={server.data.name}
+              permissions={permissions}
               data={loaded.data}
               canManage={
                 form.action?.requiredPermissions.every((p) => permissions.includes(p)) ?? false
@@ -876,6 +900,7 @@ function GameActionForm({
   form,
   serverId,
   serverName,
+  permissions,
   data,
   canManage,
   state,
@@ -889,6 +914,7 @@ function GameActionForm({
   form: UiForm;
   serverId: string;
   serverName: string;
+  permissions: readonly string[];
   data: UiSectionData;
   canManage: boolean;
   state: string;
@@ -1014,7 +1040,19 @@ function GameActionForm({
           }
         >
           <View
-            {...{ fields, values, errors, data, onChange, serverName }}
+            {...{
+              fields,
+              values,
+              errors,
+              data,
+              onChange,
+              serverName,
+              serverId,
+              permissions,
+              onAccepted,
+            }}
+            operationPending={activeOperation || busy}
+            runtimeState={state}
             disabled={Boolean(blocked) || busy}
             dirty={hasChanges}
             feedback={

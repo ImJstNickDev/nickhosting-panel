@@ -12,6 +12,7 @@ export const minecraftPluginsMessages: Record<string, [string, string]> = {
   'plugins.searchInstalled': ['Search installed plugins', 'Cerca plugin installati'],
   'plugins.showAllProjects': ['Include incompatible plugins', 'Includi plugin incompatibili'],
   'plugins.installed': ['Installed', 'Installati'],
+  'plugins.backInstalled': ['Back to Installed', 'Torna a Installati'],
   'plugins.alreadyInstalled': ['Already installed', 'Già installato'],
   'plugins.ready': ['Ready', 'Pronto'],
   'plugins.enabled': ['Enabled', 'Abilitato'],

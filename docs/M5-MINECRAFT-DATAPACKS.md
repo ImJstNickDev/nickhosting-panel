@@ -1,10 +1,15 @@
 # Minecraft datapacks
 
-Datapacks belong to a world. The Minecraft tab starts on the configured world;
-the world selector also exposes the other discovered worlds. The inventory reads
+The Datapacks selector uses the Worlds inventory and starts on the configured
+world when available. If that folder is missing, choose an existing world
+before managing its packs. A visit stays on the chosen world until the user
+switches or that world disappears. Browsing another world leaves `level-name` intact.
+The inventory reads
 the actual server directories, including packs uploaded through Fileman/SFTP or
 included with an imported world. Filesystem presence and Minecraft's loaded pack
-selection are distinct observations.
+selection are distinct observations. An empty inventory skips the native selection
+download. For a populated inventory, Fileman batches the folder metadata files
+and the selected world's `level.dat` within its existing request and byte limits.
 
 Before the first world exists, the default inventory read returns an empty
 `worlds` list, empty packs/changes and `world: ''`. The tab shows a centered,
@@ -15,7 +20,8 @@ and are never disguised as an empty inventory.
 
 ## Task flow
 
-1. Choose packs from Modrinth/CurseForge, or upload a ZIP/folder. Folder uploads use
+1. Search the installed packs for the selected world. Open **Browse catalog** to
+   find packs on Modrinth or CurseForge, or upload a ZIP/folder. Folder uploads use
    the existing Fileman archive worker with `pack.mcmeta` as the root marker.
 2. Acquisition, archive metadata inspection and transfer happen during preparation.
    A prepared ZIP ends in `.pending`; Minecraft cannot discover it yet. Other

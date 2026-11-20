@@ -228,6 +228,124 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     }
   });
 
+  it('opens world details and scopes Files and Datapacks to the inspected external world', async () => {
+    const name = 'Città & piazza';
+    const files = await provider.files();
+    await provider.adapter.createDirectory(identifier, '', name);
+    files.set(`${name}/level.dat`, browserLevelDat());
+    const fileUrl = `${fixture.origin}/servers/${provider.ids.serverId}/files?directory=${encodeURIComponent(name)}`;
+    const packsUrl = `${fixture.origin}/servers/${provider.ids.serverId}/game/datapacks?world=${encodeURIComponent(name)}`;
+    const requests: string[] = [];
+    const onResponse = (response: import('@playwright/test').Response) => {
+      const url = new URL(response.url());
+      if (url.pathname === `${api()}/datapacks`) requests.push(url.searchParams.get('world') ?? '');
+    };
+    user.on('response', onResponse);
+    try {
+      await user.goto(route());
+      await user.getByRole('button', { name: `View details for ${name}`, exact: true }).click();
+      const dialog = user.getByRole('dialog', { name });
+      await browserExpect(dialog.getByText(`/${name}`, { exact: true })).toBeVisible();
+      await browserExpect(dialog.getByText('26.1', { exact: true })).toBeVisible();
+      await browserExpect(dialog.getByText('No', { exact: true })).toBeVisible();
+      await browserExpect(dialog.getByText('Server stopped', { exact: true })).toBeVisible();
+      await browserExpect(dialog.locator('time')).toHaveAttribute('datetime', /^\d{4}-/);
+      await browserExpect(dialog.getByRole('link', { name: 'View datapacks' })).toHaveAttribute(
+        'href',
+        new URL(packsUrl).pathname + new URL(packsUrl).search,
+      );
+      await accessible();
+      await screenshot(user, 'minecraft-world-detail-desktop-en');
+      await dialog.getByRole('link', { name: 'Open in Files' }).click();
+      await browserExpect(user).toHaveURL(fileUrl);
+      await browserExpect(
+        user.locator('.fm-breadcrumb').getByText(name, { exact: true }),
+      ).toBeVisible();
+      await user.goBack();
+      await user.getByRole('button', { name: `View details for ${name}`, exact: true }).click();
+      await dialog.getByRole('link', { name: 'View datapacks' }).click();
+      await browserExpect(user).toHaveURL(packsUrl);
+      await browserExpect(user.getByRole('combobox', { name: 'World', exact: true })).toHaveValue(
+        name,
+      );
+      expect(requests).toEqual([name]);
+      const observer = identities.peer;
+      await journeyRequest(
+        fixture,
+        user,
+        `/v1/platform/servers/${provider.ids.serverId}/subusers/${identities.peerId}`,
+        { permissionKeys: ['game.minecraft.worlds.read'] },
+        'PUT',
+      );
+      await observer.goto(route());
+      await observer.getByRole('button', { name: `View details for ${name}`, exact: true }).click();
+      const readOnly = observer.getByRole('dialog', { name });
+      await browserExpect(readOnly).toBeVisible();
+      await browserExpect(readOnly.getByRole('link')).toHaveCount(0);
+      await journeyRequest(
+        fixture,
+        user,
+        `/v1/platform/servers/${provider.ids.serverId}/subusers/${identities.peerId}`,
+        undefined,
+        'DELETE',
+      );
+      await provider.adapter.deleteFiles(identifier, '', [name]);
+      await user.reload();
+      await browserExpect(user.getByRole('combobox', { name: 'World', exact: true })).toHaveValue(
+        '',
+      );
+      await browserExpect(
+        user.getByText(`${name} is unavailable. Choose another world.`, { exact: true }),
+      ).toBeVisible();
+      await browserExpect(
+        user.getByRole('button', { name: 'Upload ZIP', exact: true }),
+      ).toHaveCount(0);
+    } finally {
+      user.off('response', onResponse);
+      if (files.has(`${name}/level.dat`))
+        await provider.adapter.deleteFiles(identifier, '', [name]);
+    }
+  });
+
+  it('explains secondary-world removal on the affected row until the server stops', async () => {
+    const arena = 'plugin-arena';
+    const files = await provider.files();
+    await provider.adapter.createDirectory(identifier, '', arena);
+    files.set(`${arena}/level.dat`, browserLevelDat());
+    const matchesWorlds = (url: URL) => url.pathname === `${api()}/worlds`;
+    // Supply the extensible-runtime policy to the shared Vanilla browser fixture.
+    await user.route(matchesWorlds, async (request) => {
+      const response = await request.fetch();
+      const snapshot = await response.json();
+      await request.fulfill({
+        response,
+        json: snapshot && { ...snapshot, allowOnlineRemoval: false },
+      });
+    });
+    try {
+      await running(true);
+      await user.goto(route());
+      const row = user
+        .locator('.minecraft-world')
+        .filter({ has: user.getByText(arena, { exact: true }) });
+      const remove = row.getByRole('button', { name: `Delete world: ${arena}`, exact: true });
+      const reason = row.getByText('Stop the server to delete this world.', { exact: true });
+      await browserExpect(remove).toBeDisabled();
+      await browserExpect(reason).toBeVisible();
+      await user.setViewportSize({ width: 390, height: 844 });
+      await accessible();
+      await screenshot(user, 'minecraft-worlds-stop-to-delete-mobile-en');
+      await running(false);
+      await user.reload();
+      await browserExpect(remove).toBeEnabled();
+      await browserExpect(reason).toHaveCount(0);
+    } finally {
+      await user.unroute(matchesWorlds);
+      await user.setViewportSize({ width: 1440, height: 1000 });
+      await provider.adapter.deleteFiles(identifier, '', [arena]);
+    }
+  });
+
   it('removes an inactive world while running and updates immediately before slow inventory refreshes finish', async () => {
     const world = 'online-remove';
     const files = await provider.files();
@@ -845,20 +963,25 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
   });
 
   it('shows indexed worlds while discovery is blocked, retains rows on failure, and uses observed version metadata', async () => {
+    const world = 'indexed-world';
+    const files = await provider.files();
+    await provider.adapter.createDirectory(identifier, '', world);
+    files.set(`${world}/level.dat`, browserLevelDat());
+    await journeyRequest(fixture, user, `${api()}/worlds`);
     let release = () => {};
     readGate = new Promise<void>((resolve) => {
       release = resolve;
     });
     try {
       await user.goto(route());
-      await browserExpect(user.getByText('replacement', { exact: true }).first()).toBeVisible();
+      await browserExpect(user.getByText(world, { exact: true }).first()).toBeVisible();
       await browserExpect(user.locator('.minecraft-worlds-list')).toBeVisible();
     } finally {
       release();
       readGate = undefined;
     }
     await browserExpect(
-      user.getByRole('button', { name: 'Select world: replacement', exact: true }),
+      user.getByRole('button', { name: `Select world: ${world}`, exact: true }),
     ).toBeEnabled();
     failFiles = true;
     await user.goto(route());
@@ -881,11 +1004,12 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
         user.getByRole('button', { name: 'Import world', exact: true }),
       ).toBeEnabled();
       await browserExpect(
-        user.getByRole('button', { name: 'Select world: replacement', exact: true }),
+        user.getByRole('button', { name: `Select world: ${world}`, exact: true }),
       ).toBeEnabled();
       await screenshot(user, 'minecraft-worlds-version-metadata-desktop-en');
       await accessible();
     } finally {
+      await provider.adapter.deleteFiles(identifier, '', [world]);
       for (const row of evidence)
         await fixture.database.db
           .insertInto('minecraft_verification_evidence')

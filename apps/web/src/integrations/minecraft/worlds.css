@@ -90,11 +90,56 @@
   min-width: 0;
   flex: 1 1 auto;
 }
-.minecraft-world-identity > strong {
-  display: block;
+.minecraft-world-name {
+  display: inline-block;
+  max-width: 100%;
+  min-height: 24px;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: start;
   overflow-wrap: anywhere;
   font-size: 0.88rem;
-  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+}
+.minecraft-world-name:hover {
+  background: transparent;
+  color: var(--blue);
+  text-decoration-color: currentColor;
+}
+.minecraft-world-detail-dialog {
+  width: min(460px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+}
+.minecraft-world-detail-dialog .dialog-close-icon {
+  width: 36px;
+  min-height: 36px;
+  padding: 6px;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+}
+.minecraft-world-detail-dialog h2 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.minecraft-world-detail-dialog .details {
+  margin-top: 20px;
+}
+.minecraft-world-detail-links:not(:empty) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.minecraft-world-detail-links a {
+  padding-block: 4px;
 }
 .minecraft-world-details {
   flex-wrap: wrap;
@@ -245,7 +290,7 @@
 }
 .minecraft-worlds-import-dialog .dialog-close-icon:hover:not(:disabled) {
   background: var(--surface-subtle, #f1f4f7);
-  color: var(--text);
+  color: inherit;
 }
 
 .minecraft-worlds-source-actions {
