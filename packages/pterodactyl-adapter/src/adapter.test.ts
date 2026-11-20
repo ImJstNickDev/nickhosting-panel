@@ -569,6 +569,50 @@ describe('typed Pterodactyl boundary', () => {
       feature_limits: features,
     });
   });
+  it('checks only one application page per scope even for large inventories', async () => {
+    const requests: URL[] = [];
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      requests.push(url);
+      const data = url.pathname.endsWith('/servers') ? [{ attributes: server }] : [];
+      return Response.json({
+        object: 'list',
+        data,
+        meta: { pagination: { current_page: 1, total_pages: data.length ? 2000 : 0 } },
+      });
+    });
+    const result = await createPterodactylAdapter({ ...config, fetcher }).discoverCapabilities(
+      false,
+    );
+    expect(result).toEqual(
+      Object.fromEntries(
+        ['nodes', 'nests', 'servers', 'users'].map((key) => [key, { available: true }]),
+      ),
+    );
+    expect(requests).toHaveLength(4);
+    expect(
+      requests.every(
+        (url) => url.searchParams.get('per_page') === '1' && url.searchParams.get('page') === '1',
+      ),
+    ).toBe(true);
+  });
+  it.each([
+    [429, 'rate_limited'],
+    [403, 'permission_denied'],
+    [200, 'invalid_response'],
+  ] as const)(
+    'preserves scope failure on HTTP %s or an invalid first row',
+    async (status, reason) => {
+      const fetcher = vi.fn<typeof fetch>(async () =>
+        Response.json({ object: 'list', data: [{ attributes: {} }] }, { status }),
+      );
+      const result = await createPterodactylAdapter({ ...config, fetcher }).discoverCapabilities(
+        false,
+      );
+      expect(result.servers).toMatchObject({ available: false, reason, scope: 'application' });
+    },
+  );
+
   it('reports missing discovery scopes without suggesting automatic permission changes', async () => {
     const fetcher = vi
       .fn<typeof fetch>()

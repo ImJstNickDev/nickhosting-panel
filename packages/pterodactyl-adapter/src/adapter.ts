@@ -1144,11 +1144,22 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     },
     /** Read scopes only. Write permissions cannot be proven by these probes. */
     async discoverCapabilities(includeClient = true) {
+      function probe<T>(resource: string, attributes: z.ZodType<T>) {
+        return transport.json(
+          'application',
+          `${resource}?per_page=1&page=1`,
+          z.object({
+            object: z.literal('list'),
+            data: z.array(z.object({ attributes })).max(1),
+            meta: z.object({ pagination: z.object({ current_page: z.literal(1) }) }).optional(),
+          }),
+        );
+      }
       const checks = {
-        nodes: () => transport.list('application', 'nodes', nodeSchema),
-        nests: () => transport.list('application', 'nests', nestSchema),
-        servers: () => transport.list('application', 'servers', applicationServerSchema),
-        users: () => transport.list('application', 'users', userSchema),
+        nodes: () => probe('nodes', nodeSchema),
+        nests: () => probe('nests', nestSchema),
+        servers: () => probe('servers', applicationServerSchema),
+        users: () => probe('users', userSchema),
         client: () =>
           transport.json(
             'client',
