@@ -8,6 +8,7 @@ import type {
   UploadProxyOptions,
 } from '@nickhosting/pterodactyl-adapter';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { uploadNotDispatched } from '../../../packages/pterodactyl-adapter/src/upload-dispatch.js';
 import { publishExtractedFiles } from './file-extraction-publication.js';
 
 const stages: string[] = [];
@@ -141,6 +142,20 @@ describe('validated extraction publication', () => {
     await expect(f.run()).rejects.toThrow();
     expect(f.claim.rejectBeforeDispatch).toHaveBeenCalledOnce();
     expect(f.sent).toHaveLength(0);
+  });
+  it('releases the claim when every single-use grant expires before dispatch', async () => {
+    const f = await fixture(4);
+    f.prepareUploadBatch.mockResolvedValue({
+      expiresAt: Date.now() - 1,
+      uploads: Array.from({ length: 4 }, () => async () => {
+        throw uploadNotDispatched(new DomainError('conflict'));
+      }),
+    });
+    await expect(f.run()).rejects.toMatchObject({ code: 'conflict' });
+    expect(f.sent).toHaveLength(0);
+    expect(f.claim.rejectBeforeDispatch).toHaveBeenCalledOnce();
+    expect(f.claim.complete).not.toHaveBeenCalled();
+    expect(f.claim.unlock).toHaveBeenCalledOnce();
   });
   it('preserves uncertain claims and confirmed counts on a partial publication', async () => {
     const f = await fixture(4);

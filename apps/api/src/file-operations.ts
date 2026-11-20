@@ -1075,13 +1075,6 @@ export function registerFileOperationRoutes(
             server.limits.disk,
             resources.resources.disk_bytes + files.reduce((sum, file) => sum + file.size, 0),
           );
-          await service.authorizeTransfer(current, serverId, true, connection);
-          if (
-            (await service.adapter.listFiles(id, root)).some(
-              (item) => item.name.toLowerCase() === input.destination.toLowerCase(),
-            )
-          )
-            throw new DomainError('conflict');
           let completed = 0;
           let dispatched = false;
           const metadata = {
@@ -1106,6 +1099,14 @@ export function registerFileOperationRoutes(
               const currentRoot = await inspectFilePath(service.adapter, id, root);
               if (!currentRoot || currentRoot.is_file) throw new DomainError('conflict');
             }
+            if (
+              (await service.adapter.listFiles(id, root)).some(
+                (item) => item.name.toLowerCase() === input.destination.toLowerCase(),
+              )
+            )
+              throw new DomainError('conflict');
+            await service.authorizeTransfer(current, serverId, true, connection, undefined, server);
+            c.req.raw.signal.throwIfAborted();
             dispatched = true;
             await service.adapter.createDirectory(id, root, input.destination);
             await publishExtractedFiles({
@@ -1134,12 +1135,13 @@ export function registerFileOperationRoutes(
               outcome: 'succeeded',
             });
             return c.json({ completed, destination });
-          } catch {
+          } catch (error) {
             await recordAudit(connection, current, 'server.files.incomplete', {
               ...metadata,
               completed,
               outcome: completed > 0 ? 'partial' : dispatched ? 'uncertain' : 'failed',
             });
+            if (!dispatched) throw error;
             throw new DomainError('operation_uncertain', 409, {
               completed,
               fileReason: 'partial_or_uncertain',

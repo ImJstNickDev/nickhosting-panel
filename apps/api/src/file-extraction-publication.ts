@@ -2,10 +2,11 @@ import { createReadStream } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import { Readable } from 'node:stream';
 import { DomainError } from '@nickhosting/core';
-import type {
-  PterodactylAdapter,
-  ServerFile,
-  UploadProxyOptions,
+import {
+  isUploadNotDispatched,
+  type PterodactylAdapter,
+  type ServerFile,
+  type UploadProxyOptions,
 } from '@nickhosting/pterodactyl-adapter';
 import type { reserveUploadIngestion } from '@nickhosting/server-management';
 import type { StagedFile } from './file-operations.js';
@@ -43,9 +44,9 @@ export async function publishExtractedFiles(options: {
     for (let depth = baseDepth + 1; depth <= parts.length; depth++) {
       const child = parts.slice(0, depth).join('/');
       if (directories.has(child)) continue;
-      await authorize();
       const parent = dirname(child);
       await requireDirectory(parent);
+      await authorize();
       signal.throwIfAborted();
       await adapter.createDirectory(id, parent, basename(child));
       directories.add(child);
@@ -120,8 +121,8 @@ export async function publishExtractedFiles(options: {
       // Do not carry preflight listings or credentials across batches. Grants
       // and claims may take time; check current permissions, parents and names
       // one last time before starting this group of independent publications.
-      await authorize();
       await readDirectory(directory);
+      await authorize();
       signal.throwIfAborted();
       dispatched = true;
       const results = await Promise.allSettled(
@@ -137,6 +138,12 @@ export async function publishExtractedFiles(options: {
           }
         }),
       );
+      if (
+        results.every(
+          (result) => result.status === 'rejected' && isUploadNotDispatched(result.reason),
+        )
+      )
+        dispatched = false;
       for (const result of results) if (result.status === 'rejected') throw result.reason;
       await claim.complete();
     } catch (error) {
