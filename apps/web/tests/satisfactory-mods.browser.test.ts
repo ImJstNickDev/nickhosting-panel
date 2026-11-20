@@ -1156,7 +1156,24 @@ it('revalidates a returned cached draft and replaces an evicted plan before allo
     finishThird = false;
   await page.route('**/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
-    if (path.endsWith('/inventory')) return route.fulfill({ json: emptyInventory() });
+    if (path.endsWith('/inventory'))
+      return route.fulfill({
+        json: {
+          ...emptyInventory(),
+          diverged: true,
+          items: [
+            {
+              reference: 'Legacy',
+              name: 'Legacy',
+              version: null,
+              path: 'FactoryGame/Mods/Legacy',
+              managed: true,
+              dependency: false,
+              gameFeature: false,
+            },
+          ],
+        },
+      });
     if (path.endsWith('/catalog'))
       return route.fulfill({
         json: {

@@ -760,7 +760,7 @@ function ModsWorkspace(props: GameSectionViewProps) {
             <button
               type="button"
               className="mods-primary"
-              disabled={!editable || !planReady || !stopped || !!diverged}
+              disabled={!editable || !planReady || !stopped}
               onClick={apply}
             >
               <ModsIcon name="check" />

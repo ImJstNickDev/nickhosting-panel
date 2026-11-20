@@ -156,19 +156,16 @@ export async function observeSatisfactoryMods(
       maxEntries: limits.maxFiles * 2,
     });
     await check();
-    // A descriptor or marker can prove visible drift. Byte-only changes are
-    // checked against the full fingerprint at preview, apply and external adoption.
-    const expected = new Map(
-      Object.entries(lock.mods).filter(([, mod]) => mod.targets.LinuxServer),
+    // A descriptor's optional VersionName can differ from the SMR release label.
+    // Only flag unexpected marked directories or missing Linux mod references here.
+    const expected = new Set(
+      Object.keys(lock.mods).filter((ref) => lock.mods[ref]?.targets.LinuxServer),
     );
-    const managed = new Set(reading.items.filter((mod) => mod.managed).map((mod) => mod.reference));
+    const present = new Set(reading.items.map((mod) => mod.reference));
     const inventory = {
       diverged:
-        reading.items.some(
-          (mod) =>
-            mod.managed &&
-            (!expected.has(mod.reference) || expected.get(mod.reference)?.version !== mod.version),
-        ) || [...expected.keys()].some((ref) => !managed.has(ref)),
+        reading.items.some((mod) => mod.managed && !expected.has(mod.reference)) ||
+        [...expected].some((ref) => !present.has(ref)),
       items: reading.items,
       issues: reading.issues,
       gameVersion: reading.gameBuild,

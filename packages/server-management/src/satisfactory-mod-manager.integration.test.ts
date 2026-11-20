@@ -438,6 +438,37 @@ it('cancels and drains every active inventory stream when a capture fails', asyn
   expect(active).toBe(0);
 });
 
+it.each([undefined, 'Marketing label'])(
+  'accepts a known mod with descriptor VersionName %s',
+  async (version) => {
+    await f.db
+      .updateTable('satisfactory_mod_states')
+      .set({ lock: JSON.stringify(nativeLock) })
+      .where('server_id', '=', id)
+      .execute();
+    files.set(
+      'FactoryGame/Mods/Example/Example.uplugin',
+      Buffer.from(
+        JSON.stringify({
+          FriendlyName: 'Example',
+          VersionName: version,
+        }),
+      ),
+    );
+    const current = await server();
+    const result = await observeSatisfactoryMods(
+      f.db,
+      current,
+      await satisfactoryObservationScope(f.db, current),
+      adapter,
+      async () => {},
+      satisfactoryModDefaultLimits,
+      new AbortController().signal,
+    );
+    expect(result.diverged).toBe(false);
+    expect(result.items.find((mod) => mod.reference === 'Example')?.version).toBe(version ?? null);
+  },
+);
 it('opens twenty observed mods without binary reads and coalesces a cold observation', async () => {
   files.clear();
   await f.db
