@@ -108,6 +108,7 @@ export const openworldUiModule = defineTrustedGameUiModule({
           kind: 'version-list',
           titleKey: 'games.openworld.version',
         },
+        { id: 'address', kind: 'address', titleKey: 'games.openworld.address' },
       ],
       choicesHandler: 'mappings',
       createHandler: 'create',
@@ -141,6 +142,7 @@ export const openworldUiModule = defineTrustedGameUiModule({
   creationCatalog: { handlers: ['mappings', 'versions'], load: catalog, options },
   catalogs: {
     en: {
+      'games.openworld.address': 'Choose an address',
       'games.openworld.gamePort': 'Game',
       'games.openworld.versions': 'Versions',
       'games.openworld.catalogTitle': 'Dedicated server · Linux x64',
@@ -154,6 +156,7 @@ export const openworldUiModule = defineTrustedGameUiModule({
       ...openworldDashboardCatalogs.en,
     },
     it: {
+      'games.openworld.address': 'Scegli un indirizzo',
       'games.openworld.gamePort': 'Gioco',
       'games.openworld.versions': 'Versioni',
       'games.openworld.catalogTitle': 'Server dedicato · Linux x64',

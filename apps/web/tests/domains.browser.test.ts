@@ -468,6 +468,62 @@ describe('Domain choices and management (isolated responses, real components)', 
     await check(page.getByLabel('Subdomain', { exact: true })).toHaveValue('ready-panda-bag');
     expect(calls).toBe(3);
   });
+  it('reserves the Openworld subdomain after version selection and submits it at creation', async () => {
+    const mappingId = '10000000-0000-4000-8000-000000000001';
+    await page.route('**/v1/games', (route) =>
+      route.fulfill({
+        json: [
+          { id: 'openworld', access: { canCreate: true }, manifest: { runtimes: ['dedicated'] } },
+        ],
+      }),
+    );
+    await page.route('**/v1/games/openworld/choices', (route) =>
+      route.fulfill({
+        json: {
+          mappings: [{ mappingId, node: 1, delivery: { direct: true, gateway: false } }],
+          versions: ['a1.2.9'],
+        },
+      }),
+    );
+    await page.route('**/v1/servers', (route) => {
+      writes.push({ path: '/v1/servers', body: route.request().postDataJSON() });
+      return route.fulfill({ json: { serverId: mappingId, jobId: mappingId } });
+    });
+    await open('wizard');
+    const next = page.getByRole('button', { name: 'Next', exact: true });
+    await page.getByRole('button', { name: 'Openworld' }).click();
+    await next.click();
+    await page.getByLabel('Server name', { exact: true }).fill('Island');
+    await next.click();
+    await page.getByText('Dedicated server', { exact: true }).last().click();
+    await next.click();
+    await page.getByText('a1.2.9', { exact: true }).click();
+    await next.click();
+    await check(page.getByRole('heading', { name: 'Choose an address' })).toBeVisible();
+    await page.getByLabel('Subdomain', { exact: true }).fill('island');
+    await check(page.locator('.connection-availability')).toHaveText('Available');
+    await next.click();
+    await next.click();
+    await page.getByRole('button', { name: 'Create server', exact: true }).click();
+    await check(page.getByTestId('created-console')).toBeVisible();
+    expect(writes).toEqual([
+      {
+        path: '/v1/games/openworld/connection-reservation',
+        body: { domainId: 'main', subdomain: 'island' },
+      },
+      {
+        path: '/v1/servers',
+        body: expect.objectContaining({
+          game: { id: 'openworld', configuration: { version: 'a1.2.9' } },
+          connection: {
+            domainId: 'main',
+            subdomain: 'island',
+            reservationId: '20000000-0000-4000-8000-000000000002',
+          },
+        }),
+      },
+    ]);
+  });
   it('renders the SDK address step after version, reserves on Next and reuses the hold when navigating back', async () => {
     await open('wizard');
     await page.getByRole('button', { name: 'Minecraft', exact: true }).click();
