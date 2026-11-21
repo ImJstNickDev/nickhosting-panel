@@ -87,6 +87,18 @@ Signing out, revoking the grant, and unpublishing the hostname deny subsequent r
 The browser uses a separate, host-only dashboard cookie. Native credentials stay on the
 private side of the proxy.
 
+Inside NickPanel, **Overview** shows player counts, TPS, memory, current inbound and
+outbound traffic, and world generation. **Performance** adds tick timings, the game's
+recent metric history, chunks and storage. Both use the Openworld performance read
+permission. **Players** lists the current roster. Opening a player's detailed statistics,
+position and inventory also requires the separate inspection permission. These tabs use
+the instance's private HTTP service and work with web publication turned off.
+
+Opening a tab reads its data on demand. Concurrent viewers share native reads. When the
+server is offline or its private API is unavailable, each panel shows the time of its
+last saved observation when one exists. Opening a tab leaves a sleeping server asleep.
+Individual player details and skins are available only during a live session.
+
 The verified Linux builds are a1.0.11–a1.0.13, a1.1.0–a1.1.3, a1.2.0–a1.2.9 and
 pre-a1.2.0-1. The a1.0.10 package requires glibc 2.38 and cannot run on the Debian
 Bookworm image used by this egg. When that release is present in the catalog, the

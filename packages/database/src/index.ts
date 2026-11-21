@@ -76,6 +76,13 @@ export interface Database
     sha256: string;
     size: number;
   };
+  openworld_telemetry_snapshots: {
+    server_id: string;
+    resource: 'status' | 'players' | 'history' | 'chunks' | 'storage';
+    binding: string;
+    observed_at: Date;
+    data: ColumnType<unknown, string, string>;
+  };
   satisfactory_server_state: {
     server_id: string;
     snapshot: Record<string, unknown>;

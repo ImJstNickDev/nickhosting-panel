@@ -14,6 +14,7 @@ import {
 } from '../dashboard-ui.js';
 import { openworldSupportsRuntime, openworldVersionDelivery } from '../version-policy.js';
 import { openworldGameArtwork, openworldRuntimeArtwork } from './artwork.js';
+import { openworldTelemetryCatalogs } from './telemetry-catalog.js';
 
 const catalogSchema = z.object({
   mappings: z.array(
@@ -116,7 +117,27 @@ export const openworldUiModule = defineTrustedGameUiModule({
     administration: [
       { id: 'versions', titleKey: 'games.openworld.versions', component: 'openworld-versions' },
     ],
-    sections: [openworldDashboardSection],
+    sections: [
+      ...(['overview', 'players', 'performance'] as const).map((id, order) => ({
+        id,
+        titleKey: `games.openworld.telemetry.${id}`,
+        loader: 'telemetry',
+        renderer: `openworld-${id}`,
+        navigation: {
+          group: 'tools',
+          order: 10 * (order + 1),
+          icon: id === 'players' ? 'users' : id === 'performance' ? 'activity' : 'layers',
+          placement: 'sidebar',
+        },
+        requiredPermissions: [
+          id === 'players' ? 'game.openworld.players.read' : 'game.openworld.performance.read',
+        ],
+        requiredCapabilities: id === 'players' ? ['players'] : [],
+        columns: [],
+        forms: [],
+      })),
+      openworldDashboardSection,
+    ],
     ports: [
       { role: 'game', labelKey: 'games.openworld.gamePort', transports: ['udp'], required: true },
       {
@@ -152,6 +173,15 @@ export const openworldUiModule = defineTrustedGameUiModule({
       'games.openworld.incompatibleRuntime':
         'Requires glibc 2.38. The server uses Debian Bookworm.',
       ...openworldDashboardCatalogs.en,
+      ...openworldTelemetryCatalogs.en,
+      'games.openworld.permissions.viewPlayers': 'View online players',
+      'games.openworld.permissions.inspect': 'Inspect player details',
+      'games.openworld.permissions.inspectHelp':
+        'Shows inventory, exact position and player statistics. Also requires access to the online players list.',
+      'games.openworld.permissions.moderate': 'Moderate players',
+      'games.openworld.permissions.moderateHelp':
+        'Reserved for player actions. The current Players tab is read-only.',
+      'games.openworld.permissions.viewPerformance': 'View overview and performance',
     },
     it: {
       'games.openworld.gamePort': 'Gioco',
@@ -164,10 +194,22 @@ export const openworldUiModule = defineTrustedGameUiModule({
       'games.openworld.requiresDirect': 'Richiede una connessione diretta su questo nodo.',
       'games.openworld.incompatibleRuntime': 'Richiede glibc 2.38. Il server usa Debian Bookworm.',
       ...openworldDashboardCatalogs.it,
+      ...openworldTelemetryCatalogs.it,
+      'games.openworld.permissions.viewPlayers': 'Visualizza i giocatori online',
+      'games.openworld.permissions.inspect': 'Ispeziona i dettagli dei giocatori',
+      'games.openworld.permissions.inspectHelp':
+        'Mostra inventario, posizione esatta e statistiche. Richiede anche l’accesso all’elenco dei giocatori online.',
+      'games.openworld.permissions.moderate': 'Modera i giocatori',
+      'games.openworld.permissions.moderateHelp':
+        'Riservato alle azioni sui giocatori. La scheda Giocatori attuale è di sola lettura.',
+      'games.openworld.permissions.viewPerformance': 'Visualizza panoramica e prestazioni',
     },
   },
   handlers: {
     ...openworldDashboardHandlers,
+    async telemetry() {
+      return { values: {}, rows: [] };
+    },
     mappings: choicesHandler('mappings'),
     versions: choicesHandler('versions'),
     async create(client, { values, signal, idempotencyKey }) {

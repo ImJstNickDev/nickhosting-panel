@@ -22,6 +22,7 @@ import {
   getGameAdminSections,
   getGameArtwork,
   getGameFileIcon,
+  getGameSectionView,
 } from './integrations.js';
 
 function render(element: ReactElement, cache?: QueryClient) {
@@ -63,7 +64,13 @@ describe('trusted game frontend rendering', () => {
     expect(gameUiRegistry.list().map((m) => m.descriptor.gameId)).toEqual([
       'minecraft',
       'satisfactory',
+      'openworld',
     ]);
+    for (const id of ['overview', 'players', 'performance']) {
+      const section = gameUiRegistry.get('openworld')?.descriptor.sections.find((s) => s.id === id);
+      expect(section?.navigation?.placement).toBe('sidebar');
+      expect(getGameSectionView(section?.renderer)).toBeDefined();
+    }
   });
   it('renders distinct bundled runtime artwork from integration-provided choices', () => {
     const cache = new QueryClient();

@@ -46,6 +46,7 @@ import { registerOpenworldRoutes } from './openworld.js';
 import { registerOpenworldArtifactRoute } from './openworld-artifacts.js';
 import { registerOpenworldDashboardRoutes } from './openworld-dashboard.js';
 import { registerOpenworldDashboardSso } from './openworld-dashboard-sso.js';
+import { registerOpenworldTelemetryRoutes } from './openworld-telemetry.js';
 import { registerPlatformRoutes } from './platform.js';
 import { registerProfilePhotoRoutes } from './profile-photo.js';
 import { PROVIDER_EVENTS_PATH, receiveProviderEvent } from './provider-events.js';
@@ -713,6 +714,7 @@ export function createApp(options: Options) {
   });
   registerOpenworldDashboardSso(app, db, principal);
   registerOpenworldDashboardRoutes(app, { db, principal, management: options.management });
+  registerOpenworldTelemetryRoutes(app, { db, principal, management: options.management });
   registerOpenworldRoutes(app, { db, env, codec: options.codec, principal });
   registerSatisfactoryRoutes(app, { db, principal });
   registerSatisfactoryOverviewRoutes(app, { db, codec: options.codec, principal });

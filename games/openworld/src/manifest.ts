@@ -1,4 +1,5 @@
 import { gameManifestSchema } from '@nickhosting/game-sdk';
+import { openworldTelemetryPermissions } from './server-permissions.js';
 
 export const openworldRuntimeImage = 'ghcr.io/ptero-eggs/yolks:debian_bookworm';
 export const openworldManifest = gameManifestSchema.parse({
@@ -9,7 +10,7 @@ export const openworldManifest = gameManifestSchema.parse({
     console: true,
     files: true,
     backups: true,
-    players: false,
+    players: true,
     mods: false,
     worlds: false,
     idleDetection: true,
@@ -20,6 +21,7 @@ export const openworldManifest = gameManifestSchema.parse({
   backupPolicy: { offline: 'required' },
   connection: { mode: 'custom-subdomain', zoneSettingKey: 'dnsBaseDomain' },
   serverPermissions: [
+    ...openworldTelemetryPermissions,
     {
       key: 'game.openworld.dashboard.admin',
       resource: 'game.openworld.dashboard',
@@ -44,6 +46,8 @@ export const openworldManifest = gameManifestSchema.parse({
     },
   ],
   wizard: { steps: [{ id: 'version', titleKey: 'games.openworld.version', fields: ['version'] }] },
-  management: [],
+  management: [
+    { id: 'players', titleKey: 'games.openworld.telemetry.players', requiredCapability: 'players' },
+  ],
   localizations: { namespace: 'games.openworld', locales: ['en', 'it'] },
 });
