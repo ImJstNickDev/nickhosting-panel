@@ -506,3 +506,195 @@ button.ow-player-link {
   min-height: 34px;
   padding-block: 3px;
 }
+.ow-switcher {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  gap: 3px;
+  flex-wrap: wrap;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 0;
+  padding: 3px;
+  background: var(--surface);
+}
+.ow-switcher button {
+  min-height: 34px;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--muted);
+  background: transparent;
+}
+.ow-switcher button[aria-pressed="true"] {
+  color: #194d41;
+  background: #eaf3ee;
+}
+.ow-saved-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.ow-saved-list li {
+  border-top: 1px solid var(--line);
+  padding: 14px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 16px;
+  flex-wrap: wrap;
+  font-size: 0.86rem;
+}
+.ow-saved-list li > span,
+.ow-last-save small,
+.ow-file-name small,
+.ow-uuid {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: normal;
+}
+button.ow-file-name {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--ow-primary);
+  text-align: start;
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  overflow-wrap: anywhere;
+}
+.ow-file-name:hover {
+  text-decoration: underline;
+}
+.ow-last-save {
+  display: grid;
+  gap: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.ow-open-save {
+  margin-top: 16px;
+}
+.ow-capture img {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  max-height: 70vh;
+  margin: 12px auto 0;
+  object-fit: contain;
+}
+.ow-actions,
+.ow-action-editor,
+.ow-action-editor > fieldset:not([hidden]) {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.ow-actions {
+  padding-top: 12px;
+}
+.ow-actions .field {
+  margin: 0;
+  min-width: 0;
+}
+.ow-action-editor > fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+.ow-action-editor p {
+  margin: 0;
+}
+.ow-coordinates {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.ow-coordinates .field:last-child {
+  grid-column: 1 / -1;
+}
+.ow-action-review {
+  padding: 14px 0;
+  border-block: 1px solid var(--line);
+  display: grid;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+.ow-action-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.ow-receipt {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 12px 16px;
+  border: 1px solid #b2cebf;
+  background: #eff6f0;
+  color: #254b38;
+  border-radius: 7px;
+}
+.ow-receipt-label {
+  flex: 1;
+}
+.ow-dismiss {
+  padding: 3px 8px;
+  background: transparent;
+  color: inherit;
+  border: 0;
+  font-size: 1.2rem;
+}
+.ow-uuid {
+  overflow-wrap: anywhere;
+}
+.ow-captures {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(185px, 100%), 1fr));
+  gap: 12px;
+  list-style: none;
+  padding: 0;
+  margin: 0 0 12px;
+}
+button.ow-capture-tile {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  background: transparent;
+  border: 1px solid var(--line);
+  padding: 8px;
+  color: inherit;
+  text-align: start;
+}
+.ow-capture-tile > strong {
+  overflow-wrap: anywhere;
+  font-size: 0.85rem;
+}
+.ow-capture-tile > span:last-child {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+.ow-thumbnail {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 9;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #eef2f1;
+  color: #647971;
+}
+.ow-thumbnail img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+@media (max-width: 640px) {
+  .ow-captures {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.ow-action-editor > fieldset[hidden] {
+  display: none;
+}

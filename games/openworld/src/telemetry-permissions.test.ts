@@ -25,6 +25,7 @@ it('separates the roster and performance grants from inspection, moderation and 
     expect.arrayContaining([
       'game.openworld.players.inspect',
       'game.openworld.players.moderate',
+      'game.openworld.players.screenshots',
       'game.openworld.dashboard.admin',
     ]),
   );

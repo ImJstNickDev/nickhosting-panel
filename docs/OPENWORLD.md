@@ -99,6 +99,20 @@ server is offline or its private API is unavailable, each panel shows the time o
 last saved observation when one exists. Opening a tab leaves a sleeping server asleep.
 Individual player details and skins are available only during a live session.
 
+In **Players → Saved**, users with the inspection permission can search the server's
+saved profiles even when the game is stopped. The directory reads the configured
+data directory and identifies a record by the account ID stored in the file. It
+shows the save time and distinguishes saved inventory from the current live inventory.
+A verified account in a live player card links to its saved profile by UUID.
+
+The separate **Moderate players** permission enables private messages, kick, game
+mode changes, kill, respawn and teleport to coordinates, a connected player or a
+checkpoint. Commands target a running session. NickPanel rechecks the connection
+and records the request before sending it. If the game stops responding after dispatch,
+the panel reports the uncertain outcome. **Request and view game screenshots** is a
+separate grant. It covers requests to the game client and the whole instance's gallery.
+A capture can arrive several seconds after the game accepts the request.
+
 The verified Linux builds are a1.0.11–a1.0.13, a1.1.0–a1.1.3, a1.2.0–a1.2.9 and
 pre-a1.2.0-1. The a1.0.10 package requires glibc 2.38 and cannot run on the Debian
 Bookworm image used by this egg. When that release is present in the catalog, the

@@ -169,6 +169,7 @@ async function serve(page: Page, offline = false) {
       json: {
         data: sample[name as keyof typeof sample],
         source: offline ? 'snapshot' : 'live',
+        ...(!offline && name === 'players' ? { processRef: 'a'.repeat(64) } : {}),
         observedAt: instant,
         reason: offline ? 'offline' : null,
       },
@@ -379,6 +380,285 @@ it('drops roster and open detail when the same server switches to an assisted id
     await check(page.getByText('New identity roster', { exact: true })).toBeVisible();
   } finally {
     hold.resolve();
+    await context.close();
+  }
+});
+
+it('lets a moderator act on a pinned live session without reading player details', async () => {
+  const context = await browser.newContext({
+    locale: 'en-GB',
+    viewport: { width: 1280, height: 800 },
+  });
+  const page = await context.newPage();
+  const sent: {
+    player: typeof person;
+    requestId: string;
+    processRef: string;
+    action: { kind: string; text?: string; reason?: string };
+  }[] = [];
+  try {
+    const paths = await serve(page);
+    await page.route('**/openworld/players/actions', (r) => {
+      const body = r.request().postDataJSON();
+      sent.push(body);
+      return r.fulfill({ status: 202, json: { requestId: body.requestId, outcome: 'accepted' } });
+    });
+    await page.goto(`${url}telemetry-fixture?section=players&reader&moderator`);
+    await check(page.getByRole('button', { name: 'Saved players' })).toHaveCount(0);
+    await page.getByRole('button', { name: /Solstice/ }).click();
+    const dialog = page.getByRole('dialog');
+    await check(dialog.getByRole('button', { name: 'Inventory' })).toHaveCount(0);
+    await check(dialog.getByRole('option', { name: 'Request screenshot' })).toHaveCount(0);
+    await dialog.getByLabel('Private message').fill('Welcome back');
+    await dialog.getByRole('button', { name: 'Send message' }).click();
+    await check(page.getByRole('status')).toContainText('Request accepted for Solstice');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      processRef: 'a'.repeat(64),
+      player: { id: 23, name: 'Solstice', joinedAt: Date.parse(instant) - 345000 },
+      action: { kind: 'message', text: 'Welcome back' },
+    });
+
+    await page.getByRole('button', { name: /Solstice/ }).click();
+    await dialog.getByLabel('Action', { exact: true }).selectOption('kick');
+    await dialog.getByLabel('Reason (optional)').fill('Please reconnect after the server update.');
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    await check(dialog).toContainText('Disconnect Solstice from the server?');
+    expect(sent).toHaveLength(1);
+    await page.screenshot({ path: `${shots}/block2-kick-desktop.png` });
+    await dialog.getByRole('button', { name: 'Back' }).click();
+    expect(sent).toHaveLength(1);
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    await dialog.getByRole('button', { name: 'Kick player' }).click();
+    await check(dialog).toHaveCount(0);
+    expect(sent[1]?.action).toEqual({
+      kind: 'kick',
+      reason: 'Please reconnect after the server update.',
+    });
+    expect(sent[1]?.requestId).not.toBe(sent[0]?.requestId);
+    expect(paths.some((path) => path.startsWith('players/'))).toBe(false);
+  } finally {
+    await context.close();
+  }
+});
+
+it('validates teleport coordinates and prevents repeating an uncertain write', async () => {
+  const context = await browser.newContext({
+      locale: 'it-IT',
+      viewport: { width: 390, height: 844 },
+    }),
+    page = await context.newPage();
+  try {
+    await serve(page);
+    const sent: unknown[] = [];
+    await page.route('**/openworld/players/destinations', (r) =>
+      r.fulfill({
+        json: {
+          worlds: [{ key: 'earth', name: 'Terra' }],
+          checkpoints: [{ id: 7, world: 'earth', name: 'Baita' }],
+        },
+      }),
+    );
+    await page.route('**/openworld/players/actions', (r) => {
+      sent.push(r.request().postDataJSON());
+      const code = sent.length === 1 ? 'game_not_ready' : 'operation_uncertain';
+      return r.fulfill({
+        status: 409,
+        json: { error: { code, messageKey: `errors.${code}` } },
+      });
+    });
+    await page.goto(`${url}telemetry-fixture?section=players&reader&moderator`);
+    await page.getByRole('button', { name: /Solstice/ }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Azione', { exact: true }).selectOption('teleport');
+    await dialog.getByLabel('Destinazione', { exact: true }).selectOption('coordinates');
+    await dialog.getByLabel('Mondo', { exact: true }).selectOption('earth');
+    await dialog.getByLabel('Latitudine (°)').fill('91');
+    await dialog.getByLabel('Longitudine (°)').fill('11');
+    await dialog.getByRole('button', { name: 'Continua' }).click();
+    expect(
+      await dialog
+        .locator('input[name="lat"]')
+        .evaluate((el) => (el as HTMLInputElement).validity.rangeOverflow),
+    ).toBe(true);
+    await dialog.getByLabel('Latitudine (°)').fill('41');
+    await dialog.getByRole('button', { name: 'Continua' }).click();
+    await check(dialog).toContainText('Livello del terreno');
+    await fits(page);
+    await dialog.getByRole('button', { name: 'Teletrasporta' }).click();
+    await check(dialog.getByRole('alert')).toBeVisible();
+    await check(dialog.getByRole('button', { name: 'Teletrasporta' })).toBeEnabled();
+    await dialog.getByRole('button', { name: 'Teletrasporta' }).click();
+    await check(dialog.getByRole('button', { name: 'Teletrasporta' })).toBeDisabled();
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toMatchObject({
+      action: {
+        kind: 'teleport',
+        destination: { type: 'coordinates', world: 'earth', lat: 41, lon: 11, alt: null },
+      },
+    });
+  } finally {
+    await context.close();
+  }
+});
+
+const archiveId = '1a6d0a8f-3995-4336-960f-dd7e430b212f';
+it('opens persisted player saves while offline and keeps same-name accounts separate', async () => {
+  const context = await browser.newContext({
+      locale: 'it-IT',
+      viewport: { width: 390, height: 844 },
+    }),
+    page = await context.newPage();
+  try {
+    const paths = await serve(page, true);
+    const row = { uuid: archiveId, name: 'Solstice', savedAt: instant };
+    const savedCalls: string[] = [];
+    await page.route('**/openworld/players/saved?*', (r) =>
+      r.fulfill({
+        json: {
+          indexedAt: instant,
+          indexing: false,
+          stale: true,
+          page: 1,
+          total: 2,
+          players: [row, { ...row, uuid: '9a9712ef-4b49-4d65-8ea7-3627e827d873' }],
+        },
+      }),
+    );
+    await page.route('**/openworld/players/saved/*', (r) => {
+      savedCalls.push(r.request().url());
+      return r.fulfill({
+        json: {
+          ...row,
+          statsAt: instant,
+          mode: 'survival',
+          world: 'Terra',
+          position: { x: 2, y: 80, z: 5 },
+          stats: { joins: 9, lastSeenMs: Date.parse(instant) },
+          inventory: { selected: 0, hotbar: [{ code: 71, count: 24 }], bag: [] },
+        },
+      });
+    });
+    await page.goto(`${url}telemetry-fixture?section=players&offline`);
+    await page.getByRole('button', { name: 'Giocatori salvati' }).click();
+    await check(page.getByRole('status')).toContainText('indice');
+    await page.getByRole('button', { name: new RegExp(archiveId) }).click();
+    const dialog = page.getByRole('dialog');
+    await check(dialog).toContainText(archiveId);
+    await check(dialog).toContainText('Ultimo salvataggio');
+    await dialog.getByText('Barra rapida', { exact: true }).click();
+    await check(dialog).toContainText('Oggetto #71');
+    await check(dialog).toContainText('×24');
+    await fits(page);
+    await page.screenshot({ path: `${shots}/block2-save-mobile.png` });
+    expect(savedCalls).toHaveLength(1);
+    expect(savedCalls[0]).toContain(`/saved/${archiveId}`);
+    expect(paths.some((p) => p.startsWith('players/'))).toBe(false);
+  } finally {
+    await context.close();
+  }
+});
+
+it('opens linked history using the verified account id and keeps screenshot permissions independent', async () => {
+  const context = await browser.newContext({
+      locale: 'en-GB',
+      viewport: { width: 390, height: 844 },
+    }),
+    page = await context.newPage();
+  try {
+    await serve(page);
+    await page.route('**/telemetry/players/23?*', (r) =>
+      r.fulfill({
+        json: {
+          data: { ...sample.player, account: archiveId, accountVerified: true },
+          source: 'live',
+          observedAt: instant,
+          reason: null,
+        },
+      }),
+    );
+    await page.route(`**/openworld/players/saved/${archiveId}`, (r) =>
+      r.fulfill({ status: 404, json: { error: { code: 'not_found' } } }),
+    );
+    await page.goto(`${url}telemetry-fixture?section=players`);
+    await page.getByRole('button', { name: /Solstice/ }).click();
+    await page.getByRole('button', { name: 'Open saved profile' }).click();
+    await check(page.getByRole('dialog')).toContainText('No save found for this UUID.');
+    await page.goto(`${url}telemetry-fixture?section=players&reader&screenshots`);
+    const files = Array.from({ length: 9 }, (_, i) => ({
+      name: `capture-${i}.png`,
+      mtimeMs: Date.parse(instant),
+      bytes: 1200000,
+    }));
+    await page.route('**/openworld/screenshots', (r) => r.fulfill({ json: { files } }));
+    let shotsRequested = 0;
+    await page.route('**/openworld/players/actions', (r) => {
+      shotsRequested++;
+      expect(r.request().postDataJSON().action).toEqual({ kind: 'screenshot' });
+      return r.fulfill({
+        status: 202,
+        json: { outcome: 'accepted', requestId: r.request().postDataJSON().requestId },
+      });
+    });
+    const imgs: string[] = [];
+    await page.route('**/openworld/screenshots/image?*', (r) => {
+      imgs.push(r.request().url());
+      return r.fulfill({
+        contentType: 'image/png',
+        body: Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAOgeONsAAAAASUVORK5CYII=',
+          'base64',
+        ),
+      });
+    });
+    await page.getByRole('button', { name: /Solstice/ }).click();
+    const dialog = page.getByRole('dialog');
+    await check(dialog.getByRole('option', { name: 'Kick player' })).toHaveCount(0);
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    await dialog.getByRole('button', { name: 'Request screenshot' }).click();
+    await page.getByRole('button', { name: 'Open screenshots' }).click();
+    await check(page.getByRole('button', { name: /capture-7/ })).toBeVisible();
+    await check(page.getByRole('button', { name: /capture-8/ })).toHaveCount(0);
+    expect(imgs).toHaveLength(0);
+    await page.getByRole('button', { name: 'Next' }).click();
+    await page.getByRole('button', { name: /capture-8/ }).click();
+    await check(dialog.getByRole('img')).toBeVisible();
+    await expect.poll(() => imgs.length).toBe(1);
+    expect(new URL(imgs[0] ?? '').searchParams.get('name')).toBe('capture-8.png');
+    expect(shotsRequested).toBe(1);
+    await fits(page);
+  } finally {
+    await context.close();
+  }
+});
+
+it('disables a prepared action when the same player id appears in another game process', async () => {
+  const context = await browser.newContext({ locale: 'en-GB' }),
+    page = await context.newPage();
+  try {
+    await serve(page);
+    await page.clock.install();
+    await page.goto(`${url}telemetry-fixture?section=players&reader&moderator`);
+    await page.getByRole('button', { name: /Solstice/ }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Action', { exact: true }).selectOption('kill');
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    await check(dialog).toContainText('Kill the character of Solstice?');
+    await page.route('**/telemetry/players', (r) =>
+      r.fulfill({
+        json: {
+          data: sample.players,
+          source: 'live',
+          observedAt: instant,
+          reason: null,
+          processRef: 'b'.repeat(64),
+        },
+      }),
+    );
+    await page.clock.fastForward(6000);
+    await check(dialog.getByRole('button', { name: 'Kill character' })).toHaveCount(0);
+    await check(dialog).toContainText('This player has left the server.');
+  } finally {
     await context.close();
   }
 });

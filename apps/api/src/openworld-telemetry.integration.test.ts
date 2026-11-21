@@ -5,9 +5,13 @@ import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import { Hono } from 'hono';
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { openworldManifest } from '../../../games/openworld/src/manifest.js';
+import { createOpenworldPlayerActions } from '../../../packages/server-management/src/openworld-player-actions.js';
+import { createOpenworldPlayerChannel } from '../../../packages/server-management/src/openworld-player-channel.js';
 import { createOpenworldTelemetry } from '../../../packages/server-management/src/openworld-telemetry.js';
 import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
 import type { Variables } from './app.js';
+import { registerOpenworldPlayerActionRoutes } from './openworld-player-actions.js';
+import { registerOpenworldScreenshotRoutes } from './openworld-screenshots.js';
 import { registerOpenworldTelemetryRoutes } from './openworld-telemetry.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -91,6 +95,7 @@ async function fixture() {
     invalidLogin: false,
     beforeReply: undefined as ((resource: string) => Promise<void>) | undefined,
     empty: false,
+    actionResult: undefined as (() => Response | Promise<Response>) | undefined,
   };
   const calls: string[] = [];
   const fetcher: typeof fetch = async (input, init) => {
@@ -107,6 +112,12 @@ async function fixture() {
     if (new Headers(init?.headers).get('X-OW-Token') !== state.token)
       return new Response(null, { status: 401 });
     if (state.serviceDown) return new Response(null, { status: 503 });
+    if (url.pathname.startsWith('/api/live/player/') && init?.method === 'POST')
+      return state.actionResult ? state.actionResult() : Response.json({ ok: true });
+    if (resource === 'checkpoints')
+      return Response.json({
+        checkpoints: [{ id: 2, world: 'earth', name: 'Base', note: 'private' }],
+      });
     const player = {
       id: 7,
       name: state.name,
@@ -125,7 +136,9 @@ async function fixture() {
     if (resource === 'players') return Response.json({ players: state.empty ? [] : [player] });
     if (resource === 'player')
       return state.empty ? new Response(null, { status: 404 }) : Response.json(player);
-    if (resource === 'skin') {
+    if (resource === 'screenshots')
+      return Response.json({ files: [{ name: 'conn7-fixture.png', mtimeMs: 100, bytes: 67 }] });
+    if (resource === 'skin' || resource === 'screenshot') {
       const png = Buffer.from(
         'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAOgeONsAAAAASUVORK5CYII=',
         'base64',
@@ -139,7 +152,7 @@ async function fixture() {
     if (resource === 'storage') return Response.json({ parts: [], worlds: [], totalBytes: 200 });
     throw new Error('unplanned native API request');
   };
-  const router = () => {
+  const appWithErrors = () => {
     const app = new Hono<{ Variables: Variables }>();
     app.onError((e, c) =>
       c.json(
@@ -147,6 +160,10 @@ async function fixture() {
         e instanceof DomainError ? (e.status as 400) : 500,
       ),
     );
+    return app;
+  };
+  const router = () => {
+    const app = appWithErrors();
     registerOpenworldTelemetryRoutes(
       app,
       {
@@ -160,7 +177,45 @@ async function fixture() {
         headers: { 'x-reader': reader },
       });
   };
-  return { id, db, grant, power, state, calls, target, request: router(), router };
+  const actionRouter = () => {
+    const app = appWithErrors();
+    registerOpenworldPlayerActionRoutes(
+      app,
+      {
+        db,
+        principal: async (c) => (c.req.header('x-reader') === 'sub' ? sub.context : owner.context),
+      },
+      createOpenworldPlayerActions({ db, now: () => state.now, target, fetcher }),
+    );
+    return (body?: unknown, reader = 'sub') =>
+      app.request(`/v1/servers/${id}/openworld/players/${body ? 'actions' : 'destinations'}`, {
+        method: body ? 'POST' : 'GET',
+        body: body ? JSON.stringify(body) : undefined,
+        headers: { 'content-type': 'application/json', 'x-reader': reader },
+      });
+  };
+  const gallery = appWithErrors();
+  registerOpenworldScreenshotRoutes(
+    gallery,
+    { db, principal: async () => sub.context },
+    createOpenworldPlayerChannel({ db, now: () => state.now, target, fetcher }),
+    fetcher,
+  );
+  const galleryRead = (suffix = '') =>
+    gallery.request(`/v1/servers/${id}/openworld/screenshots${suffix}`);
+  return {
+    id,
+    db,
+    grant,
+    power,
+    state,
+    calls,
+    target,
+    request: router(),
+    router,
+    actionRouter,
+    galleryRead,
+  };
 }
 
 it('uses current granular permissions even on cached data and never sends native credentials or raw player fields', async () => {
@@ -181,6 +236,7 @@ it('uses current granular permissions even on cached data and never sends native
     expect(res.headers.get('cache-control')).toContain('no-store');
     expect(await res.json()).toEqual({
       source: 'live',
+      processRef: expect.stringMatching(/^[a-f0-9]{64}$/),
       reason: null,
       observedAt: new Date(state.now).toISOString(),
       data: { players: [{ id: 7, name: 'Ada', connectedS: 90, skinHash: '12ab34cd' }] },
@@ -282,7 +338,12 @@ it('shares authentication across endpoints, renews once and recovers projected s
   const count = calls.length;
   const freshRouter = router();
   const offline = await (await freshRouter('players')).json();
-  expect(offline).toEqual({ ...empty, source: 'snapshot', reason: 'offline' });
+  expect(offline).toEqual({
+    data: empty.data,
+    observedAt: empty.observedAt,
+    source: 'snapshot',
+    reason: 'offline',
+  });
   expect(await (await freshRouter('players/7?name=Ada')).json()).toEqual({
     source: 'unavailable',
     reason: 'offline',
@@ -407,7 +468,12 @@ it('discards observations spanning a stop and persists last-player departure wit
   await entered.promise;
   await power('offline');
   gate.resolve();
-  const snapshot = { ...left, source: 'snapshot', reason: 'offline' };
+  const snapshot = {
+    data: left.data,
+    observedAt: left.observedAt,
+    source: 'snapshot',
+    reason: 'offline',
+  };
   expect(await (await pending).json()).toEqual(snapshot);
   expect(await (await router()('players')).json()).toEqual(snapshot);
 });
@@ -432,4 +498,181 @@ it('rechecks a pending reader grant without cancelling a different authorized re
   expect((await pending).status).toBe(403);
   expect(await (await ownerRead).json()).toMatchObject({ source: 'live' });
   expect(calls.filter((key) => key === 'players')).toHaveLength(1);
+});
+
+it('authorizes and records one native player action across concurrent attempts, retries and API restarts', async () => {
+  const { id, db, grant, power, state, calls, request, actionRouter } = await fixture();
+  await power('running');
+  const action = actionRouter(),
+    { processRef } = await (await request('players')).json();
+  const input = {
+    requestId: randomUUID(),
+    processRef,
+    player: { id: 7, name: 'Ada', joinedAt: state.now - 90_000 },
+    action: { kind: 'message', text: 'Only to Ada' },
+  };
+  const read = 'game.openworld.players.read',
+    moderate = 'game.openworld.players.moderate',
+    shots = 'game.openworld.players.screenshots';
+  await grant(read);
+  expect((await action(input)).status).toBe(403);
+  expect((await action()).status).toBe(403);
+  await grant(read, moderate);
+  const d = await (await action()).json();
+  expect(d.checkpoints).toEqual([{ id: 2, name: 'Base', world: 'earth' }]);
+  const screenshots = { ...input, requestId: randomUUID(), action: { kind: 'screenshot' } };
+  expect((await action(screenshots)).status).toBe(403);
+  const entered = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>();
+  state.actionResult = async () => {
+    entered.resolve();
+    await release.promise;
+    return Response.json({ ok: true });
+  };
+  const first = action(input);
+  await entered.promise;
+  try {
+    expect(await (await actionRouter()(input)).json()).toEqual({ error: 'operation_uncertain' });
+  } finally {
+    release.resolve();
+  }
+  expect((await first).status).toBe(202);
+  expect((await actionRouter()(input)).status).toBe(202);
+  expect((await action({ ...input, action: { kind: 'kill' } })).status).toBe(409);
+  expect(calls.filter((c) => c === 'message')).toHaveLength(1);
+  const receipt = await db
+    .selectFrom('audit_events')
+    .select(['actor_user_id', 'metadata'])
+    .where('action', '=', 'server.openworld.player.action')
+    .executeTakeFirstOrThrow();
+  expect(receipt.metadata).toMatchObject({
+    serverId: id,
+    operationId: input.requestId,
+    outcome: 'accepted',
+    connectionId: 7,
+    playerAction: 'message',
+  });
+  expect(JSON.stringify(receipt.metadata)).not.toContain('Only to Ada');
+  await grant(read, shots);
+  expect((await actionRouter()(input)).status).toBe(403);
+  expect((await action(screenshots)).status).toBe(202);
+  expect(calls.filter((c) => c === 'screenshot')).toHaveLength(1);
+});
+
+it('validates both sessions, current grants and process before acting, and never repeats an ambiguous send', async () => {
+  const { grant, power, state, calls, request, actionRouter } = await fixture();
+  await power('running');
+  const read = 'game.openworld.players.read',
+    moderate = 'game.openworld.players.moderate';
+  await grant(read, moderate);
+  const action = actionRouter(),
+    { processRef } = await (await request('players')).json();
+  const player = { id: 7, name: state.name, joinedAt: state.now - 90_000 };
+  const input = {
+    requestId: randomUUID(),
+    processRef,
+    player,
+    action: { kind: 'kick', reason: 'Fixture' },
+  };
+  expect((await action({ ...input, processRef: 'a'.repeat(64) })).status).toBe(409);
+  expect(
+    (
+      await action({
+        ...input,
+        requestId: randomUUID(),
+        player: { ...player, name: 'Someone else' },
+      })
+    ).status,
+  ).toBe(409);
+  expect(
+    (
+      await action({
+        ...input,
+        requestId: randomUUID(),
+        player: { ...player, joinedAt: state.now - 8000 },
+      })
+    ).status,
+  ).toBe(409);
+  expect(
+    (
+      await action({
+        ...input,
+        requestId: randomUUID(),
+        action: { kind: 'teleport', destination: { type: 'player', player: { ...player, id: 8 } } },
+      })
+    ).status,
+  ).toBe(409);
+  expect(
+    (
+      await action({
+        ...input,
+        requestId: randomUUID(),
+        action: { kind: 'teleport', destination: { type: 'checkpoint', id: 11 } },
+      })
+    ).status,
+  ).toBe(404);
+  expect(calls).not.toContain('kick');
+  expect(calls).not.toContain('teleport');
+  const during = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>();
+  state.beforeReply = async (r) => {
+    if (r === 'players') {
+      during.resolve();
+      await release.promise;
+    }
+  };
+  const blocked = action({ ...input, requestId: randomUUID() });
+  await during.promise;
+  await grant(read);
+  release.resolve();
+  expect((await blocked).status).toBe(403);
+  expect(calls).not.toContain('kick');
+  state.beforeReply = undefined;
+  await grant(read, moderate);
+  state.actionResult = () => {
+    throw new TypeError('connection interrupted');
+  };
+  expect(await (await action(input)).json()).toEqual({ error: 'operation_uncertain' });
+  expect(await (await actionRouter()(input)).json()).toEqual({ error: 'operation_uncertain' });
+  expect(calls.filter((c) => c === 'kick')).toHaveLength(1);
+  await power('offline');
+  const count = calls.length;
+  expect((await action({ ...input, requestId: randomUUID() })).status).toBe(409);
+  expect(calls).toHaveLength(count);
+});
+
+it('isolates screenshot metadata and image bytes from inspection and moderation and denies revoked access', async () => {
+  const { grant, power, calls, galleryRead } = await fixture();
+  await power('running');
+  const read = 'game.openworld.players.read',
+    shots = 'game.openworld.players.screenshots';
+  const image = '/image?name=conn7-fixture.png';
+  for (const keys of [
+    [read, 'game.openworld.players.inspect'],
+    [read, 'game.openworld.players.moderate'],
+    [shots],
+  ]) {
+    await grant(...keys);
+    expect((await galleryRead()).status).toBe(403);
+    expect((await galleryRead(image)).status).toBe(403);
+  }
+  expect(calls).toEqual([]);
+  await grant(read, shots);
+  const files = await galleryRead();
+  expect(files.status).toBe(200);
+  expect(await files.json()).toEqual({
+    files: [{ name: 'conn7-fixture.png', mtimeMs: 100, bytes: 67 }],
+  });
+  const opened = await galleryRead(image);
+  expect(opened.status).toBe(200);
+  expect(opened.headers.get('content-type')).toBe('image/png');
+  expect(opened.headers.get('cache-control')).toContain('no-store');
+  expect(new Uint8Array(await opened.arrayBuffer()).slice(1, 4)).toEqual(
+    Uint8Array.from([80, 78, 71]),
+  );
+  await grant(read);
+  const count = calls.length;
+  expect((await galleryRead()).status).toBe(403);
+  expect((await galleryRead(image)).status).toBe(403);
+  expect(calls).toHaveLength(count);
 });

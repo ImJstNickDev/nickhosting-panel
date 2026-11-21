@@ -76,6 +76,20 @@ export interface Database
     sha256: string;
     size: number;
   };
+  openworld_player_directories: {
+    server_id: string;
+    binding: string;
+    indexed_at: Date;
+    indexing: boolean;
+  };
+  openworld_saved_players: {
+    server_id: string;
+    file_stem: string;
+    revision: string;
+    account_id: string | null;
+    display_name: string | null;
+    saved_at: Date | null;
+  };
   openworld_telemetry_snapshots: {
     server_id: string;
     resource: 'status' | 'players' | 'history' | 'chunks' | 'storage';

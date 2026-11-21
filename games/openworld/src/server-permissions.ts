@@ -2,6 +2,15 @@ import type { ServerPermissionDefinition } from '@nickhosting/core';
 
 export const openworldTelemetryPermissions: ServerPermissionDefinition[] = [
   {
+    key: 'game.openworld.players.screenshots',
+    resource: 'game.openworld.players',
+    kind: 'additional',
+    legacy: 'explicit',
+    labelKey: 'games.openworld.permissions.screenshots',
+    resourceLabelKey: 'games.openworld.telemetry.players',
+    descriptionKey: 'games.openworld.permissions.screenshotsHelp',
+  },
+  {
     key: 'game.openworld.players.read',
     resource: 'game.openworld.players',
     kind: 'read',

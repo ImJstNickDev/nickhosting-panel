@@ -174,13 +174,16 @@ export const openworldUiModule = defineTrustedGameUiModule({
         'Requires glibc 2.38. The server uses Debian Bookworm.',
       ...openworldDashboardCatalogs.en,
       ...openworldTelemetryCatalogs.en,
-      'games.openworld.permissions.viewPlayers': 'View online players',
+      'games.openworld.permissions.viewPlayers': 'View players',
       'games.openworld.permissions.inspect': 'Inspect player details',
       'games.openworld.permissions.inspectHelp':
-        'Shows inventory, exact position and player statistics. Also requires access to the online players list.',
+        'View saved players, inventory, exact position and individual statistics. Requires access to the player list.',
       'games.openworld.permissions.moderate': 'Moderate players',
       'games.openworld.permissions.moderateHelp':
-        'Reserved for player actions. The current Players tab is read-only.',
+        'Send messages, disconnect, teleport, change game mode, kill or respawn a connected player. Requires access to the player list.',
+      'games.openworld.permissions.screenshots': 'Request and view game screenshots',
+      'games.openworld.permissions.screenshotsHelp':
+        'Request a capture from a connected player and view the shared gallery for this server. Requires access to the player list.',
       'games.openworld.permissions.viewPerformance': 'View overview and performance',
     },
     it: {
@@ -195,13 +198,16 @@ export const openworldUiModule = defineTrustedGameUiModule({
       'games.openworld.incompatibleRuntime': 'Richiede glibc 2.38. Il server usa Debian Bookworm.',
       ...openworldDashboardCatalogs.it,
       ...openworldTelemetryCatalogs.it,
-      'games.openworld.permissions.viewPlayers': 'Visualizza i giocatori online',
+      'games.openworld.permissions.viewPlayers': 'Visualizza i giocatori',
       'games.openworld.permissions.inspect': 'Ispeziona i dettagli dei giocatori',
       'games.openworld.permissions.inspectHelp':
-        'Mostra inventario, posizione esatta e statistiche. Richiede anche l’accesso all’elenco dei giocatori online.',
+        'Mostra giocatori salvati, inventario, posizione esatta e statistiche individuali. Richiede l’accesso all’elenco dei giocatori.',
       'games.openworld.permissions.moderate': 'Modera i giocatori',
       'games.openworld.permissions.moderateHelp':
-        'Riservato alle azioni sui giocatori. La scheda Giocatori attuale è di sola lettura.',
+        'Invia messaggi, disconnetti, teletrasporta, cambia modalità, uccidi o fai rinascere un giocatore connesso. Richiede l’accesso all’elenco dei giocatori.',
+      'games.openworld.permissions.screenshots': 'Richiedi e visualizza screenshot di gioco',
+      'games.openworld.permissions.screenshotsHelp':
+        'Richiedi una cattura a un giocatore connesso e consulta la galleria condivisa del server. Richiede l’accesso all’elenco dei giocatori.',
       'games.openworld.permissions.viewPerformance': 'Visualizza panoramica e prestazioni',
     },
   },

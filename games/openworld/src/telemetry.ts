@@ -277,7 +277,13 @@ export type OpenworldTelemetryData = {
 };
 export type OpenworldObservationReason = 'offline' | 'not_ready' | 'unreachable';
 export type OpenworldObservation<K extends OpenworldTelemetryResource> =
-  | { source: 'live'; observedAt: string; reason: null; data: OpenworldTelemetryData[K] }
+  | {
+      source: 'live';
+      observedAt: string;
+      processRef?: string;
+      reason: null;
+      data: OpenworldTelemetryData[K];
+    }
   | {
       source: 'snapshot';
       observedAt: string;

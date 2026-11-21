@@ -10,6 +10,8 @@ const params = new URLSearchParams(location.search);
 const id = '10000000-0000-4000-8000-000000000001';
 const permissionKeys = ['game.openworld.players.read', 'game.openworld.performance.read'];
 if (!params.has('reader')) permissionKeys.push('game.openworld.players.inspect');
+if (params.has('moderator')) permissionKeys.push('game.openworld.players.moderate');
+if (params.has('screenshots')) permissionKeys.push('game.openworld.players.screenshots');
 const section = gameUiRegistry
   .get('openworld')
   ?.descriptor.sections.find((s) => s.id === params.get('section'));

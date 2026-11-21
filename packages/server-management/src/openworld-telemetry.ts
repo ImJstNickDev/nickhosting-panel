@@ -31,7 +31,7 @@ import { serverPermissionDefinitionsForGame, sharedServerPermissionKeys } from '
 type Resource = OpenworldTelemetryResource;
 type SnapshotResource = Exclude<Resource, 'player'>;
 type Sample = { data: OpenworldTelemetryData[Resource]; observedAt: number };
-type Scope = {
+export type OpenworldScope = {
   serverId: string;
   binding: string;
   liveKey: string;
@@ -90,11 +90,12 @@ function sharedReads<T>(max: number, clock: () => number, failureTtl: number) {
   };
 }
 
-async function readScope(
+export type OpenworldPlayerGrant = 'moderate' | 'screenshots';
+export async function readOpenworldScope(
   db: Kysely<Database>,
   serverId: string,
-  reader?: { who: AuthContext; resource: Resource },
-): Promise<Scope> {
+  reader?: { who: AuthContext; resource: Resource; playerGrant?: OpenworldPlayerGrant },
+): Promise<OpenworldScope> {
   if (reader) assertAuthContext(reader.who);
   if (!z.uuid().safeParse(serverId).success) throw new DomainError('validation_failed');
   // Resolve current grants and the private instance binding together on every read,
@@ -170,7 +171,8 @@ async function readScope(
     const roster = resource === 'players' || resource === 'player';
     if (
       !keys.includes(roster ? 'game.openworld.players.read' : 'game.openworld.performance.read') ||
-      (resource === 'player' && !keys.includes('game.openworld.players.inspect'))
+      (resource === 'player' && !keys.includes('game.openworld.players.inspect')) ||
+      (reader.playerGrant && !keys.includes(`game.openworld.players.${reader.playerGrant}`))
     )
       throw new DomainError('forbidden');
   }
@@ -225,7 +227,7 @@ async function readScope(
   return { serverId, binding, liveKey, reason: null, origin: `http://${host}:${scope.port}` };
 }
 
-function assertCurrent(before: Scope, after: Scope) {
+export function assertCurrentOpenworldScope(before: OpenworldScope, after: OpenworldScope) {
   if (before.binding !== after.binding) throw new DomainError('provenance_mismatch');
   if (after.reason || before.liveKey !== after.liveKey) throw new DomainError('game_not_ready');
 }
@@ -248,7 +250,7 @@ function rosterChanged(previous: Sample, next: Sample) {
   });
 }
 
-function sampleKey(scope: Scope, resource: Resource, id?: number) {
+function sampleKey(scope: OpenworldScope, resource: Resource, id?: number) {
   return JSON.stringify([scope.liveKey, resource, id]);
 }
 
@@ -268,27 +270,30 @@ function assertSelection(
     throw new DomainError('not_found');
 }
 
-export function createOpenworldTelemetry(options: {
+export type OpenworldNativeOptions = {
   db: Kysely<Database>;
   target: (serverId: string) => Promise<{ address: string; password: string }>;
   fetcher?: typeof fetch;
   now?: () => number;
-}) {
+};
+
+export function openworldProcessRef(scope: OpenworldScope) {
+  return createHash('sha256').update(scope.liveKey).digest('hex');
+}
+
+export function createOpenworldNativeConnection(options: OpenworldNativeOptions) {
   const { db, target, fetcher = fetch, now = Date.now } = options;
   const tokens = sharedReads<Token>(128, now, 5000);
-  const reads = sharedReads<Sample>(256, now, 1500);
-  const skins = sharedReads<Uint8Array<ArrayBuffer>>(128, now, 1500);
-  const recent = new Map<string, Sample & { persistedAt: number }>();
-
   async function native<T>(
-    scope: Scope,
+    scope: OpenworldScope,
     work: (origin: string, token: string, signal: AbortSignal) => Promise<T>,
+    retryExpired = true,
   ) {
     const signal = AbortSignal.timeout(8000);
     const credential = () =>
       tokens.get(scope.liveKey, 60000, async () => {
         const verified = await target(scope.serverId);
-        assertCurrent(scope, await readScope(db, scope.serverId));
+        assertCurrentOpenworldScope(scope, await readOpenworldScope(db, scope.serverId));
         if (verified.address !== scope.origin) throw new DomainError('provenance_mismatch');
         return {
           origin: verified.address,
@@ -307,12 +312,23 @@ export function createOpenworldTelemetry(options: {
     } catch (error) {
       if (!(error instanceof OpenworldTokenExpired)) throw error;
       tokens.discard(scope.liveKey, current);
+      if (!retryExpired) throw error;
       const next = await credential();
       return work(next.origin, next.token, signal);
     }
   }
 
-  async function save(scope: Scope, resource: SnapshotResource, sample: Sample) {
+  return native;
+}
+
+export function createOpenworldTelemetry(options: OpenworldNativeOptions) {
+  const { db, fetcher = fetch, now = Date.now } = options;
+  const native = createOpenworldNativeConnection(options);
+  const reads = sharedReads<Sample>(256, now, 1500);
+  const skins = sharedReads<Uint8Array<ArrayBuffer>>(128, now, 1500);
+  const recent = new Map<string, Sample & { persistedAt: number }>();
+
+  async function save(scope: OpenworldScope, resource: SnapshotResource, sample: Sample) {
     const key = scope.binding + resource;
     const previous = recent.get(key);
     let persistedAt = previous?.persistedAt ?? 0;
@@ -330,7 +346,7 @@ export function createOpenworldTelemetry(options: {
           .where('id', '=', scope.serverId)
           .forUpdate()
           .executeTakeFirst();
-        assertCurrent(scope, await readScope(tx, scope.serverId));
+        assertCurrentOpenworldScope(scope, await readOpenworldScope(tx, scope.serverId));
         await tx
           .insertInto('openworld_telemetry_snapshots')
           .values({
@@ -354,7 +370,7 @@ export function createOpenworldTelemetry(options: {
       });
       persistedAt = sample.observedAt;
     } else {
-      assertCurrent(scope, await readScope(db, scope.serverId));
+      assertCurrentOpenworldScope(scope, await readOpenworldScope(db, scope.serverId));
     }
     if (recent.size >= 256 && !recent.has(key)) recent.delete(recent.keys().next().value as string);
     if ((recent.get(key)?.observedAt ?? -1) <= sample.observedAt)
@@ -362,7 +378,7 @@ export function createOpenworldTelemetry(options: {
   }
 
   async function fallback<K extends Resource>(
-    scope: Scope,
+    scope: OpenworldScope,
     resource: K,
     reason: OpenworldObservationReason,
   ): Promise<OpenworldObservation<K>> {
@@ -392,14 +408,14 @@ export function createOpenworldTelemetry(options: {
     return { source: 'unavailable', data: null, observedAt: null, reason };
   }
 
-  async function live(scope: Scope, resource: Resource, id?: number) {
+  async function live(scope: OpenworldScope, resource: Resource, id?: number) {
     return reads.get(sampleKey(scope, resource, id), freshness[resource], async () => {
       const data = await native(scope, (origin, token, signal) =>
         readOpenworldTelemetry(origin, token, resource, signal, id, fetcher),
       );
       const sample = { data, observedAt: now() };
       if (resource !== 'player') await save(scope, resource, sample);
-      else assertCurrent(scope, await readScope(db, scope.serverId));
+      else assertCurrentOpenworldScope(scope, await readOpenworldScope(db, scope.serverId));
       return sample;
     });
   }
@@ -412,7 +428,7 @@ export function createOpenworldTelemetry(options: {
       selected?: OpenworldPlayerSelection,
     ): Promise<OpenworldObservation<K>> {
       const reader = { who, resource };
-      const scope = await readScope(db, serverId, reader);
+      const scope = await readOpenworldScope(db, serverId, reader);
       if (scope.reason) return fallback(scope, resource, scope.reason);
       if (resource === 'player' && !selected) throw new DomainError('validation_failed');
       // A caller awaiting another viewer's in-flight read needs its own current grants.
@@ -429,7 +445,7 @@ export function createOpenworldTelemetry(options: {
           )
         )
           throw error;
-        const current = cached ? scope : await readScope(db, serverId, reader);
+        const current = cached ? scope : await readOpenworldScope(db, serverId, reader);
         if (scope.binding !== current.binding) throw new DomainError('provenance_mismatch');
         return fallback(
           current,
@@ -438,7 +454,7 @@ export function createOpenworldTelemetry(options: {
         );
       }
       if (!cached) {
-        const current = await readScope(db, serverId, reader);
+        const current = await readOpenworldScope(db, serverId, reader);
         if (scope.binding !== current.binding) throw new DomainError('provenance_mismatch');
         if (current.reason || current.liveKey !== scope.liveKey)
           return fallback(current, resource, current.reason ?? 'not_ready');
@@ -451,6 +467,7 @@ export function createOpenworldTelemetry(options: {
         );
       return {
         source: 'live',
+        ...(resource === 'players' ? { processRef: openworldProcessRef(scope) } : {}),
         data: sample.data as OpenworldTelemetryData[K],
         observedAt: new Date(sample.observedAt).toISOString(),
         reason: null,
@@ -464,7 +481,7 @@ export function createOpenworldTelemetry(options: {
       hash: string,
     ) {
       const reader = { who, resource: 'players' as const };
-      const scope = await readScope(db, serverId, reader);
+      const scope = await readOpenworldScope(db, serverId, reader);
       if (scope.reason) throw new DomainError('game_not_ready');
       const key = JSON.stringify([scope.liveKey, selected.id, selected.name, view, hash]);
       const cached = reads.completed(sampleKey(scope, 'players')) && skins.completed(key);
@@ -479,7 +496,8 @@ export function createOpenworldTelemetry(options: {
           readOpenworldPlayerSkin(origin, token, selected.id, view, hash, signal, fetcher),
         ),
       );
-      if (!cached) assertCurrent(scope, await readScope(db, serverId, reader));
+      if (!cached)
+        assertCurrentOpenworldScope(scope, await readOpenworldScope(db, serverId, reader));
       return image;
     },
   };

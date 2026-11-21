@@ -1,8 +1,7 @@
 import { DomainError } from '@nickhosting/core';
 import { OpenworldTokenExpired } from './dashboard-api.js';
-import { readNativeBytes } from './native-response.js';
+import { readNativePng } from './native-response.js';
 
-const signature = [137, 80, 78, 71, 13, 10, 26, 10];
 const maxSkinBytes = 512 * 1024;
 
 export async function readOpenworldPlayerSkin(
@@ -42,22 +41,7 @@ export async function readOpenworldPlayerSkin(
       if (response.status === 401) throw new OpenworldTokenExpired();
       throw new DomainError(response.status === 404 ? 'not_found' : 'integration_unavailable');
     }
-    const bytes = await readNativeBytes(response, maxSkinBytes);
-    if (bytes.byteLength < 45 || !signature.every((value, i) => bytes[i] === value))
-      throw new DomainError('integration_unavailable');
-    const header = new DataView(bytes.buffer);
-    const width = header.getUint32(16);
-    const height = header.getUint32(20);
-    if (
-      header.getUint32(8) !== 13 ||
-      header.getUint32(12) !== 0x49484452 ||
-      width < 1 ||
-      height < 1 ||
-      width > 1024 ||
-      height > 1024
-    )
-      throw new DomainError('integration_unavailable');
-    return bytes;
+    return await readNativePng(response, maxSkinBytes, 1024, 1024 * 1024);
   } catch (error) {
     if (error instanceof DomainError || error instanceof OpenworldTokenExpired) throw error;
     throw new DomainError('integration_unavailable');
