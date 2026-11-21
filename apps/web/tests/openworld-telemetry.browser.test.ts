@@ -172,7 +172,7 @@ async function serve(page: Page, offline = false) {
         data: sample[name as keyof typeof sample],
         source: offline ? 'snapshot' : 'live',
         ...(!offline && name === 'players' ? { processRef: 'a'.repeat(64) } : {}),
-        observedAt: instant,
+        observedAt: name === 'status' && !offline ? new Date().toISOString() : instant,
         reason: offline ? 'offline' : null,
       },
     });
@@ -273,6 +273,177 @@ it('displays independent performance resources and current bitrates on mobile It
     await context.close();
   }
 });
+async function expectWorldTime(page: Page, expected: string) {
+  const clock = page.locator('.ow-world-clock');
+  await expect
+    .poll(
+      async () => {
+        await page.clock.runFor(32);
+        return clock.locator('time:visible').allTextContents();
+      },
+      { timeout: 8000 },
+    )
+    .toEqual([expected]);
+}
+async function setTabHidden(page: Page, hidden: boolean) {
+  await page.evaluate((hidden) => {
+    if (hidden) {
+      Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    } else {
+      Reflect.deleteProperty(document, 'hidden');
+      Reflect.deleteProperty(document, 'visibilityState');
+    }
+    document.dispatchEvent(new Event('visibilitychange', { bubbles: true }));
+  }, hidden);
+}
+it.each(['no-preference', 'reduce'] as const)(
+  'advances the live world clock between samples with %s motion',
+  async (reducedMotion) => {
+    const context = await browser.newContext({ locale: 'en-GB', reducedMotion });
+    const page = await context.newPage();
+    const releaseSecondSample = Promise.withResolvers<void>();
+    try {
+      await serve(page);
+      const dayLengthS = 2400;
+      let start: number | undefined;
+      let reads = 0;
+      await page.route('**/telemetry/status', async (route) => {
+        const now = await page.evaluate(() => Date.now());
+        start ??= now;
+        reads++;
+        const sampleLag = reads > 1 ? 0.4 : 0;
+        const elapsed = (now - start) / 1000;
+        const dayFraction = 0.5 + (elapsed - sampleLag) / dayLengthS;
+        if (reads === 2) await releaseSecondSample.promise;
+        await route.fulfill({
+          json: {
+            data: {
+              ...sample.status,
+              tick: sample.status.tick + Math.floor(elapsed * 20),
+              worldTime: { dayFraction, dayLengthS },
+            },
+            source: 'live',
+            reason: null,
+            observedAt: new Date(now).toISOString(),
+          },
+        });
+      });
+      await page.clock.install({ time: new Date(instant) });
+      await page.clock.pauseAt(new Date(Date.parse(instant) + 1000));
+      await page.goto(`${url}telemetry-fixture?section=overview`);
+      const clock = page.locator('.ow-world-clock');
+      await expectWorldTime(page, '12:00');
+      const marker = clock.locator('circle');
+      const position = async () => Number.parseFloat((await marker.getAttribute('cx')) ?? '');
+      const initial = await position();
+      // Count painted marker positions, independently of the renderer's scheduling mechanism.
+      const changes = await marker.evaluateHandle((dot) => {
+        const counter = { ticks: 0 };
+        new MutationObserver((mutations) => {
+          counter.ticks += mutations.length;
+        }).observe(dot, { attributes: true, attributeFilter: ['cx'] });
+        return counter;
+      });
+      await page.clock.runFor(2000);
+      expect(await position()).toBeGreaterThan(initial);
+      await check(clock.locator('time')).toHaveText('12:01');
+      expect(reads).toBe(1);
+      const ticks = await changes.evaluate((value) => value.ticks);
+      if (reducedMotion === 'reduce') expect(ticks).toBeLessThanOrEqual(3);
+      else expect(ticks).toBeGreaterThan(3);
+
+      const secondResponse = page.waitForResponse('**/telemetry/status');
+      await page.clock.runFor(3100);
+      await expect.poll(() => reads).toBe(2);
+      const beforeCorrection = await position();
+      releaseSecondSample.resolve();
+      await secondResponse;
+      await page.clock.runFor(32);
+      expect(await position()).toBeGreaterThanOrEqual(beforeCorrection);
+      await page.clock.runFor(2000);
+      expect(await position()).toBeGreaterThan(beforeCorrection);
+      expect(reads).toBe(2);
+
+      await setTabHidden(page, true);
+      const hiddenPosition = await position();
+      await page.clock.runFor(1500);
+      expect(await position()).toBe(hiddenPosition);
+      await setTabHidden(page, false);
+      await page.clock.runFor(32);
+      expect(await position()).toBeGreaterThan(hiddenPosition);
+    } finally {
+      releaseSecondSample.resolve();
+      await context.close();
+    }
+  },
+);
+it('waits for fresh world time after a long-hidden tab and resumes at the reported phase', async () => {
+  const context = await browser.newContext({ locale: 'en-GB' });
+  const page = await context.newPage();
+  const delayedSample = Promise.withResolvers<void>();
+  const freshSample = Promise.withResolvers<void>();
+  let reads = 0;
+  let firstObserved = 0;
+  try {
+    await serve(page);
+    await page.route('**/telemetry/status', async (route) => {
+      const read = ++reads;
+      if (read === 2) await delayedSample.promise;
+      if (read >= 3) await freshSample.promise;
+      const now = await page.evaluate(() => Date.now());
+      if (read === 1) firstObserved = now;
+      const observedAt = new Date(read === 2 ? firstObserved + 1000 : now).toISOString();
+      await route.fulfill({
+        json: {
+          data: {
+            ...sample.status,
+            tick: 10 + Math.round((Date.parse(observedAt) - firstObserved) / 50),
+            worldTime: { dayFraction: read < 3 ? 0.375 : 0.90625, dayLengthS: 1500 },
+          },
+          source: 'live',
+          reason: null,
+          observedAt,
+        },
+      });
+    });
+    await page.clock.install({ time: new Date(instant) });
+    await page.clock.pauseAt(new Date(Date.parse(instant) + 1000));
+    await page.goto(`${url}telemetry-fixture?section=overview`);
+    await expectWorldTime(page, '09:00');
+    await setTabHidden(page, true);
+    await page.clock.fastForward(900_000);
+    await setTabHidden(page, false);
+    await page.clock.runFor(32);
+    const clock = page.locator('.ow-world-clock');
+    await check(clock.locator('time')).toBeHidden();
+    await check(clock.locator('circle')).toBeHidden();
+    await check(clock.locator('polyline').first()).toBeVisible();
+    await expect.poll(() => reads).toBe(2);
+    delayedSample.resolve();
+    await expect
+      .poll(async () => {
+        await page.clock.runFor(32);
+        return page.locator('.ow-stamp time').getAttribute('datetime');
+      })
+      .toBe(new Date(firstObserved + 1000).toISOString());
+    await check(clock.locator('time')).toBeHidden();
+    await check(clock.locator('circle')).toBeHidden();
+    await page.clock.runFor(5100);
+    await expect.poll(() => reads).toBe(3);
+    freshSample.resolve();
+    await expectWorldTime(page, '21:45');
+    await check(clock.locator('circle')).toBeVisible();
+    expect(Number.parseFloat((await clock.locator('circle').getAttribute('cx')) ?? '')).toBeCloseTo(
+      90.625,
+      1,
+    );
+  } finally {
+    delayedSample.resolve();
+    freshSample.resolve();
+    await context.close();
+  }
+});
 it('keeps the last observed world time while offline and leaves a missing clock unknown', async () => {
   const context = await browser.newContext({
     locale: 'en-GB',
@@ -281,7 +452,10 @@ it('keeps the last observed world time while offline and leaves a missing clock 
   const page = await context.newPage();
   try {
     await serve(page, true);
-    let worldTime: { dayFraction: number } | undefined = { dayFraction: 0 };
+    let worldTime: { dayFraction: number; dayLengthS: number } | undefined = {
+      dayFraction: 0,
+      dayLengthS: 1200,
+    };
     let statusReads = 0;
     await page.route('**/telemetry/status', (route) => {
       statusReads++;
@@ -304,6 +478,7 @@ it('keeps the last observed world time while offline and leaves a missing clock 
     ).toBeGreaterThan(50);
     await page.clock.fastForward(60000);
     await check(clock.locator('time')).toHaveText('00:00');
+    expect(Number.parseFloat((await clock.locator('circle').getAttribute('cx')) ?? '')).toBe(0);
     expect(statusReads).toBe(1);
     await fits(page);
     await page

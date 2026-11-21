@@ -89,7 +89,12 @@ private side of the proxy.
 
 Inside NickPanel, **Overview** shows player counts, TPS, memory, current inbound and
 outbound traffic, and world generation. Its 24-hour clock plots the observed world time
-on a day/night curve. **Performance** adds tick timings, the game's
+on a day/night curve. Between status reads the browser advances the clock from the
+reported day length and the rate of completed simulation ticks. New readings adjust
+its speed gradually. A snapshot shows the recorded time. Openworld a1.2.9 reported a
+default day of 1,500 seconds. In an isolated run one real second advanced the game
+by about 57.4 seconds at 19.96 ticks/s and 9.2 seconds at 3.20 ticks/s.
+**Performance** adds tick timings, the game's
 recent metric history, chunks and storage. Both use the Openworld performance read
 permission. **Players** lists the current roster. Opening a player's detailed statistics,
 position and inventory also requires the separate inspection permission. These tabs use
