@@ -7,13 +7,15 @@ import type { Variables } from './app.js';
 import { profilePhotoUrl } from './profile-photo.js';
 
 type C = Context<{ Variables: Variables }>;
-const cookieName = 'nh.support';
+function supportCookie(c: C) {
+  return c.get('identity').hostCookies ? '__Host-nh-support' : 'nh.support';
+}
 
 /** An HttpOnly browser transport for the existing parent-session-bound token.
  * Header clients retain their contract; disagreement never changes authority. */
 export function supportToken(c: C): string | undefined {
   const header = c.req.header('x-nh-support-token');
-  const cookie = getCookie(c, cookieName);
+  const cookie = getCookie(c, supportCookie(c));
   if (header && cookie && header !== cookie) throw new DomainError('support_invalid');
   return header ?? cookie;
 }
@@ -35,7 +37,7 @@ export function registerWebSessionRoutes(
     return c.json({
       instanceName: values.instanceName,
       defaultLocale: values.defaultLocale,
-      supportSessionPresent: Boolean(getCookie(c, cookieName)),
+      supportSessionPresent: Boolean(getCookie(c, supportCookie(c))),
       auth: {
         email: Boolean(values.smtpHost && values.smtpFrom),
         discord: Boolean(values.discordClientId && discordSecret),
@@ -119,9 +121,8 @@ export function registerWebSessionRoutes(
   app.post('/v1/web/support', async (c) => {
     await principal(c, true);
     const result = await c.get('identity').startSupport(c.get('authHeaders'), await body(c));
-    const { values } = await getSettings(db, env);
-    const secure = values.publicUrl?.startsWith('https:') === true;
-    setCookie(c, cookieName, result.token, {
+    const secure = c.get('identity').hostCookies;
+    setCookie(c, supportCookie(c), result.token, {
       path: '/',
       httpOnly: true,
       sameSite: 'Strict',
@@ -151,7 +152,7 @@ export function registerWebSessionRoutes(
           throw error;
       }
     }
-    deleteCookie(c, cookieName, { path: '/' });
+    deleteCookie(c, supportCookie(c), { path: '/', secure: c.get('identity').hostCookies });
     return c.body(null, 204);
   });
 }

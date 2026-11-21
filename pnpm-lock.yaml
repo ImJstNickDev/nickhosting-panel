@@ -408,6 +408,18 @@ importers:
         specifier: 3.3.1
         version: 3.3.1
 
+  games/openworld:
+    dependencies:
+      '@nickhosting/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@nickhosting/game-sdk':
+        specifier: workspace:*
+        version: link:../../packages/game-sdk
+      zod:
+        specifier: 4.6.5
+        version: 4.6.5
+
   games/satisfactory:
     dependencies:
       '@nickhosting/core':

@@ -5,6 +5,14 @@ import { dirname, matchesGlob, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { containerEnvironment } from '../deploy/container-env.mjs';
 import { assertConfigWritable, resolveConfig } from '../packages/core/src/config.js';
+import { type AuthContext, SecretCodec } from '../packages/core/src/index.js';
+import {
+  clearProviderSecret,
+  gameMetivaSecret,
+  getGameMetivaToken,
+  getSecret,
+  storeSecret,
+} from '../packages/database/src/settings.js';
 
 type Environment = 'development' | 'production';
 const repository = resolve('.');
@@ -34,6 +42,38 @@ function deployment(environment: Environment): Record<string, string> {
 }
 
 describe('scoped container environment', () => {
+  it.each(['development', 'production'] as const)(
+    'resolves and locks both Metiva scopes in the %s application environment',
+    async (environment) => {
+      const prefix = environment === 'development' ? 'NH_DEV_' : 'NH_PROD_';
+      const env = containerEnvironment({
+        ...deployment(environment),
+        [`${prefix}METIVA_ACCESS_TOKEN`]: 'mtv_platform_fixture',
+        [`${prefix}METIVA_ACCESS_TOKEN_OPENWORLD`]: 'mtv_game_fixture',
+      });
+      const codec = new SecretCodec({
+        activeKeyId: 'fixture',
+        keys: { fixture: Buffer.alloc(32, 19) },
+      });
+      const owner: AuthContext = {
+        role: 'owner',
+        actorUserId: 'owner',
+        subjectUserId: 'owner',
+        sessionType: 'regular',
+        ownerElevation: false,
+      };
+      // A configured environment value is read or locked before any database work.
+      const db = {} as never;
+      expect(await getSecret(db, codec, 'metivaAccessToken', env)).toBe('mtv_platform_fixture');
+      expect(await getGameMetivaToken(db, codec, 'openworld', env)).toBe('mtv_game_fixture');
+      await expect(
+        storeSecret(db, owner, codec, 'metivaAccessToken', 'mtv_other', env),
+      ).rejects.toMatchObject({ code: 'conflict' });
+      await expect(
+        clearProviderSecret(db, owner, gameMetivaSecret('openworld'), env),
+      ).rejects.toMatchObject({ code: 'conflict' });
+    },
+  );
   it.each(['development', 'production'] as const)(
     'keeps the %s host storage root out of application configuration',
     (environment) => {
@@ -1165,7 +1205,7 @@ describe('deployment Compose isolation (read-only configuration parsing)', () =>
         if (!volume.target.startsWith('/app/') || volume.target.startsWith('/app/mountdata'))
           continue;
         expect(volume.target).toMatch(
-          /^\/app\/(?:apps\/web\/(?:index\.html|vite(?:-network|\.config)\.ts)|scripts\/compile-web-i18n\.ts|tsconfig\.json|(?:apps|packages|games)\/[^/]+\/src)$/,
+          /^\/app\/(?:apps\/web\/(?:index\.html|vite(?:-network|\.config)\.ts)|scripts\/compile-web-i18n\.ts|tsconfig\.json|games\/openworld|(?:apps|packages|games)\/[^/]+\/src)$/,
         );
         expect(volume.target).not.toContain('node_modules');
         expect(volume.read_only ?? false).toBe(volume.target !== '/app/apps/web/src');

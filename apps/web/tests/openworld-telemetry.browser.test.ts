@@ -1,0 +1,1447 @@
+import { mkdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { type Browser, expect as check, chromium, type Page } from '@playwright/test';
+import { createServer, type ViteDevServer } from 'vite';
+import { afterAll, beforeAll, expect, it } from 'vitest';
+
+let vite: ViteDevServer, browser: Browser, url: string;
+const shots = '.codex/local/openworld-browser';
+beforeAll(async () => {
+  vite = await createServer({
+    root: `${process.cwd()}/apps/web`,
+    configFile: false,
+    cacheDir: `${process.cwd()}/.codex/local/openworld-telemetry-vite`,
+    server: { host: '127.0.0.1', port: 0, hmr: false, watch: null },
+    plugins: [
+      {
+        name: 'openworld-telemetry-fixture',
+        configureServer(server) {
+          server.middlewares.use((req, res, next) => {
+            if (!req.url?.startsWith('/telemetry-fixture')) return next();
+            res.setHeader('content-type', 'text/html');
+            res.end(
+              '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Openworld</title></head><body><div id="root"></div><script type="module" src="/tests/fixtures/openworld-telemetry-page.tsx"></script></body></html>',
+            );
+          });
+        },
+      },
+    ],
+  });
+  await vite.listen();
+  url = vite.resolvedUrls?.local[0] ?? '';
+  browser = await chromium.launch({
+    env: {
+      ...process.env,
+      LD_LIBRARY_PATH: `${homedir()}/.cache/nickhosting-playwright-libs/root/usr/lib/x86_64-linux-gnu`,
+    },
+  });
+  await mkdir(shots, { recursive: true });
+});
+afterAll(async () => {
+  await browser?.close();
+  await vite?.close();
+});
+const instant = '2026-01-20T10:34:49.000Z';
+const person = {
+  id: 23,
+  name: 'Solstice',
+  state: 'playing',
+  admitted: true,
+  mode: 'survival',
+  world: 'Earth',
+  connectedS: 345,
+  pingMs: 28,
+};
+const sample = {
+  status: {
+    tps: 19.9,
+    players: { online: 2, slots: 12 },
+    tickMs: { mean: 12, p99: 25, max: 36 },
+    tickBudgetMs: 50,
+    worldTime: { dayFraction: 0.65625, dayLengthS: 1200 },
+    phasesMs: { net: 0.4, chunks: 6.5, sim: 3.1 },
+    memory: { rssMB: 140 },
+    uptimeS: 7250,
+    net: { sentKbps: 2680, recvKbps: 10000, lossPct: 0 },
+    pingMs: { mean: 33 },
+    chunks: {
+      live: 24,
+      genBacklog: 3,
+      generatedTotal: 1234,
+      savedColumns: 10,
+      generatedPerS: 2.4,
+      genMeanMs: 6.6,
+      servedPerS: 19.2,
+      memHits: 780,
+      diskHits: 25,
+    },
+    tick: 48921,
+  },
+  players: {
+    players: [person, { ...person, id: 42, name: 'Northwind', mode: 'creative', pingMs: 39 }],
+  },
+  player: {
+    ...person,
+    geo: { lat: 31, lon: 12, alt: 100 },
+    pos: { face: 2, x: 128, y: 3, z: 256 },
+    vitals: { health: 80, maxHealth: 100 },
+    client: { fps: 60 },
+    inventoryKnown: false,
+    record: { joins: 9, blocksPlaced: 25 },
+  },
+  history: {
+    t: [0, 1000, 2000, 3000].map((v) => Date.parse(instant) + v),
+    tickMean: [10, 11, 9, 12],
+    tickP99: [18, 25, 20, 25],
+    recvKbps: [1150, 1520, 2030, 10000],
+    sentKbps: [320, 1800, 2130, 2680],
+  },
+  chunks: {
+    worlds: [
+      { key: 'earth', name: 'Earth', live: 24, dirty: 7, generatedColumns: 1200, savedColumns: 10 },
+      { key: 'moon', name: 'Moon', live: 8, dirty: 0, generatedColumns: 32, savedColumns: 8 },
+    ],
+    hot: [{ world: 'earth', face: 2, i: 1, j: -3, editsPerS: 0.3, simWritesPerS: 1.1, score: 81 }],
+  },
+  storage: {
+    totalBytes: 729168,
+    totalFiles: 23,
+    worlds: [
+      {
+        key: 'earth',
+        name: 'Earth',
+        generatedBytes: 8192,
+        savedBytes: 4096,
+        pendingFlush: 4,
+        dirtyLive: 2,
+      },
+    ],
+    parts: [{ key: 'logs', label: 'Journaux', bytes: 8820, files: 2 }],
+  },
+};
+function viewer(id: string, assisted = false) {
+  const account = {
+    id,
+    name: id,
+    email: `${id}@example.test`,
+    emailVerified: true,
+    locale: 'en',
+    role: 'user',
+    twoFactorEnabled: false,
+  };
+  return {
+    context: {
+      actorUserId: assisted ? 'support' : id,
+      subjectUserId: id,
+      role: 'user',
+      sessionType: assisted ? 'support' : 'regular',
+      ownerElevation: false,
+      ...(assisted
+        ? {
+            support: {
+              id: 'support-session',
+              expiresAt: instant,
+              startedAt: instant,
+              lastActivityAt: instant,
+              reason: 'Test',
+            },
+          }
+        : {}),
+    },
+    actor: assisted ? { ...account, id: 'support' } : account,
+    subject: account,
+  };
+}
+async function serve(page: Page, offline = false) {
+  await page.route('**/v1/web/session', (route) => route.fulfill({ json: viewer('reader') }));
+  const paths: string[] = [];
+  await page.route('**/v1/servers/**/openworld/telemetry/**', async (route) => {
+    const u = new URL(route.request().url()),
+      path = u.pathname.split('/telemetry/')[1];
+    if (!path) return route.abort();
+    paths.push(path);
+    const name = path === 'players/23' ? 'player' : path;
+    if (
+      name === 'player' &&
+      (u.searchParams.get('name') !== person.name ||
+        u.searchParams.get('joinedAt') !== String(Date.parse(instant) - person.connectedS * 1000))
+    )
+      return route.fulfill({ status: 404 });
+    return route.fulfill({
+      json: {
+        data: sample[name as keyof typeof sample],
+        source: offline ? 'snapshot' : 'live',
+        ...(!offline && name === 'players' ? { processRef: 'a'.repeat(64) } : {}),
+        observedAt: instant,
+        reason: offline ? 'offline' : null,
+      },
+    });
+  });
+  return paths;
+}
+async function fits(page: Page) {
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+}
+it('opens live roster and pinned read-only details in English; a roster-only reader cannot open details', async () => {
+  const context = await browser.newContext({
+      locale: 'en-GB',
+      viewport: { width: 1280, height: 800 },
+    }),
+    page = await context.newPage();
+  try {
+    const paths = await serve(page);
+    await page.goto(`${url}telemetry-fixture?section=players`);
+    await check(page.getByRole('heading', { name: 'Players', exact: true })).toBeVisible();
+    await page.getByRole('searchbox').fill('sol');
+    await check(page.getByText('Northwind')).toHaveCount(0);
+    await page.getByRole('button', { name: /Solstice/ }).click();
+    await check(page.getByRole('dialog')).toContainText('80 / 100');
+    await page.getByRole('button', { name: 'Inventory', exact: true }).click();
+    await check(page.getByRole('dialog')).toContainText(
+      'The client has not reported an inventory yet.',
+    );
+    await page.getByRole('button', { name: 'Network', exact: true }).click();
+    await check(page.getByRole('dialog')).toContainText('60');
+    await page.getByRole('button', { name: 'Activity', exact: true }).click();
+    await check(page.getByRole('dialog')).toContainText('Blocks placed');
+    await page.keyboard.press('Escape');
+    await check(page.getByRole('dialog')).toHaveCount(0);
+    await page.getByRole('searchbox').fill('');
+    await page.screenshot({ path: `${shots}/telemetry-players-en.png` });
+    await fits(page);
+    await page.goto(`${url}telemetry-fixture?section=players&reader`);
+    await check(page.getByText('Solstice', { exact: true })).toBeVisible();
+    await check(page.getByRole('button', { name: /Solstice/ })).toHaveCount(0);
+    expect(paths.filter((p) => p === 'players/23')).toHaveLength(1);
+  } finally {
+    await context.close();
+  }
+});
+it('displays independent performance resources and current bitrates on mobile Italian', async () => {
+  const context = await browser.newContext({
+      locale: 'it-IT',
+      viewport: { width: 390, height: 844 },
+    }),
+    page = await context.newPage();
+  try {
+    await serve(page);
+    let unblock!: () => void;
+    const gate = new Promise<void>((ok) => {
+      unblock = ok;
+    });
+    await page.route('**/telemetry/history', async (route) => {
+      await gate;
+      await route.fallback();
+    });
+    await page.goto(`${url}telemetry-fixture?section=performance`);
+    await check(page.getByText('19,9', { exact: true })).toBeVisible();
+    const world = page.getByRole('combobox', { name: 'Mondo', exact: true });
+    await world.selectOption('moon');
+    await check(page.getByText('32', { exact: true })).toBeVisible();
+    await world.selectOption('earth');
+    unblock();
+    await page.getByRole('combobox', { name: 'Metrica' }).selectOption('network');
+    await check(page.getByRole('img', { name: /Rete/ })).toBeVisible();
+    await check(page.locator('.ow-legend')).toContainText('10.000 kb/s');
+    await page.getByText('Tempo per fase del tick', { exact: true }).click();
+    await check(page.getByText('6,5 ms', { exact: true })).toBeVisible();
+    await check(page.getByText('36 ms', { exact: true })).toBeVisible();
+    await page.getByText('Generazione del terreno e cache', { exact: true }).click();
+    await check(page.getByText('Coda di generazione', { exact: true })).toBeVisible();
+    await page.getByText('Archiviazione del mondo', { exact: true }).click();
+    await check(page.getByText('4 KiB', { exact: true })).toBeVisible();
+    await page.getByText('Spazio per categoria', { exact: true }).click();
+    await check(page.getByText('Log', { exact: true })).toBeVisible();
+    await check(page.getByText('Journaux', { exact: true })).toHaveCount(0);
+    await page.getByText('Chunk più attivi', { exact: true }).click();
+    await check(page.getByText('1, -3', { exact: true })).toBeVisible();
+    await fits(page);
+    await page.screenshot({ path: `${shots}/telemetry-performance-it.png`, fullPage: true });
+    await page.goto(`${url}telemetry-fixture?section=overview`);
+    await check(page.getByText('2 / 12', { exact: true })).toBeVisible();
+    await check(page.getByText('10 Mb/s', { exact: true })).toBeVisible();
+    const clock = page.locator('.ow-world-clock');
+    await check(clock).toContainText('Ora del mondo');
+    await check(clock.locator('time')).toHaveText('15:45');
+    await check(clock.locator('.ow-cycle')).toHaveAttribute('aria-hidden', 'true');
+    expect(
+      Number.parseFloat((await clock.locator('circle').getAttribute('cy')) ?? ''),
+    ).toBeLessThan(50);
+    await fits(page);
+    await page.locator('.ow-workspace').screenshot({ path: `${shots}/world-clock-mobile-it.png` });
+  } finally {
+    await context.close();
+  }
+});
+it('keeps the last observed world time while offline and leaves a missing clock unknown', async () => {
+  const context = await browser.newContext({
+    locale: 'en-GB',
+    viewport: { width: 1280, height: 800 },
+  });
+  const page = await context.newPage();
+  try {
+    await serve(page, true);
+    let worldTime: { dayFraction: number } | undefined = { dayFraction: 0 };
+    let statusReads = 0;
+    await page.route('**/telemetry/status', (route) => {
+      statusReads++;
+      return route.fulfill({
+        json: {
+          data: { ...sample.status, worldTime },
+          source: 'snapshot',
+          observedAt: instant,
+          reason: 'offline',
+        },
+      });
+    });
+    await page.clock.install();
+    await page.goto(`${url}telemetry-fixture?section=overview&offline`);
+    const clock = page.locator('.ow-world-clock');
+    await check(page.locator('.ow-stamp time')).toHaveAttribute('datetime', instant);
+    await check(clock.locator('time')).toHaveText('00:00');
+    expect(
+      Number.parseFloat((await clock.locator('circle').getAttribute('cy')) ?? ''),
+    ).toBeGreaterThan(50);
+    await page.clock.fastForward(60000);
+    await check(clock.locator('time')).toHaveText('00:00');
+    expect(statusReads).toBe(1);
+    await fits(page);
+    await page
+      .locator('.ow-workspace')
+      .screenshot({ path: `${shots}/world-clock-midnight-en.png` });
+
+    worldTime = undefined;
+    await page.reload();
+    await check(page.getByText('2 / 12', { exact: true })).toBeVisible();
+    await check(clock.getByText('Unavailable', { exact: true })).toBeVisible();
+    await check(clock.locator('time')).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+it('labels observations from a stopped server and suppresses live detail actions', async () => {
+  const context = await browser.newContext({
+      locale: 'it-IT',
+      viewport: { width: 390, height: 844 },
+    }),
+    page = await context.newPage();
+  try {
+    const paths = await serve(page, true);
+    await page.goto(`${url}telemetry-fixture?section=players&offline`);
+    await check(page.getByText('Ultima osservazione')).toBeVisible();
+    await check(page.getByText('Il server è spento.')).toBeVisible();
+    await check(page.locator('time')).toHaveAttribute('datetime', instant);
+    await check(page.getByText('Solstice', { exact: true })).toBeVisible();
+    await check(page.getByRole('button', { name: /Solstice/ })).toHaveCount(0);
+    expect(paths).toEqual(['players']);
+    await fits(page);
+  } finally {
+    await context.close();
+  }
+});
+
+it('renders populated slots and requests skin only from the pinned NickPanel route on mobile', async () => {
+  const context = await browser.newContext({
+    locale: 'it-IT',
+    viewport: { width: 390, height: 844 },
+  });
+  const page = await context.newPage();
+  try {
+    await serve(page);
+    await page.route('**/telemetry/players', (route) =>
+      route.fulfill({
+        json: {
+          source: 'live',
+          observedAt: instant,
+          reason: null,
+          data: { players: [{ ...person, skinHash: 'aa12bc34' }] },
+        },
+      }),
+    );
+    await page.route('**/telemetry/players/23?*', (route) =>
+      route.fulfill({
+        json: {
+          source: 'live',
+          observedAt: instant,
+          reason: null,
+          data: {
+            ...sample.player,
+            inventoryKnown: true,
+            inventory: {
+              selected: 0,
+              hotbar: [{ name: 'Iron pickaxe', count: 2, wearPct: 8 }, null],
+              bag: [null, { name: 'Stone', count: 48 }],
+              reportedAgoS: 20,
+            },
+          },
+        },
+      }),
+    );
+    let skin: URL | undefined;
+    await page.route('**/telemetry/players/23/skin?*', (route) => {
+      skin = new URL(route.request().url());
+      return route.fulfill({ status: 404 });
+    });
+    await page.goto(`${url}telemetry-fixture?section=players`);
+    await page.getByRole('button', { name: /Solstice/ }).click();
+    await page.getByRole('button', { name: 'Inventario', exact: true }).click();
+    await check(page.getByRole('dialog')).toContainText('Iron pickaxe');
+    await check(page.getByRole('dialog')).toContainText('×48');
+    await check(page.getByRole('listitem', { name: /Selezionato/ })).toContainText('×2');
+    await check(page.getByRole('dialog')).toContainText('Usura 8 %');
+    await expect.poll(() => skin?.searchParams.get('h')).toBe('aa12bc34');
+    expect(skin?.origin).toBe(new URL(url).origin);
+    expect(skin?.searchParams.get('name')).toBe(person.name);
+    expect(skin?.searchParams.get('joinedAt')).toBe(
+      String(Date.parse(instant) - person.connectedS * 1000),
+    );
+    await page.screenshot({ path: `${shots}/telemetry-inventory-it.png` });
+    await fits(page);
+  } finally {
+    await context.close();
+  }
+});
+
+it('drops roster and open detail when the same server switches to an assisted identity', async () => {
+  const context = await browser.newContext({ locale: 'en-GB' });
+  const page = await context.newPage();
+  const hold = Promise.withResolvers<void>();
+  try {
+    await serve(page);
+    await page.clock.install();
+    await page.goto(`${url}telemetry-fixture?section=players`);
+    await page.getByRole('button', { name: /Solstice/ }).click();
+    await check(page.getByRole('dialog')).toContainText('80 / 100');
+    await page.route('**/v1/web/session', (route) =>
+      route.fulfill({ json: viewer('reader', true) }),
+    );
+    await page.route('**/telemetry/players', async (route) => {
+      await hold.promise;
+      await route
+        .fulfill({
+          json: {
+            source: 'live',
+            reason: null,
+            observedAt: instant,
+            data: { players: [{ id: 82, name: 'New identity roster' }] },
+          },
+        })
+        .catch(() => {});
+    });
+    await page.clock.fastForward(30001);
+    await check(page.getByRole('dialog')).toHaveCount(0);
+    await check(page.getByText('Solstice', { exact: true })).toHaveCount(0);
+    await check(page.getByText('Northwind', { exact: true })).toHaveCount(0);
+    hold.resolve();
+    await check(page.getByText('New identity roster', { exact: true })).toBeVisible();
+  } finally {
+    hold.resolve();
+    await context.close();
+  }
+});
+
+it('lets a moderator act on a pinned live session without reading player details', async () => {
+  const context = await browser.newContext({
+    locale: 'en-GB',
+    viewport: { width: 1280, height: 800 },
+  });
+  const page = await context.newPage();
+  const sent: {
+    player: typeof person;
+    requestId: string;
+    processRef: string;
+    action: { kind: string; text?: string; reason?: string };
+  }[] = [];
+  try {
+    const paths = await serve(page);
+    await page.route('**/openworld/players/actions', (r) => {
+      const body = r.request().postDataJSON();
+      sent.push(body);
+      return r.fulfill({ status: 202, json: { requestId: body.requestId, outcome: 'accepted' } });
+    });
+    await page.goto(`${url}telemetry-fixture?section=players&reader&moderator`);
+    await check(page.getByRole('button', { name: 'Saved players' })).toHaveCount(0);
+    await page.getByRole('button', { name: /Solstice/ }).click();
+    const dialog = page.getByRole('dialog');
+    await check(dialog.getByRole('button', { name: 'Inventory' })).toHaveCount(0);
+    await check(dialog.getByRole('option', { name: 'Request screenshot' })).toHaveCount(0);
+    await dialog.getByLabel('Private message').fill('Welcome back');
+    await dialog.getByRole('button', { name: 'Send message' }).click();
+    await check(page.getByRole('status')).toContainText('Request accepted for Solstice');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      processRef: 'a'.repeat(64),
+      player: { id: 23, name: 'Solstice', joinedAt: Date.parse(instant) - 345000 },
+      action: { kind: 'message', text: 'Welcome back' },
+    });
+
+    await page.getByRole('button', { name: /Solstice/ }).click();
+    await dialog.getByLabel('Action', { exact: true }).selectOption('kick');
+    await dialog.getByLabel('Reason (optional)').fill('Please reconnect after the server update.');
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    await check(dialog).toContainText('Disconnect Solstice from the server?');
+    expect(sent).toHaveLength(1);
+    await page.screenshot({ path: `${shots}/block2-kick-desktop.png` });
+    await dialog.getByRole('button', { name: 'Back' }).click();
+    expect(sent).toHaveLength(1);
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    await dialog.getByRole('button', { name: 'Kick player' }).click();
+    await check(dialog).toHaveCount(0);
+    expect(sent[1]?.action).toEqual({
+      kind: 'kick',
+      reason: 'Please reconnect after the server update.',
+    });
+    expect(sent[1]?.requestId).not.toBe(sent[0]?.requestId);
+    expect(paths.some((path) => path.startsWith('players/'))).toBe(false);
+  } finally {
+    await context.close();
+  }
+});
+
+it('validates teleport coordinates and prevents repeating an uncertain write', async () => {
+  const context = await browser.newContext({
+      locale: 'it-IT',
+      viewport: { width: 390, height: 844 },
+    }),
+    page = await context.newPage();
+  try {
+    await serve(page);
+    const sent: unknown[] = [];
+    await page.route('**/openworld/players/destinations', (r) =>
+      r.fulfill({
+        json: {
+          worlds: [{ key: 'earth', name: 'Terra' }],
+          checkpoints: [{ id: 7, world: 'earth', name: 'Baita' }],
+        },
+      }),
+    );
+    await page.route('**/openworld/players/actions', (r) => {
+      sent.push(r.request().postDataJSON());
+      const code = sent.length === 1 ? 'game_not_ready' : 'operation_uncertain';
+      return r.fulfill({
+        status: 409,
+        json: { error: { code, messageKey: `errors.${code}` } },
+      });
+    });
+    await page.goto(`${url}telemetry-fixture?section=players&reader&moderator`);
+    await page.getByRole('button', { name: /Solstice/ }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Azione', { exact: true }).selectOption('teleport');
+    await dialog.getByLabel('Destinazione', { exact: true }).selectOption('coordinates');
+    await dialog.getByLabel('Mondo', { exact: true }).selectOption('earth');
+    await dialog.getByLabel('Latitudine (°)').fill('91');
+    await dialog.getByLabel('Longitudine (°)').fill('11');
+    await dialog.getByRole('button', { name: 'Continua' }).click();
+    expect(
+      await dialog
+        .locator('input[name="lat"]')
+        .evaluate((el) => (el as HTMLInputElement).validity.rangeOverflow),
+    ).toBe(true);
+    await dialog.getByLabel('Latitudine (°)').fill('41');
+    await dialog.getByRole('button', { name: 'Continua' }).click();
+    await check(dialog).toContainText('Livello del terreno');
+    await fits(page);
+    await dialog.getByRole('button', { name: 'Teletrasporta' }).click();
+    await check(dialog.getByRole('alert')).toBeVisible();
+    await check(dialog.getByRole('button', { name: 'Teletrasporta' })).toBeEnabled();
+    await dialog.getByRole('button', { name: 'Teletrasporta' }).click();
+    await check(dialog.getByRole('button', { name: 'Teletrasporta' })).toBeDisabled();
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toMatchObject({
+      action: {
+        kind: 'teleport',
+        destination: { type: 'coordinates', world: 'earth', lat: 41, lon: 11, alt: null },
+      },
+    });
+  } finally {
+    await context.close();
+  }
+});
+
+const archiveId = '1a6d0a8f-3995-4336-960f-dd7e430b212f';
+it('opens persisted player saves while offline and keeps same-name accounts separate', async () => {
+  const context = await browser.newContext({
+      locale: 'it-IT',
+      viewport: { width: 390, height: 844 },
+    }),
+    page = await context.newPage();
+  try {
+    const paths = await serve(page, true);
+    const row = { uuid: archiveId, name: 'Solstice', savedAt: instant };
+    const savedCalls: string[] = [];
+    await page.route('**/openworld/players/saved?*', (r) =>
+      r.fulfill({
+        json: {
+          indexedAt: instant,
+          indexing: false,
+          stale: true,
+          page: 1,
+          total: 2,
+          players: [row, { ...row, uuid: '9a9712ef-4b49-4d65-8ea7-3627e827d873' }],
+        },
+      }),
+    );
+    await page.route('**/openworld/players/saved/*', (r) => {
+      savedCalls.push(r.request().url());
+      return r.fulfill({
+        json: {
+          ...row,
+          statsAt: instant,
+          mode: 'survival',
+          world: 'Terra',
+          position: { x: 2, y: 80, z: 5 },
+          stats: { joins: 9, lastSeenMs: Date.parse(instant) },
+          inventory: { selected: 0, hotbar: [{ code: 71, count: 24 }], bag: [] },
+        },
+      });
+    });
+    await page.goto(`${url}telemetry-fixture?section=players&offline`);
+    await page.getByRole('button', { name: 'Giocatori salvati' }).click();
+    await check(page.getByRole('status')).toContainText('indice');
+    await page.getByRole('button', { name: new RegExp(archiveId) }).click();
+    const dialog = page.getByRole('dialog');
+    await check(dialog).toContainText(archiveId);
+    await check(dialog).toContainText('Ultimo salvataggio');
+    await dialog.getByText('Barra rapida', { exact: true }).click();
+    await check(dialog).toContainText('Oggetto #71');
+    await check(dialog).toContainText('×24');
+    await fits(page);
+    await page.screenshot({ path: `${shots}/block2-save-mobile.png` });
+    expect(savedCalls).toHaveLength(1);
+    expect(savedCalls[0]).toContain(`/saved/${archiveId}`);
+    expect(paths.some((p) => p.startsWith('players/'))).toBe(false);
+  } finally {
+    await context.close();
+  }
+});
+
+it('opens linked history using the verified account id and keeps screenshot permissions independent', async () => {
+  const context = await browser.newContext({
+      locale: 'en-GB',
+      viewport: { width: 390, height: 844 },
+    }),
+    page = await context.newPage();
+  try {
+    await serve(page);
+    await page.route('**/telemetry/players/23?*', (r) =>
+      r.fulfill({
+        json: {
+          data: { ...sample.player, account: archiveId, accountVerified: true },
+          source: 'live',
+          observedAt: instant,
+          reason: null,
+        },
+      }),
+    );
+    await page.route(`**/openworld/players/saved/${archiveId}`, (r) =>
+      r.fulfill({ status: 404, json: { error: { code: 'not_found' } } }),
+    );
+    await page.goto(`${url}telemetry-fixture?section=players`);
+    await page.getByRole('button', { name: /Solstice/ }).click();
+    await page.getByRole('button', { name: 'Open saved profile' }).click();
+    await check(page.getByRole('dialog')).toContainText('No save found for this UUID.');
+    await page.goto(`${url}telemetry-fixture?section=players&reader&screenshots`);
+    const files = Array.from({ length: 9 }, (_, i) => ({
+      name: `capture-${i}.png`,
+      mtimeMs: Date.parse(instant),
+      bytes: 1200000,
+    }));
+    await page.route('**/openworld/screenshots', (r) => r.fulfill({ json: { files } }));
+    let shotsRequested = 0;
+    await page.route('**/openworld/players/actions', (r) => {
+      shotsRequested++;
+      expect(r.request().postDataJSON().action).toEqual({ kind: 'screenshot' });
+      return r.fulfill({
+        status: 202,
+        json: { outcome: 'accepted', requestId: r.request().postDataJSON().requestId },
+      });
+    });
+    const imgs: string[] = [];
+    await page.route('**/openworld/screenshots/image?*', (r) => {
+      imgs.push(r.request().url());
+      return r.fulfill({
+        contentType: 'image/png',
+        body: Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAOgeONsAAAAASUVORK5CYII=',
+          'base64',
+        ),
+      });
+    });
+    await page.getByRole('button', { name: /Solstice/ }).click();
+    const dialog = page.getByRole('dialog');
+    await check(dialog.getByRole('option', { name: 'Kick player' })).toHaveCount(0);
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    await dialog.getByRole('button', { name: 'Request screenshot' }).click();
+    await page.getByRole('button', { name: 'Open screenshots' }).click();
+    await check(page.getByRole('button', { name: /capture-7/ })).toBeVisible();
+    await check(page.getByRole('button', { name: /capture-8/ })).toHaveCount(0);
+    expect(imgs).toHaveLength(0);
+    await page.getByRole('button', { name: 'Next' }).click();
+    await page.getByRole('button', { name: /capture-8/ }).click();
+    await check(dialog.getByRole('img')).toBeVisible();
+    await expect.poll(() => imgs.length).toBe(1);
+    expect(new URL(imgs[0] ?? '').searchParams.get('name')).toBe('capture-8.png');
+    expect(shotsRequested).toBe(1);
+    await fits(page);
+  } finally {
+    await context.close();
+  }
+});
+
+it('disables a prepared action when the same player id appears in another game process', async () => {
+  const context = await browser.newContext({ locale: 'en-GB' }),
+    page = await context.newPage();
+  try {
+    await serve(page);
+    await page.clock.install();
+    await page.goto(`${url}telemetry-fixture?section=players&reader&moderator`);
+    await page.getByRole('button', { name: /Solstice/ }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Action', { exact: true }).selectOption('kill');
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    await check(dialog).toContainText('Kill the character of Solstice?');
+    await page.route('**/telemetry/players', (r) =>
+      r.fulfill({
+        json: {
+          data: sample.players,
+          source: 'live',
+          observedAt: instant,
+          reason: null,
+          processRef: 'b'.repeat(64),
+        },
+      }),
+    );
+    await page.clock.fastForward(6000);
+    await check(dialog.getByRole('button', { name: 'Kill character' })).toHaveCount(0);
+    await check(dialog).toContainText('This player has left the server.');
+  } finally {
+    await context.close();
+  }
+});
+
+it('opens the exact connected player from a map marker and links back to their location', async () => {
+  const page = await browser.newPage();
+  try {
+    const paths = await serve(page);
+    const fromMap = new URLSearchParams({
+      player: '23',
+      name: person.name,
+      processRef: 'a'.repeat(64),
+      joinedAt: String(Date.parse(instant) - person.connectedS * 1000),
+    });
+    const target = `${url}telemetry-fixture?section=players&mapAccess#`;
+    await page.goto(target + fromMap);
+    const dialog = page.getByRole('dialog', { name: 'Solstice' });
+    await check(dialog).toBeVisible();
+    const link = dialog.getByRole('link', { name: 'Show on map' });
+    await check(link).toBeVisible();
+    const href = new URL((await link.getAttribute('href')) ?? '', url);
+    expect(href.pathname).toBe('/servers/10000000-0000-4000-8000-000000000001/game/map');
+    expect(Object.fromEntries(new URLSearchParams(href.hash.slice(1)))).toMatchObject({
+      world: 'Earth',
+      face: '2',
+      x: '128',
+      z: '256',
+      y: '3',
+    });
+    fromMap.set('processRef', 'b'.repeat(64));
+    await page.goto('about:blank');
+    const start = paths.length;
+    await page.goto(target + fromMap);
+    await check(page.getByRole('dialog')).toBeVisible();
+    await check(page.getByRole('link', { name: 'Show on map' })).toHaveCount(0);
+    await check(page.getByText('Solstice', { exact: true }).first()).toBeVisible();
+    expect(paths.slice(start)).not.toContain('players/23');
+  } finally {
+    await page.close();
+  }
+});
+
+function fixtureCheckpoint(id: number, name: string, visibility: 'admins' | 'players' = 'players') {
+  return {
+    id,
+    world: 'earth',
+    name,
+    note: 'Western approach',
+    color: '#438a6a',
+    icon: 'flag',
+    visibility,
+    pos: { face: 0, x: id === 1 ? 150 : 124, y: 41, z: id === 1 ? 70 : 128 },
+    geo: { lat: 12.12, lon: 42.42, alt: 41 },
+    revision: 'a'.repeat(64),
+    createdAtMs: 0,
+  };
+}
+async function mapRoutes(
+  page: Page,
+  options: {
+    wide?: boolean;
+    emptyWorlds?: boolean;
+    failWrites?: boolean;
+    deltaGate?: Promise<void>;
+    revoked?: () => boolean;
+  } = {},
+) {
+  await serve(page);
+  const paths: URL[] = [],
+    writes: Record<string, unknown>[] = [];
+  let checkpoints = [
+    fixtureCheckpoint(1, 'Lakeside'),
+    fixtureCheckpoint(2, 'Supply cache', 'admins'),
+  ];
+  const processRef = 'f'.repeat(64);
+  await page.route('**/v1/servers/**/openworld/map**', async (route) => {
+    const u = new URL(route.request().url());
+    paths.push(u);
+    const path = u.pathname.split('/map')[1];
+    if (options.revoked?.())
+      return route.fulfill({
+        status: 403,
+        json: { code: 'forbidden', messageKey: 'errors.forbidden' },
+      });
+    if (!path)
+      return route.fulfill({
+        json: {
+          worlds: options.emptyWorlds
+            ? []
+            : [
+                { key: 'earth', name: 'Earth', faceEdgeMeters: 8192 },
+                { key: 'moon', name: 'Moon', faceEdgeMeters: null },
+              ],
+          processRef,
+        },
+      });
+    if (u.searchParams.get('processRef') !== processRef && route.request().method() !== 'POST')
+      return route.fulfill({ status: 409, json: { code: 'conflict' } });
+    if (path === '/index')
+      return route.fulfill({
+        json: {
+          stamp: 7,
+          faces: Array.from({ length: 6 }, (_, face) =>
+            face === 0
+              ? {
+                  face,
+                  count: 100,
+                  i0: 0,
+                  j0: 0,
+                  i1: options.wide ? 200 : 15,
+                  j1: options.wide ? 100 : 15,
+                }
+              : { face, count: 0, i0: null, j0: null, i1: null, j1: null },
+          ),
+        },
+      });
+    if (path === '/changes') {
+      if (options.deltaGate) await options.deltaGate;
+      return route.fulfill({
+        json: options.deltaGate
+          ? { stamp: 8, reset: false, columns: [[0, 0, 0]] }
+          : { stamp: 7, reset: false, columns: [] },
+      });
+    }
+    if (path === '/columns')
+      return route.fulfill({
+        json: {
+          columns: [
+            [0, 0],
+            [2, 2],
+            [4, 2],
+            [4, 4],
+          ],
+        },
+      });
+    if (path === '/surface') {
+      const ci = Number(u.searchParams.get('ci')),
+        cj = Number(u.searchParams.get('cj'));
+      const samples = Array.from({ length: 1024 }, (_, i) => {
+        const x = (i % 32) + ci * 4,
+          z = Math.floor(i / 32) + cj * 4;
+        if (x + z > 105 || x + z < 15) return -1;
+        const river = Math.abs(z - 24 - 7 * Math.sin(x / 10));
+        if (river < 3) return 0x598ea5;
+        return (
+          (river < 5 ? 0xc1b990 : 0x729c74) +
+          (Math.floor(Math.sin(x / 4) * 1.7 + Math.cos(z / 7) * 2.8) + 5) * 0x020301
+        );
+      });
+      return route.fulfill({ json: { side: 32, samples } });
+    }
+    if (path === '/creatures') {
+      const world = u.searchParams.get('world'),
+        earth = world === 'earth';
+      const markers = u.searchParams.get('markers') === '1' && earth;
+      return route.fulfill({
+        json: {
+          world,
+          total: earth ? 7 : 0,
+          items: earth ? 31 : 0,
+          species: earth
+            ? [{ id: 3, key: 'marsh_toad', name: 'Marsh toad', count: 7, hostile: false }]
+            : [],
+          markers: markers ? [{ species: 3, face: 0, x: 131, z: 128 }] : [],
+          markersTruncated: markers,
+        },
+      });
+    }
+    if (path === '/space')
+      return route.fulfill({
+        json: {
+          t: 123456,
+          bodies: [
+            {
+              index: 0,
+              name: 'Sol',
+              world: null,
+              parent: null,
+              radiusMeters: 2000,
+              position: [0, 0, 0],
+              atmosphere: false,
+              isLight: true,
+            },
+            {
+              index: 1,
+              name: 'Earth',
+              world: 'earth',
+              parent: 0,
+              radiusMeters: 900,
+              position: [400000, 100, 40000],
+              atmosphere: true,
+              isLight: false,
+            },
+            {
+              index: 2,
+              name: 'Moon',
+              world: 'moon',
+              parent: 1,
+              radiusMeters: 200,
+              position: [404000, 30, 110000],
+              atmosphere: false,
+              isLight: false,
+            },
+          ],
+          players: [{ id: 4, name: 'Night sail', world: null, position: [100000, 11, 72000] }],
+          checkpoints: ['players', 'admins'].map((visibility, i) => ({
+            id: i + 1,
+            name: i ? 'Private beacon' : 'Public beacon',
+            world: 'earth',
+            visibility,
+            color: '#998855',
+            position: [400700, 0, 40000],
+          })),
+        },
+      });
+    if (path === '/players') return route.fulfill({ json: { processRef, players: [] } });
+    if (path === '/checkpoints' && route.request().method() === 'POST') {
+      const body = route.request().postDataJSON();
+      writes.push(body);
+      if (options.failWrites) return route.abort('failed');
+      const { action } = body;
+      if (action.kind === 'create')
+        checkpoints.push({
+          ...fixtureCheckpoint(3, action.fields.name),
+          ...action.fields,
+          ...(action.position.type === 'face' ? { pos: action.position } : {}),
+        });
+      if (action.kind === 'update')
+        checkpoints = checkpoints.map((c) => (c.id === action.id ? { ...c, ...action.fields } : c));
+      if (action.kind === 'delete') checkpoints = checkpoints.filter((c) => c.id !== action.id);
+      return route.fulfill({
+        status: 202,
+        json: { requestId: body.requestId, outcome: 'accepted' },
+      });
+    }
+    if (path === '/checkpoints')
+      return route.fulfill({
+        json: { checkpoints: u.searchParams.get('world') === 'earth' ? checkpoints : [] },
+      });
+    return route.abort();
+  });
+  return { paths, writes };
+}
+it('opens and edits a checkpoint at the linked player position, then requires confirmation to delete it', async () => {
+  const context = await browser.newContext({
+    locale: 'en-GB',
+    viewport: { width: 1280, height: 900 },
+  });
+  const page = await context.newPage();
+  try {
+    const { writes, paths } = await mapRoutes(page);
+    await page.goto(
+      `${url}telemetry-fixture?section=map&cartographer#world=earth&face=0&x=86&y=22&z=111`,
+    );
+    await check(page.getByRole('heading', { name: 'Map', exact: true })).toBeVisible();
+    await check(page.locator('.ow-map-pin')).toHaveCount(2);
+    await check
+      .poll(() => paths.filter((p) => p.pathname.endsWith('/surface')).length)
+      .toBeGreaterThan(0);
+    await page.getByRole('button', { name: 'Add checkpoint at this position' }).click();
+    const dialog = page.getByRole('dialog');
+    await check(dialog.getByLabel('X (m)', { exact: true })).toHaveValue('86');
+    await check(dialog.getByLabel('Z (m)', { exact: true })).toHaveValue('111');
+    await check(dialog.getByLabel('Altitude (m, optional)')).toHaveValue('22');
+    await dialog.getByLabel('Name', { exact: true }).fill('Trailhead');
+    await dialog.getByLabel('Note', { exact: true }).fill('By the footbridge');
+    await dialog.getByRole('button', { name: 'Create checkpoint' }).click();
+    await check(page.getByRole('list').getByRole('button', { name: /Trailhead/ })).toBeVisible();
+    expect(writes[0]).toMatchObject({
+      world: 'earth',
+      processRef: 'f'.repeat(64),
+      action: {
+        kind: 'create',
+        position: { type: 'face', face: 0, x: 86, z: 111, y: 22 },
+        fields: { visibility: 'admins', name: 'Trailhead', note: 'By the footbridge' },
+      },
+    });
+    await page
+      .getByRole('list')
+      .getByRole('button', { name: /Trailhead/ })
+      .click();
+    await page.getByRole('button', { name: 'Edit checkpoint', exact: true }).click();
+    await dialog.getByLabel('Name', { exact: true }).fill('Footbridge');
+    await dialog.getByLabel('Visible to').selectOption('players');
+    await dialog.getByRole('button', { name: 'Save changes' }).click();
+    await check(page.getByRole('heading', { name: 'Footbridge' })).toBeVisible();
+    expect(writes[1]).toMatchObject({
+      action: {
+        kind: 'update',
+        id: 3,
+        revision: 'a'.repeat(64),
+        fields: { visibility: 'players' },
+      },
+    });
+    expect(writes[1]?.action).not.toHaveProperty('position');
+    await page.screenshot({ path: `${shots}/world-map-en.png` });
+    await page.getByRole('button', { name: 'Delete checkpoint', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    expect(writes).toHaveLength(2);
+    await page.getByRole('button', { name: 'Delete checkpoint', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Delete checkpoint', exact: true }).click();
+    await check(page.getByRole('list').getByRole('button', { name: /Footbridge/ })).toHaveCount(0);
+    expect(writes[2]).toMatchObject({
+      action: { kind: 'delete', id: 3, revision: 'a'.repeat(64) },
+    });
+    await fits(page);
+  } finally {
+    await context.close();
+  }
+});
+it('shows the explored overview on mobile and limits player and private checkpoint access', async () => {
+  const context = await browser.newContext({
+      locale: 'it-IT',
+      viewport: { width: 390, height: 844 },
+    }),
+    page = await context.newPage();
+  try {
+    const { paths } = await mapRoutes(page, { wide: true });
+    await page.goto(`${url}telemetry-fixture?section=map&reader`);
+    await check(page.getByRole('heading', { name: 'Mappa', exact: true })).toBeVisible();
+    await check
+      .poll(() => paths.filter((p) => p.pathname.endsWith('/columns')).length)
+      .toBeGreaterThan(0);
+    expect(
+      paths.some((p) => p.pathname.endsWith('/surface') || p.pathname.endsWith('/players')),
+    ).toBe(false);
+    const footprint = paths.find((p) => p.pathname.endsWith('/columns'));
+    expect(Number(footprint?.searchParams.get('stride'))).toBeGreaterThan(1);
+    await check(page.getByRole('button', { name: 'Aggiungi checkpoint', exact: true })).toHaveCount(
+      0,
+    );
+    await check(page.getByLabel('Mostra giocatori')).toHaveCount(0);
+    await check(page.getByRole('button', { name: /Supply cache/ })).toHaveCount(0);
+    const search = page.getByRole('searchbox');
+    await search.fill('wrong');
+    await check(page.getByText('Nessun checkpoint corrispondente.')).toBeVisible();
+    await search.fill('lake');
+    await page
+      .getByRole('list')
+      .getByRole('button', { name: /Lakeside/ })
+      .click();
+    await check(page.getByRole('heading', { name: 'Lakeside' })).toBeVisible();
+    await check(page.getByText('Western approach')).toHaveCount(0);
+    await check
+      .poll(() => paths.filter((p) => p.pathname.endsWith('/surface')).length)
+      .toBeGreaterThan(0);
+    await fits(page);
+    await page.screenshot({ path: `${shots}/world-map-it-mobile.png` });
+    await page.getByLabel('Mondo', { exact: true }).selectOption('moon');
+    await check(page.getByText('Questo mondo non ha checkpoint.')).toBeVisible();
+    await check(page.getByRole('heading', { name: 'Lakeside' })).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+it('refreshes only changed visible tiles, suppresses reads offline and clears revoked data', async () => {
+  const context = await browser.newContext({ viewport: { width: 1150, height: 800 } }),
+    page = await context.newPage();
+  let resume!: () => void,
+    revoked = false;
+  const deltaGate = new Promise<void>((r) => {
+    resume = r;
+  });
+  try {
+    const { paths } = await mapRoutes(page, { deltaGate, revoked: () => revoked });
+    await page.goto(`${url}telemetry-fixture?section=map&offline`);
+    await check(page.getByText(/offline/i)).toBeVisible();
+    expect(paths).toEqual([]);
+    await page.goto(`${url}telemetry-fixture?section=map`);
+    await check(page.locator('canvas')).toBeVisible();
+    const tiles = () => paths.filter((p) => p.pathname.endsWith('/surface'));
+    await check.poll(() => tiles().length).toBe(4);
+    resume();
+    await check
+      .poll(() =>
+        tiles()
+          .filter((p) => p.searchParams.get('stamp') === '8')
+          .map((p) => [p.searchParams.get('ci'), p.searchParams.get('cj')]),
+      )
+      .toEqual([['0', '0']]);
+    await page.getByLabel('Face', { exact: true }).selectOption('4');
+    await check(page.getByText('No explored terrain on this face.')).toBeVisible();
+    const before = tiles().length;
+    revoked = true;
+    await page.getByLabel('World', { exact: true }).selectOption('moon');
+    await check(page.getByRole('alert')).toBeVisible();
+    await check(page.getByRole('list')).toHaveCount(0);
+    expect(tiles().length).toBe(before);
+  } finally {
+    resume();
+    await context.close();
+  }
+});
+it('locks a checkpoint submission with an unknown outcome and preserves the original request', async () => {
+  const context = await browser.newContext(),
+    page = await context.newPage();
+  try {
+    const { writes } = await mapRoutes(page, { failWrites: true });
+    await page.goto(`${url}telemetry-fixture?section=map&cartographer`);
+    await page
+      .getByRole('list')
+      .getByRole('button', { name: /Lakeside/ })
+      .click();
+    await page.getByRole('button', { name: 'Delete checkpoint', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('button', { name: 'Delete checkpoint', exact: true }).click();
+    await check(dialog.getByRole('alert')).toBeVisible();
+    await check(
+      dialog.getByRole('button', { name: 'Delete checkpoint', exact: true }),
+    ).toBeDisabled();
+    expect(writes).toHaveLength(1);
+  } finally {
+    await context.close();
+  }
+});
+
+it('switches coordinate systems without reusing numbers, then closes a private checkpoint that disappears', async () => {
+  const context = await browser.newContext(),
+    page = await context.newPage();
+  try {
+    await mapRoutes(page);
+    await page.goto(`${url}telemetry-fixture?section=map&cartographer`);
+    await page
+      .getByRole('list')
+      .getByRole('button', { name: /Supply cache/ })
+      .click();
+    await page.getByRole('button', { name: 'Edit checkpoint', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Change position').check();
+    await dialog.getByLabel('Longitude').fill('77.025');
+    await dialog.getByLabel('Position', { exact: true }).selectOption('face');
+    await check(dialog.getByLabel('X (m)', { exact: true })).toHaveValue('124');
+    await check(dialog.getByLabel('Z (m)', { exact: true })).toHaveValue('128');
+    await page.route('**/map/checkpoints?**', (r) =>
+      r.fulfill({ json: { checkpoints: [fixtureCheckpoint(1, 'Lakeside')] } }),
+    );
+    await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')));
+    await check(dialog).toHaveCount(0);
+    await check(page.getByText('Supply cache', { exact: true })).toHaveCount(0);
+    await check(page.locator('.ow-map-location')).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+it('keeps the map available after a failed index refresh and picks up new explored columns on retry', async () => {
+  const context = await browser.newContext(),
+    page = await context.newPage();
+  let resume!: () => void;
+  const deltaGate = new Promise<void>((r) => {
+    resume = r;
+  });
+  try {
+    const { paths } = await mapRoutes(page, { deltaGate });
+    let reads = 0;
+    await page.route('**/map/index?**', async (r) => {
+      reads++;
+      if (reads === 1)
+        return r.fulfill({
+          json: {
+            stamp: 7,
+            faces: [{ face: 0, count: 0, i0: null, i1: null, j0: null, j1: null }],
+          },
+        });
+      if (reads === 2) return r.fulfill({ status: 503, json: { code: 'integration_unavailable' } });
+      return r.fallback();
+    });
+    await page.goto(`${url}telemetry-fixture?section=map`);
+    await check(page.getByText('No explored terrain on this face.')).toBeVisible();
+    resume();
+    await check(page.getByRole('alert')).toBeVisible();
+    await check(page.locator('canvas')).toBeVisible();
+    await page.getByRole('alert').getByRole('button').click();
+    await check(page.getByRole('alert')).toHaveCount(0);
+    await check(page.getByText('No explored terrain on this face.')).toHaveCount(0);
+    await check.poll(() => paths.some((p) => p.pathname.endsWith('/surface'))).toBe(true);
+  } finally {
+    resume();
+    await context.close();
+  }
+});
+
+it('frames a populated cluster, then reaches distant indexed columns without unbounded tile requests', async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  try {
+    const { paths } = await mapRoutes(page);
+    const cluster = Array.from({ length: 2816 }, (_, k) => [
+      45632 + (k % 56),
+      76880 + Math.floor(k / 56),
+    ]);
+    const far = [12622489, 951427];
+    const indexed = [...cluster, far];
+    const queries: URL[] = [];
+    await page.route('**/map/index?**', (r) =>
+      r.fulfill({
+        json: {
+          stamp: 7,
+          faces: [{ face: 0, count: indexed.length, i0: 45632, j0: 76880, i1: far[0], j1: far[1] }],
+        },
+      }),
+    );
+    await page.route('**/map/columns?**', (r) => {
+      queries.push(new URL(r.request().url()));
+      return r.fulfill({ json: { columns: indexed } });
+    });
+    await page.goto(`${url}telemetry-fixture?section=map&reader`);
+    const all = page.getByRole('button', { name: 'Show full index' }),
+      canvas = page.locator('canvas');
+    await check(all).toBeVisible();
+    const colored = () =>
+      canvas.evaluate((c) => {
+        const el = c as HTMLCanvasElement,
+          ctx = el.getContext('2d');
+        if (!ctx) return 0;
+        const { data } = ctx.getImageData(0, 0, el.width, el.height);
+        let count = 0;
+        for (let p = 3; p < data.length; p += 4) if (data[p]) count++;
+        return count;
+      });
+    await check.poll(colored).toBeGreaterThan(10000);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]?.searchParams.get('stride')).toBe('1');
+    expect(queries[0]?.searchParams.get('sample')).toBe('1');
+    expect(paths.some((u) => u.pathname.endsWith('/surface'))).toBe(false);
+    await all.click();
+    await check.poll(colored).toBeLessThan(100);
+    // Locate the rightmost visible footprint dot and open its exact tile.
+    const pixel = await canvas.evaluate((c) => {
+      const el = c as HTMLCanvasElement,
+        ctx = el.getContext('2d');
+      if (!ctx) return null;
+      const { data } = ctx.getImageData(0, 0, el.width, el.height);
+      for (let x = el.width - 1; x >= 0; x--)
+        for (let y = 0; y < el.height; y++) {
+          if (data[4 * (y * el.width + x) + 3]) return { x, y };
+        }
+      return null;
+    });
+    if (!pixel) throw new Error('Expected an indexed column on the overview');
+    await canvas.click({ position: pixel });
+    await check
+      .poll(() =>
+        paths.some(
+          (u) =>
+            u.pathname.endsWith('/surface') &&
+            Number(u.searchParams.get('ci')) === 12622488 &&
+            Number(u.searchParams.get('cj')) === 951424,
+        ),
+      )
+      .toBe(true);
+    expect(paths.filter((u) => u.pathname.endsWith('/surface')).length).toBeLessThanOrEqual(16);
+    await page.getByRole('button', { name: 'Recenter' }).click();
+    await check.poll(colored).toBeGreaterThan(10000);
+    await fits(page);
+  } finally {
+    await context.close();
+  }
+});
+
+it('uses a bounded sample to frame a larger map and fetches the actual overview inside that region', async () => {
+  const page = await browser.newPage();
+  try {
+    await mapRoutes(page);
+    const far = [0x7fffffff, 0x7fffffff];
+    const cluster = Array.from({ length: 200 }, (_, k) => [
+      500000 + (k % 10),
+      800000 + Math.floor(k / 10) * 8,
+    ]);
+    const queries: URLSearchParams[] = [];
+    await page.route('**/map/index?**', (r) =>
+      r.fulfill({
+        json: {
+          stamp: 7,
+          faces: [{ face: 0, count: 45000, i0: 500000, j0: 800000, i1: far[0], j1: far[1] }],
+        },
+      }),
+    );
+    await page.route('**/map/columns?**', (r) => {
+      const q = new URL(r.request().url()).searchParams;
+      queries.push(q);
+      return r.fulfill({ json: { columns: q.has('sample') ? [...cluster, far] : cluster } });
+    });
+    await page.goto(`${url}telemetry-fixture?section=map&reader`);
+    await check(page.getByRole('button', { name: 'Show full index' })).toBeVisible();
+    await check
+      .poll(() =>
+        queries.some(
+          (q) => !q.has('sample') && Number(q.get('i1')) > 500000 && Number(q.get('i1')) < 502000,
+        ),
+      )
+      .toBe(true);
+    expect(queries.filter((q) => q.has('sample'))).toHaveLength(1);
+    await page.getByRole('button', { name: 'Show full index' }).click();
+    await check
+      .poll(() =>
+        queries.some(
+          (q) =>
+            Number(q.get('i1')) === 0x7fffffff &&
+            Number(q.get('j1')) === 0x7fffffff &&
+            Number(q.get('stride')) > 8192,
+        ),
+      )
+      .toBe(true);
+    await fits(page);
+  } finally {
+    await page.close();
+  }
+});
+
+it('loads creature populations on demand, requests markers only when selected, and switches world and face', async () => {
+  const context = await browser.newContext({
+    locale: 'en-GB',
+    viewport: { width: 1280, height: 900 },
+  });
+  const page = await context.newPage();
+  try {
+    const { paths } = await mapRoutes(page);
+    await page.goto(`${url}telemetry-fixture?section=map&cartographer`);
+    await check(page.getByRole('button', { name: 'Creatures', exact: true })).toBeVisible();
+    expect(paths.filter((p) => /\/(creatures|space)$/.test(p.pathname))).toHaveLength(0);
+    const place = page.getByRole('button', { name: 'Place checkpoint', exact: true });
+    await place.click();
+    await check(place).toHaveAttribute('aria-pressed', 'true');
+    await page.getByRole('button', { name: 'Creatures', exact: true }).click();
+    await check(page.getByRole('heading', { name: 'Active population in Earth' })).toBeVisible();
+    await check(page.getByRole('row', { name: 'Marsh toad 7' })).toBeVisible();
+    await check(
+      page.locator('.ow-map-counts div').filter({ hasText: 'Items on the ground' }),
+    ).toContainText('31');
+    expect(
+      paths
+        .filter((p) => p.pathname.endsWith('/creatures'))
+        .map((p) => p.searchParams.get('markers')),
+    ).toEqual([null]);
+    await check(page.locator('.ow-map-picking')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Terrain', exact: true }).click();
+    await check(place).toHaveAttribute('aria-pressed', 'false');
+    await page.getByRole('button', { name: 'Creatures', exact: true }).click();
+    await page.getByLabel('Show creature positions').check();
+    const toad = page.getByRole('img', { name: 'Creature · Marsh toad', exact: true });
+    await toad.hover();
+    await check(toad).toHaveAttribute('title', 'Creature · Marsh toad');
+    const box = await toad.boundingBox();
+    if (!box) throw Error('Marker is outside the viewport');
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + 36, box.y + box.height / 2 + 14);
+    await page.mouse.up();
+    await check.poll(async () => (await toad.boundingBox())?.x ?? 0).toBeGreaterThan(box.x + 25);
+    await page.getByRole('button', { name: 'Recenter' }).click();
+    await check(page.getByText('The map shows a sample of the creature positions.')).toBeVisible();
+    await fits(page);
+    await page.screenshot({ path: `${shots}/world-map-creatures-en.png` });
+    await page.getByLabel('Face', { exact: true }).selectOption('3');
+    await check(page.getByRole('img', { name: /^Creature ·/ })).toHaveCount(0);
+    await page.getByLabel('World', { exact: true }).selectOption('moon');
+    await check(page.getByRole('heading', { name: 'Active population in Moon' })).toBeVisible();
+    await check(page.getByText('No species recorded in this world.')).toBeVisible();
+    expect(paths.filter((p) => p.pathname.endsWith('/space'))).toHaveLength(0);
+    expect(
+      paths
+        .filter((p) => p.searchParams.get('markers') === '1')
+        .every((p) => p.searchParams.get('world') === 'earth'),
+    ).toBe(true);
+  } finally {
+    await context.close();
+  }
+});
+
+it('centers on an orbital body, opens its terrain and clears space markers when authorization changes', async () => {
+  const context = await browser.newContext({
+    locale: 'en-GB',
+    viewport: { width: 1280, height: 900 },
+  });
+  const page = await context.newPage();
+  try {
+    await mapRoutes(page);
+    await page.goto(`${url}telemetry-fixture?section=map&cartographer`);
+    await page.getByRole('button', { name: 'Space', exact: true }).click();
+    await check(page.getByRole('img', { name: 'Orbital view centered on Sol' })).toBeVisible();
+    await check(page.getByRole('listitem').filter({ hasText: 'Night sail' })).toBeVisible();
+    await check(page.getByRole('listitem').filter({ hasText: 'Private beacon' })).toBeVisible();
+    await page.getByRole('button', { name: 'Center on Moon', exact: true }).click();
+    await check(page.getByLabel('Celestial body')).toHaveValue('2');
+    await check(page.getByRole('button', { name: 'Earth', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Open terrain map' }).click();
+    await check(page.getByLabel('World', { exact: true })).toHaveValue('moon');
+    await page.getByRole('button', { name: 'Space', exact: true }).click();
+    await check(page.getByRole('heading', { name: 'Sol', exact: true })).toBeVisible();
+    await page.route('**/map/space?**', (r) =>
+      r.fulfill({ status: 403, json: { code: 'forbidden', messageKey: 'errors.forbidden' } }),
+    );
+    await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')));
+    await check(page.getByRole('alert')).toBeVisible();
+    await check(page.getByRole('listitem').filter({ hasText: 'Private beacon' })).toHaveCount(0);
+    await check(page.getByRole('img', { name: 'Orbital view centered on Sol' })).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+it('keeps reader-only space and factory positions accessible on mobile without reading player locations', async () => {
+  const context = await browser.newContext({
+    locale: 'it-IT',
+    viewport: { width: 390, height: 844 },
+  });
+  const page = await context.newPage();
+  try {
+    const { paths } = await mapRoutes(page);
+    await page.goto(
+      `${url}telemetry-fixture?section=map&reader#origin=factories&world=moon&face=3&x=123&z=145`,
+    );
+    await check(page.getByLabel('Mondo', { exact: true })).toHaveValue('moon');
+    await check(page.locator('.ow-map-location')).toBeVisible();
+    await page.getByRole('button', { name: 'Spazio', exact: true }).click();
+    await check(page.getByRole('heading', { name: 'Sol', exact: true })).toBeVisible();
+    await check(page.getByRole('listitem').filter({ hasText: 'Public beacon' })).toBeVisible();
+    await check(page.getByText('Private beacon', { exact: true })).toHaveCount(0);
+    await check(page.getByText('Night sail', { exact: true })).toHaveCount(0);
+    await check(page.getByText('Giocatori nello spazio', { exact: true })).toHaveCount(0);
+    await fits(page);
+    await page.screenshot({ path: `${shots}/world-map-space-it-mobile.png` });
+    await page.getByLabel('Corpo celeste').selectOption('1');
+    await check(page.getByRole('heading', { name: 'Earth', exact: true })).toBeVisible();
+    expect(paths.some((p) => p.pathname.endsWith('/players'))).toBe(false);
+    expect(paths.some((p) => p.pathname.endsWith('/creatures'))).toBe(false);
+  } finally {
+    await context.close();
+  }
+});

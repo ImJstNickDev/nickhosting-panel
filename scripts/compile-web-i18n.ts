@@ -55,6 +55,9 @@ try {
   const { minecraftUiModule } = await import('../games/minecraft/src/ui/index.js');
   Object.assign(catalogs.en!, minecraftUiModule.catalogs.en);
   Object.assign(catalogs.it!, minecraftUiModule.catalogs.it);
+  const { openworldUiModule } = await import('../games/openworld/src/ui/index.js');
+  Object.assign(catalogs.en!, openworldUiModule.catalogs.en);
+  Object.assign(catalogs.it!, openworldUiModule.catalogs.it);
   const { satisfactoryUiModule } = await import('../games/satisfactory/src/ui/index.js');
   Object.assign(catalogs.en!, satisfactoryUiModule.catalogs.en);
   Object.assign(catalogs.it!, satisfactoryUiModule.catalogs.it);

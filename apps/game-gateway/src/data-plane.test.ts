@@ -21,6 +21,10 @@ import {
   frameMinecraftPacket,
   readMinecraftFrame,
 } from '../../../games/minecraft/src/protocol.js';
+import {
+  openworldGatewayAdapter,
+  openworldStatusRequest,
+} from '../../../games/openworld/src/gateway-module.js';
 import { createSatisfactoryGatewayAdapter } from '../../../games/satisfactory/src/gateway-module.js';
 import {
   decodeSatisfactoryPoll,
@@ -189,7 +193,7 @@ async function exchange(
   await closed;
   return Buffer.concat(chunks);
 }
-async function datagram(port: number, data: string, client?: DatagramSocket) {
+async function datagram(port: number, data: string | Buffer, client?: DatagramSocket) {
   const socket = client ?? createSocket('udp4');
   if (!client)
     cleanups.push(async () => new Promise<void>((resolve) => socket.close(() => resolve())));
@@ -710,6 +714,60 @@ describe('persistent Gateway fixture forwarding', () => {
     await f.gateway.refresh();
     expect((await exchange(tcp.port, 'ready-again')).toString()).toBe('ready-again');
     expect((await datagram(udp.port, 'ready-again')).toString()).toBe('ready-again');
+  });
+  it('Openworld idle reports distinguish a server-list query, a connecting peer and an online player', async () => {
+    const backend = await udpFixture();
+    backend.socket.removeAllListeners('message');
+    let players = 0;
+    const version = 'a1.2.9';
+    backend.socket.on('message', (message, peer) => {
+      if (message.length !== 1040 || message[16] !== 7) {
+        backend.socket.send('session', peer.port, peer.address);
+        return;
+      }
+      const reply = Buffer.alloc(44 + version.length);
+      reply[16] = 8;
+      reply.write('OWMU', 17);
+      message.copy(reply, 21, 22, 26);
+      reply.writeUInt16LE(players, 26);
+      reply.writeUInt16LE(12, 28);
+      reply[43] = version.length;
+      reply.write(version, 44);
+      backend.socket.send(reply, peer.port, peer.address);
+    });
+    const current = route(backend.port, 'udp');
+    current.protocol = { handlerId: 'openworld', gameVersion: version, role: 'game' };
+    let clock = Date.now();
+    const f = plane([current], {
+      protocols: [openworldGatewayAdapter],
+      policy: { maxClassificationBytes: 65536 },
+      now: () => clock,
+    });
+    await f.gateway.applySnapshot(f.snapshot());
+    const observed = async () => {
+      await f.gateway.observe();
+      return vi.mocked(f.control.reportObservation).mock.calls.at(-1)?.[0];
+    };
+    await datagram(backend.port, openworldStatusRequest(Buffer.from('list')));
+    expect(await observed()).toMatchObject({
+      ready: true,
+      idle: true,
+      playerCount: 0,
+      activeSessions: 0,
+    });
+    // UDP count is still zero while the incoming peer negotiates a session.
+    await datagram(backend.port, 'session');
+    expect(await observed()).toMatchObject({ idle: false, playerCount: 0, activeSessions: 1 });
+    clock += policy.udpIdleTimeoutMs + 1;
+    players = 1;
+    expect(await observed()).toMatchObject({ idle: false, playerCount: 1, activeSessions: 0 });
+    players = 0;
+    expect(await observed()).toMatchObject({ idle: true, playerCount: 0, activeSessions: 0 });
+    await f.gateway.applySnapshot(
+      f.snapshot([{ ...current, revision: 2, sleepEligibleAt: new Date(clock).toISOString() }], 2),
+    );
+    expect((await observed())?.quiescenceUntil).toBeDefined();
+    expect(f.control.requestWake).not.toHaveBeenCalled();
   });
   it('streams binary TCP with half-close and concurrent clients on the same numeric port at distinct addresses', async () => {
     const backend = await tcpFixture();

@@ -12,6 +12,7 @@ import { createServer, type ViteDevServer } from 'vite';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest';
 
 const id = '10000000-0000-4000-8000-000000000001';
+const directMappingId = '10000000-0000-4000-8000-000000000002';
 let vite: ViteDevServer, browser: Browser, context: BrowserContext, page: Page, origin: string;
 let writes: Record<string, unknown>[], errors: string[];
 beforeAll(async () => {
@@ -70,8 +71,17 @@ beforeEach(async () => {
         subject: user,
       });
     }
+    if (path === '/v1/games/openworld/choices')
+      return response({
+        mappings: [
+          { mappingId: id, node: 1, delivery: { gateway: true, direct: false } },
+          { mappingId: directMappingId, node: 2, delivery: { gateway: false, direct: true } },
+        ],
+        versions: ['a1.2.10', 'a1.2.9', 'a1.2.8', 'a1.0.10'],
+      });
     if (path === '/v1/games')
       return response([
+        { id: 'openworld', access: { canCreate: true }, manifest: { runtimes: ['dedicated'] } },
         { id: 'satisfactory', access: { canCreate: true }, manifest: { runtimes: ['dedicated'] } },
       ]);
     if (path === '/v1/games/satisfactory/choices')
@@ -227,4 +237,105 @@ it('keeps the optional credentials form usable on Italian mobile', async () => {
   });
   await next('it');
   await check(page.getByLabel('Password amministratore', { exact: true })).toHaveCount(0);
+});
+
+it.each(['en', 'it'])(
+  'selects the Openworld release through the creation wizard in %s',
+  async (locale) => {
+    await page.addInitScript((language) => localStorage.setItem('nh.locale', language), locale);
+    if (locale === 'it') await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${origin}domains-fixture?view=wizard`);
+    const game = page.getByRole('button', { name: 'Openworld', exact: true });
+    await check(game).toBeVisible();
+    await check
+      .poll(() => game.locator('img').evaluate((img) => (img as HTMLImageElement).naturalWidth))
+      .toBeGreaterThan(0);
+    await game.click();
+    await next(locale);
+    await page
+      .getByLabel(locale === 'en' ? 'Server name' : 'Nome del server', { exact: true })
+      .fill('Openworld QA');
+    await next(locale);
+    await select('Openworld · #2');
+    await next(locale);
+    await check(page.getByRole('radio', { name: /a1\.0\.10/ })).toBeDisabled();
+    await page
+      .locator('.installer-version')
+      .filter({ has: page.getByRole('radio', { name: /a1\.2\.10/ }) })
+      .click();
+    await page
+      .getByRole('button', { name: locale === 'en' ? 'Back' : 'Indietro', exact: true })
+      .click();
+    await select('Openworld · #1');
+    await next(locale);
+    await check(page.getByRole('radio', { name: /a1\.2\.10/ })).toBeDisabled();
+    await check(
+      page.getByText(
+        locale === 'en' ? /Requires a direct connection/ : /Richiede una connessione diretta/,
+      ),
+    ).toBeVisible();
+    await check(page.getByText(/glibc 2\.38/)).toBeVisible();
+    await check(page.getByRole('radio', { name: /a1\.2\.9/ })).toBeChecked();
+    await page
+      .locator('.installer-version')
+      .filter({ has: page.getByRole('radio', { name: /a1\.2\.8/ }) })
+      .click();
+    await page.screenshot({ path: `test-results/openworld-wizard-${locale}.png`, fullPage: true });
+    await next(locale);
+    await next(locale);
+    await page
+      .getByRole('button', { name: locale === 'en' ? 'Create server' : 'Crea server', exact: true })
+      .click();
+    await check(page.getByTestId('created-console')).toBeVisible();
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({
+      mappingId: id,
+      game: { id: 'openworld', configuration: { version: 'a1.2.8' } },
+    });
+  },
+);
+
+it.each([
+  { locale: 'en', width: 1280, height: 900, title: 'Dedicated server' },
+  { locale: 'it', width: 390, height: 844, title: 'Server dedicato' },
+])('keeps the single recommended Openworld runtime legible in $locale', async (view) => {
+  await page.addInitScript((lang) => localStorage.setItem('nh.locale', lang), view.locale);
+  await page.setViewportSize({ width: view.width, height: view.height });
+  await page.route('**/v1/games/openworld/choices', (route) =>
+    route.fulfill({
+      json: {
+        mappings: [{ mappingId: id, node: 1, delivery: { gateway: true, direct: false } }],
+        versions: ['a1.2.9'],
+      },
+    }),
+  );
+  await page.goto(`${origin}domains-fixture?view=wizard`);
+  await page.getByRole('button', { name: 'Openworld', exact: true }).click();
+  await next(view.locale);
+  await page
+    .getByLabel(view.locale === 'en' ? 'Server name' : 'Nome del server', { exact: true })
+    .fill('Openworld');
+  await next(view.locale);
+
+  const card = page.locator('.installer-choice-card');
+  await check(card.getByRole('radio', { name: new RegExp(view.title) })).toBeChecked();
+  await check(card.locator('.installer-recommended')).toBeVisible();
+  const geometry = await card.evaluate((element) => {
+    const title = element.querySelector('.installer-choice-title');
+    const badge = element.querySelector('.installer-recommended');
+    if (!title || !badge) throw new Error('Missing runtime caption');
+    const range = document.createRange();
+    range.selectNodeContents(title);
+    const image = element.querySelector('img');
+    return {
+      titleLines: range.getClientRects().length,
+      aboveLabel:
+        !image || image.getBoundingClientRect().bottom <= title.getBoundingClientRect().top + 1,
+      badgeBelow: badge.getBoundingClientRect().top >= title.getBoundingClientRect().bottom - 1,
+    };
+  });
+  await card.screenshot({ path: `test-results/openworld-runtime-card-${view.locale}.png` });
+  expect(geometry.titleLines).toBeLessThanOrEqual(2);
+  expect(geometry.aboveLabel).toBe(true);
+  expect(geometry.badgeBelow).toBe(true);
 });

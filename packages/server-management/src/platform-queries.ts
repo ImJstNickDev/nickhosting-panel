@@ -4,6 +4,7 @@ import {
   assertPermission,
   DomainError,
   hasPermission,
+  ownerServerPermissionKeys,
 } from '@nickhosting/core';
 import { type Database, getSettings, recordAudit, secretStatus } from '@nickhosting/database';
 import { gameManifestSchema } from '@nickhosting/game-sdk';
@@ -404,7 +405,10 @@ function describeServer(
   const scope = { ownerUserId: row.owner_id, memberRole: row.member_role ?? undefined };
   const permissionKeys =
     context.role === 'owner' || row.owner_id === context.subjectUserId
-      ? definitions.map(({ key }) => key)
+      ? ownerServerPermissionKeys(
+          definitions,
+          context.sessionType === 'regular' && row.owner_id === context.subjectUserId,
+        )
       : sharedServerPermissionKeys(definitions, scope.memberRole, row.direct_permissions);
   const manage = hasPermission(context, 'server:manage', scope),
     operate = permissionKeys.includes('console.power');
@@ -1439,6 +1443,7 @@ export async function getPlatformConnections(
       .selectFrom('server_allocations')
       .select(['id', 'role', 'port', 'protocols', 'is_primary', 'direct_endpoint'])
       .where('server_id', '=', serverId)
+      .where('private_only', '=', false)
       .orderBy('role')
       .execute(),
     db

@@ -576,6 +576,40 @@ describe('M5 real browser platform and Owner journeys', () => {
     expect(pageErrors).toEqual([]);
   });
 
+  it('saves the Nginx Proxy Manager destination and write-only token in Owner credentials', async () => {
+    await owner.setViewportSize({ width: 1280, height: 800 });
+    await owner.goto(`${fixture.origin}/owner/settings#credentials`);
+    const section = owner
+      .locator('details')
+      .filter({ has: owner.locator('summary').filter({ hasText: 'Nginx Proxy Manager' }) });
+    await section.locator('summary').click();
+    const url = section.getByLabel('NPM API URL', { exact: true });
+    const token = section.getByLabel('NPM API token', { exact: true });
+    const contact = 'certificates@example.test';
+    const target = 'https://npm.example.test';
+    await url.fill(target);
+    await section.getByLabel('Let’s Encrypt email', { exact: true }).fill(contact);
+    await token.fill('isolated-npm-test-token');
+    await section.getByRole('button', { name: 'Save changes', exact: true }).click();
+    await browserExpect(token).toHaveValue('');
+    await browserExpect(url).toBeDisabled();
+    await browserExpect(section.locator('summary')).toContainText('Configured');
+    const written = await journeyRequest<{
+      config: { values: { npmApiUrl: string; npmAcmeEmail: string } };
+    }>(fixture, owner, '/v1/owner/settings');
+    expect(written.config.values).toMatchObject({ npmApiUrl: target, npmAcmeEmail: contact });
+    expect(JSON.stringify(written)).not.toContain('isolated-npm-test-token');
+    await section.scrollIntoViewIfNeeded();
+    await fixture.screenshot(owner, 'owner-npm-credentials-desktop-en');
+    await owner.setViewportSize({ width: 390, height: 844 });
+    expect(
+      await owner.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+    await section.getByRole('button', { name: 'Remove API token', exact: true }).click();
+    await browserExpect(url).toBeEnabled();
+    await browserExpect(token).toHaveValue('');
+  });
+
   it('changes protected platform settings and rollout through Owner forms without exposing credentials or bypassing evidence', async () => {
     await owner.goto(`${fixture.origin}/owner/settings`);
     const instance = owner

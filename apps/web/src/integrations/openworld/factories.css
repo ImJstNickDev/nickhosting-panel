@@ -1,0 +1,59 @@
+.ow-factory-measures {
+  display: grid;
+  gap: 20px;
+}
+.ow-factory-measures > dl + dl {
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.ow-factory-measures .ow-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.ow-factory-flows {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: 16px;
+}
+.ow-factory-flows .ow-metrics {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.ow-factory-columns {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ow-factory-columns li {
+  display: grid;
+  grid-template-columns: minmax(125px, 1fr) 3fr;
+  align-items: center;
+  gap: 12px 20px;
+  border-top: 1px solid var(--line);
+  padding: 12px 0;
+}
+.ow-factory-columns li:last-child {
+  padding-bottom: 0;
+}
+.ow-factory-columns li > div {
+  display: grid;
+  gap: 3px;
+  overflow-wrap: anywhere;
+}
+.ow-factory-columns small {
+  color: var(--muted);
+}
+.ow-factory-columns .ow-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.ow-factory-columns a {
+  width: fit-content;
+  font-size: 0.85rem;
+}
+@media (max-width: 640px) {
+  .ow-factory-flows,
+  .ow-factory-columns li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ow-factory-columns .ow-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

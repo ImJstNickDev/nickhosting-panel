@@ -12,6 +12,7 @@ import {
 import { createServer, type ViteDevServer } from 'vite';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { minecraftManifest } from '../../../games/minecraft/src/index.js';
+import { openworldManifest } from '../../../games/openworld/src/manifest.js';
 
 describe('Owner integration workspace (real components, isolated API responses)', () => {
   let vite: ViteDevServer, browser: Browser, context: BrowserContext, page: Page, origin: string;
@@ -81,6 +82,7 @@ describe('Owner integration workspace (real components, isolated API responses)'
       if (path === '/v1/owner/game-modules')
         return response([
           { id: 'minecraft', manifest: minecraftManifest },
+          { id: 'openworld', manifest: openworldManifest },
           {
             id: 'fixture-game',
             manifest: {
@@ -187,6 +189,86 @@ describe('Owner integration workspace (real components, isolated API responses)'
   afterAll(async () => {
     await browser?.close();
     await vite?.close();
+  });
+  it.each([
+    ['en', 'Versions', 'Sync versions', 'Search versions', 1280],
+    ['it', 'Versioni', 'Sincronizza versioni', 'Cerca versioni', 390],
+  ] as const)(
+    'opens and synchronizes the full Openworld catalog in %s',
+    async (locale, title, sync, search, width) => {
+      await page.setViewportSize({ width, height: 844 });
+      const path = '/v1/owner/integrations/openworld/versions';
+      let calls = 0;
+      const item = (version: string) => ({ version, size: 1234567, sha256: 'a'.repeat(64) });
+      const before = [item('a1.2.9'), item('a1.2.8')];
+      await page.route(`**${path}**`, (route) => {
+        if (route.request().method() === 'POST') calls++;
+        if (calls === 2)
+          return route.fulfill({ status: 503, json: { code: 'integration_unavailable' } });
+        return route.fulfill({
+          json: {
+            source: calls ? 'metiva' : 'official',
+            syncedAt: '2026-11-21T12:00:00Z',
+            releases: calls ? [item('a1.2.10'), ...before] : before,
+          },
+        });
+      });
+      await page.goto(`${origin}owner/integrations/openworld/versions`);
+      await page.evaluate((value) => localStorage.setItem('nh.locale', value), locale);
+      if (locale !== 'en') {
+        // The fixture's default locale is installed on each document.
+        await page.addInitScript(() => localStorage.setItem('nh.locale', 'it'));
+        await page.reload();
+      }
+      await check(page.getByRole('link', { name: title, exact: true })).toHaveAttribute(
+        'aria-current',
+        'page',
+      );
+      const table = page.getByRole('table', { name: title });
+      await check(table.getByText('a1.2.8', { exact: true })).toBeVisible();
+      await page.getByRole('button', { name: sync }).click();
+      await check(table.getByText('a1.2.10', { exact: true })).toBeVisible();
+      await check(page.getByText('Metiva', { exact: true })).toBeVisible();
+      await page.getByRole('searchbox', { name: search }).fill('1.2.8');
+      await check(table.getByRole('row')).toHaveCount(2);
+      await page.getByRole('button', { name: sync }).click();
+      await check(page.getByRole('alert')).toBeVisible();
+      await check(table.getByText('a1.2.8', { exact: true })).toBeVisible();
+      expect(calls).toBe(2);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+    },
+  );
+  it('edits a scoped Metiva token and restores inheritance without retrieving the value', async () => {
+    const path = '/v1/owner/integrations/minecraft/metiva-token';
+    let stored = false;
+    await page.route(`**${path}`, async (route) => {
+      const method = route.request().method();
+      if (method === 'GET')
+        return route.fulfill({ json: { configured: stored, inherited: true, locked: false } });
+      if (method === 'PUT') {
+        expect(route.request().postDataJSON()).toEqual({ value: 'mtv_fixture' });
+        stored = true;
+      } else if (method === 'DELETE') stored = false;
+      else throw new Error('Unexpected method');
+      return route.fulfill({ status: 204 });
+    });
+    await page.goto(`${origin}owner/integrations/minecraft`);
+    await page.getByText('Metiva access token', { exact: true }).click();
+    await check(page.getByText('Using the platform token')).toBeVisible();
+    await page.locator('input[type=password]').fill('mtv_fixture');
+    const box = page
+      .locator('details')
+      .filter({ has: page.getByText('Metiva access token', { exact: true }) });
+    await box.getByRole('button', { name: 'Save changes', exact: true }).click();
+    await check(box.getByText('Integration token configured')).toBeVisible();
+    await check(box.locator('input')).toHaveValue('');
+    await page.screenshot({ path: '.codex/local/m5-browser/screenshots/metiva-token-desktop.png' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: '.codex/local/m5-browser/screenshots/metiva-token-mobile.png' });
+    await box.getByRole('button', { name: 'Remove token' }).click();
+    await check(box.getByText('Using the platform token')).toBeVisible();
   });
   it('keeps the index compact and generic setup available even without a bespoke game renderer', async () => {
     await page.goto(`${origin}owner/integrations`);

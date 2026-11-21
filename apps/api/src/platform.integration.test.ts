@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { createIdentity, type IdentityMail } from '@nickhosting/auth';
 import { SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
@@ -309,6 +309,7 @@ describe('M5 additive platform HTTP contracts with actual identity/session handl
     expect(await (await request(owner, '/v1/owner/game-modules')).json()).toEqual([
       expect.objectContaining({ id: 'minecraft' }),
       expect.objectContaining({ id: 'satisfactory' }),
+      expect.objectContaining({ id: 'openworld' }),
     ]);
     expect((await request(owner, '/v1/platform/owner/games')).status).toBe(200);
     const auditedProject = await (
@@ -393,6 +394,50 @@ describe('M5 additive platform HTTP contracts with actual identity/session handl
       (await request(user, path, { gameTimeoutSeconds: -1, runtimeTimeouts: {} }, 'PUT')).status,
     ).toBe(403);
     expect((await request(owner, '/v1/owner/integrations/unknown/sleep-policy')).status).toBe(404);
+  });
+  it('saves NPM settings and credentials while an existing CPU reservation exceeds its quota', async () => {
+    const path = '/v1/owner/settings';
+    const settings = { npmApiUrl: 'https://proxy.example.test', npmAcmeEmail: 'acme@example.test' };
+    const serverId = await f.server();
+    const { config } = await (await request(owner, path)).json();
+    const cpuQuota = config.values.defaultUserCpuPercent;
+    await f.db
+      .insertInto('resource_reservations')
+      .values({
+        server_id: serverId,
+        owner_id: f.context.subjectUserId,
+        physical_host_id: f.hostId,
+        memory_mib: f.limits.memory,
+        physical_memory_mib: f.limits.memory,
+        cpu_percent: cpuQuota + 1,
+        operation_id: randomUUID(),
+        state: 'running',
+      })
+      .execute();
+    try {
+      const mixed = await request(owner, path, { ...settings, defaultUserCpuPercent: 1 }, 'PATCH');
+      expect(mixed.status).toBe(409);
+      expect((await (await request(owner, path)).json()).config.values.npmApiUrl).toBeUndefined();
+
+      const saved = await request(owner, path, settings, 'PATCH');
+      expect(saved.status).toBe(200);
+      expect((await saved.json()).values).toMatchObject(settings);
+      const token = randomBytes(32).toString('base64url');
+      const secret = await request(
+        owner,
+        '/v1/owner/secrets/npmAccessToken',
+        { value: token, expectedOrigin: settings.npmApiUrl },
+        'PUT',
+      );
+      expect(secret.status).toBe(204);
+      const result = await (await request(owner, path)).json();
+      expect(result.secrets).toContainEqual(
+        expect.objectContaining({ name: 'npmAccessToken', configured: true }),
+      );
+      expect(result.config.values.defaultUserCpuPercent).toBe(cpuQuota);
+    } finally {
+      await f.db.deleteFrom('resource_reservations').where('server_id', '=', serverId).execute();
+    }
   });
   it('authorizes Gateway messages through actual sessions and rejects forged Origin writes', async () => {
     const id = await f.server();

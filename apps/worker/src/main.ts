@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLogger, DomainError, encryptionKeyFromBase64, SecretCodec } from '@nickhosting/core';
-import { createDatabase, getSettings } from '@nickhosting/database';
+import { createDatabase, getSecret, getSettings } from '@nickhosting/database';
 import { createPrivateTransferCache, processJob, startJobWorker } from '@nickhosting/jobs';
 import {
   createDirectoryIdentityCache,
@@ -11,13 +11,16 @@ import {
   createManagementTransportCoordinator,
   ensureInstallationFeedLink,
   ensureProviderAccounts,
+  reconcileOpenworldPublications,
   recordWorkerHeartbeat,
   refreshHostObservations,
   wakeInstallationOperation,
 } from '@nickhosting/server-management';
+import { nginxProxyManager } from '../../../packages/external-services/src/nginx-proxy-manager.js';
 import { minecraftModpackSchemaAvailable } from '../../../packages/server-management/src/minecraft-modpack-schema.js';
 import { minecraftContentProviders } from '../../../packages/server-management/src/minecraft-world-catalog.js';
 import { createMinecraftModpackBridge } from '../../../packages/server-management/src/modpack-bridge.js';
+import { startDashboardPublicationLoop } from './dashboard-publications.js';
 import { startHostObservationLoop } from './host-observations.js';
 import { startMinecraftMetadataLoop } from './minecraft-metadata.js';
 import { startMinecraftModpackLoop } from './minecraft-modpacks.js';
@@ -140,6 +143,45 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         .execute();
       for (const row of rows) installations?.ensure(row.job_id, row.id);
     };
+    const dashboards = startDashboardPublicationLoop(
+      pool,
+      () => {
+        // One snapshot binds the configured destination to its matching credential.
+        // Resolve it only for a due operation and share it within that worker batch.
+        let provider: ReturnType<typeof nginxProxyManager> | undefined;
+        const load = async () => {
+          const keyId = env.NH_SECRETS_KEY_ID ?? 'primary';
+          const codec = new SecretCodec({
+            activeKeyId: keyId,
+            keys: { [keyId]: encryptionKeyFromBase64(env.NH_SECRETS_MASTER_KEY ?? '') },
+          });
+          const settings = await db
+            .transaction()
+            .setIsolationLevel('repeatable read')
+            .execute(async (tx) => {
+              const { values } = await getSettings(tx, env);
+              const bearer = await getSecret(tx, codec, 'npmAccessToken', env);
+              if (!values.npmApiUrl || !values.npmAcmeEmail || !bearer)
+                throw new DomainError('configuration_invalid');
+              return { apiUrl: values.npmApiUrl, acmeEmail: values.npmAcmeEmail, bearer };
+            });
+          const dev = env.NH_DEPLOYMENT_ENV === 'development',
+            prod = env.NH_DEPLOYMENT_ENV === 'production';
+          const prefix = dev ? 'NH_DEV_NPM_' : prod ? 'NH_PROD_NPM_' : 'NH_NPM_';
+          const forwardHost =
+            env[`${prefix}DASHBOARD_FORWARD_HOST`] ??
+            (dev ? 'nickhosting-dev-web' : prod ? 'nickhosting-prod-web' : '');
+          const forwardPort = Number(env[`${prefix}DASHBOARD_FORWARD_PORT`] ?? 8081);
+          return nginxProxyManager({ ...settings, forwardHost, forwardPort });
+        };
+        return reconcileOpenworldPublications(
+          db,
+          () => (provider ??= load()),
+          (id) => logger.log('warn', 'dashboard.publication_unavailable', { id }),
+        );
+      },
+      () => logger.log('warn', 'dashboard.reconciliation_unavailable'),
+    );
     const observations = startHostObservationLoop(
       async () => {
         await refreshHostObservations(db, env, { force: true });
@@ -247,6 +289,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           catalogs.close(),
           schedulePoll,
           observations.close(),
+          dashboards.close(),
           providerFeeds.close(),
           providerAccounts.close(),
           modpacks.close(),

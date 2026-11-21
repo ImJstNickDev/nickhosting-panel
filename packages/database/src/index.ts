@@ -1,6 +1,6 @@
 import type { EncryptedSecret, PlatformConfig } from '@nickhosting/core';
 import type { GameRolloutState } from '@nickhosting/game-sdk';
-import { type Generated, Kysely, PostgresDialect } from 'kysely';
+import { type ColumnType, type Generated, Kysely, PostgresDialect } from 'kysely';
 import { Pool, type PoolConfig } from 'pg';
 import type { GatewayRouteTables } from './gateway-route-types.js';
 import type { GatewayTables } from './gateway-types.js';
@@ -60,6 +60,42 @@ export interface Database
     key: string;
     value: Partial<PlatformConfig>;
     updated_at: Generated<Date>;
+  };
+  openworld_release_catalog: {
+    runtime: 'dedicated-linux-x64';
+    credential_hash: string;
+    source: 'metiva' | 'official';
+    releases: ColumnType<{ version: string; size: number; sha256: string }[], string, string>;
+    sync_order: string;
+    synced_at: Date;
+  };
+  openworld_server_profiles: {
+    dashboard_credential_prepared: Generated<boolean>;
+    server_id: string;
+    version: string;
+    sha256: string;
+    size: number;
+  };
+  openworld_player_directories: {
+    server_id: string;
+    binding: string;
+    indexed_at: Date;
+    indexing: boolean;
+  };
+  openworld_saved_players: {
+    server_id: string;
+    file_stem: string;
+    revision: string;
+    account_id: string | null;
+    display_name: string | null;
+    saved_at: Date | null;
+  };
+  openworld_telemetry_snapshots: {
+    server_id: string;
+    resource: 'status' | 'players' | 'history' | 'chunks' | 'storage';
+    binding: string;
+    observed_at: Date;
+    data: ColumnType<unknown, string, string>;
   };
   satisfactory_server_state: {
     server_id: string;

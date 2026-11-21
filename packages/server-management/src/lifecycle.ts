@@ -162,7 +162,11 @@ export interface LifecycleOptions {
     };
   } | null>;
   /** Game hooks run under the same pinned server lock and durable effect journal. */
+  gameInstallerEnvironment?: (
+    context: GameLifecycleContext,
+  ) => Promise<Record<string, string> | undefined>;
   configureGameProvision?: (context: GameLifecycleContext) => Promise<boolean>;
+  prepareGameStart?: (context: GameLifecycleContext) => Promise<void>;
   finalizeGameStart?: (context: GameLifecycleContext) => Promise<boolean>;
   cleanupGameSecrets?: (serverId: string, db: Kysely<Database>) => Promise<void>;
   prepareGameStop?: (context: GameLifecycleContext) => Promise<void>;
@@ -349,7 +353,7 @@ function processStartTime(value: unknown): bigint | null {
 }
 
 /** A PostgreSQL session lock spans bounded provider calls but no DB transaction does. */
-async function withServerLock<T>(
+export async function withServerLock<T>(
   db: Kysely<Database>,
   serverId: string,
   work: (connection: Kysely<Database>) => Promise<T>,
@@ -1395,6 +1399,7 @@ export async function processServerOperation(
         try {
           if (operation.plan.gatewayAutomation !== undefined)
             assertGatewaySleepFence(operation.plan, nowOf(options));
+          if (finalPowerIdentity) await options.prepareGameStart?.(gameContext());
           if (worldFileContent) {
             // Revalidate current local identity and policy after durable intent.
             // A changed mapping/ownership cannot borrow an earlier remote proof.
@@ -2678,7 +2683,14 @@ export async function processServerOperation(
             )
               throw new DomainError('allocation_unavailable');
             await options.reserveInstallation(server.id, jobId, db);
-            await effect('provision', () => options.adapter.createServer(plan));
+            const installEnvironment = await options.gameInstallerEnvironment?.(gameContext());
+            await effect('provision', () =>
+              options.adapter.createServer(
+                installEnvironment
+                  ? { ...plan, environment: { ...plan.environment, ...installEnvironment } }
+                  : plan,
+              ),
+            );
             remote = await options.adapter.findServerByExternalId(server.external_id);
           }
           if (!remote) return wait('provision_outcome_unknown');
@@ -3415,6 +3427,41 @@ export async function processServerOperation(
             .execute();
           await progress('installing');
           options.onInstallationAvailable?.(jobId, server.id);
+          const installEnvironment = await options.gameInstallerEnvironment?.(gameContext());
+          if (installEnvironment) {
+            // Refresh a version-scoped download URL when the previous installation's
+            // URL has expired. Keep it out of the durable job and event journal.
+            const original = await db
+              .selectFrom('server_operations')
+              .select('plan')
+              .where('server_id', '=', server.id)
+              .where('action', '=', 'provision')
+              .orderBy('job_id')
+              .limit(1)
+              .executeTakeFirstOrThrow();
+            const provision = provisionPlanSchema.parse(original.plan.provision);
+            const current = remote.container.environment;
+            if (
+              !current ||
+              provision.eggId !== remote.egg ||
+              provision.dockerImage !== remote.container.image
+            )
+              throw new DomainError('conflict');
+            const environment = Object.fromEntries(
+              Object.entries(provision.environment).map(([key, defaultValue]) => [
+                key,
+                current[key] ?? defaultValue,
+              ]),
+            );
+            await gameContext().authorize();
+            await options.adapter.updateStartup(remote.id, {
+              egg: remote.egg,
+              image: remote.container.image,
+              startup: remote.container.startup_command,
+              environment: { ...environment, ...installEnvironment },
+              skip_scripts: false,
+            });
+          }
           await effect('reinstall', async () => {
             await options.adapter.reinstallWithConfirmation(
               server.pterodactyl_id ?? 0,

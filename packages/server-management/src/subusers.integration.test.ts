@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { openworldManifest } from '../../../games/openworld/src/manifest.js';
 import { lockResources } from './admission.js';
+import { canAccessOpenworldDashboard } from './openworld-dashboard-access.js';
 import {
   deletePlatformProject,
   getPlatformServer,
@@ -37,6 +39,40 @@ const grant = (keys: string[]) =>
   setServerSubuser(f.db, f.context, serverId, peer.context.subjectUserId, { permissionKeys: keys });
 
 describe('direct server Subusers', () => {
+  it('reserves native game administration for the resource owner and explicit personal grants', async () => {
+    await f.db
+      .insertInto('game_integrations')
+      .values({ id: 'openworld', version: openworldManifest.version, manifest: openworldManifest })
+      .onConflict((c) => c.column('id').doNothing())
+      .execute();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'openworld', runtime_id: 'dedicated' })
+      .where('id', '=', f.mappingId)
+      .execute();
+    const key = 'game.openworld.dashboard.admin';
+    const game = { id: serverId, owner_id: f.context.subjectUserId };
+    expect(await canAccessOpenworldDashboard(f.db, f.owner, game)).toBe(false);
+    expect(await canAccessOpenworldDashboard(f.db, f.context, game)).toBe(true);
+    await grant([
+      'settings.read',
+      'console.read',
+      'console.command',
+      'subusers.read',
+      'subusers.write',
+    ]);
+    expect(await canAccessOpenworldDashboard(f.db, peer.context, game)).toBe(false);
+    await grant([key, 'subusers.read', 'subusers.write']);
+    expect(await canAccessOpenworldDashboard(f.db, peer.context, game)).toBe(true);
+    const other = await managementFixture(f.db, { interactive: true });
+    await expect(
+      setServerSubuser(f.db, peer.context, serverId, other.context.subjectUserId, {
+        permissionKeys: [key],
+      }),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    await grant(['settings.read']);
+    expect(await canAccessOpenworldDashboard(f.db, peer.context, game)).toBe(false);
+  });
   it('provides project-independent visibility and granular access without legacy manage escalation', async () => {
     await expect(authorizeServer(f.db, peer.context, serverId)).rejects.toMatchObject({
       code: 'forbidden',

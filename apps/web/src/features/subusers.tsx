@@ -13,6 +13,7 @@ interface PermissionDefinition {
   resource: string;
   kind: 'read' | 'write' | 'additional';
   labelKey?: string;
+  descriptionKey?: string;
   resourceLabelKey?: string;
 }
 interface Subuser {
@@ -349,11 +350,22 @@ export function ServerSubusers() {
                                             }
                                             aria-label={`${resourceLabel}: ${label}`}
                                             aria-describedby={
-                                              inherited ? `inherited-${definition.key}` : undefined
+                                              [
+                                                definition.descriptionKey &&
+                                                  `description-${definition.key}`,
+                                                inherited && `inherited-${definition.key}`,
+                                              ]
+                                                .filter(Boolean)
+                                                .join(' ') || undefined
                                             }
                                           />
                                           {label}
                                         </span>
+                                        {definition.descriptionKey && (
+                                          <small id={`description-${definition.key}`}>
+                                            {t(definition.descriptionKey)}
+                                          </small>
+                                        )}
                                         {inherited && (
                                           <small
                                             id={`inherited-${definition.key}`}

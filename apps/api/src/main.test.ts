@@ -4,7 +4,11 @@ import { httpServerPolicy } from './http-server.js';
 
 const fixture = vi.hoisted(() => ({ close: vi.fn(async () => {}), log: vi.fn() }));
 vi.mock('./runtime.js', () => ({
-  createRuntime: async () => ({
+  createRuntime: async (env: Record<string, string | undefined>) => ({
+    createDashboardIngress: () => {
+      if (!env.NH_PUBLIC_URL?.startsWith('https://')) throw new Error('https_required');
+      return { fetch: () => new Response('dashboard') };
+    },
     app: { fetch: () => new Response('fixture') },
     close: fixture.close,
     logger: { log: fixture.log },
@@ -35,6 +39,37 @@ describe('API executable lifecycle', () => {
     await expect(main({ NH_API_BIND_HOST: 'localhost', NH_API_PORT: 'bad' })).rejects.toMatchObject(
       { code: 'configuration_invalid' },
     );
+  });
+  it('opens a separate dashboard listener only when enabled and releases the panel port on invalid configuration', async () => {
+    async function freePort() {
+      const probe = createServer();
+      await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
+      const address = probe.address();
+      if (!address || typeof address === 'string') throw Error('Missing port');
+      await new Promise<void>((resolve) => probe.close(() => resolve()));
+      return address.port;
+    }
+    const panel = await freePort(),
+      dashboard = await freePort();
+    const env = {
+      NH_API_BIND_HOST: '127.0.0.1',
+      NH_API_PORT: String(panel),
+      NH_DASHBOARD_INGRESS_PORT: String(dashboard),
+    };
+    await expect(main({ ...env, NH_PUBLIC_URL: 'http://localhost' })).rejects.toThrow(
+      'https_required',
+    );
+    const runtime = await main({ ...env, NH_PUBLIC_URL: 'https://panel.example.test' });
+    try {
+      expect(await (await fetch(`http://127.0.0.1:${dashboard}/v1/web/session`)).text()).toBe(
+        'dashboard',
+      );
+      expect(await (await fetch(`http://127.0.0.1:${panel}/v1/web/session`)).text()).toBe(
+        'fixture',
+      );
+    } finally {
+      await runtime.stop();
+    }
   });
   it('uses the guarded HTTP server in the actual executable listener', async () => {
     const probe = createServer();

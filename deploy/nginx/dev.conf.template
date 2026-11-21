@@ -18,6 +18,24 @@ http {
   map $http_upgrade $connection_upgrade { default upgrade; '' ''; }
   upstream core { zone core 64k; server api:3001 resolve; }
   upstream vite { zone vite 64k; server vite:5173 resolve; }
+  # Exact public hostnames are configured by NPM. The dedicated listener cannot serve panel routes.
+  upstream dashboard { zone dashboard 64k; server api:3002 resolve; }
+  server {
+    listen 8081 default_server;
+    server_name _;
+    client_max_body_size 1m;
+    client_body_timeout 15s;
+    location / {
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-Host "";
+      proxy_set_header Forwarded "";
+      proxy_set_header X-Forwarded-Proto https;
+      proxy_set_header Connection "";
+      proxy_set_header Upgrade "";
+      proxy_http_version 1.1;
+      proxy_pass http://dashboard;
+    }
+  }
   server {
     listen 8080 default_server;
     server_name _;
