@@ -204,6 +204,9 @@ const SatisfactorySettingsSection = sectionView(async () => ({
 const SatisfactoryModsSection = sectionView(async () => ({
   default: (await import('../integrations/satisfactory/mods.js')).SatisfactoryModsSection,
 }));
+const OpenworldMapSection = sectionView(async () => ({
+  default: (await import('../integrations/openworld/world-map.js')).OpenworldMap,
+}));
 const OpenworldPlayersSection = sectionView(async () => ({
   default: (await import('../integrations/openworld/players.js')).OpenworldPlayers,
 }));
@@ -223,6 +226,7 @@ const SatisfactoryWorldsSection = sectionView(async () => ({
   default: (await import('../integrations/satisfactory/worlds.js')).SatisfactoryWorldsSection,
 }));
 const sectionViews = new Map<string, ComponentType<GameSectionViewProps> & { preload(): void }>([
+  ['openworld-map', OpenworldMapSection],
   ['openworld-players', OpenworldPlayersSection],
   ['openworld-overview', OpenworldOverviewSection],
   ['openworld-performance', OpenworldPerformanceSection],

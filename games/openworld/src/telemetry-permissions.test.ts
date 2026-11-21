@@ -14,15 +14,19 @@ it('separates the roster and performance grants from inspection, moderation and 
     }).map(({ id }) => id);
   expect(sections(['game.openworld.players.read'])).toEqual(['players']);
   expect(sections(['game.openworld.performance.read'])).toEqual(['overview', 'performance']);
+  expect(sections(['game.openworld.map.read'])).toEqual(['map']);
+  expect(sections(['game.openworld.checkpoints.manage'])).toEqual([]);
   expect(sections(['game.openworld.dashboard.admin'])).toEqual(['dashboard']);
   for (const role of ['viewer', 'operator', 'manager', 'owner'] as const) {
     expect(legacyServerPermissionKeys(role, definitions).sort()).toEqual([
+      'game.openworld.map.read',
       'game.openworld.performance.read',
       'game.openworld.players.read',
     ]);
   }
   expect(ownerServerPermissionKeys(definitions, true)).toEqual(
     expect.arrayContaining([
+      'game.openworld.checkpoints.manage',
       'game.openworld.players.inspect',
       'game.openworld.players.moderate',
       'game.openworld.players.screenshots',

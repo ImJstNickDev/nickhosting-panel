@@ -113,6 +113,26 @@ the panel reports the uncertain outcome. **Request and view game screenshots** i
 separate grant. It covers requests to the game client and the whole instance's gallery.
 A capture can arrive several seconds after the game accepts the request.
 
+**Map** opens the selected world's explored terrain. Select a planetary face to pan or
+zoom. The overview uses explored columns, and the detailed view loads just the
+surface tiles in view. Water and elevation come from the saved or active terrain.
+Unknown ground remains blank. The map follows the game's change cursor while open
+and loads a new index if the game resets that cursor. It reads a running instance
+through the private API, including when public dashboard access is off.
+
+Map readers can find player-visible checkpoints by world and name. The separate
+**Manage checkpoints** grant also reveals administrative checkpoints and the notes on
+all checkpoints. It enables
+creation, editing and deletion. A checkpoint can be placed at map coordinates or
+at the location opened from a live player card. The game stores its note, location
+and visibility. NickPanel checks the checkpoint revision before editing or deleting it.
+
+Player markers require both roster and inspection access in addition to map access.
+Open a marker to see its current player card, or use **Show on map** on the card to
+return to the player's position. A reconnected player's previous marker cannot open
+the new session. The existing moderation grant still covers teleport to the game's
+checkpoint destinations.
+
 The verified Linux builds are a1.0.11–a1.0.13, a1.1.0–a1.1.3, a1.2.0–a1.2.9 and
 pre-a1.2.0-1. The a1.0.10 package requires glibc 2.38 and cannot run on the Debian
 Bookworm image used by this egg. When that release is present in the catalog, the

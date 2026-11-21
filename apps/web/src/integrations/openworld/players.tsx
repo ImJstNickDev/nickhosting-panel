@@ -1,10 +1,12 @@
 import { useState } from 'react';
+import { Link } from 'react-router';
 import type { OpenworldActionPlayer } from '../../../../../games/openworld/src/player-actions.js';
 import type { OpenworldTelemetryData } from '../../../../../games/openworld/src/telemetry.js';
 import { ApiError } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
 import { Dialog, ErrorNotice, Loading } from '../../components/ui.js';
 import { SearchField } from '../../components/workspace-controls.js';
+import { mapHref, playerSelectionFromMap } from './map-players.js';
 import { type ActionReceipt, PlayerActions } from './player-actions.js';
 import { PlayerGallery } from './player-gallery.js';
 import { SavedPlayerDialog, SavedPlayers, savedUuid } from './saved-players.js';
@@ -107,7 +109,11 @@ function Players(props: TelemetryViewProps) {
     (view === 'gallery' && !screenshots) || (view === 'directory' && !inspect) ? 'live' : view;
   const roster = useTelemetry(props, 'players', 'players', activeView === 'live');
   const [search, setSearch] = useState(''),
-    [selection, setSelection] = useState<(Selection & { processRef?: string }) | null>(null);
+    [selection, setSelection] = useState<(Selection & { processRef?: string }) | null>(() =>
+      inspect && props.permissionKeys.includes('game.openworld.map.read')
+        ? playerSelectionFromMap()
+        : null,
+    );
   const current =
     roster.data?.source === 'live' && !roster.error && props.runtimeState === 'running';
   const liveProcess = roster.data?.source === 'live' ? roster.data.processRef : undefined;
@@ -281,6 +287,7 @@ function Players(props: TelemetryViewProps) {
         <PlayerDialog
           server={props}
           selection={selection}
+          mapAccess={props.permissionKeys.includes('game.openworld.map.read')}
           inspect={inspect}
           moderate={moderate}
           screenshots={screenshots}
@@ -308,6 +315,7 @@ function PlayerDialog({
   selection,
   connected,
   rosterUnavailable,
+  mapAccess,
   onClose,
   inspect,
   moderate,
@@ -320,6 +328,7 @@ function PlayerDialog({
   selection: Selection & { processRef?: string };
   connected: boolean;
   rosterUnavailable: string | null;
+  mapAccess: boolean;
   inspect: boolean;
   moderate: boolean;
   screenshots: boolean;
@@ -434,6 +443,28 @@ function PlayerDialog({
                   <PlayerMetrics p={data} tab={tab} />
                 )}
               </div>
+              {tab === 'character' &&
+                mapAccess &&
+                data.world &&
+                !data.inSpace &&
+                numeric(data.pos?.face) &&
+                Number.isInteger(data.pos.face) &&
+                data.pos.face >= 0 &&
+                data.pos.face <= 5 &&
+                numeric(data.pos.x) &&
+                numeric(data.pos.z) && (
+                  <Link
+                    to={mapHref(server.serverId, {
+                      world: data.world,
+                      face: data.pos.face,
+                      x: data.pos.x,
+                      z: data.pos.z,
+                      ...(numeric(data.pos.y) ? { y: data.pos.y } : {}),
+                    })}
+                  >
+                    {t('games.openworld.map.showOnMap')}
+                  </Link>
+                )}
               {account && (
                 <button
                   type="button"

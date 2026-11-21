@@ -82,6 +82,7 @@ const sample = {
   player: {
     ...person,
     geo: { lat: 31, lon: 12, alt: 100 },
+    pos: { face: 2, x: 128, y: 3, z: 256 },
     vitals: { health: 80, maxHealth: 100 },
     client: { fps: 60 },
     inventoryKnown: false,
@@ -659,6 +660,418 @@ it('disables a prepared action when the same player id appears in another game p
     await check(dialog.getByRole('button', { name: 'Kill character' })).toHaveCount(0);
     await check(dialog).toContainText('This player has left the server.');
   } finally {
+    await context.close();
+  }
+});
+
+it('opens the exact connected player from a map marker and links back to their location', async () => {
+  const page = await browser.newPage();
+  try {
+    const paths = await serve(page);
+    const fromMap = new URLSearchParams({
+      player: '23',
+      name: person.name,
+      processRef: 'a'.repeat(64),
+      joinedAt: String(Date.parse(instant) - person.connectedS * 1000),
+    });
+    const target = `${url}telemetry-fixture?section=players&mapAccess#`;
+    await page.goto(target + fromMap);
+    const dialog = page.getByRole('dialog', { name: 'Solstice' });
+    await check(dialog).toBeVisible();
+    const link = dialog.getByRole('link', { name: 'Show on map' });
+    await check(link).toBeVisible();
+    const href = new URL((await link.getAttribute('href')) ?? '', url);
+    expect(href.pathname).toBe('/servers/10000000-0000-4000-8000-000000000001/game/map');
+    expect(Object.fromEntries(new URLSearchParams(href.hash.slice(1)))).toMatchObject({
+      world: 'Earth',
+      face: '2',
+      x: '128',
+      z: '256',
+      y: '3',
+    });
+    fromMap.set('processRef', 'b'.repeat(64));
+    await page.goto('about:blank');
+    const start = paths.length;
+    await page.goto(target + fromMap);
+    await check(page.getByRole('dialog')).toBeVisible();
+    await check(page.getByRole('link', { name: 'Show on map' })).toHaveCount(0);
+    await check(page.getByText('Solstice', { exact: true }).first()).toBeVisible();
+    expect(paths.slice(start)).not.toContain('players/23');
+  } finally {
+    await page.close();
+  }
+});
+
+function fixtureCheckpoint(id: number, name: string, visibility: 'admins' | 'players' = 'players') {
+  return {
+    id,
+    world: 'earth',
+    name,
+    note: 'Western approach',
+    color: '#438a6a',
+    icon: 'flag',
+    visibility,
+    pos: { face: 0, x: id === 1 ? 150 : 124, y: 41, z: id === 1 ? 70 : 128 },
+    geo: { lat: 12.12, lon: 42.42, alt: 41 },
+    revision: 'a'.repeat(64),
+    createdAtMs: 0,
+  };
+}
+async function mapRoutes(
+  page: Page,
+  options: {
+    wide?: boolean;
+    emptyWorlds?: boolean;
+    failWrites?: boolean;
+    deltaGate?: Promise<void>;
+    revoked?: () => boolean;
+  } = {},
+) {
+  await serve(page);
+  const paths: URL[] = [],
+    writes: Record<string, unknown>[] = [];
+  let checkpoints = [
+    fixtureCheckpoint(1, 'Lakeside'),
+    fixtureCheckpoint(2, 'Supply cache', 'admins'),
+  ];
+  const processRef = 'f'.repeat(64);
+  await page.route('**/v1/servers/**/openworld/map**', async (route) => {
+    const u = new URL(route.request().url());
+    paths.push(u);
+    const path = u.pathname.split('/map')[1];
+    if (options.revoked?.())
+      return route.fulfill({
+        status: 403,
+        json: { code: 'forbidden', messageKey: 'errors.forbidden' },
+      });
+    if (!path)
+      return route.fulfill({
+        json: {
+          worlds: options.emptyWorlds
+            ? []
+            : [
+                { key: 'earth', name: 'Earth', faceEdgeMeters: 8192 },
+                { key: 'moon', name: 'Moon', faceEdgeMeters: null },
+              ],
+          processRef,
+        },
+      });
+    if (u.searchParams.get('processRef') !== processRef && route.request().method() !== 'POST')
+      return route.fulfill({ status: 409, json: { code: 'conflict' } });
+    if (path === '/index')
+      return route.fulfill({
+        json: {
+          stamp: 7,
+          faces: Array.from({ length: 6 }, (_, face) =>
+            face === 0
+              ? {
+                  face,
+                  count: 100,
+                  i0: 0,
+                  j0: 0,
+                  i1: options.wide ? 200 : 15,
+                  j1: options.wide ? 100 : 15,
+                }
+              : { face, count: 0, i0: null, j0: null, i1: null, j1: null },
+          ),
+        },
+      });
+    if (path === '/changes') {
+      if (options.deltaGate) await options.deltaGate;
+      return route.fulfill({
+        json: options.deltaGate
+          ? { stamp: 8, reset: false, columns: [[0, 0, 0]] }
+          : { stamp: 7, reset: false, columns: [] },
+      });
+    }
+    if (path === '/columns')
+      return route.fulfill({
+        json: {
+          columns: [
+            [0, 0],
+            [2, 2],
+            [4, 2],
+            [4, 4],
+          ],
+        },
+      });
+    if (path === '/surface') {
+      const ci = Number(u.searchParams.get('ci')),
+        cj = Number(u.searchParams.get('cj'));
+      const samples = Array.from({ length: 1024 }, (_, i) => {
+        const x = (i % 32) + ci * 4,
+          z = Math.floor(i / 32) + cj * 4;
+        if (x + z > 105 || x + z < 15) return -1;
+        const river = Math.abs(z - 24 - 7 * Math.sin(x / 10));
+        if (river < 3) return 0x598ea5;
+        return (
+          (river < 5 ? 0xc1b990 : 0x729c74) +
+          (Math.floor(Math.sin(x / 4) * 1.7 + Math.cos(z / 7) * 2.8) + 5) * 0x020301
+        );
+      });
+      return route.fulfill({ json: { side: 32, samples } });
+    }
+    if (path === '/players') return route.fulfill({ json: { processRef, players: [] } });
+    if (path === '/checkpoints' && route.request().method() === 'POST') {
+      const body = route.request().postDataJSON();
+      writes.push(body);
+      if (options.failWrites) return route.abort('failed');
+      const { action } = body;
+      if (action.kind === 'create')
+        checkpoints.push({
+          ...fixtureCheckpoint(3, action.fields.name),
+          ...action.fields,
+          ...(action.position.type === 'face' ? { pos: action.position } : {}),
+        });
+      if (action.kind === 'update')
+        checkpoints = checkpoints.map((c) => (c.id === action.id ? { ...c, ...action.fields } : c));
+      if (action.kind === 'delete') checkpoints = checkpoints.filter((c) => c.id !== action.id);
+      return route.fulfill({
+        status: 202,
+        json: { requestId: body.requestId, outcome: 'accepted' },
+      });
+    }
+    if (path === '/checkpoints')
+      return route.fulfill({
+        json: { checkpoints: u.searchParams.get('world') === 'earth' ? checkpoints : [] },
+      });
+    return route.abort();
+  });
+  return { paths, writes };
+}
+it('opens and edits a checkpoint at the linked player position, then requires confirmation to delete it', async () => {
+  const context = await browser.newContext({
+    locale: 'en-GB',
+    viewport: { width: 1280, height: 900 },
+  });
+  const page = await context.newPage();
+  try {
+    const { writes, paths } = await mapRoutes(page);
+    await page.goto(
+      `${url}telemetry-fixture?section=map&cartographer#world=earth&face=0&x=86&y=22&z=111`,
+    );
+    await check(page.getByRole('heading', { name: 'Map', exact: true })).toBeVisible();
+    await check(page.locator('.ow-map-pin')).toHaveCount(2);
+    await check
+      .poll(() => paths.filter((p) => p.pathname.endsWith('/surface')).length)
+      .toBeGreaterThan(0);
+    await page.getByRole('button', { name: 'Add checkpoint at this position' }).click();
+    const dialog = page.getByRole('dialog');
+    await check(dialog.getByLabel('X (m)', { exact: true })).toHaveValue('86');
+    await check(dialog.getByLabel('Z (m)', { exact: true })).toHaveValue('111');
+    await check(dialog.getByLabel('Altitude (m, optional)')).toHaveValue('22');
+    await dialog.getByLabel('Name', { exact: true }).fill('Trailhead');
+    await dialog.getByLabel('Note', { exact: true }).fill('By the footbridge');
+    await dialog.getByRole('button', { name: 'Create checkpoint' }).click();
+    await check(page.getByRole('list').getByRole('button', { name: /Trailhead/ })).toBeVisible();
+    expect(writes[0]).toMatchObject({
+      world: 'earth',
+      processRef: 'f'.repeat(64),
+      action: {
+        kind: 'create',
+        position: { type: 'face', face: 0, x: 86, z: 111, y: 22 },
+        fields: { visibility: 'admins', name: 'Trailhead', note: 'By the footbridge' },
+      },
+    });
+    await page
+      .getByRole('list')
+      .getByRole('button', { name: /Trailhead/ })
+      .click();
+    await page.getByRole('button', { name: 'Edit checkpoint', exact: true }).click();
+    await dialog.getByLabel('Name', { exact: true }).fill('Footbridge');
+    await dialog.getByLabel('Visible to').selectOption('players');
+    await dialog.getByRole('button', { name: 'Save changes' }).click();
+    await check(page.getByRole('heading', { name: 'Footbridge' })).toBeVisible();
+    expect(writes[1]).toMatchObject({
+      action: {
+        kind: 'update',
+        id: 3,
+        revision: 'a'.repeat(64),
+        fields: { visibility: 'players' },
+      },
+    });
+    expect(writes[1]?.action).not.toHaveProperty('position');
+    await page.screenshot({ path: `${shots}/world-map-en.png` });
+    await page.getByRole('button', { name: 'Delete checkpoint', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    expect(writes).toHaveLength(2);
+    await page.getByRole('button', { name: 'Delete checkpoint', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Delete checkpoint', exact: true }).click();
+    await check(page.getByRole('list').getByRole('button', { name: /Footbridge/ })).toHaveCount(0);
+    expect(writes[2]).toMatchObject({
+      action: { kind: 'delete', id: 3, revision: 'a'.repeat(64) },
+    });
+    await fits(page);
+  } finally {
+    await context.close();
+  }
+});
+it('shows the explored overview on mobile and limits player and private checkpoint access', async () => {
+  const context = await browser.newContext({
+      locale: 'it-IT',
+      viewport: { width: 390, height: 844 },
+    }),
+    page = await context.newPage();
+  try {
+    const { paths } = await mapRoutes(page, { wide: true });
+    await page.goto(`${url}telemetry-fixture?section=map&reader`);
+    await check(page.getByRole('heading', { name: 'Mappa', exact: true })).toBeVisible();
+    await check
+      .poll(() => paths.filter((p) => p.pathname.endsWith('/columns')).length)
+      .toBeGreaterThan(0);
+    expect(
+      paths.some((p) => p.pathname.endsWith('/surface') || p.pathname.endsWith('/players')),
+    ).toBe(false);
+    const footprint = paths.find((p) => p.pathname.endsWith('/columns'));
+    expect(Number(footprint?.searchParams.get('stride'))).toBeGreaterThan(1);
+    await check(page.getByRole('button', { name: 'Aggiungi checkpoint', exact: true })).toHaveCount(
+      0,
+    );
+    await check(page.getByLabel('Mostra giocatori')).toHaveCount(0);
+    await check(page.getByRole('button', { name: /Supply cache/ })).toHaveCount(0);
+    const search = page.getByRole('searchbox');
+    await search.fill('wrong');
+    await check(page.getByText('Nessun checkpoint corrispondente.')).toBeVisible();
+    await search.fill('lake');
+    await page
+      .getByRole('list')
+      .getByRole('button', { name: /Lakeside/ })
+      .click();
+    await check(page.getByRole('heading', { name: 'Lakeside' })).toBeVisible();
+    await check(page.getByText('Western approach')).toHaveCount(0);
+    await check
+      .poll(() => paths.filter((p) => p.pathname.endsWith('/surface')).length)
+      .toBeGreaterThan(0);
+    await fits(page);
+    await page.screenshot({ path: `${shots}/world-map-it-mobile.png` });
+    await page.getByLabel('Mondo', { exact: true }).selectOption('moon');
+    await check(page.getByText('Questo mondo non ha checkpoint.')).toBeVisible();
+    await check(page.getByRole('heading', { name: 'Lakeside' })).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+it('refreshes only changed visible tiles, suppresses reads offline and clears revoked data', async () => {
+  const context = await browser.newContext({ viewport: { width: 1150, height: 800 } }),
+    page = await context.newPage();
+  let resume!: () => void,
+    revoked = false;
+  const deltaGate = new Promise<void>((r) => {
+    resume = r;
+  });
+  try {
+    const { paths } = await mapRoutes(page, { deltaGate, revoked: () => revoked });
+    await page.goto(`${url}telemetry-fixture?section=map&offline`);
+    await check(page.getByText(/offline/i)).toBeVisible();
+    expect(paths).toEqual([]);
+    await page.goto(`${url}telemetry-fixture?section=map`);
+    const tiles = () => paths.filter((p) => p.pathname.endsWith('/surface'));
+    await check.poll(() => tiles().length).toBe(4);
+    resume();
+    await check
+      .poll(() =>
+        tiles()
+          .filter((p) => p.searchParams.get('stamp') === '8')
+          .map((p) => [p.searchParams.get('ci'), p.searchParams.get('cj')]),
+      )
+      .toEqual([['0', '0']]);
+    await page.getByLabel('Face', { exact: true }).selectOption('4');
+    await check(page.getByText('No explored terrain on this face.')).toBeVisible();
+    const before = tiles().length;
+    revoked = true;
+    await page.getByLabel('World', { exact: true }).selectOption('moon');
+    await check(page.getByRole('alert')).toBeVisible();
+    await check(page.getByRole('list')).toHaveCount(0);
+    expect(tiles().length).toBe(before);
+  } finally {
+    resume();
+    await context.close();
+  }
+});
+it('locks a checkpoint submission with an unknown outcome and preserves the original request', async () => {
+  const context = await browser.newContext(),
+    page = await context.newPage();
+  try {
+    const { writes } = await mapRoutes(page, { failWrites: true });
+    await page.goto(`${url}telemetry-fixture?section=map&cartographer`);
+    await page
+      .getByRole('list')
+      .getByRole('button', { name: /Lakeside/ })
+      .click();
+    await page.getByRole('button', { name: 'Delete checkpoint', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('button', { name: 'Delete checkpoint', exact: true }).click();
+    await check(dialog.getByRole('alert')).toBeVisible();
+    await check(
+      dialog.getByRole('button', { name: 'Delete checkpoint', exact: true }),
+    ).toBeDisabled();
+    expect(writes).toHaveLength(1);
+  } finally {
+    await context.close();
+  }
+});
+
+it('switches coordinate systems without reusing numbers, then closes a private checkpoint that disappears', async () => {
+  const context = await browser.newContext(),
+    page = await context.newPage();
+  try {
+    await mapRoutes(page);
+    await page.goto(`${url}telemetry-fixture?section=map&cartographer`);
+    await page
+      .getByRole('list')
+      .getByRole('button', { name: /Supply cache/ })
+      .click();
+    await page.getByRole('button', { name: 'Edit checkpoint', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Change position').check();
+    await dialog.getByLabel('Longitude').fill('77.025');
+    await dialog.getByLabel('Position', { exact: true }).selectOption('face');
+    await check(dialog.getByLabel('X (m)', { exact: true })).toHaveValue('124');
+    await check(dialog.getByLabel('Z (m)', { exact: true })).toHaveValue('128');
+    await page.route('**/map/checkpoints?**', (r) =>
+      r.fulfill({ json: { checkpoints: [fixtureCheckpoint(1, 'Lakeside')] } }),
+    );
+    await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')));
+    await check(dialog).toHaveCount(0);
+    await check(page.getByText('Supply cache', { exact: true })).toHaveCount(0);
+    await check(page.locator('.ow-map-location')).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+it('keeps the map available after a failed index refresh and picks up new explored columns on retry', async () => {
+  const context = await browser.newContext(),
+    page = await context.newPage();
+  let resume!: () => void;
+  const deltaGate = new Promise<void>((r) => {
+    resume = r;
+  });
+  try {
+    const { paths } = await mapRoutes(page, { deltaGate });
+    let reads = 0;
+    await page.route('**/map/index?**', async (r) => {
+      reads++;
+      if (reads === 1)
+        return r.fulfill({
+          json: {
+            stamp: 7,
+            faces: [{ face: 0, count: 0, i0: null, i1: null, j0: null, j1: null }],
+          },
+        });
+      if (reads === 2) return r.fulfill({ status: 503, json: { code: 'integration_unavailable' } });
+      return r.fallback();
+    });
+    await page.goto(`${url}telemetry-fixture?section=map`);
+    await check(page.getByText('No explored terrain on this face.')).toBeVisible();
+    resume();
+    await check(page.getByRole('alert')).toBeVisible();
+    await check(page.locator('canvas')).toBeVisible();
+    await page.getByRole('alert').getByRole('button').click();
+    await check(page.getByRole('alert')).toHaveCount(0);
+    await check(page.getByText('No explored terrain on this face.')).toHaveCount(0);
+    await check.poll(() => paths.some((p) => p.pathname.endsWith('/surface'))).toBe(true);
+  } finally {
+    resume();
     await context.close();
   }
 });

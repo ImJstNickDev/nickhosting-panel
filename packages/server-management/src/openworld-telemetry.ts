@@ -36,6 +36,7 @@ export type OpenworldScope = {
   binding: string;
   liveKey: string;
   origin: string;
+  canManageCheckpoints?: boolean;
   reason: OpenworldObservationReason | null;
 };
 export type OpenworldPlayerSelection = { id: number; name: string; joinedAt?: number };
@@ -52,7 +53,7 @@ const freshness: Record<Resource, number> = {
 
 // A pending read belongs to the server, not to the initiating browser. Limit active
 // as well as completed entries so a burst cannot create unbounded upstream work.
-function sharedReads<T>(max: number, clock: () => number, failureTtl: number) {
+export function sharedReads<T>(max: number, clock: () => number, failureTtl: number) {
   const entries = new Map<string, { promise: Promise<T>; expires: number }>();
   return {
     get(key: string, ttl: number, load: () => Promise<T>) {
@@ -84,6 +85,12 @@ function sharedReads<T>(max: number, clock: () => number, failureTtl: number) {
       const entry = entries.get(key);
       return !!entry && Number.isFinite(entry.expires) && entry.expires > clock();
     },
+    invalidate(key: string) {
+      entries.delete(key);
+    },
+    current(key: string, promise: Promise<T>) {
+      return entries.get(key)?.promise === promise;
+    },
     discard(key: string, promise: Promise<T>) {
       if (entries.get(key)?.promise === promise) entries.delete(key);
     },
@@ -94,7 +101,14 @@ export type OpenworldPlayerGrant = 'moderate' | 'screenshots';
 export async function readOpenworldScope(
   db: Kysely<Database>,
   serverId: string,
-  reader?: { who: AuthContext; resource: Resource; playerGrant?: OpenworldPlayerGrant },
+  reader?:
+    | { who: AuthContext; resource: Resource; playerGrant?: OpenworldPlayerGrant }
+    | {
+        who: AuthContext;
+        resource: 'map';
+        manageCheckpoints?: boolean;
+        requirePlayerInspection?: boolean;
+      },
 ): Promise<OpenworldScope> {
   if (reader) assertAuthContext(reader.who);
   if (!z.uuid().safeParse(serverId).success) throw new DomainError('validation_failed');
@@ -154,6 +168,7 @@ export async function readOpenworldScope(
     .where('m.runtime_id', '=', 'dedicated')
     .executeTakeFirst();
   if (!scope) throw new DomainError('not_found');
+  let canManageCheckpoints = false;
   if (reader) {
     const { who, resource } = reader;
     const definitions = serverPermissionDefinitionsForGame('openworld');
@@ -168,13 +183,27 @@ export async function readOpenworldScope(
             scope.member_role ?? undefined,
             scope.permission_keys,
           );
-    const roster = resource === 'players' || resource === 'player';
-    if (
-      !keys.includes(roster ? 'game.openworld.players.read' : 'game.openworld.performance.read') ||
-      (resource === 'player' && !keys.includes('game.openworld.players.inspect')) ||
-      (reader.playerGrant && !keys.includes(`game.openworld.players.${reader.playerGrant}`))
-    )
-      throw new DomainError('forbidden');
+    if (reader.resource === 'map') {
+      canManageCheckpoints = keys.includes('game.openworld.checkpoints.manage');
+      if (
+        !keys.includes('game.openworld.map.read') ||
+        (reader.manageCheckpoints && !canManageCheckpoints) ||
+        (reader.requirePlayerInspection &&
+          (!keys.includes('game.openworld.players.read') ||
+            !keys.includes('game.openworld.players.inspect')))
+      )
+        throw new DomainError('forbidden');
+    } else {
+      const roster = resource === 'players' || resource === 'player';
+      if (
+        !keys.includes(
+          roster ? 'game.openworld.players.read' : 'game.openworld.performance.read',
+        ) ||
+        (resource === 'player' && !keys.includes('game.openworld.players.inspect')) ||
+        (reader.playerGrant && !keys.includes(`game.openworld.players.${reader.playerGrant}`))
+      )
+        throw new DomainError('forbidden');
+    }
   }
   if (scope.identity_invalidated) throw new DomainError('provenance_mismatch');
   const binding = createHash('sha256')
@@ -224,7 +253,14 @@ export async function readOpenworldScope(
     throw new DomainError('provenance_mismatch');
   const host =
     isIP(scope.backend_address) === 6 ? `[${scope.backend_address}]` : scope.backend_address;
-  return { serverId, binding, liveKey, reason: null, origin: `http://${host}:${scope.port}` };
+  return {
+    serverId,
+    binding,
+    liveKey,
+    canManageCheckpoints,
+    reason: null,
+    origin: `http://${host}:${scope.port}`,
+  };
 }
 
 export function assertCurrentOpenworldScope(before: OpenworldScope, after: OpenworldScope) {

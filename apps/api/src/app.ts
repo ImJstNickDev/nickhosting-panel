@@ -50,6 +50,7 @@ import { registerOpenworldPlayerActionRoutes } from './openworld-player-actions.
 import { registerOpenworldPlayerDirectoryRoutes } from './openworld-player-directory.js';
 import { registerOpenworldScreenshotRoutes } from './openworld-screenshots.js';
 import { registerOpenworldTelemetryRoutes } from './openworld-telemetry.js';
+import { registerOpenworldWorldMapRoutes } from './openworld-world-map.js';
 import { registerPlatformRoutes } from './platform.js';
 import { registerProfilePhotoRoutes } from './profile-photo.js';
 import { PROVIDER_EVENTS_PATH, receiveProviderEvent } from './provider-events.js';
@@ -721,6 +722,7 @@ export function createApp(options: Options) {
   registerOpenworldPlayerActionRoutes(app, { db, principal, management: options.management });
   registerOpenworldPlayerDirectoryRoutes(app, { db, principal, management: options.management });
   registerOpenworldScreenshotRoutes(app, { db, principal, management: options.management });
+  registerOpenworldWorldMapRoutes(app, { db, principal, management: options.management });
   registerOpenworldRoutes(app, { db, env, codec: options.codec, principal });
   registerSatisfactoryRoutes(app, { db, principal });
   registerSatisfactoryOverviewRoutes(app, { db, codec: options.codec, principal });

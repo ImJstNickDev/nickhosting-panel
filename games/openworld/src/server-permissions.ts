@@ -2,6 +2,23 @@ import type { ServerPermissionDefinition } from '@nickhosting/core';
 
 export const openworldTelemetryPermissions: ServerPermissionDefinition[] = [
   {
+    key: 'game.openworld.map.read',
+    resource: 'game.openworld.map',
+    kind: 'read',
+    legacy: 'read',
+    labelKey: 'games.openworld.permissions.viewMap',
+    resourceLabelKey: 'games.openworld.map.title',
+  },
+  {
+    key: 'game.openworld.checkpoints.manage',
+    resource: 'game.openworld.checkpoints',
+    kind: 'additional',
+    legacy: 'explicit',
+    labelKey: 'games.openworld.permissions.manageCheckpoints',
+    resourceLabelKey: 'games.openworld.map.checkpoints',
+    descriptionKey: 'games.openworld.permissions.manageCheckpointsHelp',
+  },
+  {
     key: 'game.openworld.players.screenshots',
     resource: 'game.openworld.players',
     kind: 'additional',

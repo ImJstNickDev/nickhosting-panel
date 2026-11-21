@@ -14,6 +14,7 @@ import {
 } from '../dashboard-ui.js';
 import { openworldSupportsRuntime, openworldVersionDelivery } from '../version-policy.js';
 import { openworldGameArtwork, openworldRuntimeArtwork } from './artwork.js';
+import { openworldMapCatalogs } from './map-catalog.js';
 import { openworldTelemetryCatalogs } from './telemetry-catalog.js';
 
 const catalogSchema = z.object({
@@ -136,6 +137,17 @@ export const openworldUiModule = defineTrustedGameUiModule({
         columns: [],
         forms: [],
       })),
+      {
+        id: 'map',
+        titleKey: 'games.openworld.map.title',
+        loader: 'telemetry',
+        renderer: 'openworld-map',
+        navigation: { group: 'tools', order: 25, icon: 'world', placement: 'sidebar' },
+        requiredPermissions: ['game.openworld.map.read'],
+        requiredCapabilities: [],
+        columns: [],
+        forms: [],
+      },
       openworldDashboardSection,
     ],
     ports: [
@@ -174,6 +186,7 @@ export const openworldUiModule = defineTrustedGameUiModule({
         'Requires glibc 2.38. The server uses Debian Bookworm.',
       ...openworldDashboardCatalogs.en,
       ...openworldTelemetryCatalogs.en,
+      ...openworldMapCatalogs.en,
       'games.openworld.permissions.viewPlayers': 'View players',
       'games.openworld.permissions.inspect': 'Inspect player details',
       'games.openworld.permissions.inspectHelp':
@@ -198,6 +211,7 @@ export const openworldUiModule = defineTrustedGameUiModule({
       'games.openworld.incompatibleRuntime': 'Richiede glibc 2.38. Il server usa Debian Bookworm.',
       ...openworldDashboardCatalogs.it,
       ...openworldTelemetryCatalogs.it,
+      ...openworldMapCatalogs.it,
       'games.openworld.permissions.viewPlayers': 'Visualizza i giocatori',
       'games.openworld.permissions.inspect': 'Ispeziona i dettagli dei giocatori',
       'games.openworld.permissions.inspectHelp':

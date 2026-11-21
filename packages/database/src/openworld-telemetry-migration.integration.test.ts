@@ -39,6 +39,12 @@ it('upgrades the registered Openworld manifest, preserving other entries on repe
     );
     await fixture.pool.query(screenshots);
     await fixture.pool.query(screenshots);
+    const mapPermissions = await readFile(
+      new URL('../migrations/084_openworld_map_permissions.sql', import.meta.url),
+      'utf8',
+    );
+    await fixture.pool.query(mapPermissions);
+    await fixture.pool.query(mapPermissions);
     const stored = await fixture.db
       .selectFrom('game_integrations')
       .select('manifest')

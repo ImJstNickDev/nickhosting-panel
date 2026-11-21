@@ -1,6 +1,7 @@
 import { QueryClientProvider } from '@tanstack/react-query';
 import { Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
+import { BrowserRouter } from 'react-router';
 import { queryClient } from '../../src/api/client.js';
 import { LocaleProvider } from '../../src/app/i18n.js';
 import { gameUiRegistry, getGameSectionView } from '../../src/features/integrations.js';
@@ -10,6 +11,9 @@ const params = new URLSearchParams(location.search);
 const id = '10000000-0000-4000-8000-000000000001';
 const permissionKeys = ['game.openworld.players.read', 'game.openworld.performance.read'];
 if (!params.has('reader')) permissionKeys.push('game.openworld.players.inspect');
+if (params.get('section') === 'map' || params.has('mapAccess'))
+  permissionKeys.push('game.openworld.map.read');
+if (params.has('cartographer')) permissionKeys.push('game.openworld.checkpoints.manage');
 if (params.has('moderator')) permissionKeys.push('game.openworld.players.moderate');
 if (params.has('screenshots')) permissionKeys.push('game.openworld.players.screenshots');
 const section = gameUiRegistry
@@ -19,22 +23,24 @@ const View = getGameSectionView(section?.renderer);
 if (!View) throw Error('Missing Openworld section renderer');
 createRoot(document.getElementById('root') as HTMLElement).render(
   <QueryClientProvider client={queryClient}>
-    <LocaleProvider>
-      <main style={{ margin: '20px auto', maxWidth: 960, padding: '0 12px' }}>
-        <Suspense>
-          <View
-            serverId={id}
-            serverName="North Coast"
-            data={{ values: {}, rows: [] }}
-            canManage={false}
-            permissionKeys={permissionKeys}
-            runtimeState={params.has('offline') ? 'offline' : 'running'}
-            pending={false}
-            reload={async () => {}}
-            onAccepted={() => {}}
-          />
-        </Suspense>
-      </main>
-    </LocaleProvider>
+    <BrowserRouter>
+      <LocaleProvider>
+        <main style={{ margin: '20px auto', maxWidth: 960, padding: '0 12px' }}>
+          <Suspense>
+            <View
+              serverId={id}
+              serverName="North Coast"
+              data={{ values: {}, rows: [] }}
+              canManage={false}
+              permissionKeys={permissionKeys}
+              runtimeState={params.has('offline') ? 'offline' : 'running'}
+              pending={false}
+              reload={async () => {}}
+              onAccepted={() => {}}
+            />
+          </Suspense>
+        </main>
+      </LocaleProvider>
+    </BrowserRouter>
   </QueryClientProvider>,
 );
